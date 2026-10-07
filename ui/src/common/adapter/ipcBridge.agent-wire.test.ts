@@ -14,6 +14,11 @@ const typeSource = readFileSync(
 );
 
 describe('agent metadata wire ID contract', () => {
+  test('removes retired Skill command discovery while retaining system side questions', () => {
+    expect(bridgeSource.includes('/slash-commands')).toBe(false);
+    expect(bridgeSource.includes('/side-question')).toBe(true);
+  });
+
   test('uses agent_id without a generic id compatibility path', () => {
     expect(typeSource.includes('agent_id: AgentId;')).toBe(true);
     expect(typeSource.includes('\n  id: string;')).toBe(false);
@@ -27,7 +32,7 @@ describe('agent metadata wire ID contract', () => {
     // a surviving client would only ever produce a 404.
     expect(bridgeSource.includes('/api/agents/custom/')).toBe(false);
     expect(bridgeSource.includes('/api/agents/health-check')).toBe(false);
-    expect(bridgeSource.includes('/enabled')).toBe(false);
+    expect(bridgeSource.includes('/api/agents/{agent_id}/enabled')).toBe(false);
     for (const survivor of ['/api/agents', '/api/agents/refresh', '/api/agents/provider-health-check']) {
       expect(bridgeSource.includes(`'${survivor}'`)).toBe(true);
     }

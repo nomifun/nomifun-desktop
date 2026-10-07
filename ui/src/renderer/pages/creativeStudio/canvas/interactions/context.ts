@@ -28,7 +28,6 @@ const openMode = (type: CanvasState['document']['nodes'][number]['type']): Canva
   switch (type) {
     case 'text': return 'edit-text';
     case 'config': return 'compose';
-    case 'director': return 'open-director';
     case 'group': return 'inspect-group';
     default: return 'preview-media';
   }
@@ -65,7 +64,7 @@ export function resolveCanvasDoubleClick(
   });
 }
 
-export function toggleCanvasNodeLock(
+function toggleCanvasNodeLock(
   state: CanvasState,
   nodeId: string,
   at?: number

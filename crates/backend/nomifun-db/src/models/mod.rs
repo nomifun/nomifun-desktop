@@ -1,27 +1,22 @@
 mod agent_metadata;
 mod agent_execution;
+mod agent_execution_effect;
 mod agent_execution_template;
 mod attachment;
 mod channel;
 mod client_preference;
 mod instance_token;
-mod conversation;
-mod conversation_artifact;
 mod cron_job;
 mod customer_service;
 mod cron_job_run;
-mod idmm_intervention;
 mod knowledge;
 mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
-mod message;
-mod miniapp;
 mod oauth_token;
 mod provider;
 mod provider_connection;
 mod provider_model;
-mod preset;
 mod requirement;
 mod skill_tag;
 mod ssh_host;
@@ -32,9 +27,11 @@ mod terminal_turn;
 mod user;
 mod webhook;
 mod workshop;
+mod remote_binding;
 
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
 pub use agent_execution::*;
+pub use agent_execution_effect::*;
 pub use agent_execution_template::*;
 pub use attachment::AttachmentRow;
 pub use channel::{
@@ -51,19 +48,12 @@ pub use channel::{
 };
 pub use client_preference::ClientPreference;
 pub use instance_token::InstanceApiTokenRow;
-pub use conversation::{
-    ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow,
-    CreativeStudioAgentSessionBindingRow,
-};
-pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
 pub use customer_service::{
-    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
-    NewCsAgentRow,
-};
-pub use idmm_intervention::{
-    IdmmActionReservationRow, IdmmInterventionRow, NewIdmmInterventionRow,
+    CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
+    CS_HANDOFF_STATUS_RESOLVED, CsAgentCapabilityReceiptRow, CsAgentRow, CsAuditEventRow,
+    CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow, NewCsAgentRow,
 };
 pub use knowledge::{
     CreateKnowledgeTagParams, KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
@@ -84,25 +74,25 @@ pub use knowledge_tree_operation::{
     KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
 };
 pub use mcp_server::McpServerRow;
-pub use message::MessageRow;
-pub use miniapp::{MiniAppDocumentRow, MiniAppRow};
 pub use oauth_token::OAuthTokenRow;
 pub use provider::Provider;
 pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionParams};
 pub use provider_model::{
     NewProviderModel, NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
 };
-pub use preset::*;
 pub use requirement::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
 pub use skill_tag::{SkillTagRow, UpsertSkillTagParams};
 pub use ssh_host::SshHostRow;
 pub use system_settings::SystemSettings;
-pub use tag_setting::TagSettingRow;
+pub use tag_setting::{TagSettingPatch, TagSettingRow};
 pub use terminal_session::TerminalSessionRow;
 pub use terminal_turn::TerminalTurnAdmissionRow;
 pub use user::User;
-pub use webhook::WebhookRow;
+pub use webhook::{WebhookPatch, WebhookRow};
 pub use workshop::{
     CreationTaskRow, CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow,
     CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, WorkshopAssetRow,
+};
+pub use remote_binding::{
+    NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };

@@ -1,1509 +1,33 @@
 .guidLayout {
-  --preset-surface-bg: color-mix(in srgb, var(--bg-2) 65%, transparent);
-  --preset-surface-bg-hover: color-mix(in srgb, var(--bg-2) 85%, transparent);
-  width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
+  width: min(100%, 880px);
   max-width: 100%;
   padding: 0 16px;
   box-sizing: border-box;
   margin: 0 auto;
 }
 
-.heroHeader {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 16px;
-}
-
-.heroTitle {
-  margin: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.presetPromptChip {
-  background: var(--preset-surface-bg);
-}
-
-.presetPromptHint {
-  color: var(--color-text-3);
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.presetPromptChip:hover {
-  background: var(--preset-surface-bg-hover);
-}
-
-.guidInputCardWrap {
-  width: 100%;
-  box-sizing: border-box;
-  background: var(--bg-2);
-}
-
-.guidInputInner {
-  background: var(--bg-base, #fff);
-  border: 1px solid var(--color-border-3);
-  border-radius: 24px;
-  box-sizing: border-box;
-}
-
-:global([data-theme='dark']) .guidInputInner {
-  background: #262626;
-  border-color: #3a3a3a;
-}
-
-.guidResourceCards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 22px;
-}
-
-.guidResourceCard {
+.guidComposerGroup {
   min-width: 0;
-  height: 144px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 8px;
-  color: var(--color-text-1);
-  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
-  box-sizing: border-box;
-  text-align: left;
-  font-family: inherit;
-  outline: none;
-  transition:
-    background-color 0.16s ease,
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    transform 0.16s ease;
-}
-
-button.guidResourceCard {
-  cursor: pointer;
-}
-
-button.guidResourceCard:hover,
-button.guidResourceCard:focus-visible {
-  border-color: rgba(var(--primary-6), 0.32);
-  background: color-mix(in srgb, var(--bg-2) 90%, transparent);
-  box-shadow: 0 10px 26px rgba(var(--primary-6), 0.08);
-  transform: translateY(-1px);
-}
-
-.guidResourceCardHeader {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.guidResourceIcon {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-}
-
-.guidResourceTitle {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--color-text-1);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.guidResourceDescription {
-  color: var(--color-text-3);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 18px;
-}
-
-.guidResourceAction {
-  margin-top: auto;
-  color: rgb(var(--primary-6));
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 18px;
-}
-
-.guidCompanionPoster {
-  position: relative;
-  min-width: 0;
-  min-height: 292px;
-  display: grid;
-  grid-template-columns: minmax(190px, 0.84fr) minmax(0, 1.16fr);
-  gap: 18px;
-  padding: 22px 24px 18px;
-  border: 1px solid color-mix(in srgb, rgba(var(--primary-6), 0.2) 38%, var(--color-border-2));
-  border-radius: 18px;
-  color: var(--color-text-1);
-  background:
-    linear-gradient(135deg, rgba(255, 239, 244, 0.92), rgba(244, 249, 255, 0.88) 52%, rgba(255, 250, 239, 0.76)),
-    var(--bg-2);
-  box-shadow: 0 18px 44px rgba(219, 72, 119, 0.09);
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-:global([data-theme='dark']) .guidCompanionPoster {
-  background:
-    linear-gradient(135deg, rgba(92, 35, 54, 0.42), rgba(39, 49, 66, 0.78) 52%, rgba(74, 58, 30, 0.42)),
-    #262626;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
-}
-
-.guidCompanionPoster::before {
-  content: '';
-  position: absolute;
-  inset: auto 26px 26px 26px;
-  height: 108px;
-  border-radius: 999px 999px 30px 30px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.68), rgba(255, 255, 255, 0));
-  opacity: 0.84;
-  pointer-events: none;
-}
-
-:global([data-theme='dark']) .guidCompanionPoster::before {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0));
-}
-
-.guidCompanionPosterCopy {
-  position: relative;
-  z-index: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-self: center;
-  gap: 8px;
-}
-
-.guidCompanionPosterEyebrow {
-  color: rgb(var(--primary-6));
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 18px;
-}
-
-.guidCompanionPosterTitle {
-  margin: 0;
-  color: var(--color-text-1);
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 30px;
-  letter-spacing: 0;
-}
-
-.guidCompanionPosterDescription {
-  max-width: 260px;
-  margin: 0;
-  color: var(--color-text-3);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-}
-
-.guidCompanionPosterStage {
-  position: relative;
-  z-index: 1;
-  min-width: 0;
-  min-height: 226px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: clamp(2px, 1.6vw, 12px);
-  padding: 8px 0 2px;
-  box-sizing: border-box;
-}
-
-.guidCompanionPosterHorizon {
-  position: absolute;
-  left: 8%;
-  right: 8%;
-  bottom: 16px;
-  height: 28px;
-  border-radius: 999px;
-  background: radial-gradient(ellipse at center, rgba(255, 150, 183, 0.2), rgba(255, 150, 183, 0));
-  pointer-events: none;
-}
-
-.guidCompanionPosterFigure {
-  --poster-index: 0;
-  --poster-y: 0px;
-  position: relative;
-  z-index: calc(2 + var(--poster-index));
-  min-width: 0;
-  display: flex;
-  flex: 0 1 122px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  margin: 0;
-  transform: translateY(var(--poster-y));
-}
-
-.guidCompanionPosterFigurePrimary {
-  flex-basis: 150px;
-  transform: translateY(-4px);
-}
-
-.guidCompanionPosterAvatar {
-  height: 166px;
-  max-width: 100%;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  filter: drop-shadow(0 16px 18px rgba(64, 39, 50, 0.16));
-}
-
-.guidCompanionPosterFigure:not(.guidCompanionPosterFigurePrimary) .guidCompanionPosterAvatar {
-  height: 144px;
-}
-
-:global([data-theme='dark']) .guidCompanionPosterAvatar {
-  filter: drop-shadow(0 16px 20px rgba(0, 0, 0, 0.34));
-}
-
-.guidCompanionPosterName {
-  max-width: 118px;
-  overflow: hidden;
-  padding: 4px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.64);
-  border-radius: 999px;
-  color: var(--color-text-1);
-  background: rgba(255, 255, 255, 0.68);
-  box-shadow: 0 8px 18px rgba(64, 39, 50, 0.08);
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 16px;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-:global([data-theme='dark']) .guidCompanionPosterName {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-@media (max-width: 768px) {
-  .guidResourceCards {
-    grid-template-columns: 1fr;
-    gap: 10px;
-    margin-top: 16px;
-  }
-
-  .guidResourceCard {
-    height: auto;
-    min-height: 112px;
-  }
-
-  .guidCompanionPoster {
-    min-height: 356px;
-    grid-template-columns: 1fr;
-    gap: 14px;
-    padding: 18px 16px 16px;
-  }
-
-  .guidCompanionPosterCopy {
-    align-self: stretch;
-    text-align: left;
-  }
-
-  .guidCompanionPosterDescription {
-    max-width: none;
-  }
-
-  .guidCompanionPosterStage {
-    min-height: 220px;
-    justify-content: center;
-    gap: 0;
-  }
-
-  .guidCompanionPosterFigure {
-    flex-basis: 108px;
-  }
-
-  .guidCompanionPosterFigurePrimary {
-    flex-basis: 130px;
-  }
-
-  .guidCompanionPosterAvatar {
-    height: 154px;
-  }
-
-  .guidCompanionPosterFigure:not(.guidCompanionPosterFigurePrimary) .guidCompanionPosterAvatar {
-    height: 132px;
-  }
-}
-
-.entryStrip {
-  container-name: guid-entry-strip;
-  container-type: inline-size;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 38px;
-  margin-bottom: 8px;
-  padding: 0 4px 0 2px;
-  background: transparent;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-@container guid-entry-strip (max-width: 560px) {
-  .entryStrip .entryButton,
-  .entryStrip .entryBackButton,
-  .entryStrip :global(.guid-entry-policy-btn) {
-    width: auto !important;
-    min-width: 34px !important;
-    max-width: 34px !important;
-    height: 34px !important;
-    justify-content: center !important;
-    padding: 0 !important;
-    border-radius: 12px !important;
-    flex: 0 1 auto !important;
-    overflow: hidden !important;
-    transition:
-      max-width 160ms ease,
-      padding 160ms ease,
-      background-color 150ms ease,
-      border-color 150ms ease,
-      color 150ms ease !important;
-  }
-
-  .entryStrip .entryButtonText,
-  .entryStrip :global(.guid-entry-policy-btn .sendbox-responsive-label) {
-    display: none !important;
-  }
-
-  .entryStrip .entryPersonaButton {
-    max-width: 34px;
-  }
-
-  .entryStrip .entryPersonaButton .entryDismiss {
-    display: none;
-  }
-}
-
-@media (hover: hover) and (pointer: fine) {
-  @container guid-entry-strip (max-width: 560px) {
-    .entryStrip {
-      overflow: visible;
-    }
-
-    .entryStrip .entryButton:hover,
-    .entryStrip .entryButton:focus-visible,
-    .entryStrip .entryButton:focus-within,
-    .entryStrip .entryBackButton:hover,
-    .entryStrip .entryBackButton:focus-visible,
-    .entryStrip :global(.guid-entry-policy-btn:hover),
-    .entryStrip :global(.guid-entry-policy-btn:focus-visible) {
-      width: auto !important;
-      min-width: 34px !important;
-      max-width: min(220px, 100%) !important;
-      padding: 0 11px !important;
-      justify-content: flex-start !important;
-      flex: 0 1 auto !important;
-      position: relative;
-      z-index: 2;
-    }
-
-    .entryStrip .entryButton:hover .entryButtonText,
-    .entryStrip .entryButton:focus-visible .entryButtonText,
-    .entryStrip .entryButton:focus-within .entryButtonText,
-    .entryStrip .entryBackButton:hover .entryButtonText,
-    .entryStrip .entryBackButton:focus-visible .entryButtonText,
-    .entryStrip :global(.guid-entry-policy-btn:hover .sendbox-responsive-label),
-    .entryStrip :global(.guid-entry-policy-btn:focus-visible .sendbox-responsive-label) {
-      display: inline-flex !important;
-    }
-
-    .entryStrip .entryPersonaButton:hover .entryDismiss,
-    .entryStrip .entryPersonaButton:focus-within .entryDismiss {
-      display: inline-flex;
-    }
-  }
-}
-
-.entryButton {
-  min-width: 0;
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  padding: 0 11px;
-  color: var(--color-text-2);
-  background: transparent;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  box-sizing: border-box;
-}
-
-.entryButtonInteractive {
-  cursor: pointer;
-  transition:
-    background-color 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.entryButtonInteractive:hover,
-.entryButtonInteractive:focus-visible {
-  color: var(--color-text-1);
-  background: rgba(var(--primary-6), 0.05);
-  border-color: rgba(var(--primary-6), 0.13);
-}
-
-.entryButtonActive {
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-  border-color: rgba(var(--primary-6), 0.22);
-  box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.06);
-}
-
-.entryPersonaButton {
-  max-width: min(260px, 42%);
-  padding-left: 6px;
-  padding-right: 7px;
-}
-
-.entryAvatar {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  background: var(--color-fill-2);
-  color: var(--color-text-2);
-  overflow: hidden;
-}
-
-.entryButtonText {
-  min-width: 0;
-  overflow: hidden;
-  /* Enough vertical room so overflow:hidden (for the ellipsis) doesn't clip
-     the top/bottom of CJK glyphs, whose rendered box exceeds the em box. */
-  line-height: 1.5;
-  text-overflow: ellipsis;
-}
-
-.entryCountBadge {
-  min-width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 7px;
-  border-radius: 999px;
-  color: var(--control-selected-fg);
-  background: var(--control-selected-bg);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  box-shadow: 0 4px 10px var(--control-focus-ring);
-}
-
-.entrySkillControl {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-}
-
-.entrySkillCountTrigger {
-  border: 0;
-  cursor: pointer;
-  font-family: inherit;
-  transition:
-    transform 160ms ease,
-    box-shadow 160ms ease,
-    background 160ms ease;
-}
-
-.entrySkillCountTrigger:hover,
-.entrySkillCountTrigger:focus-visible {
-  transform: translateY(-1px);
-  background: var(--control-selected-bg);
-  box-shadow: 0 6px 14px var(--control-focus-ring);
-  outline: none;
-}
-
-.entrySkillPopover {
-  width: min(320px, calc(100vw - 32px));
-  overflow: hidden;
-  border: 1px solid rgba(var(--primary-6), 0.16);
-  border-radius: 14px;
-  padding: 12px;
-  color: var(--color-text-1);
-  background: var(--color-bg-2);
-  box-shadow:
-    0 14px 34px rgba(58, 34, 14, 0.13),
-    inset 0 1px 0 rgba(255, 255, 255, 0.68);
-}
-
-.entrySkillPopoverTitleRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.entrySkillPopoverTitle {
-  color: var(--color-text-1);
-  font-size: 13px;
-  font-weight: 740;
-  line-height: 18px;
-}
-
-.entrySkillPopoverDesc {
-  margin-top: 5px;
-  color: var(--color-text-3);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 17px;
-}
-
-.entrySkillPopoverCount {
-  height: 20px;
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0 8px;
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-  font-size: 11px;
-  font-weight: 760;
-  line-height: 1;
-}
-
-.entrySkillCompactList {
-  max-height: min(220px, calc(100vh - 280px));
-  overflow-y: auto;
-  margin-top: 10px;
-}
-
-.entrySkillCompactRow {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  min-height: 42px;
-  padding: 7px 0;
-}
-
-.entrySkillCompactRow + .entrySkillCompactRow {
-  border-top: 1px solid var(--color-border-1);
-}
-
-.entrySkillIcon {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-}
-
-.entrySkillCompactBody {
-  min-width: 0;
-}
-
-.entrySkillCompactNameRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.entrySkillCompactName {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--color-text-1);
-  font-size: 12px;
-  font-weight: 720;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.entrySkillSource {
-  height: 18px;
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0 6px;
-  color: rgb(var(--success-6));
-  background: rgba(var(--success-6), 0.1);
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.entrySkillCompactDesc {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--color-text-3);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.entrySkillOverflow,
-.entrySkillCompactHint {
-  color: var(--color-text-3);
-  font-size: 11px;
-  font-weight: 520;
-  line-height: 16px;
-}
-
-.entrySkillOverflow {
-  padding-top: 7px;
-  border-top: 1px solid var(--color-border-1);
-}
-
-.entrySkillCompactHint {
-  margin-top: 9px;
-  padding-top: 9px;
-  border-top: 1px solid var(--color-border-1);
-}
-
-.entryDismiss {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  margin-left: -2px;
-  border: 0;
-  border-radius: 7px;
-  padding: 0;
-  color: var(--color-text-3);
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.entryDismiss:hover,
-.entryDismiss:focus-visible {
-  color: var(--color-text-1);
-  background: var(--color-fill-2);
-  outline: none;
-}
-
-.entryBackButton {
-  min-width: 0;
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  border: 0;
-  border-radius: 10px;
-  padding: 0 9px;
-  color: var(--color-text-3);
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.entryBackButton:hover,
-.entryBackButton:focus-visible {
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-  outline: none;
-}
-
-.drawerSurface {
-  /* Keep the command drawer neutral. The active colour is reserved for small,
-     meaningful selection cues so custom themes never flood the whole panel. */
-  --drawer-surface-bg: var(--color-bg-1);
-  --drawer-panel-bg: var(--color-bg-2);
-  --drawer-panel-hover-bg: color-mix(in srgb, var(--color-fill-2) 64%, var(--color-bg-2));
-  --drawer-control-bg: color-mix(in srgb, var(--color-fill-2) 72%, var(--color-bg-2));
-  --drawer-control-hover-bg: color-mix(in srgb, var(--color-fill-3) 72%, var(--color-bg-2));
-  --drawer-selection-bg: color-mix(in srgb, rgb(var(--primary-6)) 5%, var(--color-bg-2));
-  --drawer-selection-fg: rgb(var(--primary-6));
-  --drawer-selection-border: color-mix(in srgb, rgb(var(--primary-6)) 26%, var(--color-border-3));
-  --drawer-accent-soft: color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--color-bg-2));
-  --drawer-accent-border: color-mix(in srgb, rgb(var(--primary-6)) 22%, var(--color-border-2));
-  --drawer-hairline: var(--color-border-2);
-  --drawer-hairline-strong: var(--color-border-3);
-  --drawer-soft-shadow: color-mix(in srgb, var(--color-text-1) 5%, transparent);
-  --drawer-strong-shadow: color-mix(in srgb, var(--color-text-1) 8%, transparent);
-  --drawer-focus-ring: color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent);
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-  color: var(--color-text-1);
-  background: var(--drawer-surface-bg);
-}
-
-.drawerTopbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 20px 10px;
-}
-
-.drawerSegmented {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 36px;
-  border: 1px solid var(--drawer-hairline);
-  border-radius: 10px;
-  padding: 3px;
-  background: var(--drawer-control-bg);
-}
-
-.drawerSegment {
-  min-width: 68px;
-  height: 30px;
-  border: 0;
-  border-radius: 7px;
-  padding: 0 13px;
-  color: var(--color-text-2);
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: 0;
-  transition:
-    background-color 0.16s ease,
-    box-shadow 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
-}
-
-.drawerSegment:hover,
-.drawerSegment:focus-visible {
-  color: var(--color-text-1);
-  background: var(--drawer-accent-soft);
-  outline: none;
-}
-
-.drawerSegmentActive {
-  color: var(--drawer-selection-fg);
-  background: var(--drawer-panel-bg);
-  box-shadow: 0 1px 3px var(--drawer-soft-shadow);
-}
-
-.drawerCloseButton {
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: auto;
-  border: 0;
-  border-radius: 8px;
-  color: var(--color-text-3);
-  background: transparent;
-  cursor: pointer;
-  transition:
-    background-color 0.16s ease,
-    border-color 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
-}
-
-.drawerCloseButton:hover,
-.drawerCloseButton:focus-visible {
-  color: var(--color-text-1);
-  background: var(--drawer-control-hover-bg);
-  outline: none;
-}
-
-.drawerSearchPanel {
-  padding: 0 20px 14px;
-}
-
-.drawerSearchInput:global(.arco-input-inner-wrapper) {
-  width: 100%;
-  height: 40px;
-  border: 1px solid var(--drawer-hairline) !important;
-  border-radius: 10px !important;
-  background: var(--drawer-panel-bg) !important;
-  box-shadow: none !important;
-  overflow: hidden;
-}
-
-.drawerSearchInput:global(.arco-input-inner-wrapper):hover {
-  border-color: var(--drawer-hairline-strong) !important;
-  background: var(--drawer-panel-hover-bg) !important;
-}
-
-.drawerSearchInput:global(.arco-input-inner-wrapper-focus) {
-  border-color: var(--drawer-hairline-strong) !important;
-  box-shadow: 0 0 0 3px var(--drawer-focus-ring) !important;
-}
-
-.drawerSearchInput :global(.arco-input-prefix) {
-  margin-left: 13px;
-  margin-right: 10px;
-  color: var(--color-text-3);
-}
-
-.drawerSearchInput :global(.arco-input) {
-  height: 38px;
-  color: var(--color-text-1);
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.drawerSearchInput :global(.arco-input::placeholder) {
-  color: var(--color-text-3);
-  font-weight: 500;
-}
-
-.drawerFilterPanel {
-  padding: 0 20px 12px;
-}
-
-.drawerResultMeta {
-  display: flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 1px 22px 8px;
-  color: var(--color-text-3);
-  font-size: 12px;
-  font-weight: 560;
-}
-
-.drawerResultMeta strong {
-  color: var(--color-text-1);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.drawerList {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0 20px 18px;
-}
-
-.drawerEmptyState {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  min-height: 160px;
-  padding: 24px;
-  color: var(--color-text-3);
-  font-size: 13px;
-  line-height: 1.6;
-  text-align: center;
-}
-
-.drawerCard {
-  position: relative;
-  display: grid;
-  flex: 0 0 auto;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  border: 1px solid var(--drawer-hairline);
-  border-radius: 12px;
-  padding: 12px;
-  color: var(--color-text-1);
-  background: var(--drawer-panel-bg);
-  box-shadow: 0 1px 2px var(--drawer-soft-shadow);
-  cursor: pointer;
-  overflow: hidden;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    background-color 0.16s ease,
-    transform 0.16s ease;
-}
-
-.drawerCard::before {
-  content: '';
-  position: absolute;
-  inset: 12px auto 12px 0;
-  width: 2px;
-  border-radius: 999px;
-  background: transparent;
-  transition: background-color 0.16s ease;
-}
-
-.drawerCard:hover,
-.drawerCard:focus-visible {
-  border-color: var(--drawer-hairline-strong);
-  background: var(--drawer-panel-hover-bg);
-  box-shadow: 0 5px 16px var(--drawer-strong-shadow);
-  outline: none;
-}
-
-.drawerCard:hover::before,
-.drawerCard:focus-visible::before {
-  background: color-mix(in srgb, rgb(var(--primary-6)) 48%, transparent);
-}
-
-.drawerCardSelected {
-  color: var(--color-text-1);
-  border-color: var(--drawer-selection-border);
-  background: var(--drawer-selection-bg);
-  box-shadow: 0 1px 2px var(--drawer-soft-shadow);
-}
-
-.drawerCardStatus {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--drawer-hairline-strong);
-  border-radius: 6px;
-  color: transparent;
-  background: var(--drawer-control-bg);
-}
-
-.drawerCardStatusSelected {
-  color: #fff;
-  border-color: var(--drawer-selection-fg);
-  background: var(--drawer-selection-fg);
-  box-shadow: none;
-}
-
-.drawerIconTile {
-  width: 40px;
-  height: 40px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--drawer-hairline);
-  border-radius: 10px;
-  color: rgb(var(--primary-6));
-  background: var(--drawer-accent-soft);
-  font-size: 13px;
-  font-weight: 720;
-  letter-spacing: 0;
-  overflow: hidden;
-}
-
-.drawerCardBody {
-  min-width: 0;
-}
-
-.drawerCardTitleRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.drawerCardTitle {
-  min-width: 0;
-  margin: 0;
-  color: var(--color-text-1);
-  font-size: 14px;
-  font-weight: 680;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.drawerBadge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 20px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0 8px;
-  font-size: 10px;
-  font-weight: 720;
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.drawerBadgePrimary {
-  color: rgb(var(--primary-6));
-  border-color: var(--drawer-accent-border);
-  background: var(--drawer-accent-soft);
-}
-
-.drawerBadgeMuted {
-  color: var(--color-text-3);
-  border-color: var(--drawer-hairline);
-  background: var(--drawer-control-bg);
-}
-
-.drawerBadgeSuccess {
-  color: rgb(var(--green-6));
-  border-color: rgba(var(--green-6), 0.22);
-  background: rgba(var(--green-6), 0.1);
-}
-
-.drawerDescription {
-  display: -webkit-box;
-  margin: 5px 0 0;
-  color: var(--color-text-2);
-  font-size: 12px;
-  line-height: 1.55;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-}
-
-.drawerMetaRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
-.drawerEngineBadge,
-.drawerTagChip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 21px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0 8px;
-  color: var(--color-text-3);
-  background: var(--drawer-control-bg);
-  font-size: 10px;
-  font-weight: 620;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.drawerEngineBadge {
-  gap: 5px;
-  color: rgb(var(--primary-6));
-  border-color: var(--drawer-accent-border);
-  background: var(--drawer-accent-soft);
-}
-
-.drawerEngineGlyph {
-  width: 14px;
-  height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 5px;
-  color: #fff;
-  background: rgb(var(--primary-6));
-  font-size: 8px;
-  font-weight: 800;
-}
-
-/* Skill rows stay as one compact, two-line unit at every drawer width. Keep
-   these overrides after the shared card rules so the preset layout cannot
-   re-enable wrapping through the cascade. */
-.drawerSkillCard {
-  box-sizing: border-box;
-  grid-template-columns: 40px minmax(0, 1fr) 20px;
-  gap: 10px;
-  align-items: center;
-  min-height: 58px;
-  padding: 8px 12px;
-}
-
-.drawerSkillCard::before {
-  display: none;
-}
-
-.drawerSkillCard .drawerCardStatus {
-  position: static;
-  justify-self: end;
-  box-sizing: border-box;
-  width: 20px;
-  height: 20px;
-}
-
-.drawerSkillCard .drawerIconTile {
-  box-sizing: border-box;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-}
-
-.drawerSkillCard .drawerCardBody {
-  overflow: hidden;
-  padding-right: 0;
-}
-
-.drawerSkillTitleRow {
-  height: 20px;
-  flex-wrap: nowrap;
-  gap: 6px;
-  overflow: hidden;
-}
-
-.drawerSkillTitleRow .drawerCardTitle {
-  flex: 0 1 auto;
-  line-height: 20px;
-}
-
-.drawerSkillTitleRow .drawerBadge {
-  box-sizing: border-box;
-  flex: 0 0 auto;
-  height: 20px;
-  min-height: 20px;
-}
-
-.drawerSkillMetaRow {
-  height: 20px;
-  flex: 1 1 auto;
-  flex-wrap: nowrap;
-  gap: 5px;
-  min-width: 0;
-  margin-top: 0;
-  overflow: hidden;
-}
-
-.drawerSkillMetaRow .drawerTagChip {
-  box-sizing: border-box;
-  flex: 0 0 auto;
-  height: 20px;
-  min-height: 20px;
-}
-
-.drawerSkillDescription {
-  display: block;
-  height: 17px;
-  margin-top: 3px;
-  overflow: hidden;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  -webkit-line-clamp: 1;
-}
-
-.drawerCallAction {
-  display: inline-flex;
-  align-items: center;
-  align-self: center;
-  gap: 5px;
-  border-radius: 999px;
-  padding: 7px 10px;
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.09);
-  font-size: 12px;
-  font-weight: 720;
-  line-height: 1;
-  opacity: 0;
-  transform: translateX(6px);
-  transition:
-    opacity 0.16s ease,
-    transform 0.16s ease;
-  pointer-events: none;
-}
-
-.drawerCard:hover .drawerCallAction,
-.drawerCard:focus-visible .drawerCallAction {
-  opacity: 1;
-  transform: translateX(0);
-}
-
-.drawerFooter {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border-top: 1px solid var(--drawer-hairline);
-  padding: 12px 20px 14px;
-  background: var(--color-bg-1);
-}
-
-.drawerFooterHint {
-  min-width: 0;
-  color: var(--color-text-3);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.drawerGhostButton,
-.drawerPrimaryButton {
-  min-height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  padding: 0 14px;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0;
-  white-space: nowrap;
-  transition:
-    background-color 0.16s ease,
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
-}
-
-.drawerGhostButton {
-  margin-left: auto;
-  color: var(--color-text-2);
-  border-color: var(--drawer-hairline);
-  background: var(--drawer-control-bg);
-}
-
-.drawerGhostButton:hover,
-.drawerGhostButton:focus-visible {
-  color: rgb(var(--primary-6));
-  border-color: var(--drawer-hairline-strong);
-  background: var(--drawer-accent-soft);
-  outline: none;
-  transform: translateY(-1px);
-}
-
-.drawerPrimaryButton {
-  margin-left: auto;
-  color: #fff;
-  border-color: rgb(var(--primary-6));
-  background: rgb(var(--primary-6));
-  box-shadow: 0 2px 6px color-mix(in srgb, rgb(var(--primary-6)) 18%, transparent);
-}
-
-.drawerPrimaryButton:hover,
-.drawerPrimaryButton:focus-visible {
-  background: color-mix(in srgb, rgb(var(--primary-6)) 88%, var(--color-text-1));
-  box-shadow: 0 3px 8px color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
-  outline: none;
-  transform: translateY(-1px);
-}
-
-@media (max-width: 640px) {
-  .drawerTopbar,
-  .drawerSearchPanel,
-  .drawerFilterPanel,
-  .drawerList,
-  .drawerFooter {
-    padding-right: 14px;
-    padding-left: 14px;
-  }
-
-  .drawerFilterPanel {
-    overflow-x: hidden;
-  }
-
-  .drawerCard {
-    grid-template-columns: 42px minmax(0, 1fr);
-  }
-
-  .drawerIconTile {
-    width: 42px;
-    height: 42px;
-  }
-
-  .drawerCallAction {
-    display: none;
-  }
-}
-
-.actionRow {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  width: 100%;
-  gap: 8px;
-  margin-top: auto;
-}
-
-.actionTools {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 1;
-  min-width: 0;
-}
-
-.actionEntry {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  margin-right: 0;
-}
-
-/* 方案E：模型 + 权限各自独立 tb-btn，中间有竖线分隔 */
-.actionConfigGroup {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
-.actionConfigGroupResponsive {
-  container-name: guid-action-config;
-  container-type: inline-size;
-  flex: 1 1 0;
-  justify-content: flex-end;
-  max-width: 100%;
-}
-
-@container guid-action-config (max-width: 440px) {
-  .actionConfigGroup :global(.sendbox-responsive-label),
-  .actionConfigGroup :global(.sendbox-responsive-chevron) {
-    display: none !important;
-  }
-
-  .actionConfigGroup :global(.guid-config-btn),
-  .actionConfigGroup :global(.agent-mode-compact-pill) {
-    width: auto !important;
-    min-width: 28px !important;
-    max-width: 28px !important;
-    height: 28px !important;
-    padding: 0 !important;
-    border-radius: 999px !important;
-    flex: 0 1 auto !important;
-    overflow: hidden !important;
-    transition:
-      max-width 160ms ease,
-      padding 160ms ease,
-      opacity 160ms ease !important;
-  }
-
-  .actionConfigGroup :global(.guid-config-btn .arco-btn-content),
-  .actionConfigGroup :global(.agent-mode-compact-pill .arco-btn-content) {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 100% !important;
-    min-width: 0 !important;
-    overflow: visible !important;
-  }
-}
-
-@media (hover: hover) and (pointer: fine) {
-  @container guid-action-config (max-width: 440px) {
-    .actionConfigGroup :global(.guid-config-btn:hover),
-    .actionConfigGroup :global(.guid-config-btn:focus-visible),
-    .actionConfigGroup :global(.agent-mode-compact-pill:hover),
-    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible) {
-      width: auto !important;
-      min-width: 28px !important;
-      max-width: 200px !important;
-      padding: 0 10px !important;
-      flex: 0 1 auto !important;
-      position: relative;
-      z-index: 2;
-    }
-
-    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-label),
-    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-chevron),
-    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-label),
-    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-chevron),
-    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-label),
-    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-chevron),
-    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-label),
-    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron) {
-      display: inline-flex !important;
-    }
-  }
-}
-
-/* 首页输入框右下「模型 / 模式」按钮：与对话框 .sendbox-tools/.sendbox-actions 同款 */
-.actionSubmit :global(.sendbox-model-btn),
-.actionSubmit :global(.sendbox-model-btn:hover),
-.actionSubmit :global(.sendbox-model-btn:active),
-.actionSubmit :global(.sendbox-model-btn:focus),
-.actionSubmit :global(.sendbox-model-btn:focus-visible) {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  color: var(--text-secondary) !important;
-}
-
-.actionSubmit :global(.sendbox-model-btn:hover),
-.actionSubmit :global(.sendbox-model-btn:active),
-.actionSubmit :global(.sendbox-model-btn:focus),
-.actionSubmit :global(.sendbox-model-btn:focus-visible) {
-  color: var(--text-primary) !important;
-}
-
-.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content) {
-  gap: 0 !important;
-}
-
-.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content > span:first-child) {
-  gap: 4px !important;
-}
-
-.actionSubmit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  margin-left: auto;
-  min-width: 0;
-}
-
-.actionSubmitResponsive {
-  flex: 1 1 auto;
-  justify-content: flex-end;
 }
 
 .workspaceFootnote {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 6px 6px 10px 14px;
-  background: transparent;
+  min-width: 0;
+  min-height: 38px;
+  margin: 0 14px -12px;
+  padding: 7px 12px 19px;
+  border-radius: 14px 14px 0 0;
+  background: var(--color-fill-2);
 }
 
 .workspaceEmptyBtn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text-3);
   background: transparent;
@@ -1531,14 +55,15 @@ button.guidResourceCard:focus-visible {
   border: none;
   border-radius: 6px;
   overflow: hidden;
-  max-width: 460px;
+  min-width: 0;
+  max-width: min(100%, 460px);
 }
 
 .workspacePillMain {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text-2);
   background: transparent;
@@ -1549,6 +74,7 @@ button.guidResourceCard:focus-visible {
   transition:
     background 0.12s,
     color 0.12s;
+  min-width: 0;
   max-width: 400px;
   overflow: hidden;
   white-space: nowrap;
@@ -1671,24 +197,6 @@ button.guidResourceCard:focus-visible {
   margin: 4px 0;
 }
 
-.lightPlaceholder::placeholder {
-  color: #b4b5bc;
-  opacity: 1;
-}
-
-.plusButtonRotate {
-  animation: rotate-animation 0.3s ease-in-out;
-}
-
-@keyframes rotate-animation {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(45deg);
-  }
-}
-
 /* Skeleton shimmer animation */
 @keyframes guid-shimmer {
   0% {
@@ -1706,68 +214,11 @@ button.guidResourceCard:focus-visible {
   border-radius: 50%;
 }
 
-/* 移动端优化 */
-@media (max-width: 768px) {
-  .guidLayout {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 24px), 100%);
-    padding: 0 12px;
-    padding-bottom: 100px; /* 为底部快捷按钮留出空间 */
-    box-sizing: border-box;
-  }
-
-  .actionRow {
-    flex-wrap: nowrap;
-    gap: 8px;
-  }
-
-  .actionTools {
-    gap: 8px;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-
-  .actionTools::-webkit-scrollbar {
-    display: none;
-  }
-
-  .actionTools > * {
-    flex: 0 0 auto;
-  }
-
-  .actionEntry {
-    margin-right: 0;
-  }
-
-  .actionConfigGroup {
-    gap: 0;
-  }
-
-  .actionSubmit {
-    flex-shrink: 0;
-    margin-left: 8px;
-  }
-}
-
-/* 小屏手机再收窄一点安全边距，提升可操作面积 */
-@media (max-width: 420px) {
-  .guidLayout {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 20px), 100%);
-    padding: 0 10px;
-  }
-}
-
-/* 移动端容器滚动支持 */
 .guidContainer {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
-  -webkit-overflow-scrolling: touch;
 }
 
 .guidPrimaryStage {
@@ -1777,25 +228,18 @@ button.guidResourceCard:focus-visible {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 10px;
+  /* Center the complete group as the companion stage smoothly changes height.
+     min-height lets taller content grow into normal document scrolling. */
+  padding: 48px 20px;
   box-sizing: border-box;
 }
 
-/* 整体内容块略往上移，减轻「重心偏下」的感觉 */
+/* Keep horizontal centering while the stage owns vertical alignment. */
 .guidPrimaryStage .guidLayout {
-  margin-top: -5vh;
+  margin-top: 0;
 }
 
-.guidDiscoveryArea {
-  width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
-  max-width: 100%;
-  margin: 0 auto;
-  padding: 22px 26px calc(132px + env(safe-area-inset-bottom, 0px));
-  box-sizing: border-box;
-}
-
-/* 高级控件悬挂在内容区右上角 —— 与正常会话 ChatLayout header 右侧一致
-   （flex + gap:12px）。仅桌面端显示，移动端隐藏（与会话一致）。 */
+/* 高级控件悬挂在内容区右上角，与正常会话 ChatLayout header 右侧一致。 */
 .guidAdvancedControls {
   position: absolute;
   top: 14px;
@@ -1806,201 +250,106 @@ button.guidResourceCard:focus-visible {
   gap: 12px;
 }
 
-@media (max-width: 768px) {
-  .guidAdvancedControls {
-    display: none;
-  }
+.guidPresetCapabilityError {
+  margin-bottom: 12px;
 }
 
-/* Agent 选中时：先放大再回落至略大（pop 动效） */
-@keyframes agentSelectPop {
-  0% {
-    transform: scale(1);
-  }
-  35% {
-    transform: scale(1.12);
-  }
-  100% {
-    transform: scale(1.02);
-  }
+.modelCompatibilityAlert :global(.arco-alert-content) {
+  flex: 1;
+  min-width: 0;
 }
 
-.agentItemSelected {
-  background-color: var(--fill-0);
-  transition:
-    opacity 0.5s cubic-bezier(0.2, 0.8, 0.3, 1),
-    background-color 0.25s ease-out;
-  animation: agentSelectPop 0.4s ease-out forwards;
+.modelCompatibilityBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
 }
 
-/* 底部快捷按钮：基础间距 + 安全区 */
-.guidQuickActions {
-  bottom: calc(32px + env(safe-area-inset-bottom, 0px));
+.modelCompatibilitySummary,
+.modelCompatibilityPreserved {
+  margin: 0;
+  line-height: 20px;
 }
 
-@media (max-width: 768px) {
-  .guidPrimaryStage {
-    justify-content: flex-start;
-    padding-top: 20px;
-    min-height: auto;
-  }
-
-  .guidPrimaryStage .guidLayout {
-    margin-top: 0;
-  }
-
-  .guidDiscoveryArea {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 20px), 100%);
-    padding: 16px 20px calc(108px + env(safe-area-inset-bottom, 0px));
-  }
+.modelCompatibilitySummary {
+  color: var(--color-text-2);
 }
 
-/* 浅色占位符 */
-.lightPlaceholder :global(textarea::placeholder) {
-  color: #b4b5bc !important;
-  opacity: 1 !important;
+.modelCompatibilityFacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin: 0;
 }
 
-/* 设定标签 */
-.presetAgentTag {
-  display: inline-flex;
+.modelCompatibilityFact {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
-  gap: 0;
-  background: var(--color-fill-2);
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 11px;
   border: 1px solid var(--color-border-2);
-  padding: 0;
-  border-radius: 16px;
-  cursor: pointer;
-  user-select: none;
-  transition: background-color 0.2s;
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
+  border-radius: 8px;
+  background: var(--color-bg-1);
 }
 
-.presetAgentTag:hover {
-  background: color-mix(in srgb, var(--color-fill-3) 92%, transparent);
-}
-
-/* Left clickable area: agent logo + avatar + name */
-.presetAgentTagMain {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px 6px 12px;
-  min-width: 0;
-}
-
-.presetAgentTagMain:hover {
-  background: var(--color-fill-3);
-  border-radius: 16px 0 0 16px;
-}
-
-.presetAgentTagAgentLogo {
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
-/* Inner divider between agent logo and preset avatar/name */
-.presetAgentTagInnerDivider {
-  width: 1px;
-  height: 14px;
-  background: var(--color-border-3);
-  flex-shrink: 0;
-}
-
-/* Vertical divider between main area and right chevron/close */
-.presetAgentTagDivider {
-  width: 1px;
-  height: 14px;
-  background: var(--color-border-3);
-  flex-shrink: 0;
-}
-
-.presetAgentTagName {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text-1);
+.modelCompatibilityFact dt {
+  color: var(--color-text-3);
+  font-size: 12px;
   white-space: nowrap;
+}
+
+.modelCompatibilityFact dd {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--color-text-1);
+}
+
+.modelCompatibilityFact dd strong,
+.modelCompatibilityProvider {
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 200px;
+  white-space: nowrap;
 }
 
-/* Chevron (right side dropdown trigger) */
-.presetAgentTagChevron {
+.modelCompatibilityProvider {
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.modelCompatibilityTags {
+  flex-wrap: wrap;
+}
+
+.modelCompatibilityTags :global(.arco-tag) {
+  margin: 0;
+}
+
+.modelCompatibilityPreserved {
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.modelCompatibilityActions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  margin-left: 2px;
-  margin-right: 6px;
-  transition: background-color 0.2s;
-  flex-shrink: 0;
+  gap: 6px;
 }
 
-.presetAgentTagChevron:hover {
-  background: var(--color-fill-4);
+.modelCompatibilityNoAlternative {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 20px;
 }
 
-.presetAgentTagClose {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  margin-left: 2px;
-  margin-right: 8px;
-  transition: background-color 0.2s;
-  flex-shrink: 0;
-}
 
-.presetAgentTagClose:hover {
-  background: var(--color-fill-4);
-}
-
-/* 移动端设定标签优化 */
-@media (max-width: 768px) {
-  .presetAgentTagName {
-    max-width: 120px;
-  }
-
-  .actionTools {
-    gap: 6px;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
-  }
-}
-
-/* iPhone专门优化 */
-@supports (-webkit-touch-callout: none) {
-  .actionRow {
-    flex-wrap: nowrap !important;
-  }
-
-  .actionTools {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
-  }
-
-  .actionSubmit {
-    flex-shrink: 0;
-  }
-
-  .presetAgentTagName {
-    max-width: 100px;
-  }
+@media (max-height: 720px) {
+  .guidPrimaryStage { padding-block: 32px; }
 }

@@ -10,7 +10,7 @@
 
 export const BACKGROUND_BLOCK_START = '/* Nomi Theme Background Start */';
 export const BACKGROUND_BLOCK_END = '/* Nomi Theme Background End */';
-export const BACKGROUND_MASK_VERSION = '/* Nomi Theme Background Mask v2 */';
+const BACKGROUND_MASK_VERSION = '/* Nomi Theme Background Mask v2 */';
 
 // Light mode renders dark foreground text, so arbitrary user images need the
 // stronger white veil to retain readable contrast. Dark mode uses a lighter

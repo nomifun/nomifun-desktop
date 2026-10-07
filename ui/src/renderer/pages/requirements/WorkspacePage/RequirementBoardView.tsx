@@ -13,7 +13,7 @@
  * six status columns are always rendered, even when empty.
  *
  * Items are grouped into the six status columns client-side. Each column is a
- * native HTML5 drop target: dropping a card whose status differs from the
+ * native HTML5 drop target: an allowed manual transition to the target
  * column fires `onStatusChange(id, columnStatus)`. The dragged id is recovered
  * from internal state (seeded by the card's `onDragStart`) with a dataTransfer
  * fallback, so drops work regardless of which path delivered the id.
@@ -23,6 +23,7 @@ import { Tag } from '@arco-design/web-react';
 import React, { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import RequirementBoardCard from './RequirementBoardCard';
+import { canChangeRequirementStatus } from '../components/StatusPill';
 import { parseRequirementId, type RequirementId } from '@/common/types/ids';
 
 interface RequirementBoardViewProps {
@@ -87,14 +88,19 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
     draggedIdRef.current = null;
     if (id == null) return;
     const dragged = items.find((it) => it.requirement_id === id);
-    // Only fire when the card is actually moving to a different column.
-    if (dragged && dragged.status !== columnStatus) {
+    if (dragged && canChangeRequirementStatus(dragged.status, columnStatus)) {
       onStatusChange(id, columnStatus);
     }
   };
 
   return (
-    <div className='flex w-full flex-1 min-h-0 items-start gap-12px overflow-x-auto pb-4px'>
+    <div
+      className='flex w-full flex-1 min-h-0 items-start gap-12px overflow-x-auto pb-4px'
+      onDragEnd={() => {
+        draggedIdRef.current = null;
+        setDropTarget(null);
+      }}
+    >
       {COLUMNS.map((status) => {
         const colItems = grouped[status];
         const hasItems = colItems.length > 0;
@@ -104,6 +110,13 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
           <div
             key={status}
             onDragOver={(e) => {
+              const id = resolveDraggedId(e);
+              const dragged = items.find((item) => item.requirement_id === id);
+              if (!dragged || !canChangeRequirementStatus(dragged.status, status)) {
+                e.dataTransfer.dropEffect = 'none';
+                setDropTarget(null);
+                return;
+              }
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
               if (dropTarget !== status) setDropTarget(status);

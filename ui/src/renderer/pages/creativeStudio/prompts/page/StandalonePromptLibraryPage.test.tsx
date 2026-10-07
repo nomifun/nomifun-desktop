@@ -24,7 +24,7 @@ await testI18n.use(initReactI18next).init({
 
 const ITEM: PromptLibraryItem = {
   id: 'prompt-1',
-  source: 'preset',
+  source: 'catalog',
   title: '镜头规划',
   description: '整理画面节奏',
   prompt: '按故事目标规划镜头。',

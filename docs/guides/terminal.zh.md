@@ -1,8 +1,7 @@
 # 应用内终端
 
 Nomi 在应用内附带了一个真正的终端。每个终端都是一个由后端管理的
-PTY 会话，你可以从浏览器/桌面窗口中以交互方式驱动它 —— 当你把它
-绑定到一个 tag 上时，AutoWork 也可以代你来驱动它。
+PTY 会话，你可以从浏览器/桌面窗口中以交互方式驱动它。
 
 > 需要自动化指南？参见 [AutoWork & Requirements](./autowork-requirements.md)。
 > 需要按计划运行 agent？参见 [定时任务](./scheduled-tasks.zh.md)。
@@ -98,46 +97,13 @@ PTY 子进程不能被暂停或在进程间迁移：当子进程退出时，
 客户端到服务器的输入走另一个方向，通过一个小的 REST 端点
 (base64 编码的字节)。后端会把这些字节直接写到 PTY 的 stdin。
 
-## 终端作为自动化目标
+## 自动化边界
 
-驱动 UI 的同一个内存中的 PTY 映射通过 `TerminalDriver` trait
-与 `nomifun-requirement` 中的 **AutoWork 执行循环** 共享。该
-trait 让 AutoWork：
-
-- 订阅终端实时输出的副本 (它会监视完成标记并检测静默 ——
-  契约见 AutoWork 指南)。
-- 向 PTY 写入输入字节 (它把 requirement prompt 包装在
-  bracketed-paste 中注入，使得多行指令会作为单次粘贴落地)。
-- 检查存活性，读取该行的元数据 (user、backend、mode)，并读取或
-  写入每个终端的 `autowork` 配置 blob。
-
-换句话说：**你在这里创建的终端可被 AutoWork 自动化**。
-在会话头的 AutoWork 工具栏上绑定一个 tag，AutoWork 循环
-就会开始认领 requirement 并把它们喂给运行在该终端中的 CLI。
-只有 agent-CLI 终端 (`claude`、`codex`、`gemini`) 才符合条件 ——
-普通的 shell 可以手动驱动但不是 AutoWork 目标。AutoWork 循环也
-推荐使用 Full Auto 模式，因为一轮如果撞上交互式审批提示
-会一直阻塞直到超时。
-
-如果工作区挂载了知识库 (存在 `{cwd}/.nomi/knowledge/`)，AutoWork 与
-cron 驱动注入的 prompt 会自动前置一行提示，让 CLI 先阅读挂载目录里的
-`README.md` 再开工。
-
-如果在 AutoWork 仍绑定时 PTY 退出，循环不会停止 —— 它会
-空转并等待你重新启动该终端，然后从中断处继续认领。
-如果你删除该行，循环会彻底停止。
-
-## IDMM (决策停滞监督)
-
-长时间运行的 CLI 会话有时会停滞：provider 掉线，模型在某个工具
-调用上空转，CLI 打印了一个无人回答的确认提示。IDMM
-(Intelligent Decision-Making Mode) supervisor 会监视会话并介入 ——
-先用基于规则的轻推 (无 LLM)，然后调用一个 sidecar 备用模型 ——
-这样这一轮会到达一个终态，而不是挂起到 AutoWork 超时触发。
-
-你可以在同一个会话头 (AutoWork 旁边的 **IDMM** 控件) 中按终端
-启用 IDMM。无论 AutoWork 是否同时绑定它都能工作；当两者都开启
-时，AutoWork 会确保 IDMM 在每一轮的全程都在监督。
+Terminal AutoWork 与跨 Session 的 IDMM supervisor 已退出产品。
+AutoWork 现在只绑定 canonical AgentSession，并把执行、retry、attention、
+cancel 与 receipt recovery 统一交给 AgentExecution。需要 Requirements 队列时，
+请从会话或首页入口选择已保存 Agent。Terminal 保持为交互工具；获得授权的
+Agent 仍可通过 Process/Terminal capability 启动它。
 
 ## 路由 & API
 
@@ -158,9 +124,6 @@ cron 驱动注入的 prompt 会自动前置一行提示，让 CLI 先阅读挂�
 - **找不到 CLI。** Agent preset 直接调用 `claude`、`codex` 或
   `gemini` —— 它们必须在运行后端的账户的 `PATH` 上。要么全局安装
   CLI，要么在启动前编辑启动命令使用绝对路径。
-- **AutoWork 绑定是灰色的。** 当前只有 `claude`/`codex` 终端才是
-  AutoWork 目标。普通 shell preset 不能被绑定；Gemini 终端 AutoWork
-  还没有接入后端的完成契约。
 - **重新启动一直复用同一个 env / cwd。** 这是有意为之 —— 会话
   行存储着它们。要修改它们，请用想要的设置创建一个新的终端。
 - **调整大小后输出乱了。** 一些 TUI 在 `SIGWINCH` 时需要重绘。

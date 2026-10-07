@@ -6,46 +6,44 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Input, Message } from '@arco-design/web-react';
-import { ipcBridge } from '@/common';
+import { Input } from '@arco-design/web-react';
 import type { ICompanionProfile } from '@/common/adapter/ipcBridge';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
-import PresetApplyControl from '@/renderer/components/preset/PresetApplyControl';
 import type { CompanionHandle } from '../../types';
 import { useDebouncedText } from './useDebouncedText';
 
 interface PersonaSectionProps {
   profile: ICompanionProfile;
   patchCompanion: CompanionHandle['patchCompanion'];
-  /** Re-read the profile after the backend applied a preset snapshot. */
-  refresh: CompanionHandle['refresh'];
 }
 
 /**
- * 伙伴设定 — how this companion talks: a tone preset plus free-text notes, and the
- * one-click reuse of a saved preset. Both rows write the same idea (“who it is”),
- * so they live in one list.
+ * Companion persona settings are local tone/notes controls. AgentPreset
+ * authoring and reusable Agent configuration belong to the Agent Workbench,
+ * so this surface has no preset picker or apply action.
  */
-const PersonaSection: React.FC<PersonaSectionProps> = ({ profile, patchCompanion, refresh }) => {
+const PersonaSection: React.FC<PersonaSectionProps> = ({ profile, patchCompanion }) => {
   const { t } = useTranslation();
   const companionName = profile.name;
 
   const [customDraft, onCustomChange] = useDebouncedText(profile.persona.custom ?? '', (custom) => {
     if (custom === (profile.persona.custom ?? '')) return;
-    void patchCompanion({ persona: { custom } }).catch((e) => Message.error(String(e)));
+    void patchCompanion({ persona: { custom } }).catch(() => undefined);
   });
 
   return (
     <NomiSettingSection
-      title={t('nomi.overview.personaSection', { defaultValue: '伙伴设定' })}
-      description={t('nomi.overview.personaSectionHint', { defaultValue: '它是谁、怎么说话，都会写进每次对话的开场' })}
+      title={t('nomi.overview.personaSection', { defaultValue: 'Persona' })}
+      description={t('nomi.overview.personaSectionHint', {
+        defaultValue: 'Choose how this companion speaks in future conversations.',
+      })}
     >
       <NomiSettingList>
         <NomiSettingRow
-          title={t('nomi.overview.personaTitle', { defaultValue: '角色介绍' })}
+          title={t('nomi.overview.personaTitle', { defaultValue: 'Tone and notes' })}
           description={t('nomi.settings.personaHint', {
-            defaultValue: '决定 {{companionName}} 说话的性格与语气',
+            defaultValue: 'Set the tone and optional instructions for {{companionName}}.',
             companionName,
           })}
           controls={
@@ -56,11 +54,13 @@ const PersonaSection: React.FC<PersonaSectionProps> = ({ profile, patchCompanion
               onChange={(preset: string) => void patchCompanion({ persona: { preset } })}
             >
               <NomiSelect.Option value='lively'>
-                {t('nomi.settings.personaLively', { defaultValue: '活泼' })}
+                {t('nomi.settings.personaLively', { defaultValue: 'Lively' })}
               </NomiSelect.Option>
-              <NomiSelect.Option value='calm'>{t('nomi.settings.personaCalm', { defaultValue: '沉稳' })}</NomiSelect.Option>
+              <NomiSelect.Option value='calm'>
+                {t('nomi.settings.personaCalm', { defaultValue: 'Calm' })}
+              </NomiSelect.Option>
               <NomiSelect.Option value='sassy'>
-                {t('nomi.settings.personaSassy', { defaultValue: '小毒舌' })}
+                {t('nomi.settings.personaSassy', { defaultValue: 'Sassy' })}
               </NomiSelect.Option>
             </NomiSelect>
           }
@@ -69,32 +69,10 @@ const PersonaSection: React.FC<PersonaSectionProps> = ({ profile, patchCompanion
               autoSize={{ minRows: 1, maxRows: 4 }}
               className='!bg-[var(--color-bg-1)] !border-[var(--color-border-2)] !rd-8px !px-10px !py-7px !leading-20px'
               placeholder={t('nomi.settings.personaCustomPlaceholder', {
-                defaultValue: '补充人格设定（可选），例如：叫我「队长」',
+                defaultValue: 'Optional persona notes, for example: call me team lead.',
               })}
               value={customDraft}
               onChange={onCustomChange}
-            />
-          }
-        />
-
-        <NomiSettingRow
-          title={t('nomi.settings.preset', { defaultValue: '复用设定' })}
-          description={t('nomi.settings.presetHint', {
-            defaultValue: '一键应用已保存的 Agent、模型、Skill 与知识范围配置。',
-          })}
-          controls={
-            <PresetApplyControl
-              compact
-              target='companion'
-              appliedPreset={profile.applied_preset}
-              onApply={async (presetId, locale) => {
-                await ipcBridge.companion.applyPreset.invoke({
-                  companion_id: profile.companion_id,
-                  preset_id: presetId,
-                  locale,
-                });
-                await refresh();
-              }}
             />
           }
         />

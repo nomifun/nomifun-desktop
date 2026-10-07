@@ -28,9 +28,11 @@ impl UserEventSink for NoopBroadcaster {
 fn make_router(root: &std::path::Path) -> axum::Router {
     let broadcaster = Arc::new(NoopBroadcaster);
     let roots = vec![root.to_path_buf()];
+    let file_service = Arc::new(FileService::new(broadcaster.clone(), roots.clone()));
+    let watch_service = Arc::new(FileWatchService::new(broadcaster, Arc::downgrade(&file_service)).expect("watch service"));
     file_routes(FileRouterState {
-        file_service: Arc::new(FileService::new(broadcaster.clone(), roots.clone())),
-        watch_service: Arc::new(FileWatchService::new(broadcaster).expect("watch service")),
+        file_service,
+        watch_service,
         snapshot_service: Arc::new(SnapshotService::new()),
         allowed_roots: roots.clone(),
         browse_roots: roots,
@@ -110,6 +112,27 @@ async fn browse_show_files_true_includes_files() {
     assert_eq!(status, StatusCode::OK, "browse rejected showFiles=true: {raw}");
     let items = json["data"]["items"].as_array().expect("items array");
     assert_eq!(items.len(), 2, "showFiles=true must include files: {raw}");
+}
+
+#[tokio::test]
+async fn workspace_list_route_reconciles_external_changes_without_a_watcher() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("old.txt"), "old").unwrap();
+    let router = make_router(tmp.path());
+    let body = serde_json::json!({ "root": tmp.path().to_str().unwrap() });
+
+    let (status, first, raw) =
+        post_json(router.clone(), "/api/fs/list", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "initial list failed: {raw}");
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+
+    std::fs::write(tmp.path().join("new.txt"), "new").unwrap();
+    std::fs::remove_file(tmp.path().join("old.txt")).unwrap();
+    let (status, refreshed, raw) = post_json(router, "/api/fs/list", body).await;
+    assert_eq!(status, StatusCode::OK, "refresh list failed: {raw}");
+    let items = refreshed["data"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "explicit list returned a stale snapshot: {raw}");
+    assert_eq!(items[0]["relative_path"], "new.txt");
 }
 
 #[tokio::test]

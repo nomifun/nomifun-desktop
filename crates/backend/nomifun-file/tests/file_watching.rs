@@ -49,7 +49,7 @@ impl UserEventSink for RecordingBroadcaster {
 
 fn make_service() -> (Arc<dyn IFileWatchService>, Arc<RecordingBroadcaster>) {
     let recorder = Arc::new(RecordingBroadcaster::new());
-    let svc = FileWatchService::new(recorder.clone()).unwrap();
+    let svc = FileWatchService::new(recorder.clone(), std::sync::Weak::new()).unwrap();
     (Arc::new(svc), recorder)
 }
 

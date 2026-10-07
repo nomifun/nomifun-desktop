@@ -7,6 +7,10 @@
 import { ipcBridge } from '@/common';
 import type { IStartOnBootStatus } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
+import type {
+  ThinkingContentDisplayLength,
+  ThinkingSummaryDisplayLength,
+} from '@/common/config/thinkingDisplay';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
@@ -14,6 +18,9 @@ import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
+import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
+import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
 import { FolderSearch } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -52,6 +59,8 @@ const SystemModalContent: React.FC = () => {
   const [autoPreviewOfficeFiles, setAutoPreviewOfficeFiles] = useState(true);
   const [sendKey, setSendKey] = useState<'enter' | 'mod-enter'>('enter');
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
+  const thinkingDisplay = useThinkingDisplayPreferences();
+  const [showDecisionBasis, setShowDecisionBasis] = useConfig('chat.idmm.showDecisionBasis');
 
   useEffect(() => {
     // Start-on-boot is only meaningful in the Tauri desktop shell (backed by
@@ -102,21 +111,46 @@ const SystemModalContent: React.FC = () => {
     [startOnBoot, t]
   );
 
-  const handleNotificationEnabledChange = useCallback((checked: boolean) => {
+  const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
+    if (!isDesktopShell()) return true;
+    try {
+      let state = await ipcBridge.notification.permissionState.invoke();
+      if (state !== 'granted') state = await ipcBridge.notification.requestPermission.invoke();
+      if (state === 'granted') return true;
+    } catch {
+      // The permission page provides the durable recovery path below.
+    }
+    Message.error({
+      duration: 6000,
+      content: (
+        <span className='inline-flex items-center gap-8px'>
+          <span>{t('settings.notificationPermissionDenied')}</span>
+          <a className='font-600 text-primary-6 no-underline' href={capabilityPermissionsHref('notifications')}>
+            {t('settings.notificationPermissionManage')}
+          </a>
+        </span>
+      ),
+    });
+    return false;
+  }, [t]);
+
+  const handleNotificationEnabledChange = useCallback(async (checked: boolean) => {
+    if (checked && !(await ensureNotificationPermission())) return;
     setNotificationEnabled(checked);
     configService.set('system.notificationEnabled', checked).catch(() => {
       setNotificationEnabled(!checked);
       configService.setLocal('system.notificationEnabled', !checked);
     });
-  }, []);
+  }, [ensureNotificationPermission]);
 
-  const handleCronNotificationEnabledChange = useCallback((checked: boolean) => {
+  const handleCronNotificationEnabledChange = useCallback(async (checked: boolean) => {
+    if (checked && !(await ensureNotificationPermission())) return;
     setCronNotificationEnabled(checked);
     configService.set('system.cronNotificationEnabled', checked).catch(() => {
       setCronNotificationEnabled(!checked);
       configService.setLocal('system.cronNotificationEnabled', !checked);
     });
-  }, []);
+  }, [ensureNotificationPermission]);
 
   const handleSaveUploadToWorkspaceChange = useCallback((checked: boolean) => {
     setSaveUploadToWorkspace(checked);
@@ -143,7 +177,47 @@ const SystemModalContent: React.FC = () => {
     });
   }, []);
 
+  const handleThinkingVisibleChange = useCallback(
+    (checked: boolean) => {
+      const previous = thinkingDisplay.visible;
+      configService.set('chat.thinking.visible', checked).catch(() => {
+        configService.setLocal('chat.thinking.visible', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.visible]
+  );
+
+  const handleThinkingContentLengthChange = useCallback(
+    (value: ThinkingContentDisplayLength) => {
+      const previous = thinkingDisplay.contentLength;
+      configService.set('chat.thinking.contentLength', value).catch(() => {
+        configService.setLocal('chat.thinking.contentLength', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.contentLength]
+  );
+
+  const handleThinkingSummaryLengthChange = useCallback(
+    (value: ThinkingSummaryDisplayLength) => {
+      const previous = thinkingDisplay.summaryLength;
+      configService.set('chat.thinking.summaryLength', value).catch(() => {
+        configService.setLocal('chat.thinking.summaryLength', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.summaryLength]
+  );
+
   const { keepAwake, setKeepAwake: applyKeepAwake } = useKeepAwake();
+  const handleDecisionBasisChange = useCallback((checked: boolean) => {
+    const previous = showDecisionBasis;
+    void setShowDecisionBasis(checked).catch(() => {
+      configService.setLocal('chat.idmm.showDecisionBasis', previous);
+      Message.error(t('settings.idmmDecisionBasisSaveFailed'));
+    });
+  }, [setShowDecisionBasis, showDecisionBasis, t]);
 
   const handleKeepAwakeChange = useCallback(async (checked: boolean) => {
     try { await applyKeepAwake(checked); } catch (err) { Message.error(String(err)); }
@@ -191,6 +265,50 @@ const SystemModalContent: React.FC = () => {
         >
           <NomiSelect.Option value='enter'>{t('settings.sendKeyEnter')}</NomiSelect.Option>
           <NomiSelect.Option value='mod-enter'>{t('settings.sendKeyModEnter')}</NomiSelect.Option>
+        </NomiSelect>
+      ),
+    },
+    {
+      key: 'thinkingVisible',
+      label: t('settings.thinkingProcessVisible'),
+      description: t('settings.thinkingProcessVisibleDesc'),
+      component: <Switch checked={thinkingDisplay.visible} onChange={handleThinkingVisibleChange} />,
+    },
+    {
+      key: 'idmmDecisionBasis',
+      label: t('settings.idmmDecisionBasis'),
+      description: t('settings.idmmDecisionBasisDesc'),
+      component: <Switch checked={showDecisionBasis === true} onChange={handleDecisionBasisChange} />,
+    },
+    {
+      key: 'thinkingContentLength',
+      label: t('settings.thinkingContentLength'),
+      description: t('settings.thinkingContentLengthDesc'),
+      component: (
+        <NomiSelect
+          className='w-200px'
+          value={thinkingDisplay.contentLength}
+          disabled={!thinkingDisplay.visible}
+          onChange={(value) => handleThinkingContentLengthChange(value as ThinkingContentDisplayLength)}
+        >
+          <NomiSelect.Option value='compact'>{t('settings.thinkingContentCompact')}</NomiSelect.Option>
+          <NomiSelect.Option value='full'>{t('settings.thinkingContentFull')}</NomiSelect.Option>
+        </NomiSelect>
+      ),
+    },
+    {
+      key: 'thinkingSummaryLength',
+      label: t('settings.thinkingSummaryLength'),
+      description: t('settings.thinkingSummaryLengthDesc'),
+      component: (
+        <NomiSelect
+          className='w-200px'
+          value={thinkingDisplay.summaryLength}
+          disabled={!thinkingDisplay.visible}
+          onChange={(value) => handleThinkingSummaryLengthChange(value as ThinkingSummaryDisplayLength)}
+        >
+          <NomiSelect.Option value='hidden'>{t('settings.thinkingSummaryHidden')}</NomiSelect.Option>
+          <NomiSelect.Option value='shown'>{t('settings.thinkingSummaryShown')}</NomiSelect.Option>
         </NomiSelect>
       ),
     },

@@ -5,7 +5,7 @@
 
 权威顺序如下：
 
-1. [`001_v3_baseline.sql`](../../crates/backend/nomifun-db/migrations/001_v3_baseline.sql)
+1. [`001_canonical_baseline.sql`](../../crates/backend/nomifun-db/migrations/001_canonical_baseline.sql)
    与
    [`id_schema_contract.rs`](../../crates/backend/nomifun-db/src/id_schema_contract.rs)
    —— 可执行 schema 和运行时 registry；
@@ -27,7 +27,9 @@
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-这适用于实体表、关系表、值对象表、单例表、缓存表、事件/outbox 表和依附表。
+这适用于运行时 registry 中的非 Agent 产品表。由
+`agent_store_schema_manifest_payload` 列出的 generation-5 Agent Store 表是明确例外：
+它们使用 canonical TEXT/复合主键与物理外键，组成唯一 Session/Event/Effect 事实图。
 SQLite 内部表、migration metadata 和临时表不属于产品表。
 
 技术 `id` 只属于当前数据集中的本表行。它是：
@@ -98,15 +100,12 @@ credential_id
 | 操作 token | request ID、幂等键、nonce、workspace token、receipt token；有明确用途，不是实体身份。 |
 | 文档身份 | Canvas node/edge 等文档内部身份；不是数据库主键。 |
 
-协议专用的 UUIDv7 也必须明确分类。例如
-`message_correlations.turn_message_id` 是在投影前使用的、wire scope 的协议
-owner token，不是指向 `messages.message_id` 的父引用。相反，像
-`messages.msg_id` 这样的字段，如果连接另一条消息，就必须服从逻辑关联
-registry。不能只根据字段后缀推断语义。
+协议专用的 UUIDv7 也必须明确分类，不能只根据字段后缀推断身份或关联语义。
 
 ## 4. 用逻辑关联替代物理外键
 
-产品 DDL 禁止出现：
+非 Agent 产品 DDL 禁止出现以下内容。Canonical Agent Store 表可按冻结的 Agent
+Store schema 使用物理外键和 guard 约束；该例外不得扩散到其他领域。
 
 ```text
 FOREIGN KEY
@@ -193,14 +192,16 @@ fail-closed。用户自有的外部 workspace 不删除，但其历史数据库�
 
 数据库或 ID 改动必须为受影响的契约增加或更新聚焦测试，至少覆盖适用项：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`；
-- 产品 DDL 没有物理 FK、`REFERENCES`、trigger、数据库级联或 `*_row_id`；
+- 每张非 Agent 产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，canonical
+  Agent Store 表与冻结的 TEXT/复合主键 schema 一致；
+- 非 Agent 产品 DDL 没有物理 FK、`REFERENCES`、数据库级联或 `*_row_id`，
+  必需 guard trigger 保持精确；
 - 接受规范 UUIDv7，拒绝旧格式、带前缀格式和短 ID；
 - logical-reference registry、索引、scope 检查和删除策略；
 - repository 父项校验与事务行为；
 - orphan audit，包括 JSON/side-store 关联；
 - dataset lineage 检测、hard reset、generation 和 reset receipt；
-- backup/restore/clone 的业务 ID 保留与技术 ID 重建。
+- backup/restore 精确保留 generation-5 SQLite 身份图。
 
 删除真实过时或误导性的测试，不要靠伪覆盖维持表面通过。优先运行最小定向
 测试，昂贵的 workspace 全量门禁留到最终集成阶段。

@@ -16,10 +16,10 @@ import {
   canLeaveCreativeCanvasAfterFlush,
   creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
+  restoreCreativeCanvasSessionPanels,
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
-  withCreativeCanvasBottomView,
   withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
@@ -48,7 +48,7 @@ const asset = (overrides: Partial<CreativeAsset> = {}): CreativeAsset => ({
 });
 
 describe('Creative Canvas product controller helpers', () => {
-  test('projects and updates canonical panel views without losing persisted dimensions', () => {
+  test('projects and updates visible panel views without losing compatibility state', () => {
     const document = createEmptyCreativeProjectDocument(
       '019b0000-0000-7000-8000-000000000001'
     );
@@ -56,18 +56,23 @@ describe('Creative Canvas product controller helpers', () => {
 
     const left = withCreativeCanvasLeftView(initial, 'assets');
     const right = withCreativeCanvasRightView(left, 'properties');
-    const bottom = withCreativeCanvasBottomView(right, 'timeline');
-    const closed = withCreativeCanvasRightView(bottom, null);
+    const closed = withCreativeCanvasRightView(right, null);
+    const legacyBottomOpen = {
+      ...right,
+      bottom: { ...right.bottom, open: true },
+    };
 
     expect(creativeCanvasProductPanelViews(initial)).toEqual({
       left: 'canvas',
       right: null,
-      bottom: null,
     });
-    expect(creativeCanvasProductPanelViews(bottom)).toEqual({
+    expect(creativeCanvasProductPanelViews(right)).toEqual({
       left: 'assets',
       right: 'properties',
-      bottom: 'timeline',
+    });
+    expect(creativeCanvasProductPanelViews(legacyBottomOpen)).toEqual({
+      left: 'assets',
+      right: 'properties',
     });
     expect(creativeCanvasProductPanelViews(closed).right).toBeNull();
     expect(closed.right.activeView).toBe('properties');
@@ -90,6 +95,22 @@ describe('Creative Canvas product controller helpers', () => {
     expect(assistant.right.width).toBe(
       clampCreativeCanvasRightPanelWidth(staleGeometry.right.width)
     );
+  });
+
+  test('each canvas visit starts collapsed while refresh preserves a manual expansion', () => {
+    const saved = createEmptyCreativeProjectDocument('019b0000-0000-7000-8000-000000000001').panels;
+    saved.left.open = true;
+    saved.left.activeView = 'prompts';
+    const firstVisit = restoreCreativeCanvasSessionPanels(saved);
+    expect(firstVisit.left.open).toBe(false);
+    expect(firstVisit.left.activeView).toBe('prompts');
+    expect(firstVisit.right).toEqual(saved.right);
+    expect(firstVisit.bottom).toEqual(saved.bottom);
+    const expanded = withCreativeCanvasLeftPanelOpen(firstVisit, true);
+    const refreshed = restoreCreativeCanvasSessionPanels(saved, expanded.left.open);
+    expect(refreshed.left.open).toBe(true);
+    expect(restoreCreativeCanvasSessionPanels(refreshed).left.open).toBe(false);
+    expect(saved.left.open).toBe(true);
   });
 
   test('derives grouping and deletion affordances from canonical selection', () => {

@@ -21,7 +21,7 @@ import type {
   CreativeTaskReference,
 } from './types';
 
-export type CreativeTaskPollWait = (delayMs: number, signal?: AbortSignal) => Promise<void>;
+type CreativeTaskPollWait = (delayMs: number, signal?: AbortSignal) => Promise<void>;
 
 export interface CreativeTaskPollOptions {
   signal?: AbortSignal;
@@ -297,7 +297,7 @@ export interface CreativeTaskRecovery {
   issues: CreativeTaskRecoveryIssue[];
 }
 
-export interface CreativeTaskRecoveryIssue {
+interface CreativeTaskRecoveryIssue {
   reference: CreativeTaskReference;
   kind: 'orphaned' | 'contract' | 'request';
   error: Error;

@@ -9,6 +9,10 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Largest portable PTY dimension. Windows ConPTY uses signed 16-bit COORD
+/// fields, so the shared contract must reject larger values before dispatch.
+pub const MAX_PTY_DIMENSION: u16 = i16::MAX as u16;
+
 use crate::{
     CapabilityPolicy,
     outcome::{CleanupReport, ProcessSnapshot, SessionId, SpawnFailure},
@@ -247,7 +251,7 @@ pub fn normalize_request(
     })
 }
 
-fn canonicalize_compatible(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn canonicalize_compatible(path: &Path) -> std::io::Result<PathBuf> {
     let canonical = fs::canonicalize(path)?;
 
     #[cfg(windows)]

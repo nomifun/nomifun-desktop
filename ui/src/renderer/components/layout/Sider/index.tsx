@@ -4,46 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef } from 'react';
+import PluginPinnedEntries from '@/renderer/pages/plugins/PluginPinnedEntries';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {
-  preloadCreativeStudioNavigationRoutes,
-  preloadCreativeStudioRoute,
-} from '@renderer/components/layout/Router';
+import { preloadResourceRoute } from '@renderer/components/layout/routePreload';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
-import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
-import {
-  CREATIVE_STUDIO_ASSETS_PATH,
-  WORKBENCH_HOME_PATH,
-  isCreativeStudioPath,
-} from '@renderer/pages/creativeStudio/app/routes';
+import { PLUGIN_FEATURE_VISIBLE } from '@renderer/utils/plugins/pluginFeatureAvailability';
+import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
+import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
+import SiderResourceEntry from './SiderNav/SiderResourceEntry';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
-import {
-  normalizeCreativeStudioCanvasesResumeLocation,
-  readCreativeStudioCanvasesResumeLocation,
-  readCreativeStudioResumeLocation,
-  rememberCreativeStudioResumeLocation,
-} from '@renderer/pages/creativeStudio/app/resumeLocation';
+import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@renderer/pages/creativeStudio/app/canvasResumeLocation';
 import {
   SiderAssetLibraryEntry,
-  SiderBrowserEntry,
-  SiderCreativeStudioEntry,
-  SiderPresetEntry,
+  SiderAgentEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
   SiderMcpEntry,
-  SiderMiniAppsEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
+  SiderPluginEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -51,9 +38,6 @@ import {
 import SiderFooter from './SiderFooter';
 
 const SettingsSider = React.lazy(() => import('@renderer/pages/settings/components/SettingsSider'));
-const loadCreativeStudioSider = () =>
-  import('@renderer/pages/creativeStudio/app/CreativeStudioSider');
-const CreativeStudioSider = React.lazy(loadCreativeStudioSider);
 
 interface SiderProps {
   onSessionClick?: () => void;
@@ -70,41 +54,23 @@ interface SiderProps {
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
  * 增强工具 (设定 / Skill / MCP), 服务 (客服), and a bottom-pinned 设置 group
- * (浏览器管理 + 模型管理 + the footer). Execution engines live as an
+ * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
  */
 const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const location = useLocation();
   const { pathname, search, hash } = location;
-  const {
-    overview: browserOverview,
-    transient: browserOverviewTransient,
-    retry: retryBrowserOverview,
-  } = useBrowserOverview();
 
   const navigate = useNavigate();
   const { logout, status } = useAuth();
   const isSettings = pathname.startsWith('/settings');
-  const isCreativeStudio = isCreativeStudioPath(pathname);
   const currentPath = `${pathname}${search}${hash}`;
-  const currentCanvasesResumeLocation =
-    normalizeCreativeStudioCanvasesResumeLocation(currentPath);
   const lastNonSettingsPathRef = useRef('/guid');
-  const lastCreativeStudioPathRef = useRef(readCreativeStudioResumeLocation());
-  const lastCreativeStudioCanvasesPathRef = useRef(
-    readCreativeStudioCanvasesResumeLocation()
-  );
-  const [creativeStudioNavigationPendingPath, setCreativeStudioNavigationPendingPath] =
-    useState<string | null>(null);
-  const pendingCreativeStudioNavigationRef = useRef<{
-    target: string;
-    replace: boolean;
-  } | null>(null);
-  const creativeStudioNavigationInFlightRef = useRef(false);
+  const lastCanvasPathRef = useRef(readCanvasResumeLocation());
+  const pendingNavigationRef = useRef<{ target: string; replace: boolean; state?: unknown } | null>(null);
+  const navigationInFlightRef = useRef(false);
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
   // Tauri) is single-user with no auth, so there is nothing to log out of.
   const showLogout = !isDesktopShell() && status === 'authenticated';
@@ -115,151 +81,56 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
     }
   }, [currentPath, isSettings]);
 
-  const rememberCurrentCreativeStudioPath = useCallback(() => {
-    if (!isCreativeStudio) return;
-    lastCreativeStudioPathRef.current = rememberCreativeStudioResumeLocation(currentPath);
-    if (currentCanvasesResumeLocation) {
-      lastCreativeStudioCanvasesPathRef.current =
-        currentCanvasesResumeLocation;
-    }
-  }, [currentCanvasesResumeLocation, currentPath, isCreativeStudio]);
-
   useEffect(() => {
-    rememberCurrentCreativeStudioPath();
-  }, [rememberCurrentCreativeStudioPath]);
-
-  const preloadCreativeStudio = useCallback((target: string) => {
-    void loadCreativeStudioSider().catch(() => undefined);
-    void preloadCreativeStudioRoute(target);
-  }, []);
-
-  useEffect(() => {
-    if (!isCreativeStudio) return;
-
-    let cancelled = false;
-    const preloadNavigation = () => {
-      if (!cancelled) {
-        void preloadCreativeStudioNavigationRoutes();
-      }
-    };
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-
-    if (idleWindow.requestIdleCallback) {
-      const handle = idleWindow.requestIdleCallback(preloadNavigation, { timeout: 1500 });
-      return () => {
-        cancelled = true;
-        idleWindow.cancelIdleCallback?.(handle);
-      };
-    }
-
-    const timeout = window.setTimeout(preloadNavigation, 300);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeout);
-    };
-  }, [isCreativeStudio]);
+    const remembered = rememberCanvasResumeLocation(currentPath);
+    if (remembered) lastCanvasPathRef.current = remembered;
+  }, [currentPath]);
 
   const navTo = useCallback(
-    (target: string, replace = false) => {
+    (target: string, replace = false, state?: unknown) => {
       cleanupSiderTooltips();
       blurActiveElement();
-      Promise.resolve(navigate(target, { replace })).catch((error) => {
-        console.error('Navigation failed:', error);
-      });
-      if (onSessionClick) {
-        onSessionClick();
-      }
+      pendingNavigationRef.current = { target, replace, state };
+      if (navigationInFlightRef.current) return;
+      navigationInFlightRef.current = true;
+      void (async () => {
+        let allowed = false;
+        try { allowed = await requestCreativeStudioBeforeLeave(); } catch { /* A failed canvas save keeps its page open. */ }
+        const pending = pendingNavigationRef.current;
+        pendingNavigationRef.current = null;
+        navigationInFlightRef.current = false;
+        if (!allowed || !pending) return;
+        try {
+          await navigate(pending.target, { replace: pending.replace, state: pending.state });
+          onSessionClick?.();
+        } catch (error) { console.error('Navigation failed:', error); }
+      })();
     },
     [navigate, onSessionClick]
   );
 
-  const handleConversationClick = () => navTo('/guid');
-  const handleBrowserClick = () => {
-    if (browserOverviewTransient) {
-      void retryBrowserOverview();
-    }
-    const currentSession = parseSessionRoute(pathname);
-    if (currentSession?.kind === 'conversation') {
-      navTo(`/browser?conversation_id=${encodeURIComponent(currentSession.id)}`);
-      return;
-    }
-    navTo(pathname === '/browser' && search ? `/browser${search}` : '/browser');
-  };
+  const handleConversationClick = () =>
+    navTo('/guid');
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleAssetLibraryClick = () => {
-    preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH);
-    navTo(CREATIVE_STUDIO_ASSETS_PATH);
+    void preloadResourceRoute(MATERIALS_PATH);
+    navTo(MATERIALS_PATH);
   };
   const handleNomiClick = () => navTo('/nomi');
-  const handleCreativeStudioClick = () => {
-    const target = lastCreativeStudioPathRef.current;
-    preloadCreativeStudio(target);
-    navTo(target);
+  const handleCanvasClick = () => {
+    void preloadResourceRoute(lastCanvasPathRef.current);
+    navTo(lastCanvasPathRef.current);
   };
-  const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
-  const handlePresetClick = () => navTo('/presets');
+  const handleAgentClick = () => navTo('/agent');
   const handleSkillsClick = () => navTo('/skills');
+  const handlePluginClick = () => navTo('/plugins');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
   const handleModelHubClick = () => navTo('/models');
-  const handleCreativeStudioNavigation = useCallback(
-    (target: string, replace = false) => {
-      // Capture the committed detail route before an async save gate can
-      // navigate to a sibling section and overwrite the product-wide resume.
-      rememberCurrentCreativeStudioPath();
-      preloadCreativeStudio(target);
-      pendingCreativeStudioNavigationRef.current = { target, replace };
-      setCreativeStudioNavigationPendingPath(target);
-
-      if (creativeStudioNavigationInFlightRef.current) return;
-      creativeStudioNavigationInFlightRef.current = true;
-
-      void (async () => {
-        let canLeave = false;
-        try {
-          canLeave = await requestCreativeStudioBeforeLeave();
-        } catch {
-          canLeave = false;
-        }
-
-        const pendingNavigation = pendingCreativeStudioNavigationRef.current;
-        pendingCreativeStudioNavigationRef.current = null;
-        creativeStudioNavigationInFlightRef.current = false;
-        setCreativeStudioNavigationPendingPath(null);
-
-        if (!canLeave || !pendingNavigation) return;
-        navTo(pendingNavigation.target, pendingNavigation.replace);
-      })();
-    },
-    [navTo, preloadCreativeStudio, rememberCurrentCreativeStudioPath]
-  );
-  const handleReturnToWorkbench = useCallback(() => {
-    handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true);
-  }, [handleCreativeStudioNavigation]);
-
-  const handleSettingsClick = () => {
-    cleanupSiderTooltips();
-    blurActiveElement();
-    if (isSettings) {
-      const target = lastNonSettingsPathRef.current || '/guid';
-      Promise.resolve(navigate(target)).catch((error) => {
-        console.error('Navigation failed:', error);
-      });
-    } else {
-      Promise.resolve(navigate('/settings/system')).catch((error) => {
-        console.error('Navigation failed:', error);
-      });
-    }
-    if (onSessionClick) {
-      onSessionClick();
-    }
-  };
+  const handleSettingsClick = () => navTo(isSettings ? lastNonSettingsPathRef.current || '/guid' : '/settings/system');
 
   const handleLogout = useCallback(async () => {
     cleanupSiderTooltips();
@@ -291,7 +162,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
     };
   }, [handleLogout, showLogout]);
 
-  const tooltipEnabled = collapsed && !isMobile;
+  const tooltipEnabled = collapsed;
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
 
   // The "会话" entry stays active across every route owned by ConversationShell.
@@ -309,91 +180,75 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
           <Suspense fallback={<div className='size-full' />}>
             <SettingsSider collapsed={collapsed} tooltipEnabled={tooltipEnabled} />
           </Suspense>
-        ) : isCreativeStudio ? (
-          <Suspense fallback={<div className='size-full' />}>
-            <CreativeStudioSider
-              collapsed={collapsed}
-              tooltipEnabled={tooltipEnabled}
-              canvasesResumePath={
-                currentCanvasesResumeLocation ??
-                lastCreativeStudioCanvasesPathRef.current
-              }
-              navigationPendingPath={creativeStudioNavigationPendingPath}
-              onPreload={preloadCreativeStudio}
-              onNavigate={handleCreativeStudioNavigation}
-            />
-          </Suspense>
         ) : (
           <div className='size-full flex flex-col gap-1px'>
             {/* 常用 — high-frequency primary destinations */}
             <SiderSectionHeader label={t('common.siderSection.common')} collapsed={collapsed} />
             {/* Conversations — opens the session secondary sidebar (ContentSider) */}
             <SiderConversationEntry
-              isMobile={isMobile}
               isActive={isSessionRoute}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleConversationClick}
             />
+            {/* Agent authoring workbench */}
+            <SiderAgentEntry
+              isActive={pathname === '/agent' || pathname.startsWith('/agent-sessions/')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleAgentClick}
+            />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/nomi')}
+              isActive={pathname === '/nomi'}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
             />
-            {/* Creative Studio (创意工坊) — swaps this rail to product navigation. */}
-            <div
-              className='shrink-0'
-              onMouseEnter={() => preloadCreativeStudio(lastCreativeStudioPathRef.current)}
-              onFocusCapture={() => preloadCreativeStudio(lastCreativeStudioPathRef.current)}
-            >
-              <SiderCreativeStudioEntry
-                isMobile={isMobile}
-                isActive={isCreativeStudio}
-                collapsed={collapsed}
-                siderTooltipProps={siderTooltipProps}
-                onClick={handleCreativeStudioClick}
-              />
-            </div>
-            {/* 小程序 (Mini-apps) — solidified single-file web tools, opened instantly */}
-            <SiderMiniAppsEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/mini-apps')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleMiniAppsClick}
+            <SiderResourceEntry
+              label={t('creativeStudio.navigation.canvases', { defaultValue: '我的画布' })}
+              icon={<FullScreen theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
+              isActive={pathname === CANVASES_PATH || pathname.startsWith(CANVASES_PATH + '/')}
+              collapsed={collapsed} siderTooltipProps={siderTooltipProps} onClick={handleCanvasClick}
             />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
             {/* Knowledge base */}
             <SiderKnowledgeEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/knowledge')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
             />
-            {/* Asset library — enter the canonical Creative Studio surface. */}
+            {/* Asset library — retained materials page. */}
             <div
               className='shrink-0'
-              onMouseEnter={() => preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH)}
-              onFocusCapture={() => preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH)}
+              onMouseEnter={() => void preloadResourceRoute(MATERIALS_PATH)}
+              onFocusCapture={() => void preloadResourceRoute(MATERIALS_PATH)}
             >
               <SiderAssetLibraryEntry
-                isMobile={isMobile}
-                isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
+                isActive={pathname === MATERIALS_PATH}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
                 onClick={handleAssetLibraryClick}
               />
             </div>
+            <SiderResourceEntry
+              label={t('creativeStudio.navigation.prompts', { defaultValue: '提示词库' })}
+              icon={<FileText theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
+              isActive={pathname === PROMPTS_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}
+              onClick={() => navTo(PROMPTS_PATH)}
+            />
+            <SiderResourceEntry
+              label={t('creativeStudio.navigation.templates', { defaultValue: '模板工作台' })}
+              icon={<PageTemplate theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
+              isActive={pathname === TEMPLATES_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}
+              onClick={() => navTo(TEMPLATES_PATH)}
+            />
             {/* 自动化 — automation platforms */}
             <SiderSectionHeader label={t('common.siderSection.automation')} collapsed={collapsed} />
             {/* Scheduled tasks */}
             <SiderScheduledEntry
-              isMobile={isMobile}
               isActive={pathname === '/scheduled'}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -401,7 +256,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* Requirements platform */}
             <SiderRequirementsEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/requirements')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -409,24 +263,24 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* 增强工具 — extension capabilities */}
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
-            {/* Presets and skills are separate concepts and destinations. */}
-            <SiderPresetEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/presets')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handlePresetClick}
-            />
+            {/* Skills and MCP remain platform capability destinations. */}
             <SiderSkillsEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/skills')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
+            {PLUGIN_FEATURE_VISIBLE && <>
+              <SiderPluginEntry
+                isActive={pathname.startsWith('/plugins')}
+                collapsed={collapsed}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handlePluginClick}
+              />
+              <PluginPinnedEntries collapsed={collapsed} />
+            </>}
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/mcp')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -436,7 +290,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 from the desktop-companion group above. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
             <SiderCustomerServiceEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/customer-service')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -445,54 +298,24 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
           </div>
         )}
       </div>
-      {/* Bottom pinned group — Creative Studio keeps its workbench exit here; other routes keep Settings. */}
+      {/* Bottom pinned settings group. */}
       <div className='shrink-0 mt-auto pt-5px flex flex-col gap-1px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
-        {isCreativeStudio ? (
-          <SiderFooter
-            isMobile={isMobile}
-            isSettings={false}
-            collapsed={collapsed}
-            siderTooltipProps={siderTooltipProps}
-            onSettingsClick={handleReturnToWorkbench}
-            backLabel={
-              creativeStudioNavigationPendingPath === WORKBENCH_HOME_PATH
-                ? t('common.loading')
-                : t('creativeStudio.focus.backToWorkbench')
-            }
-          />
-        ) : (
-          <>
+        <>
             {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
             <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
-            {/* Unified Browser management — keep the entry reachable when Browser Use is
-                disabled so the user can open Settings and turn it back on. */}
-            {(isDesktopShell() || browserOverview?.supported !== false) && (
-              <SiderBrowserEntry
-                isMobile={isMobile}
-                isActive={pathname === '/browser'}
-                collapsed={collapsed}
-                runningCount={browserOverview?.running_lanes ?? 0}
-                queuedCount={browserOverview?.queued_lanes ?? 0}
-                siderTooltipProps={siderTooltipProps}
-                onClick={handleBrowserClick}
-              />
-            )}
             <SiderModelHubEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/models')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleModelHubClick}
             />
             <SiderOpenCapabilitiesEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/open-capabilities')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleOpenCapabilitiesClick}
             />
             <SiderFooter
-              isMobile={isMobile}
               isSettings={isSettings}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -500,8 +323,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               showLogout={showLogout}
               onLogoutClick={handleLogout}
             />
-          </>
-        )}
+        </>
       </div>
     </div>
   );

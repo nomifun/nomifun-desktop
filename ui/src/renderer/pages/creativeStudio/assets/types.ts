@@ -14,11 +14,12 @@ export type CreativeAssetSort =
   | 'size_desc';
 
 export interface CreativeAssetOrigin {
+  conversationId?: string;
+  messageId?: string;
   prompt?: string;
   model?: string;
   providerId?: string;
   params?: Record<string, unknown>;
-  workbenchKind?: 'image' | 'video' | 'audio';
   canvasId?: string;
   nodeId?: string;
   generationTaskId?: string;
@@ -32,9 +33,9 @@ export interface CreativeAssetOrigin {
   licenseUrl?: string;
 }
 
-export type CreativePromptLibrarySource = 'catalog' | 'preset';
+type CreativePromptLibrarySource = 'catalog';
 
-export interface CreativeCatalogPromptAssetOrigin {
+interface CreativeCatalogPromptAssetOrigin {
   promptLibrarySource: 'catalog';
   promptLibraryId: string;
   promptCatalogId: string;
@@ -43,14 +44,7 @@ export interface CreativeCatalogPromptAssetOrigin {
   licenseUrl?: string;
 }
 
-export interface CreativePresetPromptAssetOrigin {
-  promptLibrarySource: 'preset';
-  promptLibraryId: string;
-}
-
-export type CreativePromptAssetOrigin =
-  | CreativeCatalogPromptAssetOrigin
-  | CreativePresetPromptAssetOrigin;
+type CreativePromptAssetOrigin = CreativeCatalogPromptAssetOrigin;
 
 /** Product-facing asset shape. Backend snake_case is contained in api.ts/client.ts. */
 export interface CreativeAsset {

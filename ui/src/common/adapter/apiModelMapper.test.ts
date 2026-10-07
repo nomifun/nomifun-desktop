@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { fromApiConversation, fromApiResolvedPresetSnapshot } from './apiModelMapper';
-import { parseMcpServerId, parseMessageId } from '../types/ids';
+import { fromApiAgentSnapshot, fromApiConversation } from './apiModelMapper';
+import { parseMessageId } from '../types/ids';
 
 // 最小 ApiConversation 片段：只构造 mapper 关心的字段
 const apiConv = (o: Record<string, unknown>) => ({
@@ -28,12 +28,15 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   instructions: 'Write concise copy.',
   included_skills: [],
   excluded_auto_skills: [],
+  enabled_capabilities: [],
+  enabled_capability_actions: {},
+
+  required_resource_kinds: ['workspace'],
   knowledge_policy: {
     enabled: false,
     writeback: false,
     grounded: false,
   },
-  knowledge_base_ids: [],
   warnings: [],
   ...overrides,
 });
@@ -83,6 +86,17 @@ describe('fromApiConversation first-class fields', () => {
     expect(mapped.extra && 'pinned' in mapped.extra).toBe(false);
   });
 
+  test('accepts only bounded session reasoning effort values', () => {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const) {
+      expect(
+        fromApiConversation(apiConv({ reasoning_effort: effort, extra: {} })).reasoning_effort,
+      ).toBe(effort);
+    }
+    expect(() =>
+      fromApiConversation(apiConv({ reasoning_effort: 'extreme', extra: {} })),
+    ).toThrow('conversation reasoning_effort is not a supported level');
+  });
+
   test('parses runtime active_turn_id as exact lifecycle authority', () => {
     const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000021');
     const mapped = fromApiConversation(
@@ -99,23 +113,47 @@ describe('fromApiConversation first-class fields', () => {
 
     expect(mapped.runtime?.active_turn_id).toBe(turnId);
   });
+
+  test('keeps a refreshed Nomi-managed workspace in the default workpath', () => {
+    const mapped = fromApiConversation(
+      apiConv({
+        extra: {
+          workspace: 'C:\\Users\\me\\AppData\\Local\\NomiFun',
+          is_temporary_workspace: true,
+        },
+      })
+    ) as { extra?: Record<string, unknown> };
+
+    expect(mapped.extra?.custom_workspace).toBe(false);
+    expect(mapped.extra?.is_temporary_workspace).toBe(true);
+  });
+
+  test('continues to classify an unmarked external workspace as custom', () => {
+    const mapped = fromApiConversation(
+      apiConv({ extra: { workspace: 'D:\\projects\\game' } })
+    ) as { extra?: Record<string, unknown> };
+
+    expect(mapped.extra?.custom_workspace).toBe(true);
+  });
 });
 
-describe('fromApiConversation preset lineage boundary', () => {
-  test('canonically maps one complete immutable preset lineage', () => {
+describe('fromApiConversation Agent lineage boundary', () => {
+  test('canonically maps one complete immutable Agent lineage', () => {
     const mapped = fromApiConversation(
       apiConv({
         extra: {},
         preset_id: PRESET_ID,
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       }),
     );
 
     expect(mapped.preset_id).toBe(PRESET_ID);
     expect(mapped.preset_revision).toBe(3);
-    expect(mapped.preset_snapshot?.preset_id).toBe(PRESET_ID);
-    expect(mapped.preset_snapshot?.preset_revision).toBe(3);
+    expect(mapped.agent_snapshot?.preset_id).toBe(PRESET_ID);
+    expect(mapped.agent_snapshot?.preset_revision).toBe(3);
+    expect(mapped.agent_snapshot?.required_resource_kinds).toEqual(['workspace']);
+    expect(mapped.agent_snapshot?.enabled_capability_actions).toEqual({});
   });
 
   test('rejects partial lineage and non-canonical top-level preset ids', () => {
@@ -125,12 +163,12 @@ describe('fromApiConversation preset lineage boundary', () => {
       {
         preset_id: 'preset:0190f5fe-7c00-7a00-8000-000000000011',
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       },
       {
         preset_id: '0190F5FE-7C00-7A00-8000-000000000011',
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       },
     ];
 
@@ -149,7 +187,7 @@ describe('fromApiConversation preset lineage boundary', () => {
             extra: {},
             preset_id: PRESET_ID,
             preset_revision: 3,
-            preset_snapshot: snapshot({ preset_id: OTHER_PRESET_ID }),
+            agent_snapshot: snapshot({ preset_id: OTHER_PRESET_ID }),
           }),
         ),
       ).includes('preset_id must match'),
@@ -162,26 +200,31 @@ describe('fromApiConversation preset lineage boundary', () => {
             extra: {},
             preset_id: PRESET_ID,
             preset_revision: 3,
-            preset_snapshot: snapshot({ preset_revision: 4 }),
+            agent_snapshot: snapshot({ preset_revision: 4 }),
           }),
         ),
       ).includes('preset_revision must match'),
     ).toBe(true);
   });
 
-  test('canonical snapshot parser rejects legacy ids and invalid revisions', () => {
+  test('canonical Agent snapshot parser rejects legacy ids and invalid revisions', () => {
     expect(
       thrownMessage(() =>
-        fromApiResolvedPresetSnapshot(snapshot({ id: PRESET_ID })),
+        fromApiAgentSnapshot(snapshot({ id: PRESET_ID })),
       ).includes('legacy field "id"'),
     ).toBe(true);
     for (const preset_revision of [0, -1, 1.5, '3']) {
       expect(
         thrownMessage(() =>
-          fromApiResolvedPresetSnapshot(snapshot({ preset_revision })),
+          fromApiAgentSnapshot(snapshot({ preset_revision })),
         ).includes('positive safe integer'),
       ).toBe(true);
     }
+    expect(
+      thrownMessage(() =>
+        fromApiAgentSnapshot(snapshot({ required_resource_kinds: null })),
+      ).includes('required_resource_kinds must be an array'),
+    ).toBe(true);
   });
 });
 
@@ -200,98 +243,5 @@ describe('fromApiConversation 协作方案顶层契约', () => {
       apiConv({ extra: { execution_template_id: 'template-stale' } }),
     ) as { execution_template_id?: string };
     expect(extraOnly.execution_template_id).toBeUndefined();
-  });
-});
-
-describe('fromApiConversation MCP id boundaries', () => {
-  test('keeps canonical UUIDv7 MCP identities across snapshots', () => {
-    const mcpServerId = parseMcpServerId('0190f5fe-7c00-7a00-8000-000000000123');
-    const mapped = fromApiConversation(
-      apiConv({
-        extra: {
-          mcp_server_ids: [mcpServerId],
-          mcp_statuses: [
-            { mcp_server_id: mcpServerId, name: 'everything', status: 'loaded' },
-          ],
-          session_mcp_servers: [
-            {
-              mcp_server_id: mcpServerId,
-              name: 'everything',
-              transport: { type: 'stdio', command: 'npx' },
-            },
-          ],
-        },
-      }),
-    ) as unknown as {
-      extra: {
-        mcp_server_ids: ReturnType<typeof parseMcpServerId>[];
-        mcp_statuses: Array<{ mcp_server_id: ReturnType<typeof parseMcpServerId> }>;
-        session_mcp_servers: Array<{ mcp_server_id: ReturnType<typeof parseMcpServerId> }>;
-      };
-    };
-
-    expect(mapped.extra.mcp_server_ids).toEqual([mcpServerId]);
-    expect(mapped.extra.mcp_statuses[0]?.mcp_server_id).toBe(mcpServerId);
-    expect(mapped.extra.session_mcp_servers[0]?.mcp_server_id).toBe(mcpServerId);
-  });
-
-  test('rejects integer, numeric string, UUIDv4, uppercase, and prefixed MCP ids', () => {
-    const invalidIds = [
-      3,
-      '3',
-      '550e8400-e29b-41d4-a716-446655440000',
-      '0190F5FE-7C00-7A00-8000-000000000123',
-      'mcp_0190f5fe-7c00-7a00-8000-000000000123',
-    ];
-    for (const invalidId of invalidIds) {
-      for (const extra of [
-        { mcp_server_ids: [invalidId] },
-        {
-          mcp_statuses: [
-            { mcp_server_id: invalidId, name: 'everything', status: 'loaded' },
-          ],
-        },
-        {
-          session_mcp_servers: [
-            {
-              mcp_server_id: invalidId,
-              name: 'everything',
-              transport: { type: 'stdio', command: 'npx' },
-            },
-          ],
-        },
-      ]) {
-        let rejected = false;
-        try {
-          fromApiConversation(apiConv({ extra }));
-        } catch {
-          rejected = true;
-        }
-        expect(rejected).toBe(true);
-      }
-    }
-  });
-
-  test('rejects removed generic id fields for MCP status and session snapshots', () => {
-    for (const extra of [
-      { mcp_statuses: [{ id: 3, name: 'everything', status: 'loaded' }] },
-      {
-        session_mcp_servers: [
-          {
-            id: 3,
-            name: 'everything',
-            transport: { type: 'stdio', command: 'npx' },
-          },
-        ],
-      },
-    ]) {
-      let rejected = false;
-      try {
-        fromApiConversation(apiConv({ extra }));
-      } catch {
-        rejected = true;
-      }
-      expect(rejected).toBe(true);
-    }
   });
 });

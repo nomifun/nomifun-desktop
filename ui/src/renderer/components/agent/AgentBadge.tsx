@@ -8,7 +8,6 @@ import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Robot } from '@icon-park/react';
 import React from 'react';
-import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 export type AgentBadgeProps = {
   /** Agent backend type */
@@ -19,8 +18,6 @@ export type AgentBadgeProps = {
   agentLogo?: string;
   /** Whether the logo is an emoji */
   agentLogoIsEmoji?: boolean;
-  /** Preset lineage for callers that expose configuration details. */
-  presetId?: PresetReference;
 };
 
 /** Render agent logo from custom logo, backend logo, or fallback Robot icon */

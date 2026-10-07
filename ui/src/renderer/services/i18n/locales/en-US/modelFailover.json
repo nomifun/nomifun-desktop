@@ -1,9 +1,9 @@
 {
   "title": "Model failover queue",
-  "desc": "When a provider faults (rate-limit, 5xx, network) before any reply is produced, the conversation automatically switches to the next usable candidate in this queue and keeps going. Applies to NOMI sessions only.",
+  "desc": "After saving, this queue is frozen into newly created Nomi AgentSession routes; existing Sessions stay unchanged. The runtime switches candidates in order on pre-response rate-limit, 5xx, or network faults.",
   "enable": "Enable failover queue",
   "queue": "Candidates (in order)",
-  "queueHint": "Tried head-to-tail; the first enabled, healthy candidate that isn't the failed one is used.",
+  "queueHint": "New Sessions try enabled candidates head-to-tail when they satisfy the current turn; duplicates of the primary model are removed.",
   "empty": "No candidates yet. Add a provider + model below.",
   "selectProvider": "Select a provider",
   "selectModel": "Select a model",

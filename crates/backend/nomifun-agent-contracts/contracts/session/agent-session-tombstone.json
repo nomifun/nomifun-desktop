@@ -1,0 +1,12 @@
+{
+  "record_kind": "tombstone",
+  "record": {
+    "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000003",
+    "owner_ref": {
+      "principal_kind": "user",
+      "principal_id": "user-001"
+    },
+    "state": "deleted",
+    "deleted_at": 1788000001000
+  }
+}

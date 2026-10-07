@@ -124,7 +124,7 @@ impl McpOAuthService {
         }
 
         // Wait for callback.
-        let code = match self.wait_for_callback(listener).await {
+        let code = match self.wait_for_callback(listener, CALLBACK_TIMEOUT).await {
             Ok(code) => code,
             Err(e) => {
                 self.clear_pending().await;
@@ -323,21 +323,14 @@ impl McpOAuthService {
     }
 
     /// Wait for the OAuth callback redirect on the given listener.
-    async fn wait_for_callback(&self, listener: TcpListener) -> Result<String, McpError> {
-        let (code_tx, code_rx) = tokio::sync::oneshot::channel::<Result<String, McpError>>();
-        let pending = self.pending.clone();
-
-        tokio::spawn(async move {
-            let result = Self::handle_callback_connection(listener, pending).await;
-            let _ = code_tx.send(result);
-        });
-
-        match tokio::time::timeout(CALLBACK_TIMEOUT, code_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(McpError::OAuth("Callback channel closed unexpectedly".to_string())),
-            Err(_) => Err(McpError::OAuth(
-                "OAuth callback timed out — no redirect received within 120s".to_string(),
-            )),
+    async fn wait_for_callback(&self, listener: TcpListener, timeout: Duration) -> Result<String, McpError> {
+        // Keep the listener/connection owned by this future so timeout or cancellation drops them.
+        let callback = Self::handle_callback_connection(listener, self.pending.clone());
+        match tokio::time::timeout(timeout, callback).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::OAuth(format!(
+                "OAuth callback timed out — no redirect received within {timeout:?}"
+            ))),
         }
     }
 
@@ -539,7 +532,7 @@ fn parse_callback_query(request: &str) -> Result<(String, String), McpError> {
 
 /// Minimal percent-decoding for query parameter values.
 fn url_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len());
     let mut chars = input.bytes();
 
     while let Some(b) = chars.next() {
@@ -551,22 +544,22 @@ fn url_decode(input: &str) -> String {
                 if let Ok(s) = std::str::from_utf8(&hex)
                     && let Ok(byte) = u8::from_str_radix(s, 16)
                 {
-                    result.push(byte as char);
+                    result.push(byte);
                     continue;
                 }
-                // Malformed percent-encoding: keep as-is.
-                result.push('%');
-                result.push(h as char);
-                result.push(l as char);
             }
+            // Preserve malformed or incomplete percent-encoding byte-for-byte.
+            result.push(b'%');
+            result.extend(hi);
+            result.extend(lo);
         } else if b == b'+' {
-            result.push(' ');
+            result.push(b' ');
         } else {
-            result.push(b as char);
+            result.push(b);
         }
     }
 
-    result
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +578,10 @@ mod tests {
         let (code, state) = parse_callback_query(request).unwrap();
         assert_eq!(code, "abc123");
         assert_eq!(state, "xyz789");
+
+        let (code, state) = parse_callback_query("GET /callback?code=caf%C3%A9&state=%E4%BD%A0%E5%A5%BD HTTP/1.1\r\n").unwrap();
+        assert_eq!(code, "café");
+        assert_eq!(state, "你好");
     }
 
     #[test]
@@ -635,11 +632,21 @@ mod tests {
     #[test]
     fn url_decode_no_encoding() {
         assert_eq!(url_decode("hello"), "hello");
+        assert_eq!(url_decode("café你好🦀"), "café你好🦀");
     }
 
     #[test]
     fn url_decode_percent_encoded() {
         assert_eq!(url_decode("hello%20world"), "hello world");
+        assert_eq!(url_decode("caf%C3%A9%E4%BD%A0%E5%A5%BD%F0%9F%A6%80"), "café你好🦀");
+        assert_eq!(url_decode("%FF"), "\u{fffd}");
+    }
+
+    #[test]
+    fn url_decode_preserves_malformed_escapes() {
+        for input in ["%", "%A", "hello%", "hello%A", "%GG", "%4Z", "%é", "%Aé"] {
+            assert_eq!(url_decode(input), input);
+        }
     }
 
     #[test]
@@ -819,6 +826,37 @@ mod tests {
     }
 
     // -- Service behavior tests ----------------------------------------------
+
+    #[tokio::test]
+    async fn callback_timeout_releases_listener() {
+        let svc = McpOAuthService::new(Arc::new(MockTokenRepo), reqwest::Client::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let err = svc.wait_for_callback(listener, Duration::ZERO).await.unwrap_err();
+        assert!(err.to_string().contains("OAuth callback timed out"));
+        assert_eq!(Arc::strong_count(&svc.pending), 1);
+        let _rebound = TcpListener::bind(addr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn callback_cancellation_releases_listener() {
+        let svc = McpOAuthService::new(Arc::new(MockTokenRepo), reqwest::Client::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut callback = Box::pin(svc.wait_for_callback(listener, CALLBACK_TIMEOUT));
+
+        // Poll before cancelling so the callback has started waiting for a connection.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(callback.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(callback);
+
+        assert_eq!(Arc::strong_count(&svc.pending), 1);
+        let _rebound = TcpListener::bind(addr).await.unwrap();
+    }
 
     #[tokio::test]
     async fn check_status_no_token_returns_false() {

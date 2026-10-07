@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nomifun-agent-contracts.workspace = true
 nomifun-common.workspace = true
 sqlx = { workspace = true, features = ["migrate"] }
 async-trait.workspace = true

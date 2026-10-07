@@ -1,0 +1,125 @@
+{
+  "contract_version": "1.0.0",
+  "remote_binding": {
+    "remote_binding_id": "0190f5fe-7c00-7a00-8000-000000000401",
+    "owner_user_id": "0190f5fe-7c00-7a00-8000-000000000402",
+    "name": "Coding workspace",
+    "agent_binding": {
+      "preset_revision_ref": {
+        "preset_id": "0190f5fe-7c00-7a00-8000-000000000403",
+        "revision": 7,
+        "revision_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "resolved_snapshot_ref": {
+        "snapshot_id": "0190f5fe-7c00-7a00-8000-000000000404",
+        "snapshot_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "typed_resource_bindings": [
+        {
+          "binding_id": "workspace-primary",
+          "resource_kind": "workspace",
+          "resource_id": "workspace-owner-root",
+          "owner_id": "0190f5fe-7c00-7a00-8000-000000000402",
+          "operations": ["execute", "read", "write"],
+          "typed_parameters": {
+            "logical_root": "workspace",
+            "normalized_relative_path": "projects/nomifun"
+          }
+        }
+      ],
+      "binding_version": 3
+    }
+  },
+  "open": {
+    "request": {
+      "binding_id": "0190f5fe-7c00-7a00-8000-000000000401",
+      "idempotency_key": "remote-open-0001",
+      "initial_input": {
+        "content": "Inspect the workspace."
+      }
+    },
+    "opening_response": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+      "agent_binding": {
+        "preset_revision_ref": {
+          "preset_id": "0190f5fe-7c00-7a00-8000-000000000403",
+          "revision": 7,
+          "revision_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "resolved_snapshot_ref": {
+          "snapshot_id": "0190f5fe-7c00-7a00-8000-000000000404",
+          "snapshot_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "typed_resource_bindings": [
+          {
+            "binding_id": "workspace-primary",
+            "resource_kind": "workspace",
+            "resource_id": "workspace-owner-root",
+            "owner_id": "0190f5fe-7c00-7a00-8000-000000000402",
+            "operations": ["execute", "read", "write"],
+            "typed_parameters": {
+              "logical_root": "workspace",
+              "normalized_relative_path": "projects/nomifun"
+            }
+          }
+        ],
+        "binding_version": 3
+      },
+      "open_state": {
+        "state": "opening"
+      },
+      "cursor": {
+        "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+        "seq": 1
+      }
+    },
+    "ready_state": {
+      "state": "ready"
+    },
+    "failed_state": {
+      "state": "failed",
+      "code": "REMOTE_OPEN_FAILED",
+      "recoverable": true
+    }
+  },
+  "turn": {
+    "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+    "input": {
+      "content": "Run the requested task."
+    },
+    "idempotency_key": "remote-turn-0001"
+  },
+  "observe": {
+    "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+    "after_cursor": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+      "seq": 1
+    },
+    "limit": 100
+  },
+  "cancel": {
+    "agent_session_id": "0190f5fe-7c00-7a00-8000-000000000405",
+    "idempotency_key": "remote-cancel-0001"
+  },
+  "invariants": {
+    "binding_update_affects_existing_session": false,
+    "binding_delete_cancels_existing_session": false,
+    "network_disconnect_changes_session_fact": false,
+    "transport_session_id_is_product_identity": false,
+    "direct_capability_requires_agent_session_id": true,
+    "full_auto_only": true
+  },
+  "forbidden_remote_binding_fields": [
+    "approval",
+    "caller_role",
+    "capability_scope",
+    "confirmation",
+    "credential_id",
+    "expiry",
+    "grant",
+    "mode",
+    "model_override",
+    "remote_agent_id",
+    "token_hash"
+  ]
+}

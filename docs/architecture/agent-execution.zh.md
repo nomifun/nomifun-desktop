@@ -18,7 +18,7 @@ Execution 前可复用的一组输入，实例化时一次性解析成 Participa
 回读。v3 只为新数据提供该模型，不把旧配置行迁入新数据集，也不恢复历史配置间的
 引用、继承或双状态。
 
-这次收敛不是改名补丁。数据库、Repository、HTTP、Gateway 工具、事件、前端状态和恢复逻辑必须在同一版本切到唯一模型；v3 发布时通过完整 managed-dataset reset 退出旧代际，不保留旧表、旧路由、旧事件、逐行迁移器或双读 fallback。
+数据库、Repository、HTTP、工具、事件、前端状态和恢复逻辑共用唯一 AgentExecution 模型。Session 与日志的数据代际切换遵守 [Agent Session 架构](agent-session.zh.md) 的 Agent-only clean cut，不迁移旧 Agent 数据或保留双读。
 
 ## 2. 统一词汇与旧概念映射
 
@@ -119,7 +119,7 @@ Execution 持久状态（不存在额外 `created` 过渡态）：
 | `completed` / `completed_with_failures` / `failed` | 只有带 expected version 的显式 retry/adopt/add 命令可以重开为 `running` |
 | `cancelled` | 无；取消永久终止 |
 
-Pause 同时接受 `running` 与 `waiting_input`。原子暂停会把尚未开始的 queued Attempt 记为 `cancelled`、已经开始的 running Attempt 记为 `interrupted`，相关 Step 回到 `pending`，并停止对应 Agent Turn；已经提交的 waiting question 和 WaitingInput Attempt 保留。Resume 若仍有未回答问题就回到 `waiting_input`，否则回到 `running` 并追加新的 Attempt，绝不复活已结束的调用。显式 Cancel 则把所有在途 Attempt/Step 归约为 `cancelled`，只做停止、Link cleanup 与事件投递，不生成终态结果消息。
+Pause 同时接受 `running` 与 `waiting_input`。原子暂停撤销调度租约；尚未开始的 queued Attempt 记为 `cancelled`，Step 回到 `pending`。已经开始的 running Attempt 只有在 canonical owner 返回精确终态正文及已验证产物、Repository 在同一事务复核 operation 与 terminal event 后才能结算；回合已准入而效果仍未知时，保留为不可自动重试的 WaitingInput review，不能因暂停而重新派发。已经提交的 waiting question 和 WaitingInput Attempt 保留。Resume 若仍有未回答问题就回到 `waiting_input`，否则回到 `running`；review blocked 的未知效果必须先由 owner 处理。显式 Cancel 则把所有在途 Attempt/Step 归约为 `cancelled`，只做停止、Link cleanup 与事件投递，不生成终态结果消息。
 
 同状态写入只用于幂等恢复。非终态 Execution 只有经过 Engine 领域校验和 optimistic version
 校验的显式 replan，才能因为新计划的 `plan_gate=require_approval` 回到
@@ -150,7 +150,7 @@ Attempt 状态：
 | `waiting_input` | `running`、`completed`、`failed`、`cancelled`、`interrupted` |
 | `completed` / `failed` / `cancelled` / `interrupted` | 无；Attempt 永不重开 |
 
-`agent_execution_attempts.version` 同时是持久化 Turn 代际栅栏。派发或 decision continuation 启动时捕获 Step/Attempt version，回调结算必须携带原值做 CAS，禁止结算前重读最新 version 后替旧 Turn 续命。Agent 提交用户问题会先原子写入 WaitingInput 并增加 version，再请求停止当前 Turn；用户回答再次增加 version 并启动 continuation。因此提问前的迟到 callback 和提问后的同 Turn 副作用都不能覆盖已恢复状态。
+持久化 invocation 代际由原 Step version、不可变 Attempt identity 及活动状态共同约束。派发或 decision continuation 启动时冻结原 Step version；提问、回答、暂停、retry 和替换都会改变该 Step version，迟到 callback 不能结算后继。`agent_execution_attempts.version` 是该行的 optimistic CAS，还会因 steer write-ahead intent 及其 acknowledgement 等元数据更新而递增；它的变化不表示原 Turn 被替换。结算必须先验证原 Step generation 和原 Attempt identity/status，再在同一 generation 内用当前 Attempt version 做 Repository CAS；不能不验证原 generation 就给旧 Turn 续命，也不能把合法 steer 元数据更新误认为结果已过期。未投递的 steering intent 不得被回合结算擦除。
 
 超时通过 `failed + error_code=timeout` 表达，不再增加一个与失败处理完全相同的
 持久状态。`interrupted` 只表示具体调用已经进入 `running` / `waiting_input`，随后因进程退出、
@@ -159,9 +159,13 @@ Attempt 状态：
 `interrupted`。用户显式取消任何在途 Attempt 也统一写 `cancelled`；只有系统失去已开始
 调用的控制权时才写 `interrupted`。
 
-普通交互只需要 Conversation/Turn，不为每条聊天虚构 Execution。一旦目标需要独立持久化、跨 Turn 恢复、并行或 DAG，即使只用一个 Agent 也走 AgentExecution：Engine 创建一个 Participant、一个 Step，并在 Step ready 后创建 Attempt。多 Agent 不创建 Cluster：Engine 创建多个 Participant/Step，并由同一个 Scheduler 按依赖和并发上限派发。Attempt 内再次委派只是向当前 Execution 追加 Step；顶层 Conversation 或 Remote actor 才创建新的 Execution。追加调用返回同一个 execution id 与新增 step ids，当前 Attempt 随后正常结束，Scheduler 会在整个 DAG（包括新增 Step）归约完成前阻止 Execution 进入终态。为形成明确 join 语义，Engine 还会在同一事务中把新批次叶节点接成 caller Step 尚未开始的直接下游 Step 的 blocker；已经 running/completed 的下游历史不回写。
+普通交互只需要 Conversation/Turn，不为每条聊天虚构 Execution。一旦目标需要独立持久化、跨 Turn 恢复、并行或 DAG，即使只用一个 Agent 也走 AgentExecution：Engine 创建一个 Participant、一个 Step，并在 Step ready 后创建 Attempt。多 Agent 不创建 Cluster：Engine 创建多个 Participant/Step，并由同一个 Scheduler 按依赖和并发上限派发。Attempt 内再次委派只是向当前 Execution 追加 Step；顶层、已认证的 Conversation actor 才创建新的 Execution。Canonical Remote 目前只提供 `open/turn/observe/cancel`，不通过 Gateway 直接创建 Execution。追加调用返回同一个 execution id 与新增 step ids，当前 Attempt 随后正常结束，Scheduler 会在整个 DAG（包括新增 Step）归约完成前阻止 Execution 进入终态。为形成明确 join 语义，Engine 还会在同一事务中把新批次叶节点接成 caller Step 尚未开始的直接下游 Step 的 blocker；已经 running/completed 的下游历史不回写。
 
 Step 只保存当前归约状态；每次实际派发（包括改派后的再次派发、retry 和 rerun）都新增 ExecutionAttempt，禁止覆盖历史 assignment。只修改未来路由的命令本身不伪造 Attempt。Execution 状态由 Step 状态和策略归约产生，已结算状态不得被迟到的 Attempt 事件复活。
+
+Step spec 是任务数据，完成要求和交付评估由唯一 Runtime 的 source-anchored requirements 与 `report_completion` 管理。Execution 不从自然语言、参考文件名或工具文字再推导一份文件格式/数量门槛。正常结算、重启恢复和显式 adopt 都消费同一 typed canonical output：成功终态必须有非空公开正文或已验证输出；reasoning、控制 metadata、其他 Turn 的正文和 UI Message projection 不构成结果。已关闭回合的空输出或未验证产物不进入自动重试，缺失终态回执也不能被解释成可重试超时。
+
+用户回答产生的 DecisionInput 与普通 Agent Step 共用调度 job、并发计数和 Step/Attempt 代际栅栏，不能在调度主循环内等待整个 continuation 回合。独立可运行 Step、已有 job 结算、租约丢失及取消仍能被及时处理。StopTurn 的 write-ahead intent 同时记录稳定取消 operation 和精确目标 canonical Turn，迟到投递或重放不能取消后继回合。
 
 ### 4.1 有界复杂度
 
@@ -235,11 +239,11 @@ frozen preset 只提供审计与配置快照；Participant 行的最终
 
 在持久协作执行域，模型、Gateway 和内置 Agent 只看到以下三个工具：
 
-1. `nomi_delegate`：从顶层 Conversation/Remote actor 创建 AgentExecution；从已有 Attempt Conversation 调用时，则向该 ConversationLink 所属的同一个 Execution 原子追加 Step。输入包含目标、可选显式 steps、模型范围、计划门禁、适配策略和并发上限；delegation/decision policy 从调用 Conversation 继承。只有目标时由 Planner 生成计划；显式 steps 仍进入同一持久化和调度入口。
+1. `nomi_delegate`：从顶层已认证 Conversation 创建 AgentExecution；从已有 Attempt Conversation 调用时，则向该 ConversationLink 所属的同一个 Execution 原子追加 Step。Canonical Remote 不直接暴露这组 Gateway 工具；远程客户端先通过 Remote 四操作管理显式 AgentSession。输入包含目标、可选显式 steps、模型范围、计划门禁、适配策略和并发上限；delegation/decision policy 从调用 Conversation 继承。只有目标时由 Planner 生成计划；显式 steps 仍进入同一持久化和调度入口。
 2. `nomi_execution_get`：读取 Execution 摘要、Participant、当前及历史 DAG revision，以及每个 Attempt 的输出、错误和 Conversation。不再拆出近似的 status/result 工具；事件游标由 HTTP 事件端点负责。
-3. `nomi_execution_update`：执行带 tag 的命令，当前包括 `replan`、`adjust`、`add`、`rename`、`update_step`、`reassign`、`configure`、`steer`、`retry`、`approve`、`pause`、`resume`、`cancel` 和 Attempt 内的 `request_user_decision`。修改命令携带 expected version，统一经过领域校验。用户或 lead 对已完成/失败 Execution 显式 add 时，Engine 必须先确保上一终态回执已幂等投影，再原子追加并重开为 running；cancelled 永不重开。
+3. `nomi_execution_update`：执行带 tag 的命令，当前包括 `replan`、`adjust`、`add`、`rename`、`update_step`、`reassign`、`configure`、`steer`、`retry`、`approve`、`pause`、`resume` 和 `cancel`。修改命令携带 expected version，统一经过领域校验。用户或 lead 对已完成/失败 Execution 显式 add 时，Engine 必须先确保上一终态回执已幂等投影，再原子追加并重开为 running；cancelled 永不重开。
 
-Step Agent 请求决策也使用 `nomi_execution_update(request_user_decision)`。Attempt actor 在该工具中只允许这个命令；它要扩展工作必须走 `nomi_delegate` 的受控追加入口，不能 replan/adjust/add/update/reassign/configure/steer/retry 或控制整个聚合。完整更新命令只开放给 owner、HTTP/UI 与顶层 lead Agent。execution、step、attempt 和调用者身份从当前会话的 `ConversationExecutionLink` 与认证上下文解析，不允许模型提交可伪造的归属字段。HTTP/UI 仍可提供 `adopt`、事件分页和工作目录浏览等面向用户的操作，但不为每项操作新增模型工具。
+Step Agent 请求决策使用内置 Nomi Runtime 的 `agent.collaboration` Module 精确 Action `agent/request_user_decision`。模型只提交 `question`；host 将该调用的 canonical `context.turn_id` 传给 Engine，execution、step、attempt 与调用者身份从当前会话的 `ConversationExecutionLink` 和认证上下文派生。领域结算在同一写事务内校验该精确 Turn 仍拥有活动 Session 与 Attempt，再转为 waiting_input；持久 StopTurn 意图保存同一个目标，迟到调用不能选择后继 Turn。临时准入条件不构成另一份 Session 账本。缺少 canonical source Turn 的外部 Gateway update 不提供决策请求。Attempt actor 要扩展工作必须走 `nomi_delegate` 的受控追加入口，不能通过 Gateway update 控制整个聚合。完整更新命令只开放给 owner、HTTP/UI 与顶层 lead Agent。HTTP/UI 仍可提供 `adopt`、事件分页和工作目录浏览等面向用户的操作，但不为每项操作新增独立 Module。
 
 Attempt 内 `nomi_delegate` 还必须具备数据库持久幂等。Engine 用可信的 execution/step/attempt 身份与规范化后的 goal、model pool、显式 DAG 在服务端派生内容寻址 operation id；该字段不出现在模型 schema。Repository 在同一 Execution 的 Event 中唯一记录 operation id 与首次写入的 `added_step_ids`，重放先于 Attempt active/version 校验和 Planner 调用，直接返回原 Step id。并发相同调用在 SQLite 写锁与唯一索引下也只能落一批 Step，不使用进程内缓存，不增加第八张运行表。
 
@@ -260,7 +264,7 @@ embedded fan-out 的并行与协调属于 AgentExecution 内部实现：宿主�
 | 3 | ExecutionStep | `agent_execution_steps` | Step 规格、自由文本 role、显式 tool policy、当前归约状态、当前路由、Engine 派生的委派深度、受约束的节点配置和版本 |
 | 4 | ExecutionStepDependency | `agent_execution_step_dependencies` | blocker_step_id → blocked_step_id 有向边及其 revision 生命周期 |
 | 5 | ExecutionAttempt | `agent_execution_attempts` | attempt_no、participant_id、触发原因、生效配置快照、状态、错误、输出、token、开始/结束时间 |
-| 6 | ConversationExecutionLink | `conversation_execution_links` | lead/attempt Conversation 与 execution/step/attempt 的显式关系和活动状态 |
+| 6 | ConversationExecutionLink | `conversation_execution_links` | lead/attempt/automation AgentSession 与 execution/step/attempt 的显式关系和活动状态 |
 | 7 | ExecutionEvent | `agent_execution_events` | execution 内单调 sequence、事件类型、不可变的实际 actor（system/user/agent 与 Agent 会话/attempt 上下文）、由执行 owner 事务内派生的 `on_behalf_of_user_id`、step/attempt 引用、payload 和时间戳 |
 
 关键约束：
@@ -277,7 +281,7 @@ embedded fan-out 的并行与协调属于 AgentExecution 内部实现：宿主�
 - Provider 删除以“未来是否仍可调度”为边界，而不是以“当前是否运行”为边界：未墓碑且非 `cancelled` 的 Execution（包括 `completed`、`completed_with_failures`、`failed`，它们可通过 retry/adopt 重开）的当前 Participant 都是硬引用；只有 `cancelled` 或已墓碑 Execution 不再阻断。frozen preset snapshot 不是 live provider 引用。
 - `UNIQUE(execution_id, sequence)`；状态变更与对应 ExecutionEvent 在同一事务提交，WebSocket 只转发已提交事件。
 - Event 类型固定为 `created`、`status_changed`、`plan_changed`、`step_changed`、`attempt_changed`、`decision_requested`、`decision_answered`、`deleted` 八种。新 v3 Execution 的第一条只能是 `created`；v3 不生成 `migrated` 事件，因为历史数据通过 hard reset 退出 active dataset，不进入 v3 执行域。
-- Conversation Link 必须满足 relation 对应的空值规则：lead 只需 execution，attempt 必须同时指向 step 和 attempt。同一 Attempt 只能有一个活动 link；Link 身份不可改写，只能从 active 单向转为 inactive。只要 Conversation 曾有 attempt Link，即使 Link 已失活或 Execution 已结算，它仍是该 Attempt 的审计 transcript，永远不能成为另一个 Execution 的 lead；Gateway 只能把相同语义的重放路由回原 Execution，任何新委派由 Engine 拒绝。
+- Conversation Link 必须满足 relation 对应的空值规则：lead 只需 execution；attempt 与 automation 必须同时指向 step 和 attempt。同一 Attempt 只能有一个活动执行 link；Link 身份不可改写，只能从 active 单向转为 inactive。普通 attempt Link 表示独立、可清理的协作审计 transcript：Conversation 即使在 Link 失活或 Execution 结算后也永远不能成为另一个 Execution 的 lead。automation Link 则表示 AutoWork 精确复用既有主 AgentSession，只参与 Attempt authority、receipt 与恢复，不把主 Session 变成协作 transcript，不进入 Attempt cleanup，也不投影协作画布。
 - 非终态且未墓碑 Execution 的 active lead Conversation 是可恢复与最终回执的权威入口，用户不得删除；Execution 进入 `completed`、`completed_with_failures`、`failed` 或 `cancelled` 后，lead Conversation 恢复为普通产品数据，可删除并由 Repository 应用层清理对应 Link。账户级删除始终允许按逻辑删除策略清理完整聚合。
 - Attempt Conversation 及其 message transcript 是 Execution 审计记录的一部分；普通 Conversation 删除，以及 reset、clear messages、edit-resubmit 等物理删 message 路径都必须 fail-closed，即使对应 Link 已失活。只有删除用户账户时才允许整套聚合随 owner 一起清理。
 - ExecutionEvent 的 sequence、类型、actor、payload 和关联对象提交后不可改写；唯一可变的 outbox 元数据是 `published_at`。发布失败靠后台有界退避重扫未发布行，不在 Event 表复制尝试次数、错误或另一套投递状态。

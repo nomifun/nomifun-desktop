@@ -5,78 +5,80 @@
  */
 import type { ConversationId, CronJobId } from '@/common/types/ids';
 
-import type { IConversationMcpStatus } from '@/common/config/storage';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
 import MessageList from '@renderer/pages/conversation/Messages/MessageList';
-import { ConversationArtifactProvider } from '@renderer/pages/conversation/Messages/artifacts';
+import ConversationPluginArtifacts from '@/renderer/pages/plugins/ConversationPluginArtifacts';
+import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 import {
   MessageListLoadingProvider,
   MessageListProvider,
   useMessageLstCache,
 } from '@renderer/pages/conversation/Messages/hooks';
-import { usePendingConfirmationsRecovery } from '@renderer/pages/conversation/Messages/usePendingConfirmationsRecovery';
 import HOC from '@renderer/utils/ui/HOC';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
-import { mergeWithCapabilities, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
+import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
+import { currentModelProviderTarget } from './currentModelProviderTarget';
 
 const NomiChat: React.FC<{
   conversation_id: ConversationId;
   workspace: string;
   modelSelection: NomiModelSelection;
-  session_mode?: string;
+  agentSelectorNode?: React.ReactNode;
   cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;
-  loadedSkills?: string[];
-  loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
+  currentAgent?: ConversationContextValue['currentAgent'];
   isProcessing?: boolean;
-  /** Hide the permission/agent-mode selector in the send box (locked surfaces). */
-  hideModeSelector?: boolean;
-  /** Conversation collaborator-model control rendered after the main model. */
-  collaboratorSelectorNode?: React.ReactNode;
+  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
   /** Extra right-side tools used by projected task transcripts. */
   extraRightTools?: React.ReactNode;
+  /** Only Sessions frozen with creation.media own generation task history. */
+  creationTasksEnabled?: boolean;
+  /** Product-owned chat surfaces can explicitly suppress media creation scenes. */
+  creationEnabled?: boolean;
+  /** Product-owned compact composer; configuration is exposed outside chat. */
+  compactProductComposer?: boolean;
 }> = ({
   conversation_id,
   workspace,
   modelSelection,
-  session_mode,
+  agentSelectorNode,
   cron_job_id,
   hideSendBox,
   readOnly,
   emptySlot,
-  loadedSkills,
-  loadedMcpStatuses,
   agent_name,
+  currentAgent,
   isProcessing,
-  hideModeSelector,
-  collaboratorSelectorNode,
+  modelSelectionHint,
+  modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating,
+  onReasoningEffortChange,
   extraRightTools,
+  creationTasksEnabled = false,
+  creationEnabled = true,
+  compactProductComposer = false,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
   // companion's single session (which also absorbs every IM-channel turn and can
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
-  const historyPaging = useMessageLstCache(conversation_id, { windowed: true });
-  usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly });
-  const [dynamicModes, setDynamicModes] = useState<AgentModeOption[]>([]);
-  const turnActivity = useNomiMessage(conversation_id, {
-    readOnly,
-    onConfigChanged: (capabilities) => {
-      const modes = (capabilities as { modes?: string[] })?.modes;
-      if (modes && modes.length > 0) {
-        setDynamicModes(mergeWithCapabilities('nomi', modes));
-      }
-    },
-  });
+  const historyPaging = useMessageLstCache(conversation_id);
+  const turnActivity = useNomiMessage(conversation_id);
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
@@ -84,6 +86,10 @@ const NomiChat: React.FC<{
   const resolvedIsProcessing = turnActivity.hasHydratedRunningState
     ? turnActivity.running
     : isProcessing === true || turnActivity.running;
+  const currentModel = useMemo(
+    () => currentModelProviderTarget(modelSelection.current_model, modelSelection.providers),
+    [modelSelection.current_model?.id, modelSelection.current_model?.use_model, modelSelection.providers]
+  );
   const conversationValue = useMemo<ConversationContextValue>(() => {
     return {
       conversation_id: conversation_id,
@@ -93,9 +99,12 @@ const NomiChat: React.FC<{
       hideSendBox,
       readOnly,
       isProcessing: resolvedIsProcessing,
+      activeTurnId: turnActivity.activeTurnId,
+      activeRequestMessageId: turnActivity.activeRequestMessageId,
       stopNotice: turnActivity.stopNotice,
-      loadedSkills,
-      loadedMcpStatuses,
+      executionPause: turnActivity.pauseNotice,
+      currentAgent,
+      currentModel,
     };
   }, [
     conversation_id,
@@ -104,15 +113,18 @@ const NomiChat: React.FC<{
     hideSendBox,
     readOnly,
     resolvedIsProcessing,
+    turnActivity.activeTurnId,
+    turnActivity.activeRequestMessageId,
     turnActivity.stopNotice,
-    loadedSkills,
-    loadedMcpStatuses,
+    turnActivity.pauseNotice,
+    currentAgent,
+    currentModel,
   ]);
 
   return (
     <ConversationProvider value={conversationValue}>
-      <ConversationArtifactProvider conversation_id={conversation_id}>
-        <div className='flex-1 flex flex-col px-20px min-h-0'>
+      <ConversationCreationTasksProvider conversationId={conversation_id} enabled={creationTasksEnabled}>
+        <div data-conversation-layout className='flex-1 flex flex-col px-20px min-h-0'>
           <FlexFullContainer>
             <MessageList
               className='flex-1'
@@ -122,21 +134,26 @@ const NomiChat: React.FC<{
               loadingOlder={historyPaging.loadingOlder}
             />
           </FlexFullContainer>
+          {!readOnly && PLUGIN_FEATURE_VISIBLE && <ConversationPluginArtifacts conversationId={conversation_id} />}
           {!readOnly && !hideSendBox && (
             <NomiSendBox
               conversation_id={conversation_id}
               modelSelection={modelSelection}
-              session_mode={session_mode}
+              agentSelectorNode={agentSelectorNode}
               agent_name={agent_name}
-              hideModeSelector={hideModeSelector}
-              collaboratorSelectorNode={collaboratorSelectorNode}
+              modelSelectionHint={modelSelectionHint}
+              modelSelectionDisabled={modelSelectionDisabled}
+              reasoningEffort={reasoningEffort}
+              reasoningEffortUpdating={reasoningEffortUpdating}
+              onReasoningEffortChange={onReasoningEffortChange}
               extraRightTools={extraRightTools}
-              dynamicModes={dynamicModes}
+              creationEnabled={creationEnabled}
+              compactProductComposer={compactProductComposer}
               turnActivity={turnActivity}
             />
           )}
         </div>
-      </ConversationArtifactProvider>
+      </ConversationCreationTasksProvider>
     </ConversationProvider>
   );
 };

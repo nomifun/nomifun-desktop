@@ -22,10 +22,10 @@ pub struct CronJobRow {
     pub execution_mode: String,
     /// JSON: serialized `CronAgentConfig`.
     pub agent_config: Option<String>,
-    /// Preset lineage and immutable resolved launch configuration.
+    /// AgentPreset provenance and immutable resolved Agent launch snapshot.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     /// Target conversation; NULL for a new_conversation job before first fire.
     /// This is a business-ID logical reference.
     pub conversation_id: Option<String>,
@@ -67,7 +67,7 @@ mod tests {
             agent_config: Some(r#"{"backend":"openai","name":"OpenAI"}"#.into()),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             conversation_id: Some(nomifun_common::ConversationId::new().into_string()),
             conversation_title: Some("Reports".into()),
             agent_type: "openai".into(),
@@ -111,7 +111,7 @@ mod tests {
             agent_config: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             conversation_id: Some(nomifun_common::ConversationId::new().into_string()),
             conversation_title: None,
             agent_type: "acp".into(),

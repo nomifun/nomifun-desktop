@@ -137,22 +137,44 @@ impl JwtService {
     ///
     /// Returns the new secret string for database persistence.
     pub fn rotate_secret(&self) -> Result<String, AuthError> {
-        let new_secret = generate_random_secret_string();
+        let new_secret = self.generate_secret();
+        self.install_secret(new_secret.clone())?;
+        Ok(new_secret)
+    }
+
+    /// Generate a candidate JWT secret without changing the current service state.
+    ///
+    /// Callers that need durable rotation should persist the returned value
+    /// first, then pass it to [`Self::install_secret`].
+    pub fn generate_secret(&self) -> String {
+        generate_random_secret_string()
+    }
+
+    /// Install a previously generated JWT secret.
+    ///
+    /// Installing invalidates all tokens signed with the prior secret and
+    /// clears the blacklist. The caller is responsible for persisting the
+    /// secret before calling this method when rotation must survive restart.
+    pub fn install_secret(&self, new_secret: String) -> Result<(), AuthError> {
         let mut secret = self
             .secret
             .write()
             .map_err(|e| AuthError::TokenInvalid(format!("Secret lock poisoned: {e}")))?;
-        *secret = new_secret.clone();
+        *secret = new_secret;
         // All old tokens are invalid with the new secret; clear the blacklist
         self.blacklist.clear();
         tracing::info!("JWT secret rotated; all existing tokens invalidated");
-        Ok(new_secret)
+        Ok(())
     }
 
     /// Remove expired entries from the blacklist.
     pub fn cleanup_blacklist(&self) {
         let now = now_secs().unwrap_or(0);
-        self.blacklist.retain(|_, exp| *exp > now);
+        // Verification accepts tokens through exp + leeway (inclusive).
+        // Removing a revocation at exp would make it usable again during
+        // that clock-skew allowance. Keep the existing validation policy.
+        let leeway = Validation::default().leeway;
+        self.blacklist.retain(|_, exp| exp.saturating_add(leeway) >= now);
     }
 
     /// Number of entries in the blacklist (for monitoring/testing).
@@ -400,6 +422,32 @@ mod tests {
     }
 
     #[test]
+    fn generate_secret_does_not_change_current_state() {
+        let service = test_service();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
+
+        let candidate = service.generate_secret();
+
+        assert!(!candidate.is_empty());
+        assert!(service.verify(&token).is_ok());
+    }
+
+    #[test]
+    fn install_secret_invalidates_old_tokens_and_clears_blacklist() {
+        let service = test_service();
+        let old_token = service.sign(TEST_USER_ID, "admin").unwrap();
+        service.blacklist_token(&old_token);
+        assert_eq!(service.blacklist_size(), 1);
+
+        service.install_secret("persisted-secret".to_owned()).unwrap();
+
+        assert!(service.verify(&old_token).is_err());
+        assert_eq!(service.blacklist_size(), 0);
+        let new_token = service.sign(TEST_USER_ID, "admin").unwrap();
+        assert!(service.verify(&new_token).is_ok());
+    }
+
+    #[test]
     fn cleanup_removes_expired_entries() {
         let service = test_service();
         let secret = service.secret.read().unwrap();
@@ -445,6 +493,40 @@ mod tests {
         let (secret, generated) = resolve_jwt_secret(Some("env_secret"), Some("db_secret"));
         assert_eq!(secret, "env_secret");
         assert!(!generated);
+    }
+
+    #[test]
+    fn core_audit_cleanup_keeps_revocations_during_expiration_leeway() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", now - 120, now - 1)
+            .unwrap();
+        // This token is still accepted by the existing clock-skew policy.
+        assert!(service.verify(&token).is_ok());
+
+        service.blacklist_token(&token);
+        service.cleanup_blacklist();
+
+        assert_eq!(service.blacklist_size(), 1);
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenBlacklisted)));
+    }
+
+    #[test]
+    fn core_audit_cleanup_removes_revocations_after_expiration_leeway() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        let exp = now - Validation::default().leeway - 1;
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", exp - 120, exp)
+            .unwrap();
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
+
+        service.blacklist_token(&token);
+        service.cleanup_blacklist();
+
+        assert_eq!(service.blacklist_size(), 0);
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
     }
 
     #[test]

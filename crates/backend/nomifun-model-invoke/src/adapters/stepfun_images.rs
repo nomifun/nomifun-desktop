@@ -411,6 +411,7 @@ mod tests {
             prompt: "让角色骑自行车".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs,
             extra,
         })

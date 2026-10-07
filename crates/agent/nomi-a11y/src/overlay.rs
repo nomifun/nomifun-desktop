@@ -44,7 +44,11 @@ const PAD: i64 = SCALE;
 pub fn draw_set_of_marks(img: &mut RgbaImage, entries: &[ElementEntry]) {
     let (iw, ih) = img.dimensions();
     for e in entries {
-        if e.bounds.is_empty() {
+        if e.bounds.is_empty()
+            || ![e.bounds.x, e.bounds.y, e.bounds.w, e.bounds.h]
+                .iter()
+                .all(|v| v.is_finite())
+        {
             continue;
         }
         let color = PALETTE[(e.r#ref as usize) % PALETTE.len()];
@@ -57,17 +61,13 @@ pub fn draw_set_of_marks(img: &mut RgbaImage, entries: &[ElementEntry]) {
     }
 }
 
-fn put(img: &mut RgbaImage, x: i64, y: i64, c: [u8; 3], iw: u32, ih: u32) {
-    if x < 0 || y < 0 || x >= iw as i64 || y >= ih as i64 {
-        return;
-    }
-    img.put_pixel(x as u32, y as u32, Rgba([c[0], c[1], c[2], 255]));
-}
-
 fn fill_rect(img: &mut RgbaImage, x: i64, y: i64, w: i64, h: i64, c: [u8; 3], iw: u32, ih: u32) {
-    for dy in 0..h {
-        for dx in 0..w {
-            put(img, x + dx, y + dy, c, iw, ih);
+    // Clip before iterating: accessibility bounds can be huge or off-screen.
+    let right = x.saturating_add(w).min(iw as i64);
+    let bottom = y.saturating_add(h).min(ih as i64);
+    for py in y.max(0)..bottom {
+        for px in x.max(0)..right {
+            img.put_pixel(px as u32, py as u32, Rgba([c[0], c[1], c[2], 255]));
         }
     }
 }
@@ -83,18 +83,15 @@ fn draw_rect_border(
     iw: u32,
     ih: u32,
 ) {
-    for k in 0..t {
-        // top / bottom
-        for dx in 0..w {
-            put(img, x + dx, y + k, c, iw, ih);
-            put(img, x + dx, y + h - 1 - k, c, iw, ih);
-        }
-        // left / right
-        for dy in 0..h {
-            put(img, x + k, y + dy, c, iw, ih);
-            put(img, x + w - 1 - k, y + dy, c, iw, ih);
-        }
+    if w <= 0 || h <= 0 {
+        return;
     }
+    let tx = t.min(w);
+    let ty = t.min(h);
+    fill_rect(img, x, y, w, ty, c, iw, ih);
+    fill_rect(img, x, y.saturating_add(h - ty), w, ty, c, iw, ih);
+    fill_rect(img, x, y, tx, h, c, iw, ih);
+    fill_rect(img, x.saturating_add(w - tx), y, tx, h, c, iw, ih);
 }
 
 fn label_size(n: u32) -> (i64, i64) {
@@ -108,7 +105,10 @@ fn draw_label(img: &mut RgbaImage, ex: i64, ey: i64, n: u32, bg: [u8; 3], iw: u3
     let (lw, lh) = label_size(n);
     // Prefer just above the element's top-left; if no room, place inside.
     let lx = ex.max(0);
-    let ly = if ey - lh >= 0 { ey - lh } else { ey };
+    let ly = if ey >= lh { ey - lh } else { ey };
+    if lx >= iw as i64 || ly >= ih as i64 || ly <= -lh {
+        return;
+    }
     fill_rect(img, lx, ly, lw, lh, bg, iw, ih);
 
     let fg = [255u8, 255, 255]; // white digits on the colored chip
@@ -172,5 +172,30 @@ mod tests {
     fn label_size_grows_with_digits() {
         assert!(label_size(7).0 < label_size(42).0);
         assert!(label_size(42).0 < label_size(123).0);
+    }
+
+    #[test]
+    fn extreme_bounds_are_clipped_and_nonfinite_bounds_ignored() {
+        let blank = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        for bounds in [
+            Rect { x: f64::MAX, y: f64::MAX, w: f64::MAX, h: f64::MAX },
+            Rect { x: -f64::MAX, y: -f64::MAX, w: 40.0, h: 20.0 },
+            Rect { x: f64::NAN, y: 0.0, w: 40.0, h: 20.0 },
+            Rect { x: 0.0, y: f64::INFINITY, w: 40.0, h: 20.0 },
+            Rect { x: 0.0, y: 0.0, w: f64::INFINITY, h: 20.0 },
+            Rect { x: 0.0, y: 0.0, w: 40.0, h: f64::NAN },
+        ] {
+            let mut img = blank.clone();
+            let mut e = entry(u32::MAX, 0.0, 0.0);
+            e.bounds = bounds;
+            draw_set_of_marks(&mut img, &[e]);
+            assert_eq!(img, blank, "bounds: {bounds:?}");
+        }
+
+        let mut img = blank;
+        draw_rect_border(&mut img, 0, 0, i64::MAX, i64::MAX, [255, 0, 0], 2, 8, 8);
+        for (x, y, p) in img.enumerate_pixels() {
+            assert_eq!(p[0] == 255, x < 2 || y < 2);
+        }
     }
 }

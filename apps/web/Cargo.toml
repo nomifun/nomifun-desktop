@@ -21,9 +21,9 @@ tempfile = "3"
 
 [dependencies]
 # The unified backend, consumed in-process as a library (no spawned binary).
-# P2 will expose nomifun_app's boot entry (init_environment / data layer /
-# AppServices) so this host can mount the real /api router. For now this host
-# serves the built SPA (ui/dist) and a health endpoint.
+# The current product host uses nomifun_app's explicit Nomi-core bootstrap and
+# mounts the same /api router as the desktop shell. Fresh-v4 remains a separate
+# future host composition and is not selected by this binary.
 nomifun-app.workspace = true
 nomifun-common.workspace = true
 nomifun-runtime.workspace = true

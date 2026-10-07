@@ -45,7 +45,6 @@ export type StartCanvasConnectionDragResult =
         | 'missing_origin'
         | 'locked_origin'
         | 'group_connection'
-        | 'director_output_not_supported'
         | 'invalid_pointer';
     };
 
@@ -75,9 +74,6 @@ export function startCanvasConnectionDrag(
   if (!node) return { ok: false, reason: 'missing_origin' };
   if (node.locked) return { ok: false, reason: 'locked_origin' };
   if (node.type === 'group') return { ok: false, reason: 'group_connection' };
-  if (node.type === 'director' && input.handle === 'source') {
-    return { ok: false, reason: 'director_output_not_supported' };
-  }
   if (
     !Number.isInteger(input.pointerId) ||
     input.pointerId < 0 ||
@@ -100,8 +96,7 @@ export function startCanvasConnectionDrag(
               .filter((candidate) =>
                 input.selectedNodeIds?.includes(candidate.id) &&
                 !candidate.locked &&
-                candidate.type !== 'group' &&
-                candidate.type !== 'director'
+                candidate.type !== 'group'
               )
               .map((candidate) => candidate.id)
           : [node.id],

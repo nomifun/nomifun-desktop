@@ -16,6 +16,7 @@ import { iconColors } from '@/renderer/styles/colors';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { modelProviderManagementRoute } from '@/renderer/pages/modelHub/modelAdditionIntent';
 
 /**
  * A picked provider+model pair for the knowledge AI generators, or `null` to
@@ -111,7 +112,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
             <Menu.Item
               key='add-model'
               className='text-12px text-t-secondary'
-              onClick={() => navigate('/models?section=models')}
+              onClick={() => navigate(modelProviderManagementRoute('chat'))}
             >
               <Plus theme='outline' size='12' />
               {t('settings.addModel')}

@@ -14,7 +14,9 @@
     "pausedBadge": "Paused: {{reason}}",
     "pausedReasons": {
       "requirementFailed": "requirement failed",
-      "userInterrupted": "stopped by user"
+      "userInterrupted": "stopped by user",
+      "executionFailed": "execution failed",
+      "userActionRequired": "waiting for human attention"
     },
     "resume": "Resume",
     "resumeSuccess": "Tag resumed"
@@ -22,6 +24,7 @@
   "runState": {
     "off": "Off",
     "idle": "Idle",
-    "active": "Active"
+    "active": "Active",
+    "paused": "Paused"
   }
 }

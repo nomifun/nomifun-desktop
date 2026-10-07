@@ -22,7 +22,6 @@ const snapshot = (
       has_runtime: isProcessing,
       runtime_status: status,
       is_processing: isProcessing,
-      pending_confirmations: 0,
     },
   }) as TChatConversation;
 

@@ -7,7 +7,7 @@
 import classNames from 'classnames';
 import React from 'react';
 
-export type SkillButtonTone = 'primary' | 'quiet' | 'danger';
+type SkillButtonTone = 'primary' | 'quiet' | 'danger';
 
 interface SkillButtonProps {
   onClick: () => void;

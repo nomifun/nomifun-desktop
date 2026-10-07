@@ -62,9 +62,11 @@ describe('fetchCurrentUser session probe classification', () => {
   });
 
   test('network failure is transient', async () => {
-    globalThis.fetch = (() => Promise.reject(new TypeError('Load failed'))) as unknown as typeof fetch;
     try {
-      expect(await fetchCurrentUser()).toEqual({ kind: 'transient' });
+      for (const reason of [new TypeError('Load failed'), null, undefined, 'offline']) {
+        globalThis.fetch = (() => Promise.reject(reason)) as unknown as typeof fetch;
+        expect(await fetchCurrentUser()).toEqual({ kind: 'transient' });
+      }
     } finally {
       globalThis.fetch = realFetch;
     }

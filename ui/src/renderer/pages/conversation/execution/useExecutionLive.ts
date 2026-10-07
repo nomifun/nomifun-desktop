@@ -8,9 +8,9 @@ const ACTIVE_EXECUTION_POLL_MS = 2_000;
 
 const ACTIVE_EXECUTION_STATUSES = new Set([
   'planning',
-  'awaiting_approval',
   'running',
   'waiting_input',
+  'paused',
 ]);
 
 export function useExecutionLive(executionId: ExecutionId | undefined): {
@@ -58,7 +58,8 @@ export function useExecutionLive(executionId: ExecutionId | undefined): {
       }
     } catch (error) {
       console.error('[useExecutionLive] Failed to fetch execution detail:', error);
-      if (sequence === requestSequence.current) setDetail(null);
+      // A transient read failure must not turn known in-flight work into an
+      // apparent completion. The execution-switch effect clears old snapshots.
     } finally {
       if (sequence === requestSequence.current) setLoading(false);
       requestInFlight.current = false;

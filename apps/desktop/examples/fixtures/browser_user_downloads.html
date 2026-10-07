@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Native user download fixture</title>
+<style>body{font:16px system-ui;margin:24px}a{display:block;padding:8px}</style>
+<h1>Local native download</h1>
+<a id="download" href="/download-file">Download local fixture</a>
+<a id="slow" href="/download-slow">Download pending fixture</a>
+<a href="/download-disguised">Download disguised fixture</a>
+<a href="/download-executable">Download executable fixture</a>
+<a href="/download-oversize">Download oversized fixture</a>
+<a href="/download-interrupted">Download interrupted fixture</a>
+<a href="/download-redirect">Download redirected fixture</a>
+<a href="/download-file" target="_blank">Download popup attachment</a>
+<a id="blob" download="export.csv">Download Blob export</a>
+<a id="empty" download="empty.txt">Download empty Blob export</a>
+<a id="unsafe-blob" download="report.txt">Download disguised Blob export</a>
+<script>
+document.getElementById('blob').href = URL.createObjectURL(new Blob(['name,value\n中文,42\n'], {type:'text/csv'}));
+document.getElementById('empty').href = URL.createObjectURL(new Blob([], {type:'text/plain'}));
+document.getElementById('unsafe-blob').href = URL.createObjectURL(new Blob(['MZ fixture, not a real executable'], {type:'text/plain'}));
+</script>

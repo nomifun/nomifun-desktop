@@ -20,6 +20,7 @@ const NotifyPanel: React.FC = () => {
   const [channelsLoading, setChannelsLoading] = useState(false);
   const [channelsError, setChannelsError] = useState<string | null>(null);
   const latestChannelRequest = useRef(0);
+  const mounted = useRef(false);
 
   /**
    * Channels are shared by the CRUD table and every routing-rule picker.
@@ -27,6 +28,7 @@ const NotifyPanel: React.FC = () => {
    * updates both views from the same snapshot without requiring a remount.
    */
   const loadChannels = useCallback(async () => {
+    if (!mounted.current) return;
     const requestId = ++latestChannelRequest.current;
     setChannelsLoading(true);
     setChannelsError(null);
@@ -48,7 +50,12 @@ const NotifyPanel: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void loadChannels();
+    return () => {
+      mounted.current = false;
+      latestChannelRequest.current++;
+    };
   }, [loadChannels]);
 
   return (

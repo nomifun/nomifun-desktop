@@ -17,7 +17,7 @@ import { translateCreativeImageTool } from "./imageToolI18n";
 const ASSET: CreativeAsset = {
   id: "018f7a3c-1234-7abc-8abc-1234567890ab",
   kind: "image",
-  title: "Director / Capture",
+  title: "Canvas / Capture",
   collection: null,
   tags: [],
   mimeType: "image/jpeg",
@@ -81,7 +81,7 @@ describe("browser creative image mask adapter", () => {
     expect(result.file.name).toBe(
       translateCreativeImageTool(
         "creativeStudio.canvas.imageTools.fileNames.maskReference",
-        { stem: "Director - Capture" },
+        { stem: "Canvas - Capture" },
       ),
     );
     expect(result.width).toBe(1_920);

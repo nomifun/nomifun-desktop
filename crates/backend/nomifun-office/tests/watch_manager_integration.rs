@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_office::{DocType, OfficeError, OfficecliWatchManager, ProcessHandle, ProcessSpawner};
@@ -12,12 +11,14 @@ use nomifun_realtime::UserEventSink;
 
 struct MockHandle {
     alive: AtomicBool,
+    listener: std::sync::Mutex<Option<std::net::TcpListener>>,
 }
 
 impl MockHandle {
-    fn new() -> Self {
+    fn new(listener: std::net::TcpListener) -> Self {
         Self {
             alive: AtomicBool::new(true),
+            listener: std::sync::Mutex::new(Some(listener)),
         }
     }
 }
@@ -25,6 +26,7 @@ impl MockHandle {
 impl ProcessHandle for MockHandle {
     fn kill(&self) {
         self.alive.store(false, Ordering::SeqCst);
+        drop(self.listener.lock().unwrap().take());
     }
 
     fn is_alive(&self) -> bool {
@@ -64,9 +66,7 @@ impl ProcessSpawner for TestSpawner {
 
         let listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
             .map_err(|e| OfficeError::StartFailed(e.to_string()))?;
-        std::mem::forget(listener);
-
-        Ok(Box::new(MockHandle::new()))
+        Ok(Box::new(MockHandle::new(listener)))
     }
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {
@@ -235,25 +235,6 @@ async fn pp1_ppt_independent_session_pool() {
 }
 
 // ---------------------------------------------------------------------------
-// PP-3: PPT triggers background version check
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn pp3_ppt_background_version_check() {
-    let spawner = Arc::new(TestSpawner::new(true));
-    let broadcaster = Arc::new(TestBroadcaster::new());
-    let mgr = OfficecliWatchManager::new(spawner, broadcaster);
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = create_temp_file(&dir, "slides.pptx");
-
-    mgr.start("0190f5fe-7c00-7a00-8abc-012345678901", &path, DocType::Ppt).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    // Version check is fire-and-forget; we just verify it doesn't panic
-}
-
-// ---------------------------------------------------------------------------
 // Status event naming per doc type
 // ---------------------------------------------------------------------------
 
@@ -335,7 +316,6 @@ async fn stop_then_restart_creates_new_session() {
         .await;
 
     let second = mgr.start("0190f5fe-7c00-7a00-8abc-012345678901", &path, DocType::Word).await.unwrap();
-    assert_ne!(first.port, second.port);
     assert_ne!(first.capability, second.capability);
     assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 2);
 }

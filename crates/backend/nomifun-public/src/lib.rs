@@ -1,47 +1,26 @@
-//! `nomifun-public` — the installation-owner **Remote front door**.
+//! Canonical installation-owner Remote transport.
 //!
-//! Projects the platform's single capability source of truth
-//! (`nomifun_gateway::Registry`) onto network-reachable MCP and REST endpoints
-//! authenticated by one installation token. A validated token authenticates
-//! the NomiFun Desktop owner and never selects or impersonates a companion.
-//!
-//! This crate is deliberately thin: it owns transport + auth + identity only.
-//! Every capability, its schema, its danger tier and its surface gate already
-//! live in `nomifun-gateway`; adding a capability there makes it appear here
-//! automatically (the inheritance guarantee — see the design spec §2.1). It MUST
-//! be mounted in-process by `nomifun-app` (the `server.lock` data-dir is
-//! single-writer; a sidecar is impossible).
+//! MCP delegates to host-injected operations, independent of any Engine or
+//! legacy AgentPlatform. Transport session state is kept only for rmcp
+//! lifecycle and admission; it is never a second product identity.
 
-mod handler;
-mod idempotency;
-mod rest;
+mod canonical;
+mod platform;
 mod result;
 mod router;
 mod session;
 
-pub use handler::RemoteMcpHandler;
-pub use rest::public_rest_router;
-pub use result::build_tool_result;
-pub use router::{
-    PublicMcpState, public_mcp_router, public_mcp_router_with_admission,
+pub use canonical::{
+    CANONICAL_REMOTE_CANCEL_TOOL, CANONICAL_REMOTE_OBSERVE_TOOL, CANONICAL_REMOTE_OPEN_TOOL,
+    CANONICAL_REMOTE_TURN_TOOL, CanonicalRemoteMcpHandler, CanonicalRemoteOperationError,
+    CanonicalRemoteOperationFuture, CanonicalRemoteOperations,
+    canonical_remote_mcp_router_with_operations,
 };
+pub use result::build_tool_result;
+pub use platform::{
+    REMOTE_INGRESS_AGENT_ACTION_IDS, REMOTE_INGRESS_OPERATION_IDS,
+    REMOTE_INGRESS_PLATFORM_SERVICE_ID, RemoteIngressBindingSelection,
+    RemoteIngressTransport,
+};
+pub use router::{PublicMcpState, RemoteInstanceOwner, instance_token_middleware};
 pub use session::RemoteMcpSessionAdmissionAuthority;
-
-/// Curated "agent" profile for the Remote surface: the do-work capability
-/// domains an external task-delegation agent typically needs, excluding
-/// platform-management domains (channel/companion/cron/system/team/…). Keeps a
-/// remote MCP client's tool list tight (better tool-selection) without changing
-/// permissions — dispatch is still gated by the Remote surface, not the profile.
-/// (`computer` lights up when the computer-use caps land.)
-pub const AGENT_PROFILE_DOMAINS: &[&str] =
-    &[
-        "agent_execution",
-        "agent",
-        "remote",
-        "conversation",
-        "browser",
-        "computer",
-        "knowledge",
-        "files",
-        "memory",
-    ];

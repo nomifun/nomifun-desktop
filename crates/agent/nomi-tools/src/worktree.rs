@@ -62,7 +62,7 @@ impl WorktreeBaseline {
             .canonicalize()
             .map_err(|error| format!("could not canonicalize repository root: {error}"))?;
         let storage = tempfile::Builder::new()
-            .prefix("nomi-agent-worktrees-")
+            .prefix("nomifun-agent-worktrees-")
             .tempdir()
             .map_err(|error| format!("could not create private worktree storage: {error}"))?;
         let git_dir = storage.path().join("repo.git");

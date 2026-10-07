@@ -24,13 +24,16 @@ fn helper_binary() -> &'static str {
     env!("CARGO_BIN_EXE_process_test_helper")
 }
 
-fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
+fn program_request(
+    program: impl Into<OsString>,
+    args: impl IntoIterator<Item = OsString>,
+) -> NormalizedProcessRequest {
     let cwd = std::env::current_dir().expect("current directory should exist");
     NormalizedProcessRequest {
         owner: ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
         command: CommandSpec::Program {
-            program: helper_binary().into(),
-            args: args.iter().map(OsString::from).collect(),
+            program: program.into(),
+            args: args.into_iter().collect(),
         },
         cwd: cwd.clone(),
         env: BTreeMap::new(),
@@ -41,6 +44,10 @@ fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
         policy: ProcessPolicy::default(),
         capability: CapabilityPolicy::local_owner(cwd),
     }
+}
+
+fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
+    program_request(helper_binary(), args.iter().map(OsString::from))
 }
 
 async fn start_pty(
@@ -132,6 +139,7 @@ fn strip_terminal_controls(text: &str) -> String {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn consecutive_pty_sessions_do_not_lose_quick_exit_output() {
     let first = ProcessSupervisor::new(SupervisorConfig::default());
     let first_handle = start_pty(&first, &["exit", "0"])
@@ -157,6 +165,7 @@ async fn consecutive_pty_sessions_do_not_lose_quick_exit_output() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn pty_echoes_stdin_and_close_stdin_delivers_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["echo-stdin"])
@@ -217,6 +226,7 @@ async fn pty_echoes_stdin_and_close_stdin_delivers_eof() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn unix_pty_close_stdin_flushes_unterminated_canonical_input_then_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["echo-stdin"])
@@ -246,6 +256,7 @@ async fn unix_pty_close_stdin_flushes_unterminated_canonical_input_then_eof() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn pty_decodes_utf8_split_one_byte_at_a_time() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["emit-split-utf8"])
@@ -274,6 +285,7 @@ async fn pty_decodes_utf8_split_one_byte_at_a_time() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn pty_preserves_fast_output_after_a_prior_terminal_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let warmup = start_pty(&supervisor, &["exit", "0"])
@@ -293,12 +305,21 @@ async fn pty_preserves_fast_output_after_a_prior_terminal_session() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let started = Instant::now();
-    let handle = start_pty(&supervisor, &["exit", "0"])
+    #[cfg(unix)]
+    let request = program_request(
+        "/bin/sh",
+        [OsString::from("-c"), OsString::from("exit 0")],
+    );
+    #[cfg(windows)]
+    let request = helper_request(&["exit", "0"]);
+    let handle = supervisor
+        .start(request)
         .await
-        .expect("quick PTY helper should start");
+        .expect("quick PTY process should start");
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -333,6 +354,48 @@ async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
+async fn macos_concurrent_pty_sessions_keep_output_and_cleanup_isolated() {
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let mut sessions = tokio::task::JoinSet::new();
+    for index in 0..8 {
+        let supervisor = std::sync::Arc::clone(&supervisor);
+        sessions.spawn(async move {
+            let expected = format!("pty-{index}");
+            let request = program_request(
+                "/bin/sh",
+                [
+                    OsString::from("-c"),
+                    OsString::from(format!("printf '{expected}'")),
+                ],
+            );
+            let handle = supervisor
+                .start(request)
+                .await
+                .unwrap_or_else(|error| panic!("PTY {index} failed to start: {error:?}"));
+            let outcome = wait_for_terminal(&supervisor, &handle).await;
+            let ProcessOutcome::Exited {
+                code,
+                output,
+                cleanup,
+                ..
+            } = outcome
+            else {
+                panic!("PTY {index} did not exit truthfully: {outcome:?}");
+            };
+            assert_eq!(code, Some(0));
+            assert!(cleanup.reaped);
+            assert_eq!(strip_terminal_controls(&output.text()), expected);
+        });
+    }
+    while let Some(result) = sessions.join_next().await {
+        result.expect("concurrent PTY task must not panic");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
     // Darwin's trusted temporary directories are intentionally writable in
     // the profile. Keep both fixtures beside the checkout so `outside` really
@@ -374,6 +437,7 @@ async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn running_pty_supports_poll_write_resize_and_cancel() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["ignore-interrupt"])
@@ -440,18 +504,198 @@ async fn running_pty_supports_poll_write_resize_and_cancel() {
     assert!(cleanup.reaped);
 }
 
+#[cfg(windows)]
 #[tokio::test]
-async fn resize_rejects_zero_dimensions_without_mutating_the_session() {
+#[ignore = "run alone to compare Windows ConPTY host handle counts"]
+async fn conpty_resize_changes_application_window_and_releases_handles() {
+    // Initialize the existing ConPTY close executor before measuring this one
+    // resize lifecycle. This warmup is not a second application-size sample.
+    let warmup = ProcessSupervisor::new(SupervisorConfig::default());
+    let warmup_handle = start_pty(&warmup, &["exit", "0"])
+        .await
+        .expect("ConPTY warmup should start");
+    let ProcessOutcome::Exited { code, cleanup, .. } =
+        wait_for_terminal(&warmup, &warmup_handle).await
+    else {
+        panic!("ConPTY warmup must exit normally");
+    };
+    assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty());
+    assert!(warmup.shutdown().await.is_exact());
+    drop(warmup_handle);
+    drop(warmup);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let handles_before = windows_host_handle_count();
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = start_pty(&supervisor, &["observe-console-size", "132", "43"])
+        .await
+        .expect("console-size observer should start in the real ConPTY");
+    let original = supervisor
+        .status(&handle.owner, &handle.session_id)
+        .await
+        .expect("original observer identity should be available");
+    let process = ExactWindowsProcess::open(original.pid)
+        .expect("retain the original observer's OS process handle");
+    let initial = format!(
+        "console-size initial pid={} window={PTY_COLS}x{PTY_ROWS} buffer=",
+        original.pid
+    );
+    let resized = format!(
+        "console-size resized pid={} window=132x43 buffer=",
+        original.pid
+    );
+    let mut cursor = OutputCursor::START;
+    let mut observed = Vec::new();
+    poll_until_windows_console_report(
+        &supervisor, &handle, original.pid, &mut cursor, &mut observed, &initial,
+    )
+    .await;
+    let initial_cursor = cursor;
+    assert!(initial_cursor > OutputCursor::START);
+    assert!(!strip_terminal_controls(&String::from_utf8_lossy(&observed))
+        .lines()
+        .any(|line| line.starts_with(&resized)));
+
+    supervisor
+        .resize(&handle.owner, &handle.session_id, 132, 43)
+        .await
+        .expect("resize must reach this same admitted ConPTY owner");
+    poll_until_windows_console_report(
+        &supervisor, &handle, original.pid, &mut cursor, &mut observed, &resized,
+    )
+    .await;
+    assert!(cursor > initial_cursor);
+    let current = supervisor
+        .status(&handle.owner, &handle.session_id)
+        .await
+        .expect("resized observer should remain registered");
+    assert_eq!(current.pid, original.pid);
+    assert_eq!(current.started_at, original.started_at);
+    assert_eq!(current.state, ProcessState::Running);
+
+    let ProcessOutcome::Cancelled { output, cleanup } = tokio::time::timeout(
+        Duration::from_secs(5),
+        supervisor.cancel(&handle.owner, &handle.session_id),
+    )
+    .await
+    .expect("console-size observer cancellation must stay bounded")
+    .expect("original ConPTY cancellation should resolve")
+    else {
+        panic!("console-size observer must have one Cancelled terminal outcome");
+    };
+    assert!(cleanup.interrupt_attempted);
+    assert!(cleanup.terminate_attempted || cleanup.force_kill_attempted);
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty(), "native cleanup failed: {cleanup:?}");
+    process.wait_terminated(Duration::from_secs(2), "console-size observer").await;
+    let PollResult::Finished(ProcessOutcome::Cancelled { output: tail, cleanup: replay_cleanup }) =
+        supervisor.poll(&handle.owner, &handle.session_id, cursor, Instant::now()).await
+            .expect("terminal cursor poll should resolve")
+    else {
+        panic!("terminal poll must preserve the original cancellation");
+    };
+    assert_eq!(cleanup, replay_cleanup);
+    observed.extend_from_slice(&tail.raw_bytes());
+    assert_eq!(observed, output.raw_bytes(), "cursor polling lost or repeated PTY bytes");
+    assert_eq!(tail.next_cursor, output.next_cursor);
+    assert_eq!(output.next_cursor.offset(), observed.len() as u64);
+    assert_eq!(output.dropped_bytes, 0);
+    assert!(output.chunks.iter().all(|chunk| chunk.stream == OutputStream::Pty));
+    let plain = strip_terminal_controls(&String::from_utf8_lossy(&observed));
+    // A ConPTY resize may repaint existing console text. Compare raw cursor
+    // bytes above; repainting an old line is not a repeated helper execution.
+    assert!(plain.lines().any(|line| line.starts_with(&initial)));
+    assert!(plain.lines().any(|line| line.starts_with(&resized)));
+    eprintln!("application console reports: {plain:?}; cursor={}; cleanup={cleanup:?}", output.next_cursor.offset());
+    assert!(supervisor.shutdown().await.is_exact());
+    drop(process);
+    drop(handle);
+    drop(supervisor);
+    let handles_after = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let count = windows_host_handle_count();
+            if count <= handles_before {
+                break count;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!(
+        "ConPTY handles did not return to the warmed baseline: before={handles_before}, after={}",
+        windows_host_handle_count()
+    ));
+    eprintln!("Windows host handles: before={handles_before}, after={handles_after}");
+}
+
+#[cfg(windows)]
+async fn poll_until_windows_console_report(
+    supervisor: &ProcessSupervisor,
+    handle: &nomi_process_runtime::ProcessHandle,
+    pid: u32,
+    cursor: &mut OutputCursor,
+    observed: &mut Vec<u8>,
+    expected: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let PollResult::Running { snapshot, output } = supervisor
+                .poll(&handle.owner, &handle.session_id, *cursor,
+                    Instant::now() + Duration::from_millis(25))
+                .await
+                .expect("console observer poll should resolve")
+            else {
+                panic!("console observer exited before application report {expected:?}");
+            };
+            assert_eq!(snapshot.pid, pid);
+            assert_eq!(snapshot.state, ProcessState::Running);
+            assert_eq!(output.dropped_bytes, 0);
+            assert!(output.chunks.iter().all(|chunk| chunk.stream == OutputStream::Pty));
+            let bytes = output.raw_bytes();
+            assert_eq!(output.next_cursor.offset(), cursor.offset() + bytes.len() as u64);
+            observed.extend_from_slice(&bytes);
+            *cursor = output.next_cursor;
+            if strip_terminal_controls(&String::from_utf8_lossy(observed))
+                .lines().any(|line| line.starts_with(expected))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("application console report missing: {expected:?}; raw={observed:?}"));
+}
+
+#[cfg(windows)]
+fn windows_host_handle_count() -> u32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut count = 0;
+    // SAFETY: the pseudo-handle belongs to this test host and count is writable.
+    assert_ne!(unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }, 0,
+        "host handle count failed: {}", std::io::Error::last_os_error());
+    count
+}
+
+#[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
+async fn resize_rejects_out_of_range_dimensions_without_mutating_the_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["sleep", "60000"])
         .await
         .expect("PTY resize helper should start");
 
-    for (cols, rows) in [(0, PTY_ROWS), (PTY_COLS, 0)] {
+    for (cols, rows) in [
+        (0, PTY_ROWS),
+        (PTY_COLS, 0),
+        (nomi_process_runtime::MAX_PTY_DIMENSION + 1, PTY_ROWS),
+        (PTY_COLS, nomi_process_runtime::MAX_PTY_DIMENSION + 1),
+    ] {
         let error = supervisor
             .resize(&handle.owner, &handle.session_id, cols, rows)
             .await
-            .expect_err("zero PTY dimensions should be rejected");
+            .expect_err("out-of-range PTY dimensions should be rejected");
         assert_eq!(error.code(), "invalid_transport");
     }
 
@@ -466,6 +710,7 @@ async fn resize_rejects_zero_dimensions_without_mutating_the_session() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn resize_after_terminal_close_fails_truthfully() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["exit", "0"])
@@ -484,6 +729,7 @@ async fn resize_after_terminal_close_fails_truthfully() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn unix_pty_cancellation_reaps_the_leader_and_grandchild_group() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("pty-grandchild.pid");
@@ -624,6 +870,7 @@ async fn conpty_cancellation_reaps_the_leader_and_grandchild_job() {
         panic!("ConPTY Job cancellation should be Cancelled, got {outcome:?}");
     };
     assert!(cleanup.reaped);
+    assert!(cleanup.interrupt_attempted,"ConPTY retains its real VT interrupt contract");
 
     leader
         .wait_terminated(Duration::from_secs(2), "ConPTY leader")

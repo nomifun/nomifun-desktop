@@ -1,30 +1,19 @@
-//! IDMM (Intelligent Decision-Making Mode): per-session supervision that keeps
-//! agent/terminal sessions alive through provider faults and decision stalls.
-//! Rule tier (no LLM) + sidecar backup-model tier, stacking on AutoWork.
+//! Intelligent Decision-Making Mode for canonical AgentSessions.
 //!
-//! Layering: `signal`/`config`/`detector`/`prompt`/`util` are pure; `probe`
-//! abstracts the target; `sidecar` calls the backup model; `policy` is the
-//! escalation ladder; `supervisor` runs the per-session loop + `IdmmManager`
-//! (which implements `nomifun_requirement::IdmmHandle`); `service`/`state`/
-//! `routes` are the domain API surface.
+//! The crate deliberately owns neither a Session nor a model runtime.  It
+//! observes bounded Session facts through [`IdmmSessionPort`], applies a
+//! deterministic rule policy first, and asks [`IdmmBypassModelPort`] only when
+//! an explicitly configured bypass model is required.
 
-pub mod config;
-pub mod detector;
-pub mod events;
-pub mod policy;
-pub mod probe;
-pub mod prompt;
-pub mod routes;
-pub mod service;
-pub mod sidecar;
-pub mod signal;
-pub mod state;
-pub mod supervisor;
-pub mod util;
+#![forbid(unsafe_code)]
 
-pub use events::IdmmEventEmitter;
-pub use routes::idmm_routes;
-pub use service::{IdmmService, ProbeDeps};
-pub use sidecar::{Completer, LiveCompleter, SidecarClient};
-pub use state::IdmmRouterState;
-pub use supervisor::{IdmmManager, LoopDeps};
+mod detector;
+mod service;
+mod store;
+
+pub use detector::{DecisionClass, DecisionOption, DecisionPrompt, detect_decision};
+pub use service::{
+    IdmmBypassModelPort, IdmmProgressPhase, IdmmProgressSink, IdmmService,
+    IdmmSessionObservation, IdmmSessionPort, ObservedMessage, ObservedMessageRole,
+    ObservedTurn, ObservedTurnState,
+};

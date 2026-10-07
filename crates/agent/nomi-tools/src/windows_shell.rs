@@ -93,8 +93,8 @@ pub(crate) fn validate_shell_script(script: &str) -> Result<(), String> {
 
 /// OS opener and browser executables that would hand an `http/https` URL to a
 /// visible operating-system browser. Invoking one of these with a web URL from
-/// the Agent shell bypasses the managed Browser Hub's approval, egress and
-/// lifecycle policies, so it fails closed on every platform. Local files and
+/// the Agent shell bypasses the explicitly selected conversation/system
+/// Browser capability and its run ownership, so it fails closed on every platform. Local files and
 /// plain application launches (no web URL argument) stay allowed.
 const WEB_OPENER_PROGRAMS: &[&str] = &[
     "xdg-open",

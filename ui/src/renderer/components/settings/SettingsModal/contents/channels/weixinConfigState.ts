@@ -69,6 +69,20 @@ export function buildWeixinEnableConfig(
 }
 
 /**
+ * Keep the localized summary while preserving the backend's actionable cause
+ * (for example, both the configured proxy path and the direct path failing).
+ * The previous UI discarded every non-expiry detail and reduced distinct
+ * network/protocol failures to the same opaque toast.
+ */
+export function formatWeixinLoginFailure(
+  summary: string,
+  detail?: string
+): string {
+  const normalizedDetail = detail?.trim();
+  return normalizedDetail ? `${summary}: ${normalizedDetail}` : summary;
+}
+
+/**
  * Resolve only the entity created/updated by the enable response. Owner/type
  * fallbacks can select a different WeChat bot in multi-plugin mode.
  */

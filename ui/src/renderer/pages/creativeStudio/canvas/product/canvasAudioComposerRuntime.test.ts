@@ -309,7 +309,7 @@ describe('canvas audio composer runtime integration', () => {
           connection.targetNodeId === source.id
       )
     ).toBe(false);
-    expect(state.selection.nodeIds).toEqual([source.id]);
+    expect(state.selection.nodeIds).toEqual([]);
     expect(seenAssets).toEqual([RESULT_ASSET_ID]);
     expect(harness.pending()).toEqual([]);
     expect(harness.events.at(-1)).toBe(`pending:remove:${TASK_ID}`);
@@ -341,7 +341,7 @@ describe('canvas audio composer runtime integration', () => {
     expect(harness.events.at(-1)).toBe(`pending:remove:${TASK_ID}`);
   });
 
-  test('refuses missing, multiple, mismatched, wrong-kind and occupied results', async () => {
+  test('refuses missing, multiple, mismatched and wrong-kind results', async () => {
     const cases: Array<{
       name: string;
       resultIds: string[];
@@ -374,15 +374,7 @@ describe('canvas audio composer runtime integration', () => {
         ]),
         message: '真实音频素材',
       },
-      {
-        name: 'occupied source',
-        resultIds: [RESULT_ASSET_ID],
-        source: {
-          ...sourceNode(),
-          data: { ...sourceNode().data, assetId: SECOND_RESULT_ASSET_ID },
-        },
-        message: '已关联其他素材',
-      },
+
     ];
 
     for (const entry of cases) {

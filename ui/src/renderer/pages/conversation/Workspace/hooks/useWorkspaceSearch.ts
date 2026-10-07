@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 type UseWorkspaceSearchParams = {
   workspace: string;
-  loadWorkspace: (path: string, search?: string) => Promise<IDirOrFile[]>;
+  loadWorkspace: (path: string, search?: string) => Promise<IDirOrFile[] | null>;
 };
 
 /**
@@ -53,6 +53,7 @@ export function useWorkspaceSearch({ workspace, loadWorkspace }: UseWorkspaceSea
   const onSearch = useDebounce(
     (value: string) => {
       void loadWorkspace(workspace, value).then((files) => {
+        if (files === null) return;
         setShowSearch(files.length > 0 && (files[0]?.children?.length ?? 0) > 0);
       });
     },

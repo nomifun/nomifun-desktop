@@ -1,0 +1,151 @@
+{
+  "manifest_version": "1.0.0",
+  "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
+  "canonical_schema_manifest_digest": "d80495381e86ed1e41d7f27de41d58b25a4f10cb2a98c4e7b9dfac96f159aec9",
+  "cargo_lock_digest": "52d72d0ec2f04834a5e07bd309e98662db77f46049ddd851514d41456cb42975",
+  "official_preset_seed_manifest_digest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb",
+  "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
+  "coding_codex_native_contract_digest": "a0d2527993a9a1c987c0f024faa7883872fd7e0b3a807fa92dba5baf9f9e569b",
+  "platform_matrix": {
+    "target_cells": {
+      "windows_desktop_x64": {
+        "host_os": "windows",
+        "host_arch": "x86_64",
+        "host_target": "x86_64-pc-windows-msvc",
+        "runtime_target": "x86_64-pc-windows-msvc",
+        "host_surface": "desktop",
+        "package_format": "nsis",
+        "capability_availability": {
+          "coding_codex_native": {
+            "availability": "required_exact_set"
+          },
+          "browser": {
+            "availability": "release_manifest_defined"
+          },
+          "computer": {
+            "availability": "release_manifest_defined"
+          }
+        }
+      },
+      "macos_desktop_arm64": {
+        "host_os": "macos",
+        "host_arch": "aarch64",
+        "host_target": "aarch64-apple-darwin",
+        "runtime_target": "aarch64-apple-darwin",
+        "host_surface": "desktop",
+        "package_format": "universal-app",
+        "capability_availability": {
+          "coding_codex_native": {
+            "availability": "required_exact_set"
+          },
+          "browser": {
+            "availability": "release_manifest_defined"
+          },
+          "computer": {
+            "availability": "release_manifest_defined"
+          }
+        }
+      },
+      "linux_desktop_x64": {
+        "host_os": "linux",
+        "host_arch": "x86_64",
+        "host_target": "x86_64-unknown-linux-gnu",
+        "runtime_target": "x86_64-unknown-linux-musl",
+        "host_surface": "desktop",
+        "package_format": "appimage-deb-rpm",
+        "capability_availability": {
+          "coding_codex_native": {
+            "availability": "required_exact_set"
+          },
+          "browser": {
+            "availability": "release_manifest_defined"
+          },
+          "computer": {
+            "availability": "independent_partial_or_exact_unavailable"
+          }
+        }
+      }
+    },
+    "unsupported_local_targets": [
+      "windows_arm64",
+      "linux_arm64"
+    ],
+    "remote_only_surfaces": [
+      "mobile",
+      "web_browser_client",
+      "robot_firmware",
+      "im_client"
+    ]
+  },
+  "required_checks": [
+    {
+      "check_id": "c8_win_pre_full_gate",
+      "target_cells": [
+        "windows_desktop_x64"
+      ],
+      "command": "bun run gate:agent-v2 -- c8-win-pre",
+      "required_execution_kind": "native"
+    },
+    {
+      "check_id": "c8_ma_full_gate",
+      "target_cells": [
+        "macos_desktop_arm64"
+      ],
+      "command": "bun run gate:agent-v2 -- c8-ma",
+      "required_execution_kind": "native"
+    },
+    {
+      "check_id": "c8_ld_full_gate",
+      "target_cells": [
+        "linux_desktop_x64"
+      ],
+      "command": "bun run gate:agent-v2 -- c8-ld",
+      "required_execution_kind": "native"
+    }
+  ],
+  "platform_verification_points": [
+    {
+      "verification_point_id": "windows_process_tree_cleanup",
+      "owning_module": "runtime-supervisor/windows",
+      "target_cell": "windows_desktop_x64",
+      "behavior_to_observe": "dispose removes sidecar, terminal, PTY, browser, and subagent descendants",
+      "exact_check_id": "c8_win_pre_full_gate"
+    },
+    {
+      "verification_point_id": "macos_arm64_universal_runtime_leaf",
+      "owning_module": "packaging/macos",
+      "target_cell": "macos_desktop_arm64",
+      "behavior_to_observe": "Universal app arm64 slice launches the native arm64 runtime leaf",
+      "exact_check_id": "c8_ma_full_gate"
+    },
+    {
+      "verification_point_id": "linux_desktop_gnu_host_musl_runtime",
+      "owning_module": "runtime-supervisor/linux",
+      "target_cell": "linux_desktop_x64",
+      "behavior_to_observe": "GNU desktop Host launches the musl x64 runtime and fails closed for unavailable Computer capability",
+      "exact_check_id": "c8_ld_full_gate"
+    }
+  ],
+  "decision_fixture_refs": {
+    "d026_request_admission_ordering": {
+      "artifact_id": "d026_request_admission_ordering_fixture",
+      "normalized_relative_path": "contracts/remote/d026-request-admission-ordering.fixture.json",
+      "digest": "4e3fecbbfe4ce59a9c30e233ff266987ba8ef3684519fde303d9bf17a148d711"
+    },
+    "d026_validation_outcomes": {
+      "artifact_id": "d026_validation_outcomes_matrix",
+      "normalized_relative_path": "contracts/validation/d026-ordering-outcomes.matrix.json",
+      "digest": "8f30ad0a0e0fa216776ffcefbcfadeef556ffa5e92bbe665eef175f5a04ab0c0"
+    },
+    "d027_terminal_drain": {
+      "artifact_id": "d027_terminal_drain_matrix",
+      "normalized_relative_path": "contracts/validation/d027-terminal-sequences.matrix.json",
+      "digest": "149d176e1392d226e8b3c7841670db5c462ac918462b307c5fd79a212d29afb3"
+    },
+    "d028_platform_matrix": {
+      "artifact_id": "d028_platform_matrix",
+      "normalized_relative_path": "contracts/validation/d028-platform-matrix.json",
+      "digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c"
+    }
+  }
+}

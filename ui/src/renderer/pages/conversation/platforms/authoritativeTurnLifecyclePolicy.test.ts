@@ -8,9 +8,9 @@ import {
   shouldAcceptAuthoritativeTurnStart,
 } from './authoritativeTurnLifecyclePolicy';
 import {
-  getAuthoritativeHydrationFence,
-  shouldAcceptAuthoritativeStreamActivity,
-} from './useAuthoritativeTurnLifecycle';
+  getNomiHydrationLifecycleFence,
+  shouldApplyNomiStreamEventToTurn,
+} from './nomi/nomiLifecycleFence';
 
 const oldTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000011');
 const newTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000012');
@@ -36,11 +36,12 @@ describe('authoritative turn lifecycle policy', () => {
   });
 
   test('pending and idle hydration fence late stream activity and verify unannounced starts', () => {
-    const fence = getAuthoritativeHydrationFence(false);
+    const fence = getNomiHydrationLifecycleFence(false);
 
     expect(
-      shouldAcceptAuthoritativeStreamActivity({
-        closed: fence.closed,
+      shouldApplyNomiStreamEventToTurn({
+        activeTurnId: null,
+        turnClosed: fence.turnClosed,
         awaitingBackendTurn: false,
       })
     ).toBe(false);
@@ -63,8 +64,9 @@ describe('authoritative turn lifecycle policy', () => {
 
   test('an explicit local submit opens activity while the backend turn is pending', () => {
     expect(
-      shouldAcceptAuthoritativeStreamActivity({
-        closed: false,
+      shouldApplyNomiStreamEventToTurn({
+        activeTurnId: null,
+        turnClosed: false,
         awaitingBackendTurn: true,
       })
     ).toBe(true);
@@ -72,8 +74,8 @@ describe('authoritative turn lifecycle policy', () => {
 
   test('a correlated prior-turn stream cannot cross an awaiting local submit fence', () => {
     expect(
-      shouldAcceptAuthoritativeStreamActivity({
-        closed: false,
+      shouldApplyNomiStreamEventToTurn({
+        turnClosed: false,
         awaitingBackendTurn: true,
         activeTurnId: null,
         eventTurnId: oldTurnId,

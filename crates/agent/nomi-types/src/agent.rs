@@ -14,7 +14,6 @@ use crate::message::TokenUsage;
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecutionStatus {
     Planning,
-    AwaitingApproval,
     Running,
     Paused,
     WaitingInput,
@@ -28,7 +27,6 @@ impl AgentExecutionStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Planning => "planning",
-            Self::AwaitingApproval => "awaiting_approval",
             Self::Running => "running",
             Self::Paused => "paused",
             Self::WaitingInput => "waiting_input",
@@ -55,15 +53,11 @@ impl AgentExecutionStatus {
         match self {
             Self::Planning => matches!(
                 next,
-                Self::AwaitingApproval | Self::Running | Self::Failed | Self::Cancelled
+                Self::Running | Self::Failed | Self::Cancelled
             ),
-            Self::AwaitingApproval => {
-                matches!(next, Self::Running | Self::Failed | Self::Cancelled)
-            }
             Self::Running => matches!(
                 next,
-                Self::AwaitingApproval
-                    | Self::Paused
+                Self::Paused
                     | Self::WaitingInput
                     | Self::Completed
                     | Self::CompletedWithFailures
@@ -72,16 +66,14 @@ impl AgentExecutionStatus {
             ),
             Self::Paused => matches!(
                 next,
-                Self::AwaitingApproval
-                    | Self::Running
+                Self::Running
                     | Self::WaitingInput
                     | Self::Failed
                     | Self::Cancelled
             ),
             Self::WaitingInput => matches!(
                 next,
-                Self::AwaitingApproval
-                    | Self::Running
+                Self::Running
                     | Self::Paused
                     | Self::Failed
                     | Self::Cancelled
@@ -121,7 +113,6 @@ impl FromStr for AgentExecutionStatus {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "planning" => Ok(Self::Planning),
-            "awaiting_approval" => Ok(Self::AwaitingApproval),
             "running" => Ok(Self::Running),
             "paused" => Ok(Self::Paused),
             "waiting_input" => Ok(Self::WaitingInput),

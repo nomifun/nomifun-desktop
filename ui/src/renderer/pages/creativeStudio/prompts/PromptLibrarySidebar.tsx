@@ -39,5 +39,3 @@ export const PromptLibrarySidebar: React.FC<PromptLibrarySidebarProps> = ({
     />
   );
 };
-
-export default PromptLibrarySidebar;

@@ -216,7 +216,7 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
                       model: model?.model ?? '',
                     })
                   : model
-                    ? `${model.providerId} / ${model.model}`
+                    ? model.model
                     : t('creativeStudio.agent.selectConversationModel', {
                         defaultValue: 'Choose a conversation model',
                       })

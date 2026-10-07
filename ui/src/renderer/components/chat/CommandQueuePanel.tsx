@@ -198,6 +198,12 @@ const QueueItemCard: React.FC<QueueItemCardProps> = ({
           <Typography.Ellipsis rows={1} showTooltip className='min-w-0 flex-1 text-11px leading-16px text-t-secondary'>
             {preview}
           </Typography.Ellipsis>
+          {item.requires_review ? (
+            <span className='text-11px shrink-0' style={{ color: 'rgb(var(--warning-6))' }}
+              title={t('conversation.steer.fallbackQueued')}>
+              {t('conversation.steer.reviewDelivery')}
+            </span>
+          ) : null}
           {fileCountLabel ? (
             <span
               className='inline-flex items-center rd-999px px-5px py-1px text-9px leading-none shrink-0'

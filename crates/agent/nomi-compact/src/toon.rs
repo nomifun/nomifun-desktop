@@ -25,7 +25,7 @@ pub fn toon_encode_array(value: &serde_json::Value) -> Option<String> {
     }
 
     let mut result = String::new();
-    let header = format!("[{}]{{{}}}:", arr.len(), fields.join(","));
+    let header = format!("[{}]{{{}}}:", arr.len(), fields.iter().map(|f| format_toon_string(f)).collect::<Vec<_>>().join(","));
     result.push_str(&header);
     result.push('\n');
 
@@ -47,70 +47,38 @@ pub fn toon_encode_array(value: &serde_json::Value) -> Option<String> {
     Some(result)
 }
 
+fn format_toon_string(value: &str) -> String {
+    // Bare words stay compact; ambiguous scalars and syntax use JSON escaping.
+    if !value.is_empty()
+        && value.trim() == value
+        && !matches!(value, "true" | "false" | "null")
+        && value.parse::<f64>().is_err()
+        && !value.starts_with('-')
+        && !value.chars().any(|c| c.is_control() || matches!(c, ',' | ':' | '[' | ']' | '{' | '}' | '"' | '\\'))
+    {
+        value.to_owned()
+    } else {
+        serde_json::to_string(value).unwrap()
+    }
+}
+
 fn format_toon_value(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            if s.contains(',') || s.contains('\n') || s.contains('"') {
-                format!("\"{}\"", s.replace('"', "\\\""))
-            } else {
-                s.clone()
-            }
-        }
-        _ => serde_json::to_string(value).unwrap_or_default(),
+        serde_json::Value::String(s) => format_toon_string(s),
+        _ => serde_json::to_string(value).unwrap(),
     }
 }
 
 pub fn try_toon_encode(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-
-    let trimmed = text.trim();
-
-    if trimmed.starts_with('[')
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
-        && value.is_array()
+    let Some(start) = text.find('[') else { return text.to_owned() };
+    let mut values = serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+    if let Some(Ok(value)) = values.next()
+        && let Some(encoded) = toon_encode_array(&value)
     {
-        if let Some(encoded) = toon_encode_array(&value) {
-            return encoded;
-        }
-        return text.to_string();
+        let end = start + values.byte_offset();
+        return format!("{}{}{}", &text[..start], encoded, &text[end..]);
     }
-
-    if let Some(start) = trimmed.find('[') {
-        let rest = &trimmed[start..];
-        // Try to find the JSON array boundary by looking for matching ']'
-        let mut depth = 0;
-        let mut end = None;
-        for (i, ch) in rest.char_indices() {
-            match ch {
-                '[' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(end_pos) = end {
-            let candidate = &rest[..end_pos];
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate)
-                && value.is_array()
-                && let Some(encoded) = toon_encode_array(&value)
-            {
-                let suffix = &rest[end_pos..];
-                return format!("{}{}{}", &trimmed[..start], encoded, suffix);
-            }
-        }
-    }
-
-    text.to_string()
+    text.to_owned()
 }
 
 pub fn toon_format_instructions() -> &'static str {
@@ -129,7 +97,7 @@ for token efficiency. Format:
 - `[N]` is the array length
 - `{fields}` are column headers
 - Each indented line is one row, values comma-separated
-- String values containing commas are quoted
+- Ambiguous string values and column headers are quoted using JSON string escapes
 
 This is equivalent to a JSON array of objects. Example:
 ```

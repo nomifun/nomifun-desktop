@@ -21,7 +21,7 @@ async fn public_logo_assets_do_not_require_auth() {
     assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
     assert_eq!(
         response.headers()[header::CACHE_CONTROL],
-        "public, max-age=31536000, immutable"
+        "public, no-cache"
     );
     assert!(response.headers().contains_key(header::ETAG));
 }

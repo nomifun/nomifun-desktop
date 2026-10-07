@@ -28,10 +28,10 @@ const renderDetails = (item: PromptLibraryItem) =>
   );
 
 describe('prompt-library standalone details', () => {
-  test('renders the full validated preset without inventing a preview asset', () => {
+  test('renders the full validated catalog prompt without inventing a preview asset', () => {
     const html = renderDetails({
-      id: 'preset-1',
-      source: 'preset',
+      id: 'catalog-1',
+      source: 'catalog',
       title: '品牌海报',
       description: '面向品牌视觉创作。',
       prompt: '生成一张具有明确视觉层级的品牌海报。',
@@ -49,8 +49,8 @@ describe('prompt-library standalone details', () => {
     });
 
     expect(html.includes('data-prompt-library-details="true"')).toBe(true);
-    expect(html.includes('data-prompt-source="preset"')).toBe(true);
-    expect(html.includes('NomiFun preset')).toBe(true);
+    expect(html.includes('data-prompt-source="catalog"')).toBe(true);
+    expect(html.includes('Public prompt catalog')).toBe(true);
     expect(html.includes('Full prompt')).toBe(true);
     expect(html.includes('生成一张具有明确视觉层级的品牌海报。')).toBe(true);
     expect(html.includes('2 linked knowledge bases')).toBe(true);

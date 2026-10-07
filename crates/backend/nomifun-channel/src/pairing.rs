@@ -10,6 +10,7 @@ use nomifun_db::models::{
 };
 use nomifun_realtime::UserEventSink;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::constants::{PAIRING_CLEANUP_INTERVAL, PAIRING_CODE_LENGTH, PAIRING_CODE_TTL};
@@ -405,15 +406,33 @@ impl PairingService {
         Ok(user.channel_user_id)
     }
 
-    /// Starts a background task that periodically cleans up expired
-    /// pairing codes. Returns a `JoinHandle` that can be used to cancel
-    /// the task on shutdown.
+    /// Compatibility constructor for callers that own the returned task.
+    /// Application hosts should use [`Self::start_cleanup_timer_with_shutdown`]
+    /// and retain its handle until repository access has quiesced.
     pub fn start_cleanup_timer(repo: Arc<dyn IChannelRepository>) -> JoinHandle<()> {
+        Self::start_cleanup_timer_with_shutdown(repo, CancellationToken::new())
+    }
+
+    /// Stop admitting sweeps on shutdown, then finish any already-started
+    /// repository call before the retained task can be joined and storage closed.
+    pub fn start_cleanup_timer_with_shutdown(
+        repo: Arc<dyn IChannelRepository>,
+        shutdown: CancellationToken,
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(PAIRING_CLEANUP_INTERVAL);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 let now = now_ms();
+                // Do not race cancellation against an admitted query: dropping
+                // its future would not establish that repository work stopped.
                 match repo.cleanup_expired_pairings(now).await {
                     Ok(count) if count > 0 => {
                         debug!(count, "cleaned up expired pairing codes");
@@ -526,9 +545,18 @@ mod tests {
 
     // ── Mock IChannelRepository ────────────────────────────────────────
 
+    struct CleanupGate {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        finished: std::sync::atomic::AtomicBool,
+        repository_closed: std::sync::atomic::AtomicBool,
+    }
+
     struct MockRepo {
         pairings: Mutex<Vec<ChannelPairingCodeRow>>,
         users: Mutex<Vec<ChannelUserRow>>,
+        cleanup_calls: std::sync::atomic::AtomicUsize,
+        cleanup_gate: Option<Arc<CleanupGate>>,
     }
 
     impl MockRepo {
@@ -536,6 +564,8 @@ mod tests {
             Self {
                 pairings: Mutex::new(Vec::new()),
                 users: Mutex::new(Vec::new()),
+                cleanup_calls: std::sync::atomic::AtomicUsize::new(0),
+                cleanup_gate: None,
             }
         }
 
@@ -876,6 +906,14 @@ mod tests {
         }
 
         async fn cleanup_expired_pairings(&self, now: TimestampMs) -> Result<u64, DbError> {
+            use std::sync::atomic::Ordering;
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.cleanup_gate {
+                assert!(!gate.repository_closed.load(Ordering::SeqCst));
+                gate.started.notify_one();
+                gate.release.notified().await;
+                assert!(!gate.repository_closed.load(Ordering::SeqCst));
+            }
             let mut pairings = self.pairings.lock().unwrap();
             let mut count = 0u64;
             for p in pairings.iter_mut() {
@@ -883,6 +921,9 @@ mod tests {
                     p.status = "expired".into();
                     count += 1;
                 }
+            }
+            if let Some(gate) = &self.cleanup_gate {
+                gate.finished.store(true, Ordering::SeqCst);
             }
             Ok(count)
         }
@@ -1528,5 +1569,63 @@ mod tests {
         assert_eq!(second.status, "expired");
 
         handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_timer_shutdown_prevents_later_repository_calls() {
+        use std::sync::atomic::Ordering;
+        let repo = Arc::new(MockRepo::new());
+        let shutdown = CancellationToken::new();
+        let handle = PairingService::start_cleanup_timer_with_shutdown(repo.clone(), shutdown.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert_eq!(repo.cleanup_calls.load(Ordering::SeqCst), 1);
+
+        shutdown.cancel();
+        handle.await.unwrap();
+        tokio::time::advance(PAIRING_CLEANUP_INTERVAL * 2).await;
+        assert_eq!(repo.cleanup_calls.load(Ordering::SeqCst), 1);
+
+        // Cancellation wins even when the timer's immediate first tick is ready.
+        let stopped_repo = Arc::new(MockRepo::new());
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        PairingService::start_cleanup_timer_with_shutdown(stopped_repo.clone(), stopped)
+            .await
+            .unwrap();
+        assert_eq!(stopped_repo.cleanup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_timer_join_waits_for_inflight_sweep_before_repository_close() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let gate = Arc::new(CleanupGate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            finished: AtomicBool::new(false),
+            repository_closed: AtomicBool::new(false),
+        });
+        let mut mock = MockRepo::new();
+        mock.cleanup_gate = Some(gate.clone());
+        let repo = Arc::new(mock);
+        let shutdown = CancellationToken::new();
+        let handle = PairingService::start_cleanup_timer_with_shutdown(repo.clone(), shutdown.clone());
+        gate.started.notified().await;
+        shutdown.cancel();
+        tokio::task::yield_now().await;
+        assert!(!handle.is_finished(), "shutdown must not drop an admitted sweep");
+
+        let closing_gate = gate.clone();
+        let closing = tokio::spawn(async move {
+            handle.await.unwrap();
+            assert!(closing_gate.finished.load(Ordering::SeqCst));
+            closing_gate.repository_closed.store(true, Ordering::SeqCst);
+        });
+        tokio::task::yield_now().await;
+        assert!(!gate.repository_closed.load(Ordering::SeqCst));
+        gate.release.notify_one();
+        closing.await.unwrap();
+        assert!(gate.repository_closed.load(Ordering::SeqCst));
+        tokio::time::advance(PAIRING_CLEANUP_INTERVAL * 2).await;
+        assert_eq!(repo.cleanup_calls.load(Ordering::SeqCst), 1);
     }
 }

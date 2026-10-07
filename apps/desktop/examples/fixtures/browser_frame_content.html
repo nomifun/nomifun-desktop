@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>__LEVEL__ child</title>
+<style>
+  body { margin: 12px; font: 14px sans-serif; }
+  input { display: block; width: 170px; height: 22px; margin: 5px 0; }
+  iframe { display: block; width: 350px; height: 180px; border: 5px solid #29a;
+    padding: 3px; transform: translate(10px,12px) scale(.92); transform-origin: top left; margin-top: 12px; }
+</style>
+<button id="button">__LEVEL__ button</button>
+<input id="field" aria-label="__LEVEL__ text">
+<select id="choice" aria-label="__LEVEL__ choice"><option>One</option><option>Two</option></select>
+__NESTED__
+<script>
+  for (const type of ['click', 'input', 'keydown', 'change']) {
+    document.addEventListener(type, event => parent.postMessage({nomiFrame:'__LEVEL__',type,
+      target:event.target.id,trusted:event.isTrusted,value:event.target.value,key:event.key}, '*'));
+  }
+  addEventListener('message', event => {
+    if (event.data?.nomiFrame) parent.postMessage(event.data, '*');
+  });
+</script>

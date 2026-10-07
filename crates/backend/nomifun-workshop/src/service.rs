@@ -24,8 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::archive::{
     CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
     build_creative_canvas_archive, build_creative_project_archive, collect_document_asset_ids,
-    director_sidecar_asset_ids, parse_creative_archive, remap_creative_archive_for_import,
-    sanitized_archive_origin,
+    parse_creative_archive, remap_creative_archive_for_import, sanitized_archive_origin,
 };
 use crate::canvas_agent_artifact::{
     CREATIVE_CANVAS_AGENT_ARTIFACT_KIND, parse_creative_canvas_agent_artifact,
@@ -393,7 +392,7 @@ impl WorkshopService {
     /// already applies the installation-owner middleware; keeping the same
     /// check in the domain prevents a directly-mounted router from widening
     /// the model invocation surface.
-    pub(crate) async fn require_creative_studio_owner(
+    pub async fn require_creative_studio_owner(
         &self,
         owner_id: &str,
     ) -> Result<(), AppError> {
@@ -535,56 +534,14 @@ impl WorkshopService {
         Ok(())
     }
 
-    /// Resolve the complete project-owned asset closure, including the hidden
-    /// Director v1 sidecar and every panorama/model/capture asset referenced by
-    /// that sidecar. All asset lifecycle paths share this authority so export,
-    /// deletion protection, project cleanup, and startup audit cannot drift.
+    /// Resolve the complete project-owned asset closure. All asset lifecycle
+    /// paths share this authority so export, deletion protection, project
+    /// cleanup, and startup audit cannot drift.
     async fn collect_creative_project_asset_closure(
         &self,
         document: &CreativeProjectDocument,
     ) -> Result<BTreeSet<String>, AppError> {
-        let mut asset_ids = collect_document_asset_ids(document)?;
-        let scene_ids = document
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.data {
-                CreativeNodeData::Director(data) => data.scene_id.clone(),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        for scene_id in scene_ids {
-            let row = self.repo.get_asset(&scene_id).await?.ok_or_else(|| {
-                AppError::Conflict(format!(
-                    "creative project {} references missing Director sidecar {scene_id}",
-                    document.project_id
-                ))
-            })?;
-            if row.kind != "text" {
-                return Err(AppError::Conflict(format!(
-                    "creative project {} Director sidecar {scene_id} is not a text asset",
-                    document.project_id
-                )));
-            }
-            if row.deleted_at.is_some() {
-                continue;
-            }
-            let bytes = self.read_original(&row).await.map_err(|error| {
-                AppError::Conflict(format!(
-                    "creative project {} Director sidecar {scene_id} is unavailable: {error}",
-                    document.project_id
-                ))
-            })?.0;
-            let nested = director_sidecar_asset_ids(&bytes, &document.project_id).map_err(
-                |error| {
-                    AppError::Conflict(format!(
-                        "creative project {} Director sidecar {scene_id} is invalid: {error}",
-                        document.project_id
-                    ))
-                },
-            )?;
-            asset_ids.extend(nested);
-        }
-        Ok(asset_ids)
+        collect_document_asset_ids(document)
     }
 
     // ---- projects ----
@@ -1993,9 +1950,9 @@ impl WorkshopService {
         model: &str,
     ) -> Result<ProviderModelCleanupPlan, AppError> {
         let model = model.trim();
-        if model.is_empty() || model.chars().count() > 512 {
+        if model.is_empty() {
             return Err(AppError::BadRequest(
-                "provider model must contain 1 to 512 characters".into(),
+                "provider model must not be empty".into(),
             ));
         }
         self.build_provider_model_cleanup_plan(provider_id, Some(model))
@@ -3388,7 +3345,7 @@ mod tests {
                         task: crate::template::CreativeTemplateTextTask::Chat,
                     }),
                     instruction: "保持系列连贯".into(),
-                    max_tokens: 4096,
+                    max_tokens: Some(4096),
                 },
             },
             CreativeTemplateStep::GenerateImages {
@@ -3847,95 +3804,6 @@ mod tests {
         .unwrap()
     }
 
-    fn director_sidecar_text(
-        project_id: &str,
-        panorama_asset_id: &str,
-        capture_asset_id: &str,
-    ) -> String {
-        serde_json::to_string_pretty(&serde_json::json!({
-            "kind": "nomifun.director.project",
-            "version": 1,
-            "project": {
-                "projectId": project_id,
-                "name": "Portable Director",
-                "scene": {
-                    "name": "Scene",
-                    "transform": {
-                        "position": { "x": 0, "y": 0, "z": 0 },
-                        "rotation": { "x": 0, "y": 0, "z": 0 },
-                        "scale": { "x": 1, "y": 1, "z": 1 }
-                    },
-                    "environment": {
-                        "skyColor": "#101820",
-                        "panorama": { "assetId": panorama_asset_id },
-                        "panoramaYawDegrees": 0,
-                        "panoramaRadius": 50,
-                        "groundVisible": true,
-                        "gridVisible": true,
-                        "snapToGrid": false,
-                        "characterLabelsVisible": true
-                    }
-                },
-                "cameras": [{
-                    "kind": "camera",
-                    "id": "camera-1",
-                    "name": "Camera",
-                    "transform": {
-                        "position": { "x": 0, "y": 2, "z": 8 },
-                        "rotation": { "x": 0, "y": 0, "z": 0 },
-                        "scale": { "x": 1, "y": 1, "z": 1 }
-                    },
-                    "visible": true,
-                    "locked": false,
-                    "projection": "perspective",
-                    "focalLengthMm": 50,
-                    "orthographicSize": 10,
-                    "nearClip": 0.1,
-                    "farClip": 1000,
-                    "aspectRatio": { "width": 16, "height": 9 },
-                    "guides": { "frame": true, "center": true, "thirds": true, "safeArea": false }
-                }],
-                "characters": [],
-                "objects": [],
-                "lights": [],
-                "activeCameraId": "camera-1",
-                "selection": null,
-                "viewMode": "director",
-                "panels": {
-                    "leftSidebarOpen": true,
-                    "rightSidebarOpen": true,
-                    "timelineOpen": true
-                },
-                "timeline": {
-                    "durationSeconds": 5,
-                    "currentTimeSeconds": 0,
-                    "framesPerSecond": 24,
-                    "loop": false,
-                    "tracks": []
-                },
-                "capture": {
-                    "settings": {
-                        "width": 1920,
-                        "height": 1080,
-                        "imageFormat": "png",
-                        "videoFramesPerSecond": 24
-                    },
-                    "records": [{
-                        "id": "capture-1",
-                        "kind": "image",
-                        "cameraId": "camera-1",
-                        "assetId": capture_asset_id,
-                        "capturedAt": 123,
-                        "width": 1,
-                        "height": 1,
-                        "format": "png"
-                    }]
-                }
-            }
-        }))
-        .unwrap()
-    }
-
     // A 1x1 PNG.
     fn png_1x1() -> Vec<u8> {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -3974,7 +3842,7 @@ mod tests {
             "panels": {
                 "left": { "open": true, "width": 320, "activeView": "canvas" },
                 "right": { "open": true, "width": 360, "activeView": "assistant" },
-                "bottom": { "open": false, "height": 240, "activeView": "timeline" }
+                "bottom": { "open": false, "height": 240, "activeView": "history" }
             },
             "pendingTaskIds": []
         }))
@@ -4231,9 +4099,11 @@ mod tests {
 
         let conversation_id = ConversationId::new().into_string();
         nomifun_db::sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
-             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+            "INSERT INTO agent_sessions \
+                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at) \
+             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
         )
         .bind(&conversation_id)
         .bind(&owner_id)
@@ -4274,14 +4144,18 @@ mod tests {
         let assistant_content_json =
             serde_json::json!({ "content": assistant_text }).to_string();
         nomifun_db::sqlx::query(
-            "INSERT INTO messages \
-                (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-             VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 2)",
+            "INSERT INTO agent_messages \
+                (session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                 projection_json, semantic_digest) \
+             VALUES (?, ?, 1, 1, 'message', \
+                     json_object('correlation_id', ?, 'state', 'completed', \
+                                 'content', json(?)), ?)",
         )
-        .bind(&assistant_message_id)
         .bind(&conversation_id)
         .bind(&assistant_message_id)
+        .bind(&assistant_message_id)
         .bind(&assistant_content_json)
+        .bind("a".repeat(64))
         .execute(db.pool())
         .await
         .unwrap();
@@ -5040,145 +4914,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn director_archive_is_self_contained_across_fresh_data_roots() {
-        let (source, _source_dir) = service().await;
-        let project = source
-            .create_creative_project(Some("Portable Director".into()))
-            .await
-            .unwrap();
-        let panorama = source
-            .ingest_asset_bytes(png_1x1(), "image/png", "Director panorama", false, None)
-            .await
-            .unwrap();
-        let capture = source
-            .ingest_asset_bytes(png_1x1(), "image/png", "Unsent capture", false, None)
-            .await
-            .unwrap();
-        let sidecar = source
-            .create_text_asset(NewTextAsset {
-                title: "Director scene".into(),
-                text_content: director_sidecar_text(
-                    &project.project_id,
-                    &panorama.asset_id,
-                    &capture.asset_id,
-                ),
-                collection: None,
-                tags: Some(vec!["nomifun-director-v1".into()]),
-                in_library: Some(false),
-                origin: None,
-            })
-            .await
-            .unwrap();
-        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
-        document.nodes.push(
-            serde_json::from_value(serde_json::json!({
-                "id": "director-node",
-                "type": "director",
-                "position": { "x": 0, "y": 0 },
-                "size": { "width": 640, "height": 360 },
-                "groupId": null,
-                "zIndex": 1,
-                "locked": false,
-                "data": {
-                    "sceneId": sidecar.asset_id,
-                    "cameraId": "camera-1",
-                    "timelineMs": 0,
-                    "durationMs": 5000
-                }
-            }))
-            .unwrap(),
-        );
-        source
-            .save_creative_project(&project.project_id, "1", &document)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            source.delete_asset(&panorama.asset_id).await,
-            Err(AppError::Conflict(message)) if message.contains("Creative Studio project")
-        ));
-        source.audit_managed_data_on_boot().await.unwrap();
-        let first_archive = source
-            .export_creative_project_archive(&project.project_id)
-            .await
-            .unwrap();
-
-        let (target, _target_dir) = service().await;
-        let imported = target
-            .import_creative_project_archive(first_archive.bytes)
-            .await
-            .unwrap();
-        let imported_detail = target
-            .get_creative_project(&imported.project_id)
-            .await
-            .unwrap();
-        let CreativeNodeData::Director(imported_director) =
-            &imported_detail.document.nodes[0].data
-        else {
-            panic!("expected imported Director node")
-        };
-        let imported_sidecar_id = imported_director.scene_id.as_deref().unwrap();
-        assert_ne!(imported_sidecar_id, sidecar.asset_id);
-        let imported_sidecar = target
-            .read_asset_bytes(imported_sidecar_id)
-            .await
-            .unwrap()
-            .0;
-        let imported_nested =
-            director_sidecar_asset_ids(&imported_sidecar, &imported.project_id).unwrap();
-        assert_eq!(imported_nested.len(), 2);
-        assert!(!imported_nested.contains(&panorama.asset_id));
-        assert!(!imported_nested.contains(&capture.asset_id));
-        for asset_id in &imported_nested {
-            assert_eq!(target.read_asset_bytes(asset_id).await.unwrap().0, png_1x1());
-        }
-        target.audit_managed_data_on_boot().await.unwrap();
-        let second_archive = target
-            .export_creative_project_archive(&imported.project_id)
-            .await
-            .unwrap();
-
-        let (third, _third_dir) = service().await;
-        let imported_again = third
-            .import_creative_project_archive(second_archive.bytes)
-            .await
-            .unwrap();
-        let third_detail = third
-            .get_creative_project(&imported_again.project_id)
-            .await
-            .unwrap();
-        let CreativeNodeData::Director(third_director) = &third_detail.document.nodes[0].data
-        else {
-            panic!("expected twice-imported Director node")
-        };
-        let third_sidecar_id = third_director.scene_id.as_deref().unwrap();
-        let third_sidecar = third.read_asset_bytes(third_sidecar_id).await.unwrap().0;
-        let third_nested =
-            director_sidecar_asset_ids(&third_sidecar, &imported_again.project_id).unwrap();
-        assert_eq!(third_nested.len(), 2);
-        for asset_id in &third_nested {
-            third.read_asset_bytes(asset_id).await.unwrap();
-        }
-        third.audit_managed_data_on_boot().await.unwrap();
-
-        let imported_owned_assets = imported_nested
-            .iter()
-            .cloned()
-            .chain(std::iter::once(imported_sidecar_id.to_owned()))
-            .collect::<Vec<_>>();
-        target
-            .delete_creative_project(&imported.project_id)
-            .await
-            .unwrap();
-        for asset_id in imported_owned_assets {
-            assert!(matches!(
-                target.read_asset_bytes(&asset_id).await,
-                Err(AppError::NotFound(_))
-            ));
-        }
-    }
-
-    #[tokio::test]
     async fn creative_project_save_rejects_wrong_contract_and_oversize() {
         let (svc, _dir) = service().await;
         let created = svc.create_creative_project(None).await.unwrap();
@@ -5696,6 +5431,19 @@ mod tests {
             .expect("unrelated template planning binding must survive provider cleanup");
         assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
         assert_eq!(surviving_planning_binding.model, "keep-me");
+    }
+
+    #[tokio::test]
+    async fn exact_model_cleanup_accepts_long_saved_keys_but_rejects_empty_keys() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, _db) = service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let _write_guard = barrier.write().await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008a";
+        let cleanup = svc.plan_provider_model_cleanup_under_lifecycle_write_guard(
+            provider_id, &"x".repeat(513),
+        ).await.unwrap();
+        assert!(cleanup.projects.is_empty() && cleanup.templates.is_empty());
+        assert!(svc.plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "  ").await.is_err());
     }
 
     #[tokio::test]

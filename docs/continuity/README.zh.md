@@ -5,15 +5,17 @@
 all-targets check、UI typecheck/check/production build 已通过，workspace
 全量测试和真实桌面 reset/发布矩阵仍未关闭）
 
-本目录是跨账号、跨平台、跨工作区的唯一接力入口。任何接手本专项的
-开发者先阅读本文件，再阅读当前工作流的 brief。（早期 v2 快照、目标架构
-草案、reset 执行计划与 ID-001…ID-005 决策记录已按文档政策移除，见 Git
-历史。）
+本目录是 ID/数据存储重构的历史连续性与发布审计归档，不是当前开发任务入口。
+早期 v2 快照、目标架构草案、reset 执行计划与 ID-001…ID-005 决策记录已按
+文档政策移除，需要时查 Git 历史。
+
+Agent Session 的当前实现与开发边界见
+[当前架构](../architecture/agent-session.zh.md)。
 
 本目录不是仓库级全局开发规范入口。当前强制规则请阅读
 [数据与标识符规范](../contributing/data-and-identifier-standards.zh.md) 和
-[ID 体系架构契约](../architecture/id-system.zh.md)。本目录只记录决策、交接
-背景、实施证据和发布审计状态，不能覆盖当前权威来源。
+[ID 体系架构契约](../architecture/id-system.zh.md)。本目录只记录历史决策、
+连续性背景、实施证据和发布审计状态，不能覆盖当前权威来源。
 
 ## 当前基线
 
@@ -132,10 +134,10 @@ URL、文件路径或跨设备协议。SQLite 内部表、migration metadata 和
 v3 全面移除物理外键。以 conversation/message 为例：
 
 ```text
-conversations.id                 本表自增技术主键
-conversations.conversation_id    稳定业务 ID
-messages.id                      本表自增技术主键
-messages.conversation_id         指向 conversation_id 的逻辑关联
+agent_sessions.id                 本表自增技术主键
+agent_sessions.agent_session_id    稳定业务 ID
+agent_messages.id                      本表自增技术主键
+agent_messages.agent_session_id         指向 conversation_id 的逻辑关联
 ```
 
 不再同时保存 `messages.conversation_row_id`。文档中的该名称只用于说明
@@ -149,7 +151,7 @@ repository/service 在事务中验证、维护删除策略，并通过索引和 
 | --- | --- | --- |
 | `04-verification-gates.zh.md` | 低耗时验证、编译策略、完成门禁 | `ACCEPTED / WORKSPACE CHECK VERIFIED` |
 | `06-open-questions.zh.md` | 实施证据与发布前检查表 | `IMPLEMENTATION AUDIT` |
-| `07-browser-platform-handoff.zh.md` | Browser Platform 已完成范围、剩余 TODO、验证顺序与可复制启动 Prompt | `CORE VERIFIED / FOLLOW-UP OPEN` |
+| `07-browser-platform-handoff.zh.md` | Browser Platform 历史产品结论与审计摘要，不作为当前实施入口 | `HISTORICAL / NOT ACTIVE` |
 
 历史文档（v2 快照 `00-current-state.md`、目标架构 `01`、逐表分类 `02`、
 reset 执行计划 `03`、交接模板 `05`、决策记录 `decisions/ID-001`—`ID-005`）

@@ -10,7 +10,7 @@ import { useTranslation } from 'react-i18next';
 
 import styles from './CanvasMiniMapFrame.module.css';
 
-export interface CanvasMiniMapFrameProps extends React.HTMLAttributes<HTMLDivElement> {
+interface CanvasMiniMapFrameProps extends React.HTMLAttributes<HTMLDivElement> {
   children: React.ReactNode;
   label?: string;
   footer?: React.ReactNode;

@@ -62,5 +62,3 @@ export const useDebouncedText = (source: string, commit: (value: string) => void
 
   return [draft, onChange] as const;
 };
-
-export default useDebouncedText;

@@ -9,7 +9,7 @@ import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
-import { blockMobileInputFocus, blurActiveElement } from '@/renderer/utils/ui/focus';
+import { blurActiveElement } from '@/renderer/utils/ui/focus';
 import { Message, Modal } from '@arco-design/web-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -60,7 +60,6 @@ export const useConversationActions = ({
         toggleSelectedConversation(conversation);
         return;
       }
-      blockMobileInputFocus();
       blurActiveElement();
 
       markAsRead(conversation.id);

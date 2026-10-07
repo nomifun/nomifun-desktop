@@ -12,7 +12,7 @@ import { getCurrentCronTimeZone } from '@renderer/pages/cron/cronUtils';
 const repairInFlight = new Map<CronJobId, Promise<ICronJob>>();
 let repairAllInFlight: Promise<ICronJob[]> | null = null;
 
-export function hasMissingCronTimeZone(job: ICronJob): job is ICronJob & {
+function hasMissingCronTimeZone(job: ICronJob): job is ICronJob & {
   schedule: Extract<ICronJob['schedule'], { kind: 'cron' }>;
 } {
   return job.schedule.kind === 'cron' && Boolean(job.schedule.expr.trim()) && !job.schedule.tz?.trim();
@@ -54,7 +54,7 @@ export async function repairCronJobTimeZones(jobs: ICronJob[]): Promise<ICronJob
   return Promise.all(jobs.map((job) => repairCronJobTimeZone(job)));
 }
 
-export async function repairAllCronJobTimeZones(): Promise<ICronJob[]> {
+async function repairAllCronJobTimeZones(): Promise<ICronJob[]> {
   const jobs = await ipcBridge.cron.listJobs.invoke();
   return repairCronJobTimeZones(jobs || []);
 }

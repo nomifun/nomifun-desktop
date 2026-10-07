@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import {
   formatToolDisplayName,
   normalizeToolCall,
@@ -6,6 +6,139 @@ import {
 } from './normalizeToolCall';
 
 describe('normalizeToolCall', () => {
+  const nativeExit = (code = 1) => ({
+    state: 'exited', exit_code: code, signal: null,
+    output: { text: '0 pass, 1 fail', next_cursor: 14, retained_bytes: 14, dropped_bytes: 0 },
+    cleanup: { interrupt_attempted: false, terminate_attempted: false, force_kill_attempted: false,
+      reaped: true, elapsed_ms: 0, errors: [] },
+    process_id: 'owned-process', success: code === 0,
+  });
+
+  it('keeps a real native nonzero exit visible as a command outcome', () => {
+    const output = JSON.stringify(nativeExit());
+    const result = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'diagnostic-test', name: 'exec_command', status: 'error', output,
+    } } as any);
+    expect(result?.status).toBe('error');
+    expect(result?.commandExitCode).toBe(1);
+    expect(result?.nonFatalFailure).toBe(true);
+    expect(result?.output).toBe(output);
+  });
+  it('recognizes only a clean native timeout while retaining its error status and raw output', () => {
+    const timeout = { state: 'timed_out', success: false, process_id: 'owned-process', output: { text: '' },
+      cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false } };
+    const normalize = (value: unknown, name = 'poll_process') => normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'timeout', name, status: 'error', output: JSON.stringify(value),
+    } } as any);
+    const result = normalize(timeout)!;
+    expect(result.commandTimedOut).toBe(true);
+    expect(result.status).toBe('error');
+    expect(result.nonFatalFailure).toBeUndefined();
+    expect(result.commandExitCode).toBeUndefined();
+    expect(result.output).toBe(JSON.stringify(timeout));
+    for (const value of [
+      { ...timeout, state: 'lost' }, { ...timeout, success: true }, { ...timeout, process_id: '' },
+      { ...timeout, exit_code: 0 }, { ...timeout, signal: 9 }, { ...timeout, output: {} },
+      { ...timeout, cleanup: { ...timeout.cleanup, reaped: false } },
+      { ...timeout, cleanup: { ...timeout.cleanup, errors: ['cleanup failed'] } },
+      { ...timeout, cleanup: { ...timeout.cleanup, terminate_attempted: 'true' } },
+    ]) expect(normalize(value)?.commandTimedOut).toBeUndefined();
+    expect(normalize(timeout, 'mcp__remote__poll_process')?.commandTimedOut).toBeUndefined();
+  });
+  it('identifies a proven native launch refusal without erasing its error or diagnostic', () => {
+    const receipt = {
+      schema: 'nomifun.process-start-observation.v1', state: 'not_started',
+      code: 'PROCESS_NOT_STARTED', user_code_started: false, success: false,
+      message: 'The requested executable did not start.',
+    };
+    const normalize = (name: string, value: unknown, status = 'error') => normalizeToolCall({
+      type: 'tool_call', content: { call_id: 'not-started', name, status, output: JSON.stringify(value) },
+    } as any);
+    const result = normalize('exec_command', receipt);
+    expect(result?.commandNotStarted).toBe(true);
+    expect(result?.status).toBe('error');
+    expect(result?.notExecutedReason).toBeUndefined();
+    expect(result?.nonFatalFailure).toBeUndefined();
+    expect(result?.output).toBe(JSON.stringify(receipt));
+    for (const value of [
+      { ...receipt, user_code_started: true }, { ...receipt, success: true },
+      { ...receipt, state: 'lost' }, { ...receipt, schema: 'remote.result' },
+      { ...receipt, process_id: 'live' }, { ...receipt, exit_code: 1 },
+      { ...receipt, signal: null }, { ...receipt, message: '' },
+      { ...receipt, message: ' ' }, { ...receipt, message: 'x'.repeat(2049) },
+    ]) {
+      expect(normalize('exec_command', value)?.commandNotStarted).toBeUndefined();
+    }
+    expect(normalize('start_process', receipt)?.commandNotStarted).toBe(true);
+    expect(normalize('poll_process', receipt)?.commandNotStarted).toBeUndefined();
+    expect(normalize('remote_exec_command', receipt)?.commandNotStarted).toBeUndefined();
+    expect(normalize('exec_command', receipt, 'completed')?.commandNotStarted).toBeUndefined();
+  });
+
+  it('shows a proven rejected process reference as unexecuted and preserves the diagnostic', () => {
+    const receipt = { schema: 'nomifun.process-control-observation.v1', state: 'not_executed',
+      code: 'PROCESS_REFERENCE_INVALID', operation: 'poll', control_applied: false, success: false,
+      message: 'Process reference is not available in this exact turn; no control was applied.' };
+    const normalize = (name: string, value: unknown) => normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'wrong-reference', name, status: 'error', output: JSON.stringify(value),
+    } } as any);
+    const result = normalize('poll_process', receipt);
+    expect(result?.notExecutedReason).toBe('process_reference');
+    expect(result?.status).toBe('canceled');
+    expect(result?.output).toBe(JSON.stringify(receipt));
+    for (const value of [
+      { ...receipt, control_applied: true }, { ...receipt, operation: 'cancel' },
+      { ...receipt, state: 'lost' }, { ...receipt, process_id: 'foreign-id' },
+    ]) expect(normalize('poll_process', value)?.notExecutedReason).toBeUndefined();
+    expect(normalize('remote_poll_process', receipt)?.notExecutedReason).toBeUndefined();
+  });
+
+  it('does not relabel infrastructure, signal or cleanup failures as ordinary command exits', () => {
+    for (const receipt of [
+      { ...nativeExit(), state: 'timed_out' },
+      { ...nativeExit(), signal: 9 },
+      { ...nativeExit(), exit_code: -1 },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, reaped: false } },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, errors: ['cleanup unproven'] } },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, force_kill_attempted: true } },
+    ]) {
+      const result = normalizeToolCall({ type: 'tool_call', content: {
+        call_id: 'failed-native', name: 'exec_command', status: 'error', output: JSON.stringify(receipt),
+      } } as any);
+      expect(result?.commandExitCode).toBeUndefined();
+      expect(result?.nonFatalFailure).toBeUndefined();
+      expect(result?.status).toBe('error');
+    }
+    const remote = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'remote', name: 'remote_exec_command', status: 'error', output: JSON.stringify(nativeExit()),
+    } } as any);
+    expect(remote?.nonFatalFailure).toBeUndefined();
+  });
+
+  it('recognizes the native structured argument rejection without hiding its diagnostic', () => {
+    const output = JSON.stringify({ status: 'not_executed', code: 'INVALID_TOOL_ARGUMENTS',
+      tool: 'read_tool_history', issues: [{ schema_path: '/properties/id/pattern',
+        expected: '^[0-9a-f]{64}$', parameter_path_template: '/id' }],
+      message: 'No call in this batch was executed.' });
+    const result = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'bad-history-id', name: 'read_tool_history', status: 'error', output,
+    } } as any);
+    expect(result?.notExecutedReason).toBe('invalid_arguments');
+    expect(result?.output).toBe(output);
+    const remote = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'remote', name: 'remote_read_tool_history', status: 'error', output,
+    } } as any);
+    expect(remote?.notExecutedReason).toBeUndefined();
+  });
+
+  it('preserves an explicit cancelled process receipt and its partial output', () => {
+    const result = normalizeToolCall({type:'tool_call',content:{
+      call_id:'cancel-call',name:'exec_command',status:'canceled',output:'STARTED',
+    }} as any);
+    expect(result?.status).toBe('canceled');
+    expect(result?.output).toBe('STARTED');
+  });
+
   it('preserves only structurally valid explicit retry identity', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
@@ -59,6 +192,45 @@ describe('normalizeToolCall', () => {
     expect(result?.nonFatalFailure).toBe(true);
   });
 
+  it('keeps an exact bounded search result inspectable without calling it an execution failure', () => {
+    const output = JSON.stringify({
+      kind: 'search_context_withheld',
+      search_executed: true,
+      snippets_withheld: true,
+      notice: 'The search ran, but snippets need a narrower instruction scope.',
+    });
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-search',
+        name: 'search_files',
+        status: 'error',
+        args: { path: 'burst', query: 'needle', limit: 200 },
+        output,
+      },
+    } as any);
+
+    expect(result?.status).toBe('error');
+    expect(result?.boundedResult).toBe('search_context_withheld');
+    expect(result?.nonFatalFailure).toBe(true);
+    expect(result?.output).toBe(output);
+  });
+
+  it('keeps malformed or mismatched bounded-search claims fatal', () => {
+    for (const [name, value] of [
+      ['search_files', { kind: 'search_context_withheld', search_executed: false, snippets_withheld: true, notice: 'x' }],
+      ['read_file', { kind: 'search_context_withheld', search_executed: true, snippets_withheld: true, notice: 'x' }],
+      ['search_files', { kind: 'search_context_withheld', search_executed: true, snippets_withheld: true, notice: 'x', extra: true }],
+    ] as const) {
+      const result = normalizeToolCall({
+        type: 'tool_call',
+        content: { call_id: `call-${name}`, name, status: 'error', output: JSON.stringify(value) },
+      } as any);
+      expect(result?.boundedResult).toBeUndefined();
+      expect(result?.nonFatalFailure).toBeUndefined();
+    }
+  });
+
   it('marks prior-error barrier results as skipped cancellations', () => {
     const result = normalizeToolCall({
       type: 'tool_call',
@@ -97,6 +269,49 @@ describe('normalizeToolCall', () => {
     expect(result?.skipped).toBeUndefined();
     expect(result?.nonFatalFailure).toBeUndefined();
     expect(result?.input).toBeUndefined();
+  });
+
+  it('shows a local runtime preflight deferral as unexecuted without hiding its diagnostic', () => {
+    const output = 'Operations not executed: instruction scope changed before write';
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-preflight', name: 'write_file', status: 'error',
+        args: { path: 'snake_game.html' }, output,
+      },
+    } as any);
+    expect(result?.status).toBe('canceled');
+    expect(result?.notExecutedReason).toBe('runtime_preflight');
+    expect(result?.output).toBe(output);
+  });
+
+  it('treats the local command-shape rejection as not executed', () => {
+    const output = 'Capability Kernel rejected Agent Runtime Tool (CAPABILITY_UNAVAILABLE): Process launch failed. The command field must contain only the executable; put options in args. No successful launch was reported.';
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-command-shape', name: 'exec_command', status: 'error',
+        args: { command: 'ls -la' }, output,
+      },
+    } as any);
+
+    expect(result?.status).toBe('canceled');
+    expect(result?.notExecutedReason).toBe('runtime_preflight');
+    expect(result?.output).toBe(output);
+  });
+
+  it('keeps remote and actual local failures red even if the text resembles a preflight', () => {
+    for (const [name, output] of [
+      ['mcp__server__write_file__abcdefghijklmnop', 'Operations not executed: remote service error'],
+      ['write_file', 'Permission denied while writing snake_game.html'],
+    ]) {
+      const result = normalizeToolCall({
+        type: 'tool_call',
+        content: { call_id: `call-${name}`, name, status: 'error', output },
+      } as any);
+      expect(result?.status).toBe('error');
+      expect(result?.notExecutedReason).toBeUndefined();
+    }
   });
 
   it('keeps remote failures fatal even when their arguments are null', () => {
@@ -139,6 +354,15 @@ describe('normalizeToolCall', () => {
     );
     expect(formatToolDisplayName('mcp__server__read_file')).toBe('server/read_file');
     expect(formatToolDisplayName('Bash')).toBe('Bash');
+  });
+
+  it('removes canonical platform routing hashes from labels without changing tool identity', () => {
+    const alias = 'platform__plugin_development_plugin_develo__0d897918b652be9c2802';
+    expect(formatToolDisplayName(alias)).toBe('platform/plugin_development_plugin_develo');
+    expect(formatToolDisplayName('platform__custom__not-a-routing-hash')).toBe('platform__custom__not-a-routing-hash');
+    const tool = normalizeToolCall({ type: 'tool_call', content: { call_id: 'platform-call', name: alias, status: 'completed' } } as any);
+    expect(tool?.name).toBe(alias);
+    expect(tool?.key).toBe('platform-call');
   });
 
   const infrastructureFailures = [
@@ -227,29 +451,7 @@ describe('normalizeToolCall', () => {
 });
 
 describe('normalizeToolGroup', () => {
-  it('marks failed confirmed shell commands as non-fatal process outcomes', () => {
-    const [result] = normalizeToolGroup({
-      type: 'tool_group',
-      content: [
-        {
-          call_id: 'call-shell',
-          name: 'Bash',
-          status: 'Error',
-          description: 'Run a validation command',
-          confirmationDetails: {
-            type: 'exec',
-            title: 'Run command',
-            command: 'node test.js',
-          },
-        },
-      ],
-    } as any);
-
-    expect(result.status).toBe('error');
-    expect(result.nonFatalFailure).toBe(true);
-  });
-
-  it('keeps failed edit groups fatal', () => {
+  it('keeps failed tool groups fatal', () => {
     const [result] = normalizeToolGroup({
       type: 'tool_group',
       content: [
@@ -257,16 +459,12 @@ describe('normalizeToolGroup', () => {
           call_id: 'call-edit',
           name: 'Edit',
           status: 'Error',
-          confirmationDetails: {
-            type: 'edit',
-            title: 'Apply edit',
-            file_name: 'app.ts',
-            file_diff: '',
-          },
+          description: 'app.ts',
         },
       ],
     } as any);
 
+    expect(result.status).toBe('error');
     expect(result.nonFatalFailure).toBeUndefined();
   });
 });

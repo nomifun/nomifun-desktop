@@ -41,7 +41,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cli::Cli;
 use crate::lan_endpoint::detect_all_lan_ipv4s;
-use crate::{AppServices, bootstrap, create_router};
+use crate::{bootstrap, services::AppServices};
 use nomifun_auth::AuthPolicy;
 use nomifun_db::{IClientPreferenceRepository, IUserRepository};
 
@@ -438,7 +438,7 @@ struct ListenerLifecycle {
 }
 
 /// Owns the desktop's in-process backend serving. Construct with
-/// [`DesktopServer::start`]; drive the LAN listener with the `*_blocking`
+/// [`DesktopServer::start_with_outcome`]; drive the LAN listener with the `*_blocking`
 /// methods (safe to call from Tauri command threads).
 ///
 /// Holds only `Send + Sync` handles so it can live in Tauri managed state. The
@@ -468,11 +468,11 @@ pub struct DesktopServer {
     /// The singleton terminal service (live PTY map + session repo). Held here
     /// so the unified shutdown path can clean up all terminal sessions before
     /// the database is closed.
-    terminal_service: Arc<nomifun_terminal::TerminalService>,
+    terminal_service: Option<Arc<nomifun_terminal::TerminalService>>,
     /// The process SSH connection pool. Held here so the unified shutdown path can
     /// close every live remote session — and write the resulting host status — while
     /// the database is still open.
-    ssh_pool: nomifun_ssh::SshConnectionPool,
+    ssh_pool: Option<nomifun_ssh::SshConnectionPool>,
     /// LAN robot gateway. Held here for two reasons: the unified shutdown path
     /// stops its accept loop and loopback MCP front, and the LAN listener's
     /// status is projected into its endpoint advertiser (the OTA response is the
@@ -481,16 +481,16 @@ pub struct DesktopServer {
     /// Clone of the database pool used by the embedded router. Closing this
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
-    database: nomifun_db::Database,
+    database: Option<nomifun_db::Database>,
+    /// Current product application owned by the Nomi-core desktop path.
+    nomi_core_application: Option<crate::bootstrap::NomiCoreApplication>,
     /// Complete startup authority. Keeping this alongside the published
     /// server prevents a listener failure from dropping the environment lock
     /// or long-lived services before cleanup has been verified.
     _keep_alive: DesktopKeepAlive,
-    /// Shared process-wide Gateway/Browser shutdown authority. Desktop
-    /// exit/restart always stops the Gateway; browser-enabled builds also stop
-    /// ACP browser ingress and then join the same Hub shutdown flight used by
-    /// services/server cleanup.
-    browser_platform_shutdown: crate::services::BrowserPlatformShutdown,
+    /// Shared process-wide Gateway shutdown authority. Desktop exit/restart
+    /// joins the same ingress shutdown flight used by services/server cleanup.
+    browser_platform_shutdown: Option<crate::services::BrowserPlatformShutdown>,
     /// The first unexpected listener failure is delivered to the desktop
     /// backend thread, which then drops [`DesktopKeepAlive`] and exits the
     /// host. `watch` keeps this signal observable without exposing internals.
@@ -533,6 +533,7 @@ struct DesktopKeepAliveInner {
 enum DesktopStartupCleanupAuthority {
     Services(AppServices),
     Startup(Arc<crate::services::StartupCleanupAuthority>),
+    NomiCore(crate::bootstrap::NomiCoreApplication),
 }
 
 impl DesktopKeepAlive {
@@ -547,11 +548,12 @@ impl DesktopKeepAlive {
     pub async fn shutdown_after_startup_failure(&self) -> anyhow::Result<()> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => {
-                services.shutdown_browser_platform().await?;
-                services.database.close().await;
-                Ok(())
+                services.shutdown_nomi_core_host().await
             }
             DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
+            DesktopStartupCleanupAuthority::NomiCore(application) => {
+                application.clone().close().await
+            }
         }
     }
 
@@ -593,10 +595,30 @@ impl DesktopKeepAlive {
         }
     }
 
+    fn from_nomi_core(
+        env: bootstrap::ServerEnvironment,
+        application: crate::bootstrap::NomiCoreApplication,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DesktopKeepAliveInner {
+                _env: env,
+                cleanup: DesktopStartupCleanupAuthority::NomiCore(application),
+            }),
+        }
+    }
+
+
     fn services(&self) -> Option<&AppServices> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => Some(services),
+            DesktopStartupCleanupAuthority::NomiCore(application) => Some(application.services()),
             DesktopStartupCleanupAuthority::Startup(_) => None,
+        }
+    }
+
+    fn request_background_shutdown(&self) {
+        if let Some(services) = self.services() {
+            services.request_background_shutdown();
         }
     }
 }
@@ -612,10 +634,39 @@ async fn cleanup_start_failure(
         }
         Err(cleanup_error) => DesktopStartError::unverified(
             anyhow::anyhow!(
-                "{error:#}; managed browser platform cleanup after startup failure also failed: {cleanup_error:#}"
+                "{error:#}; managed host cleanup after startup failure also failed: {cleanup_error:#}"
             ),
             keep_alive,
         ),
+    }
+}
+
+/// Native host dependencies are injected before the backend router is built.
+/// Headless hosts leave these absent; no fallback creates a hidden second browser.
+#[derive(Default)]
+pub struct DesktopHostServices {
+    /// Pinned installed release; live protocol admission happens before use.
+    #[cfg(feature = "browser-use")]
+    pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
+    #[cfg(feature = "browser-use")]
+    pub headless_render: Option<Arc<crate::headless_render::HeadlessRenderRuntime>>,
+    #[cfg(feature = "browser-use")]
+    pub browser_resources: Option<Arc<nomifun_browser_platform::workspace::BrowserResourceService>>,
+    #[cfg(feature = "browser-use")]
+    pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
+}
+
+#[cfg(feature = "browser-use")]
+impl DesktopHostServices {
+    /// Trusted shell metadata only. The runtime is launched and its product
+    /// rechecked only when a selected search or admitted render actually runs.
+    pub async fn set_browser_release(&mut self, path:PathBuf, product:String) -> Result<()> {
+        let provider=nomifun_ai_agent::local_web_search::BrowserSearchProvider::from_installed_release(path.clone(),"en-US".into(),product.clone()).await?;
+        let render=crate::headless_render::HeadlessRenderRuntime::from_installed_release(path,product).await?;
+        anyhow::ensure!(render.binding()["browser_binary_digest"].as_str()==Some(provider.binding().browser_binary_digest.as_str()),"Browser release changed during admission");
+        self.local_web_search=Some(Arc::new(provider));
+        self.headless_render=Some(render);
+        Ok(())
     }
 }
 
@@ -631,19 +682,22 @@ impl DesktopServer {
     /// the SPA to the vite dev server so remote browsers match the live desktop.
     /// `webui_asset_source` is the preferred production source and should adapt
     /// the desktop host's compile-time embedded frontend assets.
-    pub async fn start(
+    pub async fn start_nomi_core(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
-        Self::start_with_outcome(
+        // Tests and embedded callers use the same Nomi-core composition as the
+        // native desktop shell.
+        Self::start_with_host_services(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
+            DesktopHostServices::default(),
         )
         .await
         .map_err(DesktopStartError::into_inner)
@@ -651,7 +705,7 @@ impl DesktopServer {
 
     /// Typed desktop startup entry point used by the native shell.
     ///
-    /// Unlike [`Self::start`], failures retain a positive cleanup disposition
+    /// Unlike [`Self::start_nomi_core`], failures retain a positive cleanup disposition
     /// so the shell can distinguish a safe-to-release runtime from a failed
     /// teardown that must retain runtime authority and fail closed.
     pub async fn start_with_outcome(
@@ -660,11 +714,37 @@ impl DesktopServer {
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
+        host_services: DesktopHostServices,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = bootstrap::init_environment(cli, merged_path)
+        Self::start_with_host_services(
+            cli,
+            merged_path,
+            spa_dir,
+            dev_frontend_url,
+            webui_asset_source,
+            host_services,
+        )
+        .await
+    }
+
+    /// Fixed-runtime desktop entry point with the same typed cleanup outcome as
+    /// `start_with_outcome`. AppServices installs the sole official Driver;
+    /// callers can supply platform services but cannot register a Runtime.
+    async fn start_with_host_services(
+        cli: &Cli,
+        merged_path: &str,
+        spa_dir: Option<PathBuf>,
+        dev_frontend_url: Option<String>,
+        webui_asset_source: Option<WebUiAssetSource>,
+        host_services: DesktopHostServices,
+    ) -> std::result::Result<
+        (Arc<DesktopServer>, DesktopKeepAlive),
+        DesktopStartError,
+    > {
+        let env = bootstrap::init_nomi_core_environment(cli, merged_path)
             .map_err(DesktopStartError::verified)?;
 
         // Override the CLI-derived policy: the desktop trusts its own webview via
@@ -683,7 +763,7 @@ impl DesktopServer {
         let database = bootstrap::init_data_layer(&config)
             .await
             .map_err(DesktopStartError::verified)?;
-        let services = match AppServices::try_from_config(database, &config).await {
+        let services = match AppServices::try_from_config_with_host(database, &config, host_services).await {
             Ok(services) => services,
             Err(failure) => {
                 let (error, cleanup_error, authority) = failure.into_parts();
@@ -749,7 +829,29 @@ impl DesktopServer {
                 );
             }
         };
-        let router = create_router(&services).await;
+        let router = match crate::router::try_create_router(&services).await {
+            Ok(router) => router,
+            Err(error) => {
+                // The reserved socket never served requests. Release it before
+                // cleanup, but retain services and the environment lock until
+                // the normal typed cleanup protocol has reached its outcome.
+                drop(loopback);
+                let keep_alive = DesktopKeepAlive::from_parts(env, services);
+                return Err(cleanup_start_failure(keep_alive, error).await);
+            }
+        };
+        let application =
+            crate::bootstrap::NomiCoreApplication::from_parts(services, router);
+        let (router, ssh_pool, robot, database, browser_platform_shutdown) = {
+            let app_services = application.services();
+            (
+                application.router(),
+                app_services.ssh_pool.clone(),
+                app_services.robot.clone(),
+                app_services.database.clone(),
+                app_services.browser_platform_shutdown.clone(),
+            )
+        };
 
         // Seed the initial status with the PERSISTED admin identity so the
         // desktop UI shows the real username / "password set" state immediately
@@ -767,10 +869,8 @@ impl DesktopServer {
         let (loopback_shutdown, _) = watch::channel(false);
         let loopback_termination = ListenerTermination::new();
         let (shutdown_complete_tx, shutdown_complete_rx) = watch::channel(false);
-        let keep_alive = DesktopKeepAlive::from_parts(env, services);
-        let services = keep_alive
-            .services()
-            .expect("DesktopKeepAlive built from AppServices");
+        let keep_alive =
+            DesktopKeepAlive::from_nomi_core(env, application.clone());
 
         tracing::info!(
             loopback_port,
@@ -785,12 +885,13 @@ impl DesktopServer {
             webui_asset_source,
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
-            terminal_service,
-            ssh_pool: services.ssh_pool.clone(),
-            robot: services.robot.clone(),
-            database: services.database.clone(),
+            terminal_service: Some(terminal_service),
+            ssh_pool: Some(ssh_pool),
+            robot,
+            database: Some(database),
+            nomi_core_application: Some(application),
             _keep_alive: keep_alive.clone(),
-            browser_platform_shutdown: services.browser_platform_shutdown.clone(),
+            browser_platform_shutdown: Some(browser_platform_shutdown),
             failure_tx,
             loopback_shutdown,
             listener_lifecycle: ListenerLifecycle {
@@ -816,9 +917,23 @@ impl DesktopServer {
         Ok((server, keep_alive))
     }
 
+
     /// The loopback port the webview connects to (`window.__backendPort`).
     pub fn loopback_port(&self) -> u16 {
         self.loopback_port
+    }
+
+    /// Trusted desktop Surface commands can attach only a Browser Resource
+    /// owned by the authenticated user and exact canonical Session.
+    #[cfg(feature = "browser-use")]
+    pub async fn browser_resource_for_local_surface(&self, agent_session_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>> {
+        let services = self._keep_alive.services().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
+        let resources = services.browser_resources.as_ref().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
+        resources
+            .get_for_agent_session(services.authoritative_user_id.as_ref(), agent_session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .ok_or_else(|| anyhow::anyhow!("AgentSession Browser Resource is not available."))
     }
 
     /// Keep the robot endpoint advertiser in step with the LAN listener.
@@ -1048,72 +1163,108 @@ impl DesktopServer {
         // the final error retains every cleanup diagnostic.
         let mut errors = Vec::new();
 
+        self._keep_alive.request_background_shutdown();
         if let Err(error) = self.stop_listeners_and_wait().await {
             errors.push(format!("listener cleanup failed: {error:#}"));
         }
 
-        let terminal_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.terminal_service.shutdown_cleanup(),
-        )
-        .await;
-        match terminal_result {
-            Ok(Ok(deleted)) => {
-                tracing::info!(deleted, "terminal sessions cleaned up during desktop shutdown");
+        let nomi_core_owned_cleanup = self.nomi_core_application.is_some();
+        if !nomi_core_owned_cleanup {
+            if let Some(terminal_service) = &self.terminal_service {
+                let terminal_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    terminal_service.shutdown_cleanup(),
+                )
+                .await;
+                match terminal_result {
+                    Ok(Ok(deleted)) => {
+                        tracing::info!(
+                            deleted,
+                            "terminal sessions cleaned up during desktop shutdown"
+                        );
+                    }
+                    Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
+                    Err(_) => {
+                        errors.push("terminal cleanup timed out after 5 seconds".to_owned())
+                    }
+                }
             }
-            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
-            Err(_) => errors.push(
-                "terminal cleanup timed out after 5 seconds".to_owned(),
-            ),
         }
 
-        let browser_result: anyhow::Result<()> =
-            self.browser_platform_shutdown.shutdown().await;
-        if let Err(error) = browser_result {
-            errors.push(format!("browser cleanup failed: {error:#}"));
+        if !nomi_core_owned_cleanup {
+            if let Some(browser_platform_shutdown) = &self.browser_platform_shutdown {
+                let browser_result: anyhow::Result<()> =
+                    browser_platform_shutdown.shutdown().await;
+                if let Err(error) = browser_result {
+                    errors.push(format!("browser cleanup failed: {error:#}"));
+                }
+            }
         }
 
-        // Stop the robot gateway before the listeners go: its accept loop and the
-        // loopback MCP front are pure in-process tasks with nothing durable to
-        // write, so this is unconditional and cannot fail. Live sessions end with
-        // their own sockets when the listener closes.
-        if let Some(robot) = &self.robot {
-            robot.shutdown();
+        // The gateway owns session producers too. An abort request alone does
+        // not prove they stopped; pending or failed joins must keep SQLite open.
+        if !nomi_core_owned_cleanup {
+            if let Some(robot) = &self.robot {
+                if let Err(error) = robot.shutdown_and_wait().await {
+                    errors.push(format!("Robot task cleanup failed: {error:#}"));
+                }
+            }
         }
 
         // Quiesce the SSH pool before the database closes: closing a link walks the
         // host row back from "connected", and a link let go of without exit evidence
         // is a real leak on someone else's machine, so it is reported rather than
         // silently counted as clean.
-        let ssh_result = tokio::time::timeout(            std::time::Duration::from_secs(5),
-            self.ssh_pool.shutdown_all(),
-        )
-        .await;
-        match ssh_result {
-            Ok(report) => {
-                tracing::info!(
-                    reaped = report.reaped,
-                    lost = report.lost,
-                    already_down = report.already_down,
-                    "ssh links closed during desktop shutdown"
-                );
-                if report.lost > 0 {
-                    errors.push(format!(
-                        "{} ssh link(s) were let go of without proof the remote shell died",
-                        report.lost
-                    ));
+        if !nomi_core_owned_cleanup {
+            if let Some(ssh_pool) = &self.ssh_pool {
+                let ssh_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    ssh_pool.shutdown_all(),
+                )
+                .await;
+                match ssh_result {
+                    Ok(report) => {
+                        tracing::info!(
+                            reaped = report.reaped,
+                            lost = report.lost,
+                            already_down = report.already_down,
+                            "ssh links closed during desktop shutdown"
+                        );
+                        if report.lost > 0 {
+                            errors.push(format!(
+                                "{} ssh link(s) were let go of without proof the remote shell died",
+                                report.lost
+                            ));
+                        }
+                    }
+                    Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
                 }
             }
-            Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
         }
 
         // Do not close the shared database after an earlier cleanup failure.
         // Terminal cleanup intentionally preserves durable rows on failure and
-        // BrowserSessionHub retains Host authority for an explicit retry; closing
-        // the shared pool here would make both retries fail for the wrong reason.
+        // browser owners retain their exact cleanup authority for an explicit
+        // retry; closing the shared pool here would make both retries fail for
+        // the wrong reason.
         // The database is therefore closed only after listeners, terminals, and
         // every explicit Host shutdown have all completed successfully.
-        close_database_after_cleanup(errors, || self.database.close()).await
+        if errors.is_empty() {
+            if let Some(application) = &self.nomi_core_application {
+                if let Err(error) = application.clone().close().await {
+                    errors.push(format!("Nomi-core runtime cleanup failed: {error:#}"));
+                }
+            } else {
+                if let Some(database) = &self.database {
+                    database.close().await;
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("desktop cleanup failed: {}", errors.join("; ")))
+        }
     }
 
     pub async fn shutdown_all(&self) -> anyhow::Result<()> {
@@ -1174,9 +1325,17 @@ impl DesktopServer {
     ///   silently at boot with nobody watching the one-time value — while the
     ///   port is already reachable. We stay loopback-only and say why.
     pub async fn restore_lan_if_requested(self: &Arc<Self>) -> LanRestoreOutcome {
-        let prefs = nomifun_db::SqliteClientPreferenceRepository::new(
-            self.database.pool().clone(),
-        );
+        let preference_pool = self
+            .database
+            .as_ref()
+            .map(|database| database.pool().clone());
+        let Some(preference_pool) = preference_pool else {
+            // No host-owned persistence is available. Keep the listener
+            // loopback-only rather than guessing whether LAN exposure was
+            // requested.
+            return LanRestoreOutcome::NotRequested;
+        };
+        let prefs = nomifun_db::SqliteClientPreferenceRepository::new(preference_pool);
         let stored = match prefs.get_by_keys(&[DESKTOP_WEBUI_ENABLED_PREF_KEY]).await {
             Ok(rows) => rows
                 .into_iter()
@@ -1490,8 +1649,8 @@ impl DesktopServer {
     /// Synchronously perform the complete application shutdown on the backend
     /// runtime. This is called from the Tauri main thread, so it schedules the
     /// async single-flight cleanup and waits without calling `Handle::block_on`.
-    /// Cleanup is ordered: listeners, terminal sessions, BrowserSessionHub,
-    /// then the database.
+    /// Cleanup is ordered: listeners, terminal sessions, browser owners, then
+    /// the database.
     pub fn shutdown_all_blocking(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.shutdown_success.get().is_some() {
             tracing::info!(
@@ -1622,6 +1781,7 @@ where
     success.get_or_try_init(init).await.map(|_| ())
 }
 
+#[cfg(test)]
 async fn close_database_after_cleanup<F, Fut>(
     errors: Vec<String>,
     close: F,

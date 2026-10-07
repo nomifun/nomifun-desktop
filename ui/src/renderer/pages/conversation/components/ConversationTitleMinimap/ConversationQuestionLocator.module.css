@@ -176,11 +176,6 @@
   -webkit-line-clamp: 2;
 }
 
-@media (max-width: 767px) {
-  .root {
-    display: none;
-  }
-}
 
 @media (max-height: 520px) {
   .root {

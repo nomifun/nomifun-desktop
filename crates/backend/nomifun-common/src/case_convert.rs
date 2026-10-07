@@ -86,8 +86,8 @@ mod tests {
     #[test]
     fn normalize_nested_object() {
         let mut v = json!({
-            "currentModeId": "yolo",
-            "availableModes": [
+            "currentModelId": "model-a",
+            "availableModels": [
                 { "id": "a", "nameLabel": "A" },
                 { "id": "b", "nameLabel": "B" }
             ]
@@ -96,8 +96,8 @@ mod tests {
         assert_eq!(
             v,
             json!({
-                "current_mode_id": "yolo",
-                "available_modes": [
+                "current_model_id": "model-a",
+                "available_models": [
                     { "id": "a", "name_label": "A" },
                     { "id": "b", "name_label": "B" }
                 ]
@@ -108,12 +108,12 @@ mod tests {
     #[test]
     fn normalize_preserves_meta_content() {
         let mut v = json!({
-            "availableModes": [],
+            "availableModels": [],
             "_meta": { "keepThisAsIs": true }
         });
         normalize_keys_to_snake_case(&mut v);
         assert_eq!(v["_meta"]["keepThisAsIs"], true);
-        assert!(v.get("available_modes").is_some());
+        assert!(v.get("available_models").is_some());
     }
 
     #[test]

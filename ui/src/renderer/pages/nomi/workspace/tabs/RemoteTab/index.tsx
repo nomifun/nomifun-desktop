@@ -11,6 +11,7 @@ import RemoteConnectSection from './RemoteConnectSection';
 import type { WorkspaceTabProps } from '../../types';
 import RobotConnectSection from './RobotConnectSection';
 import { usePairingAttention } from './usePairingAttention';
+import CompanionMcpSettings from './CompanionMcpSettings';
 
 /**
  * 远程控制 tab：从桌面应用之外触达这只伙伴的两条路径 —— IM 渠道（谁来接待）
@@ -54,6 +55,7 @@ const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
         companionName={profile.name}
         onAttentionChange={setRobotAttention}
       />
+      <CompanionMcpSettings companionId={profile.companion_id} />
     </div>
   );
 };

@@ -5,18 +5,17 @@
  */
 
 import type {
-  CreativeTemplateDefinitionV1,
-  CreativeTemplateInputValue,
-  CreativePromptTemplate,
-  CreativeTemplateValidationError,
-  CreativeTemplateValueResult,
-  CreativeTemplateWorkspaceDocumentV1,
+CreativePromptTemplate,
+CreativeTemplateDefinitionV1,
+CreativeTemplateInputValue,
+CreativeTemplateValidationError,
+CreativeTemplateValueResult,
+CreativeTemplateWorkspaceDocumentV1,
 } from './types';
 import {
-  cloneTemplateOutput,
-  cloneTemplateVariable,
-  validateTemplateDefinition,
-  validateTemplateInputsForDefinition,
+cloneTemplateOutput,
+cloneTemplateVariable,
+validateTemplateInputsForDefinition
 } from './validation';
 
 export function createTemplateWorkspaceDocumentV1(): CreativeTemplateWorkspaceDocumentV1 {
@@ -70,13 +69,6 @@ export function cloneTemplateDefinition(template: CreativeTemplateDefinitionV1):
       return { ...step, dependsOn: [...step.dependsOn] };
     }),
   };
-}
-
-export function createTemplateDefinitionV1(
-  input: CreativeTemplateDefinitionV1
-): CreativeTemplateValueResult<CreativeTemplateDefinitionV1> {
-  const result = validateTemplateDefinition(input);
-  return result.ok ? { ok: true, value: cloneTemplateDefinition(input) } : result;
 }
 
 export function createTemplateDefaultInputs(template: CreativeTemplateDefinitionV1): CreativeTemplateInputValue[] {
@@ -171,11 +163,4 @@ export function renderCreativePromptTemplate(
     rendered += formatted;
   }
   return { ok: true, value: rendered };
-}
-
-export function findTemplate(
-  document: CreativeTemplateWorkspaceDocumentV1,
-  templateId: string
-): CreativeTemplateDefinitionV1 | undefined {
-  return document.templates.find((template) => template.id === templateId);
 }

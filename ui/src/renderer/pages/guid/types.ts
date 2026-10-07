@@ -4,52 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AgentSource } from '@/renderer/utils/model/agentTypes';
-import type { PresetReference } from '@/common/types/agent/presetTypes';
+import type { GuidAgentSelectionPreference } from '@/common/config/configKeys';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 
-/**
- * Available agent entry returned by the backend.
- * `agent_type` is the top-level discriminant; only `nomi` remains.
- */
-export type AvailableAgent = {
-  /**
-   * Opaque AgentRegistry identity. Custom/extension identifiers are external
-   * catalog keys, not UUID entities, and are never passed through UUID parsers.
-   */
-  id?: string;
-  agent_type: string;
-  agent_source?: AgentSource;
-  backend?: string;
-  icon?: string;
-  name: string;
-  cli_path?: string;
-  is_preset?: boolean;
-  preset_id?: PresetReference;
-  context?: string;
-  avatar?: string;
-  isExtension?: boolean;
-  extensionName?: string;
+/** Quick start selects Nomi, an official template, or a saved personal Agent. */
+export type GuidAgentSelection = GuidAgentSelectionPreference;
+
+/** A saved AgentPreset that can be launched because it has a stable revision. */
+export type ExecutableAgentPreset = AgentPresetSummary & {
+  current_stable_revision: NonNullable<AgentPresetSummary['current_stable_revision']>;
 };
 
-/**
- * Computed mention option for the @ mention dropdown.
- */
+/** Computed option for the Guid @ mention dropdown. */
 export type MentionOption = {
   key: string;
   label: string;
   tokens: Set<string>;
+  selection: GuidAgentSelection;
   avatarEmoji: string | undefined;
   avatarImage: string | undefined;
   logo: string | undefined;
-  isExtension?: boolean;
-};
-
-/**
- * Effective agent type info used for UI display and send logic.
- */
-export type EffectiveAgentInfo = {
-  agent_type: string;
-  isFallback: boolean;
-  originalType: string;
-  isAvailable: boolean;
 };

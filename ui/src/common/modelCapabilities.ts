@@ -14,21 +14,17 @@ export const MODEL_TASK_ORDER = [
   'image_generation',
   'image_edit',
   'video_generation',
+  'music_generation',
   'speech_synthesis',
   'speech_recognition',
   'embedding',
   'rerank',
 ] as const satisfies readonly ModelTask[];
 
-/** Canonical product order for refinements within a model capability. */
+/** Advisory catalog metadata order. These traits never authorize Chat inputs. */
 export const MODEL_TRAIT_ORDER = [
   'vision_input',
   'video_input',
   'audio_input',
-  'audio_output',
-  'realtime',
-  'streaming',
-  'function_calling',
-  'reasoning',
   'web_search',
 ] as const satisfies readonly ModelTrait[];

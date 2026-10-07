@@ -3,15 +3,20 @@
 //! full-text search, and user tag CRUD. Supplements `caps_knowledge.rs` which
 //! owns the core catalog + binding + write + autogen + fetch-url tools.
 
+use std::future::Future;
 use std::sync::Arc;
 
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityId, CapabilityRef,
+};
 use nomifun_common::KnowledgeBaseId;
+use nomifun_knowledge::KnowledgeService;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::deps::CompatibilityCapabilityHost;
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 /// Hard cap on `read_file` content returned to the model (256 KiB). Larger
@@ -124,19 +129,44 @@ struct DeleteTagParams {
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
-async fn get_base(deps: Arc<GatewayDeps>, p: GetBaseParams) -> Value {
-    match deps.knowledge_service.get_base_info(p.kb_id.as_str()).await {
+#[derive(Clone)]
+struct KnowledgeCapabilityDeps {
+    service: Arc<KnowledgeService>,
+    admission: Arc<dyn crate::deps::CapabilityAdmissionPort>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<KnowledgeCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(KnowledgeCapabilityDeps {
+                service: deps.knowledge_service.clone(),
+                admission: deps.capability_admission.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn get_base(deps: Arc<KnowledgeCapabilityDeps>, p: GetBaseParams) -> Value {
+    match deps.service.get_base_info(p.kb_id.as_str()).await {
         Ok(info) => ok(info),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn update_base(deps: Arc<GatewayDeps>, p: UpdateBaseParams) -> Value {
+async fn update_base(deps: Arc<KnowledgeCapabilityDeps>, p: UpdateBaseParams) -> Value {
     if p.name.is_none() && p.description.is_none() && p.tags.is_none() {
         return json!({"error": "nothing to update: provide at least one of name / description / tags"});
     }
     match deps
-        .knowledge_service
+        .service
         .update_base(p.kb_id.as_str(), p.name.as_deref(), p.description.as_deref(), p.tags)
         .await
     {
@@ -151,9 +181,9 @@ async fn update_base(deps: Arc<GatewayDeps>, p: UpdateBaseParams) -> Value {
     }
 }
 
-async fn delete_base(deps: Arc<GatewayDeps>, p: DeleteBaseParams) -> Value {
+async fn delete_base(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteBaseParams) -> Value {
     let purge = p.purge.unwrap_or(false);
-    match deps.knowledge_service.delete_base(p.kb_id.as_str(), purge).await {
+    match deps.service.delete_base(p.kb_id.as_str(), purge).await {
         Ok(()) => ok(json!({
             "deleted": p.kb_id,
             "purged": purge,
@@ -162,8 +192,8 @@ async fn delete_base(deps: Arc<GatewayDeps>, p: DeleteBaseParams) -> Value {
     }
 }
 
-async fn list_files(deps: Arc<GatewayDeps>, p: ListFilesParams) -> Value {
-    match deps.knowledge_service.list_files(p.kb_id.as_str()).await {
+async fn list_files(deps: Arc<KnowledgeCapabilityDeps>, p: ListFilesParams) -> Value {
+    match deps.service.list_files(p.kb_id.as_str()).await {
         Ok(files) => ok(json!({
             "kb_id": p.kb_id,
             "total": files.len(),
@@ -173,8 +203,8 @@ async fn list_files(deps: Arc<GatewayDeps>, p: ListFilesParams) -> Value {
     }
 }
 
-async fn read_file(deps: Arc<GatewayDeps>, p: ReadFileParams) -> Value {
-    match deps.knowledge_service.read_file(p.kb_id.as_str(), &p.rel_path).await {
+async fn read_file(deps: Arc<KnowledgeCapabilityDeps>, p: ReadFileParams) -> Value {
+    match deps.service.read_file(p.kb_id.as_str(), &p.rel_path).await {
         Ok(file) => {
             let truncated = file.content.len() > READ_FILE_MAX_BYTES;
             let content = if truncated {
@@ -197,8 +227,8 @@ async fn read_file(deps: Arc<GatewayDeps>, p: ReadFileParams) -> Value {
     }
 }
 
-async fn delete_file(deps: Arc<GatewayDeps>, p: DeleteFileParams) -> Value {
-    match deps.knowledge_service.delete_file(p.kb_id.as_str(), &p.rel_path).await {
+async fn delete_file(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteFileParams) -> Value {
+    match deps.service.delete_file(p.kb_id.as_str(), &p.rel_path).await {
         Ok(()) => ok(json!({
             "deleted": format!("{}/{}", p.kb_id, p.rel_path),
         })),
@@ -206,7 +236,21 @@ async fn delete_file(deps: Arc<GatewayDeps>, p: DeleteFileParams) -> Value {
     }
 }
 
-async fn search(deps: Arc<GatewayDeps>, p: SearchParams) -> Value {
+async fn search(deps: Arc<KnowledgeCapabilityDeps>, p: SearchParams) -> Value {
+    let capability = CapabilityRef {
+        id: CapabilityId::from("knowledge"),
+    };
+    if let Err(error) = deps
+        .admission
+        .admit(capability, CapabilityConsumer::Gateway)
+        .await
+    {
+        return json!({
+            "error": "capability_admission_failed",
+            "code": error.code,
+            "message": error.message,
+        });
+    }
     if p.kb_ids.is_empty() {
         return json!({"error": "kb_ids must not be empty"});
     }
@@ -215,7 +259,7 @@ async fn search(deps: Arc<GatewayDeps>, p: SearchParams) -> Value {
         return json!({"error": "query must not be empty"});
     }
     let limit = p.limit.unwrap_or(20).clamp(1, 100);
-    match deps.knowledge_service.search_bases(&p.kb_ids, query, limit).await {
+    match deps.service.search_bases(&p.kb_ids, query, limit).await {
         Ok(hits) => ok(json!({
             "total": hits.len(),
             "hits": hits,
@@ -224,8 +268,8 @@ async fn search(deps: Arc<GatewayDeps>, p: SearchParams) -> Value {
     }
 }
 
-async fn list_tags(deps: Arc<GatewayDeps>, _p: ListTagsParams) -> Value {
-    match deps.knowledge_service.list_tags().await {
+async fn list_tags(deps: Arc<KnowledgeCapabilityDeps>, _p: ListTagsParams) -> Value {
+    match deps.service.list_tags().await {
         Ok(tags) => ok(json!({
             "total": tags.len(),
             "tags": tags,
@@ -234,19 +278,19 @@ async fn list_tags(deps: Arc<GatewayDeps>, _p: ListTagsParams) -> Value {
     }
 }
 
-async fn create_tag(deps: Arc<GatewayDeps>, p: CreateTagParams) -> Value {
+async fn create_tag(deps: Arc<KnowledgeCapabilityDeps>, p: CreateTagParams) -> Value {
     let label = p.label.trim();
     if label.is_empty() {
         return json!({"error": "label must not be empty"});
     }
-    match deps.knowledge_service.create_tag(label, p.color).await {
+    match deps.service.create_tag(label, p.color).await {
         Ok(tag) => ok(tag),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn delete_tag(deps: Arc<GatewayDeps>, p: DeleteTagParams) -> Value {
-    match deps.knowledge_service.delete_tag(&p.key).await {
+async fn delete_tag(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteTagParams) -> Value {
+    match deps.service.delete_tag(&p.key).await {
         Ok(()) => ok(json!({
             "deleted": p.key,
             "note": "tag removed from all bases that referenced it",
@@ -264,28 +308,27 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_get_base",
             "knowledge",
             "Get full detail of one knowledge base (id, name, description, source, tags, file count, etc.).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
-        |deps, _ctx, p| get_base(deps, p),
+        adapt(get_base),
     ));
     out.push(Capability::new::<UpdateBaseParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_update_base",
             "knowledge",
             "Update a knowledge base's name, description, or assigned tags.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
-        |deps, _ctx, p| update_base(deps, p),
+        adapt(update_base),
     ));
     out.push(Capability::new::<DeleteBaseParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_delete_base",
             "knowledge",
             "Delete a knowledge base registration (optionally purge its managed directory).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
-        |deps, _ctx, p| delete_base(deps, p),
+            EffectClass::Destructive,
+        ),
+        adapt(delete_base),
     ));
 
     // ── file access ──────────────────────────────────────────────────────
@@ -294,28 +337,27 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_list_files",
             "knowledge",
             "List all markdown files in a knowledge base (paths, sizes, modification times).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
-        |deps, _ctx, p| list_files(deps, p),
+        adapt(list_files),
     ));
     out.push(Capability::new::<ReadFileParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_read_file",
             "knowledge",
             "Read one markdown document from a knowledge base (truncated at 256 KiB).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
-        |deps, _ctx, p| read_file(deps, p),
+        adapt(read_file),
     ));
     out.push(Capability::new::<DeleteFileParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_delete_file",
             "knowledge",
             "Delete one markdown file from a knowledge base.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
-        |deps, _ctx, p| delete_file(deps, p),
+            EffectClass::Destructive,
+        ),
+        adapt(delete_file),
     ));
 
     // ── search ───────────────────────────────────────────────────────────
@@ -324,9 +366,9 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_search",
             "knowledge",
             "Full-text search across one or more knowledge bases (ranked by relevance).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
-        |deps, _ctx, p| search(deps, p),
+        adapt(search),
     ));
 
     // ── user tags ────────────────────────────────────────────────────────
@@ -335,27 +377,26 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_list_tags",
             "knowledge",
             "List all user-defined knowledge tags (key, label, color, sort order).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
-        |deps, _ctx, p| list_tags(deps, p),
+        adapt(list_tags),
     ));
     out.push(Capability::new::<CreateTagParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_create_tag",
             "knowledge",
             "Create a new user-defined tag for categorizing knowledge bases.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
-        |deps, _ctx, p| create_tag(deps, p),
+        adapt(create_tag),
     ));
     out.push(Capability::new::<DeleteTagParams, _, _>(
         CapabilityMeta::new(
             "nomi_knowledge_delete_tag",
             "knowledge",
             "Delete a user tag (also strips it from all bases that reference it).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
-        |deps, _ctx, p| delete_tag(deps, p),
+            EffectClass::Destructive,
+        ),
+        adapt(delete_tag),
     ));
 }

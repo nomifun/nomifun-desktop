@@ -6,6 +6,8 @@
 
 import classNames from 'classnames';
 import React from 'react';
+import contentStyles from '../../components/ConversationContentColumn.module.css';
+import { useConversationColumnRef } from '../../components/useConversationColumnRef';
 
 /**
  * MessageListSkeleton — a chat-shaped shimmer placeholder shown while a
@@ -18,6 +20,7 @@ import React from 'react';
  * reuse the exact same visual language.
  */
 const MessageListSkeleton: React.FC = () => {
+  const handleColumnRef = useConversationColumnRef();
   const rows = [
     { align: 'left', bubbleWidth: '100%', lines: [72, 58, 64] },
     { align: 'right', bubbleWidth: '82%', lines: [54, 48] },
@@ -32,16 +35,16 @@ const MessageListSkeleton: React.FC = () => {
 
   return (
     <div
-      className='flex-1 h-full overflow-y-auto pb-10px box-border'
+      className={`flex-1 h-full overflow-y-auto pb-10px box-border ${contentStyles.scroller}`}
       data-testid='message-list-skeleton'
       style={{ minHeight: '100%' }}
     >
-      <div className='min-h-full flex flex-col justify-between py-10px box-border'>
+      <div ref={handleColumnRef} className={`${contentStyles.column} min-h-full flex flex-col justify-between py-10px box-border`}>
         {rows.map((row, index) => (
           <div
             key={index}
             className={classNames(
-              'w-full min-w-0 flex items-start message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto',
+              'w-full min-w-0 flex items-start message-item m-t-10px',
               {
                 'justify-start': row.align === 'left',
                 'justify-end': row.align === 'right',

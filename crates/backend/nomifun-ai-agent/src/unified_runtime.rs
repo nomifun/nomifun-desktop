@@ -1,0 +1,1444 @@
+//! Long-horizon implementation of the single Nomi runtime contract.
+//!
+//! This adapter supplies adaptive execution/event projection to the shared engine
+//! lifecycle SDK. Production composition supplies admitted Session/Broker/Kernel
+//! ports; neither adapter nor SDK creates a second persistence/authority owner.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use nomifun_agent_runtime::{
+    AgentEngine, AgentEngineError, AgentEngineEvent, AgentEventSink, AgentModelPort,
+    AgentToolInvoker, AgentTurnRequest, AgentTurnTerminal, EngineBinding,
+};
+use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
+use crate::protocol::events::{
+    AgentStreamEvent, TextEventData, ThinkingEventData, ToolCallEventData, ToolCallStatus,
+};
+use crate::protocol::send_error::AgentSendError;
+use crate::engine_sdk::{EngineProgress, EngineSessionDriver, EngineTurnOutcome, EngineTurnOutput, EngineTurnTerminal, HostedAgentRuntime};
+use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
+use crate::{
+    AgentRuntimeControl, OfficialAgentRuntime, RuntimeTeardown,
+};
+
+/// Per-Session, host-admitted ports. Implementations must validate the durable
+/// root message, principal, snapshot, route and tool plan against the existing
+/// Session owner. They must not infer authority from user/model JSON.
+#[async_trait]
+pub trait UnifiedRuntimeHost: Send + Sync {
+    /// Validate a completed proposal against Host-owned delivery facts before
+    /// the lifecycle SDK records success. It can only narrow completion.
+    async fn completion_gate(
+        &self, _message: &SendMessageData,
+    ) -> Result<Option<EngineTurnTerminal>, AppError> { Ok(None) }
+    async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
+    async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
+    fn supports_execution_checkpoints(&self) -> bool { false }
+    async fn execution_pressure(&self, _message: &SendMessageData)
+        -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
+        Ok(Default::default())
+    }
+    async fn save_execution_checkpoint(
+        &self, _message: &SendMessageData, _checkpoint: &nomifun_agent_runtime::AgentExecutionCheckpoint,
+    ) -> Result<Option<nomifun_agent_runtime::AgentCheckpointReceipt>, AppError> {
+        Ok(None)
+    }
+    async fn queue_steer(&self, _delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        Err(AppError::BadRequest("Nomi host does not support receipt-bound steering".into()))
+    }
+    /// Return the same canonical active set used by tool admission. A host
+    /// without a materialized Snapshot must explicitly return None.
+    fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError>;
+
+    /// Assemble canonical history/context and claim the exact turn. The token
+    /// fences all preparation, model and tool work for this logical turn.
+    async fn prepare_turn(
+        &self,
+        message: &SendMessageData,
+        cancellation: CancellationToken,
+    ) -> Result<AgentTurnRequest, AppError>;
+
+    /// Record engine semantics in the existing owner's event/history chain
+    /// before broadcasting a UI projection. No separate engine rollout store.
+    async fn record_event(
+        &self,
+        message: &SendMessageData,
+        event: &AgentEngineEvent,
+    ) -> Result<(), AppError>;
+
+    /// Hosts accepting concurrent steering must override this and atomically
+    /// check the inbox and persist admission. False must record no ToolStarted.
+    async fn admit_tool(
+        &self,
+        message: &SendMessageData,
+        event: &AgentEngineEvent,
+    ) -> Result<bool, AppError> {
+        if !matches!(event, AgentEngineEvent::ToolStarted { .. }) {
+            return Err(AppError::BadRequest("tool admission requires ToolStarted".into()));
+        }
+        self.record_event(message, event).await?;
+        Ok(true)
+    }
+
+    /// Required on every exit, including preparation failure and cancellation.
+    /// Success proves turn-scoped tools/processes are quiescent.
+    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError>;
+
+    /// Required, idempotent proof that all Session-owned resources have exited.
+    /// A failure retains the registry's teardown quarantine.
+    async fn cleanup_session(&self) -> Result<(), AppError>;
+}
+
+fn contract_error(error: AgentEngineError) -> AppError {
+    match error {
+        error @ (AgentEngineError::Model { .. }
+        | AgentEngineError::ModelStreamEndedWithoutTerminal
+        | AgentEngineError::InvalidModelEvent(_)) => {
+            AppError::BadGateway(format!("Nomi runtime: {error}"))
+        }
+        error @ (AgentEngineError::TurnAlreadyRunning | AgentEngineError::SessionDisposed) => {
+            AppError::Conflict(format!("Nomi runtime: {error}"))
+        }
+        error => AppError::Internal(format!("Nomi runtime: {error}")),
+    }
+}
+
+pub struct UnifiedAgentRuntime {
+    runtime: HostedAgentRuntime,
+}
+
+struct UnifiedSessionDriver {
+    owner_id: String,
+    engine: Arc<AgentEngine>,
+    binding: EngineBinding,
+    model: Arc<dyn AgentModelPort>,
+    tools: Arc<dyn AgentToolInvoker>,
+    host: Arc<dyn UnifiedRuntimeHost>,
+}
+
+impl UnifiedAgentRuntime {
+    /// The adaptive loop plugs into the same lifecycle SDK as source-integrated
+    /// engines; only its execution/context policy and semantic codec differ.
+    pub fn new(
+        options: &AgentRuntimeBuildOptions,
+        engine: Arc<AgentEngine>,
+        binding: EngineBinding,
+        model: Arc<dyn AgentModelPort>,
+        tools: Arc<dyn AgentToolInvoker>,
+        host: Arc<dyn UnifiedRuntimeHost>,
+    ) -> Result<Self, AppError> {
+        if binding.agent_session_id().as_ref() != options.conversation_id {
+            return Err(AppError::Conflict("Nomi runtime Session binding mismatch".into()));
+        }
+        engine.open_session(binding.clone(), model.clone(), tools.clone(), None)
+            .map_err(contract_error)?;
+        let driver = Arc::new(UnifiedSessionDriver {
+            owner_id: options.user_id.clone(), engine, binding, model, tools, host,
+        });
+        Ok(Self { runtime: HostedAgentRuntime::new(options, driver)? })
+    }
+}
+
+struct TurnProjection {
+    host: Arc<dyn UnifiedRuntimeHost>,
+    message: SendMessageData,
+    output: EngineTurnOutput,
+    calls: Mutex<BTreeMap<String, ToolCallEventData>>,
+    thinking_step: Mutex<Option<u16>>,
+    terminal: Mutex<Option<AgentEngineEvent>>,
+    last_model_step: std::sync::atomic::AtomicU16,
+}
+
+#[async_trait]
+impl AgentEventSink for TurnProjection {
+    fn supports_checkpoints(&self) -> bool { self.host.supports_execution_checkpoints() }
+    async fn execution_pressure(&self) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AgentEngineError> {
+        self.host.execution_pressure(&self.message).await
+            .map_err(|error| AgentEngineError::EventSink(error.to_string()))
+    }
+    async fn save_checkpoint(&self, checkpoint: nomifun_agent_runtime::AgentExecutionCheckpoint)
+        -> Result<Option<nomifun_agent_runtime::AgentCheckpointReceipt>, AgentEngineError> {
+        self.host.save_execution_checkpoint(&self.message, &checkpoint).await
+            .map_err(|error| AgentEngineError::EventSink(error.to_string()))
+    }
+    async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+        match &event {
+            AgentEngineEvent::ModelStepStarted { step,.. } => self.last_model_step.store(*step,std::sync::atomic::Ordering::Release),
+            AgentEngineEvent::ExecutionResumed { model_steps,.. } => self.last_model_step.store(*model_steps,std::sync::atomic::Ordering::Release),
+            _ => {}
+        }
+        if matches!(
+            event,
+            AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnCancelled { .. }
+                | AgentEngineEvent::TurnPaused { .. }
+                | AgentEngineEvent::TurnFailed { .. }
+        ) {
+            // Publication of a terminal must wait for proven tool/process exit.
+            *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
+            return Ok(());
+        }
+        self.host
+            .record_event(&self.message, &event)
+            .await
+            .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+        match &event {
+            AgentEngineEvent::ModelStepStarted { step, .. } => { self.output.record_model_steps(*step); }
+            AgentEngineEvent::ExecutionResumed { model_steps, .. } => { self.output.record_model_steps(*model_steps); }
+            _ => {}
+        }
+        self.project(event)
+    }
+
+    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
+        let admitted = self.host.admit_tool(&self.message, &event).await
+            .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+        if admitted { self.project(event)?; }
+        Ok(admitted)
+    }
+}
+
+impl TurnProjection {
+    fn complete_thinking(&self) {
+        let step = self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(step) = step {
+            self.output.publish(EngineProgress::Thinking(ThinkingEventData {
+                content: String::new(),
+                step: Some(step),
+                subject: None,
+                duration: None,
+                status: Some("done".into()),
+            }));
+        }
+    }
+
+    fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+        // This runs only after the typed transition is recorded by the host.
+        // Closing one reasoning phase does not complete the enclosing Turn;
+        // its terminal remains owned by the cleanup and receipt path.
+        match event.reasoning_display_transition() {
+            Some(Some(step)) => {
+                let previous = *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner());
+                if previous.is_some_and(|previous| previous != step) {
+                    self.complete_thinking();
+                }
+                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(step);
+            }
+            Some(None) => self.complete_thinking(),
+            None => {}
+        }
+        let projected = match event {
+            // The host has committed the full plan. Re-read the canonical
+            // snapshot, including lifecycle and reset state, for presentation.
+            AgentEngineEvent::PlanUpdated { .. } => Some(EngineProgress::TaskPlanChanged),
+            AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
+            AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
+                Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
+            }
+            AgentEngineEvent::ReasoningDelta { step, text } => {
+                Some(EngineProgress::Thinking(ThinkingEventData {
+                    content: text,
+                    step: Some(step),
+                    subject: None,
+                    duration: None,
+                    status: Some("thinking".into()),
+                }))
+            }
+            AgentEngineEvent::ToolCallCompleted { call, .. } => {
+                self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                    call.call_id.as_ref().to_owned(),
+                    ToolCallEventData {
+                        identity: Default::default(),
+                        call_id: call.call_id.as_ref().to_owned(),
+                        name: call.name,
+                        args: call.arguments.0,
+                        status: ToolCallStatus::Running,
+                        input: None,
+                        output: None,
+                        description: None,
+                        retry: None,
+                        artifacts: Vec::new(),
+                    },
+                );
+                None
+            }
+            AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
+            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. }
+            | AgentEngineEvent::VoiceModelStepSuperseded {discarded_tool_call_ids,..} => {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
+                None
+            }
+            AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                calls.get_mut(call_id.as_ref())
+                    .filter(|call| !call.call_id.starts_with("agent-instructions:"))
+                    .map(|call| {
+                        call.identity.capability_id = Some(capability_id.as_ref().to_owned());
+                        call.identity.action_id = Some(action_id.as_ref().to_owned());
+                        EngineProgress::ToolCall(call.clone())
+                    })
+            }
+            AgentEngineEvent::ToolCompleted { result, .. } => {
+                let mut call = self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(result.call_id.as_ref())
+                    .ok_or_else(|| {
+                        AgentEngineError::InvalidModelEvent(
+                            "tool result has no admitted call".to_owned(),
+                        )
+                    })?;
+                // These are engine-owned instruction preflight reads, not
+                // model-selected work. Keep their durable observations but do
+                // not flood the conversation with synthetic read/error rows.
+                if call.call_id.starts_with("agent-instructions:") {
+                    return Ok(());
+                }
+                call.status = if result.is_error {
+                    ToolCallStatus::Error
+                } else {
+                    ToolCallStatus::Completed
+                };
+                let instruction_read = call.call_id.starts_with("agent-instructions:")
+                    || (call.name == "read_file" && call.args.get("path").and_then(|v| v.as_str())
+                        .is_some_and(|path| path.rsplit(['/', '\\']).next().is_some_and(|name|
+                            name.eq_ignore_ascii_case("AGENTS.md") || name.eq_ignore_ascii_case("AGENTS.override.md"))));
+                call.output = Some(if instruction_read {
+                    "Repository instruction body is turn-local and omitted from the stored tool display. Re-read the current file when needed.".into()
+                } else { result.output_text() });
+                Some(EngineProgress::ToolCall(call))
+            }
+            // Semantics are recorded above even when there is no UI projection.
+            _ => None,
+        };
+        if let Some(event) = projected {
+            self.output.publish(event);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EngineSessionDriver for UnifiedSessionDriver {
+    async fn run_turn(
+        &self,
+        message: &SendMessageData,
+        cancellation: CancellationToken,
+        output: EngineTurnOutput,
+    ) -> Result<EngineTurnOutcome, AppError> {
+        let projection = Arc::new(TurnProjection {
+            host: self.host.clone(), message: message.clone(), output,
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            thinking_step: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        });
+        let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
+            self.tools.clone(), Some(projection.clone())).map_err(contract_error)?;
+        let request = match self.host.prepare_turn(message, cancellation.clone()).await {
+            Ok(request) => request,
+            Err(error) => {
+                if let Some(model_steps) = self.host.recoverable_preparation_step(message).await? {
+                    return Ok(EngineTurnOutcome { model_steps,terminal:EngineTurnTerminal::Paused { reason:"EXECUTION_PREPARATION_BLOCKED".into() } });
+                }
+                return Err(error);
+            }
+        };
+        if request.principal.principal_kind != "user" || request.principal.principal_id != self.owner_id {
+            return Err(AppError::Conflict("Nomi turn principal differs from its Session owner".into()));
+        }
+        let execution = session.run_turn_cancellable(request, cancellation).await;
+        let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match execution {
+            Ok(result) => {
+                let mut outcome = EngineTurnOutcome {
+                    model_steps: result.model_steps,
+                    terminal: match result.terminal {
+                        AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
+                        AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
+                        AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
+                        AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message, failure: None },
+                    },
+                };
+                if pending.as_ref() != Some(&runtime_terminal(&outcome)) {
+                    return Err(AppError::Conflict("Nomi result and terminal event disagree or terminal is absent".into()));
+                }
+                if matches!(outcome.terminal, EngineTurnTerminal::Completed { .. }) {
+                    if let Some(terminal) = self.host.completion_gate(message).await? {
+                        outcome.terminal = terminal;
+                    }
+                }
+                Ok(outcome)
+            }
+            Err(AgentEngineError::Cancelled) => Ok(EngineTurnOutcome::cancelled(
+                match pending { Some(AgentEngineEvent::TurnCancelled { model_steps }) => model_steps,
+                    _ => projection.last_model_step.load(std::sync::atomic::Ordering::Acquire) })),
+            Err(AgentEngineError::TurnFailed(message)) => {
+                let model_steps = match pending {
+                    Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded, failure: None }) if recorded == message => model_steps,
+                    _ => return Err(AppError::Conflict("Nomi failure has no matching terminal record".into())),
+                };
+                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: None } })
+            }
+            Err(error @ (AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_))) => {
+                // The model failure ends this Turn only after the existing
+                // cleanup and canonical receipt barriers. Completed effects
+                // stay recorded; the next user input is a new Turn.
+                let (message, failure) = model_turn_failure(error);
+                Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
+                    terminal:EngineTurnTerminal::Failed { message, failure: Some(failure) } })
+            }
+            Err(error) => Err(contract_error(error)),
+        }
+    }
+
+    fn capability_activation_snapshot(&self) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+        self.host.capability_activation_snapshot()
+    }
+    fn supports_steering_context(&self) -> bool { true }
+    async fn queue_steer(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        self.host.queue_steer(delivery).await
+    }
+    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
+        self.host.cleanup_turn(message).await
+    }
+    async fn suspend_after_cleanup_failure(&self, message: &SendMessageData) -> Result<bool,AppError> {
+        self.host.suspend_after_cleanup_failure(message).await
+    }
+    async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
+        self.host.record_event(message, &runtime_terminal(outcome)).await
+    }
+    async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
+}
+
+fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime::AgentTurnFailure) {
+    use nomifun_agent_runtime::AgentTurnFailure;
+    match error {
+        AgentEngineError::Model { code, message, diagnostic } => (message, AgentTurnFailure::Model { code, diagnostic }),
+        AgentEngineError::ModelStreamEndedWithoutTerminal => (
+            "Model stream ended without a terminal event".into(), AgentTurnFailure::ModelStreamEndedWithoutTerminal,
+        ),
+        AgentEngineError::InvalidModelEvent(message) => (message, AgentTurnFailure::InvalidModelEvent),
+        _ => unreachable!("only typed model failures enter model Turn settlement"),
+    }
+}
+
+fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
+    match &outcome.terminal {
+        EngineTurnTerminal::Completed { finish_reason } => AgentEngineEvent::TurnCompleted {
+            model_steps: outcome.model_steps, finish_reason: finish_reason.clone(),
+        },
+        EngineTurnTerminal::Cancelled => AgentEngineEvent::TurnCancelled { model_steps: outcome.model_steps },
+        EngineTurnTerminal::Paused { reason } => AgentEngineEvent::TurnPaused { model_steps: outcome.model_steps, reason: reason.clone() },
+        EngineTurnTerminal::Failed { message, failure } => AgentEngineEvent::TurnFailed {
+            model_steps: outcome.model_steps, message: message.clone(), failure: failure.clone(),
+        },
+    }
+}
+
+#[async_trait]
+impl AgentRuntimeControl for UnifiedAgentRuntime {
+    fn agent_type(&self) -> AgentType { self.runtime.agent_type() }
+    fn conversation_id(&self) -> &str { self.runtime.conversation_id() }
+    fn workspace(&self) -> &str { self.runtime.workspace() }
+    fn status(&self) -> Option<ConversationStatus> { self.runtime.status() }
+    fn is_transport_healthy(&self) -> bool { self.runtime.is_transport_healthy() }
+    fn last_activity_at(&self) -> TimestampMs { self.runtime.last_activity_at() }
+    fn touch_activity(&self) { self.runtime.touch_activity(); }
+    fn capability_activation_snapshot(&self) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+        self.runtime.capability_activation_snapshot()
+    }
+    fn subscribe(&self) -> broadcast::Receiver<AgentStreamEvent> { self.runtime.subscribe() }
+    async fn send_message(&self, message: SendMessageData) -> Result<(), AgentSendError> { self.runtime.send_message(message).await }
+    async fn cancel(&self) -> Result<(), AppError> { self.runtime.cancel().await }
+    fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> { self.runtime.kill(reason) }
+}
+
+#[async_trait]
+impl OfficialAgentRuntime for UnifiedAgentRuntime {
+    fn supports_steering_context(&self) -> bool { self.runtime.supports_steering_context() }
+    async fn steer_with_receipt(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        self.runtime.steer_with_receipt(delivery).await
+    }
+    fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown { self.runtime.kill_and_wait(reason) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_state::AgentRuntimeState;
+    use crate::protocol::events::TurnStopReason;
+    use nomifun_chat_model_broker::ChatFinishReason;
+    use crate::runtime_sessions::OfficialRuntimeOpener;
+    use crate::{
+        AgentRuntimeHandle, AgentRuntimeSessions, InMemoryAgentRuntimeSessions,
+    };
+    use nomifun_agent_contracts::{
+        AgentSessionId, ChatRouteIdentity, DigestHex, EventId, ModelRouteId, OperationId,
+        PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeBindingId, VersionString,
+    };
+    use nomifun_chat_model_broker::{
+        ChatCausality, ChatContentPart, ChatMessage, ChatModelError, ChatModelEvent,
+        ChatModelInput, ChatModelRequest, ChatResponseFormat, ChatRole, ChatToolChoice,
+        PromptCachePolicy,
+    };
+    use nomifun_agent_runtime::{
+        AgentEngineBuild, AgentModelStream, AgentToolInvocation, AgentToolPlan,
+        AgentToolResult, EngineBuildId,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+    const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    #[test]
+    fn model_failure_preserves_typed_cause_and_original_diagnostic() {
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        use nomifun_agent_runtime::AgentTurnFailure;
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
+            code: ChatModelErrorCode::AuthenticationFailed, message: "private provider body".into(),
+            diagnostic: None,
+        }), ("private provider body".into(), AgentTurnFailure::Model { code: ChatModelErrorCode::AuthenticationFailed, diagnostic: None }));
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
+            code: ChatModelErrorCode::InvalidRequest, message: "private request".into(),
+            diagnostic: None,
+        }), ("private request".into(), AgentTurnFailure::Model { code: ChatModelErrorCode::InvalidRequest, diagnostic: None }));
+        assert_eq!(model_turn_failure(AgentEngineError::InvalidModelEvent("raw output".into())),
+            ("raw output".into(), AgentTurnFailure::InvalidModelEvent));
+        let mut diagnostic = nomifun_agent_contracts::ModelFailureDiagnostic::new(
+            nomifun_agent_contracts::ModelFailureReason::ConnectionFailed);
+        diagnostic.transport_detail = Some("connection refused (os error 61)".into());
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
+            code:ChatModelErrorCode::ProviderUnavailable, message:"Safe fixed failure".into(), diagnostic:Some(diagnostic.clone()),
+        }), ("Safe fixed failure".into(), AgentTurnFailure::Model {code:ChatModelErrorCode::ProviderUnavailable, diagnostic:Some(diagnostic)}));
+    }
+
+    #[test]
+    fn nomi_context_overflow_is_not_misclassified_as_an_unknown_upstream_conflict() {
+        let error = contract_error(AgentEngineError::ContextTooLarge {
+            limit: 8192,
+            actual: 8193,
+        });
+        assert!(matches!(error, AppError::Internal(message)
+            if message == "Nomi runtime: Nomi context is 8193 bytes, above the 8192 byte limit"));
+    }
+
+    #[test]
+    fn local_runtime_context_failure_keeps_nomifun_ownership() {
+        assert!(matches!(
+            contract_error(AgentEngineError::WorkspaceContext("instruction scope unavailable".into())),
+            AppError::Internal(message) if message.contains("instruction scope unavailable")
+        ));
+        assert!(matches!(
+            contract_error(AgentEngineError::InvalidModelEvent("bad provider frame".into())),
+            AppError::BadGateway(message) if message.contains("bad provider frame")
+        ));
+    }
+
+    fn options() -> AgentRuntimeBuildOptions {
+        static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let workspace = WORKSPACE
+            .get_or_init(|| tempfile::tempdir().unwrap())
+            .path();
+        AgentRuntimeBuildOptions {
+            user_id: OWNER.to_owned(),
+            agent_type: AgentType::Nomi,
+            workspace: workspace.to_string_lossy().into_owned(),
+            model: None,
+            conversation_id: SESSION.to_owned(),
+            delegation_policy: Default::default(),
+            extra: serde_json::json!({}),
+            conversation_created_at: None,
+            workspace_binding_lease: Some(
+                nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(workspace, SESSION)
+                    .unwrap(),
+            ),
+        }
+    }
+
+    fn message() -> SendMessageData {
+        SendMessageData {
+            content: "hello".to_owned(),
+            msg_id: "message".to_owned(),
+            source_message_id: Some("root".to_owned()),
+            files: Vec::new(),
+            inject_skills: Vec::new(),
+            origin: None,
+        }
+    }
+
+    fn engine() -> Arc<AgentEngine> {
+        Arc::new(
+            AgentEngine::new(AgentEngineBuild {
+                build_id: EngineBuildId::from("test-build"),
+                build_digest: DigestHex::from("a".repeat(64)),
+            })
+            .unwrap(),
+        )
+    }
+
+    fn binding() -> EngineBinding {
+        engine()
+            .bind(
+                AgentSessionId::from(SESSION),
+                RuntimeBindingId::from("binding"),
+                ResolvedSnapshotRef {
+                    snapshot_id: ResolvedSnapshotId::from("snapshot"),
+                    snapshot_digest: DigestHex::from("b".repeat(64)),
+                },
+            )
+            .unwrap()
+    }
+
+    struct Host {
+        block_completion: AtomicBool,
+        fail_record: AtomicBool,
+        events: Mutex<Vec<AgentEngineEvent>>,
+        cleanup_turns: AtomicUsize,
+        cleanup_sessions: AtomicUsize,
+        fail_cleanup: AtomicBool,
+        pending_preparation: AtomicBool,
+        prepare_failure_at: AtomicUsize,
+        block_cleanup: AtomicBool,
+        cleanup_entered: tokio::sync::Notify,
+        cleanup_release: tokio::sync::Semaphore,
+        entered: tokio::sync::Notify,
+    }
+
+    impl Host {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                block_completion: AtomicBool::new(false),
+                fail_record: AtomicBool::new(false),
+                events: Mutex::new(Vec::new()),
+                cleanup_turns: AtomicUsize::new(0),
+                cleanup_sessions: AtomicUsize::new(0),
+                fail_cleanup: AtomicBool::new(false),
+                pending_preparation: AtomicBool::new(false),
+                prepare_failure_at: AtomicUsize::new(usize::MAX),
+                entered: tokio::sync::Notify::new(),
+                block_cleanup: AtomicBool::new(false),
+                cleanup_entered: tokio::sync::Notify::new(),
+                cleanup_release: tokio::sync::Semaphore::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl UnifiedRuntimeHost for Host {
+        async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
+            Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
+                reason:"PLUGIN_DELIVERY_REQUIRED".into(),
+            }))
+        }
+        fn capability_activation_snapshot(
+            &self,
+        ) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+            Ok(None)
+        }
+
+        async fn prepare_turn(
+            &self,
+            message: &SendMessageData,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentTurnRequest, AppError> {
+            self.entered.notify_one();
+            if self.pending_preparation.load(Ordering::Acquire) {
+                return std::future::pending().await;
+            }
+            // Model the production host's awaited receipt, recovery, model,
+            // attachment, history and context preparation boundaries.
+            for stage in 0..6 {
+                tokio::task::yield_now().await;
+                if self.prepare_failure_at.load(Ordering::Acquire) == stage {
+                    return Err(AppError::Conflict(format!(
+                        "pre-active preparation stage {stage} failed"
+                    )));
+                }
+            }
+            let route =
+                ChatRouteIdentity::new("preset@1", "agent_chat", ModelRouteId::from("route"), 1);
+            Ok(AgentTurnRequest::new(
+                ChatModelRequest {
+                    contract_version: VersionString::from(
+                        nomifun_chat_model_broker::CHAT_MODEL_CONTRACT_VERSION,
+                    ),
+                    route: route.clone(),
+                    causality: ChatCausality {
+                        agent_session_id: AgentSessionId::from(SESSION),
+                        turn_operation_id: OperationId::from(message.msg_id.clone()),
+                        causation_event_id: EventId::from(
+                            message.source_message_id.clone().unwrap(),
+                        ),
+                        resolved_snapshot_ref: binding().resolved_snapshot_ref().clone(),
+                        route_identity: route,
+                        operation_id: OperationId::from("model"),
+                    },
+                    input: ChatModelInput {
+                        instructions: vec!["test".to_owned()],
+                        messages: vec![ChatMessage {
+                            role: ChatRole::User,
+                            content: vec![ChatContentPart::Text {
+                                text: message.content.clone(),
+                            }],
+                            provider_round_id: None,
+                        }],
+                        tools: Vec::new(),
+                        tool_choice: ChatToolChoice::None,
+                        parallel_tool_calls: None,
+                        max_output_tokens: Some(100),
+                        reasoning: None,
+                        prompt_cache: PromptCachePolicy::Disabled,
+                        response_format: ChatResponseFormat::Text,
+                        requested_output_modalities: BTreeSet::new(),
+                        provider_round_parent: None,
+                        preserve_native_responses_items: false,
+                        metadata: Default::default(),
+                    },
+                },
+                AgentToolPlan::default(),
+                PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: OWNER.to_owned(),
+                },
+                1,
+            ))
+        }
+        async fn record_event(
+            &self,
+            _message: &SendMessageData,
+            event: &AgentEngineEvent,
+        ) -> Result<(), AppError> {
+            if self.fail_record.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("canonical journal unavailable".into()));
+            }
+            if matches!(
+                event,
+                AgentEngineEvent::TurnCompleted { .. }
+                    | AgentEngineEvent::TurnCancelled { .. }
+                    | AgentEngineEvent::TurnFailed { .. }
+            ) {
+                assert!(
+                    self.cleanup_turns.load(Ordering::Acquire) > 0,
+                    "terminal must follow cleanup proof"
+                );
+            }
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
+            if self.block_cleanup.load(Ordering::Acquire) {
+                self.cleanup_entered.notify_one();
+                self.cleanup_release.acquire().await.unwrap().forget();
+            }
+            self.cleanup_turns.fetch_add(1, Ordering::SeqCst);
+            if self.fail_cleanup.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("process has not exited".to_owned()));
+            }
+            Ok(())
+        }
+        async fn cleanup_session(&self) -> Result<(), AppError> {
+            self.cleanup_sessions.fetch_add(1, Ordering::SeqCst);
+            if self.fail_cleanup.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("process has not exited".to_owned()));
+            }
+            Ok(())
+        }
+    }
+
+    struct Model {
+        pending: bool,
+        panics: bool,
+        opened: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl AgentModelPort for Model {
+        async fn open_stream(
+            &self,
+            _request: ChatModelRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentModelStream, ChatModelError> {
+            self.opened.notify_one();
+            assert!(!self.panics, "provider panic fixture");
+            if self.pending {
+                return std::future::pending().await;
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "reply".to_owned(),
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                }),
+            ])))
+        }
+    }
+
+    struct NoTools;
+    #[async_trait]
+    impl AgentToolInvoker for NoTools {
+        async fn invoke(
+            &self,
+            _request: AgentToolInvocation,
+            _cancel: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            panic!("an empty admitted plan must not invoke tools")
+        }
+    }
+
+    fn runtime(host: Arc<Host>, model: Arc<Model>) -> UnifiedAgentRuntime {
+        UnifiedAgentRuntime::new(
+            &options(),
+            engine(),
+            binding(),
+            model,
+            Arc::new(NoTools),
+            host,
+        )
+        .unwrap()
+    }
+
+    fn model(pending: bool, panics: bool) -> Arc<Model> {
+        Arc::new(Model {
+            pending,
+            panics,
+            opened: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn terminal(events: &mut broadcast::Receiver<AgentStreamEvent>) -> AgentStreamEvent {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(
+                    event,
+                    AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)
+                ) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gateway_model_failure_records_typed_failed_turn_after_cleanup() {
+        use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
+        use nomifun_chat_model_broker::{ChatModelErrorCode, ChatRetryDirective};
+        struct GatewayFailureModel { code: ChatModelErrorCode, reason: ModelFailureReason }
+        #[async_trait]
+        impl AgentModelPort for GatewayFailureModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                let mut error = ChatModelError::new(self.code, "Safe fixed model failure", ChatRetryDirective::Never);
+                error.diagnostic = Some(ModelFailureDiagnostic::new(self.reason));
+                Err(error)
+            }
+        }
+        for (reason, code, agent_code) in [
+            (ModelFailureReason::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::ExpiredKey, ChatModelErrorCode::AuthenticationFailed, "USER_LLM_PROVIDER_AUTH_FAILED"),
+            (ModelFailureReason::RateLimited, ChatModelErrorCode::RateLimited, "USER_LLM_PROVIDER_RATE_LIMITED"),
+        ] {
+            let host = Host::new();
+            let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
+                Arc::new(GatewayFailureModel { code, reason }), Arc::new(NoTools), host.clone()).unwrap();
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            let failure = terminal(&mut events).await;
+            let AgentStreamEvent::Error(failure) = failure else { panic!("a model error must end as a failed Turn"); };
+            assert_eq!(serde_json::to_value(failure.code).unwrap(), agent_code);
+            assert_eq!(failure.provider_diagnostic.as_ref().unwrap().reason, reason);
+            assert!(failure.detail.is_none());
+            assert_eq!(failure.retryable, Some(false));
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "failure follows cleanup");
+            assert!(host.events.lock().unwrap().iter().any(|event| matches!(event,
+                AgentEngineEvent::TurnFailed { failure: Some(nomifun_agent_runtime::AgentTurnFailure::Model { code: recorded, .. }), .. }
+                    if recorded == &code)));
+            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnPaused { .. })));
+            assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+            assert!(runtime.is_transport_healthy());
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_model_response_keeps_partial_output_and_finishes_the_failed_turn() {
+        struct InterruptedModel;
+        #[async_trait]
+        impl AgentModelPort for InterruptedModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ChatModelEvent::OutputTextDelta { text: "Completed work remains available.".into() }),
+                    Err(ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
+                        "original temporary provider failure", nomifun_chat_model_broker::ChatRetryDirective::Never)),
+                ])))
+            }
+        }
+        let host = Host::new();
+        let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
+            Arc::new(InterruptedModel), Arc::new(NoTools), host.clone()).unwrap();
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        let AgentStreamEvent::Error(error) = terminal(&mut events).await else { panic!("terminal failure expected"); };
+        assert_eq!(error.code, Some(nomifun_api_types::AgentErrorCode::UserLlmProviderUnavailable));
+        assert!(error.detail.is_none(), "opaque provider prose is not an approved public diagnostic");
+        assert!(!error.message.contains("original temporary provider failure"));
+        let recorded = host.events.lock().unwrap();
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::OutputTextDelta { text, .. }
+            if text == "Completed work remains available.")));
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { model_steps: 1, .. })));
+        assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnPaused { .. })));
+        drop(recorded);
+        assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_plan_change_is_published_only_after_its_canonical_record() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            thinking_step: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        let mut plan = nomifun_agent_runtime::AgentPlan::default();
+        plan.revision = 1;
+        plan.steps.push(nomifun_agent_runtime::AgentPlanStep {
+            step: "Verify".into(), status: nomifun_agent_runtime::AgentPlanStatus::Blocked,
+        });
+        let event = AgentEngineEvent::PlanUpdated { plan };
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(event.clone()).await.is_err());
+        assert!(host.events.lock().unwrap().is_empty());
+        assert!(events.try_recv().is_err(), "uncommitted progress must not be broadcast");
+        host.fail_record.store(false, Ordering::Release);
+        projection.emit(event.clone()).await.unwrap();
+        assert_eq!(host.events.lock().unwrap().as_slice(), &[event]);
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::TaskPlanChanged));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn thinking_completes_before_committed_public_text_without_completing_the_turn() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        projection.emit(AgentEngineEvent::ReasoningDelta {
+            step: 1, text: "Inspect the workspace".into(),
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(running) = events.try_recv().unwrap() else {
+            panic!("expected thinking delta");
+        };
+        assert_eq!(running.step, Some(1));
+        assert_eq!(running.status.as_deref(), Some("thinking"));
+
+        let text = AgentEngineEvent::OutputTextDelta { step: 1, text: "I will inspect the files.".into() };
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(text.clone()).await.is_err());
+        assert!(events.try_recv().is_err(), "uncommitted text must not close reasoning");
+        host.fail_record.store(false, Ordering::Release);
+        projection.emit(text).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected reasoning completion before text");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(completed.content.is_empty());
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
+        assert!(events.try_recv().is_err());
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "More progress".into() }).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
+        assert!(events.try_recv().is_err(), "reasoning completion is emitted once per active phase");
+    }
+
+    #[tokio::test]
+    async fn thinking_completion_tracks_tool_handoffs_and_model_step_changes() {
+        use nomifun_agent_contracts::StrictJsonValue;
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host, message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Read the source".into() }).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Thinking(_)));
+        projection.emit(AgentEngineEvent::ToolCallCompleted {
+            step: 1,
+            call: ChatToolCall {
+                call_id: ToolCallId::from("read-source"), name: "read_file".into(),
+                arguments: StrictJsonValue(serde_json::json!({"path":"README.md"})), provider_metadata: None,
+            },
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected reasoning completion at the tool handoff");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(events.try_recv().is_err());
+
+        // Providers can expose another reasoning phase within the same step.
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the next detail".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(reopened) = events.try_recv().unwrap() else {
+            panic!("expected new reasoning phase");
+        };
+        assert_eq!(reopened.step, Some(1));
+        assert_eq!(reopened.status.as_deref(), Some("thinking"));
+        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2, operation_id: OperationId::from("model:2") }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected old step completion before the new model step");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "Verify the result".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(next) = events.try_recv().unwrap() else {
+            panic!("expected next step reasoning");
+        };
+        assert_eq!(next.step, Some(2));
+        assert_eq!(next.status.as_deref(), Some("thinking"));
+
+        let model_operation_id = OperationId::from("model:2");
+        let task = tokio::spawn(async {});
+        let task_id = task.id().to_string();
+        task.await.unwrap();
+        projection.emit(AgentEngineEvent::VoiceModelStepSuperseded {
+            step: 2,
+            model_operation_id: model_operation_id.clone(),
+            steering_receipt_ids: vec!["voice-steer".into()],
+            discarded_tool_call_ids: vec![],
+            cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt {
+                operation_id: model_operation_id,
+                task_id,
+                stage: nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,
+                outcome: nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined,
+            },
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected withdrawn voice model step to close its reasoning");
+        };
+        assert_eq!(completed.step, Some(2));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(events.try_recv().is_err());
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 3, text: "Use the corrected input".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(corrected) = events.try_recv().unwrap() else {
+            panic!("expected reasoning from the replacement model step");
+        };
+        assert_eq!(corrected.step, Some(3));
+        assert_eq!(corrected.status.as_deref(), Some("thinking"));
+        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 3 }).await.unwrap();
+        assert!(events.try_recv().is_err(), "deferred terminal must not publish before the owner receipt");
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn tool_projection_retains_call_identity_arguments_and_error_outcome() {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(false, false));
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(),
+            message: message(),
+            output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()),
+            thinking_step: Mutex::new(None),
+            terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        let call_id = ToolCallId::from("tool-call");
+        projection
+            .emit(AgentEngineEvent::ToolCallCompleted {
+                step: 1,
+                call: ChatToolCall {
+                    call_id: call_id.clone(),
+                    name: "read_file".to_owned(),
+                    arguments: StrictJsonValue(serde_json::json!({"path": "README.md"})),
+                    provider_metadata: None,
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "completed arguments alone do not prove tool execution"
+        );
+        projection
+            .emit(AgentEngineEvent::ToolStarted {
+                step: 1,
+                call_id: call_id.clone(),
+                capability_id: CapabilityId::from("workspace.files"),
+                action_id: ActionId::from("workspace.files/read"),
+            })
+            .await
+            .unwrap();
+        let AgentStreamEvent::ToolCall(started) = events.recv().await.unwrap() else {
+            panic!("expected tool start");
+        };
+        assert_eq!(started.status, ToolCallStatus::Running);
+        assert_eq!(started.args["path"], "README.md");
+        assert_eq!(started.identity.capability_id.as_deref(), Some("workspace.files"));
+        assert_eq!(started.identity.action_id.as_deref(), Some("workspace.files/read"));
+        projection
+            .emit(AgentEngineEvent::ToolCompleted {
+                step: 1,
+                result: AgentToolResult::text(call_id, "file unavailable", true),
+            })
+            .await
+            .unwrap();
+        let AgentStreamEvent::ToolCall(completed) = events.recv().await.unwrap() else {
+            panic!("expected tool result");
+        };
+        assert_eq!(completed.call_id, started.call_id);
+        assert_eq!(completed.name, started.name);
+        assert_eq!(completed.identity.capability_id, started.identity.capability_id);
+        assert_eq!(completed.identity.action_id, started.identity.action_id);
+        assert_eq!(completed.args, started.args);
+        assert_eq!(completed.status, ToolCallStatus::Error);
+        assert_eq!(completed.output.as_deref(), Some("file unavailable"));
+        assert_eq!(host.events.lock().unwrap().len(), 3);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn internal_instruction_read_failure_is_recorded_without_a_chat_tool_row() {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(false, false));
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(),
+            message: message(),
+            output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()),
+            thinking_step: Mutex::new(None),
+            terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        let call_id = ToolCallId::from("agent-instructions:100");
+        projection.emit(AgentEngineEvent::ToolCallCompleted {
+            step: 0,
+            call: ChatToolCall {
+                call_id: call_id.clone(),
+                name: "read_file".into(),
+                arguments: StrictJsonValue(serde_json::json!({"format":"instruction_scope","path":"."})),
+                provider_metadata: None,
+            },
+        }).await.unwrap();
+        projection.emit(AgentEngineEvent::ToolStarted {
+            step: 0,
+            call_id: call_id.clone(),
+            capability_id: CapabilityId::from("workspace.files"),
+            action_id: ActionId::from("workspace.files/read"),
+        }).await.unwrap();
+        projection.emit(AgentEngineEvent::ToolCompleted {
+            step: 0,
+            result: AgentToolResult::text(call_id, "instruction discovery failed", true),
+        }).await.unwrap();
+
+        assert!(events.try_recv().is_err());
+        assert_eq!(host.events.lock().unwrap().len(), 3);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_delivery_obligation_cannot_be_satisfied_by_final_model_text() {
+        let host=Host::new();
+        host.block_completion.store(true,Ordering::Release);
+        let runtime=runtime(host.clone(),model(false,false));
+        let mut events=runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        assert!(matches!(terminal(&mut events).await,AgentStreamEvent::Finish(data)
+            if data.stop_reason==Some(TurnStopReason::Paused)));
+        runtime.cancel().await.unwrap();
+        let recorded=host.events.lock().unwrap();
+        assert!(!recorded.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..})));
+        assert!(recorded.iter().any(|event|matches!(event,
+            AgentEngineEvent::TurnPaused {reason,..} if reason=="PLUGIN_DELIVERY_REQUIRED")));
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire),1);
+        drop(recorded);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_turn_publishes_terminal_after_owner_cleanup_and_teardown_is_idempotent() {
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(false, false));
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        assert!(
+            matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::EndTurn))
+        );
+        runtime.cancel().await.unwrap(); // waits for the owned turn task, even after terminal publication
+        runtime.send_message(message()).await.unwrap();
+        assert!(matches!(
+            terminal(&mut events).await,
+            AgentStreamEvent::Finish(_)
+        ));
+        runtime.kill_and_wait(None).await.unwrap();
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 2);
+        assert_eq!(host.cleanup_sessions.load(Ordering::Acquire), 1);
+        assert!(!runtime.is_transport_healthy());
+        assert!(runtime.send_message(message()).await.is_err());
+        assert_eq!(
+            host.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, AgentEngineEvent::OutputTextDelta { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_covers_owner_preparation_and_model_open_without_killing_session() {
+        for preparation in [true, false] {
+            let host = Host::new();
+            host.pending_preparation
+                .store(preparation, Ordering::Release);
+            let model = model(true, false);
+            let runtime = runtime(host.clone(), model.clone());
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                if preparation {
+                    host.entered.notified().await;
+                } else {
+                    model.opened.notified().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(runtime.send_message(message()).await.is_err());
+            tokio::time::timeout(Duration::from_secs(3), runtime.cancel())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Cancelled))
+            );
+            assert!(runtime.is_transport_healthy());
+            let recorded = host.events.lock().unwrap();
+            let expected = if preparation { 0 } else { 1 };
+            assert_eq!(recorded.iter().filter_map(|event| match event {
+                AgentEngineEvent::TurnCancelled { model_steps } => Some(*model_steps), _ => None,
+            }).collect::<Vec<_>>(), vec![expected], "cancellation must retain admitted model progress");
+            drop(recorded);
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_model_continuation_retains_both_recorded_steps() {
+        struct ContinueThenWait { opened: AtomicUsize, waiting: tokio::sync::Notify }
+        #[async_trait]
+        impl AgentModelPort for ContinueThenWait {
+            async fn open_stream(&self, _request: ChatModelRequest, _cancellation: CancellationToken)
+                -> Result<AgentModelStream, ChatModelError> {
+                if self.opened.fetch_add(1, Ordering::AcqRel) == 0 {
+                    return Ok(Box::pin(futures_util::stream::iter(vec![
+                        Ok(ChatModelEvent::OutputTextDelta { text:"partial reply".into() }),
+                        Ok(ChatModelEvent::Completed { finish_reason:ChatFinishReason::MaxOutputTokens }),
+                    ])));
+                }
+                self.waiting.notify_one();
+                std::future::pending().await
+            }
+        }
+        let host = Host::new();
+        let model = Arc::new(ContinueThenWait { opened:AtomicUsize::new(0),waiting:tokio::sync::Notify::new() });
+        let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(), model.clone(), Arc::new(NoTools), host.clone()).unwrap();
+        let mut stream = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), model.waiting.notified()).await.unwrap();
+        runtime.cancel().await.unwrap();
+        assert!(matches!(terminal(&mut stream).await, AgentStreamEvent::Finish(data)
+            if data.stop_reason == Some(TurnStopReason::Cancelled)));
+        let recorded = host.events.lock().unwrap();
+        assert_eq!(recorded.iter().filter_map(|event| match event {
+            AgentEngineEvent::ModelStepStarted { step,.. } => Some(*step), _ => None,
+        }).collect::<Vec<_>>(), vec![1,2]);
+        assert_eq!(recorded.iter().filter_map(|event| match event {
+            AgentEngineEvent::TurnCancelled { model_steps } => Some(*model_steps), _ => None,
+        }).collect::<Vec<_>>(), vec![2]);
+        drop(recorded);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_the_first_driver_poll_still_cleans_and_records_terminal() {
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(true, false));
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        runtime.cancel().await.unwrap();
+        assert!(matches!(
+            terminal(&mut events).await,
+            AgentStreamEvent::Finish(data)
+                if data.stop_reason == Some(TurnStopReason::Cancelled)
+        ));
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1);
+        assert!(host.events.lock().unwrap().iter().any(|event|
+            matches!(event, AgentEngineEvent::TurnCancelled { .. })));
+        assert!(runtime.is_transport_healthy());
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_pre_active_preparation_failure_cleans_and_records_one_terminal() {
+        for stage in 0..6 {
+            let host = Host::new();
+            host.prepare_failure_at.store(stage, Ordering::Release);
+            let runtime = runtime(host.clone(), model(false, false));
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Error(_)));
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "stage {stage}");
+            assert_eq!(
+                host.events.lock().unwrap().iter().filter(|event|
+                    matches!(event, AgentEngineEvent::TurnFailed { .. })).count(),
+                1,
+                "stage {stage}",
+            );
+            assert!(runtime.is_transport_healthy(), "stage {stage}");
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_and_teardown_wait_for_owner_proof_even_if_waiter_is_dropped() {
+        let host = Host::new();
+        host.block_cleanup.store(true, Ordering::Release);
+        let runtime = runtime(host.clone(), model(false, false));
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), host.cleanup_entered.notified())
+            .await
+            .unwrap();
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                event,
+                AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)
+            ));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), runtime.kill_and_wait(None))
+                .await
+                .is_err()
+        );
+        assert_eq!(host.cleanup_sessions.load(Ordering::Acquire), 0);
+        assert!(runtime.send_message(message()).await.is_err());
+        host.cleanup_release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(3), runtime.kill_and_wait(None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.cleanup_sessions.load(Ordering::Acquire), 1);
+        assert!(
+            matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Cancelled))
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_panic_is_terminal_and_still_cleans_up() {
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(false, true));
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        assert!(matches!(
+            terminal(&mut events).await,
+            AgentStreamEvent::Error(_)
+        ));
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn session_pool_retains_official_driver_quarantine_until_real_owner_cleanup_succeeds() {
+        let host = Host::new();
+        host.fail_cleanup.store(true, Ordering::Release);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let host_capture = host.clone();
+        let calls_capture = calls.clone();
+        let factory: OfficialRuntimeOpener = Arc::new(move |_| {
+            let host = host_capture.clone();
+            calls_capture.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(AgentRuntimeHandle::Official(Arc::new(runtime(
+                    host,
+                    model(false, false),
+                ))))
+            })
+        });
+        let registry = InMemoryAgentRuntimeSessions::new(factory);
+        let handle = registry
+            .get_or_create_runtime(SESSION, options())
+            .await
+            .unwrap();
+        let mut events = handle.subscribe();
+        handle.send_message(message()).await.unwrap();
+        assert!(matches!(
+            terminal(&mut events).await,
+            AgentStreamEvent::Error(_)
+        ));
+        assert!(
+            registry
+                .terminate_and_wait_result(SESSION, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .get_or_create_runtime(SESSION, options())
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        host.fail_cleanup.store(false, Ordering::Release);
+        registry
+            .terminate_and_wait_result(SESSION, None)
+            .await
+            .unwrap();
+    }
+
+}

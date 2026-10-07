@@ -28,7 +28,7 @@ const SOURCE_EXTENSIONS = new Set([
 // Collaboration has one runtime aggregate: AgentExecution. These terms are
 // retired as active product, API, configuration, path, and code identities.
 const RETIRED_TERM =
-  /orchestrat|sub[-_ ]?agent|agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
+  /agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
 
 // These exact implementation and wire identities previously exposed two
 // delegation stacks to configuration/model callers. Internal deployment
@@ -55,13 +55,6 @@ const LEGACY_LINE_ALLOWLIST = new Map([
     [/smart_orchestration/],
   ],
   [
-    // SkillHub third-party package wire format: `orchestration:` is an
-    // external frontmatter key this parser must read (and a metadata field
-    // name to exclude from installable slugs). Not a product identity.
-    'crates/backend/nomifun-extension/src/market/package.rs',
-    [/^\s*"orchestration",$/, /root\.get\("orchestration"\)/, /\\norchestration:/],
-  ],
-  [
     // Same external SkillHub metadata-field list on the UI side.
     'ui/src/renderer/pages/settings/PresetSettings/PresetPackageMarketSettings.tsx',
     [/^\s*'orchestration',$/],
@@ -69,10 +62,6 @@ const LEGACY_LINE_ALLOWLIST = new Map([
   [
     'crates/backend/nomifun-companion/src/profile.rs',
     [/smart_orchestration/],
-  ],
-  [
-    'crates/backend/nomifun-conversation/src/service.rs',
-    [/\bagent_cluster_mode\b/, /\borchestrator_(?:legacy_identity|role)\b/, /key\.starts_with\("orchestrator_"\)/],
   ],
   [
     'crates/backend/nomifun-gateway/src/registry/mod.rs',
@@ -114,6 +103,7 @@ function workspacePaths() {
       'crates',
       'apps',
       'ui/src',
+      'ui/test',
       'scripts',
       'docs/architecture',
       'docs/guides',
@@ -145,7 +135,9 @@ function isAllowedLegacyFence(path, line) {
 const violations = [];
 for (const path of workspacePaths()) {
   const absolute = resolve(ROOT, path);
-  if (!existsSync(absolute) || isExcluded(path)) continue;
+  if (!existsSync(absolute) || path === SELF) continue;
+
+  if (isExcluded(path)) continue;
 
   if (RETIRED_TERM.test(path) || RETIRED_EXACT_IDENTITY.test(path)) {
     violations.push(`${path}: retired collaboration identity in active path`);
@@ -188,9 +180,20 @@ for (const retiredSample of [
     `retired-identity scanner must reject embedded form ${retiredSample}`,
   );
 }
+for (const activeSample of [
+  'subagent.send',
+  'subagent.spawn',
+  'subagents',
+  'orchestration',
+]) {
+  invariant(
+    !RETIRED_TERM.test(activeSample) && !RETIRED_EXACT_IDENTITY.test(activeSample),
+    `active Codex/AgentExecution vocabulary must remain allowed: ${activeSample}`,
+  );
+}
 invariant(
-  !RETIRED_EXACT_IDENTITY.test('AgentRuntimeRegistry'),
-  'retired config-key scanner must not reject the legitimate Agent runtime type family',
+  !RETIRED_EXACT_IDENTITY.test('AgentRuntimeSessions'),
+  'retired config-key scanner must not reject the official Runtime Session owner',
 );
 
 function sorted(values) {
@@ -202,7 +205,7 @@ function sorted(values) {
 // on a long Rust test run, so concept/schema drift fails the ordinary fast
 // `check` command immediately.
 const canonicalMigration = readFileSync(
-  resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_v3_baseline.sql'),
+  resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql'),
   'utf8',
 );
 
@@ -211,7 +214,7 @@ const migrationDirectory = resolve(
   'crates/backend/nomifun-db/migrations',
 );
 const nonBaselineExecutionCreates = readdirSync(migrationDirectory)
-  .filter((name) => name.endsWith('.sql') && name !== '001_v3_baseline.sql')
+  .filter((name) => name.endsWith('.sql') && name !== '001_canonical_baseline.sql')
   .flatMap((name) => {
     const source = readFileSync(resolve(migrationDirectory, name), 'utf8');
     return [...source.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([a-z_]+)/gi)]

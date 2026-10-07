@@ -23,8 +23,8 @@ describe('CreateCreativeTextAssetModal contract', () => {
     expect(source.includes('useState(')).toBe(false);
   });
 
-  test('includes title content collection tags and library fields without transport calls', () => {
-    for (const field of ['value.title', 'value.textContent', 'value.collection', 'value.tags', 'value.inLibrary']) {
+  test('includes title content collection tags fields without transport calls', () => {
+    for (const field of ['value.title', 'value.textContent', 'value.collection', 'value.tags']) {
       expect(source.includes(field)).toBe(true);
     }
     expect(source.includes('httpRequest(')).toBe(false);

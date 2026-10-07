@@ -30,6 +30,10 @@ export type EntityKind =
   | 'knowledge-binding'
   | 'provider'
   | 'agent'
+  | 'agent-preset'
+  | 'agent-session'
+  | 'remote-binding'
+  | 'resolved-snapshot'
   | 'preset'
   | 'preset-tag'
   | 'message'
@@ -51,6 +55,7 @@ export type EntityKind =
   | 'companion-evolution-feedback'
   | 'cs-agent'
   | 'cs-dialogue'
+  | 'cs-handoff'
   | 'cs-message'
   | 'cs-note'
   | 'channel-plugin'
@@ -60,7 +65,6 @@ export type EntityKind =
   | 'preview-snapshot'
   | 'conversation-artifact'
   | 'mcp-server'
-  | 'idmm-intervention'
   | 'requirement'
   | 'persisted-artifact'
   | 'user'
@@ -68,13 +72,11 @@ export type EntityKind =
   | 'creation-task'
   | 'creative-studio-project'
   | 'creative-studio-node'
-  | 'creative-studio-connection'
-  | 'miniapp';
+  | 'creative-studio-connection';
 
 export type ConversationId = EntityId<'conversation'>;
 export type TerminalId = EntityId<'terminal'>;
 export type RequirementId = EntityId<'requirement'>;
-export type ConversationArtifactId = EntityId<'conversation-artifact'>;
 export type McpServerId = EntityId<'mcp-server'>;
 export type RemoteAgentId = EntityId<'remote-agent'>;
 export type SshHostId = EntityId<'ssh-host'>;
@@ -83,11 +85,12 @@ export type KnowledgeBaseId = EntityId<'knowledge-base'>;
 export type KnowledgeEntryId = EntityId<'knowledge-entry'>;
 export type KnowledgeSourceId = EntityId<'knowledge-source'>;
 export type KnowledgeSourceItemId = EntityId<'knowledge-source-item'>;
-export type KnowledgeBindingId = EntityId<'knowledge-binding'>;
 export type ProviderId = EntityId<'provider'>;
 export type AgentId = EntityId<'agent'>;
-export type PresetId = EntityId<'preset'>;
-export type PresetTagId = EntityId<'preset-tag'>;
+export type AgentPresetId = EntityId<'agent-preset'>;
+export type AgentSessionId = EntityId<'agent-session'>;
+export type RemoteBindingId = EntityId<'remote-binding'>;
+export type ResolvedSnapshotId = EntityId<'resolved-snapshot'>;
 export type MessageId = EntityId<'message'>;
 export type CronJobId = EntityId<'cron-job'>;
 export type CronJobRunId = EntityId<'cron-job-run'>;
@@ -107,6 +110,7 @@ export type FigureId = EntityId<'figure'>;
 export type CompanionEvolutionFeedbackId = EntityId<'companion-evolution-feedback'>;
 export type CsAgentId = EntityId<'cs-agent'>;
 export type CsDialogueId = EntityId<'cs-dialogue'>;
+export type CsHandoffId = EntityId<'cs-handoff'>;
 export type CsMessageId = EntityId<'cs-message'>;
 export type CsNoteId = EntityId<'cs-note'>;
 export type ChannelPluginId = EntityId<'channel-plugin'>;
@@ -115,15 +119,12 @@ export type ChannelSessionId = EntityId<'channel-session'>;
 export type AttachmentId = EntityId<'attachment'>;
 export type PreviewSnapshotId = EntityId<'preview-snapshot'>;
 export type PersistedArtifactId = EntityId<'persisted-artifact'>;
-export type IdmmInterventionId = EntityId<'idmm-intervention'>;
 export type UserId = EntityId<'user'>;
 export type AssetId = EntityId<'asset'>;
 export type CreationTaskId = EntityId<'creation-task'>;
 export type CreativeStudioProjectId = EntityId<'creative-studio-project'>;
 export type CreativeStudioNodeId = EntityId<'creative-studio-node'>;
 export type CreativeStudioConnectionId = EntityId<'creative-studio-connection'>;
-export type MiniAppId = EntityId<'miniapp'>;
-
 export class InvalidEntityIdError extends TypeError {
   readonly entityKind: string;
   readonly value: unknown;
@@ -138,8 +139,10 @@ export class InvalidEntityIdError extends TypeError {
   }
 }
 
+// `(?![\s\S])` is an absolute end-of-input assertion. JavaScript's `$` also
+// matches immediately before a final newline, which is not canonical here.
 export const CANONICAL_UUID_V7 =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])/;
 
 /**
  * Strictly validates a stable business ID received at a wire or storage
@@ -174,8 +177,6 @@ export const parseConversationId = (value: unknown): ConversationId =>
 export const parseTerminalId = (value: unknown): TerminalId => parseEntityId('terminal', value);
 export const parseRequirementId = (value: unknown): RequirementId =>
   parseEntityId('requirement', value);
-export const parseConversationArtifactId = (value: unknown): ConversationArtifactId =>
-  parseEntityId('conversation-artifact', value);
 export const parseMcpServerId = (value: unknown): McpServerId =>
   parseEntityId('mcp-server', value);
 export const parseRemoteAgentId = (value: unknown): RemoteAgentId =>
@@ -191,13 +192,10 @@ export const parseKnowledgeSourceId = (value: unknown): KnowledgeSourceId =>
   parseEntityId('knowledge-source', value);
 export const parseKnowledgeSourceItemId = (value: unknown): KnowledgeSourceItemId =>
   parseEntityId('knowledge-source-item', value);
-export const parseKnowledgeBindingId = (value: unknown): KnowledgeBindingId =>
-  parseEntityId('knowledge-binding', value);
 export const parseProviderId = (value: unknown): ProviderId => parseEntityId('provider', value);
 export const parseAgentId = (value: unknown): AgentId => parseEntityId('agent', value);
-export const parsePresetId = (value: unknown): PresetId => parseEntityId('preset', value);
-export const parsePresetTagId = (value: unknown): PresetTagId =>
-  parseEntityId('preset-tag', value);
+export const parseAgentPresetId = (value: unknown): AgentPresetId =>
+  parseEntityId('agent-preset', value);
 export const parseMessageId = (value: unknown): MessageId => parseEntityId('message', value);
 export const parseCronJobId = (value: unknown): CronJobId => parseEntityId('cron-job', value);
 export const parseCronJobRunId = (value: unknown): CronJobRunId =>
@@ -233,6 +231,8 @@ export const parseCsAgentId = (value: unknown): CsAgentId =>
   parseEntityId('cs-agent', value);
 export const parseCsDialogueId = (value: unknown): CsDialogueId =>
   parseEntityId('cs-dialogue', value);
+export const parseCsHandoffId = (value: unknown): CsHandoffId =>
+  parseEntityId('cs-handoff', value);
 export const parseCsMessageId = (value: unknown): CsMessageId =>
   parseEntityId('cs-message', value);
 export const parseCsNoteId = (value: unknown): CsNoteId =>
@@ -249,8 +249,6 @@ export const parsePreviewSnapshotId = (value: unknown): PreviewSnapshotId =>
   parseEntityId('preview-snapshot', value);
 export const parsePersistedArtifactId = (value: unknown): PersistedArtifactId =>
   parseEntityId('persisted-artifact', value);
-export const parseIdmmInterventionId = (value: unknown): IdmmInterventionId =>
-  parseEntityId('idmm-intervention', value);
 export const parseUserId = (value: unknown): UserId => parseEntityId('user', value);
 export const parseAssetId = (value: unknown): AssetId => parseEntityId('asset', value);
 export const parseCreationTaskId = (value: unknown): CreationTaskId =>
@@ -261,8 +259,6 @@ export const parseCreativeStudioNodeId = (value: unknown): CreativeStudioNodeId 
   parseEntityId('creative-studio-node', value);
 export const parseCreativeStudioConnectionId = (value: unknown): CreativeStudioConnectionId =>
   parseEntityId('creative-studio-connection', value);
-export const parseMiniAppId = (value: unknown): MiniAppId => parseEntityId('miniapp', value);
-
 export type SessionTarget =
   | { readonly kind: 'conversation'; readonly id: ConversationId }
   | { readonly kind: 'terminal'; readonly id: TerminalId };

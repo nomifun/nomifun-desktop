@@ -1,0 +1,8695 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use futures::StreamExt;
+use nomifun_agent_contracts::{AgentSessionId, OperationId, PrincipalRef};
+use nomifun_chat_model_broker::{
+    ChatContentPart, ChatFinishReason, ChatMessage, ChatModelErrorCode, ChatModelEvent,
+    ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice, ProviderRoundId, ToolCallId,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::engine::EngineBinding;
+use crate::context::{AgentContextAssembler, AgentContextBudget};
+use crate::error::AgentEngineError;
+use crate::events::{AgentEngineEvent, AgentEventSink};
+use crate::model::AgentModelPort;
+use crate::AgentExecutionPhase;
+use crate::tool::{
+    invocation_for, parse_completed_arguments, validate_tool_argument_size, AgentEffectClass,
+    AgentToolInvoker, AgentToolPlan, AgentToolResult, ToolBatchDisposition,
+};
+
+const DEFAULT_MAX_MODEL_STEPS: u16 = 32;
+const CODING_MAX_MODEL_STEPS: u16 = 64;
+const MAX_CALLS_PER_STEP: usize = 64;
+
+#[derive(Clone, Debug)]
+pub struct AgentTurnRequest {
+    pub model_request: ChatModelRequest,
+    pub tool_plan: AgentToolPlan,
+    pub principal: PrincipalRef,
+    /// Platform-supplied compatibility generation for the frozen enabled set.
+    /// The runtime loop never changes it or the admitted tool plan.
+    pub active_set_generation: u64,
+    pub max_model_steps: u16,
+    /// Optional host policy. Without it the legacy explicit step cap remains
+    /// a hard Turn limit; automatic renewal requires a durable event sink.
+    pub segment_policy: Option<crate::AgentSegmentPolicy>,
+    pub model_budget: crate::AgentModelBudget,
+    pub context_resources: Arc<BTreeMap<String, crate::AgentContextResource>>,
+    /// Host-admitted for this turn; false unless both vision authority and the
+    /// frozen primary model route support images (Skill/workspace readers).
+    /// Broker revalidates on send.
+    pub context_image_input: bool,
+    /// The host must set this when tool middleware can mutate beyond the
+    /// declared action. Such calls cannot preserve unrelated file evidence.
+    pub unscoped_tool_hooks: bool,
+    pub input_port: Option<Arc<dyn crate::AgentInputPort>>,
+    /// Strict opt-in, supplied only for an explicitly voice-started Turn.
+    pub voice_immediate: Option<Arc<dyn crate::AgentImmediateCorrectionPort>>,
+    pub live_context_port: Option<Arc<dyn crate::AgentLiveContextPort>>,
+    pub resource_port: Option<Arc<dyn nomifun_engine_core::EngineResourcePort>>,
+    pub tool_discovery_port: Option<Arc<dyn crate::AgentToolDiscoveryPort>>,
+    pub history_port: Option<Arc<dyn crate::AgentHistoryPort>>,
+    /// Canonical latest closed task, not a checkpoint or live execution state.
+    pub prior_task: Option<crate::AgentPriorTask>,
+    /// Host-loaded permanent engine state, independent of the history window.
+    pub patch_recovery: crate::AgentPatchRecoveryState,
+    pub recovery: Option<Arc<crate::AgentTurnRecovery>>,
+}
+
+impl AgentTurnRequest {
+    pub fn new(
+        model_request: ChatModelRequest,
+        tool_plan: AgentToolPlan,
+        principal: PrincipalRef,
+        active_set_generation: u64,
+    ) -> Self {
+        let coding_workflow = tool_plan.model_name_for_action(
+            "workspace.process", "workspace.process/exec",
+        ).is_some() && (
+            tool_plan.model_name_for_action("workspace.files", "workspace.files/write").is_some()
+                || tool_plan.model_name_for_action("workspace.files", "workspace.files/patch").is_some()
+        );
+        Self {
+            model_request,
+            tool_plan,
+            principal,
+            active_set_generation,
+            max_model_steps: if coding_workflow { CODING_MAX_MODEL_STEPS } else { DEFAULT_MAX_MODEL_STEPS },
+            segment_policy: None,
+            model_budget: crate::AgentModelBudget::default(),
+            context_resources: Arc::default(),
+            context_image_input: false,
+            unscoped_tool_hooks: false,
+            input_port: None,
+            voice_immediate: None,
+            live_context_port: None,
+            resource_port: None,
+            tool_discovery_port: None,
+            history_port: None,
+            prior_task: None,
+            patch_recovery: Default::default(),
+            recovery: None,
+        }
+    }
+
+    pub fn with_max_model_steps(mut self, max_model_steps: u16) -> Self {
+        self.max_model_steps = max_model_steps;
+        self
+    }
+
+    pub fn with_execution_segments(mut self, policy: crate::AgentSegmentPolicy) -> Self {
+        self.segment_policy = Some(policy);
+        self
+    }
+
+    pub fn with_model_budget(mut self, budget: crate::AgentModelBudget) -> Self {
+        self.model_budget = budget;
+        self
+    }
+
+    pub fn with_input_port(mut self, port: Arc<dyn crate::AgentInputPort>) -> Self {
+        self.input_port = Some(port);
+        self
+    }
+
+    pub fn with_voice_immediate_correction(mut self, port: Arc<dyn crate::AgentImmediateCorrectionPort>) -> Self {
+        self.voice_immediate = Some(port);
+        self
+    }
+
+    pub fn with_live_context_port(mut self, port: Arc<dyn crate::AgentLiveContextPort>) -> Self {
+        self.live_context_port = Some(port);
+        self
+    }
+
+    pub fn with_prior_task(mut self, prior_task: Option<crate::AgentPriorTask>) -> Self {
+        self.prior_task = prior_task;
+        self
+    }
+
+    pub fn with_patch_recovery(mut self, state: crate::AgentPatchRecoveryState) -> Self {
+        self.patch_recovery = state;
+        self
+    }
+
+    pub fn with_recovery(mut self, recovery: crate::AgentTurnRecovery) -> Self {
+        self.recovery = Some(Arc::new(recovery));
+        self.prior_task = None;
+        self
+    }
+
+    pub fn with_context_resources(mut self, resources: Arc<BTreeMap<String, crate::AgentContextResource>>) -> Self {
+        self.context_resources = resources;
+        self
+    }
+
+    pub fn with_resource_port(mut self, port: Arc<dyn nomifun_engine_core::EngineResourcePort>) -> Self {
+        self.resource_port = Some(port);
+        self
+    }
+
+    pub fn with_tool_discovery_port(
+        mut self,
+        port: Arc<dyn crate::AgentToolDiscoveryPort>,
+    ) -> Self {
+        self.tool_discovery_port = Some(port);
+        self
+    }
+
+    pub fn with_context_image_input(mut self, allowed: bool) -> Self {
+        self.context_image_input = allowed;
+        self
+    }
+
+    pub fn with_history_port(mut self, port: Arc<dyn crate::AgentHistoryPort>) -> Self {
+        self.history_port = Some(port);
+        self
+    }
+
+    fn validate_for(
+        &self,
+        binding: &EngineBinding,
+    ) -> Result<(), AgentEngineError> {
+        if self.max_model_steps == 0 {
+            return Err(AgentEngineError::InvalidContract(
+                "max_model_steps must be greater than zero".to_owned(),
+            ));
+        }
+        if let Some(policy) = self.segment_policy { policy.validate(self.max_model_steps)?; }
+        if self.model_request.causality.agent_session_id.as_ref().is_empty() {
+            return Err(AgentEngineError::InvalidContract(
+                "model request must identify an AgentSession".to_owned(),
+            ));
+        }
+        if self.principal.principal_id.trim().is_empty()
+            || self.principal.principal_kind.trim().is_empty()
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "Agent Runtime turn principal must be complete".to_owned(),
+            ));
+        }
+        if &self.model_request.causality.agent_session_id != binding.agent_session_id() {
+            return Err(AgentEngineError::TurnBindingMismatch {
+                field: "agent_session_id",
+            });
+        }
+        if &self.model_request.causality.resolved_snapshot_ref != binding.resolved_snapshot_ref() {
+            return Err(AgentEngineError::TurnBindingMismatch {
+                field: "resolved_snapshot_ref",
+            });
+        }
+        if let Some(prior) = &self.prior_task {
+            prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
+        }
+        self.patch_recovery.validate()?;
+        if let Some(recovery) = &self.recovery {
+            recovery.validate_for(binding, &self.model_request.causality.turn_operation_id, self.active_set_generation)?;
+            if let Some(segments) = &recovery.checkpoint.segments {
+                if self.segment_policy != Some(segments.policy) || self.max_model_steps != segments.model_steps_per_segment {
+                    return Err(AgentEngineError::InvalidContract("recovery cannot change its admitted execution budget".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentTurnTerminal {
+    Completed { finish_reason: ChatFinishReason },
+    Cancelled,
+    Paused { reason: String },
+    Failed { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentTurnResult {
+    pub agent_session_id: AgentSessionId,
+    pub turn_operation_id: OperationId,
+    pub model_steps: u16,
+    pub output_text: String,
+    pub reasoning_text: String,
+    pub tool_call_count: u32,
+    pub provider_round_id: Option<ProviderRoundId>,
+    pub terminal: AgentTurnTerminal,
+}
+
+pub(crate) async fn run_turn(
+    binding: EngineBinding,
+    model: Arc<dyn AgentModelPort>,
+    tools: Arc<dyn AgentToolInvoker>,
+    event_sink: Arc<dyn AgentEventSink>,
+    mut request: AgentTurnRequest,
+    context_budget: AgentContextBudget,
+    cancellation: CancellationToken,
+) -> Result<AgentTurnResult, AgentEngineError> {
+    request.validate_for(&binding)?;
+    if request.voice_immediate.is_some() && request.input_port.is_none() {
+        return Err(AgentEngineError::InvalidContract("voice immediate correction requires the original receipt-backed input port".into()));
+    }
+    let model = request.voice_immediate.as_ref().map(|port| port.model_port()).unwrap_or(model);
+    let recovery = request.recovery.take();
+    let interrupted_delivery_review = recovery.as_ref().is_some_and(|state|
+        state.checkpoint.completion_review.delivery_pending && state.last_model_step > state.checkpoint.model_steps);
+    if request.segment_policy.is_some() && !event_sink.supports_checkpoints() {
+        return Err(AgentEngineError::InvalidContract("execution segments require durable checkpoints".into()));
+    }
+    let mut segments = match recovery.as_ref().and_then(|state| state.checkpoint.segments.clone()) {
+        Some(state) => Some(state),
+        None => request.segment_policy.map(|policy| crate::AgentExecutionSegmentState::new(request.max_model_steps, policy)).transpose()?,
+    };
+    let total_model_limit = segments.as_ref().map_or(request.max_model_steps, |state| state.total_model_limit());
+    let requirement = request.model_request.input.messages.last().cloned()
+        .ok_or_else(|| AgentEngineError::ContextAssembly("missing accepted requirement".into()))?;
+    if let Some(recovery) = &recovery {
+        request.model_request.input.messages.pop();
+        crate::history::replay_checkpoint_prefix(&mut request.model_request.input.messages, requirement.clone(), recovery)?;
+        request.model_request.input.messages.push(crate::recovery::notice());
+        request.model_request.input.provider_round_parent = None;
+        let mut targets = request.patch_recovery.targets.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        targets.extend(recovery.checkpoint.patch_recovery.targets.iter().cloned());
+        let mut unresolved = request.patch_recovery.unresolved_targets.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        unresolved.extend(recovery.checkpoint.patch_recovery.unresolved_targets.iter().cloned());
+        if request.patch_recovery.version == 1 { unresolved.extend(request.patch_recovery.targets.iter().cloned()); }
+        if recovery.checkpoint.patch_recovery.version == 1 {
+            unresolved.extend(recovery.checkpoint.patch_recovery.targets.iter().cloned());
+        }
+        request.patch_recovery.target_budget_exceeded |= recovery.checkpoint.patch_recovery.target_budget_exceeded
+            || targets.len() > 64 || unresolved.len() > 64;
+        request.patch_recovery.version = 2;
+        request.patch_recovery.targets = targets.into_iter().take(64).collect();
+        request.patch_recovery.unresolved_targets = unresolved.into_iter().take(64).collect();
+        request.patch_recovery.unresolved_before_input = (!request.patch_recovery.unresolved_targets.is_empty())
+            .then(|| request.patch_recovery.unresolved_before_input.into_iter()
+                .chain(recovery.checkpoint.patch_recovery.unresolved_before_input).max()).flatten();
+    }
+    request.model_budget = request.model_budget.for_request(request.model_request.input.max_output_tokens)?;
+    let mut context_lifecycle = crate::context_lifecycle::ContextLifecycle::new(request.model_budget, context_budget)?;
+    if let Some(recovery) = &recovery {
+        context_lifecycle.restore_accounting(recovery.prefix.iter().chain(&recovery.tail))?;
+    }
+
+    // Emit the root first so instruction reads have durable turn authority.
+    if let Some(recovery) = &recovery {
+        event_sink.emit(AgentEngineEvent::ExecutionResumed {
+            checkpoint_revision: recovery.checkpoint_revision, checkpoint_step: recovery.checkpoint.model_steps,
+            model_steps: recovery.last_model_step, execution_fence: recovery.execution_fence,
+            discarded_tool_call_ids: recovery.discarded_call_ids.clone(),
+        }).await?;
+    } else {
+        event_sink.emit(AgentEngineEvent::TurnStarted {
+            binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+        }).await?;
+    }
+    // Establish an empty/recovered boundary before preparation can issue
+    // instruction reads or compaction. A claim followed by a setup crash
+    // must not depend on eventually reaching the first model request.
+    if event_sink.supports_checkpoints() && !cancellation.is_cancelled() {
+        let mut initial = recovery.as_ref().map(|state| state.checkpoint.clone()).unwrap_or_else(|| crate::AgentExecutionCheckpoint {
+            version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+            active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
+            accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(),
+        });
+        if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
+        initial.validate()?;
+        event_sink.save_checkpoint(initial).await?;
+    }
+    event_sink.emit(AgentEngineEvent::ExecutionBudgetPrepared {
+        context_window_tokens: request.model_budget.context_window_tokens.unwrap_or(0),
+        max_output_tokens: request.model_budget.max_output_tokens,
+        max_model_steps: total_model_limit,
+    }).await?;
+    let mut adaptive = recovery.as_ref().map(|recovery| crate::adaptive::AdaptiveExecution::restore(&recovery.prefix, &request.tool_plan)).unwrap_or_default();
+    if recovery.as_ref().is_some_and(|recovery| recovery.checkpoint.tool_call_count > 0 || recovery.checkpoint.plan.revision > 0) {
+        adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES, crate::AgentRuntimeActivationReason::CheckpointRecovery, event_sink.as_ref()).await?;
+    }
+    let mut scoped_instructions = crate::workspace_context::ScopedInstructions::new(&request);
+    if let Some(recovery) = &recovery { scoped_instructions.restore_sequence(recovery.next_instruction_sequence); }
+    let mut patch_recovery = crate::patch_recovery::PatchRecovery::restore(&request.patch_recovery)?;
+    if request.prior_task.is_some() {
+        adaptive
+            .activate(
+                [crate::AgentRuntimeModule::TaskContinuation],
+                crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,
+                event_sink.as_ref(),
+            )
+            .await?;
+    }
+    if patch_recovery.pending() || patch_recovery.unresolved() {
+        adaptive
+            .activate(
+                crate::adaptive::LONG_HORIZON_MODULES
+                    .into_iter()
+                    .chain([crate::AgentRuntimeModule::PatchRecovery]),
+                crate::AgentRuntimeActivationReason::PendingPatchRecovery,
+                event_sink.as_ref(),
+            )
+            .await?;
+    }
+    let mut model_request = request.model_request;
+    model_request
+        .input
+        .instructions
+        .insert(0, crate::workflow::minimal_execution_instructions());
+    model_request.input.max_output_tokens = request.model_budget.wire_max_output_tokens;
+    model_request.input.instructions.push(request.model_budget.execution_context(total_model_limit));
+    if let Some(recovery) = &recovery {
+        // The journal retains only selected Skill IDs. The host rehydrates
+        // exact frozen bodies for applied steering receipts before recovery
+        // admission; restore each once as system context, not user wording.
+        for input in recovery.prepared_inputs() {
+            input.validate_prepared_live()?;
+            model_request.input.instructions.extend(input.prepared_skill_instructions.iter().cloned());
+        }
+    }
+    let segment_context_slot = segments.as_ref().map(|state| {
+        let slot = model_request.input.instructions.len();
+        model_request.input.instructions.push(state.context(recovery.as_ref().map_or(0, |state| state.last_model_step)));
+        slot
+    });
+    let requested_tool_choice = model_request.input.tool_choice.clone();
+    let requested_parallel_tool_calls = model_request.input.parallel_tool_calls;
+    if !request.context_resources.is_empty() {
+        model_request.input.instructions.push(crate::context_resources::index(&request.context_resources, request.context_image_input)?);
+    }
+    let agent_session_id = model_request.causality.agent_session_id.clone();
+    let turn_operation_id = model_request.causality.turn_operation_id.clone();
+    let tool_archive_scope = serde_json::json!([agent_session_id, turn_operation_id, recovery.as_ref().map(|state| state.execution_fence)]).to_string();
+    let mut tool_archive = adaptive
+        .tool_history()
+        .then(|| crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
+    if recovery.is_none() && let Some(port)=request.history_port.as_deref() {
+        let references=crate::history_reference::references(&requirement,&model_request.causality);
+        if !references.is_empty() {
+            let archive=tool_archive.get_or_insert_with(||crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
+            let resolved=crate::history_reference::load(archive,&references,port,&model_request.causality,&binding,&cancellation).await?;
+            archive.set_references(resolved);
+            adaptive.activate([crate::AgentRuntimeModule::ToolHistory],
+                crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            if required_historical_report(archive,std::slice::from_ref(&requirement),&model_request.causality) {
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                    crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            }
+        }
+    }
+    let mut discovered_tools = std::collections::BTreeSet::new();
+
+    // The host supplies canonical facts; the engine selects its model context.
+    // Do this only at turn entry: trimming individual messages inside an active
+    // tool cycle would break call/result pairing or discard the accepted input.
+    let mut retained_inputs = vec![requirement.clone()];
+    let mut steering_receipts = std::collections::BTreeSet::new();
+    let mut steering_receipt_order = Vec::new();
+    // Compact before the resource assembler would discard entire old turns.
+    // Repository instructions are retained independently, never summarized away.
+    let mut long_horizon = adaptive.task_ledger().then(LongHorizonState::default);
+    if let Some(recovery) = &recovery {
+        retained_inputs.extend(recovery.applied_inputs.iter().cloned());
+        steering_receipt_order = recovery.checkpoint.applied_steering_receipts.iter().map(|id| id.as_ref().to_owned()).collect();
+        steering_receipts.extend(steering_receipt_order.iter().cloned());
+        let mut work = recovery.checkpoint.work.clone();
+        work.workspace_observation_epoch = work.workspace_observation_epoch.checked_add(1)
+            .ok_or_else(|| AgentEngineError::InvalidContract("recovered workspace epoch exhausted".into()))?;
+        work.recent_commands.clear(); work.observed_processes.clear();
+        work.command_observed_after_latest_mutation = false;
+        let mut plan = recovery.checkpoint.plan.clone();
+        crate::exact_actions::close_receivers(&mut plan.exact_actions);
+        // A pending delivery review can only publish a truthful account of
+        // earlier observations, never resume actions. Recovery still drops
+        // old evidence freshness; it need not reopen a completed plan merely
+        // to report historical facts or a blocker.
+        plan.needs_replan = adaptive.task_ledger() && !(recovery.checkpoint.completion_review.is_report_only()
+            || recovery.checkpoint.completion_review.delivery_pending
+            || recovery.checkpoint.completion_review.account_repair);
+        long_horizon = Some(LongHorizonState { execution_plan: plan, work_status: work, ..Default::default() });
+        long_horizon.as_mut().unwrap().completion.review = recovery.checkpoint.completion_review.clone();
+        let mut calls = BTreeMap::new();
+        if let Some(archive) = tool_archive.as_mut() {
+            for event in &recovery.prefix {
+                match event {
+                    AgentEngineEvent::ToolCallCompleted { call, step } if *step > 0 => { calls.insert(call.call_id.clone(), call); }
+                    AgentEngineEvent::ToolCompleted { result, step } | AgentEngineEvent::ToolOutcomeReconciled { result, step, .. } if *step > 0 => {
+                        if let Some(call) = calls.get(&result.call_id) {
+                            archive.record(&call.name, &call.call_id, &call.arguments, &result.output, result.is_error, None, None)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut adaptive_slots = AdaptiveContextSlots::default();
+    let live_context_slot = if let Some(port) = &request.live_context_port {
+        let slot = model_request.input.instructions.len();
+        model_request.input.instructions.push(crate::live_context::read(port.as_ref(),
+            &model_request.causality, request.active_set_generation, &cancellation).await?);
+        Some(slot)
+    } else { None };
+    synchronize_adaptive_context(
+        &mut model_request,
+        &request.tool_plan,
+        &requested_tool_choice,
+        &adaptive,
+        &scoped_instructions,
+        &patch_recovery,
+        tool_archive.as_ref(),
+        long_horizon.as_ref(),
+        &retained_inputs,
+        retained_inputs.len(),
+        !request.context_resources.is_empty(),
+        request.prior_task.as_ref(),
+        request.resource_port.is_some(),
+        request.history_port.is_some(),
+        request.tool_discovery_port.is_some(),
+        &discovered_tools,
+        &mut adaptive_slots,
+    )?;
+    model_request
+        .validate()
+        .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+    context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
+    if recovery.is_none() {
+    let mut input = model_request.input;
+    let current = input.messages.pop().ok_or_else(|| AgentEngineError::ContextAssembly(
+        "canonical context has no current message".into(),
+    ))?;
+    let history = std::mem::take(&mut input.messages);
+    let (input, diagnostics) = AgentContextAssembler::assemble(
+        input, history, current, &crate::AgentsMdContext::default(), context_budget,
+    )?;
+    model_request.input = input;
+    event_sink.emit(AgentEngineEvent::ContextPrepared {
+        dropped_history_messages: diagnostics.dropped_history_messages,
+        warnings: diagnostics.warnings,
+    }).await?;
+    if let Some(archive) = &tool_archive
+        && let Some(data) = archive.reference_data_message(context_budget.max_context_bytes)
+    {
+        let position = model_request.input.messages.len().saturating_sub(1);
+        model_request.input.messages.insert(position, data);
+        if crate::stream_limits::serialized_size(&model_request.input, context_budget.max_context_bytes).is_err()
+            || model_request.input.messages.len() > context_budget.max_history_messages.saturating_add(1)
+        {
+            model_request.input.messages.remove(position);
+        }
+    }
+    }
+
+    let mut output_text = String::new();
+    let mut reasoning_text = String::new();
+    let mut model_steps = recovery.as_ref().map_or(0, |state| state.last_model_step);
+    let mut tool_call_count = recovery.as_ref().map_or(0, |state| state.checkpoint.tool_call_count);
+    let mut provider_round_id = None;
+    let mut completion_review_used = recovery.as_ref().is_some_and(|state| state.checkpoint.completion_review.is_report_only());
+    let mut control_rejections: ControlRejections = recovery.as_ref().map(|state| state.checkpoint.control_rejections.clone()).unwrap_or_default();
+    let mut admitted_call_ids = recovery.as_ref().map(|state| state.reserved_call_ids.clone()).unwrap_or_default();
+    let mut stream_budget = crate::stream_limits::StreamBudget::default();
+    let mut output_limit_recovery = crate::output_limit::OutputLimitRecovery::default();
+    let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
+    if let Some(recovery) = &recovery {
+        output_limit_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
+        protocol_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
+    }
+
+    if cancellation.is_cancelled() {
+        return cancelled_turn(
+            &event_sink,
+            &agent_session_id,
+            &turn_operation_id,
+            model_steps,
+            &output_text,
+            &reasoning_text,
+            tool_call_count,
+            provider_round_id.clone(),
+        )
+        .await;
+    }
+
+    'model_steps: loop {
+        if interrupted_delivery_review {
+            return fail_turn(&event_sink, model_steps,
+                "the single delivery review was interrupted after its model request started; it will not be automatically replayed or publish its candidate").await;
+        }
+        if cancellation.is_cancelled() {
+            return cancelled_turn(
+                &event_sink,
+                &agent_session_id,
+                &turn_operation_id,
+                model_steps,
+                &output_text,
+                &reasoning_text,
+                tool_call_count,
+                provider_round_id.clone(),
+            )
+            .await;
+        }
+
+        if let Some(current) = segments.as_ref() {
+            let pressure = event_sink.execution_pressure().await?;
+            let due = model_steps >= current.window_end() || pressure.renew_window;
+            let mut stop = pressure.stop;
+            let mut next = None;
+            if stop.is_none() && due {
+                if long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty()) {
+                    stop = Some(crate::AgentExecutionStopReason::NonQuiescentBoundary);
+                } else {
+                    match current.renewed(model_steps) { Ok(state) => next = Some(state), Err(reason) => stop = Some(reason) }
+                }
+            }
+            if due || stop.is_some() {
+                let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+                    request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections).await?;
+                if stop.is_none() && receipt.is_none() { stop = Some(crate::AgentExecutionStopReason::CheckpointUnavailable); }
+                if let Some(reason) = stop {
+                    event_sink.emit(AgentEngineEvent::ExecutionBudgetExhausted {
+                        model_steps, segment: current.segment, checkpoint_revision: receipt.map(|receipt| receipt.revision), reason,
+                    }).await?;
+                    let reason = reason.code().to_owned();
+                    event_sink.emit(AgentEngineEvent::TurnPaused { model_steps, reason: reason.clone() }).await?;
+                    return Ok(AgentTurnResult { agent_session_id, turn_operation_id, model_steps, output_text, reasoning_text,
+                        tool_call_count, provider_round_id, terminal: AgentTurnTerminal::Paused { reason } });
+                }
+                let next = next.expect("window renewal has a candidate");
+                event_sink.emit(AgentEngineEvent::ExecutionSegmentRenewed {
+                    segment: next.segment, model_steps, checkpoint_revision: receipt.expect("renewal requires durable acknowledgement").revision,
+                    reason: if pressure.renew_window { crate::AgentSegmentReason::JournalWindow } else { crate::AgentSegmentReason::ModelWindow },
+                }).await?;
+                context_lifecycle.begin_segment();
+                stream_budget = Default::default();
+                model_request.input.provider_round_parent = None;
+                segments = Some(next);
+            }
+        }
+        if model_steps >= total_model_limit {
+            return fail_turn(&event_sink, model_steps, format!("model step limit of {} exceeded", total_model_limit)).await;
+        }
+        if let (Some(slot), Some(state)) = (segment_context_slot, segments.as_ref()) {
+            model_request.input.instructions[slot] = state.context(model_steps);
+        }
+
+        // This boundary is reached only after the previous batch has settled.
+        // Never compact a stream with incomplete tool calls/results.
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+            }
+        }
+        let refreshed_instructions = scoped_instructions.before_model(tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
+        // before_calls may already have replaced layers. Comparing
+        // the actual model slot also catches those changes on read-only batches
+        // where no effect marked the instruction view dirty.
+        if refreshed_instructions {
+            completion_review_used = false;
+            model_request.input.provider_round_parent = None;
+            if let Some(state) = long_horizon.as_mut() {
+                // Initial instruction discovery does not make a nonexistent
+                // optional plan stale. Established plans and a gate already
+                // raised by steering/recovery still require replanning.
+                mark_patch_recovery_context_changed(&mut state.execution_plan);
+                state.completion.invalidate();
+                if adaptive.task_ledger() {
+                    event_sink.emit(AgentEngineEvent::PlanUpdated {
+                        plan: state.execution_plan.clone(),
+                    }).await?;
+                }
+            }
+        }
+        let recovery_context = patch_recovery.context();
+        if adaptive_slots
+            .patch_recovery
+            .is_some_and(|slot| model_request.input.instructions[slot] != recovery_context)
+        {
+            completion_review_used = false;
+            model_request.input.provider_round_parent = None;
+            if let Some(state) = long_horizon.as_mut() {
+                mark_patch_recovery_context_changed(&mut state.execution_plan);
+                state.completion.invalidate();
+            }
+        }
+        if let (Some(port), Some(slot)) = (&request.live_context_port, live_context_slot) {
+            let latest = crate::live_context::read(port.as_ref(), &model_request.causality,
+                request.active_set_generation, &cancellation).await?;
+            if model_request.input.instructions[slot] != latest {
+                model_request.input.provider_round_parent = None;
+                completion_review_used = false;
+                if let Some(state) = long_horizon.as_mut() {
+                    state.completion.invalidate();
+                }
+            }
+            model_request.input.instructions[slot] = latest;
+        }
+        if tool_archive.as_ref().is_some_and(|archive|required_historical_report(archive,&retained_inputs,&model_request.causality))
+            && !adaptive.task_ledger() {
+            adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            long_horizon.get_or_insert_with(LongHorizonState::default);
+        }
+        if let Some(state) = long_horizon.as_mut() {
+            state.completion.review.align_inputs(retained_inputs.len());
+        }
+        synchronize_adaptive_context(
+            &mut model_request,
+            &request.tool_plan,
+            &requested_tool_choice,
+            &adaptive,
+            &scoped_instructions,
+            &patch_recovery,
+            tool_archive.as_ref(),
+            long_horizon.as_ref(),
+            &retained_inputs,
+            retained_inputs.len(),
+            !request.context_resources.is_empty(),
+            request.prior_task.as_ref(),
+            request.resource_port.is_some(),
+            request.history_port.is_some(),
+            request.tool_discovery_port.is_some(),
+            &discovered_tools,
+            &mut adaptive_slots,
+        )?;
+        let review_has_running_processes = long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty());
+        let account_repair = long_horizon.as_ref().is_some_and(|state| state.completion.review.account_repair);
+        let report_only_locked = long_horizon.as_ref().is_some_and(|state| state.completion.review.is_report_only());
+        let continuing_complex_task = crate::delivery_review::multi_item_task(&retained_inputs)
+            && !account_repair && !report_only_locked && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
+                && (state.execution_plan.revision == 0 || state.execution_plan.is_open()));
+        let review_can_report = report_only_locked || (long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
+            && !patch_recovery.pending() && !patch_recovery.unresolved()
+            && (account_repair || !crate::delivery_review::multi_item_task(&retained_inputs)
+                || long_horizon.as_ref().is_some_and(|state| state.completion.settled_failure_gate()
+                    || (state.execution_plan.revision > 0 && !state.execution_plan.is_open()))));
+        let execution_surface = model_request.input.tools.iter().map(|tool| tool.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used || account_repair || report_only_locked, review_can_report, review_has_running_processes, continuing_complex_task);
+        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
+        let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
+        if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
+        protocol_recovery.constrain_tool_choice(
+            &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
+        );
+        protocol_recovery.constrain_exposed_tool(&mut model_request.input.tool_choice, &model_request.input.tools);
+        protocol_recovery.narrow_repair_surface(&model_request.input.tool_choice, &mut model_request.input.tools);
+        // Discovery cannot share an execution batch. Ask supporting providers
+        // for one call while both kinds are visible; keep the complete-batch
+        // guard below even if a provider ignores this delivery preference.
+        model_request.input.parallel_tool_calls = if model_request.input.tools.len() > 1
+            && model_request.input.tools.iter().any(|tool| tool.name == crate::tool_discovery::TOOL_NAME)
+        { Some(false) } else { requested_parallel_tool_calls };
+        context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
+        let context_bytes = serde_json::to_vec(&model_request.input)
+            .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))?.len();
+        if context_bytes > context_budget.max_context_bytes {
+            return fail_turn(&event_sink, model_steps,
+                format!("active turn context still exceeds the Nomi byte budget after compaction ({} > {})",
+                    context_bytes, context_budget.max_context_bytes)).await;
+        }
+        // Preparation/compaction can itself fill a journal window. Re-enter
+        // the same settled boundary to checkpoint/rotate before spending a
+        // further model request; no model or tool step is replayed here.
+        if segments.is_some() {
+            let pressure = event_sink.execution_pressure().await?;
+            if pressure.renew_window || pressure.stop.is_some() { continue 'model_steps; }
+        }
+        // The preceding batch and context updates have settled. Persist only
+        // quiescent progress; live process handles are never checkpointed as
+        // if they could survive a process restart.
+        if let Some(port)=&request.voice_immediate {
+            port.quiesce_all(tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+        }
+        persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+            request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections).await?;
+        if cancellation.is_cancelled() {
+            return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
+                model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
+        }
+        model_steps = model_steps.saturating_add(1);
+        let strict_publication=model_request.input.tools.len()==1&&model_request.input.tools[0].name==crate::completion::TOOL_NAME
+            && model_request.input.tools[0].input_schema.0["properties"].get("short_summary").is_some();
+        let model_operation_id =
+            OperationId::from(format!("{}:model:{}", turn_operation_id.as_ref(), model_steps));
+        model_request.causality.operation_id = model_operation_id.clone();
+        event_sink
+            .emit(AgentEngineEvent::ModelStepStarted {
+                step: model_steps,
+                operation_id: model_operation_id.clone(),
+            })
+            .await?;
+
+        let output_before_step = output_text.len();
+        let reasoning_before_step = reasoning_text.len();
+        let messages_before_step = model_request.input.messages.len();
+        let tool_calls_before_step = tool_call_count;
+        let mut step = StepState::default();
+        macro_rules! voice_supersede {
+            ($receipts:expr) => {{
+                let receipts = $receipts;
+                let port = request.voice_immediate.as_ref().ok_or_else(|| AgentEngineError::InvalidContract("voice correction has no opted-in owner".into()))?;
+                let cleanup = port.quiesce_model(&model_operation_id, tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                if cleanup.operation_id != model_operation_id || cleanup.task_id.is_empty() || receipts.is_empty() || receipts.len()>16 {
+                    return Err(AgentEngineError::InvalidContract("voice correction lacks exact owned attempt closure and receipts".into()));
+                }
+                let discarded_tool_call_ids = step.call_order.clone();
+                crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+                event_sink.emit(AgentEngineEvent::VoiceModelStepSuperseded {
+                    step:model_steps,model_operation_id:model_operation_id.clone(),steering_receipt_ids:receipts.clone(),discarded_tool_call_ids:discarded_tool_call_ids.clone(),cleanup,
+                }).await?;
+                admitted_call_ids.extend(discarded_tool_call_ids);
+                output_text.truncate(output_before_step);
+                reasoning_text.truncate(reasoning_before_step);
+                model_request.input.messages.truncate(messages_before_step);
+                tool_call_count = tool_calls_before_step;
+                provider_round_id = None;
+                model_request.input.provider_round_parent = None;
+                let inputs = request.input_port.as_ref().expect("validated voice input port").take(&model_request.causality,false).await?;
+                if !receipts.iter().all(|id|inputs.iter().any(|input|&input.receipt_operation_id==id)) {
+                    return Err(AgentEngineError::InvalidContract("superseded model correction lost its exact accepted input".into()));
+                }
+                crate::steering::incorporate(inputs,&mut model_request,&mut retained_inputs,&mut steering_receipts,&mut steering_receipt_order)?;
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::Steering,event_sink.as_ref()).await?;
+                let state=long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan=true;
+                state.completion.invalidate();
+                continue 'model_steps;
+            }};
+        }
+        let step_cancellation = if request.voice_immediate.is_some(){cancellation.child_token()}else{cancellation.clone()};
+        let open_stream = model.open_stream(model_request.clone(), step_cancellation.clone());
+        tokio::pin!(open_stream);
+        let opened = if let Some(port)=&request.voice_immediate {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await,
+                result = &mut open_stream => result,
+                receipts = port.wait(&model_request.causality) => {
+                    let receipts=receipts?;step_cancellation.cancel();
+                    voice_supersede!(receipts);
+                }
+            }
+        }else{tokio::select! {
+            _ = cancellation.cancelled() => {
+                return cancelled_turn(
+                    &event_sink,
+                    &agent_session_id,
+                    &turn_operation_id,
+                    model_steps,
+                    &output_text,
+                    &reasoning_text,
+                    tool_call_count,
+                    provider_round_id.clone(),
+                )
+                .await;
+            }
+            result = &mut open_stream => result,
+        }};
+        let mut stream = match opened {
+            Ok(stream) => stream,
+            Err(error)
+                if cancellation.is_cancelled()
+                    || error.code == ChatModelErrorCode::Cancelled =>
+            {
+                return cancelled_turn(
+                    &event_sink,
+                    &agent_session_id,
+                    &turn_operation_id,
+                    model_steps,
+                    &output_text,
+                    &reasoning_text,
+                    tool_call_count,
+                    provider_round_id.clone(),
+                )
+                .await;
+            }
+            Err(error) => {
+                if model_steps < total_model_limit
+                    && context_lifecycle.request_overflow_recovery(&error, false, &model_request.input)?
+                {
+                    if let Some(port)=&request.voice_immediate {
+                        port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                    }
+                    event_sink.emit(AgentEngineEvent::ContextLimitRecoveryStarted {
+                        rejected_step: model_steps,
+                    }).await?;
+                    model_request.input.provider_round_parent = None;
+                    continue 'model_steps;
+                }
+                return Err(AgentEngineError::from_model_error(error));
+            }
+        };
+        let mut public_output = crate::public_output::PublicOutputGuard::default();
+        let mut saw_terminal = false;
+        let mut protocol_violation = false;
+        let mut protocol_tool_hint = None;
+        let mut semantic_output_seen = false;
+
+        loop {
+            let next = if let Some(port)=&request.voice_immediate {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await,
+                    receipts = port.wait(&model_request.causality) => {
+                        let receipts=receipts?;step_cancellation.cancel();drop(stream);
+                        voice_supersede!(receipts);
+                    }
+                    item = stream.next() => item,
+                }
+            }else{tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return cancelled_turn(
+                        &event_sink,
+                        &agent_session_id,
+                        &turn_operation_id,
+                        model_steps,
+                        &output_text,
+                        &reasoning_text,
+                        tool_call_count,
+                        provider_round_id.clone(),
+                    )
+                    .await;
+                }
+                item = stream.next() => item,
+            }};
+
+            let Some(item) = next else {
+                break;
+            };
+            let event = match item {
+                Ok(event) => event,
+                Err(error)
+                    if cancellation.is_cancelled()
+                        || error.code == ChatModelErrorCode::Cancelled =>
+                {
+                    return cancelled_turn(
+                        &event_sink,
+                        &agent_session_id,
+                        &turn_operation_id,
+                        model_steps,
+                        &output_text,
+                        &reasoning_text,
+                        tool_call_count,
+                        provider_round_id.clone(),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    if model_steps < total_model_limit
+                        && context_lifecycle.request_overflow_recovery(&error, semantic_output_seen, &model_request.input)?
+                    {
+                        // Release the failed stream before a new model claim.
+                        // No tool from this rejected step has been admitted.
+                        drop(stream);
+                        if let Some(port)=&request.voice_immediate {
+                            port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                        }
+                        event_sink.emit(AgentEngineEvent::ContextLimitRecoveryStarted {
+                            rejected_step: model_steps,
+                        }).await?;
+                        model_request.input.provider_round_parent = None;
+                        continue 'model_steps;
+                    }
+                    return Err(AgentEngineError::from_model_error(error));
+                }
+            };
+            stream_budget.admit(&event)?;
+            semantic_output_seen |= event.is_semantic_output();
+            match event {
+                ChatModelEvent::ResponseStarted { .. } => {}
+                ChatModelEvent::OutputTextDelta { text } => {
+                    // Some compatible providers spill a truncated internal
+                    // tool representation into content before emitting length.
+                    // Withhold it, but drain the bounded stream to distinguish
+                    // output exhaustion from a completed protocol violation.
+                    if text.is_empty() {
+                        return fail_turn(
+                            &event_sink,
+                            model_steps,
+                            "model emitted an empty output text delta",
+                        )
+                        .await;
+                    }
+                    if protocol_violation { continue; }
+                    let visible = public_output.push(&text);
+                    if !visible.text.is_empty() {
+                        step.append_text(&visible.text);
+                        if !strict_publication {
+                            output_text.push_str(&visible.text);
+                            event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                                step: model_steps, text: visible.text,
+                            }).await?;
+                        }
+                    }
+                    if visible.invalid_tool_call {
+                        protocol_violation = true;
+                        protocol_tool_hint = visible.tool_hint;
+                    }
+                }
+                ChatModelEvent::ReasoningDelta { text } => {
+                    if text.is_empty() {
+                        return fail_turn(
+                            &event_sink,
+                            model_steps,
+                            "model emitted an empty reasoning delta",
+                        )
+                        .await;
+                    }
+                    reasoning_text.push_str(&text);
+                    step.append_reasoning(&text);
+                    event_sink
+                        .emit(AgentEngineEvent::ReasoningDelta {
+                            step: model_steps,
+                            text,
+                        })
+                        .await?;
+                }
+                ChatModelEvent::ReasoningSignature { signature } => {
+                    if signature.is_empty() {
+                        return fail_turn(
+                            &event_sink,
+                            model_steps,
+                            "model emitted an empty reasoning signature",
+                        )
+                        .await;
+                    }
+                    step.set_reasoning_signature(signature)?;
+                }
+                ChatModelEvent::ReasoningBlock { text, encrypted_content } => {
+                    if step.pending_reasoning_signature.is_some()
+                        || encrypted_content.as_ref().is_some_and(String::is_empty)
+                        || (text.is_empty() && encrypted_content.is_none())
+                    {
+                        return fail_turn(&event_sink, model_steps, "invalid completed reasoning block").await;
+                    }
+                    // Retain empty-summary opaque state and distinct block
+                    // boundaries in live model history. Never log the blob.
+                    step.assistant_content.push(ChatContentPart::Reasoning {
+                        text: text.clone(), signature: None, encrypted_content,
+                    });
+                    if !text.is_empty() {
+                        reasoning_text.push_str(&text);
+                        event_sink.emit(AgentEngineEvent::ReasoningDelta { step: model_steps, text }).await?;
+                    }
+                }
+                ChatModelEvent::ProviderReasoningBlock { block } => {
+                    block.validate().map_err(|message| AgentEngineError::InvalidModelEvent(message.into()))?;
+                    if step.pending_reasoning_signature.is_some() {
+                        return fail_turn(&event_sink, model_steps, "provider block conflicts with a pending reasoning signature").await;
+                    }
+                    // Only ordinary thinking text reaches the event journal
+                    // and UI. Signed/hidden payload stays in live context.
+                    if let Some(text) = block.visible_text() {
+                        reasoning_text.push_str(text);
+                        event_sink.emit(AgentEngineEvent::ReasoningDelta {
+                            step: model_steps, text: text.to_owned(),
+                        }).await?;
+                    }
+                    step.assistant_content.push(ChatContentPart::ProviderReasoning { block });
+                }
+                ChatModelEvent::ToolCallDelta {
+                    call_id,
+                    name,
+                    arguments_delta,
+                } => {
+                    if admitted_call_ids.contains(&call_id) && !step.calls.contains_key(&call_id) {
+                        return fail_turn(&event_sink, model_steps, "model reused a prior or discarded tool-call identity").await;
+                    }
+                    step.record_tool_delta(&call_id, &name, &arguments_delta)?;
+                    event_sink
+                        .emit(AgentEngineEvent::ToolCallDelta {
+                            step: model_steps,
+                            call_id,
+                            name,
+                            arguments_delta,
+                        })
+                        .await?;
+                }
+                ChatModelEvent::ToolCallCompleted { call } => {
+                    if call.call_id.as_ref().starts_with("agent-instructions:")
+                        || !admitted_call_ids.insert(call.call_id.clone()) {
+                        return fail_turn(&event_sink, model_steps, "model reused a tool-call identity within this turn").await;
+                    }
+                    step.record_tool_completed(&call)?;
+                    event_sink
+                        .emit(AgentEngineEvent::ToolCallCompleted {
+                            step: model_steps,
+                            call,
+                        })
+                        .await?;
+                }
+                ChatModelEvent::ProviderRoundId { round_id } => {
+                    provider_round_id = Some(round_id.clone());
+                    step.provider_round_id = Some(round_id);
+                }
+                ChatModelEvent::Usage { usage } => {
+                    context_lifecycle.observe_usage(&usage);
+                    event_sink
+                        .emit(AgentEngineEvent::Usage {
+                            step: model_steps,
+                            usage,
+                        })
+                        .await?;
+                }
+                ChatModelEvent::Completed { finish_reason } => {
+                    if public_output.has_pending_native_call() {
+                        protocol_violation = true;
+                    }
+                    let remaining = public_output.finish();
+                    if !protocol_violation && !remaining.is_empty() {
+                        step.append_text(&remaining);
+                        if !strict_publication {
+                            output_text.push_str(&remaining);
+                            event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                                step: model_steps, text: remaining,
+                            }).await?;
+                        }
+                    }
+                    if saw_terminal {
+                        return fail_turn(
+                            &event_sink,
+                            model_steps,
+                            "model emitted more than one terminal event",
+                        )
+                        .await;
+                    }
+                    saw_terminal = true;
+                    step.finish_reason = Some(finish_reason);
+                    break;
+                }
+                ChatModelEvent::NativeResponsesItem { item_type, .. } => {
+                    return fail_turn(
+                        &event_sink,
+                        model_steps,
+                        format!(
+                            "native Responses item {item_type:?} is not yet representable in Nomi history"
+                        ),
+                    )
+                    .await;
+                }
+                ChatModelEvent::OutputAudioDelta { .. } => {
+                    return fail_turn(
+                        &event_sink,
+                        model_steps,
+                        "audio output is outside the Nomi Runtime core",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        if let Some(port)=&request.voice_immediate {
+            // Completed/EOS is a provider observation, not proof that its
+            // owned producer finished. Close it before tool admission or a
+            // further model claim; ordinary streams keep the original path.
+            step_cancellation.cancel();
+            port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+            let receipts=port.pending(&model_request.causality).await?;
+            if !receipts.is_empty(){drop(stream);voice_supersede!(receipts);}
+        }
+
+        // User input accepted during the publication review wins even when
+        // the now-obsolete response is text, malformed or truncated. Discard
+        // its complete proposed batch before the ordinary failure branches.
+        if delivery_review_step && let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if !inputs.is_empty() {
+                let discarded_tool_call_ids = step.call_order.clone();
+                crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+                event_sink.emit(AgentEngineEvent::DeliveryReviewSuperseded {
+                    step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation: true,
+                }).await?;
+                admitted_call_ids.extend(discarded_tool_call_ids);
+                crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
+                    &mut steering_receipts, &mut steering_receipt_order)?;
+                adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                    crate::AgentRuntimeActivationReason::Steering, event_sink.as_ref()).await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+                state.completion.review.align_inputs(retained_inputs.len());
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                model_request.input.provider_round_parent = None;
+                provider_round_id = None;
+                continue 'model_steps;
+            }
+        }
+        if protocol_violation && step.finish_reason != Some(ChatFinishReason::MaxOutputTokens) {
+            drop(stream);
+            if delivery_review_step {
+                return fail_turn(&event_sink, model_steps,
+                    "the single delivery review returned non-native tool markup; the candidate was not delivered").await;
+            }
+            if cancellation.is_cancelled() {
+                return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
+                    model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
+            }
+            let discarded_tool_call_ids = step.call_order.clone();
+            crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+            // Never force a later text proposal ahead of a discarded native
+            // prefix. Recheck the name against this exact advertised surface.
+            let tool_hint = if discarded_tool_call_ids.is_empty() {
+                protocol_tool_hint.filter(|name| model_request.input.tools.iter().any(|tool| &tool.name == name))
+            } else { None };
+            let continuation = protocol_recovery.admit(model_steps < total_model_limit);
+            protocol_recovery.set_tool_hint(tool_hint.clone());
+            event_sink.emit(AgentEngineEvent::ModelResponseRejected {
+                step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation, tool_hint,
+            }).await?;
+            admitted_call_ids.extend(discarded_tool_call_ids);
+            crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+            model_request.input.messages.push(crate::protocol_recovery::notice(continuation));
+            provider_round_id = None;
+            if !continuation {
+                return fail_turn(&event_sink, model_steps,
+                    "model emitted tool-call markup as text after the bounded protocol-correction budget; no tool from the rejected responses was executed").await;
+            }
+            continue 'model_steps;
+        }
+
+        if !saw_terminal {
+            if cancellation.is_cancelled() {
+                return cancelled_turn(
+                    &event_sink,
+                    &agent_session_id,
+                    &turn_operation_id,
+                    model_steps,
+                    &output_text,
+                    &reasoning_text,
+                    tool_call_count,
+                    provider_round_id.clone(),
+                )
+                .await;
+            }
+            return Err(AgentEngineError::ModelStreamEndedWithoutTerminal);
+        }
+
+        let finish_reason = step
+            .finish_reason
+            .ok_or(AgentEngineError::ModelStreamEndedWithoutTerminal)?;
+        if cancellation.is_cancelled() || matches!(finish_reason, ChatFinishReason::Cancelled) {
+            return cancelled_turn(
+                &event_sink,
+                &agent_session_id,
+                &turn_operation_id,
+                model_steps,
+                &output_text,
+                &reasoning_text,
+                tool_call_count,
+                provider_round_id.clone(),
+            )
+                .await;
+        }
+        if matches!(finish_reason, ChatFinishReason::MaxOutputTokens) {
+            if delivery_review_step {
+                return fail_turn(&event_sink, model_steps,
+                    "the single delivery review exceeded its unchanged output budget; the candidate was not delivered").await;
+            }
+            // No invoke_tool_calls/admit_tool path has run for this step.
+            // Even complete calls in a truncated batch are NOT executable.
+            let discarded_tool_call_ids = step.call_order.clone();
+            crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+            let continuation = output_limit_recovery.admit(model_steps < total_model_limit);
+            event_sink.emit(AgentEngineEvent::ModelOutputTruncated {
+                step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation,
+            }).await?;
+            let effectful_workspace_proposal = protocol_tool_hint.as_deref().into_iter()
+                .chain(step.calls.values().map(|pending| pending.name.as_str()))
+                .filter_map(|name| request.tool_plan.binding(name))
+                .any(|binding| crate::execution_policy::requires_task_ledger(binding)
+                    && !matches!(binding.effect_class, AgentEffectClass::ReadOnly));
+            if continuation && effectful_workspace_proposal {
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                    crate::AgentRuntimeActivationReason::OutputLimitRecovery,event_sink.as_ref()).await?;
+                long_horizon.get_or_insert_with(LongHorizonState::default);
+            }
+            // Size recovery may require a different file/patch strategy. A
+            // prior protocol hint must not force the oversized function again.
+            protocol_recovery.release_constraint();
+            admitted_call_ids.extend(discarded_tool_call_ids);
+            crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+            let reasoning_only=step.call_order.is_empty()
+                && step.assistant_content.iter().any(|part|matches!(part,ChatContentPart::Reasoning {..}|ChatContentPart::ProviderReasoning {..}))
+                && !step.assistant_content.iter().any(|part|matches!(part,ChatContentPart::Text {text} if !text.trim().is_empty()));
+            model_request.input.messages.push(if reasoning_only {crate::output_limit::reasoning_only_notice(continuation)}
+                else {crate::output_limit::notice(continuation)});
+            provider_round_id = None;
+            if !continuation {
+                return fail_turn(&event_sink, model_steps,
+                    "model output remained truncated after the bounded continuation budget; task completion was not accepted").await;
+            }
+            // Steering, instruction refresh, compaction, cancellation and all
+            // normal owner fences still run at the next model-step boundary.
+            continue 'model_steps;
+        }
+        output_limit_recovery.observe_complete_step();
+        step.finalize()?;
+        let empty_task_response = matches!(finish_reason, ChatFinishReason::Completed)
+            && adaptive.task_ledger() && !step.has_tool_calls()
+            && !step.assistant_content.iter().any(|part|
+                matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        if delivery_review_step && !step.has_tool_calls() {
+            return fail_turn(&event_sink, model_steps,
+                "the single delivery review did not submit its final report; the candidate was not delivered").await;
+        }
+        if !empty_task_response {
+            protocol_recovery.observe_valid_step();
+        }
+        if !step.has_tool_calls() && matches!(finish_reason, ChatFinishReason::ToolCalls) {
+            return fail_turn(
+                &event_sink,
+                model_steps,
+                "model returned a tool-call terminal reason without Tool Calls",
+            )
+            .await;
+        }
+        // A correction accepted while the model was streaming invalidates its
+        // proposed batch. Close every call/result pair without executing it.
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if !inputs.is_empty() {
+                adaptive
+                    .activate(
+                        crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                let archive = tool_archive.get_or_insert_with(|| {
+                    crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+                });
+                append_assistant_step(&mut model_request, &step)?;
+                let deferred = step.call_order.iter().map(|id| (id.clone(), Ok(AgentToolResult::text(id.clone(),
+                    "Not executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects.", true)))).collect();
+                let results = finish_tool_results(deferred, event_sink.as_ref(), model_steps, &cancellation).await?;
+                tool_call_count = tool_call_count.saturating_add(results.len() as u32);
+                for (_, result) in results {
+                    if let Some(call) = step.calls.get(&result.call_id).and_then(|pending| pending.completed.as_ref()) {
+                        archive.record(&call.name, &call.call_id, &call.arguments,
+                            &result.output, result.is_error, Some(model_steps), Some(false))?;
+                    }
+                    model_request.input.messages.push(ChatMessage { role: ChatRole::Tool,
+                        content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
+                }
+                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)?;
+                control_rejections.reset();
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+                completion_review_used = false;
+                continue;
+            }
+        }
+        if step.has_tool_calls() {
+            if !matches!(finish_reason, ChatFinishReason::ToolCalls) {
+                return fail_turn(
+                    &event_sink,
+                    model_steps,
+                    "model returned Tool Calls with a non-tool terminal reason",
+                )
+                .await;
+            }
+
+            let completed = step.call_order.iter().map(|id| step.calls.get(id)
+                .and_then(|pending| pending.completed.clone())
+                .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            // Classify with the host's exact pre-review surface, never model
+            // output text. A phase correction must not replace the real work
+            // account with fresh-ID proposals that never reached the owner.
+            let exposure_refusal = crate::tool::reject_tool_surface_batch(
+                &completed, &model_request.input.tools, &execution_surface, phase);
+            let disposition = exposure_refusal.as_ref().map_or(ToolBatchDisposition::WorkAccounting, |refusal| refusal.disposition);
+
+            if disposition == ToolBatchDisposition::WorkAccounting {
+                let mut long_horizon_calls = 0usize;
+                let mut explicit_continuation = false;
+                let mut explicit_plan = false;
+                for call_id in &step.call_order {
+                    let call = step
+                        .calls
+                        .get(call_id)
+                        .and_then(|pending| pending.completed.as_ref())
+                        .ok_or_else(|| {
+                            AgentEngineError::InvalidModelEvent(
+                                "incomplete tool call during adaptive classification".into(),
+                            )
+                        })?;
+                    if let Some(tool) = request.tool_plan.binding(&call.name) {
+                        if crate::execution_policy::requires_task_ledger(tool) {
+                            long_horizon_calls = long_horizon_calls.saturating_add(1);
+                        }
+                    } else if call.name == crate::task_continuation::TOOL_NAME {
+                        explicit_continuation = true;
+                    } else if call.name == crate::planning::TOOL_NAME {
+                        explicit_plan = true;
+                    }
+                }
+                let discovery_only = step.call_order.iter().all(|call_id| {
+                    step.calls
+                        .get(call_id)
+                        .and_then(|pending| pending.completed.as_ref())
+                        .is_some_and(|call| call.name == crate::tool_discovery::TOOL_NAME)
+                });
+                if !discovery_only {
+                    adaptive
+                        .activate(
+                            crate::adaptive::TOOL_MODULES,
+                            crate::AgentRuntimeActivationReason::ToolCall,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                }
+                let multi_step = adaptive.observe_external_batch(long_horizon_calls);
+                if explicit_continuation {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LONG_HORIZON_MODULES
+                                .into_iter()
+                                .chain([crate::AgentRuntimeModule::TaskContinuation]),
+                            crate::AgentRuntimeActivationReason::ExplicitTaskContinuation,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                } else if explicit_plan {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LEDGER_MODULES,
+                            crate::AgentRuntimeActivationReason::ExplicitPlan,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                } else if crate::delivery_review::multi_item_task(&retained_inputs)
+                    && step.calls.values().filter_map(|pending| pending.completed.as_ref())
+                        .filter_map(|call| request.tool_plan.binding(&call.name))
+                        .any(|binding| matches!(binding.action_id.as_ref(),
+                            "workspace.files/write" | "workspace.files/patch" | "workspace.process/input")) {
+                    adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::AgentRuntimeActivationReason::EffectfulToolCall,event_sink.as_ref()).await?;
+                } else if multi_step {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LONG_HORIZON_MODULES,
+                            crate::AgentRuntimeActivationReason::MultiStepToolUse,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                }
+            }
+            let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+            let archive = tool_archive.get_or_insert_with(|| {
+                crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+            });
+
+            append_assistant_step(&mut model_request, &step)?;
+            let dispatch = crate::tool_dispatch::ToolDispatchBatch::new(tools.as_ref(), &step.call_order);
+            let plan_revision_before = state.execution_plan.revision;
+            let had_current_report = state.completion.current(
+                &state.execution_plan, &state.work_status, retained_inputs.len(),
+            ).is_some();
+            let invocation = if let Some(refusal) = exposure_refusal {
+                if disposition == ToolBatchDisposition::WorkAccounting { state.completion.invalidate_report(); }
+                finish_tool_results(refusal.results, event_sink.as_ref(), model_steps, &cancellation).await
+            } else { invoke_tool_calls(
+                &agent_session_id,
+                &request.principal,
+                &model_request,
+                &request.active_set_generation,
+                &request.tool_plan,
+                &mut state.tool_arguments,
+                &dispatch,
+                event_sink.as_ref(),
+                &step,
+                model_steps,
+                &cancellation,
+                &mut state.execution_plan,
+                adaptive.task_ledger(),
+                &mut state.completion,
+                &mut state.work_status,
+                &retained_inputs,
+                &mut scoped_instructions,
+                &mut patch_recovery,
+                &request.context_resources,
+                &request.context_image_input,
+                request.input_port.as_deref(),
+                request.voice_immediate.as_deref(),
+                request.prior_task.as_ref(),
+                request.resource_port.as_deref(),
+                request.tool_discovery_port.as_deref(),
+                &mut discovered_tools,
+                archive,
+                request.history_port.as_deref(),
+                &binding,
+            )
+            .await };
+            let results = match invocation {
+                Ok(results) => results,
+                Err(AgentEngineError::VoiceCorrectionBoundary) if request.voice_immediate.is_some()=>{
+                    let port=request.voice_immediate.as_ref().expect("guarded voice owner");
+                    let receipts=port.pending(&model_request.causality).await?;
+                    if receipts.is_empty()||port.has_admitted_tools(&model_request.causality,model_steps).await? {return Err(AgentEngineError::InvalidContract("voice boundary cannot discard an admitted effect or absent receipt".into()));}
+                    voice_supersede!(receipts);
+                }
+                Err(AgentEngineError::Cancelled) => {
+                    return cancelled_turn(
+                        &event_sink,
+                        &agent_session_id,
+                        &turn_operation_id,
+                        model_steps,
+                        &output_text,
+                        &reasoning_text,
+                        tool_call_count,
+                        provider_round_id.clone(),
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            };
+            tool_call_count = tool_call_count.saturating_add(results.len() as u32);
+            let single_call_batch = step.call_order.len() == 1;
+            let mut terminal_collaboration_accepted = false;
+            let mut terminal_completion_requested = false;
+            let mut repeated_control_rejection = None;
+            for (expected_call_id, result) in results {
+                result.validate_for(&expected_call_id)?;
+                // One accounting boundary: phase corrections carry paired
+                // protocol feedback only, never work, evidence or plan changes.
+                if disposition == ToolBatchDisposition::WorkAccounting {
+                    if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                        terminal_completion_requested |= call.name == crate::completion::TOOL_NAME && !result.is_error;
+                        let account_parameter_refusal = call.name == crate::completion::TOOL_NAME && result.is_error
+                            && serde_json::from_str::<serde_json::Value>(&result.output_text()).ok().is_some_and(|value|
+                                value["status"]=="not_executed" && value["code"]=="INVALID_TOOL_ARGUMENTS"
+                                    && value["tool"]==crate::completion::TOOL_NAME);
+                        let healthy_settled_account = account_parameter_refusal
+                            && (state.work_status.successful_commands > 0 || state.work_status.successful_workspace_mutations > 0);
+                        if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
+                            && (state.execution_plan.revision == 0 || !state.execution_plan.is_open())
+                            && (state.completion.settled_failure_gate() || healthy_settled_account)
+                            && state.work_status.running_processes.is_empty()
+                            && !patch_recovery.pending() && !patch_recovery.unresolved()
+                        {
+                            // A settled optional or explicitly closed task already entered terminal accounting.
+                            // Correct this terminal account in the existing review phase;
+                            // argument repair cannot restart checks or reset an absent plan.
+                            completion_review_used = true;
+                            state.completion.review.account_repair = true;
+                        }
+                        let made_progress = match call.name.as_str() {
+                            crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
+                            crate::completion::TOOL_NAME => !had_current_report,
+                            _ => true,
+                        };
+                        if let Some(reason) = control_rejections.observe(&call.name, &result, made_progress) {
+                            repeated_control_rejection = Some(reason);
+                        }
+                        // Internal controls have no platform binding. Count their
+                        // paired failures here, including schema refusals, without
+                        // implying a command launch or a workspace mutation.
+                        if request.tool_plan.binding(&call.name).is_none() && result.is_error {
+                            state.work_status.observe_deferred();
+                        }
+                        if let Some(binding) = request.tool_plan.binding(&call.name) {
+                            let attempted = dispatch.attempted(&expected_call_id)?;
+                            let failed_process = attempted
+                                && crate::execution_policy::failed_process_observation(binding, &result);
+                            let process_not_applied = attempted
+                                && crate::execution_policy::process_operation_not_applied(binding, &result);
+                            terminal_collaboration_accepted |= single_call_batch
+                                && attempted
+                                && !result.is_error
+                                && crate::execution_policy::completes_turn_on_success(binding);
+                            if attempted {
+                                if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
+                                state.work_status.observe(
+                                    binding,
+                                    call,
+                                    &result,
+                                    &mut state.command_tracker,
+                                );
+                                if request.unscoped_tool_hooks {
+                                    state.work_status.before_resource_request();
+                                }
+                            } else {
+                                if !result.is_error {
+                                    return Err(AgentEngineError::InvalidContract("unattempted platform tool returned success".into()));
+                                }
+                                state.work_status.observe_deferred();
+                            }
+                            if failed_process {
+                                let reportable_failure = state.execution_plan.revision == 0
+                                    && (!state.execution_plan.needs_replan || state.completion.settled_failure_gate())
+                                    && !request.unscoped_tool_hooks
+                                    && crate::execution_policy::settled_reportable_process(binding, &result);
+                                adaptive.activate(
+                                    crate::adaptive::LONG_HORIZON_MODULES,
+                                    crate::AgentRuntimeActivationReason::EffectfulToolCall,
+                                    event_sink.as_ref(),
+                                ).await?;
+                                // The first failed command activates a plan. Once
+                                // a source-anchored plan is in progress, an
+                                // expected failing test remains an observation
+                                // within that plan, not an automatic demand to
+                                // replan before the next repair. Later serial
+                                // effects in this same batch were already held.
+                                if state.execution_plan.revision == 0 {
+                                    state.execution_plan.needs_replan = true;
+                                }
+                                state.completion.invalidate();
+                                state.completion.set_settled_failure_gate(reportable_failure);
+                            }
+                            if process_not_applied {
+                                // A typed non-start or rejected control proves this
+                                // call did not apply an effect. It neither advances
+                                // workspace evidence nor forces replanning. It is
+                                // still a visible tool
+                                // failure that needs an exact completion account.
+                                // Expose plan/completion controls before the model
+                                // can search for them or replay the failed launch.
+                                adaptive
+                                    .activate(
+                                        crate::adaptive::LEDGER_MODULES,
+                                        crate::AgentRuntimeActivationReason::ToolCall,
+                                        event_sink.as_ref(),
+                                    )
+                                    .await?;
+                                state.completion.invalidate();
+                            }
+                            if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
+                                patch_recovery.observe_read(call, &result);
+                            }
+                            if (attempted && (request.unscoped_tool_hooks || (crate::execution_policy::affects_workspace(binding)
+                                && !crate::execution_policy::process_operation_not_applied(binding, &result))))
+                                || !state.work_status.running_processes.is_empty()
+                            {
+                                // Failed calls may have partial effects too.
+                                scoped_instructions.invalidate();
+                            }
+                            let observation = state.completion.observe_with_effect_scope(
+                                &state.work_status,
+                                binding,
+                                call,
+                                &result,
+                                attempted,
+                                !request.unscoped_tool_hooks,
+                            );
+                            if adaptive.task_ledger() {
+                                event_sink.emit(AgentEngineEvent::CompletionObservation { observation }).await?;
+                            }
+                            // A real owner observation starts a fresh account.
+                            // A proposal held before dispatch cannot reopen the
+                            // report-only review or authorize repeating work.
+                            if attempted { completion_review_used = false; }
+                            if crate::execution_policy::requires_replanning_after_result(
+                                binding, &result, attempted, state.execution_plan.revision,
+                            ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
+                                state.execution_plan.needs_replan = true;
+                                if !failed_process || request.unscoped_tool_hooks
+                                    || !crate::execution_policy::settled_reportable_process(binding, &result)
+                                {
+                                    state.completion.set_settled_failure_gate(false);
+                                }
+                                // Expose the recovery control before asking the
+                                // model for another expensive proposed effect.
+                                if crate::execution_policy::requires_task_ledger(binding) {
+                                    adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                                        crate::AgentRuntimeActivationReason::EffectfulToolCall,
+                                        event_sink.as_ref()).await?;
+                                }
+                            }
+                        } else if matches!(call.name.as_str(), crate::planning::TOOL_NAME | crate::task_continuation::TOOL_NAME) {
+                            // Idempotent/rejected proposals are not state changes.
+                            // Only a committed plan transition invalidates the
+                            // current report; do not create a plan/report loop.
+                            if state.execution_plan.revision != plan_revision_before
+                                && state.completion.current(&state.execution_plan, &state.work_status, retained_inputs.len()).is_none() {
+                                state.completion.invalidate();
+                                completion_review_used = false;
+                            }
+                        } else if call.name != crate::completion::TOOL_NAME {
+                            // Planning/resource control can change the
+                            // model's account even though it supplies no evidence.
+                            state.completion.invalidate();
+                            completion_review_used = false;
+                        }
+                    }
+                }
+                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    let attempted = if request.tool_plan.binding(&call.name).is_some() {
+                        Some(dispatch.attempted(&expected_call_id)?)
+                    } else { None };
+                    archive.record(&call.name, &call.call_id, &call.arguments,
+                        &result.output, result.is_error, Some(model_steps), attempted)?;
+                    if !result.is_error && matches!(call.name.as_str(),
+                        crate::tool_archive::LOAD | crate::tool_archive::READ | crate::tool_archive::SEARCH) {
+                        adaptive.activate([crate::AgentRuntimeModule::ToolHistory],
+                            crate::AgentRuntimeActivationReason::ToolCall,event_sink.as_ref()).await?;
+                    }
+                }
+                // Evidence/patch recovery and the archive above consume the
+                // original result. Only the next model's context is reduced.
+                let context_kind = step.calls.get(&expected_call_id)
+                    .and_then(|pending| pending.completed.as_ref())
+                    .and_then(|call| request.tool_plan.binding(&call.name))
+                            .and_then(|binding| crate::tool_context::ToolContextKind::for_action(binding.action_id.as_ref()));
+                let result = match context_kind {
+                    Some(kind) if dispatch.attempted(&expected_call_id)? => crate::tool_context::project(kind, &result),
+                    _ => result,
+                };
+                model_request.input.messages.push(ChatMessage {
+                    role: ChatRole::Tool,
+                    content: vec![ChatContentPart::ToolResult {
+                        call_id: result.call_id,
+                        output: result.output,
+                        is_error: result.is_error,
+                    }],
+                    provider_round_id: None,
+                });
+            }
+            if disposition == ToolBatchDisposition::PhaseCorrection {
+                repeated_control_rejection = control_rejections.observe_phase_correction();
+            }
+            patch_recovery.end_batch();
+            patch_recovery.persist(event_sink.as_ref()).await?;
+            if adaptive.task_ledger() {
+                event_sink.emit(AgentEngineEvent::WorkStatus {
+                    status: state.work_status.clone(),
+                }).await?;
+                event_sink.emit(AgentEngineEvent::PlanUpdated {
+                    plan: state.execution_plan.clone(),
+                }).await?;
+            }
+            let terminal_report = terminal_completion_requested.then(|| state.completion.current(
+                &state.execution_plan,&state.work_status,retained_inputs.len()).cloned()).flatten();
+            if delivery_review_step && terminal_report.is_none() {
+                return fail_turn(&event_sink, model_steps,
+                    "the single report-only delivery review did not produce a valid final account; the candidate was not delivered").await;
+            }
+            let terminal_handoff = terminal_collaboration_accepted
+                && (!adaptive.task_ledger()
+                    || (state.execution_plan.revision == 0
+                        && !state.execution_plan.needs_replan
+                        && state.work_status.successful_workspace_mutations == 0
+                        && state.work_status.successful_commands == 0
+                        && retained_inputs.len() == 1));
+            if (terminal_handoff || terminal_report.is_some())
+                && state.work_status.running_processes.is_empty()
+                && (!patch_recovery.pending() || terminal_report.as_ref().is_some_and(|report| report.is_blocked()))
+            {
+                // `take(..., true)` is the terminal fence: when it returns
+                // empty, the host atomically closes steering for this turn.
+                // A separate `has_pending` check would leave a race in which
+                // a newly accepted steer is acknowledged after completion and
+                // then never incorporated.
+                let terminal_inputs = match &request.input_port {
+                    Some(port) => port.take(&model_request.causality, true).await?,
+                    None => Vec::new(),
+                };
+                if terminal_inputs.is_empty() {
+                    if cancellation.is_cancelled() {
+                        return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,
+                            model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await;
+                    }
+                    if let Some(report) = terminal_report {
+                        let mut delivery = report.delivery_text();
+                        if !output_text.is_empty() { delivery.insert_str(0, "\n\n"); }
+                        output_text.push_str(&delivery);
+                        event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
+                        if report.is_blocked() {
+                            return fail_turn(&event_sink,model_steps,"completion account contains blocked work; this turn cannot be published as task completion").await;
+                        }
+                    }
+                    let finish_reason = ChatFinishReason::Completed;
+                    let result = AgentTurnResult {
+                        agent_session_id,
+                        turn_operation_id,
+                        model_steps,
+                        output_text,
+                        reasoning_text,
+                        tool_call_count,
+                        provider_round_id,
+                        terminal: AgentTurnTerminal::Completed { finish_reason },
+                    };
+                    event_sink
+                        .emit(AgentEngineEvent::TurnCompleted {
+                            model_steps,
+                            finish_reason,
+                        })
+                        .await?;
+                    return Ok(result);
+                }
+                crate::steering::incorporate(
+                    terminal_inputs,
+                    &mut model_request,
+                    &mut retained_inputs,
+                    &mut steering_receipts,
+                    &mut steering_receipt_order,
+                )?;
+                control_rejections.reset();
+                completion_review_used = false;
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+            }
+            if let Some(reason) = repeated_control_rejection {
+                return fail_turn(&event_sink, model_steps,
+                    format!("engine control made no progress; {reason}")).await;
+            }
+            if let Some(round_id) = step.provider_round_id {
+                model_request.input.provider_round_parent = Some(round_id);
+            }
+            model_request
+                .validate()
+                .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+            continue;
+        }
+
+        // Rejected reasoning-only terminals are not factual assistant history.
+        // Compatible provider codecs may flatten Reasoning into ordinary text;
+        // replaying it would turn pretend/private actions into apparent work.
+        // Keep the authoritative no-effect notice, not the rejected carrier.
+        if !empty_task_response {
+            append_assistant_step(&mut model_request, &step)?;
+        }
+        // An unresolved patch already rules out task success. Preserve the
+        // model's final failure/partial-result text and the recovery obligation;
+        // a completion review must not reopen work the model has just ended.
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && (patch_recovery.pending() || patch_recovery.unresolved())
+        {
+            return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
+        }
+        if empty_task_response {
+            // Private reasoning (or no content) is not a public closing answer.
+            // Keep the already-advertised action surface for unfinished work;
+            // correction is bounded by the existing protocol and turn budgets.
+            let continuation = protocol_recovery.admit(model_steps < total_model_limit);
+            // Private thinking is not a selected tool or task-completion
+            // decision. Correct native formatting without narrowing the
+            // existing frozen surface from an unexecuted private example.
+            protocol_recovery.set_tool_hint(None);
+            event_sink.emit(AgentEngineEvent::ModelResponseRejected {
+                step: model_steps, discarded_tool_call_ids: vec![], continuation, tool_hint: None,
+            }).await?;
+            model_request.input.messages.push(crate::protocol_recovery::empty_task_notice(continuation));
+            model_request.input.provider_round_parent = None;
+            provider_round_id = None;
+            if !continuation {
+                return fail_turn(&event_sink, model_steps,
+                    "model produced no public answer or native tool calls after bounded correction; task completion was not accepted").await;
+            }
+            continue 'model_steps;
+        }
+        // At most one evidence review, never an unbounded self-retry. The
+        // model may report a blocker/unverified result instead of invoking a
+        // command; a user prohibition on verification remains authoritative.
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+            let state = long_horizon.as_ref().ok_or_else(|| {
+                AgentEngineError::InvalidContract(
+                    "active task ledger has no turn-local state".into(),
+                )
+            })?;
+            if state
+                .completion
+                .current(
+                    &state.execution_plan,
+                    &state.work_status,
+                    retained_inputs.len(),
+                )
+                .is_none()
+                && !completion_review_used
+                && model_steps < total_model_limit
+            {
+                completion_review_used = true;
+                event_sink.emit(AgentEngineEvent::CompletionReview {
+                    status: state.work_status.clone(),
+                }).await?;
+                model_request.input.messages.push(state.work_status.completion_review_message()?);
+                model_request.input.provider_round_parent = None;
+                continue;
+            }
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && adaptive.task_ledger()
+            && long_horizon
+                .as_ref()
+                .is_some_and(|state| state.execution_plan.is_open())
+        {
+            return fail_turn(&event_sink, model_steps, "execution plan remains unresolved; completion was not accepted").await;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && long_horizon
+                .as_ref()
+                .is_some_and(|state| !state.work_status.running_processes.is_empty())
+        {
+            return fail_turn(&event_sink, model_steps, "processes remain running; poll or cancel them explicitly before completion (host cleanup will still reap them)").await;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+            let state = long_horizon.as_ref().ok_or_else(|| {
+                AgentEngineError::InvalidContract(
+                    "active task ledger has no turn-local state".into(),
+                )
+            })?;
+            let Some(report) = state.completion.current(
+                &state.execution_plan,
+                &state.work_status,
+                retained_inputs.len(),
+            ) else {
+                return fail_turn(&event_sink, model_steps, "completion account is missing or stale; call report_completion after the latest plan, input and tool observations").await;
+            };
+            if report.is_blocked() {
+                return fail_turn(&event_sink, model_steps, "completion account contains blocked work; this turn cannot be published as task completion").await;
+            }
+        }
+        model_request
+            .validate()
+            .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, true).await?;
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
+                completion_review_used = false;
+                control_rejections.reset();
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+                continue;
+            }
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) {
+            if let Some(report) = long_horizon.as_ref().and_then(|state| {
+                state.completion.current(
+                    &state.execution_plan,
+                    &state.work_status,
+                    retained_inputs.len(),
+                )
+            }) {
+                if let Some(disclosure) = report.unverified_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+                if let Some(disclosure) = report.tool_error_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+                if let Some(disclosure) = report.command_failure_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+            }
+        }
+        let result = AgentTurnResult {
+            agent_session_id,
+            turn_operation_id,
+            model_steps,
+            output_text,
+            reasoning_text,
+            tool_call_count,
+            provider_round_id,
+            terminal: AgentTurnTerminal::Completed { finish_reason },
+        };
+        event_sink
+            .emit(AgentEngineEvent::TurnCompleted {
+                model_steps,
+                finish_reason,
+            })
+            .await?;
+        return Ok(result);
+    }
+
+}
+
+fn mark_patch_recovery_context_changed(plan: &mut crate::AgentPlan) {
+    // Fresh instruction/recovery reads change model-visible context before effects.
+    // They invalidate an established plan, but must not turn the deliberately
+    // optional empty plan into a synthetic gate that rejects the first repair.
+    // A gate already raised by steering or another cause remains raised.
+    if plan.revision > 0 || !plan.steps.is_empty() || !plan.requirements.is_empty() {
+        plan.needs_replan = true;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_execution_checkpoint(
+    sink: &dyn AgentEventSink, binding: &EngineBinding, operation: &OperationId,
+    generation: u64, model_steps: u16, tool_call_count: u32, input_count: usize,
+    steering_receipts: &[String], state: Option<&LongHorizonState>,
+    patch_recovery: &crate::patch_recovery::PatchRecovery,
+    segments: Option<&crate::AgentExecutionSegmentState>,
+    control_rejections: &AgentControlRejectionState,
+) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+    if !sink.supports_checkpoints() { return Ok(None); }
+    let work = state.map(|state| state.work_status.clone()).unwrap_or_default();
+    if !work.running_processes.is_empty() { return Ok(None); }
+    let checkpoint = crate::AgentExecutionCheckpoint {
+        version: 1, binding: binding.clone(), turn_operation_id: operation.clone(),
+        active_set_generation: generation, model_steps, tool_call_count, accepted_input_count: input_count,
+        applied_steering_receipts: steering_receipts.iter().map(|id| OperationId::from(id.clone())).collect(),
+        plan: state.map(|state| state.execution_plan.clone()).unwrap_or_default(),
+        work, patch_recovery: patch_recovery.snapshot(), segments: segments.cloned(),
+        control_rejections: control_rejections.clone(),
+        completion_review: state.map(|state| state.completion.review.clone()).unwrap_or_default(),
+    };
+    checkpoint.validate()?;
+    sink.save_checkpoint(checkpoint).await
+}
+
+#[derive(Default)]
+struct LongHorizonState {
+    tool_arguments: crate::tool_validation::ToolArgumentValidators,
+    execution_plan: crate::AgentPlan,
+    work_status: crate::AgentWorkStatus,
+    completion: crate::completion::CompletionTracker,
+    command_tracker: crate::workflow::CommandTracker,
+}
+
+/// A weak tool-calling model can keep resubmitting malformed plan/completion
+/// controls. Bound that retry loop before it consumes the context window; the
+/// fourth failure still has its durable result before the turn stops.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentControlRejectionState {
+    name: String,
+    consecutive: u8,
+    total: u8,
+    no_progress: u8,
+    phase_corrections: u8,
+}
+
+type ControlRejections = AgentControlRejectionState;
+
+impl AgentControlRejectionState {
+    pub(crate) fn validate(&self) -> Result<(), AgentEngineError> {
+        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME)
+            || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 || self.phase_corrections > 4 {
+            return Err(AgentEngineError::InvalidContract("invalid persisted control correction budget".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.name.clear();
+        self.consecutive = 0;
+        self.total = 0;
+        self.no_progress = 0;
+        self.phase_corrections = 0;
+    }
+
+    fn observe_phase_correction(&mut self) -> Option<String> {
+        self.phase_corrections = self.phase_corrections.saturating_add(1);
+        (self.phase_corrections >= 4).then(||
+            "report-only phase rejected four new action batches before dispatch; original receipts and work counts are unchanged, but no valid completion account was submitted".into())
+    }
+
+    pub(crate) fn observe(&mut self, name: &str, result: &AgentToolResult, made_progress: bool) -> Option<String> {
+        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+            self.consecutive = if self.name == name { self.consecutive.saturating_add(1) } else { 1 };
+            self.total = self.total.saturating_add(1);
+            self.name = name.to_owned();
+            if self.consecutive >= 4 {
+                return Some(format!("{name} failed four consecutive times"));
+            }
+            if self.total >= 8 {
+                return Some("update_plan/report_completion failed eight times without a successful intervening tool; stop the control loop and surface the last rejection".into());
+            }
+            return None;
+        }
+        if result.is_error {
+            self.name.clear();
+            self.consecutive = 0;
+            return None;
+        }
+        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+            self.name.clear();
+            self.consecutive = 0;
+            self.no_progress = self.no_progress.saturating_add(1);
+            if self.no_progress >= 4 {
+                return Some("plan/completion controls succeeded idempotently four times without changing task state; no progress was made".into());
+            }
+            return None;
+        }
+        self.reset();
+        None
+    }
+}
+
+#[derive(Default)]
+struct AdaptiveContextSlots {
+    long_horizon_policy: Option<usize>,
+    scoped_instructions: Option<usize>,
+    patch_recovery: Option<usize>,
+    tool_history: Option<usize>,
+    historical_delivery: Option<usize>,
+    historical_report_only: Option<usize>,
+    task_plan: Option<usize>,
+    completion: Option<usize>,
+    completion_review: Option<usize>,
+    delivery_review: Option<usize>,
+    discovery_catalog: Option<usize>,
+    task_continuation: Option<usize>,
+    failure_stop: Option<usize>,
+    workspace_mutation_policy: Option<usize>,
+}
+
+fn synchronize_completion_review(
+    request: &mut ChatModelRequest,
+    slots: &mut AdaptiveContextSlots,
+    active: bool,
+    can_report: bool,
+    has_running_processes: bool,
+    continuing_complex_task: bool,
+) -> AgentExecutionPhase {
+    if active {
+        if has_running_processes {
+            // A provider's per-response stop can be a public progress update.
+            // Unsettled work is still execution, not authority to cancel a
+            // user-held process merely to obtain a completion report.
+            upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
+                "Execution remains unfinished for the same accepted task. A public progress reply does not complete it or authorize cancelling processes. Preserve the user's keep-alive/wait-for-input constraints, owned process IDs and output cursors; continue only the actions permitted by the accepted task. If the user requires keeping a helper until Stop, keep this turn active and poll that helper rather than cancel it to end a response. User cancellation and frozen execution budgets still apply. Unknown effects and pending recovery remain unresolved; this notice grants no verification, retry or wider scope. Claim completion only after the required work and owned processes have actually settled. Existing recovery policy may still permit a blocked partial account, which is never task success.".into());
+            return AgentExecutionPhase::Execution;
+        }
+        if continuing_complex_task {
+            upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
+                "A per-response stop can be a brief public progress update, not completion of this multi-item task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
+            return AgentExecutionPhase::Execution;
+        }
+        // The transcript review can be summarized with an oversized tool
+        // suffix. Keep this host-owned phase in mandatory instructions; the
+        // original inputs, evidence and authority remain unchanged.
+        upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
+            "Completion review is active for this same accepted task. The closing answer or completion call lacks a valid current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Do not add file reads or directory listings to repair this account. When report_completion is the only advertised tool, submit that report alone; the unavailable action tools are intentionally closed for this phase, not missing capabilities to discover or test. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
+        if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
+            // Select the already exposed control after a terminal answer.
+            // Some compatible providers ignore tool_choice, so expose only
+            // this control for the review. The frozen authority is unchanged;
+            // the whole-batch exposure guard still rejects any guessed action.
+            // This cannot accept arguments or create completion evidence.
+            request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
+            request.input.tool_choice = ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() };
+            return AgentExecutionPhase::CompletionReview;
+        }
+    } else if let Some(slot) = slots.completion_review {
+        request.input.instructions[slot].clear();
+    }
+    AgentExecutionPhase::Execution
+}
+
+fn synchronize_delivery_review(request: &mut ChatModelRequest, slots: &mut AdaptiveContextSlots, active: bool, phase: AgentExecutionPhase) -> AgentExecutionPhase {
+    if active {
+        upsert_instruction(&mut request.input.instructions, &mut slots.delivery_review,
+            crate::delivery_review::INSTRUCTION.to_owned());
+        request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific { name: crate::completion::TOOL_NAME.into() };
+        return AgentExecutionPhase::DeliveryReview;
+    } else if let Some(slot) = slots.delivery_review {
+        request.input.instructions[slot].clear();
+    }
+    phase
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synchronize_adaptive_context(
+    request: &mut ChatModelRequest,
+    plan: &AgentToolPlan,
+    requested_tool_choice: &ChatToolChoice,
+    adaptive: &crate::adaptive::AdaptiveExecution,
+    scoped_instructions: &crate::workspace_context::ScopedInstructions,
+    patch_recovery: &crate::patch_recovery::PatchRecovery,
+    tool_archive: Option<&crate::tool_archive::ToolArchive>,
+    long_horizon: Option<&LongHorizonState>,
+    accepted_inputs: &[ChatMessage],
+    input_revision: usize,
+    resources: bool,
+    prior_task: Option<&crate::AgentPriorTask>,
+    remote_resources: bool,
+    history: bool,
+    tool_discovery: bool,
+    discovered_tools: &std::collections::BTreeSet<String>,
+    slots: &mut AdaptiveContextSlots,
+) -> Result<(), AgentEngineError> {
+    let task_continuation_available = prior_task.is_some()
+        && long_horizon.is_none_or(|state| {
+            crate::task_continuation::available(&state.execution_plan, &state.work_status)
+        });
+    configure_tools(
+        request,
+        plan,
+        resources,
+        task_continuation_available,
+        remote_resources,
+        history,
+        adaptive.task_ledger(),
+        adaptive.tool_history(),
+        tool_discovery,
+        discovered_tools,
+    )?;
+    let workspace_mutation_forbidden =
+        crate::requirements::workspace_mutation_forbidden(accepted_inputs);
+    let requested_workspace_mutation = match requested_tool_choice {
+        ChatToolChoice::Specific { name } => plan.binding(name).is_some_and(|binding| {
+            matches!(
+                binding.capability_id.as_ref(),
+                "workspace.files" | "workspace.vcs" | "workspace.artifacts"
+            ) && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+        }),
+        _ => false,
+    };
+    if workspace_mutation_forbidden {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.workspace_mutation_policy,
+            "The accepted user input explicitly forbids workspace mutation. While this restriction is active, workspace file, VCS and Artifact mutation tools are hidden; read-only inspection remains available. Process execution can still modify files, so keep process commands read-only and inline: do not redirect output, run mutating commands, or create helper or temporary scripts. A later accepted user input must explicitly permit file changes before the mutation tools return.".into(),
+        );
+        request.input.tools.retain(|tool| {
+            plan.binding(&tool.name).is_none_or(|binding| {
+                !matches!(
+                    binding.capability_id.as_ref(),
+                    "workspace.files" | "workspace.vcs" | "workspace.artifacts"
+                ) || matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+            })
+        });
+    } else if let Some(slot) = slots.workspace_mutation_policy {
+        request.input.instructions[slot] = "A later accepted user input permits workspace mutation; the earlier turn-local read-only restriction is no longer active. The immutable frozen tool plan still bounds every available action.".into();
+    }
+    if let Some(prior) = prior_task {
+        let context = if task_continuation_available {
+            prior.context()?
+        } else {
+            prior
+                .inactive_context(
+                    &long_horizon
+                        .expect("ineligible task continuation has turn-local state")
+                        .execution_plan,
+                )
+                .into()
+        };
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.task_continuation,
+            context,
+        );
+    }
+    request.input.tool_choice = if request.input.tools.is_empty() {
+        ChatToolChoice::None
+    } else if matches!(requested_tool_choice, ChatToolChoice::None) {
+        ChatToolChoice::Auto
+    } else if workspace_mutation_forbidden && requested_workspace_mutation {
+        ChatToolChoice::Auto
+    } else {
+        requested_tool_choice.clone()
+    };
+    let continuation_plan_gate = prior_task.is_some_and(|prior| {
+        long_horizon.is_some_and(|state| prior.requires_plan_update(&state.execution_plan))
+    });
+    let failure_stop_gate = adaptive.task_ledger()
+        && long_horizon.is_some_and(|state| state.work_status.failed_tools > 0)
+        && crate::requirements::failure_stop_requested(accepted_inputs);
+    if failure_stop_gate {
+        let targets = patch_recovery.snapshot().targets;
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.failure_stop,
+            format!(
+                "The accepted user input explicitly requires stopping after an error and forbids retries. A tool error is now recorded. Do not read, inspect history, replan, or attempt another effect. Report the actual partial result now with report_completion and a blocked disposition; do not claim success or rollback. The user-visible summary must name every affected target and state that it failed or is only partial. A blocked criterion is not evidence: omit evidence_paths, evidence_call_ids, requirement_ids, step and scope_change. Use exactly the minimal shape {{\"summary\":\"...\",\"criteria\":[{{\"disposition\":\"blocked\",\"rationale\":\"...\"}}]}}. Affected patch targets: {}.",
+                serde_json::to_string(&targets).unwrap_or_else(|_| "[]".into())
+            ),
+        );
+    }
+    if tool_discovery {
+        if let Some(catalog) = crate::tool_discovery::catalog(plan, discovered_tools) {
+            upsert_instruction(&mut request.input.instructions, &mut slots.discovery_catalog, catalog);
+        } else if let Some(slot) = slots.discovery_catalog {
+            request.input.instructions[slot] = "All previously deferred tool schemas are now visible.".into();
+        }
+    }
+    if adaptive.task_ledger() {
+        let state = long_horizon.ok_or_else(|| {
+            AgentEngineError::InvalidContract("active task ledger has no turn-local state".into())
+        })?;
+        let completion_tool = request.input.tools.iter_mut()
+            .find(|tool| tool.name == crate::completion::TOOL_NAME)
+            .ok_or_else(|| AgentEngineError::InvalidContract("active task ledger has no completion tool".into()))?;
+        *completion_tool = state.completion.definition_with_evidence(
+            &state.execution_plan,
+            &state.work_status,
+            patch_recovery.pending() || patch_recovery.unresolved(),
+        );
+        state.completion.add_delivery_schema(completion_tool, accepted_inputs);
+        if let Some(archive)=tool_archive {
+            state.completion.add_historical_delivery_schema(completion_tool,archive);
+        }
+        if failure_stop_gate && !crate::delivery_review::delivery_slots(accepted_inputs).is_empty() {
+            if let Some(slot) = slots.failure_stop {
+                request.input.instructions[slot].push_str(" For this numbered task, extend that minimal shape with the REQUIRED delivery_items from the advertised schema: include every advertised item_id, status=missing, results=[], and a plain explanation. Copy required exact observed error counts too. This is a blocked account, not permission to retry or discover results.");
+            }
+        }
+        // Temporary workflow gates do not revoke tools from the frozen
+        // capability surface. Removing schemas made repairable command errors
+        // look like lost shell permission and forced needless tool discovery.
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.long_horizon_policy,
+            crate::workflow::LONG_HORIZON_EXECUTION_INSTRUCTIONS.into(),
+        );
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.task_plan,
+            state.execution_plan.context()?,
+        );
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.completion,
+            format!("{}{}", state.completion.context(
+                &state.execution_plan,
+                &state.work_status,
+                input_revision,
+            )?, state.completion.delivery_context(accepted_inputs)
+                .map(|context| format!("\n{context}")).unwrap_or_default()),
+        );
+    }
+    if scoped_instructions.has_context() || slots.scoped_instructions.is_some() {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.scoped_instructions,
+            scoped_instructions.context(),
+        );
+    }
+    if patch_recovery.pending() || patch_recovery.unresolved() || slots.patch_recovery.is_some() {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.patch_recovery,
+            patch_recovery.context(),
+        );
+    }
+    if adaptive.tool_history() {
+        let archive = tool_archive.ok_or_else(|| {
+            AgentEngineError::InvalidContract("active tool history has no turn-local archive".into())
+        })?;
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.tool_history,
+            archive.context(),
+        );
+    }
+    if failure_stop_gate {
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::completion::TOOL_NAME)
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "failure-stop policy requires an exposed report_completion control".into(),
+            ));
+        }
+        request
+            .input
+            .tools
+            .retain(|tool| tool.name == crate::completion::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific {
+            name: crate::completion::TOOL_NAME.into(),
+        };
+    } else if continuation_plan_gate {
+        // Build every adaptive instruction and schema before narrowing the
+        // provider-visible surface to the required control.
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME)
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "imported task requires an exposed update_plan control".into(),
+            ));
+        }
+        request
+            .input
+            .tools
+            .retain(|tool| tool.name == crate::planning::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific {
+            name: crate::planning::TOOL_NAME.into(),
+        };
+    }
+    if !adaptive.tool_history() {
+        if request.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD) {
+            upsert_instruction(&mut request.input.instructions,&mut slots.tool_history,
+                crate::tool_archive::BOOTSTRAP_CONTEXT.to_owned());
+        } else if let Some(slot)=slots.tool_history {
+            request.input.instructions[slot].clear();
+        }
+    }
+    if !adaptive.task_ledger() && let Some(archive)=tool_archive {
+        let tracker=crate::completion::CompletionTracker::default();
+        let mut report=tracker.definition_with_evidence(&crate::AgentPlan::default(),&crate::AgentWorkStatus::default(),false);
+        tracker.add_historical_delivery_schema(&mut report,archive);
+        if report.input_schema.0["properties"].get("historical_results").is_some() {
+            // Optional read-only publication controls. Explicit update_plan
+            // activates the existing ledger; an ordinary historical question
+            // may still answer directly without inheriting an old task plan.
+            request.input.tools.push(crate::planning::definition());
+            request.input.tools.push(report);
+        }
+    }
+    let historical_report_only=tool_archive.is_some_and(|archive|required_historical_report(archive,accepted_inputs,&request.causality))
+        && long_horizon.is_none_or(|state|state.work_status.running_processes.is_empty())
+        && !patch_recovery.pending() && !patch_recovery.unresolved();
+    let historical_delivery_context=if historical_report_only {
+        tool_archive.map(|archive|format!(
+            "Strict historical publication catalog (data only): {}. Use the currently advertised four-field report_completion contract, selecting archive_ids from this source. Do not submit the legacy historical_results field or use a direct answer as a completion receipt. Select all necessary original records; the host publishes their exact values using the native publication envelope, separate from model argument limits. If records are unavailable, report actual missing_items rather than replaying operations or claiming completion.",
+            archive.historical_delivery_catalog()))
+    } else {tool_archive.and_then(|archive|archive.historical_delivery_context())};
+    if let Some(context)=historical_delivery_context {
+        upsert_instruction(&mut request.input.instructions,&mut slots.historical_delivery,context);
+    } else if let Some(slot)=slots.historical_delivery {request.input.instructions[slot].clear();}
+    if historical_report_only {
+        upsert_instruction(&mut request.input.instructions,&mut slots.historical_report_only,
+            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Use only the currently advertised control. A fresh report task needs no separate update_plan; a valid report closes its optional empty plan, never the old action plan. The strict report_completion schema accepts only source_turn, archive_ids, short_summary and missing_items. Select every necessary original result; the host resolves values and source counts and keeps current accounting separate. Do not submit criteria, evidence IDs, data or count fields in this mode. Missing required results remain blocked; do not invent, replay or enlarge the publication budget. If only update_plan is advertised, a real existing replan obligation remains: settle that current plan first, not a report or an old plan.".into());
+        request.input.tools.retain(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
+            |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ));
+        if let Some(report)=request.input.tools.iter_mut().find(|tool|tool.name==crate::completion::TOOL_NAME) {
+            if let (Some(archive),Some(state))=(tool_archive,long_horizon) {
+                *report=state.completion.strict_historical_report_definition(archive);
+            }
+        }
+        if adaptive.task_ledger() && long_horizon.is_some_and(|state|
+            state.work_status.running_processes.is_empty() && !patch_recovery.pending() && !patch_recovery.unresolved()) {
+            // Completion already validates and closes an optional empty plan.
+            // Do not require a model-only planning round for a fresh read-only
+            // publication; preserve genuine stale-plan obligations.
+            let name=if long_horizon.is_some_and(|state|state.execution_plan.needs_replan) {
+                crate::planning::TOOL_NAME
+            } else {crate::completion::TOOL_NAME};
+            if request.input.tools.iter().any(|tool|tool.name==name) {
+                request.input.tools.retain(|tool|tool.name==name);
+                request.input.tool_choice=ChatToolChoice::Specific {name:name.into()};
+            }
+        }
+    } else if let Some(slot)=slots.historical_report_only {request.input.instructions[slot].clear();}
+    Ok(())
+}
+
+fn required_historical_report(archive:&crate::tool_archive::ToolArchive,inputs:&[ChatMessage],causality:&nomifun_chat_model_broker::ChatCausality)->bool {
+    let sources=crate::requirements::historical_report_only_sources(inputs,causality.agent_session_id.as_ref(),causality.turn_operation_id.as_ref());
+    let catalog=archive.historical_delivery_catalog();
+    sources.len()==1 && sources.iter().all(|source|catalog["sources"].as_array().is_some_and(|known|
+        known.iter().any(|entry|entry["source_turn"]==*source)))
+        && catalog["records"].as_array().is_some_and(|records|!records.is_empty())
+}
+
+fn upsert_instruction(
+    instructions: &mut Vec<String>,
+    slot: &mut Option<usize>,
+    value: String,
+) {
+    if let Some(index) = *slot {
+        instructions[index] = value;
+    } else {
+        *slot = Some(instructions.len());
+        instructions.push(value);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_tools(
+    request: &mut ChatModelRequest,
+    plan: &AgentToolPlan,
+    resources: bool,
+    prior_task: bool,
+    remote_resources: bool,
+    history: bool,
+    task_ledger: bool,
+    tool_history: bool,
+    tool_discovery: bool,
+    discovered_tools: &std::collections::BTreeSet<String>,
+) -> Result<(), AgentEngineError> {
+    // Retired capability-control names remain reserved so a host cannot
+    // accidentally restore the old dynamic authority surface as ordinary tools.
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+        .iter().any(|name| plan.binding(name).is_some()) {
+        return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
+    }
+    request.input.tools = crate::tool_discovery::definitions(plan, discovered_tools);
+    crate::standard_tools::deduplicate_workspace_guidance(request);
+    if tool_discovery {
+        request.input.tools.push(crate::tool_discovery::definition());
+    }
+    if task_ledger {
+        request.input.tools.push(crate::planning::definition());
+        request.input.tools.push(crate::completion::definition());
+    }
+    if tool_history {
+        request.input.tools.extend(crate::tool_archive::definitions());
+    }
+    // An authenticated port is already the authority for this read. ToolSearch
+    // cannot discover engine controls, so waiting for ToolHistory activation
+    // made a history-only task unable to load the very records that activate it.
+    if history { request.input.tools.push(crate::tool_archive::load_definition()); }
+    if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
+    if resources { request.input.tools.push(crate::context_resources::definition()); }
+    if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
+    Ok(())
+}
+
+async fn fail_turn(
+    event_sink: &Arc<dyn AgentEventSink>,
+    model_steps: u16,
+    message: impl Into<String>,
+) -> Result<AgentTurnResult, AgentEngineError> {
+    let message = message.into();
+    event_sink
+        .emit(AgentEngineEvent::TurnFailed {
+            model_steps,
+            message: message.clone(),
+            failure: None,
+        })
+        .await?;
+    Err(AgentEngineError::TurnFailed(message))
+}
+
+async fn cancelled_turn(
+    event_sink: &Arc<dyn AgentEventSink>,
+    agent_session_id: &AgentSessionId,
+    turn_operation_id: &OperationId,
+    model_steps: u16,
+    output_text: &str,
+    reasoning_text: &str,
+    tool_call_count: u32,
+    provider_round_id: Option<ProviderRoundId>,
+) -> Result<AgentTurnResult, AgentEngineError> {
+    event_sink
+        .emit(AgentEngineEvent::TurnCancelled { model_steps })
+        .await?;
+    Ok(AgentTurnResult {
+        agent_session_id: agent_session_id.clone(),
+        turn_operation_id: turn_operation_id.clone(),
+        model_steps,
+        output_text: output_text.to_owned(),
+        reasoning_text: reasoning_text.to_owned(),
+        tool_call_count,
+        provider_round_id,
+        terminal: AgentTurnTerminal::Cancelled,
+    })
+}
+
+async fn voice_boundary_ready(port:Option<&dyn crate::AgentImmediateCorrectionPort>,causality:&nomifun_chat_model_broker::ChatCausality,step:u16)->Result<bool,AgentEngineError> {
+    let Some(port)=port else{return Ok(false);};
+    if port.pending(causality).await?.is_empty(){return Ok(false);}
+    Ok(!port.has_admitted_tools(causality,step).await?)
+}
+
+async fn invoke_tool_calls(
+    agent_session_id: &AgentSessionId,
+    principal: &PrincipalRef,
+    model_request: &ChatModelRequest,
+    active_set_generation: &u64,
+    plan: &AgentToolPlan,
+    argument_validators: &mut crate::tool_validation::ToolArgumentValidators,
+    invoker: &dyn AgentToolInvoker,
+    event_sink: &dyn AgentEventSink,
+    step: &StepState,
+    model_step: u16,
+    cancellation: &CancellationToken,
+    execution_plan: &mut crate::AgentPlan,
+    task_ledger_active: bool,
+    completion: &mut crate::completion::CompletionTracker,
+    work_status: &mut crate::AgentWorkStatus,
+    accepted_inputs: &[ChatMessage],
+    scoped_instructions: &mut crate::workspace_context::ScopedInstructions,
+    patch_recovery: &mut crate::patch_recovery::PatchRecovery,
+    context_resources: &BTreeMap<String, crate::AgentContextResource>,
+    context_image_input: &bool,
+    input_port: Option<&dyn crate::AgentInputPort>,
+    voice_immediate: Option<&dyn crate::AgentImmediateCorrectionPort>,
+    prior_task: Option<&crate::AgentPriorTask>,
+    resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
+    tool_discovery_port: Option<&dyn crate::AgentToolDiscoveryPort>,
+    discovered_tools: &mut std::collections::BTreeSet<String>,
+    tool_archive: &mut crate::tool_archive::ToolArchive,
+    history_port: Option<&dyn crate::AgentHistoryPort>,
+    engine_binding: &EngineBinding,
+) -> Result<Vec<(ToolCallId, AgentToolResult)>, AgentEngineError> {
+    let completed = step.call_order.iter().map(|id| step.calls.get(id).and_then(|pending| pending.completed.clone())
+        .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
+        // This precedes instruction discovery, Kernel admission and controls.
+        // All calls receive paired, non-executed results; no successful prefix
+        // can be accidentally repeated when the model repairs the batch.
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+        if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
+            completion.invalidate_report();
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let protected=|call:&ChatToolCall|plan.binding(&call.name).is_some_and(|binding|
+        crate::execution_policy::affects_workspace(binding)&&!matches!(binding.effect_class,AgentEffectClass::ReadOnly)
+            && !matches!(binding.action_id.as_ref(),"workspace.process/poll"|"workspace.process/cancel"|"workspace.process/close_stdin"));
+    let exact_gate=completed.iter().find_map(|call|execution_plan.exact_action_gate(call,protected(call)));
+    let has_exact_call=crate::exact_actions::pending(&execution_plan.exact_actions).is_some_and(|action|completed.iter().any(|call|action.matches(call)));
+    if exact_gate.is_some() || (has_exact_call&&completed.len()!=1) {
+        let reason=exact_gate.unwrap_or_else(||"Not executed: submit one exact action alone; later actions cannot assume an earlier call succeeded before its owner receipt.".into());
+        let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
+        return finish_tool_results(results,event_sink,model_step,cancellation).await;
+    }
+    if completed
+        .iter()
+        .any(|call| call.name == crate::tool_discovery::TOOL_NAME)
+    {
+        let discovery_only = completed.iter().all(|call| call.name == crate::tool_discovery::TOOL_NAME);
+        let mut results = Vec::with_capacity(completed.len());
+        for call in &completed {
+            let result = if !discovery_only {
+                AgentToolResult::text(
+                    call.call_id.clone(),
+                    "No tools executed: batch ToolSearch calls only with other ToolSearch calls; use the discovered schemas in a later execution batch.",
+                    true,
+                )
+            } else if let Some(port) = tool_discovery_port {
+                crate::tool_discovery::execute(
+                    call,
+                    plan,
+                    discovered_tools,
+                    port,
+                    &model_request.causality,
+                    *active_set_generation,
+                    cancellation.clone(),
+                )
+                .await?
+            } else {
+                AgentToolResult::text(
+                    call.call_id.clone(),
+                    "ToolSearch is unavailable for this frozen AgentSession.",
+                    true,
+                )
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::tool_archive::LOAD) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if let Some(port) = history_port.filter(|_| completed.len() == 1) {
+                tool_archive.load(call, port, &model_request.causality, engine_binding, cancellation).await?
+            } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: historical loading requires an available platform history port and one call alone.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| matches!(call.name.as_str(), crate::tool_archive::SEARCH | crate::tool_archive::READ)) {
+        let isolated = completed.len() == 1;
+        let results = completed.iter().map(|call| {
+            let result = if isolated { tool_archive.handle(call) } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: submit one search/read history call alone before effects or other controls.", true)
+            };
+            (call.call_id.clone(), Ok(result))
+        }).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| matches!(call.name.as_str(), crate::remote_resources::LIST | crate::remote_resources::READ | crate::remote_resources::TEMPLATES)) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if let Some(port) = resource_port.filter(|_| completed.len() == 1) {
+                match crate::remote_resources::prepare(call, *context_image_input) {
+                    Err(result) => result,
+                    Ok(prepared) => {
+                        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+                        // Resource sessions can start stdio/OAuth/remote work.
+                        // This is a conservative observation fence, not proof
+                        // of host admission, execution or a workspace mutation.
+                        patch_recovery.invalidate_observations();
+                        patch_recovery.persist(event_sink).await?;
+                        scoped_instructions.invalidate();
+                        work_status.before_resource_request();
+                        completion.invalidate();
+                        event_sink.emit(AgentEngineEvent::WorkStatus { status: work_status.clone() }).await?;
+                        crate::remote_resources::execute(prepared, port, call, &model_request.causality,
+                            *active_set_generation, cancellation).await?
+                    }
+                }
+            } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: MCP resources require an available host port and a single-call batch.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::task_continuation::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+            let result = if completed.len() == 1 {
+                crate::task_continuation::resume(prior_task, call, execution_plan, work_status, accepted_inputs, event_sink).await?
+            } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: resume_task requires a single-call batch before planning/effects.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    // Internal control updates are isolated from effects. No Kernel capability
+    // is invented and no model-selected name can shadow the engine planner.
+    if completed.len() == 2 && completed[0].name == crate::planning::TOOL_NAME
+        && completed[1].name == crate::completion::TOOL_NAME {
+        if let Some(reason)=validate_exact_declarations(&completed[0],plan,&model_request.input.tools) {
+            let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
+            return finish_tool_results(results,event_sink,model_step,cancellation).await;
+        }
+        let planned = execution_plan.update(&completed[0], accepted_inputs, event_sink).await?;
+        let report = if planned.is_error {
+            AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
+        } else {
+            completion.submit_with_history(&completed[1], execution_plan, work_status, accepted_inputs,
+                patch_recovery.pending() || patch_recovery.unresolved(),
+                patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?
+        };
+        if !report.is_error && completion.current(execution_plan, work_status, accepted_inputs.len())
+            .is_some_and(|report| !report.is_blocked() && patch_recovery.unresolved_before_input()
+                .is_some_and(|boundary| report.scopes_out_requirements_before(boundary)))
+        {
+            patch_recovery.accept_scope_change();
+            patch_recovery.persist(event_sink).await?;
+        }
+        return finish_tool_results(vec![
+            (completed[0].call_id.clone(), Ok(planned)),
+            (completed[1].call_id.clone(), Ok(report)),
+        ], event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if completed.len() == 1 {
+                let strict=model_request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME)
+                    .is_some_and(|tool|tool.input_schema.0["properties"].get("short_summary").is_some());
+                let normalized=if strict {
+                    completion.normalize_strict_historical_report(call,tool_archive,work_status,accepted_inputs)
+                } else {Ok(call.clone())};
+                match normalized {
+                    Ok(normalized)=>completion.submit_with_history(&normalized, execution_plan, work_status, accepted_inputs,
+                    patch_recovery.pending() || patch_recovery.unresolved(),
+                    patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?,
+                    Err(reason)=>AgentToolResult::text(call.call_id.clone(),reason,true),
+                }
+            } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
+            };
+            if !result.is_error && completion.current(execution_plan, work_status, accepted_inputs.len())
+                .is_some_and(|report| !report.is_blocked() && patch_recovery.unresolved_before_input()
+                    .is_some_and(|boundary| report.scopes_out_requirements_before(boundary)))
+            {
+                patch_recovery.accept_scope_change();
+                patch_recovery.persist(event_sink).await?;
+            }
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::planning::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if completed.len() == 1 {
+                if let Some(reason)=validate_exact_declarations(call,plan,&model_request.input.tools) {
+                    AgentToolResult::text(call.call_id.clone(),reason,true)
+                } else {execution_plan.update(call, accepted_inputs, event_sink).await?}
+            } else {
+                AgentToolResult::text(call.call_id.clone(), "No tools executed: submit update_plan alone, then submit execution calls in a subsequent batch.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::context_resources::TOOL_NAME) {
+        let isolated = completed.iter().all(|call| call.name == crate::context_resources::TOOL_NAME);
+        let results = completed.iter().map(|call| {
+            let result = if isolated { crate::context_resources::read(call, context_resources, *context_image_input, completed.len() == 1) }
+                else { AgentToolResult::text(call.call_id.clone(), "No tools executed: read context resources in a separate batch before workspace calls.", true) };
+            (call.call_id.clone(), Ok(result))
+        }).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let workspace_image = completed.iter().any(|call|
+        plan.binding(&call.name).is_some_and(|binding| binding.action_id.as_ref() == "workspace.files/read")
+            && call.arguments.0.get("format").and_then(|value| value.as_str()) == Some("image"));
+    if workspace_image && (completed.len() != 1 || !*context_image_input) {
+        let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(
+            call.call_id, "No tools executed: workspace image reads require a compatible exact model route and a single-call batch. Use read_file format=image without offset/limit only when image input is available; this turn cannot change model features.", true)))).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let gate = completed.iter().find_map(|call| {
+        plan.binding(&call.name).and_then(|binding| {
+            let cleanup = matches!(binding.action_id.as_ref(),
+                "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
+            if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
+            else if task_ledger_active && crate::delivery_review::multi_item_task(accepted_inputs)
+                && matches!(binding.action_id.as_ref(),"workspace.files/write"|"workspace.files/patch"|"workspace.process/input")
+                && crate::exact_actions::pending(&execution_plan.exact_actions).is_none_or(|action|!action.matches(call)) {
+                Some("Not executed: declare the NEXT source-bound exact_actions commitment in update_plan ALONE before this numbered task's mutation/stdin phase. Keep intermediate states and final LF. For stdin, declare receiver_ref to an earlier start_process action before launching, or use its fresh owned process_id; only a digest is retained. No success flags, credentials, fabricated/cold handles or authority. Actual byte/order requirements still need independent verification.")
+            }
+            else if task_ledger_active && execution_plan.revision == 0
+                && crate::delivery_review::multi_item_task(accepted_inputs)
+                && matches!(binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch" | "workspace.process/input") {
+                Some("Not executed: this explicit multi-item task needs a concise update_plan ALONE before its first file mutation or stdin write. Keep each requested intermediate state as a separate ordered step; do not replace create-then-modify with only the final state. Retain exact requested bytes, including each final LF, and compute stdin as input plus append_newline (never specify one LF twice). The plan is model interpretation, not proof, permission or a receipt. No action in this batch ran; use fresh call IDs after the plan result, without replaying earlier settled effects.")
+            }
+            else if task_ledger_active
+                && !cleanup
+                && crate::execution_policy::requires_task_ledger(binding)
+                && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+            {
+                execution_plan.effect_gate()
+            }
+            else { None }
+        })
+    });
+    let deferred = if let Some(reason) = gate { Some(reason.to_owned()) }
+        else { scoped_instructions.before_calls(&completed, invoker, event_sink, cancellation.clone()).await? };
+    if let Some(reason) = deferred {
+        let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id, reason.clone(), true)))).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let mut calls = Vec::with_capacity(step.call_order.len());
+    let mut can_parallelize = !has_exact_call && !step.call_order.is_empty();
+    for call_id in &step.call_order {
+        if cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        let pending = step
+            .calls
+            .get(call_id)
+            .ok_or_else(|| AgentEngineError::InvalidModelEvent("tool call order is corrupt".to_owned()))?;
+        let call = pending
+            .completed
+            .clone()
+            .ok_or_else(|| {
+                AgentEngineError::InvalidModelEvent(format!(
+                    "tool call {} was not completed before the model terminal event",
+                    call_id.as_ref()
+                ))
+            })?;
+        let binding = plan
+            .binding(&call.name)
+            .ok_or_else(|| AgentEngineError::ToolNotExposed(call.name.clone()))?;
+        can_parallelize &= binding.parallel_safe
+            && matches!(binding.effect_class, AgentEffectClass::ReadOnly);
+        let invocation = invocation_for(
+            agent_session_id.clone(),
+            principal.clone(),
+            model_request.causality.resolved_snapshot_ref.clone(),
+            *active_set_generation,
+            &model_request.causality.turn_operation_id,
+            call,
+            binding,
+        );
+        calls.push(invocation);
+    }
+
+    if can_parallelize {
+        let invocations = calls.into_iter().enumerate().map(|(index, invocation)| async move {
+            let call_id = invocation.call.call_id.clone();
+            let result = async {
+                if cancellation.is_cancelled() {
+                    return Err(AgentEngineError::Cancelled);
+                }
+                if let Some(port) = input_port {
+                    if port.has_pending(&model_request.causality).await? {
+                        if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                        return Ok(steering_deferred(call_id.clone()));
+                    }
+                }
+                if !record_tool_admission(event_sink, model_step, &invocation).await? {
+                    if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                    return Ok(steering_deferred(call_id.clone()));
+                }
+                invoker.invoke(invocation, cancellation.clone()).await
+            }.await;
+            (index, call_id, result)
+        });
+        let mut pending = invocations.collect::<futures::stream::FuturesUnordered<_>>();
+        let mut ordered = vec![None; completed.len()];
+        // Owners retain admitted tasks independently of these waiter futures.
+        // Record each returned read without waiting for an unrelated slow read;
+        // scoped instruction postprocessing remains serial and precedes output.
+        while !pending.is_empty() {
+            let next = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                next = pending.next() => next,
+            };
+            let Some((index, call_id, result)) = next else { break; };
+            let call = completed.get(index).ok_or_else(|| AgentEngineError::InvalidContract(
+                "parallel result index is outside its frozen batch".into()))?;
+            if call.call_id != call_id || ordered[index].is_some() {
+                return Err(AgentEngineError::InvalidContract("parallel result identity is inconsistent".into()));
+            }
+            let result = match result {
+                Ok(result) => {
+                    result.validate_for(&call_id)?;
+                    Ok(scoped_instructions.after_call(call, result, invoker, event_sink, cancellation.clone()).await?.0)
+                }
+                Err(AgentEngineError::VoiceCorrectionBoundary)=>return Err(AgentEngineError::VoiceCorrectionBoundary),
+                Err(error) => Err(error),
+            };
+            ordered[index] = Some(record_tool_result(call_id, result, event_sink, model_step).await?);
+        }
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
+        let results = ordered.into_iter().map(|result| result.ok_or_else(||
+            AgentEngineError::InvalidContract("parallel batch has no recorded result".into())))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Live model input remains proposal-ordered. Persist that ordering so
+        // replay does not accidentally use asynchronous completion timing.
+        event_sink.emit(AgentEngineEvent::ToolResultsOrdered {
+            step: model_step, call_ids: results.iter().map(|(id, _)| id.clone()).collect(),
+        }).await?;
+        return Ok(results);
+    }
+
+    let mut results = Vec::new();
+    let mut defer_remaining: Option<String> = None;
+    for invocation in calls {
+        if cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        let call_id = invocation.call.call_id.clone();
+        if let Some(reason) = &defer_remaining {
+            let result = AgentToolResult::text(call_id.clone(), reason.clone(), true);
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        // A preceding serial effect can change repository instructions. Do
+        // not let later calls in the same batch use the pre-effect view.
+        if !results.is_empty() {
+            if let Some(reason) = scoped_instructions.before_calls(std::slice::from_ref(&invocation.call), invoker, event_sink, cancellation.clone()).await? {
+                defer_remaining = Some(reason.clone());
+                let result = AgentToolResult::text(call_id.clone(), reason, true);
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+        }
+        if let Some(port) = input_port {
+            if port.has_pending(&model_request.causality).await? {
+                if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                let reason = "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.".to_owned();
+                defer_remaining = Some(reason.clone());
+                let result = AgentToolResult::text(call_id.clone(), reason, true);
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+        }
+        if let Some(reason) = patch_recovery.gate(&invocation.binding, &invocation.call) {
+            defer_remaining = Some(reason.to_owned());
+            let result = AgentToolResult::text(call_id.clone(), reason, true);
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        let exact_armed=execution_plan.arm_exact_action(&invocation.call,event_sink).await?;
+        if !record_tool_admission(event_sink, model_step, &invocation).await? {
+            let result = steering_deferred(call_id.clone());
+            if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
+            if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+            defer_remaining = Some(result.output_text());
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        let patch_call = (invocation.binding.action_id.as_ref() == "workspace.files/patch").then(|| invocation.call.clone());
+        if let Some(call) = &patch_call {
+            // Persist BEFORE the invoker owns the effect, including cancellation
+            // and crash windows where no engine result can ever be observed.
+            if let Err(error) = patch_recovery.arm(call, accepted_inputs.len()) {
+                let reason = format!("Not executed: {error}");
+                defer_remaining = Some(reason.clone());
+                let result = AgentToolResult::text(call_id.clone(), reason, true);
+                if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+            patch_recovery.persist(event_sink).await?;
+        }
+        if patch_call.is_none()
+            && crate::execution_policy::affects_workspace(&invocation.binding)
+        {
+            patch_recovery.invalidate_observations();
+            patch_recovery.persist(event_sink).await?;
+        }
+        let observed_call = invocation.call.clone();
+        let observed_binding = invocation.binding.clone();
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+            result = invoker.invoke(invocation, cancellation.clone()) => result,
+        };
+        let result = match result {
+            Ok(result) => {
+                // A malformed/misattributed response must stop this batch
+                // before it can clear patch obligations or admit another effect.
+                result.validate_for(&call_id)?;
+                let (result, reconsider) = scoped_instructions.after_call(&observed_call, result, invoker, event_sink, cancellation.clone()).await?;
+                if reconsider {
+                    defer_remaining = Some("Not executed: an earlier search discovered changed repository instructions or withheld its snippets because required context was unavailable. Read the current context, reconsider remaining calls and submit new call identities.".into());
+                }
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        };
+        let patch_failure = patch_call.as_ref().and_then(|_| {
+            crate::patch_recovery::PatchFailureOutcome::from_result(&result)
+        });
+        // Persist every settled result before the next serial effect. A later
+        // cancellation/failure cannot erase the already recorded prefix. This
+        // is a tool observation, not owner cleanup or task-success proof.
+        let recorded = record_tool_result(call_id, result, event_sink, model_step).await?;
+        if exact_armed {
+            execution_plan.settle_exact_action(&observed_call,&recorded.1,
+                crate::execution_policy::process_operation_not_applied(&observed_binding,&recorded.1),event_sink).await?;
+        }
+        if recorded.1.is_error || plan.binding(&observed_call.name).is_some_and(|binding|
+            crate::execution_policy::failed_process_observation(binding, &recorded.1)
+        ) {
+            if let Some(call) = patch_call { patch_recovery.failed(&call, patch_failure.as_ref()); }
+            defer_remaining = Some("Not executed: an earlier serial call or command failed. Inspect its result and correct the call before proposing remaining effects again. Replan if scope changed or an attempted effect has an uncertain outcome; read/argument errors alone do not require a new plan.".into());
+        } else {
+            if patch_call.is_some() { patch_recovery.published_successfully(); }
+            else { patch_recovery.observe_successful_file_repair(&observed_binding, &recorded.1); }
+            patch_recovery.persist(event_sink).await?;
+        }
+        results.push(recorded);
+        if cancellation.is_cancelled() {
+            break;
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Err(AgentEngineError::Cancelled);
+    }
+    Ok(results)
+}
+
+fn steering_deferred(call_id: ToolCallId) -> AgentToolResult {
+    AgentToolResult::text(call_id, "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.", true)
+}
+
+fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[nomifun_chat_model_broker::ChatToolDefinition])->Option<String> {
+    for (index,action) in call.arguments.0.get("exact_actions").and_then(serde_json::Value::as_array).into_iter().flatten().enumerate() {
+        let tool=action["tool"].as_str()?;
+        if plan.binding(tool).is_none() {return Some("Exact action names a tool outside the frozen Session surface; no plan or action was applied".into());}
+        let Some(definition)=tools.iter().find(|definition|definition.name==tool) else {return Some("Discover the already-authorized tool schema before declaring its exact action; this adds no authority".into());};
+        let mut arguments=action["expected_arguments"].clone();
+        if tool=="write_process_stdin" && arguments.get("process_id").is_none() {arguments["process_id"]=serde_json::json!("validation-only-not-a-live-handle");}
+        let issues=match crate::tool_validation::declaration_issues(&definition.input_schema.0,&arguments) {
+            Ok(issues)=>issues,Err(reason)=>return Some(reason),
+        };
+        if !issues.is_empty() {return Some(serde_json::json!({"status":"not_executed","code":"INVALID_EXACT_ACTION_PARAMETERS",
+            "action_index":index,"parameter_path":format!("/exact_actions/{index}/expected_arguments"),"tool":tool,"issues":issues,
+            "message":"No plan or action applied. Correct this action's native parameter shape using the advertised frozen tool schema; do not weaken bytes/order or rerun settled work. Schema-owned expected values only; parameters were not normalized."}).to_string());}
+    }
+    None
+}
+
+async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation: &crate::AgentToolInvocation) -> Result<bool, AgentEngineError> {
+    sink.admit_tool(AgentEngineEvent::ToolStarted {
+        step, call_id: invocation.call.call_id.clone(), capability_id: invocation.binding.capability_id.clone(),
+        action_id: invocation.binding.action_id.clone(),
+    }).await
+}
+
+async fn finish_tool_results(
+    results: Vec<(
+        ToolCallId,
+        Result<AgentToolResult, AgentEngineError>,
+    )>,
+    event_sink: &dyn AgentEventSink,
+    model_step: u16,
+    cancellation: &CancellationToken,
+) -> Result<Vec<(ToolCallId, AgentToolResult)>, AgentEngineError> {
+    if cancellation.is_cancelled() {
+        return Err(AgentEngineError::Cancelled);
+    }
+    let mut normalized = Vec::with_capacity(results.len());
+    for (call_id, result) in results {
+        normalized.push(record_tool_result(call_id, result, event_sink, model_step).await?);
+    }
+    Ok(normalized)
+}
+
+/// Do not discard a returned observation merely because its token changed.
+/// Callers stop admitting more work at their next boundary. Outer driver drops
+/// and storage failures still follow the host's durable-outcome contract;
+/// cancellation without a returned result is never synthesized as success.
+async fn record_tool_result(
+    call_id: ToolCallId,
+    result: Result<AgentToolResult, AgentEngineError>,
+    event_sink: &dyn AgentEventSink,
+    model_step: u16,
+) -> Result<(ToolCallId, AgentToolResult), AgentEngineError> {
+    let result = match result {
+        Ok(result) => result,
+        Err(AgentEngineError::Cancelled) => return Err(AgentEngineError::Cancelled),
+        // Only an ordinary owner invocation failure is a model-observable tool
+        // result. Structural/host contract failures must terminate the turn;
+        // allowing the model to continue would hide a failed enforcement layer.
+        Err(error @ AgentEngineError::ToolInvocation(_))
+        | Err(error @ AgentEngineError::CapabilityKernel { .. }) => {
+            AgentToolResult::text(call_id.clone(), error.to_string(), true)
+        }
+        Err(error) => return Err(error),
+    };
+    result.validate_for(&call_id)?;
+    event_sink.emit(AgentEngineEvent::ToolCompleted {
+        step: model_step, result: result.clone(),
+    }).await?;
+    Ok((call_id, result))
+}
+
+fn append_assistant_step(
+    request: &mut ChatModelRequest,
+    step: &StepState,
+) -> Result<(), AgentEngineError> {
+    if step.assistant_content.is_empty() {
+        return Ok(());
+    }
+    request.input.messages.push(ChatMessage {
+        role: ChatRole::Assistant,
+        content: step.assistant_content.iter().map(|part| match part {
+            // Unsigned thinking is display/diagnostic data, not a portable
+            // native continuation. Keep it out of both factual history and
+            // the context budget; signed/encrypted native state stays exact.
+            ChatContentPart::Reasoning { signature: None, encrypted_content: None, .. } =>
+                ChatContentPart::Text { text: "[Private reasoning omitted from replay]".into() },
+            _ => part.clone(),
+        }).collect(),
+        provider_round_id: step.provider_round_id.clone(),
+    });
+    Ok(())
+}
+
+#[derive(Default)]
+struct StepState {
+    assistant_content: Vec<ChatContentPart>,
+    calls: BTreeMap<ToolCallId, PendingToolCall>,
+    call_order: Vec<ToolCallId>,
+    finish_reason: Option<ChatFinishReason>,
+    provider_round_id: Option<ProviderRoundId>,
+    pending_reasoning_signature: Option<String>,
+}
+
+impl StepState {
+    fn append_text(&mut self, text: &str) {
+        if let Some(ChatContentPart::Text { text: existing }) = self.assistant_content.last_mut()
+        {
+            existing.push_str(text);
+        } else {
+            self.assistant_content
+                .push(ChatContentPart::Text { text: text.to_owned() });
+        }
+    }
+
+    fn append_reasoning(&mut self, text: &str) {
+        if let Some(ChatContentPart::Reasoning { text: existing, signature: None, encrypted_content: None }) =
+            self.assistant_content.last_mut()
+        {
+            existing.push_str(text);
+        } else {
+            self.assistant_content.push(ChatContentPart::Reasoning {
+                text: text.to_owned(),
+                signature: self.pending_reasoning_signature.take(),
+                encrypted_content: None,
+            });
+        }
+    }
+
+    fn set_reasoning_signature(
+        &mut self,
+        signature: String,
+    ) -> Result<(), AgentEngineError> {
+        if let Some(ChatContentPart::Reasoning {
+            signature: existing,
+            text,
+            ..
+        }) = self.assistant_content.last_mut()
+        {
+            if existing.is_some() {
+                return Err(AgentEngineError::InvalidModelEvent(
+                    "model emitted more than one reasoning signature".to_owned(),
+                ));
+            }
+            if text.is_empty() {
+                self.pending_reasoning_signature = Some(signature);
+            } else {
+                *existing = Some(signature);
+            }
+        } else {
+            if self.pending_reasoning_signature.is_some() {
+                return Err(AgentEngineError::InvalidModelEvent(
+                    "model emitted more than one reasoning signature".to_owned(),
+                ));
+            }
+            self.pending_reasoning_signature = Some(signature);
+        }
+        Ok(())
+    }
+
+    fn record_tool_delta(
+        &mut self,
+        call_id: &ToolCallId,
+        name: &str,
+        arguments_delta: &str,
+    ) -> Result<(), AgentEngineError> {
+        crate::stream_limits::identity(call_id, name)?;
+        if !self.calls.contains_key(call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
+            return Err(AgentEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
+        }
+        if call_id.as_ref().trim().is_empty() {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "tool call delta has an empty call id".to_owned(),
+            ));
+        }
+        let entry = self.calls.entry(call_id.clone()).or_insert_with(|| {
+            self.call_order.push(call_id.clone());
+            PendingToolCall {
+                name: String::new(),
+                arguments: String::new(),
+                completed: None,
+            }
+        });
+        if entry.completed.is_some() {
+            return Err(AgentEngineError::InvalidModelEvent(format!(
+                "tool call {} emitted a delta after completion",
+                call_id.as_ref()
+            )));
+        }
+        if !name.is_empty() {
+            if !entry.name.is_empty() && entry.name != name {
+                return Err(AgentEngineError::InvalidModelEvent(format!(
+                    "tool call {} changed its name",
+                    call_id.as_ref()
+                )));
+            }
+            entry.name = name.to_owned();
+        }
+        entry.arguments.push_str(arguments_delta);
+        validate_tool_argument_size(&entry.arguments)
+    }
+
+    fn record_tool_completed(&mut self, call: &ChatToolCall) -> Result<(), AgentEngineError> {
+        crate::stream_limits::completed(call)?;
+        if !self.calls.contains_key(&call.call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
+            return Err(AgentEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
+        }
+        call.validate()
+            .map_err(|error| AgentEngineError::InvalidModelEvent(error.to_string()))?;
+        if !call.arguments.0.is_object() {
+            return Err(AgentEngineError::InvalidModelEvent(format!(
+                "tool call {} arguments must be a JSON object",
+                call.call_id.as_ref()
+            )));
+        }
+        let entry = self.calls.entry(call.call_id.clone()).or_insert_with(|| {
+            self.call_order.push(call.call_id.clone());
+            PendingToolCall {
+                name: call.name.clone(),
+                arguments: String::new(),
+                completed: None,
+            }
+        });
+        if !entry.name.is_empty() && entry.name != call.name {
+            return Err(AgentEngineError::InvalidModelEvent(format!(
+                "tool call {} changed its name before completion",
+                call.call_id.as_ref()
+            )));
+        }
+        if entry.completed.is_some() {
+            return Err(AgentEngineError::InvalidModelEvent(format!(
+                "tool call {} completed more than once",
+                call.call_id.as_ref()
+            )));
+        }
+        parse_completed_arguments(call)?;
+        if !entry.arguments.is_empty() {
+            let assembled = serde_json::from_str::<serde_json::Value>(&entry.arguments)
+                .map_err(|error| {
+                    AgentEngineError::InvalidModelEvent(format!(
+                        "tool call {} emitted invalid assembled arguments: {error}",
+                        call.call_id.as_ref()
+                    ))
+                })?;
+            if assembled != call.arguments.0 {
+                return Err(AgentEngineError::InvalidModelEvent(format!(
+                    "tool call {} completed arguments differ from assembled deltas",
+                    call.call_id.as_ref()
+                )));
+            }
+        }
+        entry.name = call.name.clone();
+        entry.completed = Some(call.clone());
+        self.assistant_content.push(ChatContentPart::ToolCall {
+            call_id: call.call_id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            provider_metadata: call.provider_metadata.clone(),
+        });
+        Ok(())
+    }
+
+    fn has_tool_calls(&self) -> bool {
+        !self.call_order.is_empty()
+    }
+
+    fn finalize(&self) -> Result<(), AgentEngineError> {
+        for call_id in &self.call_order {
+            let call = self
+                .calls
+                .get(call_id)
+                .ok_or_else(|| AgentEngineError::InvalidModelEvent("tool call order is corrupt".to_owned()))?;
+            if call.completed.is_none() {
+                return Err(AgentEngineError::InvalidModelEvent(format!(
+                    "tool call {} was not completed before the model terminal event",
+                    call_id.as_ref()
+                )));
+            }
+        }
+        if self.pending_reasoning_signature.is_some()
+            || self.assistant_content.iter().any(|part| {
+            matches!(
+                part,
+                ChatContentPart::Reasoning { text, encrypted_content, .. }
+                    if text.is_empty() && encrypted_content.is_none()
+            )
+        })
+        {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "reasoning signature was emitted without reasoning text".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct PendingToolCall {
+    name: String,
+    arguments: String,
+    completed: Option<ChatToolCall>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::engine::{
+        AgentEngine, AgentEngineBuild, EngineBuildId,
+    };
+    use crate::events::NoopAgentEventSink;
+    use crate::model::AgentModelStream;
+    use crate::tool::{
+        AgentEffectClass, AgentToolBinding, AgentToolInvocation, AgentToolInvoker,
+        AgentToolPlan, AgentToolResult,
+    };
+    use async_trait::async_trait;
+    use futures::stream;
+    use nomifun_agent_contracts::{
+        ActionId, AgentSessionId, ChatRouteIdentity, DigestHex, EventId, ModelRouteId,
+        OperationId, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef, VersionString,
+    };
+    use nomifun_chat_model_broker::{
+        ChatCausality, ChatContentPart, ChatModelError, ChatModelEvent, ChatToolDefinition,
+    };
+    use serde_json::json;
+    use tokio::sync::Notify;
+
+    #[test]
+    fn live_unsigned_thinking_is_not_replayed_or_charged_as_factual_context() {
+        let mut request=request();
+        let mut step=StepState::default();
+        step.assistant_content=vec![
+            ChatContentPart::Reasoning {text:"PRIVATE_STORY_NOT_A_RECEIPT".repeat(1024),signature:None,encrypted_content:None},
+            ChatContentPart::Text {text:"Public progress stays exact.".into()},
+            ChatContentPart::ToolCall {call_id:"actual".into(),name:"write_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"a","content":"exact\n"})),provider_metadata:None},
+        ];
+        append_assistant_step(&mut request,&step).unwrap();
+        let encoded=serde_json::to_string(&request.input).unwrap();
+        assert!(!encoded.contains("PRIVATE_STORY_NOT_A_RECEIPT"));assert!(encoded.len()<4096);
+        let content=&request.input.messages.last().unwrap().content;
+        assert_eq!(content[1..],step.assistant_content[1..]);
+        let protected=ChatContentPart::Reasoning {text:"native protected summary".into(),signature:Some("native-signature".into()),encrypted_content:None};
+        step.assistant_content=vec![protected.clone()];append_assistant_step(&mut request,&step).unwrap();
+        assert_eq!(request.input.messages.last().unwrap().content,[protected]);
+    }
+
+    fn binding() -> EngineBinding {
+        let engine = AgentEngine::new(AgentEngineBuild {
+            build_id: EngineBuildId::from("coding-dev"),
+            build_digest: DigestHex::from("a".repeat(64)),
+        })
+        .unwrap();
+        engine
+            .bind(
+                AgentSessionId::from("session"),
+                nomifun_agent_contracts::RuntimeBindingId::from("binding"),
+                ResolvedSnapshotRef {
+                    snapshot_id: ResolvedSnapshotId::from("snapshot"),
+                    snapshot_digest: DigestHex::from("b".repeat(64)),
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn patch_recovery_context_refresh_does_not_gate_the_first_repair_without_a_plan() {
+        let mut absent = crate::AgentPlan::default();
+        mark_patch_recovery_context_changed(&mut absent);
+        assert!(!absent.needs_replan);
+
+        let mut already_blocked = crate::AgentPlan {
+            needs_replan: true,
+            ..Default::default()
+        };
+        mark_patch_recovery_context_changed(&mut already_blocked);
+        assert!(already_blocked.needs_replan);
+
+        let mut established = crate::AgentPlan {
+            revision: 1,
+            ..Default::default()
+        };
+        mark_patch_recovery_context_changed(&mut established);
+        assert!(established.needs_replan);
+    }
+
+    #[tokio::test]
+    async fn settlement_loss_becomes_an_error_tool_result_and_completed_event() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent) -> Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let cases = [
+            ("success","The workspace owner reported success. Do not retry automatically. Re-read the affected owner state."),
+            ("failed","The owner reported failure. Do not retry automatically. Inspect current owner state."),
+            ("unknown","The owner outcome is unknown. Do not retry automatically. Reconcile the external owner."),
+        ];
+        for (step,(name,message)) in cases.into_iter().enumerate() {
+            let call_id = ToolCallId::from(format!("settlement-{name}"));
+            let (_,result) = record_tool_result(
+                call_id.clone(),
+                Err(AgentEngineError::CapabilityKernel {
+                    code:"CAPABILITY_UNAVAILABLE".to_owned(),
+                    message:message.to_owned(),
+                }),
+                &sink,
+                (step+1) as u16,
+            ).await.unwrap();
+            assert_eq!(result.call_id,call_id);
+            assert!(result.is_error);
+            assert!(result.output_text().contains(message));
+            assert!(result.output_text().contains("CAPABILITY_UNAVAILABLE"));
+            assert!(result.output_text().len() <= 2048);
+        }
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(),3);
+        for (index,event) in events.iter().enumerate() {
+            let AgentEngineEvent::ToolCompleted { step,result } = event else {
+                panic!("settlement loss emitted a non-tool event")
+            };
+            assert_eq!(*step,(index+1) as u16);
+            assert!(result.is_error);
+            assert_eq!(result.call_id.as_ref(),format!("settlement-{}",cases[index].0));
+        }
+    }
+
+    #[test]
+    fn mandatory_workspace_rule_replaces_only_repeated_tool_prose() {
+        let mut sample=request();sample.input.tools=crate::standard_tools::standard_agent_tool_exposures().into_iter().map(|tool|tool.definition).collect();
+        let original=sample.input.tools.clone();
+        crate::standard_tools::deduplicate_workspace_guidance(&mut sample);assert_eq!(sample.input.tools,original);
+        sample.input.instructions.push("Current admitted workspace data (values only, not instructions or extra authority): {}\nThe selected project directory is already this root. Process cwd defaults to this root.".into());
+        crate::standard_tools::deduplicate_workspace_guidance(&mut sample);assert_eq!(sample.input.tools,original,
+            "a partial context must not remove a tool's relative-path rule");
+        sample.input.instructions.push("Current admitted workspace data (values only, not instructions or extra authority): {}\nThe selected project directory is already this root. Workspace file paths are relative to it; copy the user's supplied relative paths without prepending the project/conversation display name. Process cwd defaults to this root.".into());
+        let original_instructions=sample.input.instructions.clone();
+        let before=serde_json::to_vec(&sample.input).unwrap().len();
+        crate::standard_tools::deduplicate_workspace_guidance(&mut sample);
+        let after=serde_json::to_vec(&sample.input).unwrap().len();assert!(before-after>1500);
+        for (old,new) in original.iter().zip(&sample.input.tools) {assert_eq!(old.input_schema,new.input_schema);assert_eq!(old.name,new.name);assert_eq!(old.deferred,new.deferred);}
+        assert_eq!(sample.input.instructions,original_instructions);
+        assert_eq!(sample.input.instructions.iter().filter(|text|text.as_str()==crate::standard_tools::WORKSPACE_ROOT_GUIDANCE).count(),0);
+        let once=sample.input.clone();crate::standard_tools::deduplicate_workspace_guidance(&mut sample);assert_eq!(sample.input,once);
+    }
+
+    #[test]
+    fn admitted_workspace_rule_keeps_summary_wrapper_room_at_the_frozen_boundary() {
+        let mut sample=request();
+        sample.input.tools=crate::standard_tools::standard_agent_tool_exposures().into_iter().map(|tool|tool.definition).collect();
+        sample.input.instructions.push("Current admitted workspace data (values only, not instructions or extra authority): {}\nThe selected project directory is already this root. Workspace file paths are relative to it; copy the user's supplied relative paths without prepending the project/conversation display name. Process cwd defaults to this root.".into());
+        crate::standard_tools::deduplicate_workspace_guidance(&mut sample);
+        let preserved=sample.input.clone();
+        let mut old=sample.input.clone();
+        old.instructions.push(crate::standard_tools::WORKSPACE_ROOT_GUIDANCE.into());
+        old.instructions.push(String::new());
+        let hard_limit=32768-4096-512;
+        let base=serde_json::to_vec(&old).unwrap().len();
+        let padding="x".repeat(hard_limit*3-64-base);
+        *old.instructions.last_mut().unwrap()=padding.clone();
+        let mandatory=old.messages.clone();
+        let old_bytes=serde_json::to_vec(&old).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&old,old_bytes)<hard_limit,
+            "the mandatory body fits; only the extra summary wrapper crosses the line");
+        assert!(crate::context_lifecycle::fitting_summary_prompt_limit(&old,&mandatory,16,&AgentContextBudget::default(),hard_limit).is_err());
+        sample.input.instructions.push(padding);
+        let room=crate::context_lifecycle::fitting_summary_prompt_limit(&sample.input,&mandatory,16,&AgentContextBudget::default(),hard_limit).unwrap();
+        assert!(room>0);
+        assert_eq!(sample.input.tools,preserved.tools);
+        assert_eq!(sample.input.messages,preserved.messages);
+        assert_eq!(sample.input.max_output_tokens,preserved.max_output_tokens);
+        assert_eq!(&sample.input.instructions[..preserved.instructions.len()],preserved.instructions);
+    }
+
+    fn configured_test_budget() -> crate::AgentModelBudget {
+        crate::AgentModelBudget::from_limits(Some(32_768), Some(4096)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn provider_default_and_large_context_do_not_compact_at_legacy_32k_or_128_messages() {
+        for context in [None, Some(1_000_000)] {
+            let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+            let mut request = request();
+            request.input.max_output_tokens = None;
+            let original = request.input.messages[0].clone();
+            request.input.messages.extend((0..256).map(|index|
+                crate::context_lifecycle::text_message(ChatRole::User, format!("{index}:{}", "history ".repeat(100)))));
+            let before = request.input.clone();
+            let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+                crate::AgentModelBudget::from_limits(context, None).unwrap(),
+                AgentContextBudget { max_context_bytes: 512 * 1024, ..Default::default() },
+            ).unwrap();
+            lifecycle.prepare(&mut request, &[original], &binding(), model.clone(), &NoopAgentEventSink,
+                CancellationToken::new()).await.unwrap();
+            assert_eq!(request.input, before, "provider-defined/1M context must keep fitting history exact");
+            assert!(model.requests.lock().unwrap().is_empty(), "no speculative summary request");
+        }
+    }
+
+    fn request() -> ChatModelRequest {
+        ChatModelRequest {
+            contract_version: VersionString::from(
+                nomifun_chat_model_broker::CHAT_MODEL_CONTRACT_VERSION,
+            ),
+            route: ChatRouteIdentity::new(
+                "preset@1",
+                "agent_chat",
+                ModelRouteId::from("route"),
+                1,
+            ),
+            causality: ChatCausality {
+                agent_session_id: AgentSessionId::from("session"),
+                turn_operation_id: OperationId::from("turn"),
+                causation_event_id: EventId::from("input"),
+                resolved_snapshot_ref: binding().resolved_snapshot_ref().clone(),
+                route_identity: ChatRouteIdentity::new(
+                    "preset@1",
+                    "agent_chat",
+                    ModelRouteId::from("route"),
+                    1,
+                ),
+                operation_id: OperationId::from("model"),
+            },
+            input: nomifun_chat_model_broker::ChatModelInput {
+                instructions: vec!["coding".to_owned()],
+                messages: vec![nomifun_chat_model_broker::ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatContentPart::Text {
+                        text: "inspect".to_owned(),
+                    }],
+                    provider_round_id: None,
+                }],
+                tools: Vec::new(),
+                tool_choice: ChatToolChoice::None,
+                parallel_tool_calls: None,
+                max_output_tokens: Some(100),
+                reasoning: None,
+                prompt_cache: nomifun_chat_model_broker::PromptCachePolicy::Disabled,
+                response_format: nomifun_chat_model_broker::ChatResponseFormat::Text,
+                requested_output_modalities: BTreeSet::new(),
+                provider_round_parent: None,
+                preserve_native_responses_items: false,
+                metadata: Default::default(),
+            },
+        }
+    }
+
+    fn tool_plan() -> AgentToolPlan {
+        AgentToolPlan::new([tool_binding(
+            "read_file",
+            "workspace.files",
+            "workspace.files/read",
+            AgentEffectClass::ReadOnly,
+            true,
+        )])
+        .unwrap()
+    }
+
+    #[test]
+    fn coding_workflow_gets_a_larger_bounded_model_step_budget() {
+        let coding = AgentToolPlan::new([
+            tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        assert_eq!(AgentTurnRequest::new(request(), coding, principal(), 0).max_model_steps,
+            CODING_MAX_MODEL_STEPS);
+        assert_eq!(AgentTurnRequest::new(request(), tool_plan(), principal(), 0).max_model_steps,
+            DEFAULT_MAX_MODEL_STEPS);
+    }
+
+    #[test]
+    fn alternating_control_rejections_are_bounded_without_effect_replay() {
+        let mut rejections = ControlRejections::default();
+        let failed = AgentToolResult::text("control".into(), "rejected", true);
+        for index in 0..7 {
+            let name = if index % 2 == 0 { crate::planning::TOOL_NAME } else { crate::completion::TOOL_NAME };
+            assert!(rejections.observe(name, &failed, false).is_none());
+            if index == 3 {
+                assert!(rejections.observe("exec_command", &failed, false).is_none());
+                assert_eq!(rejections.total, 4);
+            }
+        }
+        assert!(rejections.observe(crate::completion::TOOL_NAME, &failed, false)
+            .is_some_and(|reason| reason.contains("eight times")));
+        let accepted = AgentToolResult::text("control".into(), "accepted", false);
+        assert!(rejections.observe(crate::planning::TOOL_NAME, &accepted, true).is_none());
+        assert_eq!(rejections.total, 0);
+    }
+
+    fn atomic_media_plan() -> AgentToolPlan {
+        AgentToolPlan::new([tool_binding(
+            "generate_image",
+            "creation.media",
+            "creation.media/image",
+            AgentEffectClass::ExternalUncertainEffect,
+            false,
+        )])
+        .unwrap()
+    }
+
+    fn collaboration_plan(include_fork: bool) -> AgentToolPlan {
+        let delegate = tool_binding(
+            "delegate",
+            "agent.collaboration",
+            "agent/delegate",
+            AgentEffectClass::ManagedEffect,
+            false,
+        );
+        if include_fork {
+            AgentToolPlan::new([
+                delegate,
+                tool_binding(
+                    "fork",
+                    "agent.collaboration",
+                    "agent/fork",
+                    AgentEffectClass::ManagedEffect,
+                    false,
+                ),
+            ])
+            .unwrap()
+        } else {
+            AgentToolPlan::new([delegate]).unwrap()
+        }
+    }
+
+    #[test]
+    fn history_loader_bootstraps_only_when_the_authenticated_port_exists() {
+        let mut sample=request();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,&Default::default()).unwrap();
+        assert!(sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(!sample.input.tools.iter().any(|tool|matches!(tool.name.as_str(),crate::tool_archive::SEARCH|crate::tool_archive::READ|crate::planning::TOOL_NAME)));
+        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,&Default::default()).unwrap();
+        assert!(!sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+    }
+
+    #[tokio::test]
+    async fn first_history_load_activates_readers_without_owner_calls_or_task_ledger() {
+        #[derive(Debug,Default)] struct History(AtomicUsize);
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentHistoryPage {turn:None,has_older:false})
+            }
+        }
+        #[derive(Default)] struct NeverOwner(AtomicUsize);
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                panic!("history loading cannot invoke an owner: {}",invocation.call.name);
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("load-old",crate::tool_archive::LOAD,json!({})),text_step("No older history was available; no operation was repeated.")])});
+        let history=Arc::new(History::default());let owner=Arc::new(NeverOwner::default());
+        let result=open_session(model.clone(),owner.clone()).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0).with_history_port(history.clone())).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(history.0.load(Ordering::SeqCst),1);assert_eq!(owner.0.load(Ordering::SeqCst),0);
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(requests[0].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT),
+            "a new reader must advertise its scope before the first lookup, not inherit an old lookup failure");
+        assert!(crate::tool_archive::BOOTSTRAP_CONTEXT.len()<=1024);
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::READ));
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
+        assert!(!requests[1].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME||tool.name==crate::completion::TOOL_NAME));
+        assert!(!requests[1].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT),
+            "the active archive replaces the bootstrap instead of keeping contradictory state");
+    }
+
+    #[tokio::test]
+    async fn history_bootstrap_notice_requires_the_current_authenticated_reader() {
+        #[derive(Default)] struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                panic!("plain reply cannot execute an owner")
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step("No lookup requested.")])});
+        open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.unwrap();
+        let requests=model.requests.lock().unwrap();
+        assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(!requests[0].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT));
+    }
+
+    #[tokio::test]
+    async fn explicit_closed_turn_reference_loads_results_before_model_without_owner_calls() {
+        #[derive(Debug,Default)] struct History(AtomicUsize);
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,before:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                assert!(before.is_none());self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
+                    operation_id:"turn:user:msg:session:old".into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"original file task".into()),
+                    events:vec![
+                        AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn:user:msg:session:old".into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-read".into(),name:"read_file".into(),
+                            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
+                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"original report failure".into(),failure:None},
+                    ],
+                })})
+            }
+        }
+        #[derive(Default)] struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                panic!("explicit historical reference cannot invoke an owner")
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("find-original",crate::tool_archive::SEARCH,json!({"query":"第二行 after"})),text_step("Historical result observed; no operation repeated.")])});
+        let port=Arc::new(History::default());let mut sample=request();
+        sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            "只依据历史工具记录补报告。operation_id:turn:user:msg:session:old，不重发原操作。".into());
+        let accepted_reference_input = sample.input.messages[0].clone();
+        open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(port.clone())).await.unwrap();
+        assert_eq!(port.0.load(Ordering::SeqCst),1,"the explicit source must be resolved before the model can claim it missing");
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME),
+            "resolved explicit history advertises optional publication controls without forcing the ordinary answer through them");
+        assert_eq!(requests.len(),2,"the original search/direct-answer path remains available without plan or completion calls");
+        let first = serde_json::to_string(&requests[0].input.messages).unwrap();
+        assert!(first.contains("第二行 after"), "explicitly requested original body must reach the first request without requiring a guessed READ");
+        assert!(first.contains("quoted_explicit_turn_archive_data"));
+        assert_eq!(requests[0].input.messages.last().unwrap(), &accepted_reference_input);
+        assert!(serde_json::to_string(&requests[1].input.messages).unwrap().contains("第二行 after"));
+    }
+
+    #[tokio::test]
+    async fn optional_historical_publication_uses_existing_controls_without_current_evidence_or_owner_calls() {
+        const SOURCE:&str="turn:user:msg:session:old";
+        #[derive(Debug)] struct History;
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                Ok(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
+                    operation_id:SOURCE.into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"old requested read".into()),events:vec![
+                        AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:SOURCE.into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
+                            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
+                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::WorkStatus {status:crate::AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into(),failure:None},
+                    ]})})
+            }
+        }
+        #[derive(Default)] struct Model {calls:AtomicUsize,forge_current:bool,required_mode:bool,rejection_seen:std::sync::atomic::AtomicBool}
+        #[async_trait] impl AgentModelPort for Model {
+            async fn open_stream(&self,request:ChatModelRequest,_:CancellationToken)->Result<AgentModelStream,ChatModelError> {
+                let step=self.calls.fetch_add(1,Ordering::SeqCst);
+                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME);
+                if self.required_mode {
+                    assert!(request.input.tools.iter().all(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
+                        |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
+                    assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:crate::completion::TOOL_NAME.into()});
+                    assert_eq!(request.input.tools.len(),1,"a required control cannot compete with future phase controls");
+                    assert!(!request.input.instructions.iter().any(|text|text.contains("A direct answer remains available")
+                        ||text.contains("can select exact origins into historical_results")),"strict reporting must not inherit optional legacy publication instructions");
+                }
+                if let Some(report)=report {
+                    if self.required_mode {
+                        assert!(report.input_schema.0["properties"].get("criteria").is_none());
+                        assert!(report.input_schema.0["properties"].get("observed_tool_error_count").is_none());
+                    } else {
+                        assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
+                        assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                    }
+                }
+                let mut events=if self.required_mode {
+                    let schema=&report.expect("strict historical publication must be available at entry").input_schema.0;
+                    assert_eq!(schema["properties"]["source_turn"]["enum"][0],SOURCE);
+                    control_step("report",crate::completion::TOOL_NAME,json!({"source_turn":SOURCE,
+                        "archive_ids":[schema["properties"]["archive_ids"]["items"]["enum"][0].clone()],
+                        "short_summary":"已整理历史结果，未重新执行。","missing_items":[]}))
+                } else if step==0 {
+                    control_step("plan",crate::planning::TOOL_NAME,json!({"plan":[{"step":"整理所选历史结果","status":"in_progress"}]}))
+                } else if step>1 {
+                    let results=serde_json::to_string(&request.input.messages).unwrap();
+                    assert!(results.contains("Evidence call is unknown") || results.contains("INVALID_TOOL_ARGUMENTS"),
+                        "a historical ID must be rejected by advertised current-evidence schema or validation before publication");
+                    self.rejection_seen.store(true,Ordering::SeqCst);
+                    vec![Err(ChatModelError::protocol_violation("controlled end after expected invalid evidence refusal"))]
+                } else {
+                    let origin=report.unwrap().input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
+                    assert_eq!(origin["source_turn"],SOURCE);
+                    let criterion=if self.forge_current {json!({"disposition":"supported","rationale":"forged current claim",
+                        "evidence_call_ids":[origin["archive_id"].clone()]})}
+                        else {json!({"disposition":"unverified","rationale":"未作新的当前状态核验。"})};
+                    control_step("report",crate::completion::TOOL_NAME,json!({"summary":"已整理历史结果，未重新执行。",
+                        "criteria":[criterion],
+                        "observed_tool_error_count":0,"observed_command_failure_count":0,
+                        "historical_results":[{"origin":origin,"label":"原文件内容"}]}))
+                };
+                if self.required_mode {
+                    events.insert(0,Ok(ChatModelEvent::OutputTextDelta {text:"DRAFT_ONLY failed_commands=2; this prose is not an accepted report.".into()}));
+                }
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+        struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {panic!("historical publication cannot invoke an owner")}
+        }
+        #[derive(Default)] struct ReportInstructions(AtomicUsize);
+        #[async_trait] impl AgentToolInvoker for ReportInstructions {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                assert!(invocation.call.call_id.as_ref().starts_with("agent-instructions:"),"no model-selected owner call is permitted");
+                self.0.fetch_add(1,Ordering::SeqCst);
+                if invocation.call.arguments.0["path"]=="AGENTS.md" {
+                    let content="Report historical results only; do not replay commands.\n";
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"AGENTS.md","content":content,
+                        "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"total_bytes":content.len(),
+                        "offset":0,"eof":true,"next_offset":null}).to_string(),false))
+                } else {Ok(instruction_result(&invocation).expect("only root instruction reads are allowed"))}
+            }
+        }
+        let model=Arc::new(Model::default());let mut sample=request();
+        sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,format!("整理已关闭回合的记录，operation_id:{SOURCE}，不要重做。"));
+        let result=open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample.clone(),AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        assert_eq!(model.calls.load(Ordering::SeqCst),2);assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert!(result.output_text.contains("第一行 MAC-B\n第二行 after\n"));
+        assert!(result.output_text.contains("原回合未成功的工具结果：10 次"));assert!(!result.output_text.contains("failed_tools"));
+        let required=Arc::new(Model {required_mode:true,..Default::default()});
+        let mut strict=sample.clone();strict.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            format!("只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"));
+        let instructions=Arc::new(ReportInstructions::default());
+        let instruction_plan=AgentToolPlan::new([tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true)]).unwrap();
+        let published=open_session(required.clone(),instructions.clone()).run_turn(
+            AgentTurnRequest::new(strict.clone(),instruction_plan,principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        assert!(matches!(published.terminal,AgentTurnTerminal::Completed {..}));
+        assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),1);
+        assert!(!published.output_text.contains("DRAFT_ONLY")&&!published.output_text.contains("failed_commands"),"strict mode publishes the validated report, not an unchecked second answer");
+        assert_eq!(instructions.0.load(Ordering::SeqCst),2,"root instructions are loaded before the single model round");
+        // A fresh report closes an optional empty plan, but must not override
+        // a real replan obligation from the current turn.
+        let strict_input=strict.input.messages[0].clone();
+        let mut archive=crate::tool_archive::ToolArchive::new("strict-replan-check".into());
+        let references=crate::history_reference::references(&strict_input,&strict.causality);
+        let resolved=crate::history_reference::load(&mut archive,&references,&History,&strict.causality,&binding(),&CancellationToken::new()).await.unwrap();
+        archive.set_references(resolved);
+        let turn_request=AgentTurnRequest::new(strict.clone(),AgentToolPlan::default(),principal(),0);
+        let scoped=crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let mut adaptive=crate::adaptive::AdaptiveExecution::default();
+        adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,&NoopAgentEventSink).await.unwrap();
+        let mut state=LongHorizonState::default();
+        state.execution_plan.needs_replan=true;
+        let mut slots=AdaptiveContextSlots::default();
+        synchronize_adaptive_context(&mut strict,&AgentToolPlan::default(),&ChatToolChoice::Auto,&adaptive,&scoped,
+            &crate::patch_recovery::PatchRecovery::default(),Some(&archive),Some(&state),&[strict_input],1,
+            false,None,false,true,false,&Default::default(),&mut slots).unwrap();
+        assert_eq!(strict.input.tool_choice,ChatToolChoice::Specific {name:crate::planning::TOOL_NAME.into()});
+        assert_eq!(strict.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::planning::TOOL_NAME]);
+        let invalid=Arc::new(Model {calls:AtomicUsize::new(0),forge_current:true,required_mode:false,rejection_seen:std::sync::atomic::AtomicBool::new(false)});
+        assert!(open_session(invalid.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.is_err());
+        assert_eq!(invalid.calls.load(Ordering::SeqCst),3);
+        assert!(invalid.rejection_seen.load(Ordering::SeqCst),"a caught model panic cannot substitute for the intended evidence rejection");
+    }
+
+    #[tokio::test]
+    async fn history_cursor_failure_preserves_identity_and_offers_scoped_restart() {
+        #[derive(Debug,Default)] struct Port(std::sync::Mutex<Vec<Option<String>>>);
+        #[async_trait] impl crate::AgentHistoryPort for Port {
+            async fn read_previous(&self,_:&ChatCausality,before:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                self.0.lock().unwrap().push(before.map(str::to_owned));
+                if before.is_some() {return Err(AgentEngineError::ReplayContract("PRIVATE_STORE_DETAIL".into()));}
+                Ok(crate::AgentHistoryPage {turn:None,has_older:false})
+            }
+        }
+        let port=Port::default();let mut archive=crate::tool_archive::ToolArchive::new("scoped-test".into());
+        let before=archive.context();let mut call=ChatToolCall {call_id:"bad-cursor".into(),name:crate::tool_archive::LOAD.into(),
+            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"before_turn":"PRIVATE_SUFFIX_ONLY"})),provider_metadata:None};
+        let result=archive.load(&call,&port,&request().causality,&binding(),&CancellationToken::new()).await.unwrap();
+        assert!(result.is_error);let text=result.output_text();
+        let value:serde_json::Value=serde_json::from_str(&text).unwrap();
+        assert_eq!(value["status"],"history_not_loaded");assert_eq!(value["records_loaded"],0);
+        assert!(text.contains("Omit before_turn") && text.contains("copy the entire returned next_before_turn verbatim"));
+        assert!(!text.contains("PRIVATE_SUFFIX_ONLY") && !text.contains("PRIVATE_STORE_DETAIL"));
+        assert_eq!(archive.context(),before,"a failed cursor cannot import or rewrite records");
+        assert_eq!(port.0.lock().unwrap().as_slice(),[Some("PRIVATE_SUFFIX_ONLY".into())],"the host must not repair a cursor silently");
+        call.call_id="restart".into();call.arguments=nomifun_agent_contracts::StrictJsonValue(json!({}));
+        assert!(!archive.load(&call,&port,&request().causality,&binding(),&CancellationToken::new()).await.unwrap().is_error);
+        assert_eq!(port.0.lock().unwrap().as_slice(),[Some("PRIVATE_SUFFIX_ONLY".into()),None]);
+    }
+
+    #[tokio::test]
+    async fn provider_default_and_large_output_configuration_reach_the_actual_model_request() {
+        for (output,expected) in [(None,None),(Some(100_000),Some(100_000))] {
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step("done")])});
+            let budget=crate::AgentModelBudget::from_limits(Some(1_000_000),output).unwrap();
+            let mut input=request();input.input.max_output_tokens=None;
+            let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+                AgentTurnRequest::new(input,AgentToolPlan::default(),principal(),0).with_model_budget(budget)).await.unwrap();
+            assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+            let requests=model.requests.lock().unwrap();assert_eq!(requests.len(),1);
+            assert_eq!(requests[0].input.max_output_tokens,expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_truncation_uses_non_effect_recovery_without_expanding_the_budget() {
+        let limited=||vec![Ok(ChatModelEvent::ReasoningDelta {text:"PRIVATE_REASONING_DISCARDED".into()}),
+            Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::MaxOutputTokens})];
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![limited(),text_step("The known results are disclosed; missing records are not invented.")])});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests.len(),2);assert_eq!(requests[0].input.tools,requests[1].input.tools);
+        assert_eq!(requests[0].input.max_output_tokens,requests[1].input.max_output_tokens);
+        let replay=serde_json::to_string(&requests[1].input).unwrap();
+        assert!(replay.contains("only private reasoning reached") && replay.contains("not a code-size problem"));
+        assert!(!replay.contains("PRIVATE_REASONING_DISCARDED") && !replay.contains("split HTML"));
+        drop(requests);
+        let repeated=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![limited(),limited(),limited()])});
+        assert!(open_session(repeated.clone(),Arc::new(EchoTool)).run_turn(AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.is_err());
+        assert_eq!(repeated.requests.lock().unwrap().len(),3,"the existing two-continuation bound is unchanged");
+    }
+
+    #[test]
+    fn frozen_tool_surface_never_advertises_capability_activation() {
+        let mut request = request();
+        let plan = tool_plan();
+        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, &Default::default()).unwrap();
+        assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, &Default::default()).unwrap();
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
+        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, &Default::default()).unwrap();
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
+        assert!(!request.input.tools.iter().any(|tool|
+            matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
+        for name in ["activate_capability", "search_capabilities"] {
+            let calls = [ChatToolCall {
+                call_id: ToolCallId::from("retired-control"),
+                name: name.into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"capability_id":"workspace.files"})),
+                provider_metadata: None,
+            }];
+            let rejected = crate::tool::reject_unexposed_batch(&calls, &request.input.tools).unwrap();
+            assert_eq!(rejected.len(), 1);
+            assert!(rejected[0].1.as_ref().unwrap().is_error);
+            let shadow = AgentToolPlan::new([tool_binding(
+                name, "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true,
+            )]).unwrap();
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, &Default::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn advertised_history_tools_distinguish_archive_ids_from_call_ids() {
+        let mut request = request();
+        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, &Default::default()).unwrap();
+        let read = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::READ).unwrap();
+        let id = &read.input_schema.0["properties"]["id"];
+        assert!(id["description"].as_str().unwrap_or_default().contains("hits[].id"));
+        assert!(id["description"].as_str().unwrap().contains("call_id"));
+        let read_validator = jsonschema::options().build(&read.input_schema.0).unwrap();
+        assert!(!read_validator.is_valid(&json!({"id":"chatcmpl-tool-af97a43944baef29"})));
+        assert!(read_validator.is_valid(&json!({"id":"c".repeat(64)})));
+        let search = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::SEARCH).unwrap();
+        assert!(search.input_schema.0["properties"]["call_id"]["description"].as_str().unwrap_or_default().contains("filter"));
+        assert!(search.input_schema.0["properties"]["after_id"]["description"].as_str().unwrap_or_default().contains("next_after_id"));
+        let search_validator = jsonschema::options().build(&search.input_schema.0).unwrap();
+        assert!(search_validator.is_valid(&json!({"query":"","call_id":"chatcmpl-tool-af97a43944baef29"})));
+        assert!(!search_validator.is_valid(&json!({"query":"","after_id":"chatcmpl-tool-af97a43944baef29"})));
+    }
+
+    #[tokio::test]
+    async fn imported_task_plan_gate_survives_requested_tool_choice_normalization() {
+        let source = crate::AgentInputCitation {
+            input: 0,
+            quote: "修复文件".into(),
+        };
+        let historical_plan = crate::AgentPlan {
+            revision: 1,
+            explanation: "历史任务".into(),
+            exact_actions:Vec::new(),
+            steps: vec![],
+            needs_replan: false,
+            requirements: vec![crate::AgentTaskRequirement {
+                id: "files".into(),
+                description: "修复文件".into(),
+                source: source.clone(),
+                origin: None,
+            }],
+        };
+        let prior = crate::AgentPriorTask::from_closed_turn(
+            "old-turn",
+            &[
+                AgentEngineEvent::TurnStarted {
+                    binding: binding(),
+                    turn_operation_id: OperationId::from("old-turn"),
+                },
+                AgentEngineEvent::PlanUpdated {
+                    plan: historical_plan,
+                },
+                AgentEngineEvent::TurnCompleted {
+                    model_steps: 1,
+                    finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+                },
+            ],
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut state = LongHorizonState {
+            execution_plan: crate::AgentPlan {
+                revision: 1,
+                explanation: "继续历史任务".into(),
+                exact_actions:Vec::new(),
+                steps: vec![],
+                needs_replan: true,
+                requirements: vec![crate::AgentTaskRequirement {
+                    id: "files".into(),
+                    description: "修复文件".into(),
+                    source: crate::AgentInputCitation {
+                        input: 0,
+                        quote: "继续修复文件".into(),
+                    },
+                    origin: Some(crate::AgentRequirementOrigin {
+                        turn_operation_id: "old-turn".into(),
+                        requirement_id: "files".into(),
+                        source,
+                    }),
+                }],
+            },
+            ..Default::default()
+        };
+        assert!(prior.requires_plan_update(&state.execution_plan));
+
+        let plan = tool_plan();
+        let turn_request = AgentTurnRequest::new(request(), plan.clone(), principal(), 0);
+        let scoped = crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let mut adaptive = crate::adaptive::AdaptiveExecution::default();
+        adaptive
+            .activate(
+                crate::adaptive::LEDGER_MODULES,
+                crate::adaptive::AgentRuntimeActivationReason::ExplicitTaskContinuation,
+                &NoopAgentEventSink,
+            )
+            .await
+            .unwrap();
+        let recovery = crate::patch_recovery::PatchRecovery::default();
+        let mut model_request = request();
+        let mut slots = AdaptiveContextSlots::default();
+        synchronize_adaptive_context(
+            &mut model_request,
+            &plan,
+            &ChatToolChoice::Auto,
+            &adaptive,
+            &scoped,
+            &recovery,
+            None,
+            Some(&state),
+            &turn_request.model_request.input.messages,
+            1,
+            false,
+            Some(&prior),
+            false,
+            false,
+            false,
+            &Default::default(),
+            &mut slots,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model_request.input.tool_choice,
+            ChatToolChoice::Specific {
+                name: crate::planning::TOOL_NAME.into(),
+            }
+        );
+        assert!(model_request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert_eq!(
+            model_request
+                .input
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![crate::planning::TOOL_NAME]
+        );
+        assert!(model_request
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("was successfully imported")));
+
+        state.execution_plan.needs_replan = false;
+        synchronize_adaptive_context(
+            &mut model_request,
+            &plan,
+            &ChatToolChoice::Auto,
+            &adaptive,
+            &scoped,
+            &recovery,
+            None,
+            Some(&state),
+            &turn_request.model_request.input.messages,
+            1,
+            false,
+            Some(&prior),
+            false,
+            false,
+            false,
+            &Default::default(),
+            &mut slots,
+        )
+        .unwrap();
+        assert_eq!(model_request.input.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn explicit_read_only_input_hides_workspace_mutations_and_later_permission_restores_them() {
+        let plan = AgentToolPlan::new([
+            ("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            ("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
+            ("apply_patch", "workspace.files", "workspace.files/patch", AgentEffectClass::ManagedEffect, false),
+            ("git_status", "workspace.vcs", "workspace.vcs/status", AgentEffectClass::ReadOnly, true),
+            ("git_stage", "workspace.vcs", "workspace.vcs/stage", AgentEffectClass::ManagedEffect, false),
+            ("publish_artifact", "workspace.artifacts", "workspace.artifacts/publish", AgentEffectClass::ManagedEffect, false),
+            ("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ].into_iter().map(|(name, capability, action, effect, parallel)| {
+            tool_binding(name, capability, action, effect, parallel)
+        }))
+        .unwrap();
+        let mut initial = request();
+        let mut accepted_inputs = vec![crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "查看 Git 状态和 diff，不要修改任何文件。".into(),
+        )];
+        initial.input.messages = accepted_inputs.clone();
+        let turn_request = AgentTurnRequest::new(initial.clone(), plan.clone(), principal(), 0);
+        let scoped = crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let adaptive = crate::adaptive::AdaptiveExecution::default();
+        let recovery = crate::patch_recovery::PatchRecovery::default();
+        let mut model_request = initial;
+        let mut slots = AdaptiveContextSlots::default();
+        let discovered = Default::default();
+        let sync = |model_request: &mut ChatModelRequest,
+                    inputs: &[ChatMessage],
+                    revision,
+                    slots: &mut AdaptiveContextSlots| {
+            synchronize_adaptive_context(
+                model_request,
+                &plan,
+                &ChatToolChoice::Auto,
+                &adaptive,
+                &scoped,
+                &recovery,
+                None,
+                None,
+                inputs,
+                revision,
+                false,
+                None,
+                false,
+                false,
+                false,
+                &discovered,
+                slots,
+            )
+        };
+
+        sync(&mut model_request, &accepted_inputs, 1, &mut slots).unwrap();
+        let names = model_request
+            .input
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["read_file", "git_status", "exec_command"] {
+            assert!(names.contains(name));
+        }
+        for name in ["write_file", "apply_patch", "git_stage", "publish_artifact"] {
+            assert!(!names.contains(name));
+        }
+        assert!(model_request.input.instructions.iter().any(|instruction| {
+            instruction.contains("explicitly forbids workspace mutation")
+                && instruction.contains("process commands read-only")
+        }));
+
+        accepted_inputs.push(crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "现在可以修改文件。".into(),
+        ));
+        sync(&mut model_request, &accepted_inputs, 2, &mut slots).unwrap();
+        let names = model_request
+            .input
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["write_file", "apply_patch", "git_stage", "publish_artifact"] {
+            assert!(names.contains(name), "later accepted permission restores {name}");
+        }
+        assert!(model_request.input.instructions.iter().any(|instruction| {
+            instruction.contains("later accepted user input permits workspace mutation")
+        }));
+    }
+
+    fn tool_binding(
+        model_name: &str,
+        capability_id: &str,
+        action_id: &str,
+        effect_class: AgentEffectClass,
+        parallel_safe: bool,
+    ) -> AgentToolBinding {
+        let definition = ChatToolDefinition {
+            name: model_name.to_owned(),
+            description: "Agent Runtime tool".to_owned(),
+            input_schema: nomifun_agent_contracts::StrictJsonValue(json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            })),
+            deferred: false,
+        };
+        AgentToolBinding {
+            model_name: model_name.to_owned(),
+            schema_digest: crate::tool::input_schema_digest(&definition.input_schema).unwrap(),
+            canonical_input_schema_ref: nomifun_agent_contracts::CanonicalSchemaRef::from(
+                format!("schema://{capability_id}/input"),
+            ),
+            capability_contract_digest: DigestHex::from("c".repeat(64)),
+            definition,
+            capability_id: nomifun_agent_contracts::CapabilityId::from(capability_id),
+            action_id: ActionId::from(action_id),
+            resource_binding_ids: BTreeSet::new(),
+            effect_class,
+            parallel_safe,
+        }
+    }
+
+    fn two_tool_plan(effect_class: AgentEffectClass, parallel_safe: bool) -> AgentToolPlan {
+        if effect_class == AgentEffectClass::ManagedEffect {
+            return AgentToolPlan::new([
+                tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+                tool_binding("write_file", "workspace.files", "workspace.files/write", effect_class, parallel_safe),
+                tool_binding("write_other_file", "workspace.files", "workspace.files/write", effect_class, parallel_safe),
+            ]).unwrap();
+        }
+        AgentToolPlan::new([
+            tool_binding(
+                "read_file",
+                "workspace.files",
+                "workspace.files/read",
+                effect_class,
+                parallel_safe,
+            ),
+            tool_binding(
+                "search_files",
+                "workspace.files",
+                "workspace.files/search",
+                effect_class,
+                parallel_safe,
+            ),
+        ])
+        .unwrap()
+    }
+
+    struct ScriptedModel {
+        steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
+    }
+
+    #[async_trait]
+    impl AgentModelPort for ScriptedModel {
+        async fn open_stream(
+            &self,
+            _request: ChatModelRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentModelStream, ChatModelError> {
+            let events = self.steps.lock().unwrap().remove(0);
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    struct PendingModel {
+        started: tokio::sync::mpsc::UnboundedSender<CancellationToken>,
+    }
+
+    #[async_trait]
+    impl AgentModelPort for PendingModel {
+        async fn open_stream(
+            &self,
+            _request: ChatModelRequest,
+            cancellation: CancellationToken,
+        ) -> Result<AgentModelStream, ChatModelError> {
+            self.started.send(cancellation).unwrap();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_turn_cancels_broker_and_releases_admission_without_cancelling_parent() {
+        let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(open_session(Arc::new(PendingModel { started }), Arc::new(EchoTool)));
+        let parent = CancellationToken::new();
+        let task_session = Arc::clone(&session);
+        let task_parent = parent.clone();
+        let task = tokio::spawn(async move {
+            task_session.run_turn_cancellable(
+                AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 1),
+                task_parent,
+            ).await
+        });
+        let broker_token = tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        assert!(session.is_turn_active().await);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(broker_token.is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert!(!session.is_turn_active().await);
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let result = session.run_turn_cancellable(
+            AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 1),
+            cancelled,
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Cancelled));
+        assert!(observed.try_recv().is_err(), "a pre-cancelled turn must not invoke the model");
+    }
+
+    #[tokio::test]
+    async fn host_cancellation_during_model_open_returns_cancelled_and_allows_next_turn() {
+        let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(open_session(Arc::new(PendingModel { started }), Arc::new(EchoTool)));
+        let parent = CancellationToken::new();
+        let task_session = Arc::clone(&session);
+        let task_parent = parent.clone();
+        let task = tokio::spawn(async move {
+            task_session.run_turn_cancellable(
+                AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 1), task_parent,
+            ).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        parent.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Cancelled));
+        assert!(!session.is_turn_active().await);
+    }
+
+    struct ObservingModel {
+        steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
+        requests: std::sync::Mutex<Vec<ChatModelRequest>>,
+    }
+
+    #[async_trait]
+    impl AgentModelPort for ObservingModel {
+        async fn open_stream(
+            &self,
+            request: ChatModelRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentModelStream, ChatModelError> {
+            self.requests.lock().unwrap().push(request);
+            let events = self.steps.lock().unwrap().remove(0);
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    struct EchoTool;
+
+    struct CountingInstructionTool {
+        instruction_reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for CountingInstructionTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if invocation.call.arguments.0.get("missing_ok") == Some(&json!(true)) {
+                self.instruction_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
+        }
+    }
+
+    #[derive(Default)]
+    struct FailedProcessTool {
+        calls: std::sync::Mutex<Vec<String>>,
+        is_error: bool,
+    }
+
+    struct NonStartProcessTool;
+
+    struct ProcessThenWriteTool {
+        writes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for ProcessThenWriteTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            if invocation.binding.action_id.as_ref() == "workspace.files/write" {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                return Ok(workspace_result(invocation));
+            }
+            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/exec");
+            Ok(AgentToolResult::text(invocation.call.call_id,
+                json!({"process_id":"failed-process","state":"exited",
+                    "exit_code":1,"cleanup":{"reaped":true},"success":false}).to_string(), true))
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for FailedProcessTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/exec");
+            self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+            Ok(AgentToolResult::text(
+                invocation.call.call_id,
+                json!({"process_id":"failed-process","state":"exited",
+                    "exit_code":1,"cleanup":{"reaped":true},"success":false}).to_string(),
+                self.is_error,
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for NonStartProcessTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            assert_eq!(
+                invocation.binding.action_id.as_ref(),
+                "workspace.process/exec"
+            );
+            Ok(AgentToolResult::text(
+                invocation.call.call_id,
+                json!({
+                    "schema":"nomifun.process-start-observation.v1",
+                    "state":"not_started",
+                    "success":false,
+                    "user_code_started":false,
+                    "code":"PROCESS_NOT_STARTED"
+                })
+                .to_string(),
+                true,
+            ))
+        }
+    }
+
+    // Internal instruction observations are real workspace.files/read envelopes, not model
+    // tool calls. Keep them out of dispatch/concurrency/cancellation counters.
+    fn instruction_result(invocation: &AgentToolInvocation) -> Option<AgentToolResult> {
+        if invocation.binding.action_id.as_ref() != "workspace.files/read" {
+            return None;
+        }
+        let args = &invocation.call.arguments.0;
+        let path = args["path"].as_str().expect("fixture read requires a path");
+        let value = if args["missing_ok"] == true {
+            assert!(matches!(path, "AGENTS.md" | "AGENTS.override.md"));
+            json!({"kind":"workspace_file_absent", "path":path})
+        } else if args["format"] == "instruction_scope" {
+            assert!(matches!(path, "." | "README.md" | "a" | "b"));
+            json!({"path":path, "canonical_path":if path == "." { "" } else { path },
+                "kind":if path == "." { "directory" } else { "file" },
+                "recursive":args["recursive"], "directories":[""],
+                "complete":true, "incomplete_reasons":[]})
+        } else {
+            return None;
+        };
+        Some(AgentToolResult::text(invocation.call.call_id.clone(), value.to_string(), false))
+    }
+
+    fn workspace_result(invocation: AgentToolInvocation) -> AgentToolResult {
+        let args = &invocation.call.arguments.0;
+        let value = match invocation.binding.action_id.as_ref() {
+            "workspace.files/read" => {
+                let content = "file contents";
+                json!({"path":args["path"], "content":content, "offset":0,
+                    "total_bytes":content.len(), "eof":true, "next_offset":null,
+                    "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+            }
+            "workspace.files/search" => json!({"query":args["query"], "matches":[], "truncated":false,
+                "incomplete_reasons":[], "files_scanned":1, "files_skipped":0,
+                "source_bytes_read":13, "notice":"No matches in the fixture file."}),
+            "workspace.files/write" => json!({"path":args["path"], "written":true}),
+            "creation.media/image" => json!({
+                "creation_task_id":"0190f5fe-7c00-7a00-8000-000000000001",
+                "status":"queued",
+                "result_asset_ids":[]
+            }),
+            "agent/delegate" | "agent/fork" => json!({
+                "execution_id":"0190f5fe-7c00-7a00-8000-000000000002",
+                "status":"planning"
+            }),
+            other => panic!("unexpected fixture capability: {other}"),
+        };
+        AgentToolResult::text(invocation.call.call_id, value.to_string(), false)
+    }
+
+    fn text_step(text: &str) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        vec![
+            Ok(ChatModelEvent::OutputTextDelta { text: text.into() }),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn public_result_language_is_in_the_real_direct_request_without_extra_slot_or_technical_rewrite() {
+        let exact="exact_actions model_step failed_tools process_id=0190f5fe-7c00-7a00-8000-000000000001\n你好 MAC-B\n";
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step(exact)])});
+        let mut sample=request();sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            "请给出这些技术标识和原始文字，不做改写。".into());
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0)).await.unwrap();
+        assert_eq!(result.output_text,exact);
+        let requests=model.requests.lock().unwrap();assert_eq!(requests.len(),1);
+        assert_eq!(requests[0].input.instructions[0],crate::workflow::minimal_execution_instructions());
+        assert_eq!(requests[0].input.instructions.iter().filter(|text|text.contains(crate::workflow::PUBLIC_RESULT_LANGUAGE)).count(),1);
+        assert!(requests[0].input.instructions[0].starts_with(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS));
+        assert!(requests[0].input.instructions[0].contains("explicitly requests technical identifiers"));
+    }
+
+    fn control_step(id: &str, name: &str, arguments: serde_json::Value) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: id.into(), name: name.into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(arguments), provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]
+    }
+
+    fn plan_step(status: &str, quote: &str) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        control_step(&format!("plan-{status}"), crate::planning::TOOL_NAME, json!({
+            "explanation":"Account for the requested workspace operations.",
+            "plan":[{"step":"requested operations", "status":status}],
+            "requirements":[{"id":"request", "description":quote,
+                "source":{"input":0, "quote":quote}}]
+        }))
+    }
+
+    fn completion_steps(quote: &str, evidence: &[&str], supported: bool) -> Vec<Vec<Result<ChatModelEvent, ChatModelError>>> {
+        vec![
+            plan_step("completed", quote),
+            control_step("completion", crate::completion::TOOL_NAME, json!({
+                "summary":"done",
+                "criteria":[{"step":"requested operations", "requirement_ids":["request"],
+                    "disposition":if supported { "supported" } else { "unverified" },
+                    "evidence_call_ids":evidence,
+                    "rationale":if supported { "The requested reads returned successfully." }
+                        else { "Writes returned, but their resulting contents were not independently verified." }}]
+            })),
+        ]
+    }
+
+    fn completion_steps_after_tool_errors(
+        quote: &str,
+        evidence: &[&str],
+        supported: bool,
+        observed_tool_error_count: u32,
+    ) -> Vec<Vec<Result<ChatModelEvent, ChatModelError>>> {
+        let mut steps = completion_steps(quote, evidence, supported);
+        let call = steps[1].iter_mut().find_map(|event| match event {
+            Ok(ChatModelEvent::ToolCallCompleted { call }) => Some(call),
+            _ => None,
+        }).expect("completion fixture must contain one completed tool call");
+        call.arguments.0["observed_tool_error_count"] = json!(observed_tool_error_count);
+        steps
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for EchoTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
+        }
+    }
+
+    struct FailingCollaborationTool;
+
+    #[async_trait]
+    impl AgentToolInvoker for FailingCollaborationTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            Ok(AgentToolResult::text(
+                invocation.call.call_id,
+                "delegation rejected",
+                true,
+            ))
+        }
+    }
+
+    struct BlockingTool {
+        started: Arc<Notify>,
+    }
+
+    struct ConcurrencyTool {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        order: std::sync::Mutex<Vec<String>>,
+        delay: Duration,
+    }
+
+    #[derive(Debug)]
+    struct OneSteer {
+        input: std::sync::Mutex<Option<crate::AgentSteeringInput>>,
+    }
+
+    #[derive(Debug)]
+    struct TerminalFenceSteer {
+        input: std::sync::Mutex<Option<crate::AgentSteeringInput>>,
+    }
+
+    #[async_trait]
+    impl crate::AgentInputPort for OneSteer {
+        async fn take(
+            &self,
+            _causality: &ChatCausality,
+            _close_if_empty: bool,
+        ) -> Result<Vec<crate::AgentSteeringInput>, AgentEngineError> {
+            Ok(self.input.lock().unwrap().take().into_iter().collect())
+        }
+
+        async fn has_pending(
+            &self,
+            _causality: &ChatCausality,
+        ) -> Result<bool, AgentEngineError> {
+            Ok(self.input.lock().unwrap().is_some())
+        }
+    }
+
+    #[async_trait]
+    impl crate::AgentInputPort for TerminalFenceSteer {
+        async fn take(
+            &self,
+            _causality: &ChatCausality,
+            close_if_empty: bool,
+        ) -> Result<Vec<crate::AgentSteeringInput>, AgentEngineError> {
+            if close_if_empty {
+                Ok(self.input.lock().unwrap().take().into_iter().collect())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn has_pending(
+            &self,
+            _causality: &ChatCausality,
+        ) -> Result<bool, AgentEngineError> {
+            // Simulate a steer accepted after the dispatch gate but before
+            // the terminal `take(..., true)` fence.
+            Ok(false)
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for ConcurrencyTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            let delay = if invocation.call.call_id.as_ref() == "call-1" { self.delay * 2 } else { self.delay };
+            tokio::time::sleep(delay).await;
+            self.order
+                .lock()
+                .unwrap()
+                .push(invocation.call.call_id.as_ref().to_owned());
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(workspace_result(invocation))
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for BlockingTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            assert!(matches!(invocation.call.call_id.as_ref(), "call-cancel" | "call-active"));
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            Err(AgentEngineError::Cancelled)
+        }
+    }
+
+    fn open_session(
+        model: Arc<dyn AgentModelPort>,
+        tools: Arc<dyn AgentToolInvoker>,
+    ) -> crate::engine::AgentEngineSession {
+        open_session_with_budget(model, tools, AgentContextBudget::default())
+    }
+
+    fn open_session_with_budget(
+        model: Arc<dyn AgentModelPort>,
+        tools: Arc<dyn AgentToolInvoker>,
+        budget: AgentContextBudget,
+    ) -> crate::engine::AgentEngineSession {
+        let engine = AgentEngine::new(AgentEngineBuild {
+            build_id: EngineBuildId::from("coding-dev"),
+            build_digest: DigestHex::from("a".repeat(64)),
+        })
+        .unwrap().with_context_budget(budget).unwrap();
+        engine
+            .open_session(
+                binding(),
+                model,
+                tools,
+                Some(Arc::new(NoopAgentEventSink)),
+            )
+            .unwrap()
+    }
+
+    fn principal() -> PrincipalRef {
+        PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "user-1".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_bounds_initial_history_before_calling_the_model() {
+        let mut summary = text_step("Earlier user inputs: history-0 through history-7. Current request: inspect.");
+        summary.insert(0, Ok(ChatModelEvent::ReasoningDelta { text: "private summarization reasoning".repeat(100) }));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                summary,
+                text_step("done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        // Isolate message-count pressure; mandatory engine instructions and
+        // tool schemas must fit before historical data can be summarized.
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
+            budget);
+        let mut request = request();
+        request.input.max_output_tokens = Some(3000);
+        let current = request.input.messages[0].clone();
+        request.input.messages = (0..8).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("history-{index}") }],
+            provider_round_id: None,
+        }).chain([current.clone()]).collect();
+        let result = session.run_turn(AgentTurnRequest::new(request, AgentToolPlan::default(), principal(), 0)).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].input.max_output_tokens, Some(3000),
+            "compaction uses the frozen total generation budget, not a visible-text byte/token guess");
+        assert_eq!(requests[1].input.max_output_tokens, Some(3000));
+        assert!(!serde_json::to_string(&requests[1].input).unwrap().contains("private summarization reasoning"));
+        assert!(requests[0].input.tools.is_empty(), "history is summarized without tool authority");
+        assert_eq!(requests[0].input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
+        assert!(requests[0].input.instructions[0]
+            .contains("at most 1125 UTF-8 bytes"),
+            "the summary target scales with this route's frozen output budget");
+        let source = serde_json::to_string(&requests[0].input.messages).unwrap();
+        for index in 0..8 {
+            assert!(source.contains(&format!("history-{index}")), "history must not be silently discarded");
+        }
+        assert_eq!(requests[1].input.messages.len(), 2);
+        assert_eq!(requests[1].input.messages.last(), Some(&current));
+        assert!(matches!(&requests[1].input.messages[0].content[0], ChatContentPart::Text { text }
+            if text.contains("Derived summary") && text.contains("history-0 through history-7")));
+        assert!(serde_json::to_vec(&requests[1].input).unwrap().len() <= budget.max_context_bytes);
+    }
+
+    #[tokio::test]
+    async fn compaction_summarizes_large_older_prefix_once_and_keeps_headroom() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("Earlier work summarized; current file receipt remains in the retained exchange.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["Stable workspace instructions. ".repeat(650)];
+        let original = request.input.messages[0].clone();
+        let fresh_code = "RECENT_FILE_BYTES".repeat(300);
+        let call = ChatContentPart::ToolCall {
+            call_id: "recent-file".into(), name: "write_file".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"gomoku.html","content":fresh_code})),
+            provider_metadata: None,
+        };
+        request.input.messages.extend([
+            crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(3300)),
+            ChatMessage { role: ChatRole::Assistant, content: vec![call.clone()], provider_round_id: None },
+            ChatMessage { role: ChatRole::Tool, content: vec![ChatContentPart::ToolResult {
+                call_id: "recent-file".into(), is_error: false,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text: "written:true".into() }],
+            }], provider_round_id: None },
+        ]);
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget { max_context_bytes: 256 * 1024, max_history_messages: 256 },
+        ).unwrap();
+        lifecycle.prepare(&mut request, &[original.clone()], &binding(), model.clone(), &NoopAgentEventSink,
+            CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before * 3 / 4, "compaction must leave useful headroom: {before} -> {after}");
+        assert!(request.input.messages.iter().any(|message| message == &original));
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part| part == &call));
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(), 1, "a 4k output envelope must not force tiny serial summary fragments");
+        let source = serde_json::to_string(&captured[0].input.messages).unwrap();
+        assert!(source.contains("OLDER_HISTORY"));
+        assert!(!source.contains("RECENT_FILE_BYTES"), "do not summarize the suffix retained verbatim");
+        drop(captured);
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "small follow-up".repeat(100)));
+        lifecycle.prepare(&mut request, &[original], &binding(), model.clone(), &NoopAgentEventSink,
+            CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1, "no repeat compaction after a small observation");
+    }
+
+    #[tokio::test]
+    async fn compaction_keeps_settled_checks_when_fixed_context_exceeds_the_soft_byte_trigger() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("The two checks already ran; continue without replaying them.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(50_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(1100),
+        ));
+        let calls = ["check-pass", "check-expected-nonzero"];
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: calls.iter().map(|id| ChatContentPart::ToolCall {
+                call_id: (*id).into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test",id]})),
+                provider_metadata: None,
+            }).collect(),
+            provider_round_id: None,
+        });
+        for (index, id) in calls.iter().enumerate() {
+            request.input.messages.push(ChatMessage {
+                role: ChatRole::Tool,
+                content: vec![ChatContentPart::ToolResult {
+                    call_id: (*id).into(), is_error: index == 1,
+                    output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                        text: json!({"state":"exited","exit_code":index,"cleanup":{"reaped":true},
+                            "success":index==0}).to_string(),
+                    }],
+                }], provider_round_id: None,
+            });
+        }
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before && after <= resource.max_context_bytes);
+        for id in calls {
+            assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolCall { call_id, .. } if call_id.as_ref()==id)),
+                "a fitting exact check must not disappear behind a derived summary: {id}");
+        }
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, is_error:true, .. }
+                if call_id.as_ref()=="check-expected-nonzero")), "failed-check semantics must remain failed");
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert!(model.requests.lock().unwrap()[0].input.instructions.iter().any(|text|
+            text.contains("entries_scanned=0") && text.contains("not an empty directory")));
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,
+            "Continue to report the observed checks.".into()));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "unchanged fixed instructions must not cause another paid summary after a small continuation");
+    }
+
+    #[tokio::test]
+    async fn compaction_near_fixed_prefix_keeps_the_hard_envelope_and_fitting_receipt() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(1800)), text_step(&"s".repeat(1800))]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        // Same late-turn geometry as MAC-A-03: the fixed prefix fits the
+        // hard envelope, but leaves less than one summary at the soft trigger.
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(400),
+        ));
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ChatContentPart::ToolCall {
+                call_id: "settled-check".into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","one"]})),
+                provider_metadata: None,
+            }], provider_round_id: None,
+        });
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            content: vec![ChatContentPart::ToolResult {
+                call_id: "settled-check".into(), is_error: true,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                    text: "exit 1, reaped; intentionally failing check".into(),
+                }],
+            }], provider_round_id: None,
+        });
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before && after <= resource.max_context_bytes);
+        assert!(crate::media_context::estimate_tokens(&request.input, after) + 4096 + 512 < 32_768);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult {call_id,is_error:true,..} if call_id.as_ref()=="settled-check")),
+            "a fitting settled failure must remain exact, not only a model-authored summary");
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "small continuation".into()));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "a summary already within the unchanged hard envelope must not trigger another summary immediately");
+        request.input.instructions.push("new mandatory state".repeat(300));
+        let over_budget = request.input.clone();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, over_budget, "hard-budget rejection must not discard accepted state or receipts");
+        assert_eq!(model.requests.lock().unwrap().len(), 1, "a previous compacted floor must not permit a hard-byte overrun");
+    }
+
+    #[tokio::test]
+    async fn compaction_summary_beyond_soft_trigger_fits_the_frozen_hard_envelope() {
+        let note = "s".repeat(4000);
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&note), text_step(&note)]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(79_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(600),
+        ));
+        let before = request.input.clone();
+        let mut mandatory = before.clone();
+        mandatory.messages = vec![original.clone()];
+        let mandatory_tokens = crate::media_context::estimate_tokens(
+            &mandatory, serde_json::to_vec(&mandatory).unwrap().len(),
+        );
+        let hard_input_limit = 32768 - 4096 - 512;
+        let soft_trigger = mandatory_tokens + (hard_input_limit - mandatory_tokens) / 2;
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        let after_tokens = crate::media_context::estimate_tokens(&request.input, after);
+        assert!(after_tokens >= soft_trigger && after_tokens < hard_input_limit);
+        assert!(after < serde_json::to_vec(&before).unwrap().len());
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "a valid note inside the frozen envelope must not spend a second summary request");
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "Small continuation after accepted compaction.".into(),
+        ));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "an accepted note beyond the soft trigger must retain headroom for the next small step");
+    }
+
+    #[tokio::test]
+    async fn summary_advertised_byte_budget_fits_the_protected_replacement_prefix() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(1500)), text_step("compact-marker")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec![String::new()];
+        let original = request.input.messages[0].clone();
+        let mut empty = request.input.clone();
+        empty.messages = vec![crate::context_lifecycle::summary_message(""), original.clone()];
+        let hard_limit = 32768 - 4096 - 512;
+        let room = 900usize;
+        let fixed = serde_json::to_vec(&empty).unwrap().len();
+        request.input.instructions[0] = "x".repeat(hard_limit * 3 - fixed - room);
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(500),
+        ));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let attempts = model.requests.lock().unwrap();
+        let advertised: usize = attempts[0].input.instructions[0].split("at most ").nth(1).unwrap()
+            .split_whitespace().next().unwrap().parse().unwrap();
+        let mut advertised_candidate = before.clone();
+        advertised_candidate.messages = vec![crate::context_lifecycle::summary_message(&"s".repeat(advertised)), original.clone()];
+        let bytes = serde_json::to_vec(&advertised_candidate).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&advertised_candidate, bytes) < hard_limit,
+            "a note complying with the requested byte ceiling must fit beside the unchanged protected prefix");
+        advertised_candidate.messages[0] = crate::context_lifecycle::summary_message(&"\0".repeat(advertised));
+        let escaped_bytes = serde_json::to_vec(&advertised_candidate).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&advertised_candidate, escaped_bytes) < hard_limit,
+            "the advertised ceiling must also account for JSON escaping, not only plain ASCII notes");
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, before.max_output_tokens);
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn valid_summary_that_cannot_fit_the_fixed_prefix_gets_one_source_preserving_repair() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Earlier checks recorded; finish the accepted task without replay.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(400),
+        ));
+        let before = request.input.clone();
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < serde_json::to_vec(&before).unwrap().len() && after <= resource.max_context_bytes);
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages, "the correction must see the same full source");
+        assert!(attempts.iter().all(|attempt| attempt.input.tools.is_empty()
+            && attempt.input.tool_choice == ChatToolChoice::None));
+        assert!(attempts[1].input.instructions.iter().any(|text| text.contains("cannot fit") && text.contains("shorter")));
+    }
+
+    #[tokio::test]
+    async fn summary_fit_repair_honors_the_observed_token_margin() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Keep recorded checks and finish the remaining requirements.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(79_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(600)));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage { input_tokens:500, ..Default::default() });
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let bytes = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&request.input, bytes) < 32768 - 4096 - 512 - 500);
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, before.max_output_tokens);
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages);
+    }
+
+    #[tokio::test]
+    async fn a_second_unfitting_summary_fails_without_replacing_the_original_context() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step(&"t".repeat(4000))]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(400)));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 },
+        ).unwrap();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &sink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(ref text) if text.contains("after one correction")));
+        assert_eq!(request.input, before);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2, "no third paid correction");
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages);
+        assert!(attempts.iter().all(|attempt| attempt.input.tools.is_empty()
+            && attempt.input.tool_choice == ChatToolChoice::None));
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            AgentEngineEvent::CompactionSummaryRejected {reason, ..} if reason == "REPLACEMENT_CONTEXT_BUDGET")).count(), 2);
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ContextCompacted { .. })),
+            "neither rejected draft becomes an accepted replacement");
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_a_latest_receipt_that_fits_beyond_the_soft_margin() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("Earlier work was summarized; the latest command already exited.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(76_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(1600),
+        ));
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ChatContentPart::ToolCall {
+                call_id: "already-exited".into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","diagnostic.test.ts"]})),
+                provider_metadata: None,
+            }], provider_round_id: None,
+        });
+        let receipt = ChatMessage {
+            role: ChatRole::Tool,
+            content: vec![ChatContentPart::ToolResult {
+                call_id: "already-exited".into(), is_error: true,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                    text: json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                        "success":false,"output":{"text":"d".repeat(2100)}}).to_string(),
+                }],
+            }], provider_round_id: None,
+        };
+        request.input.messages.push(receipt.clone());
+        let mut oversized = request.clone();
+        if let ChatContentPart::ToolResult { output,.. } = &mut oversized.input.messages.last_mut().unwrap().content[0] {
+            *output = vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                text: json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                    "success":false,"output":{"text":"d".repeat(6000)}}).to_string(),
+            }];
+        }
+        let oversized_receipt = oversized.input.messages.last().unwrap().clone();
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let budget = crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+        let resource = AgentContextBudget { max_context_bytes:80*1024,max_history_messages:64 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        let sink = Sink::default();
+        lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),
+            &sink,CancellationToken::new()).await.unwrap();
+        assert!(serde_json::to_vec(&request.input).unwrap().len() < before);
+        assert!(serde_json::to_vec(&request.input).unwrap().len() <= resource.max_context_bytes);
+        assert!(request.input.messages.contains(&receipt),"a fitting settled result must not disappear solely to reserve optional headroom");
+        assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::ToolCall{call_id,..} if call_id.as_ref()=="already-exited")));
+        assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+        assert_eq!(model.requests.lock().unwrap().len(),1);
+        let events = sink.0.lock().unwrap();
+        let compacted = events.iter().find_map(|event| match event {
+            AgentEngineEvent::ContextCompacted { retained_context:Some(context),retained_tool_call_ids,.. }
+                => Some((context,retained_tool_call_ids)), _ => None,
+        }).expect("durable compaction must record the retained exchange");
+        assert_eq!(compacted.1.as_slice(),[nomifun_chat_model_broker::ToolCallId::from("already-exited")]);
+        let restored = crate::compacted_history::restore(compacted.0,std::slice::from_ref(&original),compacted.1).unwrap();
+        assert_eq!(restored,request.input.messages[1..],"replay preserves the exact rejected diagnostic, not inferred success");
+        request.validate().unwrap();
+        println!("LATEST_RECEIPT_BUDGET before={before} after={} byte_cap={} fixed_instruction_bytes=76000 retained_ids={}",
+            serde_json::to_vec(&request.input).unwrap().len(),resource.max_context_bytes,compacted.1.len());
+        let oversized_model = Arc::new(ObservingModel {
+            steps:std::sync::Mutex::new(vec![text_step("Large output was summarized; no new execution is claimed.")]),
+            requests:Default::default(),
+        });
+        let mut oversized_lifecycle = crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        oversized_lifecycle.prepare(&mut oversized,std::slice::from_ref(&original),&binding(),oversized_model.clone(),
+            &NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+        assert!(serde_json::to_vec(&oversized.input).unwrap().len() <= resource.max_context_bytes);
+        assert!(!oversized.input.messages.contains(&oversized_receipt),"latest retention cannot bypass the frozen input cap");
+        assert_eq!(oversized.input.messages.iter().filter(|message|**message==original).count(),1);
+        assert_eq!(oversized_model.requests.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn compaction_retains_receipts_without_replaying_private_reasoning() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let private_parts = [
+            ChatContentPart::Reasoning {text:"PRIVATE_THOUGHT_BODY".repeat(500), signature:None, encrypted_content:None},
+            ChatContentPart::Reasoning {text:"PRIVATE_THOUGHT_BODY".repeat(500),
+                signature:Some("PRIVATE_SIGNATURE".into()),encrypted_content:Some("PRIVATE_CIPHER".into())},
+            ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::AnthropicThinking {
+                text:"PRIVATE_THOUGHT_BODY".repeat(500), signature:"PRIVATE_SIGNATURE".into(),route_digest:None}},
+            ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::AnthropicRedactedThinking {
+                data:"PRIVATE_REDACTED_BODY".repeat(500),route_digest:None}},
+        ];
+        for (private_index,private) in private_parts.into_iter().enumerate() {
+            let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step("Earlier observations retained; no new execution.")]),
+                requests:Default::default()});
+            let mut request=request();
+            request.input.instructions=vec!["x".repeat(76_000)];
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1000)));
+            let call=ChatContentPart::ToolCall {call_id:"settled-diagnostic".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic","args":["PUBLIC_LITERAL"]})),
+                provider_metadata:None};
+            request.input.messages.push(ChatMessage {role:ChatRole::Assistant,
+                content:vec![private,call.clone()],provider_round_id:Some("private-live-round".into())});
+            let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult {call_id:"settled-diagnostic".into(),is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                        text:json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                            "success":false,"output":{"text":"PUBLIC_LITERAL\n"}}).to_string()}]}]};
+            request.input.messages.push(receipt.clone());
+            let original_request=request.clone();
+            let mut oversized=request.clone();
+            if let ChatContentPart::ToolResult {output,..}=&mut oversized.input.messages.last_mut().unwrap().content[0] {
+                *output=vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:"ACTUAL_LARGE_RECEIPT".repeat(500)}];
+            }
+            let oversized_receipt=oversized.input.messages.last().unwrap().clone();
+            let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+            let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            let sink=Sink::default();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&sink,CancellationToken::new()).await.unwrap();
+            assert!(request.input.messages.contains(&receipt),"private reasoning must not evict a fitting exact nonzero receipt");
+            assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|*part==call));
+            assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+            let encoded=serde_json::to_string(&request.input).unwrap();
+            assert!(encoded.len()<=resource.max_context_bytes);
+            for marker in ["PRIVATE_THOUGHT_BODY","PRIVATE_SIGNATURE","PRIVATE_CIPHER","PRIVATE_REDACTED_BODY","private-live-round"] {
+                assert!(!encoded.contains(marker),"private continuation data must not survive the reset model round");
+                assert!(!serde_json::to_string(&model.requests.lock().unwrap()[0].input).unwrap().contains(marker));
+            }
+            assert!(encoded.contains("PUBLIC_LITERAL"));
+            println!("PRIVATE_TAIL variant={} before={} after={} byte_cap={} exact_receipt=true",private_index,
+                serde_json::to_vec(&original_request.input).unwrap().len(),encoded.len(),resource.max_context_bytes);
+            assert_eq!(model.requests.lock().unwrap().len(),1);
+            let events=sink.0.lock().unwrap();
+            let (items,ids)=events.iter().find_map(|event|match event {
+                AgentEngineEvent::ContextCompacted {retained_context:Some(items),retained_tool_call_ids,..}=>Some((items,retained_tool_call_ids)),
+                _=>None,
+            }).unwrap();
+            assert_eq!(ids.as_slice(),[ToolCallId::from("settled-diagnostic")]);
+            assert_eq!(crate::compacted_history::restore(items,std::slice::from_ref(&original),ids).unwrap(),request.input.messages[1..]);
+            assert!(original_request.input.messages.iter().any(|message|message.provider_round_id.is_some()),"source transcript remains intact");
+            request.validate().unwrap();
+            let large_model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step("Large receipt remains historical; no retry authorized.")]),
+                requests:Default::default()});
+            let mut large_lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            large_lifecycle.prepare(&mut oversized,std::slice::from_ref(&original),&binding(),large_model,&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            assert!(serde_json::to_vec(&oversized.input).unwrap().len()<=resource.max_context_bytes);
+            assert!(!oversized.input.messages.contains(&oversized_receipt),"projection cannot truncate real tool output to fit the cap");
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_receipt_uses_the_hard_token_envelope_without_erasing_observed_margin() {
+        for extra_tokens in [0,1500] {
+            let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step(&"s".repeat(2000))]),requests:Default::default()});
+            let mut request=request();
+            request.input.instructions=vec!["x".repeat(76_000)];
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+            let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            assert!(model.requests.lock().unwrap().is_empty());
+            let bare_estimate=crate::media_context::estimate_tokens(&request.input,serde_json::to_vec(&request.input).unwrap().len());
+            if extra_tokens>0 {
+                lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage {input_tokens:(bare_estimate+extra_tokens) as u64,..Default::default()});
+            }
+            request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1200)));
+            let call=ChatContentPart::ToolCall {call_id:"latest-terminal".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None};
+            request.input.messages.push(ChatMessage {role:ChatRole::Assistant,content:vec![call.clone()],provider_round_id:None});
+            let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult {call_id:"latest-terminal".into(),is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:json!({"state":"exited","exit_code":1,
+                        "cleanup":{"reaped":true},"success":false,"output":{"text":"r".repeat(2100)}}).to_string()}]}]};
+            request.input.messages.push(receipt.clone());
+            let before=serde_json::to_vec(&request.input).unwrap().len();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            let after=serde_json::to_vec(&request.input).unwrap().len();
+            let tokens=crate::media_context::estimate_tokens(&request.input,after);
+            assert!(after<before && after<=resource.max_context_bytes);
+            assert!(tokens+extra_tokens+4096+512<32768,"the real output reserve and observed margin remain binding");
+            assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+            assert_eq!(model.requests.lock().unwrap().len(),1);
+            if extra_tokens==0 {
+                assert!(request.input.messages.contains(&receipt),"a soft compaction threshold must not discard a latest receipt within the hard token/byte envelope");
+                assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|*part==call));
+            } else {
+                assert!(!request.input.messages.contains(&receipt),"observed usage can make the same receipt exceed the real input envelope");
+            }
+            request.validate().unwrap();
+            println!("LATEST_HARD_TOKEN extra={} before={} after={} input_tokens={} output_reserve=4096 safety_reserve=512 byte_cap={}",extra_tokens,before,after,tokens,resource.max_context_bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_receipt_cannot_cross_a_typed_rejection_recovery_ceiling() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step(&"s".repeat(1000))]),requests:Default::default()});
+        let mut request=request();
+        request.input.instructions=vec!["x".repeat(58_000)];
+        request.input.max_output_tokens=Some(4096);
+        let original=request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLD ".repeat(3500)));
+        request.input.messages.push(ChatMessage {role:ChatRole::Assistant,provider_round_id:None,
+            content:vec![ChatContentPart::ToolCall {call_id:"terminal-under-rejection".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None}]});
+        let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+            content:vec![ChatContentPart::ToolResult {call_id:"terminal-under-rejection".into(),is_error:true,
+                output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:"recorded exit 1; ".repeat(600)}]}]};
+        request.input.messages.push(receipt.clone());
+        let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap().with_compaction_threshold_pct(80).unwrap();
+        let launch=request.input.messages[2].clone();
+        let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+        let bytes=serde_json::to_vec(&request.input).unwrap().len();
+        let rejected_estimate=crate::media_context::estimate_tokens(&request.input,bytes);
+        let recovery_limit=(rejected_estimate*3/4).min((32768-4096-512)*80/100);
+        let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        let rejection=ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::PromptTooLong,
+            "typed provider rejection",nomifun_chat_model_broker::ChatRetryDirective::Never);
+        assert!(lifecycle.request_overflow_recovery(&rejection,false,&request.input).unwrap());
+        lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+        let after=serde_json::to_vec(&request.input).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&request.input,after)<recovery_limit);
+        assert!(!request.input.messages.contains(&receipt),"a normal hard ceiling cannot override an actual provider rejection");
+        let mut with_receipt=request.input.clone();
+        with_receipt.messages.push(launch);
+        with_receipt.messages.push(receipt);
+        let candidate=serde_json::to_vec(&with_receipt).unwrap().len();
+        assert!(candidate<=resource.max_context_bytes && candidate.div_ceil(3)+4096+512<32768,
+            "the receipt would fit ordinary hard budgets but is correctly excluded by recovery");
+        assert!(candidate.div_ceil(3)>=recovery_limit);
+        assert_eq!(model.requests.lock().unwrap().len(),1);
+        println!("TYPED_RECOVERY after={} candidate={} recovery_tokens={} ordinary_hard_tokens=28160",after,candidate,recovery_limit);
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_overflow_cap_cannot_be_raised_for_a_large_fixed_prefix() {
+        let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+        ).unwrap();
+        let rejection = ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::PromptTooLong,
+            "typed provider rejection", nomifun_chat_model_broker::ChatRetryDirective::Never);
+        assert!(!lifecycle.request_overflow_recovery(&rejection, true, &request.input).unwrap());
+        assert!(lifecycle.request_overflow_recovery(&rejection, false, &request.input).unwrap());
+        assert!(!lifecycle.request_overflow_recovery(&rejection, false, &request.input).unwrap());
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, before);
+        assert!(model.requests.lock().unwrap().is_empty(), "no adaptive widening of a typed rejected prompt");
+    }
+
+    #[tokio::test]
+    async fn observed_usage_margin_still_bounds_compaction_with_a_large_fixed_prefix() {
+        let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let original = request.input.messages[0].clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage {input_tokens:8000,..Default::default()});
+        request.input.instructions.push("x".repeat(62_000));
+        let before = request.input.clone();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, before);
+        assert!(model.requests.lock().unwrap().is_empty(), "provider-observed input margin must not be reset to manufacture fit");
+    }
+
+    #[tokio::test]
+    async fn completion_review_survives_compaction_when_the_tool_suffix_cannot_fit() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new((0..8).map(|_| text_step("The accepted checks already ended; report their actual results.")).collect()),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(50_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.extend([
+            ChatMessage { role:ChatRole::Assistant, provider_round_id:None,
+                content:vec![ChatContentPart::ToolCall { call_id:"diagnostic".into(), name:"exec_command".into(),
+                    arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test"]})), provider_metadata:None }] },
+            ChatMessage { role:ChatRole::Tool, provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult { call_id:"diagnostic".into(), is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text:"diagnostic output ".repeat(2400) }] }] },
+            crate::context_lifecycle::text_message(ChatRole::Assistant, "The diagnostic exited with code 1.".into()),
+        ]);
+        request.input.instructions.push(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
+        let work = crate::AgentWorkStatus { failed_commands:1, failed_tools:1, ..Default::default() };
+        let transcript_review = work.completion_review_message().unwrap();
+        request.input.messages.push(transcript_review.clone());
+        let mut slots = AdaptiveContextSlots::default();
+        synchronize_completion_review(&mut request, &mut slots, true, false, false, false);
+        assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
+        assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
+            "user restrictions must be explicit in the preserved model policy");
+        assert!(request.input.instructions.iter().any(|instruction| instruction.contains("Do not add file reads or directory listings")),
+            "closing review must not invite extra observations to repair the account");
+        let instructions = request.input.instructions.clone();
+        let tools = request.input.tools.clone();
+        let resource = AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(configured_test_budget(),resource).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert!(!model.requests.lock().unwrap().is_empty(), "the oversized suffix must trigger real compaction");
+        assert!(!request.input.messages.contains(&transcript_review), "this fixture must exercise omission of the transcript notice");
+        assert_eq!(request.input.instructions,instructions, "the active host phase must remain exact even when its transcript is summarized");
+        assert_eq!(request.input.tools,tools, "review context grants no new tools");
+        assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
+        assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
+        synchronize_completion_review(&mut request,&mut slots,true,false,false,false);
+        assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
+        synchronize_completion_review(&mut request,&mut slots,false,false,false,false);
+        assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
+        assert_eq!(request.input.instructions[0],instructions[0]);
+        request.validate().expect("clearing the turn-local review must leave a valid model request");
+    }
+
+    #[tokio::test]
+    async fn compaction_output_limit_retries_once_without_replaying_tools() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(ChatModelEvent::OutputTextDelta { text: "partial summary".into() }),
+                    Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
+                ],
+                text_step("Concise retained context."),
+                text_step("done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool), budget);
+        let mut request = request();
+        let current = request.input.messages.pop().unwrap();
+        request.input.messages = (0..6).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("old context {index}") }],
+            provider_round_id: None,
+        }).chain([current]).collect();
+        let result = session.run_turn(AgentTurnRequest::new(
+            request, AgentToolPlan::default(), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.tool_call_count, 0);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].causality.operation_id.as_ref().ends_with(":compact:1"));
+        assert!(requests[1].causality.operation_id.as_ref().ends_with(":compact:2"));
+        assert!(requests[..2].iter().all(|request| request.input.tools.is_empty()
+            && request.input.metadata.get("nomifun_task").map(String::as_str) == Some("agent_compaction")));
+        assert!(requests[1].input.instructions[0].contains("at most 192 UTF-8 bytes"));
+        assert!(requests[2].input.messages.iter().any(|message| format!("{message:?}").contains("Concise retained context.")));
+    }
+
+    #[tokio::test]
+    async fn compaction_protocol_repair_is_bounded_and_rejects_drafts_before_commit() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let bad="<tool_call>\n<exec_command>\n<args><cmd>DO_NOT_PUBLISH_OR_EXECUTE</cmd></args>";
+        for invalid_kind in ["xml","json","wrapped_json","native"] {
+        for invalid_twice in [false,true] {
+            let invalid_step = || match invalid_kind {
+                "native" => control_step("not-admitted","exec_command",json!({"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"})),
+                "json" => text_step(r#"{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}"#),
+                "wrapped_json" => text_step(r#"{"tool_call":{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}}"#),
+                _ => text_step(bad),
+            };
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+                invalid_step(),if invalid_twice {invalid_step()} else {text_step("Earlier observations remain recorded; only the original pending work remains.")},
+            ])});
+            let mut request=request();
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            for index in 0..6 {
+                request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,
+                    format!("Recorded context {index}; no new action requested.")));
+            }
+            let before=request.input.clone();
+            let resource=AgentContextBudget {max_context_bytes:64*1024,max_history_messages:4};
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(configured_test_budget(),resource).unwrap();
+            let sink=Sink::default();
+            let result=lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),
+                &sink,CancellationToken::new()).await;
+            let requests=model.requests.lock().unwrap();
+            assert_eq!(requests.len(),2,"a summary protocol fault gets only one correction");
+            assert!(requests.iter().all(|request|request.input.tools.is_empty() && request.input.tool_choice==ChatToolChoice::None));
+            assert_eq!(requests[0].input.messages,requests[1].input.messages,"repair preserves the exact source, not a reduced task");
+            assert!(requests[1].input.instructions.iter().any(|text|text.contains("previous summary draft was rejected")));
+            let events=sink.0.lock().unwrap();
+            assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::CompactionSummaryRejected{..})).count(),
+                if invalid_twice {2} else {1});
+            for rejected in events.iter().filter(|event|matches!(event,AgentEngineEvent::CompactionSummaryRejected{..})) {
+                assert!(crate::recovery::discardable_model_event(rejected));
+                let encoded=serde_json::to_string(rejected).unwrap();
+                assert_eq!(serde_json::from_str::<AgentEngineEvent>(&encoded).unwrap(),*rejected);
+            }
+            assert!(!serde_json::to_string(&*events).unwrap().contains("DO_NOT_PUBLISH_OR_EXECUTE"));
+            if invalid_twice {
+                assert!(matches!(result,Err(AgentEngineError::CompactionInvalidSummary)));
+                assert_eq!(request.input,before,"two rejected drafts cannot replace the live context");
+                assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::ContextCompacted{..})));
+            } else {
+                result.unwrap();
+                assert!(!serde_json::to_string(&request.input.messages).unwrap().contains("DO_NOT_PUBLISH_OR_EXECUTE"));
+                assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+                assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ContextCompacted{..})));
+            }
+        }
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_byte_overrun_retries_once_with_a_smaller_summary() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                text_step(&"x".repeat(9000)),
+                text_step(&"S".repeat(260)),
+                text_step("done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool), budget);
+        let mut request = request();
+        let current = request.input.messages.pop().unwrap();
+        request.input.messages = (0..6).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("old context {index} ").repeat(20) }],
+            provider_round_id: None,
+        }).chain([current]).collect();
+        let result = session.run_turn(AgentTurnRequest::new(
+            request, AgentToolPlan::default(), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].causality.operation_id.as_ref().ends_with(":compact:1"));
+        assert!(requests[1].causality.operation_id.as_ref().ends_with(":compact:2"));
+        assert!(requests[1].input.instructions[0].contains("at most 192 UTF-8 bytes"));
+        assert!(requests[2].input.messages.iter().any(|message|
+            format!("{message:?}").contains(&"S".repeat(260))));
+    }
+
+    #[tokio::test]
+    async fn repeatedly_truncated_compaction_splits_source_without_losing_the_task() {
+        let truncated = vec![
+            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into() }),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
+        ];
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                truncated.clone(), truncated,
+                text_step("First half retained."),
+                text_step("Both halves retained."),
+                text_step("done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool), budget);
+        let mut request = request();
+        let current = request.input.messages.pop().unwrap();
+        request.input.messages = (0..6).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("old context {index} ").repeat(20) }],
+            provider_round_id: None,
+        }).chain([current.clone()]).collect();
+        let result = session.run_turn(AgentTurnRequest::new(
+            request, AgentToolPlan::default(), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.tool_call_count, 0);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        for (index, compact) in requests.iter().take(4).enumerate() {
+            assert!(compact.causality.operation_id.as_ref().ends_with(&format!(":compact:{}", index + 1)));
+            assert!(compact.input.tools.is_empty());
+        }
+        assert_eq!(requests[4].input.messages.last(), Some(&current));
+        assert!(format!("{:?}", requests[4].input.messages).contains("Both halves retained."));
+    }
+
+    #[tokio::test]
+    async fn exhausted_compaction_output_marks_missing_history_and_keeps_accepted_input() {
+        let truncated = vec![
+            Ok(ChatModelEvent::OutputTextDelta { text: "partial".into() }),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::MaxOutputTokens }),
+        ];
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new((0..64).map(|_| truncated.clone()).collect()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let current = request.input.messages.pop().unwrap();
+        request.input.messages = (0..6).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("old context {index} ").repeat(80) }],
+            provider_round_id: None,
+        }).chain([current.clone()]).collect();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), budget,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&current), &binding(),
+            model.clone(), &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(request.input.messages.last(), Some(&current));
+        let summary = format!("{:?}", request.input.messages[0]);
+        assert!(summary.contains("Automatic summary incomplete"));
+        assert!(summary.contains("does not authorize re-reading or rerunning"));
+        assert!(!summary.contains("Re-read relevant files and rerun checks"));
+        assert!(!summary.contains("partial"), "a truncated model draft must not be committed");
+        let requests = model.requests.lock().unwrap();
+        assert!(!requests.is_empty() && requests.len() <= 16);
+        assert!(requests.iter().all(|request| request.input.tools.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn one_turn_can_compact_repeatedly_without_losing_the_accepted_requirement() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new((0..16).map(|_| text_step("retained summary")).collect()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let requirement = request.input.messages[0].clone();
+        request.input.messages.insert(0, crate::context_lifecycle::text_message(
+            ChatRole::Assistant,
+            "older context one ".repeat(256),
+        ));
+        request.input.messages.insert(0, crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "older context two ".repeat(256),
+        ));
+        let budget = AgentContextBudget {
+            max_history_messages: 2,
+            max_context_bytes: 64 * 1024,
+        };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(),
+            budget,
+        )
+        .unwrap();
+        let sink = NoopAgentEventSink;
+        lifecycle
+            .prepare(
+                &mut request,
+                std::slice::from_ref(&requirement),
+                &binding(),
+                model.clone(),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant,
+            "new tool-loop context ".repeat(256),
+        ));
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "new observation ".repeat(256),
+        ));
+        lifecycle
+            .prepare(
+                &mut request,
+                std::slice::from_ref(&requirement),
+                &binding(),
+                model.clone(),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let compactions = model.requests.lock().unwrap();
+        assert!(compactions.len() >= 2);
+        for (index, compact) in compactions.iter().enumerate() {
+            assert!(compact.causality.operation_id.as_ref()
+                .ends_with(&format!(":compact:{}", index + 1)));
+        }
+        assert_eq!(request.input.messages.last(), Some(&requirement));
+        assert!(serde_json::to_string(&request.input.messages)
+            .unwrap()
+            .contains("retained summary"));
+    }
+
+    #[tokio::test]
+    async fn oversized_compaction_summary_degrades_explicitly_without_committing_its_draft() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new((0..64).map(|_| text_step(&"nonshrinking summary ".repeat(500))).collect()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let budget = AgentContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let current = request.input.messages.pop().unwrap();
+        request.input.messages = (0..6).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("old context {index} ").repeat(80) }],
+            provider_round_id: None,
+        }).chain([current.clone()]).collect();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            configured_test_budget(), budget,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&current), &binding(),
+            model.clone(), &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(request.input.messages.last(), Some(&current));
+        let summary = format!("{:?}", request.input.messages[0]);
+        assert!(summary.contains("Automatic summary incomplete"));
+        assert!(!summary.contains("nonshrinking summary"));
+        let requests = model.requests.lock().unwrap();
+        assert!(!requests.is_empty() && requests.len() <= 16);
+        for (index, compact) in requests.iter().enumerate() {
+            assert!(compact.input.tools.is_empty());
+            assert_eq!(compact.input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
+            assert!(compact.causality.operation_id.as_ref().ends_with(&format!(":compact:{}", index + 1)));
+        }
+        assert!(requests.iter().all(|request|
+            serde_json::to_vec(&request.input).unwrap().len() <= budget.max_context_bytes));
+    }
+
+    #[tokio::test]
+    async fn mandatory_context_over_budget_is_rejected_without_a_model_call() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
+            AgentContextBudget { max_history_messages: 4, max_context_bytes: 2048 });
+        let mut oversized = request();
+        oversized.input.instructions.push("x".repeat(4096));
+        let error = session.run_turn(AgentTurnRequest::new(
+            oversized, AgentToolPlan::default(), principal(), 0,
+        )).await.unwrap_err();
+        assert!(matches!(&error, AgentEngineError::Compaction(message)
+            if message.contains("Mandatory instructions/task state/accepted inputs")), "{error}");
+        assert!(model.requests.lock().unwrap().is_empty());
+        assert!(!session.is_turn_active().await);
+    }
+
+    #[test]
+    fn reasoning_signature_can_arrive_before_reasoning_text() {
+        let mut step = StepState::default();
+        step.set_reasoning_signature("signature".to_owned()).unwrap();
+        step.append_reasoning("thinking");
+        assert!(matches!(
+            step.assistant_content.as_slice(),
+            [ChatContentPart::Reasoning {
+                text,
+                signature: Some(signature),
+                ..
+            }] if text == "thinking" && signature == "signature"
+        ));
+        assert!(step.finalize().is_ok());
+    }
+
+    #[tokio::test]
+    async fn tool_call_continues_into_a_second_model_step() {
+        let call_id = ToolCallId::from("call-1");
+        let mut steps = vec![vec![
+            Ok(ChatModelEvent::ToolCallDelta {
+                call_id: call_id.clone(), name: "read_file".into(),
+                arguments_delta: r#"{"path":"README.md"}"#.into(),
+            }),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: call_id.clone(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]];
+        // One read-only batch stays on the generic Tool loop. It does not pay
+        // for a task ledger or completion-account exchange.
+        steps.push(text_step("done"));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = open_session(model.clone(), Arc::new(EchoTool));
+        let result = session.run_turn(AgentTurnRequest::new(
+            request(), tool_plan(), principal(), 0,
+        )).await.unwrap();
+        assert_eq!(result.output_text, "done");
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(result.tool_call_count, 1);
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed {
+            finish_reason: ChatFinishReason::Completed
+        }));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
+        assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repeated_read_only_calls_reuse_instructions_until_an_effect_invalidates_them() {
+        let request = AgentTurnRequest::new(request(), tool_plan(), principal(), 0);
+        let mut instructions = crate::workspace_context::ScopedInstructions::new(&request);
+        let tool = CountingInstructionTool { instruction_reads: AtomicUsize::new(0) };
+        let sink = NoopAgentEventSink;
+        let call = ChatToolCall {
+            call_id: "read-repeat".into(),
+            name: "read_file".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+            provider_metadata: None,
+        };
+        instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        let loaded = tool.instruction_reads.load(Ordering::SeqCst);
+        assert!(loaded > 0, "the first model boundary must load applicable instructions");
+        instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
+            CancellationToken::new()).await.unwrap();
+        assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
+            "the first source read must reuse the pre-model instruction observation");
+        instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
+            CancellationToken::new()).await.unwrap();
+        assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
+            "a repeated read-only target must not reload unchanged ancestors");
+        instructions.invalidate();
+        instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        assert!(tool.instruction_reads.load(Ordering::SeqCst) > loaded,
+            "effects must force a fresh instruction observation");
+    }
+
+    #[tokio::test]
+    async fn root_instructions_are_materialized_before_the_first_model_step() {
+        let request = AgentTurnRequest::new(request(), tool_plan(), principal(), 0);
+        let mut instructions = crate::workspace_context::ScopedInstructions::new(&request);
+        let tool = CountingInstructionTool { instruction_reads: AtomicUsize::new(0) };
+        let sink = NoopAgentEventSink;
+
+        assert!(!instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap());
+        let loaded = tool.instruction_reads.load(Ordering::SeqCst);
+        assert!(loaded > 0, "the workspace root must be inspected before the first model request");
+        let call = ChatToolCall {
+            call_id: "first-source-read".into(),
+            name: "read_file".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+            provider_metadata: None,
+        };
+        assert!(instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
+            CancellationToken::new()).await.unwrap().is_none(),
+            "a root source read must not be deferred by instructions that should already be loaded");
+        assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
+            "the first source read must reuse the pre-model root instruction observation");
+    }
+
+    #[tokio::test]
+    async fn reaped_timeout_can_report_without_reopening_an_optional_plan() {
+        #[derive(Default)]
+        struct TimeoutTool(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for TimeoutTool {
+            async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation) {return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                let terminal=invocation.call.name=="poll_process";
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    if terminal {json!({"process_id":"owned-timeout","state":"timed_out","success":false,
+                        "output":{"text":"READY_PARENT\nREADY_CHILD\n","next_cursor":25},
+                        "cleanup":{"reaped":true,"errors":[]}}).to_string()}
+                    else {json!({"process_id":"owned-timeout","state":"running","success":null,
+                        "output":{"text":"","next_cursor":0}}).to_string()},terminal))
+            }
+        }
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("start-once","start_process",json!({"command":"bun","args":["helper.mjs","hold"],"timeout_ms":6000,"wait_ms":0})),
+            control_step("timeout-terminal","poll_process",json!({"process_id":"owned-timeout","cursor":0,"wait_ms":30000})),
+            control_step("report-terminal","report_completion",json!({"summary":"The controlled diagnostic timed out and was reaped; no exit code was observed, no success or user stop is claimed.",
+                "observed_tool_error_count":1,"observed_command_failure_count":1,
+                "criteria":[{"disposition":"supported","evidence_call_ids":["timeout-terminal"],"rationale":"The exact owned terminal records timeout and proven cleanup."}]})),
+            text_step("Report only the observed diagnostic; no new action is authorized."),
+        ]),requests:Default::default()});
+        let tools=Arc::new(TimeoutTool::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ManagedEffect,false),
+            tool_binding("poll_process","workspace.process","workspace.process/poll",AgentEffectClass::ReadOnly,true),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan,principal(),0).with_max_model_steps(3)).await
+            .expect("a known reaped timeout is reportable without an extra plan round");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(model.requests.lock().unwrap().len(),3,"no unnecessary update_plan or repaired report round");
+        assert_eq!(*tools.0.lock().unwrap(),["start-once","timeout-terminal"]);
+        assert!(result.output_text.contains("timed out") && result.output_text.contains("reaped"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"),"the real timeout remains recorded");
+    }
+
+    #[tokio::test]
+    async fn settled_nonzero_can_report_without_reopening_an_optional_plan() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("account", "report_completion", json!({
+                    "summary":"The diagnostic command exited with code 1; no success claim.",
+                    "observed_command_failure_count":1,
+                    "observed_tool_error_count":1,
+                    "criteria":[{"disposition":"unverified","rationale":"The observed diagnostic ended with code 1; no broader verification is claimed."}]
+                })),
+                text_step("No more work is authorized"),
+                text_step("No more work is authorized"),
+            ]),
+            requests: Default::default(),
+        });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0)).await
+            .expect("a truthful settled diagnostic can close its completion account");
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert!(result.output_text.contains("no success claim"));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.instructions.iter().any(|text|
+            text.contains("requested expected diagnostic nonzero result")
+                && text.contains("repair only when the accepted task authorizes it")));
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_review_is_projected_into_the_next_model_instructions() {
+        let model = Arc::new(ObservingModel { requests:Default::default(),
+            steps:std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                text_step("The diagnostic ended with code 1. This is its result, not a successful test."),
+                control_step("account", "report_completion", json!({
+                    "summary":"The diagnostic exited with code 1.","observed_tool_error_count":1,"observed_command_failure_count":1,
+                    "criteria":[{"disposition":"unverified","rationale":"Only the recorded diagnostic result is disclosed."}]
+                })),
+            ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(),3);
+        assert!(captured[2].input.instructions.iter().any(|text| text.starts_with("Completion review is active")),
+            "the next model request must retain the host's review phase independently of optional transcript messages");
+        assert!(!captured[1].input.instructions.iter().any(|text| text.starts_with("Completion review is active")));
+        assert_eq!(captured[2].input.tool_choice,ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() },
+            "a settled terminal answer needs the exact report tool, not another autonomous task attempt");
+        assert_eq!(captured[2].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME], "a settled terminal answer exposes only its completion control");
+        assert!(captured[1].input.tools.iter().any(|tool| tool.name=="exec_command"));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+    }
+
+    #[tokio::test]
+    async fn complex_progress_reply_does_not_close_unfinished_action_tools() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {
+                    return Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"a","content":"file contents",
+                        "offset":0,"total_bytes":13,"eof":true,"next_offset":null,"sha256":"a".repeat(64),
+                        "start_line":1,"start_column_bytes":0,"source_version_pinned":true,
+                        "workspace_path":{"root_sha256":"d".repeat(64),"path":"a","case_resolved":true}}).to_string(),false));
+                }
+                Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({"process_id":format!("process:{}",invocation.call.call_id.as_ref()),
+                    "state":"exited","exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"observed\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
+            }
+        }
+        let mut commands=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));commands.pop();
+        commands.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+        let report=|summary:&str|json!({"summary":summary,"criteria":[{"disposition":"unverified","rationale":"Earlier observations are described without a later file-state claim."}],
+            "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"cwd","label":"Directory observation"}]},
+                {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"remaining-read","label":"Read result"}]}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            commands,text_step("The directory observations are ready; next I will read the requested file."),
+            control_step("remaining-read","read_file",json!({"path":"a"})),
+            control_step("candidate","report_completion",report("All requested actual observations are reported.")),
+            control_step("final","report_completion",report("The directory and the requested file were actually observed; no operation was repeated.")),
+        ])});
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {text:"1. Inspect the directory once.\n2. Read a once and give the actual results.".into()}];
+        let tools=Arc::new(Tools::default());let result=open_session(model.clone(),tools.clone())
+            .run_turn(AgentTurnRequest::new(initial,plan,principal(),0).with_max_model_steps(5)).await.unwrap();
+        assert_eq!(*tools.0.lock().unwrap(),["cwd","entries","remaining-read"]);
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[2].input.tools.iter().any(|t|t.name=="read_file"),"per-response public progress cannot revoke the remaining task's frozen tools");
+        assert_eq!(requests.len(),4,"explicit result delivery needs no additional self-review round");
+    }
+
+    #[tokio::test]
+    async fn terminal_review_with_a_running_process_keeps_process_controls_available() {
+        struct RunningTool;
+        #[async_trait]
+        impl AgentToolInvoker for RunningTool {
+            async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    json!({"process_id":"still-live","state":"running","success":true}).to_string(),false))
+            }
+        }
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("plan", "update_plan", json!({"plan":[{"step":"Inspect process","status":"in_progress"}]})),
+            control_step("launch", "exec_command", json!({"command":"worker","args":[]})),
+            text_step("A process is still running."),
+            text_step("A process is still running; completion is unproven."),
+        ]) });
+        let plan = AgentToolPlan::new([
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("poll_process", "workspace.process", "workspace.process/poll", AgentEffectClass::ReadOnly, true),
+        ]).unwrap();
+        assert!(open_session(model.clone(),Arc::new(RunningTool))
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.is_err());
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(),4);
+        assert_eq!(captured[3].input.tool_choice,ChatToolChoice::Auto,
+            "the model must still be able to settle a live process before reporting");
+        assert!(captured[3].input.tools.iter().any(|tool| tool.name=="poll_process"));
+        assert!(captured[3].input.instructions.iter().any(|text|text.starts_with("Execution remains unfinished")),
+            "a public progress response with a live process must stay in execution, not demand a closing report");
+        assert!(!captured[3].input.instructions.iter().any(|text|text.starts_with("Completion review is active")));
+        assert!(!captured[3].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::Text {text} if text.contains("Before ending, poll or explicitly cancel"))),
+            "host continuation must not override an accepted keep-alive constraint with a new cancellation request");
+    }
+
+    #[tokio::test]
+    async fn ignored_completion_choice_cannot_dispatch_another_command() {
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+            text_step("The diagnostic exited with code 1."),
+            control_step("unrequested-plan", "update_plan", json!({"plan":[{"step":"Repeat diagnostic","status":"in_progress"}]})),
+            control_step("unrequested-repeat", "exec_command", json!({"command":"bun","args":["test"]})),
+            control_step("account", "report_completion", json!({
+                "summary":"The diagnostic exited with code 1; the additional command was not executed.",
+                "observed_tool_error_count":1,"observed_command_failure_count":1,
+                "criteria":[{"disposition":"unverified","rationale":"Only the original diagnostic result is disclosed; no repeated command ran."}]
+            })),
+            text_step("No more work is authorized"),text_step("No more work is authorized"),
+        ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await
+            .expect("a rejected extra command must not force another effect or lose the settled result");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"], "the frozen action can be permitted but inadmissible during report review");
+        assert_eq!(model.requests.lock().unwrap().len(),5);
+        assert_eq!(model.requests.lock().unwrap()[4].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn completion_review_repeated_ssh_proposals_preserve_same_turn_timeout_and_success_receipts() {
+        #[derive(Default)]
+        struct SshReceipts(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for SshReceipts {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                assert_eq!(invocation.binding.action_id.as_ref(), "ssh/exec");
+                let timeout = match invocation.call.call_id.as_ref() {
+                    "ssh-timeout" => true,
+                    "ssh-followup" => false,
+                    other => panic!("a report-only proposal must never reach the owner: {other}"),
+                };
+                // These are the real SSH owner's settled result shapes. An
+                // expected remote timeout is a returned diagnostic, not an
+                // uncertain effect or a workspace-process launch failure.
+                let receipt = if timeout {
+                    json!({"status":"timed_out","stdout":"NOMIFUN_TIMEOUT_BEGIN_s9k4","exit_code":124,"timed_out":true})
+                } else {
+                    json!({"status":"succeeded","stdout":"NOMIFUN_AFTER_TIMEOUT_s9k4\nrika","exit_code":0,"timed_out":false})
+                };
+                Ok(AgentToolResult::text(invocation.call.call_id, receipt.to_string(), false))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let first = json!({"timeout_ms":1000,"command":"printf 'NOMIFUN_TIMEOUT_BEGIN_s9k4\\n'; sleep 4; printf 'NOMIFUN_UNEXPECTED_AFTER_SLEEP_s9k4\\n'"});
+        let second = json!({"timeout_ms":10000,"command":"printf 'NOMIFUN_AFTER_TIMEOUT_s9k4\\n'; whoami"});
+        let mut original = control_step("ssh-timeout", "ssh_exec", first.clone());
+        original.pop();
+        original.extend(control_step("ssh-followup", "ssh_exec", second.clone()));
+        let mut repeat = control_step("repeat-timeout", "ssh_exec", first.clone());
+        repeat.pop();
+        repeat.extend(control_step("repeat-followup", "ssh_exec", second.clone()));
+        let summary = "第1次 stdout=NOMIFUN_TIMEOUT_BEGIN_s9k4，exit_code=124，timed_out=true；第2次 stdout=NOMIFUN_AFTER_TIMEOUT_s9k4\nrika，exit_code=0，timed_out=false。两次命令已在本回合执行，未重试。";
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            original,
+            text_step(summary),
+            repeat,
+            control_step("truthful-account", "report_completion", json!({
+                "summary":summary,"observed_tool_error_count":0,"observed_command_failure_count":0,
+                "criteria":[
+                    {"disposition":"supported","evidence_call_ids":["ssh-timeout"],"rationale":"The original receipt records the expected timeout, exit 124 and exact stdout."},
+                    {"disposition":"supported","evidence_call_ids":["ssh-followup"],"rationale":"The original follow-up receipt records exit zero and exact stdout."}
+                ]
+            })),
+        ]) });
+        let plan = AgentToolPlan::new([tool_binding("ssh_exec", "ssh", "ssh/exec", AgentEffectClass::ExternalUncertainEffect, false)]).unwrap();
+        let mut initial = request();
+        initial.input.messages[0].content = vec![ChatContentPart::Text { text:
+            "顺序调用 ssh_exec 两次，不要合并、不要重试：先验收指定的超时，再执行指定的 whoami。每次报告原始 stdout、exit_code、timed_out。".into() }];
+        let tools = Arc::new(SshReceipts::default());
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
+            AgentTurnRequest::new(initial, plan, principal(), 0).with_max_model_steps(4),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*tools.0.lock().unwrap(), ["ssh-timeout", "ssh-followup"]);
+        assert!(result.output_text.contains("exit_code=124") && result.output_text.contains("timed_out=true"));
+        assert!(result.output_text.contains("NOMIFUN_AFTER_TIMEOUT_s9k4\nrika"));
+        assert!(!result.output_text.contains("未执行") && !result.output_text.contains("未成功的操作尝试"));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[2..] {
+            assert_eq!(request.input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), [crate::completion::TOOL_NAME]);
+            let properties = &request.input.tools[0].input_schema.0["properties"];
+            assert_eq!(properties["observed_tool_error_count"]["const"], 0);
+            assert_eq!(properties["observed_command_failure_count"]["const"], 0);
+            assert_eq!(properties["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"], json!(["ssh-followup", "ssh-timeout"]));
+        }
+        for id in ["repeat-timeout", "repeat-followup"] {
+            let feedback = requests[3].input.messages.iter().flat_map(|message| &message.content).find_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, output, is_error: true } if call_id.as_ref() == id => output.iter().find_map(|part| match part {
+                    nomifun_chat_model_broker::ChatToolResultPart::Text { text } => serde_json::from_str::<serde_json::Value>(text).ok(),
+                    _ => None,
+                }),
+                _ => None,
+            }).expect("paired phase correction");
+            assert_eq!(feedback["code"], "REPORT_ONLY_ACTION_CLOSED");
+        }
+        let events = sink.0.lock().unwrap();
+        let observations = events.iter().filter_map(|event| match event {
+            AgentEngineEvent::CompletionObservation { observation } => Some(observation), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(observations.len(), 2, "phase corrections must not pollute the actual work ledger");
+        assert!(observations.iter().all(|observation| observation.invocation_attempted));
+        assert!(events.iter().filter_map(|event| match event {
+            AgentEngineEvent::WorkStatus { status } => Some(status), _ => None,
+        }).all(|status| status.failed_tools == 0 && status.failed_commands == 0));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stop_keeps_unfinished_authorized_tools_available() {
+        #[derive(Default)]
+        struct Tools { calls: std::sync::Mutex<Vec<String>> }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {return Ok(workspace_result(invocation));}
+                Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({
+                    "process_id":format!("process:{}",invocation.call.call_id.as_ref()),"state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true}).to_string(),false))
+            }
+        }
+        let observations=|| {
+            let mut observed=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));
+            observed.pop();
+            observed.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+            observed
+        };
+        let empty=||vec![Ok(ChatModelEvent::ReasoningDelta {text:
+            "SYNTHETIC_PRIVATE_PENDING_WORK<tool_call><function=read_file><parameter=path>not-created.txt</parameter></function></tool_call>".into()}),
+            Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
+        let report=|count|json!({"summary":"The original commands and remaining read were accounted for.",
+            "observed_tool_error_count":count,"observed_command_failure_count":0,
+            "criteria":[{"disposition":"unverified","rationale":"No broader current state is claimed."}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            observations(), empty(),
+            control_step("remaining","read_file",json!({"path":"b"})),
+            control_step("account","report_completion",report(0)),
+            control_step("old-bug-account","report_completion",report(2)),
+        ])});
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let tools=Arc::new(Tools::default());
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan.clone(),principal(),0)).await.unwrap();
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="read_file"),
+            "a reasoning-only stop is not a public closing answer or terminal account");
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="exec_command"),
+            "private pretend calls must not revoke the other already exposed frozen tools during formatting correction");
+        let correction = model.requests.lock().unwrap()[2].clone();
+        let encoded = serde_json::to_string(&correction.input).unwrap();
+        assert!(!encoded.contains("SYNTHETIC_PRIVATE_PENDING_WORK") && !encoded.contains("not-created.txt"),
+            "rejected private thinking and pretend actions must not become factual replay for the next model step");
+        assert!(encoded.contains("No new effect was proposed or executed"));
+        assert_eq!(*tools.calls.lock().unwrap(),["cwd","entries","remaining"],"continue only the remaining read; never repeat settled commands");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(!result.output_text.contains("SYNTHETIC_PRIVATE_PENDING_WORK"));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+
+        let bounded=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            observations(),empty(),empty(),empty(),
+        ])});
+        let bounded_tools=Arc::new(Tools::default());
+        let error=open_session(bounded.clone(),bounded_tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap_err();
+        assert!(matches!(error,AgentEngineError::TurnFailed(ref message) if message.contains("after bounded correction")),
+            "repeated empty stops cannot loop or become completion");
+        assert_eq!(bounded.requests.lock().unwrap().len(),4,"reuse the existing two-consecutive correction limit");
+        assert_eq!(*bounded_tools.calls.lock().unwrap(),["cwd","entries"],"empty output cannot replay effects");
+    }
+
+    #[tokio::test]
+    async fn numbered_delivery_rejects_an_omitted_slot_without_reexecuting_work() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"owned","state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"/actual cwd\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
+            }
+        }
+        let account=|complete:bool,count| {
+            let mut items=vec![json!({"item_id":"input_0_part_0_line_0","status":"delivered",
+                "results":[{"result_ref":"cwd","label":"Actual cwd"}]})];
+            if complete { items.push(json!({"item_id":"input_0_part_0_line_1","status":"delivered",
+                "results":[{"result_ref":"cwd","label":"Earlier exact result"}]})); }
+            json!({"summary":"Actual earlier command results follow.","criteria":[{"disposition":"unverified",
+                "rationale":"Earlier observations, not a new file-state claim."}],"delivery_items":items,
+                "observed_tool_error_count":count,"observed_command_failure_count":0})
+        };
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("second-observation","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("omitted","report_completion",account(false,0)),
+            control_step("fixed","report_completion",account(true,1)),
+        ])});
+        let tools=Arc::new(Tools::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+        ]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
+            text:"1. Observe cwd once.\n2. Deliver that earlier exact result.".into()}];
+        let outcome=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
+        let result=outcome.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(*tools.0.lock().unwrap(),["cwd","second-observation"]);
+        assert!(result.output_text.contains("/actual cwd\n"));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        assert_eq!(model.requests.lock().unwrap()[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"]);
+    }
+
+    #[tokio::test]
+    async fn exact_action_preflight_rejects_wrong_bytes_and_replay_before_dispatch() {
+        #[derive(Default)] struct Files(std::sync::Mutex<Vec<String>>);
+        #[async_trait] impl AgentToolInvoker for Files {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {return Ok(workspace_result(invocation));}
+                let content=invocation.call.arguments.0["content"].as_str().unwrap().to_owned();
+                self.0.lock().unwrap().push(content.clone());
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"a","written":true,
+                    "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"bytes":content.len()}).to_string(),false))
+            }
+        }
+        let before="第一行 MAC-B\n第二行 before\n";let after="第一行 MAC-B\n第二行 after\n";
+        let source="Create the before contents with LF. Then change before to after, preserving LF.";
+        let exact=|id:&str,content:&str|json!({"id":id,"source":{"input":0,"quote":source},"tool":"write_file",
+            "expected_arguments":{"path":"a","content":content}});
+        let write=|id:&str,content:&str|control_step(id,"write_file",json!({"path":"a","content":content}));
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("observe-one","read_file",json!({"path":"a"})),
+            control_step("observe-two","read_file",json!({"path":"a"})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Create before, then modify after","status":"in_progress"}],
+                "exact_actions":[exact("before",before),exact("after",after)]})),
+            write("skip-before",after),write("omit-lf",before.trim_end()),write("create-before",before),
+            write("repeat-before",before),write("modify-after",after),
+            control_step("report","report_completion",json!({"summary":"Exact before33 and after32 completed; three proposals did not execute.",
+                "observed_tool_error_count":3,"observed_command_failure_count":0,
+                "criteria":[{"disposition":"unverified","rationale":"Only actual earlier effects are reported."}]})),
+        ])});
+        let tools=Arc::new(Files::default());let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {text:source.into()}];
+        let plan=AgentToolPlan::new([tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true)]).unwrap();
+        let outcome=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
+        let result=outcome.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(*tools.0.lock().unwrap(),[before,after]);
+        assert_eq!(before.len(),33);assert_eq!(after.len(),32);
+        for id in ["skip-before","omit-lf","repeat-before"] {
+            assert!(model.requests.lock().unwrap().iter().flat_map(|request|&request.input.messages).flat_map(|message|&message.content)
+                .any(|part|matches!(part,ChatContentPart::ToolResult{call_id,is_error:true,..} if call_id.as_ref()==id)));
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_settled_command_report_argument_repair_cannot_replay_effects() {
+        #[derive(Default)]
+        struct HealthyTools { calls: std::sync::Mutex<Vec<String>> }
+        #[async_trait]
+        impl AgentToolInvoker for HealthyTools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/write" {
+                    let content=invocation.call.arguments.0["content"].as_str().unwrap();
+                    return Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({"path":invocation.call.arguments.0["path"],
+                        "written":true,"bytes":content.len(),"sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())}).to_string(),false));
+                }
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"healthy-process","state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"exit 0\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
+            }
+        }
+        let report=|count|json!({"summary":"The original command ended with exit 0; the repeated write was not executed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":0,
+            "criteria":[{"disposition":"unverified","rationale":"Only the earlier recorded command result is disclosed."}],
+            "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]},
+                {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("premature-write","write_file",json!({"path":"a","content":"premature-final"})),
+            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}],
+                "exact_actions":[{"id":"create","source":{"input":0,"quote":"Create a once."},"tool":"write_file","expected_arguments":{"path":"a","content":"original"}},
+                    {"id":"command","source":{"input":0,"quote":"Run the original command"},"tool":"exec_command","expected_arguments":{"command":"bun","args":["test"]}}]})),
+            control_step("created","write_file",json!({"path":"a","content":"original"})),
+            control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
+            control_step("bad-report","report_completion",report(2)),
+            control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
+            control_step("fixed-report","report_completion",report(2)),
+            text_step("must not replay completed work"),
+        ])});
+        let tools=Arc::new(HealthyTools::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
+            text:"1. Create a once.\n2. Run the original command and report without repeating it.".into()}];
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
+        let feedback = model.requests.lock().unwrap()[6].input.messages.iter().flat_map(|message|&message.content)
+            .find(|part|matches!(part,ChatContentPart::ToolResult{call_id,..} if call_id.as_ref()=="bad-report")).cloned();
+        assert_eq!(*tools.calls.lock().unwrap(),["created","original"],"a parameter refusal cannot authorize a new write after a healthy settled command; feedback={feedback:?}");
+        let result=result.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap()[6].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
+        assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::ToolResult {call_id,output,is_error:true} if call_id.as_ref()=="premature-write"
+                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text {text} if text.contains("exact_actions"))))));
+        assert!(!result.output_text.contains("Unsuccessful command attempts"));
+    }
+
+    #[tokio::test]
+    async fn corrected_report_arguments_keep_the_settled_failure_gate() {
+        let report = |count| json!({"summary":"Diagnostic exit 1; no extra effect was run.",
+            "observed_tool_error_count":count, "observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Only the recorded diagnostic result is disclosed."}]});
+        let model = Arc::new(ObservingModel { requests:Default::default(),
+            steps:std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("wrong-count", "report_completion", report(0)),
+                control_step("correct-count", "report_completion", report(2)),
+                text_step("No more work is authorized"), text_step("No more work is authorized"),
+            ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), plan, principal(), 0)).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+    }
+
+    #[tokio::test]
+    async fn rejected_control_arguments_count_once_without_replaying_the_settled_command() {
+        let report = |count| json!({"summary":"The diagnostic exit was observed; no repair or repeated command is claimed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Earlier results are disclosed without a current-state claim."}]});
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("wrong-account","report_completion",report(0)),
+            control_step("correct-account","report_completion",report(2)),
+            control_step("old-undercount","report_completion",report(1)),
+            text_step("must not replay settled work"),
+        ]) });
+        let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        let requests = model.requests.lock().unwrap();
+        let definition = requests[2].input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+        assert_eq!(definition.input_schema.0["properties"]["observed_tool_error_count"]["const"],2);
+        assert_eq!(definition.input_schema.0["properties"]["observed_command_failure_count"]["const"],1);
+        let feedback = requests[2].input.messages.iter().flat_map(|message| &message.content)
+            .find_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, output, .. } if call_id.as_ref()=="wrong-account" =>
+                    output.iter().find_map(|part| match part {
+                        nomifun_chat_model_broker::ChatToolResultPart::Text {text} => serde_json::from_str::<serde_json::Value>(text).ok(),
+                        _ => None,
+                    }),
+                _ => None,
+            }).expect("paired correction feedback");
+        assert_eq!(feedback["correction_counters_after_rejected_batch"],json!({
+            "observed_tool_error_count":2,"observed_command_failure_count":1}));
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(requests.len(),3);
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+        assert_eq!(model.steps.lock().unwrap().len(),2);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn rejected_terminal_account_cannot_reopen_a_settled_failure_plan() {
+        let report = |count| json!({"summary":"Diagnostic exit 1 was observed; no new work is claimed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Only the earlier diagnostic is disclosed."}]});
+        let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("bad-report","report_completion",report(0)),
+            control_step("reopen","update_plan",json!({"plan":[{"step":"Repeat the settled diagnostic","status":"in_progress"}]})),
+            control_step("fixed-report","report_completion",report(2)),
+            text_step("must not request more work"),
+        ])});
+        let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests[2].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME],"a rejected terminal account must not advertise a plan reset or repeat effect");
+        assert_eq!(requests[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"),
+            "the real command failure and rejected account remain counted; the report-only plan proposal is a phase correction");
+    }
+
+    #[tokio::test]
+    async fn rejected_account_with_an_explicit_open_plan_keeps_authorized_repair_available() {
+        let report = |count| json!({"summary":"Requested repair finished; broader quality was not checked.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"No broader verification is claimed."}]});
+        let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"in_progress"}]})),
+            control_step("bad-report","report_completion",report(0)),
+            control_step("repair","write_file",json!({"path":"a","content":"after"})),
+            control_step("close-plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"completed"}]})),
+            control_step("report","report_completion",report(2)),
+            text_step("must not restart completed work"),
+        ])});
+        let tools = Arc::new(ProcessThenWriteTool {writes:AtomicUsize::new(0)});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(tools.writes.load(Ordering::SeqCst),1,"an explicit unfinished plan still permits its requested repair");
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[3].input.tools.iter().any(|tool|tool.name=="write_file"));
+        assert_eq!(requests[3].input.tool_choice,ChatToolChoice::Auto);
+        assert_eq!(requests.len(),6);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn failed_process_exit_activates_replanning_before_a_terminal_reply() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("failed-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                text_step("All done"),
+                text_step("Still done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), Arc::new(FailedProcessTool::default()))
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0))
+            .await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "the first attempted final reply must receive a completion review");
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn proven_process_nonstart_exposes_completion_controls_before_recovery() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "not-started",
+                    "exec_command",
+                    json!({"command":"missing-program","args":[]}),
+                ),
+                text_step("All done"),
+                text_step("Still done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let plan = AgentToolPlan::new([
+            tool_binding(
+                "read_file",
+                "workspace.files",
+                "workspace.files/read",
+                AgentEffectClass::ReadOnly,
+                true,
+            ),
+            tool_binding(
+                "exec_command",
+                "workspace.process",
+                "workspace.process/exec",
+                AgentEffectClass::ExternalUncertainEffect,
+                false,
+            ),
+        ])
+        .unwrap();
+        let result = open_session(model.clone(), Arc::new(NonStartProcessTool))
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0))
+            .await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "the first attempted final reply must receive a completion review"
+        );
+        assert!(
+            requests[1]
+                .input
+                .tools
+                .iter()
+                .any(|tool| tool.name == crate::planning::TOOL_NAME)
+        );
+        let completion = requests[1]
+            .input
+            .tools
+            .iter()
+            .find(|tool| tool.name == crate::completion::TOOL_NAME)
+            .expect("a proven non-start still needs truthful completion accounting");
+        assert_eq!(
+            completion.input_schema.0["properties"]["observed_tool_error_count"]["const"],
+            1
+        );
+        assert_eq!(
+            completion.input_schema.0["properties"]["observed_command_failure_count"]["const"],
+            0
+        );
+        assert!(
+            completion.input_schema.0["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("observed_tool_error_count"))
+        );
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"));
+    }
+
+    #[tokio::test]
+    async fn failed_process_keeps_its_name_visible_while_plan_gate_blocks_retry() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("first-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("bad-args", "exec_command", json!({"command":"cmd.exe","args":"[\"/c\",\"dir\",\"/a\"]"})),
+                control_step("held-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                plan_step("in_progress", "inspect"),
+                control_step("after-plan", "exec_command", json!({"command":"bun","args":["test"]})),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut exec = tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false);
+        exec.definition.input_schema = nomifun_agent_contracts::StrictJsonValue(json!({
+            "type":"object", "additionalProperties":false,
+            "required":["command","args"],
+            "properties":{"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}
+        }));
+        exec.schema_digest = crate::tool::input_schema_digest(&exec.definition.input_schema).unwrap();
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            exec,
+        ]).unwrap();
+        let tools = Arc::new(FailedProcessTool::default());
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0).with_max_model_steps(5))
+            .await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(*tools.calls.lock().unwrap(), ["first-exec", "after-plan"],
+            "neither the malformed nor plan-held retry may cross the owner tool port");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"),
+            "ledger activation must not revoke an advertised frozen tool name");
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, output, is_error }
+                if call_id.as_ref() == "bad-args" && *is_error
+                    && !format!("{output:?}").contains("not exposed"))));
+        assert!(requests[3].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, output, is_error }
+                if call_id.as_ref() == "held-exec" && *is_error
+                    && format!("{output:?}").contains("Call update_plan alone now"))));
+        assert!(requests[4].input.tools.iter().any(|tool| tool.name == "exec_command"));
+        let unknown = ChatToolCall {
+            call_id: "invented".into(), name: "unknown_exec".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({})), provider_metadata: None,
+        };
+        assert!(crate::tool::reject_unexposed_batch(&[unknown], &requests[1].input.tools)
+            .is_some(), "an unknown tool stays rejected after ledger activation");
+    }
+
+    #[tokio::test]
+    async fn failed_test_command_does_not_block_the_next_repair_in_an_active_plan() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("failed-first", "exec_command", json!({"command":"bun","args":["test"]})),
+                plan_step("in_progress", "inspect"),
+                control_step("failed-second", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("repair", "write_file", json!({"path":"README.md","content":"fixed"})),
+                text_step("done"),
+                text_step("still done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
+        ]).unwrap();
+        let tools = Arc::new(ProcessThenWriteTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0)).await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1,
+            "the failed baseline test must not fence a later repair in the recorded plan");
+        assert!(model.requests.lock().unwrap()[4].input.messages.iter()
+            .flat_map(|message| &message.content)
+            .any(|part| matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. }
+                if call_id.as_ref() == "repair")));
+    }
+
+    #[tokio::test]
+    async fn successful_single_collaboration_handoff_completes_without_another_model_step() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-1",
+                    "delegate",
+                    json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"A"}]}),
+                ),
+                text_step("must not be generated after the handoff"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(false),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.tool_call_count, 1);
+        assert_eq!(result.output_text, "");
+        assert!(matches!(
+            result.terminal,
+            AgentTurnTerminal::Completed {
+                finish_reason: ChatFinishReason::Completed
+            }
+        ));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_steer_is_incorporated_before_collaboration_handoff_closes_the_turn() {
+        let plan = control_step(
+            "plan-after-delegate",
+            crate::planning::TOOL_NAME,
+            json!({
+                "explanation":"Account for the accepted correction.",
+                "plan":[{"step":"response","status":"completed"}],
+                "requirements":[
+                    {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                    {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+                ]
+            }),
+        );
+        let completion = control_step(
+            "completion-after-delegate",
+            crate::completion::TOOL_NAME,
+            json!({
+                "summary":"The accepted correction was incorporated.",
+                "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                    "disposition":"unverified","evidence_call_ids":[],
+                    "rationale":"No further external observation was required."}]
+            }),
+        );
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-before-steer",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                plan,
+                completion,
+                text_step("steered after handoff"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(TerminalFenceSteer {
+            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+                receipt_operation_id: "steer-receipt-after-delegate".into(),
+                message_id: "steer-message-after-delegate".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                AgentTurnRequest::new(
+                    request(),
+                    collaboration_plan(false),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 3);
+        assert!(result.output_text.contains("The accepted correction was incorporated."));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.steps.lock().unwrap().len(), 1, "no further model request after the accepted report");
+    }
+
+    #[tokio::test]
+    async fn collaboration_handoff_cannot_bypass_an_active_completion_ledger() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-with-ledger",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                control_step(
+                    "plan-with-ledger",
+                    crate::planning::TOOL_NAME,
+                    json!({
+                        "explanation":"Account for both accepted inputs.",
+                        "plan":[{"step":"response","status":"completed"}],
+                        "requirements":[
+                            {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                            {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+                        ]
+                    }),
+                ),
+                control_step(
+                    "completion-with-ledger",
+                    crate::completion::TOOL_NAME,
+                    json!({
+                        "summary":"Both accepted inputs were accounted for.",
+                        "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                            "disposition":"unverified","evidence_call_ids":[],
+                            "rationale":"The delegated result remains owned by AgentExecution."}]
+                    }),
+                ),
+                text_step("ledger closed"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(OneSteer {
+            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+                receipt_operation_id: "steer-receipt-before-delegate".into(),
+                message_id: "steer-message-before-delegate".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                AgentTurnRequest::new(
+                    request(),
+                    collaboration_plan(false),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 3);
+        assert!(result.output_text.contains("Both accepted inputs were accounted for."));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_or_mixed_collaboration_batches_do_not_force_turn_completion() {
+        let failed = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-failed",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                text_step("recovered from rejection"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let failed_result = open_session(failed.clone(), Arc::new(FailingCollaborationTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(false),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(failed_result.model_steps, 2);
+        assert_eq!(failed_result.output_text, "recovered from rejection");
+        assert_eq!(failed.requests.lock().unwrap().len(), 2);
+
+        let mixed_step = vec![
+            Ok(ChatModelEvent::ToolCallCompleted {
+                call: ChatToolCall {
+                    call_id: "delegate-mixed".into(),
+                    name: "delegate".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        json!({"strategy":"planned","goal":"work"}),
+                    ),
+                    provider_metadata: None,
+                },
+            }),
+            Ok(ChatModelEvent::ToolCallCompleted {
+                call: ChatToolCall {
+                    call_id: "fork-mixed".into(),
+                    name: "fork".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        json!({"goal":"other work"}),
+                    ),
+                    provider_metadata: None,
+                },
+            }),
+            Ok(ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::ToolCalls,
+            }),
+        ];
+        let mixed = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![mixed_step, text_step("mixed batch reviewed")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mixed_result = open_session(mixed.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(true),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mixed_result.model_steps, 2);
+        assert_eq!(mixed_result.output_text, "mixed batch reviewed");
+        assert_eq!(mixed_result.tool_call_count, 2);
+        assert_eq!(mixed.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn atomic_media_submission_does_not_activate_coding_ledger() {
+        let call_id = ToolCallId::from("create-image");
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: call_id.clone(),
+                            name: "generate_image".into(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "prompt":"a cat"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::Completed {
+                        finish_reason: ChatFinishReason::ToolCalls,
+                    }),
+                ],
+                text_step("submitted"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                atomic_media_plan(),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output_text, "submitted");
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(result.tool_call_count, 1);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert!(!request.input.tools.iter().any(|tool| {
+                matches!(
+                    tool.name.as_str(),
+                    crate::planning::TOOL_NAME | crate::completion::TOOL_NAME
+                )
+            }));
+            assert!(!request
+                .input
+                .instructions
+                .iter()
+                .any(|instruction| instruction.contains("Long-horizon execution policy")));
+        }
+        assert!(requests[1]
+            .input
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|part| matches!(part,
+                ChatContentPart::ToolResult { call_id: id, is_error: false, .. }
+                    if id == &call_id)));
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_run_in_parallel_but_results_keep_call_order() {
+        let first = ToolCallId::from("call-1");
+        let second = ToolCallId::from("call-2");
+        let mut steps = vec![vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: first.clone(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: second.clone(), name: "search_files".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "query":"needle"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]];
+        steps.extend(completion_steps("inspect", &["call-1", "call-2"], true));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(20),
+        });
+        let session = open_session(model.clone(), tools.clone());
+        let mut model_input = request();
+        model_input.input.parallel_tool_calls = Some(true);
+        let result = session.run_turn(AgentTurnRequest::new(
+            model_input, two_tool_plan(AgentEffectClass::ReadOnly, true), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.tool_call_count, 4); // two reads, closed plan, completion
+        assert_eq!(tools.max_active.load(Ordering::SeqCst), 2);
+        assert_eq!(*tools.order.lock().unwrap(), vec!["call-2", "call-1"]);
+        let requests = model.requests.lock().unwrap();
+        let results = requests[1].input.messages.iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, is_error, .. } => Some((call_id.clone(), *is_error)),
+                _ => None,
+            }).collect::<Vec<_>>();
+        assert_eq!(results, vec![(first, false), (second, false)]);
+        assert_eq!(requests[0].input.parallel_tool_calls,Some(true),"ordinary tool surfaces retain the caller preference");
+        assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn effectful_tools_run_serially() {
+        let quote = "Write a and b; do not run verification.";
+        let proposed = vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "call-1".into(), name: "write_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a", "content":"first"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "call-2".into(), name: "write_other_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "content":"second"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        // Automatic ledger activation does not reject the first valid batch
+        // or force generation of the same file payload a second time.
+        let mut steps = vec![proposed];
+        steps.extend(completion_steps(quote, &[], false));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(10),
+        });
+        let session = open_session(model.clone(), tools.clone());
+        let mut request = request();
+        request.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let result = session.run_turn(AgentTurnRequest::new(
+            request, two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("not independently verified"));
+        assert_eq!(tools.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(*tools.order.lock().unwrap(), vec!["call-1", "call-2"]);
+        let requests = model.requests.lock().unwrap();
+        assert!(!requests[0]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[1]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[1]
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("Long-horizon execution policy")));
+        for id in ["call-1", "call-2"] {
+            assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
+        }
+        assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn discovery_batches_reveal_schemas_but_mixed_batches_have_no_effects() {
+        #[derive(Debug)]
+        struct ExactDiscovery;
+        #[async_trait]
+        impl crate::AgentToolDiscoveryPort for ExactDiscovery {
+            async fn select(&self, _: &ChatCausality, _: u64, query: &str,
+                candidates: &[crate::AgentToolDiscoveryCandidate], _: usize, _: CancellationToken,
+            ) -> Result<Vec<String>, AgentEngineError> {
+                Ok(candidates.iter().filter(|item| item.name == query).map(|item| item.name.clone()).collect())
+            }
+        }
+        let mut first = tool_binding("browser_observe", "browser", "browser/observe", AgentEffectClass::ReadOnly, true);
+        first.definition.deferred = true;
+        let mut second = tool_binding("web_search", "web.research", "web.research/search", AgentEffectClass::ReadOnly, true);
+        second.definition.deferred = true;
+        let plan = AgentToolPlan::new([first, second,
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true)]).unwrap();
+        let mut mixed = control_step("mixed-search", "ToolSearch", json!({"query":"browser_observe"}));
+        mixed.pop();
+        mixed.extend(control_step("mixed-read", "read_file", json!({"path":"a"})));
+        let mut searches = control_step("search-browser", "ToolSearch", json!({"query":"browser_observe"}));
+        searches.pop();
+        searches.extend(control_step("search-web", "ToolSearch", json!({"query":"web_search"})));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![mixed, searches, text_step("Schemas ready")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool { active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::ZERO });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), plan, principal(), 0).with_tool_discovery_port(Arc::new(ExactDiscovery)),
+        ).await.unwrap();
+        assert_eq!(result.model_steps, 3);
+        assert!(tools.order.lock().unwrap().is_empty());
+        let requests = model.requests.lock().unwrap();
+        for name in ["browser_observe", "web_search"] {
+            assert!(!requests[1].input.tools.iter().any(|tool| tool.name == name), "mixed batch cannot reveal schemas");
+            assert!(requests[2].input.tools.iter().any(|tool| tool.name == name));
+        }
+        for id in ["search-browser", "search-web"] {
+            assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
+        }
+        assert_eq!(serde_json::to_value(&requests[0].input).unwrap()["parallel_tool_calls"],json!(false),
+            "a surface with exclusive discovery must request single-call delivery without relaxing batch preflight");
+    }
+
+    #[tokio::test]
+    async fn inspection_then_handoff_does_not_require_a_second_completion_owner() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("inspect-1", "read_file", json!({"path":"a"})),
+                control_step("inspect-2", "read_file", json!({"path":"b"})),
+                control_step("delegate", "delegate", json!({"strategy":"planned","goal":"work"})),
+            ]), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("delegate", "agent.collaboration", "agent/delegate", AgentEffectClass::ManagedEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), plan, principal(), 0),
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.model_steps, 3);
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool| tool.name == "update_plan"));
+    }
+
+    #[tokio::test]
+    async fn ordered_plan_and_completion_batch_records_both_without_invalidating_the_report() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let mut controls = control_step("close-plan", "update_plan", json!({
+            "plan":[{"step":"Original internal planning label","status":"completed"}]
+        }));
+        controls.pop();
+        controls.extend(control_step("account", "report_completion", json!({"summary":"Inspected file",
+            "criteria":[{"step":"Delivered source inspection","disposition":"supported","evidence_paths":["b"],"rationale":"Read the requested file"}]
+        })));
+        let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![
+            control_step("read-a","read_file",json!({"path":"a"})),
+            control_step("read-b","read_file",json!({"path":"b"})),controls,text_step("Inspection delivered"),
+        ]),requests:std::sync::Mutex::new(Vec::new()) });
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+            AgentContextBudget::default(), CancellationToken::new(),
+        ).await.unwrap();
+        assert_eq!(result.model_steps,3);
+        assert_eq!(result.output_text,"Inspected file");
+        assert_eq!(model.requests.lock().unwrap().len(),3);
+        let requests = model.requests.lock().unwrap();
+        let completion = requests[2].input.tools.iter().find(|tool| tool.name == crate::completion::TOOL_NAME).unwrap();
+        let criteria = &completion.input_schema.0["properties"]["criteria"]["items"]["properties"];
+        assert_eq!(criteria["evidence_paths"]["items"]["enum"], json!(["a", "b"]));
+        assert_eq!(criteria["evidence_call_ids"]["items"]["enum"], json!(["read-a", "read-b"]));
+        drop(requests);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        let events = sink.0.lock().unwrap();
+        for expected in ["close-plan","account"] {
+            assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. }
+                if result.call_id.as_ref()==expected && !result.is_error)));
+        }
+    }
+
+    #[tokio::test]
+    async fn output_usage_is_not_charged_again_when_calibrating_the_next_input() {
+        let mut first = control_step("read-once","read_file",json!({"path":"a"}));
+        first.insert(first.len()-1,Ok(ChatModelEvent::Usage { usage:nomifun_chat_model_broker::ChatUsage {
+            input_tokens:17_500, output_tokens:4_096, ..Default::default()
+        }}));
+        let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![first,text_step("Read complete")]),
+            requests:std::sync::Mutex::new(Vec::new()) });
+        let mut input = request(); input.input.max_output_tokens=Some(4096);
+        let result = open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(input,tool_plan(),principal(),0),
+        ).await.unwrap();
+        assert_eq!(result.model_steps,2);
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests.len(),2,"completed output must not cause an unnecessary paid compaction request");
+        assert!(requests.iter().all(|request| !request.input.tools.is_empty()),"no summary request was needed");
+    }
+
+    #[tokio::test]
+    async fn provider_textual_tool_spill_with_length_uses_size_recovery_without_executing_or_replaying_it() {
+        let mut oversized = text_step("<tool_call><function=read_file><parameter=path>PRIVATE_DISCARDED_ARGUMENTS");
+        *oversized.last_mut().unwrap()=Ok(ChatModelEvent::Completed { finish_reason:ChatFinishReason::MaxOutputTokens });
+        let model=Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![oversized,
+            control_step("small-native","read_file",json!({"path":"a"})),text_step("Read complete")]),requests:Default::default() });
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+        ).await.unwrap();
+        assert_eq!(result.tool_call_count,1,"text is never executed");
+        let requests=model.requests.lock().unwrap();
+        let repaired=serde_json::to_string(&requests[1].input).unwrap();
+        assert!(repaired.contains("oversized payload"));
+        assert!(!repaired.contains("Engine protocol observation"),"length is not a completed malformed-tool response");
+        assert!(!repaired.contains("PRIVATE_DISCARDED_ARGUMENTS"));
+        assert_eq!(requests[1].input.tool_choice,ChatToolChoice::Auto,"do not force the same oversized tool again");
+    }
+
+    #[tokio::test]
+    async fn a_small_scaffold_after_truncation_cannot_skip_the_task_completion_account() {
+        let mut oversized=text_step("<tool_call><function=write_file><parameter=content>discarded");
+        *oversized.last_mut().unwrap()=Ok(ChatModelEvent::Completed { finish_reason:ChatFinishReason::MaxOutputTokens });
+        let model=Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![oversized,
+            control_step("scaffold","write_file",json!({"path":"a","content":"initial structure"})),
+            text_step("Done"),text_step("Done")]),requests:Default::default() });
+        let plan=AgentToolPlan::new([tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false)]).unwrap();
+        let error=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0),
+        ).await.unwrap_err();
+        assert!(matches!(&error,AgentEngineError::TurnFailed(message) if message.contains("completion account")),"{error:?}");
+        assert!(model.requests.lock().unwrap()[1].input.tools.iter().any(|tool|tool.name=="report_completion"));
+    }
+
+    #[tokio::test]
+    async fn single_workspace_write_completes_without_an_unavailable_plan_tool() {
+        let call_id = ToolCallId::from("single-write");
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("single-write", "write_file", json!({
+                    "path":"a", "content":"<html><canvas></canvas></html>"
+                })),
+                text_step("Saved the file."),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(1),
+        });
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(
+                request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output_text, "Saved the file.");
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(*tools.order.lock().unwrap(), vec!["single-write"]);
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
+        assert!(requests.iter().all(|request| !request.input.tools.iter().any(|tool|
+            matches!(tool.name.as_str(), crate::planning::TOOL_NAME | crate::completion::TOOL_NAME))));
+    }
+
+    #[tokio::test]
+    async fn accepted_completion_stops_before_the_model_can_reopen_the_task() {
+        for invalid in [false, true] {
+            let mut steps = vec![
+                control_step("inspect-one", "read_file", json!({"path":"a"})),
+                control_step("inspect-two", "read_file", json!({"path":"b"})),
+            ];
+            let mut closing = completion_steps("inspect", &["inspect-two"], true);
+            steps.extend(closing.drain(..2));
+            let mut update = json!({
+                "explanation":"A repeated status update", "plan":[{"step":"requested operations","status":"completed"}]
+            });
+            if invalid {
+                update["plan"] = json!([
+                    {"step":"one","status":"in_progress"},
+                    {"step":"two","status":"in_progress"},
+                ]);
+            }
+            steps.push(control_step("repeated-plan", crate::planning::TOOL_NAME, update));
+            steps.push(text_step("done"));
+            let model = Arc::new(ObservingModel {
+                steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+            });
+            let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+            ).await.unwrap();
+            assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+            assert_eq!(result.model_steps, 4);
+            assert_eq!(result.output_text, "done");
+            assert_eq!(model.requests.lock().unwrap().len(), 4);
+            assert_eq!(model.steps.lock().unwrap().len(), 2);
+
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_steer_at_completion_fence_requires_a_new_account() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("read-a", "read_file", json!({"path":"a"})),
+                control_step("read-b", "read_file", json!({"path":"b"})),
+                control_step("old-account", "report_completion", json!({"summary":"Old delivery",
+                    "criteria":[{"disposition":"supported","evidence_paths":["b"],"rationale":"Read observed"}]})),
+                control_step("replan", "update_plan", json!({"plan":[{"step":"Include explanation","status":"completed"}]})),
+                control_step("new-account", "report_completion", json!({"summary":"New delivery with explanation",
+                    "criteria":[{"disposition":"unverified","rationale":"Explanation is not an external observation"}]})),
+                text_step("must never request this"),
+            ]), requests: Default::default(),
+        });
+        let port = Arc::new(TerminalFenceSteer { input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+            receipt_operation_id: "completion-steer".into(), message_id: "completion-steer-message".into(),
+            text: "also explain".into(), files: vec![], inject_skills: vec![], image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![],
+        })) });
+        let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0).with_input_port(port),
+        ).await.unwrap();
+        assert_eq!(result.model_steps, 5);
+        assert!(result.output_text.contains("New delivery with explanation"));
+        assert!(!result.output_text.contains("Old delivery"));
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+        assert!(model.requests.lock().unwrap()[3].input.messages.iter().any(|message|
+            message.role == ChatRole::User && message.content.iter().any(|part|
+                matches!(part, ChatContentPart::Text { text } if text == "also explain"))));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_completion_account_cannot_publish_success() {
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![
+            control_step("read-a", "read_file", json!({"path":"a"})),
+            control_step("read-b", "read_file", json!({"path":"b"})),
+            control_step("blocked", "report_completion", json!({"summary":"Cannot deliver",
+                "criteria":[{"disposition":"blocked","rationale":"Required dependency is unavailable"}]})),
+            text_step("must never publish success"),
+        ]), requests: Default::default() });
+        let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+        ).await;
+        assert!(result.is_err());
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn blocked_patch_report_stops_without_rereading_or_retrying_the_effect() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct FailedPatch(AtomicUsize);
+        #[async_trait]
+        impl AgentToolInvoker for FailedPatch {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                assert_eq!(invocation.binding.action_id.as_ref(), "workspace.files/patch", "no recovery read or other effect was authorized");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    "Partial publication: a changed, b failed; final file state is not verified", true))
+            }
+        }
+        let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![
+            control_step("patch-once", "apply_patch", json!({"files":[{"path":"a"},{"path":"b"}]})),
+            control_step("blocked", "report_completion", json!({
+                "summary":"Partial publication for a and b failed; stopped after the error as requested. Current files remain unverified.",
+                "observed_tool_error_count":1,
+                "criteria":[{"disposition":"blocked","rationale":"A patch failed and the user forbids further operations"}]
+            })),
+            text_step("must not request another model response"),
+            text_step("must not complete"),
+        ]),requests:Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("apply_patch", "workspace.files", "workspace.files/patch", AgentEffectClass::ManagedEffect, false),
+        ]).unwrap();
+        let mut input = request();
+        input.input.messages = vec![crate::context_lifecycle::text_message(ChatRole::User,
+            "Apply one patch; on error stop, do not reread or retry.".into())];
+        let sink = Arc::new(Sink::default());
+        let tools = Arc::new(FailedPatch::default());
+        let result = run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+            AgentTurnRequest::new(input,plan,principal(),0),AgentContextBudget::default(),CancellationToken::new()).await;
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::CompletionDelivered {text,..}
+            if text.contains("Partial publication"))), "blocked result must reach the user without another tool call");
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(),2);
+        assert_eq!(requests[1].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),
+            vec![crate::completion::TOOL_NAME]);
+        assert_eq!(requests[1].input.tool_choice,ChatToolChoice::Specific {
+            name:crate::completion::TOOL_NAME.into(),
+        });
+        assert!(requests[1].input.instructions.iter().any(|instruction|
+            instruction.contains("explicitly requires stopping after an error")
+                && instruction.contains("Affected patch targets: [\"a\",\"b\"]")
+                && instruction.contains("omit evidence_paths")
+                && instruction.contains("minimal shape")));
+        drop(requests);
+        assert_eq!(tools.0.load(Ordering::SeqCst),1);
+        assert!(!events.iter().any(|event| matches!(event,AgentEngineEvent::TurnCompleted {..})));
+        let recovery = events.iter().rev().find_map(|event| match event {
+            AgentEngineEvent::PatchRecoveryUpdated {state} => Some(state), _ => None,
+        }).unwrap();
+        assert_eq!(recovery.targets,["a","b"],"failure delivery must retain the pending recovery obligation");
+    }
+
+    #[tokio::test]
+    async fn restored_patch_obligation_can_end_with_a_blocked_control_batch() {
+        let mut controls = control_step("close-plan", "update_plan", json!({
+            "plan":[{"step":"Patch recovery","status":"blocked"}]
+        }));
+        controls.pop();
+        controls.extend(control_step("blocked", "report_completion", json!({"summary":"Recovery stopped",
+            "criteria":[{"disposition":"blocked","rationale":"No further operations are authorized"}]})));
+        let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![controls,
+            text_step("must not continue"),text_step("must not complete")]),requests:Default::default()});
+        let result = open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                targets:vec!["a".into()],..Default::default()
+            }),
+        ).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),1,"blocked control batch must terminate without a recovery read");
+        assert_eq!(model.steps.lock().unwrap().len(),2);
+    }
+
+    #[tokio::test]
+    async fn restored_unresolved_mutation_cannot_complete_from_a_fresh_read_alone() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("fresh-b","read_file",json!({"path":"b"})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Patch b","status":"completed"}]})),
+            control_step("report","report_completion",json!({"summary":"b was inspected","criteria":[{
+                "disposition":"supported","evidence_call_ids":["fresh-b"],"rationale":"fresh read"}]})),
+            text_step("The original patch is still incomplete."),text_step("must not continue"),
+        ]),requests:Default::default()});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                unresolved_targets:vec!["b".into()],unresolved_before_input:Some(1),..Default::default()
+            })).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_patch_final_answer_ends_failed_before_completion_review() {
+        #[derive(Default)]
+        struct FailedPatch(AtomicUsize);
+        #[async_trait]
+        impl AgentToolInvoker for FailedPatch {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                assert_eq!(invocation.binding.action_id.as_ref(),"workspace.files/patch");
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(AgentToolResult::text(invocation.call.call_id,"Partial publication: a changed, b failed",true))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let final_text = "The patch failed after a partial publication. Stopped as requested; no retry.";
+        let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("only-patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            text_step(final_text),text_step("must not restart the task to account for an already known failure"),
+        ]),requests:Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("apply_patch","workspace.files","workspace.files/patch",AgentEffectClass::ManagedEffect,false),
+        ]).unwrap();
+        let mut input=request();
+        input.input.messages=vec![crate::context_lifecycle::text_message(ChatRole::User,
+            "Apply one patch. Stop on error; do not retry or do more reads.".into())];
+        let tools=Arc::new(FailedPatch::default());
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+            AgentTurnRequest::new(input,plan,principal(),0),AgentContextBudget::default(),CancellationToken::new()).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),2,"known unresolved patch must fail without reopening model work");
+        assert_eq!(tools.0.load(Ordering::SeqCst),1);
+        let events=sink.0.lock().unwrap();
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionReview{..}|AgentEngineEvent::TurnCompleted{..})));
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::OutputTextDelta{text,..} if text==final_text)));
+        let recovery=events.iter().rev().find_map(|event|match event {
+            AgentEngineEvent::PatchRecoveryUpdated{state}=>Some(state),_=>None,
+        }).unwrap();
+        assert_eq!(recovery.targets,["a","b"]);
+    }
+
+    #[tokio::test]
+    async fn resolved_patch_final_answer_still_requires_a_valid_completion_account() {
+        let mut reads=control_step("fresh-a","read_file",json!({"path":"a"}));
+        reads.pop();
+        reads.extend(control_step("fresh-b","read_file",json!({"path":"b"})));
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            reads,text_step("Current files inspected"),
+            control_step("report","report_completion",json!({"summary":"Current files inspected",
+                "criteria":[{"disposition":"supported","evidence_call_ids":["fresh-a","fresh-b"],"rationale":"Fresh reads of both files"}]})),
+            text_step("must not ask for more work"),
+        ]),requests:Default::default()});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                targets:vec!["a".into(),"b".into()],..Default::default()
+            }),
+        ).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests.len(),3);
+        assert_eq!(requests[2].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            ["report_completion"], "the current review phase exposes only the valid terminal control");
+        assert!(requests[2].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::Text{text} if text.starts_with("Engine execution observations"))),
+            "resolved recovery still requires a supported completion account");
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+    }
+
+    struct PartialPatchOwner { patches:AtomicUsize,writes:AtomicUsize }
+
+    #[async_trait]
+    impl AgentToolInvoker for PartialPatchOwner {
+        async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+            if let Some(result)=instruction_result(&invocation) { return Ok(result); }
+            let path=invocation.call.arguments.0.get("path").and_then(serde_json::Value::as_str);
+            match invocation.binding.action_id.as_ref() {
+                "workspace.files/patch" => {
+                    self.patches.fetch_add(1,Ordering::SeqCst);
+                    Err(AgentEngineError::CapabilityKernel {code:"CAPABILITY_EXECUTION_FAILED".into(),message:json!({
+                        "kind":"workspace_patch_failed","version":1,"journal_settlement":"settled",
+                        "index_base":0,"observed_published_count":1,"confirmed_restored_count":0,
+                        "observation":{"failed_file":1,"published":[0],"restored":[],
+                            "restore_published_unconfirmed":[],"retained_created":[],"skipped_changed_or_unreadable":[0],
+                            "rollback_failed":[],"temporary_cleanup_unconfirmed":[]},"recovery":"re-read targets"
+                    }).to_string()})
+                }
+                "workspace.files/read" => {
+                    let path=path.unwrap();
+                    let content=if path=="a" {"after"} else {"before"};
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":path,"content":content,
+                        "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"total_bytes":content.len(),
+                        "offset":0,"next_offset":null,"eof":true,"workspace_path":{
+                            "root_sha256":"d".repeat(64),"path":path,"case_resolved":true}
+                    }).to_string(),false))
+                }
+                "workspace.files/write" => {
+                    self.writes.fetch_add(1,Ordering::SeqCst);
+                    let path=path.unwrap();
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":path,"written":true,
+                        "workspace_path":{"root_sha256":"d".repeat(64),"path":path,"case_resolved":true}
+                    }).to_string(),false))
+                }
+                other=>panic!("unexpected action {other}"),
+            }
+        }
+    }
+
+    fn two_file_reads(prefix:&str) -> Vec<Result<ChatModelEvent,ChatModelError>> {
+        let mut reads=control_step(&format!("{prefix}-a"),"read_file",json!({"path":"a"}));
+        reads.pop(); reads.extend(control_step(&format!("{prefix}-b"),"read_file",json!({"path":"b"}))); reads
+    }
+
+    fn patch_fulfillment_plan() -> AgentToolPlan {
+        AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("apply_patch","workspace.files","workspace.files/patch",AgentEffectClass::ManagedEffect,false),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+        ]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fresh_reads_cannot_turn_a_partial_patch_into_completed_work() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            two_file_reads("read"),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Patch both files","status":"completed"}]})),
+            control_step("report","report_completion",json!({"summary":"Only a changed; b remains before","criteria":[
+                {"disposition":"supported","evidence_call_ids":["read-a"],"rationale":"a is after"},
+                {"disposition":"supported","evidence_call_ids":["read-b"],"rationale":"b is still before"}],
+                "observed_tool_error_count":1})),
+            text_step("Partial result; the original two-file task is not complete."),
+            text_step("must not reopen"),
+        ]),requests:Default::default()});
+        let tools=Arc::new(PartialPatchOwner {patches:AtomicUsize::new(0),writes:AtomicUsize::new(0)});
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),patch_fulfillment_plan(),principal(),0)).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(tools.patches.load(Ordering::SeqCst),1);
+        assert_eq!(tools.writes.load(Ordering::SeqCst),0);
+        assert_eq!(model.requests.lock().unwrap().len(),5);
+        let requests=model.requests.lock().unwrap();
+        let rejected=&requests[4].input.messages;
+        assert!(rejected.iter().flat_map(|message|&message.content).any(|part|matches!(part,
+            ChatContentPart::ToolResult{call_id,is_error:true,output} if call_id.as_ref()=="report"
+                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text{text}
+                    if text.contains("original task cannot be completed"))))));
+    }
+
+    #[tokio::test]
+    async fn successful_exact_repair_allows_fresh_evidence_to_complete() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            two_file_reads("read"),
+            control_step("repair-plan","update_plan",json!({"plan":[{"step":"Repair b","status":"in_progress"}]})),
+            control_step("write-b","write_file",json!({"path":"b","content":"after"})),
+            two_file_reads("verify"),
+            control_step("done-plan","update_plan",json!({"plan":[{"step":"Repair b","status":"completed"}]})),
+            control_step("done","report_completion",json!({"summary":"Both targets repaired and reread after one tool error","criteria":[
+                {"disposition":"supported","evidence_call_ids":["verify-a","verify-b"],"rationale":"fresh current reads"}],
+                "observed_tool_error_count":1})),
+            text_step("must not continue"),
+        ]),requests:Default::default()});
+        let tools=Arc::new(PartialPatchOwner {patches:AtomicUsize::new(0),writes:AtomicUsize::new(0)});
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),patch_fulfillment_plan(),principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(tools.patches.load(Ordering::SeqCst),1);
+        assert_eq!(tools.writes.load(Ordering::SeqCst),1);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn unchanged_plan_success_is_not_counted_as_task_progress_forever() {
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+        ];
+        for index in 0..4 {
+            steps.push(control_step(&format!("noop-{index}"), crate::planning::TOOL_NAME, json!({
+                "explanation":"No change", "plan":[{"step":"requested operations","status":"in_progress"}]
+            })));
+        }
+        steps.push(text_step("must not be requested"));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let error = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+        ).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::TurnFailed(message) if message.contains("succeeded idempotently")));
+        assert_eq!(model.requests.lock().unwrap().len(), 7);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    struct RecoverableReadTool { writes: AtomicUsize }
+
+    #[async_trait]
+    impl AgentToolInvoker for RecoverableReadTool {
+        async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+            if invocation.call.call_id.as_ref() == "recoverable-read" {
+                return Ok(AgentToolResult::text(invocation.call.call_id, "The optional file was not found", true));
+            }
+            if invocation.binding.action_id.as_ref() == "workspace.files/write" {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_can_be_corrected_inside_the_existing_plan() {
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+            control_step("recoverable-read", "read_file", json!({"path":"a"})),
+            control_step("write", "write_file", json!({"path":"a", "content":"fixed"})),
+            control_step("verify", "read_file", json!({"path":"a"})),
+        ];
+        steps.extend(completion_steps_after_tool_errors("inspect", &["verify"], true, 1));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(result.model_steps, 8);
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_hold_the_whole_effect_batch_until_the_model_repairs_it() {
+        let batch = |first: &str, second: &str, second_path: serde_json::Value| vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: first.into(), name: "write_file".into(), provider_metadata: None,
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a","content":"fixed"})),
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: second.into(), name: "write_file".into(), provider_metadata: None,
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":second_path,"content":"fixed"})),
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+            batch("held-valid", "held-invalid", json!(42)),
+            batch("corrected-one", "corrected-two", json!("b")),
+            control_step("verify", "read_file", json!({"path":"a"})),
+        ];
+        steps.extend(completion_steps_after_tool_errors("inspect", &["verify"], true, 2));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 2, "the valid prefix of the rejected batch must not execute");
+        let requests = model.requests.lock().unwrap();
+        for id in ["held-valid", "held-invalid"] {
+            assert!(requests[4].input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolResult { call_id, is_error: true, .. } if call_id.as_ref() == id)));
+        }
+        assert_eq!(result.model_steps, 8, "argument repair must not require a spurious plan exchange");
+    }
+
+    #[tokio::test]
+    async fn repeated_invalid_completion_reports_stop_before_compaction() {
+        let quote = "inspect";
+        let reads = vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "read-1".into(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "read-2".into(), name: "search_files".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "query":"needle"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        let mut steps = vec![reads, plan_step("completed", quote)];
+        for index in 0..4 {
+            steps.push(control_step(&format!("bad-report-{index}"), crate::completion::TOOL_NAME,
+                json!({"summary":"The reads returned.", "criteria":[{"disposition":"supported"}]})));
+        }
+        steps.push(text_step("must not be requested"));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut input = request();
+        input.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let error = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                input, two_tool_plan(AgentEffectClass::ReadOnly, true), principal(), 0,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentEngineError::TurnFailed(message)
+            if message.starts_with("engine control made no progress; report_completion")));
+        assert_eq!(model.requests.lock().unwrap().len(), 6);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_does_not_repeat_a_completed_write_or_execute_the_abandoned_model_batch() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            checkpoints: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                let mut checkpoints = self.checkpoints.lock().unwrap();
+                checkpoints.push(state.clone());
+                let revision = checkpoints.len() as u64;
+                let digest = nomifun_agent_contracts::digest_payload(&state).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                Ok(Some(crate::AgentCheckpointReceipt { revision, through_seq: events.len() as u64, digest }))
+            }
+        }
+        struct CrashModel { calls: AtomicUsize, pending: Arc<Notify> }
+        #[async_trait]
+        impl AgentModelPort for CrashModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(Box::pin(stream::iter(control_step("completed-write", "write_file", json!({"path":"a","content":"preserve"})))));
+                }
+                let mut partial = control_step("abandoned-write", "write_file", json!({"path":"b","content":"NEVER_EXECUTE"}));
+                partial.pop();
+                partial.push(Ok(ChatModelEvent::OutputTextDelta { text: "ABANDONED_MODEL_OUTPUT".into() }));
+                let pending = self.pending.clone();
+                Ok(Box::pin(stream::iter(partial).chain(stream::once(async move {
+                    pending.notify_one(); std::future::pending::<Result<ChatModelEvent, ChatModelError>>().await
+                }))))
+            }
+        }
+        let pending = Arc::new(Notify::new());
+        let journal = Arc::new(Journal::default());
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let mut initial = request();
+        let original = initial.input.messages[0].clone();
+        initial.input.max_output_tokens = Some(100);
+        let request = AgentTurnRequest::new(initial, two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0);
+        let original_request = request.clone();
+        let task = tokio::spawn(run_turn(binding(), Arc::new(CrashModel { calls: AtomicUsize::new(0), pending: pending.clone() }),
+            tools.clone(), journal.clone(), request, AgentContextBudget::default(), CancellationToken::new()));
+        tokio::time::timeout(Duration::from_secs(2), pending.notified()).await.unwrap();
+        task.abort(); assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        let snapshot = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+        let snapshot: crate::AgentExecutionCheckpoint = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+        let recorded = journal.events.lock().unwrap().clone();
+        let through = recorded.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. })).unwrap() + 1;
+        let revision = match &recorded[through - 1] { AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } => *revision, _ => unreachable!() };
+        let recovery = crate::AgentTurnRecovery::new(snapshot, revision, 1, recorded[..through].to_vec(), recorded[through..].to_vec(), vec![]).unwrap();
+        let mut steps = vec![plan_step("in_progress", "inspect"), control_step("fresh-check", "read_file", json!({"path":"a"}))];
+        steps.extend(completion_steps("inspect", &["fresh-check"], true));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
+        let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(), original_request.with_recovery(recovery),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.model_steps, 6);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert!(model.requests.lock().unwrap()[0].input.messages.iter().any(|message| message == &original));
+        assert!(!serde_json::to_string(&model.requests.lock().unwrap()[0].input).unwrap().contains("ABANDONED_MODEL_OUTPUT"));
+        let mut history = Vec::new();
+        crate::replay_closed_turn(&mut history, original, &journal.events.lock().unwrap()).unwrap();
+        let history = serde_json::to_string(&history).unwrap();
+        assert!(!history.contains("ABANDONED_MODEL_OUTPUT") && !history.contains("NEVER_EXECUTE"));
+        assert!(history.contains("preserve"));
+    }
+
+    #[tokio::test]
+    async fn native_resume_preserves_report_only_phase_and_its_independent_correction_budget() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            checkpoints: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                state.validate()?;
+                let mut checkpoints = self.checkpoints.lock().unwrap();
+                let revision = checkpoints.len() as u64 + 1;
+                let digest = nomifun_agent_contracts::digest_payload(&state).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                checkpoints.push(state);
+                Ok(Some(crate::AgentCheckpointReceipt { revision, through_seq: events.len() as u64, digest }))
+            }
+        }
+        struct InterruptedModel {
+            steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
+            pending: Arc<Notify>,
+        }
+        #[async_trait]
+        impl AgentModelPort for InterruptedModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                let next = { let mut steps = self.steps.lock().unwrap(); if steps.is_empty() { None } else { Some(steps.remove(0)) } };
+                if let Some(events) = next { return Ok(Box::pin(stream::iter(events))); }
+                self.pending.notify_one();
+                std::future::pending().await
+            }
+        }
+        #[derive(Default)]
+        struct SshOwner(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for SshOwner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                let receipt = match invocation.call.call_id.as_ref() {
+                    "original-timeout" => json!({"status":"timed_out","stdout":"TIMEOUT_BEGIN","exit_code":124,"timed_out":true}),
+                    "original-followup" => json!({"status":"succeeded","stdout":"AFTER_TIMEOUT\nrika","exit_code":0,"timed_out":false}),
+                    other => panic!("resume must not reopen settled actions: {other}"),
+                };
+                Ok(AgentToolResult::text(invocation.call.call_id, receipt.to_string(), false))
+            }
+        }
+        for refused_before_restart in [0, 1, 3] {
+            let mut original = control_step("original-timeout", "ssh_exec", json!({"command":"timeout diagnostic"}));
+            original.pop(); original.extend(control_step("original-followup", "ssh_exec", json!({"command":"whoami"})));
+            let mut steps = vec![original, text_step("Original timeout exit 124 and follow-up exit 0 were observed in this turn.")];
+            for index in 0..refused_before_restart {
+                steps.push(control_step(&format!("refused-before-{index}"), "ssh_exec", json!({"command":"whoami"})));
+            }
+            let pending = Arc::new(Notify::new());
+            let journal = Arc::new(Journal::default());
+            let tools = Arc::new(SshOwner::default());
+            let plan = AgentToolPlan::new([
+                tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+                tool_binding("ssh_exec", "ssh", "ssh/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            ]).unwrap();
+            let original_request = AgentTurnRequest::new(request(), plan, principal(), 0).with_max_model_steps(512);
+            let running = tokio::spawn(run_turn(binding(), Arc::new(InterruptedModel { steps: std::sync::Mutex::new(steps), pending: pending.clone() }),
+                tools.clone(), journal.clone(), original_request.clone(), AgentContextBudget::default(), CancellationToken::new()));
+            tokio::time::timeout(Duration::from_secs(2), pending.notified()).await.unwrap();
+            running.abort(); assert!(running.await.unwrap_err().is_cancelled());
+            let checkpoint = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+            let checkpoint: crate::AgentExecutionCheckpoint = serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
+            assert_eq!(checkpoint.completion_review.phase, AgentExecutionPhase::CompletionReview);
+            assert_eq!(checkpoint.control_rejections.phase_corrections, refused_before_restart);
+            assert_eq!(checkpoint.work.failed_tools, 0);
+            let recorded = journal.events.lock().unwrap().clone();
+            let through = recorded.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. })).unwrap() + 1;
+            let revision = match &recorded[through - 1] { AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } => *revision, _ => unreachable!() };
+            let recovery = crate::AgentTurnRecovery::new(checkpoint, revision, 1, recorded[..through].to_vec(), recorded[through..].to_vec(), vec![]).unwrap();
+            let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+                control_step("fresh-id-after-restart", "ssh_exec", json!({"command":"whoami"})),
+                control_step("account-after-restart", "report_completion", json!({
+                    "summary":"Earlier original receipts recorded TIMEOUT_BEGIN, exit 124, timed_out=true and AFTER_TIMEOUT\\nrika, exit 0, timed_out=false; no command was repeated and no fresh state is claimed.",
+                    "observed_tool_error_count":0,"observed_command_failure_count":0,
+                    "criteria":[{"disposition":"unverified","rationale":"Recovery preserves earlier results but drops their current-state evidence eligibility."}]
+                })),
+            ]) });
+            let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(), original_request.with_recovery(recovery),
+                AgentContextBudget::default(), CancellationToken::new()).await;
+            assert_eq!(*tools.0.lock().unwrap(), ["original-timeout", "original-followup"]);
+            let requests = model.requests.lock().unwrap();
+            assert!(requests.iter().all(|request| request.input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>() == [crate::completion::TOOL_NAME]));
+            let resumed_context = serde_json::to_string(&requests[0].input).unwrap();
+            assert!(resumed_context.contains("TIMEOUT_BEGIN") && resumed_context.contains("AFTER_TIMEOUT"));
+            if refused_before_restart == 3 {
+                assert!(matches!(result, Err(AgentEngineError::TurnFailed(reason)) if reason.contains("report-only phase rejected four")));
+                assert_eq!(requests.len(), 1, "restart cannot renew the phase-correction budget toward the 512-step turn cap");
+            } else {
+                assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Completed { .. }));
+                assert_eq!(requests.len(), 2);
+            }
+            assert!(journal.events.lock().unwrap().iter().filter_map(|event| match event {
+                AgentEngineEvent::WorkStatus { status } => Some(status), _ => None,
+            }).all(|status| status.failed_tools == 0 && status.failed_commands == 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_segments_cross_model_windows_only_after_checkpoint_acknowledgement() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            states: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                state.validate()?;
+                let mut states = self.states.lock().unwrap();
+                let revision = states.len() as u64 + 1;
+                let digest = nomifun_agent_contracts::digest_payload(&serde_json::to_value(&state).unwrap()).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                states.push(state);
+                Ok(Some(crate::AgentCheckpointReceipt { revision, digest, through_seq: events.len() as u64 }))
+            }
+        }
+        let mut steps = vec![control_step("write-once", "write_file", json!({"path":"a","content":"preserve"})),
+            plan_step("in_progress", "inspect"), control_step("fresh-read", "read_file", json!({"path":"a"}))];
+        steps.extend(completion_steps_after_tool_errors("inspect", &["fresh-read"], true, 1));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let journal = Arc::new(Journal::default());
+        let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(),
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0)
+                .with_max_model_steps(2).with_execution_segments(crate::AgentSegmentPolicy { max_segments: 4, max_no_progress_segments: 2 }),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.model_steps, 5);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        let events = journal.events.lock().unwrap();
+        let renewals = events.iter().enumerate().filter_map(|(index, event)| match event {
+            AgentEngineEvent::ExecutionSegmentRenewed { segment, checkpoint_revision, model_steps, .. } => Some((index, *segment, *checkpoint_revision, *model_steps)), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(renewals.iter().map(|(_, segment, _, step)| (*segment, *step)).collect::<Vec<_>>(), vec![(2, 2), (3, 4)]);
+        for (index, _, revision, step) in renewals {
+            assert!(matches!(&events[index - 1], AgentEngineEvent::ExecutionCheckpointSaved { revision: saved, step: saved_step, .. } if *saved == revision && *saved_step == step));
+        }
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.iter().map(|request| request.causality.operation_id.as_ref()).collect::<std::collections::BTreeSet<_>>().len(), 5);
+        assert!(journal.states.lock().unwrap().iter().all(|state| state.accepted_input_count == 1));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_input_indices_keep_the_actual_steering_application_order() {
+        let mut request = request();
+        let mut retained = request.input.messages.clone();
+        let mut seen = BTreeSet::new();
+        let mut applied = Vec::new();
+        let steer = |id: &str, text: &str| crate::AgentSteeringInput {
+            receipt_operation_id: id.into(), message_id: format!("message-{id}"), text: text.into(),
+            files: vec![], inject_skills: vec![], image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![],
+        };
+        crate::steering::incorporate(vec![steer("z", "Run the check"), steer("a", "Do not run the check")],
+            &mut request, &mut retained, &mut seen, &mut applied).unwrap();
+        assert_eq!(applied, vec!["z", "a"]);
+        assert!(matches!(&retained[2].content[0], ChatContentPart::Text { text } if text == "Do not run the check"));
+        assert!(crate::steering::incorporate(vec![steer("z", "must not replace prior input")],
+            &mut request, &mut retained, &mut seen, &mut applied).is_err());
+        assert_eq!(applied, vec!["z", "a"]);
+        assert_eq!(retained.len(), 3);
+    }
+
+    #[test]
+    fn steering_skill_body_is_system_context_not_accepted_user_wording() {
+        let mut request = request();
+        let mut retained = request.input.messages.clone();
+        let mut seen = BTreeSet::new();
+        let mut applied = Vec::new();
+        let skill_body = "Verified selected Skill body: BOUNDED_SKILL_INSTRUCTION";
+        let input = crate::AgentSteeringInput {
+            receipt_operation_id: "skill-receipt".into(),
+            message_id: "skill-message".into(),
+            text: "Use the selected Skill for this task".into(),
+            files: vec![], inject_skills: vec!["selected-skill".into()],
+            image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![skill_body.into()],
+        };
+        let recorded = input.journal_record();
+        assert!(recorded.same_delivery(&input));
+        assert!(!serde_json::to_string(&recorded).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"));
+        crate::steering::incorporate(vec![input.clone()], &mut request, &mut retained,
+            &mut seen, &mut applied).unwrap();
+        assert_eq!(applied, ["skill-receipt"]);
+        assert_eq!(request.input.instructions.last().map(String::as_str), Some(skill_body));
+        assert!(!serde_json::to_string(&retained).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"),
+            "completion/source citations must see accepted steering text, not Skill instructions");
+        assert!(!serde_json::to_string(&request.input.messages).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"));
+        let instruction_count = request.input.instructions.len();
+        assert!(crate::steering::incorporate(vec![input], &mut request, &mut retained,
+            &mut seen, &mut applied).is_err());
+        assert_eq!(request.input.instructions.len(), instruction_count,
+            "repeated receipt must not append Skill instructions twice");
+        assert!(crate::steering::incorporate(vec![recorded], &mut request, &mut retained,
+            &mut seen, &mut applied).is_err(), "a journal-only ID cannot become live Skill context");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_captures_quiescent_progress_without_tool_bodies_or_reasoning() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, _: AgentEngineEvent) -> Result<(), AgentEngineError> { Ok(()) }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, checkpoint: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                self.0.lock().unwrap().push(checkpoint);
+                Ok(None)
+            }
+        }
+        let mut write = control_step("write", "write_file", json!({"path":"a","content":"PRIVATE_FILE_BODY"}));
+        write.insert(0, Ok(ChatModelEvent::ReasoningDelta { text: "PRIVATE_MODEL_THOUGHT".into() }));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![write, text_step("done")]), requests: Default::default() });
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model, Arc::new(EchoTool), sink.clone(),
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let checkpoints = sink.0.lock().unwrap();
+        assert_eq!(checkpoints.iter().map(|state| state.model_steps).collect::<Vec<_>>(), vec![0, 0, 1]);
+        let latest = checkpoints.last().unwrap();
+        assert_eq!(latest.tool_call_count, 1);
+        assert_eq!(latest.work.successful_workspace_mutations, 1);
+        let encoded = serde_json::to_string(&*checkpoints).unwrap();
+        assert!(!encoded.contains("PRIVATE_FILE_BODY"));
+        assert!(!encoded.contains("PRIVATE_MODEL_THOUGHT"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_and_cancellation_cannot_open_a_model_request() {
+        struct Sink { cancellation: CancellationToken, fail: bool }
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, _: AgentEngineEvent) -> Result<(), AgentEngineError> { Ok(()) }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, _: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                if self.fail { return Err(AgentEngineError::EventSink("checkpoint failed".into())); }
+                self.cancellation.cancel();
+                Ok(None)
+            }
+        }
+        for fail in [false, true] {
+            let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+            let cancellation = CancellationToken::new();
+            let result = run_turn(binding(), model.clone(), Arc::new(EchoTool),
+                Arc::new(Sink { cancellation: cancellation.clone(), fail }),
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+                AgentContextBudget::default(), cancellation).await;
+            if fail { assert!(matches!(result, Err(AgentEngineError::EventSink(_)))); }
+            else { assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Cancelled)); }
+            assert!(model.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pseudo_tool_output_is_corrected_without_executing_the_discarded_native_prefix() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let mut rejected = control_step("must-not-execute", "write_file", json!({"path":"a","content":"wrong"}));
+        rejected.pop();
+        rejected.push(Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>SECRET_REJECTED_BODY".into() }));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![rejected,
+                control_step("corrected", "write_file", json!({"path":"a","content":"right"})),
+                text_step("done")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let sink = Arc::new(Sink::default());
+        let request = AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0);
+        let requirement = request.model_request.input.messages[0].clone();
+        let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(), request,
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert_eq!(result.model_steps, 3);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(result.output_text, "done");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests[0].input.tool_choice, ChatToolChoice::Auto);
+        assert_eq!(requests[1].input.tool_choice, ChatToolChoice::Required);
+        assert_eq!(requests[2].input.tool_choice, ChatToolChoice::Auto);
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "write_file"));
+        drop(requests);
+        let events = sink.0.lock().unwrap().clone();
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ModelResponseRejected {
+            step: 1, discarded_tool_call_ids, continuation: true, tool_hint: None,
+        } if discarded_tool_call_ids == &[ToolCallId::from("must-not-execute")])));
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "must-not-execute")));
+        let mut replayed = Vec::new();
+        crate::replay_closed_turn(&mut replayed, requirement.clone(), &events).unwrap();
+        assert!(!serde_json::to_string(&replayed).unwrap().contains("SECRET_REJECTED_BODY"));
+        assert!(!replayed.iter().flat_map(|message| &message.content).any(|part| matches!(part,
+            ChatContentPart::ToolCall { call_id, .. } if call_id.as_ref() == "must-not-execute")));
+        let mut forged = events;
+        let at = forged.iter().position(|event| matches!(event, AgentEngineEvent::ModelResponseRejected { .. })).unwrap();
+        forged.insert(at, AgentEngineEvent::ToolStarted { step: 1, call_id: "must-not-execute".into(),
+            capability_id: "workspace.files".into(), action_id: "workspace.files/write".into() });
+        assert!(crate::replay_closed_turn(&mut Vec::new(), requirement, &forged).is_err(), "discard cannot conceal an admitted effect");
+    }
+
+    #[tokio::test]
+    async fn repeated_pseudo_tools_exhaust_correction_budget_without_invocation() {
+        let bad = || vec![Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>".into() })];
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![bad(), bad(), bad(), text_step("must not run")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message)) if message.contains("protocol-correction budget")));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_protocol_rejection_persistence_cannot_start_a_retry() {
+        struct FailedSink;
+        impl FailedSink { fn model() -> Arc<ObservingModel> { Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![Ok(ChatModelEvent::OutputTextDelta { text:"<tool_call><function=write_file>".into() })], text_step("must not run")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        }) } }
+        #[async_trait]
+        impl AgentEventSink for FailedSink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                if matches!(event, AgentEngineEvent::ModelResponseRejected { .. }) {
+                    return Err(AgentEngineError::EventSink("injected failure".into()));
+                }
+                Ok(())
+            }
+        }
+        let model = FailedSink::model();
+        let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), Arc::new(FailedSink),
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0), AgentContextBudget::default(), CancellationToken::new()).await;
+        assert!(matches!(result, Err(AgentEngineError::EventSink(_))));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_text_cannot_complete_a_turn_or_execute_a_tool() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta { text: "I will write the file. <tool_".into() }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "call>\n<function=write_file>\n<parameter=content>".into() }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "SHOULD_NEVER_REACH_THE_UI".into() }),
+                Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
+            ]]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(1),
+        });
+        let result = open_session(model, tools.clone()).run_turn(AgentTurnRequest::new(
+            request(), tool_plan(), principal(), 1,
+        ).with_max_model_steps(1)).await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message))
+            if message.contains("tool-call markup as text")));
+        assert!(tools.order.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_text_turn_completes_without_tools() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "hello".to_owned(),
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                }),
+            ]]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()),
+            delay: Duration::from_millis(1),
+        });
+        let session = open_session(model.clone(), tools.clone());
+
+        let result = session
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                tool_plan(),
+                principal(),
+                1,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output_text, "hello");
+        assert_eq!(result.model_steps, 1);
+        assert!(tools.order.lock().unwrap().is_empty(), "direct answers must not pre-read workspace instructions");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(requests[0].input.instructions.iter().any(|instruction|
+            instruction.contains("Do not emit chain-of-thought")
+                && instruction.contains("give brief public progress updates")
+                && instruction.contains("Use the provided function interface for tool actions")
+                && !instruction.contains("<tool_call>")
+                && instruction.contains("reserve the final response for the outcome")));
+        assert!(!requests[0].input.tools.iter().any(|tool| matches!(tool.name.as_str(),
+            crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::tool_archive::SEARCH)));
+        assert!(!requests[0].input.instructions.iter().any(|instruction|
+            instruction.contains("Current engine plan") || instruction.contains("Completion accounting")));
+        assert!(matches!(
+            result.terminal,
+            AgentTurnTerminal::Completed {
+                finish_reason: ChatFinishReason::Completed
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepted_steering_activates_the_long_horizon_ledger() {
+        let plan = control_step("plan-steered", crate::planning::TOOL_NAME, json!({
+            "explanation":"Account for both accepted inputs.",
+            "plan":[{"step":"response","status":"completed"}],
+            "requirements":[
+                {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+            ]
+        }));
+        let completion = control_step("completion-steered", crate::completion::TOOL_NAME, json!({
+            "summary":"Both accepted inputs were addressed without external effects.",
+            "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                "disposition":"unverified","evidence_call_ids":[],
+                "rationale":"No external observation was required."}]
+        }));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![plan, completion, text_step("steered")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(OneSteer {
+            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+                receipt_operation_id: "steer-receipt".into(),
+                message_id: "steer-message".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                AgentTurnRequest::new(
+                    request(),
+                    AgentToolPlan::default(),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[0]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[0]
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("Long-horizon execution policy")));
+    }
+
+    #[tokio::test]
+    async fn request_must_match_the_session_binding() {
+        let model = Arc::new(ScriptedModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "should not run".to_owned(),
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                }),
+            ]]),
+        });
+        let session = open_session(Arc::clone(&model) as Arc<dyn AgentModelPort>, Arc::new(EchoTool));
+        let mut mismatched_request = request();
+        mismatched_request.causality.agent_session_id = AgentSessionId::from("other-session");
+
+        let error = session
+            .run_turn(AgentTurnRequest::new(
+                mismatched_request,
+                AgentToolPlan::default(),
+                principal(),
+                1,
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AgentEngineError::TurnBindingMismatch {
+                field: "agent_session_id"
+            }
+        ));
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_tool_turn_returns_a_cancelled_terminal() {
+        let call_id = ToolCallId::from("call-cancel");
+        let model = Arc::new(ScriptedModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::ToolCallCompleted {
+                    call: ChatToolCall {
+                        call_id: call_id.clone(),
+                        name: "read_file".to_owned(),
+                        arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                            "path": "README.md"
+                        })),
+                        provider_metadata: None,
+                    },
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::ToolCalls,
+                }),
+            ]]),
+        });
+        let started = Arc::new(Notify::new());
+        let session = Arc::new(open_session(
+            model.clone(),
+            Arc::new(BlockingTool {
+                started: Arc::clone(&started),
+            }),
+        ));
+        let task_session = Arc::clone(&session);
+        let task = tokio::spawn(async move {
+            task_session
+                .run_turn(AgentTurnRequest::new(
+                    request(),
+                    tool_plan(),
+                    principal(),
+                    0,
+                ))
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+        assert!(model.steps.lock().unwrap().is_empty(), "must cancel the model's tool call, not an instruction read");
+        assert!(session.cancel().await);
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
+
+        assert!(matches!(result.terminal, AgentTurnTerminal::Cancelled));
+        assert_eq!(result.model_steps, 1);
+        assert!(!session.is_turn_active().await);
+        assert!(!session.cancel().await);
+    }
+
+    #[tokio::test]
+    async fn only_one_turn_is_admitted_at_a_time() {
+        let call_id = ToolCallId::from("call-active");
+        let model = Arc::new(ScriptedModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::ToolCallCompleted {
+                    call: ChatToolCall {
+                        call_id: call_id.clone(),
+                        name: "read_file".to_owned(),
+                        arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                            "path": "README.md"
+                        })),
+                        provider_metadata: None,
+                    },
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::ToolCalls,
+                }),
+            ]]),
+        });
+        let started = Arc::new(Notify::new());
+        let session = Arc::new(open_session(
+            model.clone(),
+            Arc::new(BlockingTool {
+                started: Arc::clone(&started),
+            }),
+        ));
+        let task_session = Arc::clone(&session);
+        let task = tokio::spawn(async move {
+            task_session
+                .run_turn(AgentTurnRequest::new(
+                    request(),
+                    tool_plan(),
+                    principal(),
+                    0,
+                ))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+        assert!(model.steps.lock().unwrap().is_empty(), "first turn must reach its model-proposed tool");
+
+        let second = session
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                tool_plan(),
+                principal(),
+                0,
+            ))
+            .await;
+        assert!(matches!(second, Err(AgentEngineError::TurnAlreadyRunning)));
+
+        assert!(session.cancel().await);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap().terminal,
+            AgentTurnTerminal::Cancelled
+        ));
+        assert!(!session.is_turn_active().await);
+    }
+
+    #[tokio::test]
+    async fn dispose_is_idempotent_and_rejects_new_turns() {
+        let model = Arc::new(ScriptedModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "should not run".to_owned(),
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                }),
+            ]]),
+        });
+        let session = open_session(
+            Arc::clone(&model) as Arc<dyn AgentModelPort>,
+            Arc::new(EchoTool),
+        );
+
+        session.dispose().await;
+        session.dispose().await;
+        assert!(session.is_disposed().await);
+        assert!(matches!(
+            session
+                .run_turn(AgentTurnRequest::new(
+                    request(),
+                    AgentToolPlan::default(),
+                    principal(),
+                    1,
+                ))
+                .await,
+            Err(AgentEngineError::SessionDisposed)
+        ));
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    include!("turn_voice_tests.rs");
+}

@@ -1,18 +1,19 @@
 //! HTTP integration tests for the built-in skills migration surface:
 //! `/api/skills/builtin-auto`, `/api/skills/builtin-skill`, `/api/skills`,
-//! and the symlink-contract `/api/skills/materialize-for-agent` (POST).
 //!
 //! Covers the spec's §9.2 scenarios end-to-end through
-//! `nomifun_app::create_router_with_states` against an in-memory DB.
+//! `nomifun_app::compatibility::create_router_with_states` against an in-memory DB.
 
 mod common;
 
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use nomifun_app::{ModuleStates, build_module_states, create_router_with_states};
+use nomifun_app::compatibility::{
+    ModuleStates, build_module_states, create_router_with_states,
+};
 use nomifun_db::init_database_memory;
-use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
+use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -50,14 +51,25 @@ async fn fixture_embedded() -> Fixture {
 
     // Materialize the embedded corpus onto the temp data dir so the
     // per-test router can read it just like production would.
-    nomifun_extension::materialize_if_needed(&data_dir, nomifun_extension::builtin_skills_corpus(), "test-fixture")
-        .await
-        .expect("failed to materialize embedded builtin skills for test fixture");
+    nomifun_skill_library::materialize_if_needed(
+        &data_dir,
+        nomifun_skill_library::builtin_skills_corpus(),
+        "test-fixture",
+    )
+    .await
+    .expect("failed to materialize embedded builtin skills for test fixture");
 
     let db = init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
-        .await
-        .unwrap();
+    let services = nomifun_app::compatibility::AppServices::from_config(
+        db,
+        &nomifun_app::AppConfig {
+            data_dir: data_dir.join("app-data"),
+            work_dir: data_dir.join("app-work"),
+            ..nomifun_app::AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let (mut states, _): (ModuleStates, _) = build_module_states(&services).await;
 
     // Replace the skill state with a deterministic one rooted at tmp.
@@ -69,14 +81,11 @@ async fn fixture_embedded() -> Fixture {
         cron_skills_dir: data_dir.join("cron").join("skills"),
         builtin_skills_dir: data_dir.join("builtin-skills"),
         builtin_rules_dir: data_dir.join("builtin-rules"),
-        preset_rules_dir: data_dir.join("preset-rules"),
-        preset_skills_dir: data_dir.join("preset-skills"),
     };
     let ext_paths_mgr = Arc::new(ExternalPathsManager::with_file(data_dir.join("paths.json")).await);
     states.skill = SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        preset_dispatcher: states.skill.preset_dispatcher.clone(),
         skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
             services.database.pool().clone(),
         )),
@@ -331,203 +340,3 @@ async fn list_skills_builtin_entries_include_display_i18n_metadata() {
         "builtin skills should expose display name metadata, even when it preserves the canonical name"
     );
 }
-
-// ===========================================================================
-// POST /api/skills/materialize-for-agent
-// ===========================================================================
-
-#[tokio::test]
-async fn materialize_for_agent_returns_source_path_for_auto_inject_skill() {
-    // Post-snapshot contract: `materialize-for-agent` resolves each
-    // requested name to its on-disk source directory without copying.
-    // The frontend symlinks `source_path` into the CLI's native skills
-    // dir. `cron` lives under `auto-inject/cron/` in the builtin tree.
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({
-                "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-                "skills": ["cron"],
-            }),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json: Value = body_json(resp).await;
-    let skills = json["data"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0]["name"], "cron");
-    let source_path = skills[0]["source_path"].as_str().unwrap();
-    let path = std::path::Path::new(source_path);
-    assert!(path.is_absolute(), "source_path must be absolute: {source_path}");
-    assert!(path.is_dir(), "source_path must exist: {source_path}");
-    assert!(
-        path.join("SKILL.md").exists(),
-        "source_path must contain SKILL.md at {source_path}",
-    );
-    // It must live under the builtin tree, not under a
-    // per-conversation copy dir.
-    assert!(
-        source_path.contains("builtin-skills"),
-        "expected auto-inject source under builtin-skills, got {source_path}",
-    );
-}
-
-#[tokio::test]
-async fn materialize_for_agent_returns_source_path_for_opt_in_skill() {
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({
-                "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-                "skills": ["planning-with-files"],
-            }),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json: Value = body_json(resp).await;
-    let skills = json["data"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0]["name"], "planning-with-files");
-    let source_path = skills[0]["source_path"].as_str().unwrap();
-    assert!(
-        std::path::Path::new(source_path).join("SKILL.md").exists(),
-        "planning-with-files source_path must exist: {source_path}",
-    );
-}
-
-#[tokio::test]
-async fn materialize_for_agent_silently_skips_unknown_skill() {
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({
-                "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-                "skills": ["this-does-not-exist"],
-            }),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json: Value = body_json(resp).await;
-    let skills = json["data"]["skills"].as_array().unwrap();
-    // Unknown skill is silently dropped.
-    assert!(skills.is_empty(), "unknown skills must be silently omitted");
-}
-
-#[tokio::test]
-async fn materialize_for_agent_does_not_touch_data_dir() {
-    // Symlink-contract guardrail: the backend no longer writes anywhere
-    // under {data_dir}/agent-skills/ or {data_dir}/conversations/ for
-    // materialize-for-agent — it only reads the source tree.
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({"conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901", "skills": ["cron"]}),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    assert!(!fx.data_dir.join("agent-skills").exists());
-    assert!(!fx.data_dir.join("conversations").join("0190f5fe-7c00-7a00-8abc-012345678901").exists());
-}
-
-#[tokio::test]
-async fn materialize_for_agent_returns_sorted_list() {
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({
-                "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-                "skills": ["planning-with-files", "cron"],
-            }),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json: Value = body_json(resp).await;
-    let skills = json["data"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 2);
-    assert_eq!(skills[0]["name"], "cron");
-    assert_eq!(skills[1]["name"], "planning-with-files");
-}
-
-#[tokio::test]
-async fn materialize_for_agent_rejects_empty_conversation_id() {
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({"conversation_id": "", "skills": []}),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn materialize_for_agent_rejects_traversal_in_conversation_id() {
-    let fx = fixture_embedded().await;
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/materialize-for-agent",
-            json!({"conversation_id": "../evil", "skills": []}),
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-// ===========================================================================
-// DELETE /api/skills/materialize-for-agent/:conversation_id removed — the
-// symlink contract has nothing to clean up on the backend side.
-// ===========================================================================

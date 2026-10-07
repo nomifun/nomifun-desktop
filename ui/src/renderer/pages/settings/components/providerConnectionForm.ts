@@ -12,7 +12,7 @@
  */
 
 /** Mirrors backend `validate_role` (`nomifun-system/src/provider_connection.rs`). */
-export const CONNECTION_ROLE_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+const CONNECTION_ROLE_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /** `default` is reserved: the providers row itself is the default connection. */
 export const isValidConnectionRole = (role: string): boolean =>

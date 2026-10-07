@@ -8,18 +8,25 @@
  * 会被改写成 `Left as LeftArrow as _Left as LeftArrow` 这类非法语法,
  * 模块在 dev/build 阶段 500,而 tsc 完全无法发现(源码本身合法)。
  * 命名空间导入(`import * as Icons`)同理禁止。
+ * 同一模块的具名导入必须合并，否则插件会重复声明 IconParkHOC。
  *
  * 扫描范围:ui/src 下全部 .ts/.tsx。
  * 用法 / Usage:
  *   bun scripts/check-icon-imports.mjs             # 校验,发现违规 exit 1
  *   bun scripts/check-icon-imports.mjs --self-test # 校验器自测
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCAN_DIR = join(ROOT, 'ui', 'src');
+const GENERATED_HOC = join(
+  SCAN_DIR,
+  'renderer',
+  'components',
+  'IconParkHOC.tsx',
+);
 
 // 具名导入块:import [type] { ... } from '@icon-park/react'(可跨行)
 const NAMED_IMPORT_RE = /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]@icon-park\/react['"]/g;
@@ -45,7 +52,16 @@ function lineOf(source, index) {
 /** 返回违规清单 [{line, snippet, kind}] */
 function scanSource(source) {
   const violations = [];
+  let namedImportCount = 0;
   for (const m of source.matchAll(NAMED_IMPORT_RE)) {
+    namedImportCount += 1;
+    if (namedImportCount > 1) {
+      violations.push({
+        line: lineOf(source, m.index),
+        snippet: m[0].replace(/\s+/g, ' ').slice(0, 120),
+        kind: 'duplicate-import',
+      });
+    }
     const braces = m[1];
     if (ALIAS_RE.test(braces)) {
       violations.push({
@@ -68,6 +84,7 @@ function scanSource(source) {
 function selfTest() {
   const cases = [
     { src: "import { Left } from '@icon-park/react';", bad: 0 },
+    { src: "import { Left } from '@icon-park/react';\nimport { Robot } from '@icon-park/react';", bad: 1 },
     { src: "import { DeleteFour, Info, Left, PreviewOpen } from '@icon-park/react';", bad: 0 },
     { src: "import { Left as LeftArrow } from '@icon-park/react';", bad: 1 },
     { src: "import {\n  Cycle,\n  Play as Run,\n} from '@icon-park/react';", bad: 1 },
@@ -96,6 +113,25 @@ if (process.argv.includes('--self-test')) {
   process.exit(0);
 }
 
+if (!existsSync(GENERATED_HOC)) {
+  console.error(
+    '❌ ui/vite.config.ts injects @renderer/components/IconParkHOC into every IconPark TSX module, but IconParkHOC.tsx is missing',
+  );
+  process.exit(1);
+}
+const generatedHocSource = readFileSync(GENERATED_HOC, 'utf8');
+for (const required of [
+  "from '@icon-park/react/es/runtime'",
+  'export default IconParkHOC',
+]) {
+  if (!generatedHocSource.includes(required)) {
+    console.error(
+      `❌ IconParkHOC.tsx no longer satisfies the Vite-generated import contract: missing ${required}`,
+    );
+    process.exit(1);
+  }
+}
+
 const problems = [];
 let scanned = 0;
 for (const file of walk(SCAN_DIR)) {
@@ -108,7 +144,7 @@ for (const file of walk(SCAN_DIR)) {
 }
 
 if (problems.length > 0) {
-  console.error('❌ @icon-park/react 导入违规(禁别名/禁命名空间导入,详见 scripts/check-icon-imports.mjs 头注):');
+  console.error('❌ @icon-park/react 导入违规(禁别名/禁命名空间/需合并导入,详见 scripts/check-icon-imports.mjs 头注):');
   for (const p of problems) {
     console.error(`  ${p.file}:${p.line} [${p.kind}] ${p.snippet}`);
   }

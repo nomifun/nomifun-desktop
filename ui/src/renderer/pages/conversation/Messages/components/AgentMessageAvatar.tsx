@@ -6,7 +6,7 @@
 
 import React from 'react';
 import useSWR from 'swr';
-import { usePresetInfo } from '@renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@renderer/hooks/agent/useAgentInfo';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import type { ConversationId } from '@/common/types/ids';
 
@@ -26,7 +26,7 @@ const AgentMessageAvatar: React.FC<Props> = ({ senderName, senderConversationId,
   const { data: conversation } = useSWR(senderConversationId ? ['agent-conversation', senderConversationId] : null, () =>
     getConversationOrNull(senderConversationId!)
   );
-  const { info: presetInfo } = usePresetInfo(conversation ?? undefined);
+  const { info: presetInfo } = useAgentInfo(conversation ?? undefined);
 
   if (presetInfo) {
     if (presetInfo.isEmoji) {

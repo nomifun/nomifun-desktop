@@ -4,12 +4,10 @@
  * people understand the skill or inspect its exact file without leaving Nomi.
  */
 import { ipcBridge } from '@/common';
-import type { PresetTag } from '@/common/types/agent/presetTypes';
 import MarkdownView from '@/renderer/components/Markdown';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
+import type { SkillInfo } from '@/common/types/skill';
 import { Button, Drawer, Spin } from '@arco-design/web-react';
-import { Code, FileText, FolderOpen, Lightning, Refresh, SettingOne } from '@icon-park/react';
+import { Code, FileText, FolderOpen, Lightning, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveSkillDisplay } from './skillDisplay';
@@ -18,11 +16,9 @@ import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
 type SkillDetailDrawerProps = {
   visible: boolean;
   skill: SkillInfo | null;
-  tagByKey: Map<string, PresetTag>;
   localeKey: string;
   isAutoInjected: boolean;
   onClose: () => void;
-  onEditTags: (skill: SkillInfo) => void;
 };
 
 type ViewMode = 'preview' | 'source';
@@ -30,14 +26,11 @@ type ViewMode = 'preview' | 'source';
 const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
   visible,
   skill,
-  tagByKey,
   localeKey,
   isAutoInjected,
   onClose,
-  onEditTags,
 }) => {
   const { t } = useTranslation();
-  const isMobile = useLayoutContext()?.isMobile ?? false;
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -76,56 +69,24 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
 
   const display = skill ? resolveSkillDisplay(skill, localeKey) : null;
   const previewContent = useMemo(() => stripSkillFrontmatter(content).trim(), [content]);
-  const resolveTags = (keys: string[] | undefined) =>
-    (keys ?? []).map((key) => tagByKey.get(key)).filter((tag): tag is PresetTag => Boolean(tag));
-  const audienceTags = resolveTags(skill?.audience_tags);
-  const scenarioTags = resolveTags(skill?.scenario_tags);
 
   const sourceLabel = isAutoInjected
     ? t('settings.skillsHub.sourceAuto', { defaultValue: 'Auto' })
     : skill?.source === 'custom'
       ? t('settings.skillsHub.custom', { defaultValue: 'Custom' })
-      : skill?.source === 'extension'
-        ? t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })
-        : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
+      : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
   const sourceBadgeClass = isAutoInjected
     ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
     : skill?.source === 'custom'
       ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgba(var(--orange-6),1)]'
-      : skill?.source === 'extension'
-        ? 'bg-fill-2 text-t-secondary'
-        : 'bg-primary-1 text-primary-6';
-
-  const renderTagGroup = (label: string, values: PresetTag[]) => (
-    <div className='flex min-w-0 items-start gap-8px'>
-      <span className='w-72px flex-shrink-0 pt-2px text-11px font-600 uppercase tracking-[0.08em] text-t-tertiary'>
-        {label}
-      </span>
-      <div className='flex min-w-0 flex-1 flex-wrap gap-4px'>
-        {values.length > 0 ? (
-          values.map((tag) => (
-            <span
-              key={tag.key}
-              className='inline-flex rounded-[12px] border border-solid border-[var(--color-border-2)] bg-fill-2 px-8px py-1px text-11px leading-16px text-t-secondary'
-            >
-              {tag.label_i18n?.[localeKey] || tag.label}
-            </span>
-          ))
-        ) : (
-          <span className='pt-1px text-12px text-t-tertiary'>
-            {t('settings.skillsHub.detailNoTags', { defaultValue: 'No tags' })}
-          </span>
-        )}
-      </div>
-    </div>
-  );
+      : 'bg-primary-1 text-primary-6';
 
   return (
     <Drawer
       visible={visible}
       onCancel={onClose}
       placement='right'
-      width={isMobile ? '100%' : 760}
+      width={760}
       zIndex={1250}
       autoFocus={false}
       getPopupContainer={() => document.body}
@@ -135,21 +96,10 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
       headerStyle={{ background: 'var(--color-bg-1)' }}
       bodyStyle={{ background: 'var(--color-bg-1)', padding: 0 }}
       footer={
-        <div className='flex w-full items-center justify-between gap-12px'>
+        <div className='flex w-full items-center justify-end'>
           <Button onClick={onClose} className='min-w-100px rounded-[100px] bg-fill-2'>
             {t('common.close', { defaultValue: 'Close' })}
           </Button>
-          {skill && (
-            <Button
-              type='primary'
-              icon={<SettingOne size={14} strokeWidth={3} />}
-              onClick={() => onEditTags(skill)}
-              className='rounded-[100px]'
-              data-testid='btn-detail-edit-tags'
-            >
-              {t('settings.skillsHub.editTags', { defaultValue: 'Edit Tags' })}
-            </Button>
-          )}
         </div>
       }
     >
@@ -181,8 +131,6 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
             </div>
 
             <div className='mt-12px flex flex-col gap-6px rounded-12px bg-fill-2 p-10px'>
-              {renderTagGroup(t('settings.presetTagAudience', { defaultValue: 'Audience' }), audienceTags)}
-              {renderTagGroup(t('settings.presetTagScenario', { defaultValue: 'Skill Scenario' }), scenarioTags)}
               <div className='flex min-w-0 items-start gap-8px'>
                 <span className='w-72px flex-shrink-0 pt-2px text-11px font-600 uppercase tracking-[0.08em] text-t-tertiary'>
                   {t('settings.skillsHub.detailLocation', { defaultValue: 'Location' })}
@@ -197,7 +145,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
             </div>
           </div>
 
-          <div className='flex min-h-0 flex-1 flex-col px-20px py-14px'>
+          <div className='flex min-h-0 flex-1 flex-col overflow-auto px-20px py-14px'>
             <div className='mb-10px flex flex-shrink-0 items-center justify-between gap-10px'>
               <div>
                 <div className='text-13px font-700 text-t-primary'>
@@ -234,7 +182,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
               </div>
             </div>
 
-            <div className='min-h-0 flex-1 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-14px'>
+            <div className='min-h-180px flex-1 shrink-0 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-14px'>
               {loading ? (
                 <div className='flex h-full min-h-180px items-center justify-center' data-testid='skill-detail-loading'>
                   <Spin size={24} />

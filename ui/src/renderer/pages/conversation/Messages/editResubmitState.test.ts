@@ -65,7 +65,7 @@ describe('edit/resubmit local suffix replacement', () => {
     ]);
   });
 
-  test('clears edit state and the old suffix only after backend acceptance', () => {
+  test('exits edit mode only after a new immutable Turn is accepted', () => {
     const editSubmitBranch = sendBoxSource.slice(
       sendBoxSource.indexOf('if (editingMsgId && onEditResubmit) {'),
       sendBoxSource.indexOf('// Cancel any pending warmup:')
@@ -86,14 +86,12 @@ describe('edit/resubmit local suffix replacement', () => {
       nomiSendBoxSource.indexOf('const handleEditResubmit = useCallback('),
       nomiSendBoxSource.indexOf('// Steering injects into the turn')
     );
-    const invoke = nomiHandler.indexOf('editResubmit.invoke({');
-    const removeOldSuffix = nomiHandler.indexOf(
-      'removeMessagesByLocalIds(oldSuffixLocalIds);'
-    );
+    const invoke = nomiHandler.indexOf('sendMessage.invoke({');
     const clearAttachments = nomiHandler.indexOf('clearFiles();', invoke);
 
     expect(invoke).toBeGreaterThan(-1);
-    expect(removeOldSuffix).toBeGreaterThan(invoke);
+    expect(nomiHandler.includes('removeMessagesByLocalIds')).toBe(false);
+    expect(nomiHandler.includes('editResubmit.invoke')).toBe(false);
     expect(clearAttachments).toBeGreaterThan(invoke);
   });
 });

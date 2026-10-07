@@ -1,0 +1,1243 @@
+//! Provider-neutral chat data shared by model consumers and implementations.
+//!
+//! This module owns wire values and their validation only. Route resolution,
+//! credential leases, transport, retries and execution stay with their hosts.
+//! The broker re-exports these exact types; it does not maintain a second schema.
+
+use std::collections::{BTreeMap, BTreeSet};
+pub use crate::chat_provider_reasoning::ChatProviderReasoning;
+
+use crate::{
+    AgentSessionId, ChatRouteIdentity, ConnectionConfigRef, DigestHex, EventId, ModelRouteId,
+    OperationId, ResolvedSnapshotRef, StrictJsonValue, VersionString,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const CHAT_MODEL_CONTRACT_VERSION: &str = "chat-model-v1";
+
+macro_rules! string_ref {
+    ($name:ident) => {
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+string_ref!(ProviderIdRef);
+string_ref!(ProviderCredentialRef);
+string_ref!(ProviderResponseId);
+string_ref!(ProviderRoundId);
+string_ref!(ToolCallId);
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatProtocol {
+    Anthropic,
+    OpenaiChat,
+    OpenaiResponses,
+    Gemini,
+    Bedrock,
+    Vertex,
+}
+
+impl ChatProtocol {
+    /// Messages wire semantics, not permission to reuse signed state across
+    /// providers. Opaque continuation is separately bound to an exact route.
+    pub const fn uses_anthropic_messages(self) -> bool {
+        matches!(self, Self::Anthropic | Self::Bedrock | Self::Vertex)
+    }
+
+    pub const ALL: [Self; 6] = [
+        Self::Anthropic,
+        Self::OpenaiChat,
+        Self::OpenaiResponses,
+        Self::Gemini,
+        Self::Bedrock,
+        Self::Vertex,
+    ];
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatModelFeature {
+    TextInput,
+    ImageInput,
+    AudioInput,
+    TextOutput,
+    AudioOutput,
+    ToolCalls,
+    Reasoning,
+    ReasoningSignature,
+    PromptCache,
+    StructuredOutput,
+    ProviderRoundState,
+    NativeResponsesItems,
+    WebSearch,
+    /// Whether this route can use the provider's incremental response mode.
+    /// Unlike semantic request features, a request does not require this:
+    /// routes with a negative observation fall back to one bounded JSON reply.
+    Streaming,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatTask {
+    AgentChat,
+}
+
+impl ChatTask {
+    pub const fn model_task(self) -> &'static str {
+        match self {
+            Self::AgentChat => crate::CHAT_MODEL_TASK_AGENT_CHAT,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCausality {
+    pub agent_session_id: AgentSessionId,
+    pub turn_operation_id: OperationId,
+    pub causation_event_id: EventId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub route_identity: ChatRouteIdentity,
+    pub operation_id: OperationId,
+}
+
+/// The request-facing route selection is the canonical immutable identity
+/// itself. There is intentionally no second selection struct with a partial
+/// `(route_id, route_revision)` view.
+pub type ChatRouteSelection = ChatRouteIdentity;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedChatRoute {
+    pub model_route_id: ModelRouteId,
+    pub model_route_revision: u64,
+    pub provider_id: ProviderIdRef,
+    pub model: String,
+    pub protocol: ChatProtocol,
+    pub connection_config_ref: ConnectionConfigRef,
+    pub config_revision_digest: DigestHex,
+    pub credential_ref: ProviderCredentialRef,
+    pub features: BTreeSet<ChatModelFeature>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub activation_features: BTreeSet<ChatModelFeature>,
+}
+
+impl ResolvedChatRoute {
+    pub fn validate(&self) -> Result<(), ChatContractError> {
+        validate_natural_key("model_route_id", self.model_route_id.as_ref())?;
+        validate_natural_key("provider_id", self.provider_id.as_ref())?;
+        validate_natural_key("model", &self.model)?;
+        validate_natural_key(
+            "connection_config_ref",
+            self.connection_config_ref.as_ref(),
+        )?;
+        validate_digest("config_revision_digest", &self.config_revision_digest)?;
+        validate_natural_key("credential_ref", self.credential_ref.as_ref())?;
+        if self.model_route_revision == 0 {
+            return Err(ChatContractError::ZeroRouteRevision);
+        }
+        if !self.features.contains(&ChatModelFeature::TextOutput) {
+            return Err(ChatContractError::RouteMissingTextOutput);
+        }
+        if !self.features.is_superset(&self.activation_features) {
+            return Err(ChatContractError::RouteActivationFeatureUnsupported);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedChatRouteSet {
+    pub primary: ResolvedChatRoute,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failovers: Vec<ResolvedChatRoute>,
+}
+
+impl ResolvedChatRouteSet {
+    pub fn validate_for(
+        &self,
+        selection: &ChatRouteSelection,
+    ) -> Result<(), ChatContractError> {
+        self.primary.validate()?;
+        if !self.primary.activation_features.is_empty() {
+            return Err(ChatContractError::PrimaryRouteConditional);
+        }
+        selection
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        if self.primary.model_route_id != selection.route_id {
+            return Err(ChatContractError::PrimaryRouteMismatch);
+        }
+        if self.primary.model_route_revision != selection.route_revision {
+            return Err(ChatContractError::PrimaryRouteRevisionMismatch);
+        }
+
+        let mut route_keys = BTreeSet::new();
+        for route in std::iter::once(&self.primary).chain(self.failovers.iter()) {
+            route.validate()?;
+            if !route_keys.insert((
+                route.model_route_id.as_ref().to_owned(),
+                route.model_route_revision,
+            )) {
+                return Err(ChatContractError::DuplicateRouteCandidate);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn candidates(&self) -> impl Iterator<Item = &ResolvedChatRoute> {
+        std::iter::once(&self.primary).chain(self.failovers.iter())
+    }
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatModality {
+    Text,
+    Image,
+    Audio,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatToolResultPart {
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        data_base64: String,
+    },
+    Audio {
+        media_type: String,
+        data_base64: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatContentPart {
+    /// Complete provider-typed block, retained only for exact-producing-route replay.
+    ProviderReasoning {
+        block: ChatProviderReasoning,
+    },
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        data_base64: String,
+    },
+    Audio {
+        media_type: String,
+        data_base64: String,
+    },
+    ToolCall {
+        call_id: ToolCallId,
+        name: String,
+        arguments: StrictJsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<StrictJsonValue>,
+    },
+    ToolResult {
+        call_id: ToolCallId,
+        output: Vec<ChatToolResultPart>,
+        is_error: bool,
+    },
+    Reasoning {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: Vec<ChatContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_round_id: Option<ProviderRoundId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: StrictJsonValue,
+    #[serde(default)]
+    pub deferred: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatToolChoice {
+    Auto,
+    None,
+    Required,
+    Specific { name: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl ReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummary {
+    None,
+    Auto,
+    Concise,
+    Detailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatReasoningRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    pub summary: ReasoningSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCachePolicy {
+    Disabled,
+    Automatic,
+    Ephemeral,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: StrictJsonValue,
+        strict: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatModelInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instructions: Vec<String>,
+    pub messages: Vec<ChatMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ChatToolDefinition>,
+    pub tool_choice: ChatToolChoice,
+    /// Delivery preference for protocols with a parallel-tool control. This
+    /// is not execution authority; callers must still validate every batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ChatReasoningRequest>,
+    pub prompt_cache: PromptCachePolicy,
+    pub response_format: ChatResponseFormat,
+    #[serde(default)]
+    pub requested_output_modalities: BTreeSet<ChatModality>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_round_parent: Option<ProviderRoundId>,
+    #[serde(default)]
+    pub preserve_native_responses_items: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl ChatModelInput {
+    pub fn required_features(&self) -> BTreeSet<ChatModelFeature> {
+        let mut required =
+            BTreeSet::from([ChatModelFeature::TextInput, ChatModelFeature::TextOutput]);
+
+        for message in &self.messages {
+            for part in &message.content {
+                match part {
+                    ChatContentPart::Image { .. } => {
+                        required.insert(ChatModelFeature::ImageInput);
+                    }
+                    ChatContentPart::Audio { .. } => {
+                        required.insert(ChatModelFeature::AudioInput);
+                    }
+                    ChatContentPart::ToolCall { .. } => {
+                        required.insert(ChatModelFeature::ToolCalls);
+                    }
+                    ChatContentPart::ToolResult { output, .. } => {
+                        required.insert(ChatModelFeature::ToolCalls);
+                        if output
+                            .iter()
+                            .any(|part| matches!(part, ChatToolResultPart::Image { .. }))
+                        {
+                            required.insert(ChatModelFeature::ImageInput);
+                        }
+                        if output
+                            .iter()
+                            .any(|part| matches!(part, ChatToolResultPart::Audio { .. }))
+                        {
+                            required.insert(ChatModelFeature::AudioInput);
+                        }
+                    }
+                    ChatContentPart::Reasoning { signature, .. } => {
+                        required.insert(ChatModelFeature::Reasoning);
+                        if signature.is_some() {
+                            required.insert(ChatModelFeature::ReasoningSignature);
+                        }
+                    }
+                    ChatContentPart::ProviderReasoning { .. } => {
+                        required.insert(ChatModelFeature::Reasoning);
+                        required.insert(ChatModelFeature::ReasoningSignature);
+                    }
+                    ChatContentPart::Text { .. } => {}
+                }
+            }
+        }
+
+        if !self.tools.is_empty() || !matches!(self.tool_choice, ChatToolChoice::None) {
+            required.insert(ChatModelFeature::ToolCalls);
+        }
+        if self.reasoning.as_ref().is_some_and(|reasoning| reasoning.effort != Some(ReasoningEffort::None)
+            || reasoning.summary != ReasoningSummary::None || reasoning.max_reasoning_tokens.is_some()) {
+            required.insert(ChatModelFeature::Reasoning);
+        }
+        if !matches!(self.prompt_cache, PromptCachePolicy::Disabled) {
+            required.insert(ChatModelFeature::PromptCache);
+        }
+        if !matches!(self.response_format, ChatResponseFormat::Text) {
+            required.insert(ChatModelFeature::StructuredOutput);
+        }
+        if self.provider_round_parent.is_some() {
+            required.insert(ChatModelFeature::ProviderRoundState);
+        }
+        if self.preserve_native_responses_items {
+            required.insert(ChatModelFeature::NativeResponsesItems);
+        }
+        if self
+            .requested_output_modalities
+            .contains(&ChatModality::Audio)
+        {
+            required.insert(ChatModelFeature::AudioOutput);
+        }
+        required
+    }
+
+    /// Resolve call names from canonical history for wire encoders. This is
+    /// data validation, not permission to invoke the named tools.
+    pub fn tool_call_names(
+        &self,
+    ) -> Result<BTreeMap<ToolCallId, String>, ChatContractError> {
+        let mut names = BTreeMap::new();
+        for message in &self.messages {
+            for part in &message.content {
+                let ChatContentPart::ToolCall {
+                    call_id, name, ..
+                } = part
+                else {
+                    continue;
+                };
+                if let Some(previous) = names.insert(call_id.clone(), name.clone())
+                    && previous != *name
+                {
+                    return Err(ChatContractError::ConflictingToolCallName);
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    pub fn validate(&self) -> Result<(), ChatContractError> {
+        if self.messages.is_empty() {
+            return Err(ChatContractError::EmptyMessages);
+        }
+        if self.max_output_tokens == Some(0) {
+            return Err(ChatContractError::ZeroOutputCeiling);
+        }
+        if self
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.max_reasoning_tokens)
+            == Some(0)
+        {
+            return Err(ChatContractError::ZeroReasoningCeiling);
+        }
+        if matches!(self.tool_choice, ChatToolChoice::None) && !self.tools.is_empty() {
+            return Err(ChatContractError::ToolChoiceNoneWithTools);
+        }
+        if !matches!(self.tool_choice, ChatToolChoice::None) && self.tools.is_empty() {
+            return Err(ChatContractError::ToolChoiceWithoutTools);
+        }
+
+        let mut tool_names = BTreeSet::new();
+        for tool in &self.tools {
+            validate_natural_key("tool name", &tool.name)?;
+            if !tool_names.insert(tool.name.as_str()) {
+                return Err(ChatContractError::DuplicateToolName);
+            }
+        }
+        if self
+            .metadata
+            .keys()
+            .any(|key| is_sensitive_structured_key(key))
+        {
+            return Err(ChatContractError::CredentialMaterialForbidden);
+        }
+        if let ChatToolChoice::Specific { name } = &self.tool_choice
+            && !tool_names.contains(name.as_str())
+        {
+            return Err(ChatContractError::UnknownSpecificTool);
+        }
+
+        for message in &self.messages {
+            if message.content.is_empty() {
+                return Err(ChatContractError::EmptyMessageContent);
+            }
+            let role_content_valid = match message.role {
+                ChatRole::System => message
+                    .content
+                    .iter()
+                    .all(|part| matches!(part, ChatContentPart::Text { .. })),
+                ChatRole::User => message.content.iter().all(|part| {
+                    matches!(
+                        part,
+                        ChatContentPart::Text { .. }
+                            | ChatContentPart::Image { .. }
+                            | ChatContentPart::Audio { .. }
+                    )
+                }),
+                ChatRole::Assistant => message
+                    .content
+                    .iter()
+                    .all(|part| !matches!(part, ChatContentPart::ToolResult { .. })),
+                ChatRole::Tool => message
+                    .content
+                    .iter()
+                    .all(|part| matches!(part, ChatContentPart::ToolResult { .. })),
+            };
+            if !role_content_valid {
+                return Err(ChatContractError::InvalidRoleContent);
+            }
+            for part in &message.content {
+                match part {
+                    ChatContentPart::ProviderReasoning { block } => {
+                        if message.role != ChatRole::Assistant || block.validate().is_err() {
+                            return Err(ChatContractError::InvalidProviderReasoning);
+                        }
+                    }
+                    ChatContentPart::Text { text } => {
+                        if text.is_empty() {
+                            return Err(ChatContractError::EmptyTextPart);
+                        }
+                    }
+                    ChatContentPart::Reasoning { text, signature, encrypted_content } => {
+                        if signature.as_ref().is_some_and(String::is_empty)
+                            || encrypted_content.as_ref().is_some_and(String::is_empty)
+                            || (text.is_empty() && encrypted_content.is_none())
+                        {
+                            return Err(ChatContractError::EmptyTextPart);
+                        }
+                    }
+                    ChatContentPart::Image {
+                        media_type,
+                        data_base64,
+                    }
+                    | ChatContentPart::Audio {
+                        media_type,
+                        data_base64,
+                    } => {
+                        validate_media(media_type, data_base64)?;
+                    }
+                    ChatContentPart::ToolCall {
+                        call_id,
+                        name,
+                        provider_metadata,
+                        ..
+                    } => {
+                        validate_natural_key("tool call id", call_id.as_ref())?;
+                        validate_natural_key("tool call name", name)?;
+                        if provider_metadata
+                            .as_ref()
+                            .is_some_and(strict_json_contains_sensitive_key)
+                        {
+                            return Err(ChatContractError::CredentialMaterialForbidden);
+                        }
+                    }
+                    ChatContentPart::ToolResult {
+                        call_id, output, ..
+                    } => {
+                        validate_natural_key("tool result call id", call_id.as_ref())?;
+                        if output.is_empty() {
+                            return Err(ChatContractError::EmptyToolResult);
+                        }
+                        for part in output {
+                            match part {
+                                ChatToolResultPart::Text { text } if text.is_empty() => {
+                                    return Err(ChatContractError::EmptyTextPart);
+                                }
+                                ChatToolResultPart::Image {
+                                    media_type,
+                                    data_base64,
+                                }
+                                | ChatToolResultPart::Audio {
+                                    media_type,
+                                    data_base64,
+                                } => validate_media(media_type, data_base64)?,
+                                ChatToolResultPart::Text { .. } => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let ChatResponseFormat::JsonSchema { name, .. } = &self.response_format {
+            validate_natural_key("response schema name", name)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatModelRequest {
+    pub contract_version: VersionString,
+    pub causality: ChatCausality,
+    pub route: ChatRouteSelection,
+    pub input: ChatModelInput,
+}
+
+impl ChatModelRequest {
+    pub fn validate(&self) -> Result<(), ChatContractError> {
+        if self.contract_version.as_ref() != CHAT_MODEL_CONTRACT_VERSION {
+            return Err(ChatContractError::UnsupportedContractVersion);
+        }
+        validate_natural_key(
+            "agent_session_id",
+            self.causality.agent_session_id.as_ref(),
+        )?;
+        validate_natural_key(
+            "turn_operation_id",
+            self.causality.turn_operation_id.as_ref(),
+        )?;
+        validate_natural_key(
+            "causation_event_id",
+            self.causality.causation_event_id.as_ref(),
+        )?;
+        validate_natural_key(
+            "resolved_snapshot_id",
+            self.causality.resolved_snapshot_ref.snapshot_id.as_ref(),
+        )?;
+        validate_digest(
+            "resolved_snapshot_digest",
+            &self.causality.resolved_snapshot_ref.snapshot_digest,
+        )?;
+        validate_natural_key("operation_id", self.causality.operation_id.as_ref())?;
+        self.route
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        self.causality
+            .route_identity
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        if self.causality.route_identity != self.route {
+            return Err(ChatContractError::RouteIdentityMismatch);
+        }
+        self.input.validate()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatToolCall {
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub arguments: StrictJsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<StrictJsonValue>,
+}
+
+impl ChatToolCall {
+    pub fn validate(&self) -> Result<(), ChatContractError> {
+        validate_natural_key("tool call id", self.call_id.as_ref())?;
+        validate_natural_key("tool call name", &self.name)?;
+        if self
+            .provider_metadata
+            .as_ref()
+            .is_some_and(strict_json_contains_sensitive_key)
+        {
+            return Err(ChatContractError::CredentialMaterialForbidden);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub audio_input_tokens: u64,
+    #[serde(default)]
+    pub audio_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_reported: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatFinishReason {
+    Completed,
+    ToolCalls,
+    MaxOutputTokens,
+    Refusal,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatModelEvent {
+    ResponseStarted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_response_id: Option<ProviderResponseId>,
+    },
+    OutputTextDelta {
+        text: String,
+    },
+    OutputAudioDelta {
+        media_type: String,
+        data_base64: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ReasoningSignature {
+        signature: String,
+    },
+    /// An atomic completed block, not a duplicate of ReasoningDelta. Opaque
+    /// continuation may exist without a user-visible summary. Consumers must
+    /// retain boundaries and must not merge it with adjacent signed blocks.
+    ReasoningBlock {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+    /// Atomic complete native block, not duplicated as ReasoningDelta. The
+    /// receiving engine must retain block order, even when no text is visible.
+    ProviderReasoningBlock {
+        block: ChatProviderReasoning,
+    },
+    ToolCallDelta {
+        call_id: ToolCallId,
+        name: String,
+        arguments_delta: String,
+    },
+    ToolCallCompleted {
+        call: ChatToolCall,
+    },
+    ProviderRoundId {
+        round_id: ProviderRoundId,
+    },
+    NativeResponsesItem {
+        item_type: String,
+        item: StrictJsonValue,
+    },
+    Usage {
+        usage: ChatUsage,
+    },
+    Completed {
+        finish_reason: ChatFinishReason,
+    },
+}
+
+impl ChatModelEvent {
+    pub fn is_semantic_output(&self) -> bool {
+        !matches!(self, Self::ResponseStarted { .. })
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRetryDirective {
+    Never,
+    RetrySameRoute,
+    Failover,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChatModelErrorCode {
+    CausalityRejected,
+    DuplicateOperation,
+    ShadowNotPrimary,
+    SessionTerminal,
+    RouteNotFound,
+    RouteRevisionMismatch,
+    AdapterUnavailable,
+    CredentialReferenceMissing,
+    CredentialTargetMismatch,
+    UnsupportedFeature,
+    InvalidRequest,
+    AuthenticationFailed,
+    RateLimited,
+    PromptTooLong,
+    ProviderUnavailable,
+    ProtocolViolation,
+    StreamInterrupted,
+    Cancelled,
+    Internal,
+}
+
+/// Presentation-only evidence. Retry and settlement remain governed by the
+/// existing broker code/directive, not by these diagnostic refinements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFailureReason {
+    AuthFailed, InvalidKey, ExpiredKey, BillingRequired, InsufficientQuota, InsufficientBalance, SpendLimitReached,
+    SubscriptionExpired, ModelNotInPlan, PermissionDenied, ModelPermissionDenied,
+    ModelNotFound, EndpointMissing, NonApiResponse, AuthSchemeMismatch, RateLimited,
+    DnsFailure, ConnectionFailed, TlsFailure, ProxyFailure, RequestTimeout,
+    UpstreamServerError, ProviderOverloaded, ProviderUnavailable, NetworkFailure, StreamInterrupted,
+    InvalidResponse, InvalidRequest, UnsupportedFeature, ContentPolicy, PromptTooLong,
+    ConfigurationError, InvalidEndpoint, CredentialsMissing, CredentialTargetMismatch,
+}
+
+impl ModelFailureReason {
+    /// Only exact machine identifiers from a verified error envelope are
+    /// accepted here. Diagnostic messages and nested tool content are excluded.
+    pub fn from_machine_code(code: &str) -> Option<Self> {
+        let code = code.strip_prefix("com.amazon.coral.service#")
+            .or_else(|| code.strip_prefix("com.amazonaws.bedrock#")).unwrap_or(code);
+        Some(match code {
+            "invalid_api_key" | "api_key_invalid" | "API_KEY_INVALID" | "UnrecognizedClientException"
+                | "InvalidClientTokenId" | "invalid_token" => Self::InvalidKey,
+            "api_key_expired" | "key_expired" | "API_KEY_EXPIRED" | "ExpiredTokenException"
+                | "ExpiredToken" | "expired_token" => Self::ExpiredKey,
+            "insufficient_quota" | "quota_exceeded" | "QUOTA_EXCEEDED" | "usage_not_included"
+                | "organization_usage_limit_exceeded" | "billing_hard_limit_reached" => Self::InsufficientQuota,
+            "insufficient_balance" | "credit_balance_exhausted" => Self::InsufficientBalance,
+            "organization_spend_limit_exceeded" | "project_spend_limit_exceeded" => Self::SpendLimitReached,
+            "billing_error" => Self::BillingRequired,
+            "subscription_expired" => Self::SubscriptionExpired,
+            "model_not_in_plan" => Self::ModelNotInPlan,
+            "model_access_denied" | "model_permission_denied" => Self::ModelPermissionDenied,
+            "permission_error" | "permission_denied" | "PERMISSION_DENIED" | "AccessDeniedException" | "accessDeniedException"
+                | "AccessDenied" => Self::PermissionDenied,
+            "model_not_found" => Self::ModelNotFound,
+            "endpoint_not_found" | "not_found_error" | "NOT_FOUND"
+                | "resourceNotFoundException" | "ResourceNotFoundException" => Self::EndpointMissing,
+            "authentication_error" | "authentication_failed" | "UNAUTHENTICATED" | "InvalidSignatureException" => Self::AuthFailed,
+            "unsupported_authentication_scheme" | "invalid_authentication_scheme"
+                | "ACCESS_TOKEN_TYPE_UNSUPPORTED" => Self::AuthSchemeMismatch,
+            "rate_limit_exceeded" | "rate_limit_error" | "rate_limited" | "RATE_LIMIT_EXCEEDED" | "slow_down"
+                | "throttlingException" | "ThrottlingException" | "TooManyRequestsException" => Self::RateLimited,
+            "overloaded_error" | "server_is_overloaded" => Self::ProviderOverloaded,
+            "server_error" | "internal_server_error" | "api_error"
+                | "serviceUnavailableException" | "ServiceUnavailableException"
+                | "internalServerException" | "InternalServerException"
+                | "service_unavailable_error" => Self::UpstreamServerError,
+            "invalid_request_error" | "invalid_argument" | "INVALID_ARGUMENT" | "invalid_prompt"
+                | "unsupported_value" | "invalid_value" | "ValidationException" => Self::InvalidRequest,
+            "content_policy_violation" | "cyber_policy" | "bio_policy" | "misalignment_policy_violation"
+                => Self::ContentPolicy,
+            "context_length_exceeded" | "prompt_too_long" => Self::PromptTooLong,
+            "modelTimeoutException" | "ModelTimeoutException" | "timeout_error" => Self::RequestTimeout,
+            _ => return None,
+        })
+    }
+
+    /// Call only for the native Gemini error object. One unambiguous, exactly
+    /// identified Google ErrorInfo may refine its generic HTTP-style status.
+    pub fn refine_google_error_info(
+        envelope: &serde_json::Map<String, serde_json::Value>,
+        generic: Self,
+    ) -> Option<Self> {
+        use serde_json::Value;
+        let status_reason = match (envelope.get("code").and_then(Value::as_u64),
+            envelope.get("status").and_then(Value::as_str)) {
+            (Some(400), Some("INVALID_ARGUMENT")) => Self::InvalidRequest,
+            (Some(401), Some("UNAUTHENTICATED")) => Self::AuthFailed,
+            (Some(403), Some("PERMISSION_DENIED")) => Self::PermissionDenied,
+            _ => return None,
+        };
+        if status_reason != generic { return None; }
+        let mut reason = None;
+        for detail in envelope.get("details")?.as_array()? {
+            let detail = detail.as_object()?;
+            if detail.get("@type").and_then(Value::as_str)
+                != Some("type.googleapis.com/google.rpc.ErrorInfo")
+                || !matches!(detail.get("domain").and_then(Value::as_str),
+                    Some("googleapis.com" | "generativelanguage.googleapis.com"))
+            { continue; }
+            if reason.is_some() { return None; }
+            let machine = detail.get("reason")?.as_str()?;
+            if !matches!(machine, "API_KEY_INVALID" | "API_KEY_EXPIRED" | "ACCESS_TOKEN_TYPE_UNSUPPORTED") { return None; }
+            reason = Self::from_machine_code(machine);
+        }
+        reason
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelFailureDiagnostic {
+    pub reason: ModelFailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_param: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Redacted locally authored OS/transport cause only, never provider prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_detail: Option<String>,
+}
+
+impl ModelFailureDiagnostic {
+    pub fn new(reason: ModelFailureReason) -> Self {
+        Self { reason, http_status: None, provider_code: None, provider_type: None, provider_param: None, provider_id: None, model_name: None, endpoint: None,
+            request_id: None, retry_after_ms: None, protocol: None, auth_scheme: None,
+            content_type: None, transport_detail: None }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatModelError {
+    pub code: ChatModelErrorCode,
+    pub message: String,
+    pub retry: ChatRetryDirective,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<ModelRouteId>,
+    pub semantic_output_committed: bool,
+    /// Conclusive provider evidence for host-managed capability downgrade.
+    /// This is never inferred from diagnostic prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_feature: Option<ChatModelFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ModelFailureDiagnostic>,
+}
+
+impl ChatModelError {
+    pub fn new(
+        code: ChatModelErrorCode,
+        message: impl Into<String>,
+        retry: ChatRetryDirective,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retry,
+            retry_after_ms: None,
+            provider_status: None,
+            route_id: None,
+            semantic_output_committed: false,
+            unsupported_feature: None,
+            diagnostic: None,
+        }
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(
+            ChatModelErrorCode::InvalidRequest,
+            message,
+            ChatRetryDirective::Never,
+        )
+    }
+
+    pub fn provider_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            ChatModelErrorCode::ProviderUnavailable,
+            message,
+            ChatRetryDirective::Failover,
+        )
+    }
+
+    pub fn stream_interrupted(message: impl Into<String>) -> Self {
+        Self::new(
+            ChatModelErrorCode::StreamInterrupted,
+            message,
+            ChatRetryDirective::RetrySameRoute,
+        )
+    }
+
+    pub fn protocol_violation(message: impl Into<String>) -> Self {
+        Self::new(
+            ChatModelErrorCode::ProtocolViolation,
+            message,
+            ChatRetryDirective::Never,
+        )
+    }
+
+    pub fn with_route(mut self, route_id: ModelRouteId) -> Self {
+        self.route_id = Some(route_id);
+        self
+    }
+
+    pub fn after_semantic_output(mut self) -> Self {
+        self.semantic_output_committed = true;
+        self.retry = ChatRetryDirective::Never;
+        self
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ChatContractError {
+    #[error("unsupported chat model contract version")]
+    UnsupportedContractVersion,
+    #[error("model route revision must be greater than zero")]
+    ZeroRouteRevision,
+    #[error("chat route identity is invalid: {0}")]
+    InvalidRouteIdentity(String),
+    #[error("causality and route selection identities differ")]
+    RouteIdentityMismatch,
+    #[error("chat request must contain at least one message")]
+    EmptyMessages,
+    #[error("chat message content must not be empty")]
+    EmptyMessageContent,
+    #[error("chat message content is not valid for its role")]
+    InvalidRoleContent,
+    #[error("credential material is forbidden in chat metadata")]
+    CredentialMaterialForbidden,
+    #[error("text content must not be empty")]
+    EmptyTextPart,
+    #[error("tool result content must not be empty")]
+    EmptyToolResult,
+    #[error("provider reasoning must be a bounded valid assistant block")]
+    InvalidProviderReasoning,
+    #[error("media type and base64 payload must both be non-empty")]
+    InvalidMedia,
+    #[error("output token ceiling must be greater than zero")]
+    ZeroOutputCeiling,
+    #[error("reasoning token ceiling must be greater than zero")]
+    ZeroReasoningCeiling,
+    #[error("tool_choice=none cannot accompany tool definitions")]
+    ToolChoiceNoneWithTools,
+    #[error("a non-none tool choice requires tool definitions")]
+    ToolChoiceWithoutTools,
+    #[error("tool names must be unique")]
+    DuplicateToolName,
+    #[error("one tool call id is associated with multiple function names")]
+    ConflictingToolCallName,
+    #[error("specific tool choice does not name a declared tool")]
+    UnknownSpecificTool,
+    #[error("{0} must be a non-empty trimmed natural key")]
+    InvalidNaturalKey(&'static str),
+    #[error("{0} must be a 64-character hexadecimal digest")]
+    InvalidDigest(&'static str),
+    #[error("primary resolved route does not match the requested route")]
+    PrimaryRouteMismatch,
+    #[error("primary resolved route revision does not match the request")]
+    PrimaryRouteRevisionMismatch,
+    #[error("resolved route candidates contain a duplicate id/revision")]
+    DuplicateRouteCandidate,
+    #[error("resolved route does not support text output")]
+    RouteMissingTextOutput,
+    #[error("primary resolved route cannot be conditional")]
+    PrimaryRouteConditional,
+    #[error("resolved route activation features are not supported by that route")]
+    RouteActivationFeatureUnsupported,
+}
+
+fn validate_natural_key(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ChatContractError> {
+    if value.is_empty() || value.trim() != value {
+        return Err(ChatContractError::InvalidNaturalKey(field));
+    }
+    Ok(())
+}
+
+fn validate_digest(field: &'static str, value: &DigestHex) -> Result<(), ChatContractError> {
+    if value.as_ref().len() == 64
+        && value
+            .as_ref()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        Ok(())
+    } else {
+        Err(ChatContractError::InvalidDigest(field))
+    }
+}
+
+fn strict_json_contains_sensitive_key(value: &StrictJsonValue) -> bool {
+    json_contains_sensitive_key(&value.0)
+}
+
+fn json_contains_sensitive_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            is_sensitive_structured_key(key) || json_contains_sensitive_key(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_contains_sensitive_key),
+        _ => false,
+    }
+}
+
+fn is_sensitive_structured_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "api_key"
+            | "apikey"
+            | "authorization"
+            | "access_token"
+            | "refresh_token"
+            | "client_secret"
+            | "private_key"
+            | "credential"
+            | "credential_material"
+            | "password"
+    )
+}
+
+fn validate_media(media_type: &str, data_base64: &str) -> Result<(), ChatContractError> {
+    if media_type.is_empty()
+        || media_type.trim() != media_type
+        || data_base64.is_empty()
+        || data_base64.trim() != data_base64
+    {
+        return Err(ChatContractError::InvalidMedia);
+    }
+    Ok(())
+}

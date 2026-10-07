@@ -25,7 +25,7 @@ use nomifun_api_types::{
     UndoKnowledgeEntryRelocationRequest, UpdateKnowledgeTagRequest,
 };
 use nomifun_common::{
-    AppError, CompanionId, ConversationId, KnowledgeBaseId, KnowledgeEntryId,
+    AppError, CompanionId, KnowledgeBaseId, KnowledgeEntryId,
     KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, ProviderWithModel,
     TerminalId, TimestampMs,
     UuidV7Error, generate_id, now_ms,
@@ -71,15 +71,26 @@ use crate::events::{
     KnowledgeEntryContentUpdatedEvent, KnowledgeEventEmitter, KnowledgeTreeChangedEvent,
 };
 use crate::mount::{self, MountSpec};
-use crate::source_url::{self, HttpFetcher, PageFetcher};
+use crate::source_url::{
+    self, BrowserRenderContentPort, BrowserRenderContentRequest, HttpFetcher, PageFetcher,
+    UnavailableBrowserRenderContentPort,
+};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
-/// Binding target kinds accepted by the API. `workpath` is the primary kind
-/// for conversation/terminal sessions since the session-list unification
-/// (its `target_id` is a normalized [`workpath_key`]); the remaining kinds use
-/// their registered canonical entity IDs.
-pub const BINDING_KINDS: &[&str] = &["workpath", "conversation", "terminal", "companion"];
+mod anchored_fs;
+pub(crate) mod background;
+mod bound;
+pub use bound::{
+    BoundKnowledgeBase, BoundKnowledgeDocument, BoundKnowledgeReadService,
+    BoundKnowledgeSearchHit,
+};
+
+/// Mutable binding target kinds accepted by the Knowledge domain. Canonical
+/// AgentSession conversations are intentionally absent: their selected bases
+/// live in the frozen Agent binding, not in this side table. The repository
+/// still understands historical conversation rows for migration and cleanup.
+pub const BINDING_KINDS: &[&str] = &["workpath", "terminal", "companion"];
 
 /// Accepted write-back dispositions ("回写意识"). `manual` (the default) writes
 /// back only what the user explicitly asked for and suppresses the turn-final
@@ -271,8 +282,8 @@ pub struct KbFileUpdateResult {
     pub entry_id: Option<KnowledgeEntryId>,
 }
 
-/// One consumer (binding) of a knowledge base — a workspace/conversation/etc.
-/// that has this base mounted. Includes disabled bindings (greyed in the UI).
+/// One product consumer of a knowledge base (AgentSession, workpath, terminal,
+/// or Companion profile). Includes disabled selections (greyed in the UI).
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerInfo {
     pub target_kind: String,
@@ -311,9 +322,8 @@ impl Default for KnowledgeBinding {
     }
 }
 
-/// Result of a mount sync for one target: what is mounted and whether the
-/// write-back contract applies. Consumed by the conversation service to
-/// inject prompt context.
+/// Result of a mutable workspace mount sync: what is mounted and whether the
+/// terminal/CLI write-back contract applies.
 #[derive(Debug, Clone, Default)]
 pub struct MountOutcome {
     pub mounts: Vec<KnowledgeMountInfo>,
@@ -462,10 +472,10 @@ pub struct WriteOutcome {
 }
 
 /// Inputs for the turn-final write-back trigger. Whether the trigger fires at
-/// all is decided by the caller from [`WritebackEagerness`] — a `manual` binding
-/// never reaches here, so no provider call is spent on it. Once here, eagerness
-/// only shapes candidate extraction and [`resolve_write_policy`] decides whether
-/// this surface may write.
+/// all is decided by the caller from [`WritebackEagerness`]: automatic mode
+/// evaluates each completed turn, while manual mode reaches this boundary only
+/// after explicit user save/record intent. Once here, eagerness shapes candidate
+/// extraction and [`resolve_write_policy`] decides whether this surface may write.
 #[derive(Debug, Clone)]
 pub struct TurnWritebackRequest {
     pub mounts: Vec<KnowledgeMountInfo>,
@@ -652,6 +662,14 @@ struct RetrievalDocument {
     content: Arc<str>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RetrievalLoadLimits {
+    max_entries: usize,
+    max_documents: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+}
+
 #[derive(Debug)]
 struct RetrievalCandidate {
     hit: KnowledgeSearchHit,
@@ -711,6 +729,7 @@ struct RelocateIdempotencyCache {
 
 pub struct KnowledgeService {
     repo: Arc<dyn IKnowledgeRepository>,
+    background_tasks: background::BackgroundTasks,
     /// Rebuildable stable-identity projection. It is deliberately late-wired
     /// so lightweight/path-only test repositories remain valid and the
     /// filesystem stays usable if projection persistence is degraded.
@@ -737,21 +756,14 @@ pub struct KnowledgeService {
     /// stack is built after this service); `None` ⇒ autogen endpoints fail
     /// with a clear 409 and best-effort call sites skip silently.
     completer: RwLock<Option<Arc<dyn KnowledgeCompleter>>>,
-    /// Page-fetching backend for URL knowledge sources. A trait object so a
-    /// rendering backend (`BrowserFetcher`, late-wired from `nomifun-ai-agent`)
-    /// can replace the default HTTP fetcher without the knowledge crate
-    /// depending on the browser engine (P3 anti-cycle decision ②).
+    /// Page-fetching backend for ordinary (non-rendered) URL knowledge
+    /// sources. Rendered entries use the separate canonical operation port
+    /// below and never select this backend.
     fetcher: Arc<dyn PageFetcher>,
-    /// **P3-K2: optional rendering page-fetcher** (the engine-backed
-    /// `BrowserFetcher`, late-wired from `nomifun-ai-agent` when the `browser-use`
-    /// feature is on). `None` ⇒ no browser backend available; every source uses
-    /// [`Self::fetcher`] (the HTTP default — current behaviour, zero regression).
-    /// K2 only *provides* this backend; **per-source backend selection (the
-    /// `rendered` flag → pick this vs. the HTTP fetcher) is K3's job** and lives at
-    /// the [`Self::prepare_snapshot_body`] dispatch site, which K2 leaves untouched.
-    /// Behind a `RwLock` so it can be late-wired on the shared `Arc<KnowledgeService>`
-    /// after construction (same discipline as [`Self::completer`]).
-    render_fetcher: RwLock<Option<Arc<dyn PageFetcher>>>,
+    /// Consumer-owned typed port for the Knowledge headless render service.
+    /// The default implementation fails
+    /// closed; it is never replaced by the ordinary HTTP fetcher.
+    browser_render_content_port: RwLock<Arc<dyn BrowserRenderContentPort>>,
     /// mtime-keyed content cache for `search_bases` (perf only; see
     /// [`SearchCacheInner`]). Cloned into the search `spawn_blocking` closure.
     search_cache: Arc<RwLock<SearchCacheInner>>,
@@ -766,8 +778,8 @@ pub struct KnowledgeService {
     /// Per-logical-target write-back lock. Direct mode holds it across
     /// read+merge+replace. Staged mode holds it across duplicate detection,
     /// collision-suffix allocation, and no-replace publication. The staged key
-    /// is rooted at the outer scope so an explicit tool write and a turn-final
-    /// write for `conversation[/turn]` cannot race each other.
+    /// is rooted at the outer caller scope so explicit and synthesized writes
+    /// cannot race each other.
     turn_writeback_locks: Arc<StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     /// Serializes publication with base deletion per canonical root group.
     /// Duplicate and ancestor/descendant roots are assigned the same lock.
@@ -883,6 +895,7 @@ impl KnowledgeService {
             .unwrap_or_else(|_| data_dir.to_path_buf());
         Self {
             repo,
+            background_tasks: background::BackgroundTasks::default(),
             entry_repository: RwLock::new(None),
             source_repository: RwLock::new(None),
             tree_operation_repository: RwLock::new(None),
@@ -892,7 +905,9 @@ impl KnowledgeService {
             emitter,
             completer: RwLock::new(None),
             fetcher: Arc::new(HttpFetcher::default()),
-            render_fetcher: RwLock::new(None),
+            browser_render_content_port: RwLock::new(Arc::new(
+                UnavailableBrowserRenderContentPort,
+            )),
             search_cache: Arc::new(RwLock::new(SearchCacheInner::default())),
             relocate_idempotency: Arc::new(StdMutex::new(
                 RelocateIdempotencyCache::default(),
@@ -1915,10 +1930,11 @@ impl KnowledgeService {
         session_workpath_key(path, &self.data_dir)
     }
 
-    /// Replace the URL fetcher. Accepts any [`PageFetcher`] (tests pass a
-    /// loopback-permitting [`HttpFetcher`]; the production rendering backend
-    /// late-wires its `BrowserFetcher`), wrapping it in the `Arc<dyn …>` the
-    /// service stores.
+    /// Replace the ordinary HTTP-side URL fetcher.
+    ///
+    /// This hook is intentionally unrelated to rendered sources. A
+    /// `rendered=true` entry can only use the canonical
+    /// [`BrowserRenderContentPort`].
     pub fn with_url_fetcher(mut self, fetcher: impl PageFetcher + 'static) -> Self {
         self.fetcher = Arc::new(fetcher);
         self
@@ -1930,40 +1946,27 @@ impl KnowledgeService {
         *self.completer.write().expect("knowledge completer lock poisoned") = Some(completer);
     }
 
-    /// **P3-K2: late-wire the rendering page-fetcher** (the engine-backed
-    /// `BrowserFetcher` from `nomifun-ai-agent`, wired by the app layer when the
-    /// `browser-use` feature is on). Interior-mutable so it can be set on the shared
-    /// `Arc<KnowledgeService>` after construction (the agent stack is built after
-    /// this service — same late-wire timing as [`Self::set_completer`]).
+    /// Late-wire the Knowledge headless rendering service.
     ///
-    /// This only *registers* the backend. It does **not** change which sources use
-    /// it: the default [`Self::fetcher`] (HTTP) stays the active path for every
-    /// source, so HTTP knowledge sources are unaffected (zero regression). Routing
-    /// a source to this backend (the `rendered` flag) is K3.
-    pub fn set_render_fetcher(&self, fetcher: Arc<dyn PageFetcher>) {
-        *self.render_fetcher.write().expect("knowledge render fetcher lock poisoned") = Some(fetcher);
+    /// The application composition supplies an adapter that performs
+    /// non-Agent operation admission and dispatches against one exact
+    /// resolved Provider. Knowledge never receives a Hub, lane, profile, or
+    /// concrete Browser implementation.
+    pub fn set_browser_render_content_port(
+        &self,
+        port: Arc<dyn BrowserRenderContentPort>,
+    ) {
+        *self
+            .browser_render_content_port
+            .write()
+            .expect("knowledge browser render-content port lock poisoned") = port;
     }
 
-    /// The wired rendering page-fetcher, if any (K3 reads this to route `rendered`
-    /// sources). `None` ⇒ no browser backend → fall back to the HTTP [`Self::fetcher`].
-    fn render_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
-        self.render_fetcher.read().ok().and_then(|guard| guard.clone())
-    }
-
-    /// **P3-K3 backend selection**: pick the page-fetcher for one source entry.
-    /// `rendered == true` AND a [`Self::render_fetcher`] is wired ⇒ the browser
-    /// backend (`BrowserFetcher`); every other case ⇒ the default HTTP
-    /// [`Self::fetcher`]. In particular `rendered == true` with **no** render
-    /// backend wired (`browser-use` feature off / not injected) gracefully
-    /// degrades to HTTP rather than failing — the flag is best-effort, never a
-    /// hard requirement. Returns an owned `Arc` clone so the caller can `.await`
-    /// across the fetch without holding the `RwLock`.
-    fn fetcher_for(&self, rendered: bool) -> Arc<dyn PageFetcher> {
-        if rendered && let Some(render) = self.render_fetcher() {
-            render
-        } else {
-            Arc::clone(&self.fetcher)
-        }
+    fn browser_render_content_port(&self) -> Arc<dyn BrowserRenderContentPort> {
+        self.browser_render_content_port
+            .read()
+            .expect("knowledge browser render-content port lock poisoned")
+            .clone()
     }
 
     fn completer(&self) -> Option<Arc<dyn KnowledgeCompleter>> {
@@ -2014,6 +2017,19 @@ impl KnowledgeService {
     pub async fn get_base_info(&self, id: &str) -> Result<KnowledgeBaseInfo, AppError> {
         let row = self.require_base(id).await?;
         self.row_to_info(row).await
+    }
+
+    /// Resolve only the stable registry identity needed by the Agent
+    /// Knowledge owner. Unlike [`Self::get_base_info`], this performs no tree
+    /// walk. The owner compares the result with its frozen Resource Binding
+    /// before any provider-backed read or persistent write, so changing a
+    /// registry row cannot retarget an already-running AgentSession.
+    pub(crate) async fn agent_resource_identity(
+        &self,
+        id: &KnowledgeBaseId,
+    ) -> Result<(String, PathBuf), AppError> {
+        let row = self.require_base(id.as_str()).await?;
+        Ok((row.name, PathBuf::from(row.root_path)))
     }
 
     /// Create a base. With `root_path = None` the directory is provisioned
@@ -2088,22 +2104,40 @@ impl KnowledgeService {
         root_path: Option<&str>,
         source: Option<KnowledgeSource>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
-        let (row, info, snapshot_source) = self
-            .register_base(name, description, root_path, source, None)
-            .await?;
-        if let Some(src) = snapshot_source {
-            // Same pattern as the import handler's spawned autogen
-            // (`routes.rs::import_base`): the task holds its own Arc so it
-            // outlives the request.
-            let service = Arc::clone(&self);
-            tokio::spawn(async move {
+        let name = name.to_owned();
+        let description = description.to_owned();
+        let root_path = root_path.map(str::to_owned);
+        let service = Arc::clone(&self);
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.background_tasks.spawn(async move {
+            let registration = async {
+                let _publication = background::publication_guard().await?;
+                service.register_base(&name, &description, root_path.as_deref(), source, None).await
+            }.await;
+            let (row, info, snapshot_source) = match registration {
+                Ok(registration) => registration,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            let _ = reply.send(Ok(info));
+            if let Some(src) = snapshot_source {
                 let kb_id = row.knowledge_base_id.clone();
                 if let Err(e) = service.fetch_source_and_autogen(row, src).await {
                     tracing::warn!(kb_id = %kb_id, error = %e, "background knowledge source fetch failed");
                 }
-            });
-        }
-        Ok(info)
+            }
+        })?;
+        response.await.map_err(|_| AppError::Internal("knowledge background registration task did not return its result".into()))?
+    }
+
+    /// Close source-job admission, fence publication, and join all retained
+    /// create/resume jobs before the application closes their database pool.
+    /// A deadline or cancelled caller leaves the same handles available for
+    /// retry; successful completion is never inferred from an abort or panic.
+    pub async fn quiesce_background_tasks(&self, timeout: Duration) -> Result<(), String> {
+        self.background_tasks.quiesce(timeout).await
     }
 
     /// Shared first phase of base creation: validate, provision/verify the
@@ -2302,6 +2336,23 @@ impl KnowledgeService {
     /// entries whose file disappeared between filesystem and database commit.
     /// Failures stay warn-only; the next boot or a manual refresh can retry.
     pub async fn resume_pending_source_fetches(self: Arc<Self>) {
+        let service = Arc::clone(&self);
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if let Err(error) = self.background_tasks.spawn(async move {
+            service.resume_pending_source_fetches_owned().await;
+            let _ = reply.send(());
+        }) {
+            tracing::warn!(%error, "knowledge boot-resume was not admitted");
+            return;
+        }
+        let _ = response.await;
+    }
+
+    async fn resume_pending_source_fetches_owned(&self) {
+        let publication = match background::publication_guard().await {
+            Ok(publication) => publication,
+            Err(_) => return,
+        };
         let rows = match self.repo.list_bases().await {
             Ok(rows) => rows,
             Err(e) => {
@@ -2311,6 +2362,9 @@ impl KnowledgeService {
         };
         let mut pending: Vec<(KnowledgeBaseRow, KnowledgeSource)> = Vec::new();
         for mut row in rows {
+            if background::ensure_open().is_err() {
+                return;
+            }
             let mut source = match source_from_extra(&row.extra) {
                 Ok(source) => source,
                 Err(error) => {
@@ -2420,6 +2474,7 @@ impl KnowledgeService {
                 pending.push((row, src));
             }
         }
+        drop(publication);
         if pending.is_empty() {
             return;
         }
@@ -2428,6 +2483,9 @@ impl KnowledgeService {
             "knowledge boot-resume: re-fetching interrupted snapshot sources"
         );
         for (row, src) in pending {
+            if background::ensure_open().is_err() {
+                return;
+            }
             let kb_id = row.knowledge_base_id.clone();
             if let Err(e) = self.fetch_source_and_autogen(row, src).await {
                 tracing::warn!(kb_id = %kb_id, error = %e, "knowledge boot-resume fetch failed");
@@ -2451,6 +2509,7 @@ impl KnowledgeService {
     ) -> Result<KnowledgeBaseInfo, AppError> {
         let (fetched, errors, persisted_stamp, fatal_error) =
             if self.source_repository().is_some() && self.entry_repository().is_some() {
+                let preparation = background::publication_guard().await?;
                 self.ensure_projection_reconciled(&row).await?;
                 self.recover_pending_source_publications(&row).await?;
                 let normalized = self
@@ -2461,9 +2520,11 @@ impl KnowledgeService {
                             "knowledge source normalization did not produce an aggregate".into(),
                         )
                     })?;
+                drop(preparation);
                 let (files, mut errors) = self
                     .prepare_managed_source_items(&normalized.items)
                     .await?;
+                let _publication = background::publication_guard().await?;
                 let publication = self
                     .publish_managed_source_items(&mut row, &normalized.source, files)
                     .await;
@@ -2481,6 +2542,7 @@ impl KnowledgeService {
             } else {
                 let (files, mut errors) =
                     self.prepare_source_snapshots(&mut src.entries).await;
+                let _publication = background::publication_guard().await?;
                 let publication = self
                     .publish_prepared_url_source(&mut row, &mut src, files, false)
                     .await;
@@ -2518,6 +2580,7 @@ impl KnowledgeService {
             }
         }
         // Re-read + re-emit so clients see final stats/description.
+        let _publication = background::publication_guard().await?;
         let row = self.require_base(&row.knowledge_base_id).await?;
         let mut info = self.row_to_info(row).await?;
         self.emitter.emit_base_updated(&info);
@@ -2589,7 +2652,10 @@ impl KnowledgeService {
         Ok(info)
     }
 
-    /// Delete a base registration and its logical binding references.
+    /// Delete a base registration and its legacy logical binding references.
+    /// The SQLite repository atomically refuses deletion while any live
+    /// canonical AgentSession still selects the base, including a disabled
+    /// selection retained for later re-enabling.
     ///
     /// `purge` additionally removes the files on disk, but only for managed
     /// bases whose path is strictly below `{data_dir}/knowledge/`. The database
@@ -5191,10 +5257,26 @@ impl KnowledgeService {
     pub async fn list_consumers(&self, id: &str) -> Result<Vec<ConsumerInfo>, AppError> {
         self.require_base(id).await?;
         let rows = self.repo.list_bindings_using_kb(id).await?;
-        Ok(rows
+        let mut consumers = rows
             .into_iter()
+            // Conversation rows belong to the retired side channel. Canonical
+            // AgentSession consumers are projected below from
+            // `agent_session_resources`; never show both authorities.
+            .filter(|row| row.target_kind != "conversation")
             .map(|r| ConsumerInfo { target_kind: r.target_kind.clone(), target_id: r.target_id(), enabled: r.enabled })
-            .collect())
+            .collect::<Vec<_>>();
+        consumers.extend(
+            self.repo
+                .list_agent_sessions_using_kb(id)
+                .await?
+                .into_iter()
+                .map(|(session_id, enabled)| ConsumerInfo {
+                    target_kind: "conversation".to_owned(),
+                    target_id: Some(session_id),
+                    enabled,
+                }),
+        );
+        Ok(consumers)
     }
 
     /// Resolve a model-supplied write target to a canonical document + op.
@@ -5920,6 +6002,7 @@ impl KnowledgeService {
         preserve_existing_description: bool,
         model_override: Option<(String, String)>,
     ) -> Result<AutogenOutcome, AppError> {
+        background::ensure_open()?;
         let completer = self.require_completer()?;
         let row = self.require_base(kb_id).await?;
         require_editable_knowledge_tree(&row)?;
@@ -5937,6 +6020,7 @@ impl KnowledgeService {
         let mut parsed = None;
         let mut last_err = String::new();
         for attempt in 0..2 {
+            background::ensure_open()?;
             let raw =
                 complete_overview(completer.as_ref(), &user, model_override.as_ref()).await?;
             match autogen::parse_overview_output(&raw) {
@@ -5955,6 +6039,8 @@ impl KnowledgeService {
                 "knowledge autogen output unparseable: {last_err}"
             )));
         };
+
+        let _publication = background::publication_guard().await?;
 
         let description = autogen::clamp_description(&output.description);
         let readme = output.readme_markdown.trim();
@@ -6983,6 +7069,7 @@ impl KnowledgeService {
         &self,
         items: &[KnowledgeSourceItemRow],
     ) -> Result<(Vec<PreparedManagedSourceFile>, Vec<String>), AppError> {
+        let preparation = background::publication_guard().await?;
         let repository = self.source_repository().ok_or_else(|| {
             AppError::Internal("knowledge source identity repository is unavailable".into())
         })?;
@@ -7003,6 +7090,8 @@ impl KnowledgeService {
             );
         }
 
+        drop(preparation);
+
         let fetches = attempted_items.into_iter().map(|item| {
             let completer = completer.clone();
             async move {
@@ -7020,6 +7109,7 @@ impl KnowledgeService {
             .buffer_unordered(SOURCE_FETCH_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
+        let _publication = background::publication_guard().await?;
         let mut prepared = Vec::new();
         let mut errors = Vec::new();
         for (item, result) in results {
@@ -7241,25 +7331,45 @@ impl KnowledgeService {
     /// Fetch one source URL and condense/truncate the body to snapshot size.
     /// Errors come back as the ready-to-aggregate `"{url}: {error}"` line.
     ///
-    /// **P3-K3 backend selection**: when `rendered` is set AND a rendering
-    /// backend is wired ([`Self::render_fetcher`], the engine-backed
-    /// `BrowserFetcher`), the URL is fetched through the real browser so JS-heavy
-    /// pages yield their post-render content. Otherwise — `rendered == false`, or
-    /// `rendered == true` but no browser backend is available (`browser-use`
-    /// feature off / not injected) — it gracefully falls back to the default HTTP
-    /// [`Self::fetcher`] (no error: a missing browser backend degrades to HTTP,
-    /// never blocks the snapshot). See [`Self::fetcher_for`].
+    /// `rendered == true` is a non-Agent Knowledge service operation and must go through the injected
+    /// typed port. If that port is unavailable, this entry fails closed; it
+    /// never falls back to the ordinary HTTP fetcher. Plain entries keep the
+    /// independent HTTP path.
     async fn prepare_snapshot_body(
         &self,
         url: &str,
         rendered: bool,
         completer: Option<&dyn KnowledgeCompleter>,
     ) -> Result<PreparedSnapshot, String> {
-        let fetcher = self.fetcher_for(rendered);
-        let page = fetcher.fetch_page(url).await.map_err(|e| {
-            tracing::warn!(url, rendered, error = %e, "knowledge source fetch failed");
-            format!("{url}: {e}")
-        })?;
+        background::ensure_open().map_err(|error| error.to_string())?;
+        let page = if rendered {
+            let port = self.browser_render_content_port();
+            let content = port
+                .render_content(BrowserRenderContentRequest::new(url))
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        url,
+                        error = %error,
+                        "Knowledge headless rendering failed for source"
+                    );
+                    format!("{url}: {error}")
+                })?;
+            source_url::rendered_content_to_page(content)
+        } else {
+            let fetcher = Arc::clone(&self.fetcher);
+            fetcher.fetch_page(url).await.map_err(|error| {
+                tracing::warn!(
+                    url,
+                    rendered,
+                    error = %error,
+                    "knowledge source fetch failed"
+                );
+                format!("{url}: {error}")
+            })?
+        };
+
+        background::ensure_open().map_err(|error| error.to_string())?;
 
         let final_url = normalize_source_url(&page.final_url).map_err(|error| {
             format!("{url}: fetcher returned an invalid final URL: {error}")
@@ -7849,6 +7959,7 @@ impl KnowledgeService {
                         continue;
                     }
                     Err(error) => {
+                        background::record_join_failure(&error);
                         let message = format!(
                             "web-capture path allocation task failed: {error}"
                         );
@@ -8298,8 +8409,7 @@ impl KnowledgeService {
 
     /// Remove a target's knowledge binding row entirely. For cleanup when the
     /// target itself goes away (e.g. a deleted companion → `("companion", companion_id)`);
-    /// mirrors the conversation-delete hook below. Deleting a missing row is
-    /// a no-op.
+    /// deleting a missing row is a no-op.
     pub async fn delete_binding(&self, kind: &str, target_id: &str) -> Result<(), AppError> {
         validate_kind(kind)?;
         let target_id = canonical_target_id(kind, target_id)?;
@@ -8317,17 +8427,6 @@ impl KnowledgeService {
             hook(kind, &target_id);
         }
         Ok(())
-    }
-
-    /// Resolve a session's workpath binding without mutating its workspace.
-    pub async fn prepare_mounts_for_session(
-        &self,
-        workpath: &str,
-        workspace: &Path,
-    ) -> Result<PreparedMountPlan, AppError> {
-        let key = workpath_key(workpath);
-        self.prepare_mounts_for_target(WORKPATH_BINDING_KIND, &key, workspace)
-            .await
     }
 
     /// Resolve one target's exact binding and runtime metadata without
@@ -8487,9 +8586,9 @@ impl KnowledgeService {
     /// Deleted/missing bases are skipped (no FK by design); a disabled or
     /// empty binding clears previously created mounts. Never fails the
     /// session start — errors degrade to an empty outcome with warnings.
-    /// Conversation/terminal mounts resolve exclusively through the canonical
-    /// workpath binding (`WORKPATH_BINDING_KIND` + `workpath_key`); v3 never
-    /// reads per-session binding rows as a fallback.
+    /// Terminal mounts resolve exclusively through the canonical workpath
+    /// binding (`WORKPATH_BINDING_KIND` + `workpath_key`). Canonical
+    /// AgentSessions never read this mutable binding table.
     pub async fn ensure_mounts_for_target(&self, kind: &str, target_id: &str, workspace: &Path) -> MountOutcome {
         // Safety guard: when the workspace is the backend data root (or one
         // of its ancestors), the mount sync / legacy cleanup would run their
@@ -8617,6 +8716,73 @@ impl KnowledgeService {
             writeback_eagerness: binding.writeback_eagerness,
             channel_write_enabled: binding.channel_write_enabled,
         }
+    }
+
+    /// Build bounded prompt/write-back metadata for an exact AgentSession
+    /// Knowledge selection without creating workspace symlinks or consulting
+    /// the legacy mutable binding table.
+    pub async fn mount_info_for_bases(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<Vec<KnowledgeMountInfo>, AppError> {
+        if kb_ids.len() > 32 {
+            return Err(AppError::BadRequest(
+                "an AgentSession may mount at most 32 Knowledge bases".to_owned(),
+            ));
+        }
+        let mut unique = HashSet::with_capacity(kb_ids.len());
+        let mut used_names = HashSet::new();
+        let mut metas = Vec::with_capacity(kb_ids.len());
+        for kb_id in kb_ids {
+            if !unique.insert(kb_id.clone()) {
+                return Err(AppError::BadRequest(format!(
+                    "duplicate knowledge base id in AgentSession: {kb_id}"
+                )));
+            }
+            let row = self.require_base(kb_id.as_str()).await?;
+            validate_knowledge_root_bounded(PathBuf::from(&row.root_path)).await?;
+            let link_name = unique_link_name(&row, &mut used_names);
+            metas.push((link_name, row));
+        }
+
+        let mut tocs = Vec::with_capacity(metas.len());
+        for (_, row) in &metas {
+            tocs.push(build_toc(Path::new(&row.root_path)).await);
+        }
+        crate::context::apply_toc_budgets(&mut tocs);
+
+        let mut mounts = Vec::with_capacity(metas.len());
+        for ((link_name, row), toc) in metas.into_iter().zip(tocs) {
+            let knowledge_base_id = KnowledgeBaseId::parse(row.knowledge_base_id.clone())
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                })?;
+            let live_sources = match source_from_extra(&row.extra).map_err(|error| {
+                knowledge_row_json_error(&row.knowledge_base_id, error)
+            })? {
+                Some(source) if source.mode == KnowledgeSourceMode::Live => source
+                    .entries
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.sync_status != KnowledgeSourceSyncStatus::Paused
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            mounts.push(KnowledgeMountInfo {
+                knowledge_base_id,
+                name: row.name,
+                description: row.description,
+                rel_path: format!("{KB_MOUNT_REL_DIR}/{link_name}"),
+                toc,
+                summary: read_base_summary(Path::new(&row.root_path)).await,
+                live_sources,
+            });
+        }
+        Ok(mounts)
     }
 
     // ── Internals ───────────────────────────────────────────────────
@@ -9079,15 +9245,32 @@ fn load_one_knowledge_root(
     root: PathBuf,
     cache: Arc<RwLock<SearchCacheInner>>,
 ) -> Vec<RetrievalDocument> {
-    if let Err(error) = validate_knowledge_root(&root) {
-        tracing::warn!(
-            knowledge_base_id = %kb_id,
-            root = %root.display(),
-            %error,
-            "skipping unavailable or unsafe knowledge search root"
-        );
-        return Vec::new();
+    match load_one_knowledge_root_checked(
+        kb_id.clone(),
+        kb_name,
+        root.clone(),
+        cache,
+    ) {
+        Ok(documents) => documents,
+        Err(error) => {
+            tracing::warn!(
+                knowledge_base_id = %kb_id,
+                root = %root.display(),
+                %error,
+                "skipping unavailable or unsafe knowledge search root"
+            );
+            Vec::new()
+        }
     }
+}
+
+fn load_one_knowledge_root_checked(
+    kb_id: KnowledgeBaseId,
+    kb_name: String,
+    root: PathBuf,
+    cache: Arc<RwLock<SearchCacheInner>>,
+) -> Result<Vec<RetrievalDocument>, AppError> {
+    validate_knowledge_root(&root)?;
     let mut documents = Vec::new();
     for entry in vault_walker(&root) {
         if !entry.file_type().is_file() {
@@ -9181,7 +9364,7 @@ fn load_one_knowledge_root(
             content,
         });
     }
-    documents
+    Ok(documents)
 }
 
 fn local_keyword_candidates(
@@ -9348,22 +9531,6 @@ fn relevance_score(score: f32) -> u32 {
         .round() as u32
 }
 
-/// Conversation-delete hook: drop the conversation's knowledge binding so
-/// rows don't accumulate as orphans. Failures are logged, never propagated
-/// (hook contract).
-#[async_trait::async_trait]
-impl nomifun_common::OnConversationDelete for KnowledgeService {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(e) = self
-            .repo
-            .delete_binding("conversation", conversation_id)
-            .await
-        {
-            tracing::warn!(conversation_id, error = %e, "failed to delete knowledge binding");
-        }
-    }
-}
-
 impl KnowledgeService {
 
     async fn row_to_info(&self, row: KnowledgeBaseRow) -> Result<KnowledgeBaseInfo, AppError> {
@@ -9444,7 +9611,6 @@ fn canonical_target_id(kind: &str, target_id: &str) -> Result<String, AppError> 
     };
     match kind {
         WORKPATH_BINDING_KIND => Ok(workpath_key(target_id)),
-        "conversation" => ConversationId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         "terminal" => TerminalId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         "companion" => CompanionId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         _ => Err(AppError::BadRequest(format!("unsupported binding kind: {kind}"))),
@@ -9629,14 +9795,12 @@ fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str 
 /// resolution happens per fetch, not here — live-mode URLs are stored
 /// without ever being fetched by us).
 ///
-/// **P3-K3**: the per-entry `rendered` flag is meaningful only for URL sources.
-/// It needs no dedicated check here because the `kind != "url"` guard below
-/// rejects every non-URL source outright (rendered or not), so a `rendered`
-/// entry can only ever reach storage on a `url` source. The flag must also be
-/// backed by a valid http(s) URL — already guaranteed by the per-entry URL
-/// validation in the loop. `rendered` is best-effort routing (browser backend
-/// when wired, HTTP otherwise), so an unsupported value can never make a config
-/// invalid; there is intentionally nothing to reject.
+/// The per-entry `rendered` flag is meaningful only for URL sources. It needs
+/// no dedicated syntactic check here because the `kind != "url"` guard below
+/// rejects every non-URL source outright (rendered or not), and the per-entry
+/// URL validation guarantees an http(s) URL. At fetch time, `rendered=true`
+/// requires the Knowledge headless rendering port; a missing port is a
+/// visible fail-closed fetch error, never an HTTP fallback.
 fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
     if source.kind != "url" {
         return Err(AppError::BadRequest(format!(
@@ -10314,7 +10478,7 @@ async fn write_text_atomic_if_unchanged(
         )));
     }
 
-    let current = match tokio::time::timeout(
+    let current = match background::local_io_timeout(
         KNOWLEDGE_FILE_IO_TIMEOUT,
         tokio::fs::read(path),
     )
@@ -10456,6 +10620,7 @@ async fn preserve_replaced_file_metadata(
     })
     .await
     .map_err(|error| {
+        background::record_join_failure(&error);
         std::io::Error::other(format!("metadata preservation task failed: {error}"))
     })?
 }
@@ -11625,9 +11790,13 @@ async fn bounded_root_blocking<T: Send + 'static>(
         let _root_guard = root_guard;
         f()
     });
-    match tokio::time::timeout(remaining, handle).await {
+    match background::local_io_timeout(remaining, handle).await {
         Ok(Ok(value)) => value,
-        Ok(Err(_)) | Err(_) => on_timeout,
+        Ok(Err(error)) => {
+            background::record_join_failure(&error);
+            on_timeout
+        }
+        Err(_) => on_timeout,
     }
 }
 
@@ -11990,7 +12159,7 @@ async fn resolve_portable_md_path(
 ) -> Result<PortablePathResolution, AppError> {
     let display_path = rel_path.clone();
     let timeout_display_path = display_path.clone();
-    tokio::time::timeout(KNOWLEDGE_PATH_INSPECTION_TIMEOUT, async move {
+    background::local_io_timeout(KNOWLEDGE_PATH_INSPECTION_TIMEOUT, async move {
         let components = rel_path.split('/').collect::<Vec<_>>();
         let mut directory = root;
         let mut actual_components = Vec::with_capacity(components.len());
@@ -12709,35 +12878,45 @@ fn filesystem_entry_identity(_path: &Path, metadata: &std::fs::Metadata) -> Opti
 
 #[cfg(windows)]
 fn filesystem_entry_identity(path: &Path, _metadata: &std::fs::Metadata) -> Option<String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, OPEN_EXISTING,
     };
 
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        // Directories need FILE_FLAG_BACKUP_SEMANTICS. Opening the reparse
-        // point itself keeps this helper aligned with the caller's
-        // symlink/reparse safety check instead of following a late swap.
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .ok()?;
-    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    let ok = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr())
+    let path = windows_api_path(path);
+    // SAFETY: path is NUL-terminated; the checked handle is closed exactly once.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
     };
-    if ok == 0 {
+    if handle == INVALID_HANDLE_VALUE {
         return None;
     }
-    let info = unsafe { info.assume_init() };
-    let file_index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the output points to the exact Win32 structure for a live handle.
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &mut information) != 0 };
+    // SAFETY: handle was returned by CreateFileW above.
+    unsafe {
+        CloseHandle(handle);
+    }
+    if !succeeded {
+        return None;
+    }
+    let file_index = (u64::from(information.nFileIndexHigh) << 32)
+        | u64::from(information.nFileIndexLow);
     Some(format!(
         "windows:{}:{}",
-        info.dwVolumeSerialNumber, file_index
+        information.dwVolumeSerialNumber, file_index
     ))
 }
 
@@ -14262,9 +14441,9 @@ mod tests {
     }
 
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-    const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
-    const TEST_CONVERSATION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
-    const TEST_CONVERSATION_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000019";
+    const TEST_SESSION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
+    const TEST_SESSION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
+    const TEST_SESSION_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000019";
     const TEST_TERMINAL_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000022";
     const TEST_TERMINAL_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000029";
     const TEST_PROVIDER_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000032";
@@ -14447,38 +14626,46 @@ mod tests {
     }
 
     #[test]
-    fn canonical_entity_target_id_accepts_bare_uuidv7_and_rejects_legacy_prefix() {
+    fn mutable_binding_target_ids_are_canonical_and_conversation_is_retired() {
         assert_eq!(
-            canonical_target_id("conversation", TEST_CONVERSATION_ID).unwrap(),
-            TEST_CONVERSATION_ID
+            canonical_target_id("terminal", TEST_SESSION_ID).unwrap(),
+            TEST_SESSION_ID
         );
 
-        let legacy = format!("conv_{TEST_CONVERSATION_ID}");
-        let error = canonical_target_id("conversation", &legacy).unwrap_err();
+        let legacy = format!("terminal_{TEST_SESSION_ID}");
+        let error = canonical_target_id("terminal", &legacy).unwrap_err();
         assert!(
-            matches!(error, AppError::BadRequest(ref message) if message.contains("invalid conversation target id")),
+            matches!(error, AppError::BadRequest(ref message) if message.contains("invalid terminal target id")),
+            "{error}"
+        );
+        let error = validate_kind("conversation").unwrap_err();
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("unsupported binding kind: conversation")),
             "{error}"
         );
     }
 
-    /// **P3-K2 seam**: the render fetcher is an OPTIONAL, late-wired backend. By
-    /// default it is absent (every source uses the HTTP `fetcher` — zero
-    /// regression); the app layer registers a `BrowserFetcher` via
-    /// [`KnowledgeService::set_render_fetcher`] when `browser-use` is on. K3 reads
-    /// it to route `rendered` sources; K2 only proves the seam wires.
+    /// The rendered path is a late-wired, consumer-owned typed port. Until the
+    /// composition root supplies a canonical operation adapter, its default is
+    /// an explicit unavailable result rather than an HTTP fallback.
     #[tokio::test]
-    async fn render_fetcher_seam_is_optional_and_late_wired() {
-        use crate::source_url::FetchedPage;
+    async fn browser_render_content_port_is_typed_and_late_wired() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentRequest,
+        };
 
-        struct CannedRenderFetcher;
+        struct CannedRenderContentPort;
         #[async_trait::async_trait]
-        impl PageFetcher for CannedRenderFetcher {
-            async fn fetch_page(&self, _raw_url: &str) -> Result<FetchedPage, AppError> {
-                Ok(FetchedPage {
-                    final_url: "https://spa.example.com/app".into(),
-                    title: Some("Rendered".into()),
-                    markdown: "# Rendered\n\nonly a browser sees this".into(),
-                    truncated: false,
+        impl BrowserRenderContentPort for CannedRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><title>Rendered</title><body>canonical port</body></html>"
+                        .into(),
+                    html_truncated: false,
                 })
             }
         }
@@ -14492,52 +14679,65 @@ mod tests {
             KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
         ));
 
-        // Default: no render backend → HTTP fetcher is the only path (zero regression).
-        assert!(service.render_fetcher().is_none(), "render fetcher must default to None");
+        let unavailable = service
+            .browser_render_content_port()
+            .render_content(BrowserRenderContentRequest::new(
+                "https://spa.example.com/app",
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&unavailable, AppError::Conflict(message) if message.contains("headless rendering")),
+            "{unavailable}"
+        );
 
-        // Late-wire on the shared Arc (interior mutability, like set_completer).
-        service.set_render_fetcher(Arc::new(CannedRenderFetcher));
-        let rf = service.render_fetcher().expect("render fetcher wired");
-        let page = rf.fetch_page("https://spa.example.com/app").await.unwrap();
-        assert_eq!(page.title.as_deref(), Some("Rendered"));
-        assert!(page.markdown.contains("only a browser sees this"));
+        service.set_browser_render_content_port(Arc::new(CannedRenderContentPort));
+        let rendered = service
+            .browser_render_content_port()
+            .render_content(BrowserRenderContentRequest::new(
+                "https://spa.example.com/app",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rendered.final_url, "https://spa.example.com/app");
+        assert!(rendered.html.contains("canonical port"));
     }
 
-    /// **P3-K3 backend selection** (pure logic over `fetcher_for`): each fetcher
-    /// reports a distinctive marker so we can prove *which* backend a given
-    /// `(rendered, render-wired?)` combination selects.
-    ///   • `rendered == false`            → HTTP (default), even with a browser wired
-    ///   • `rendered == true`, browser ✓  → render backend
-    ///   • `rendered == true`, browser ✗  → graceful HTTP fallback (no error)
+    /// Plain entries stay on the HTTP seam; rendered entries use only the
+    /// canonical typed port.
     #[tokio::test]
-    async fn fetcher_for_selects_backend_by_rendered_flag() {
-        use crate::source_url::FetchedPage;
+    async fn rendered_path_does_not_use_http_fetcher() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest,
+            FetchedPage,
+        };
 
-        fn marked(marker: &str) -> FetchedPage {
-            FetchedPage {
-                final_url: "https://x".into(),
-                title: Some(marker.into()),
-                markdown: format!("via:{marker}"),
-                truncated: false,
-            }
-        }
-
-        struct Canned(&'static str);
+        struct CannedHttpFetcher;
         #[async_trait::async_trait]
-        impl PageFetcher for Canned {
+        impl PageFetcher for CannedHttpFetcher {
             async fn fetch_page(&self, _url: &str) -> Result<FetchedPage, AppError> {
-                Ok(marked(self.0))
+                Ok(FetchedPage {
+                    final_url: "https://x".into(),
+                    title: Some("http".into()),
+                    markdown: "HTTP-ONLY".into(),
+                    truncated: false,
+                })
             }
         }
 
-        async fn which(service: &KnowledgeService, rendered: bool) -> String {
-            service
-                .fetcher_for(rendered)
-                .fetch_page("https://x")
-                .await
-                .unwrap()
-                .title
-                .unwrap()
+        struct CannedRenderContentPort;
+        #[async_trait::async_trait]
+        impl BrowserRenderContentPort for CannedRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><body>RENDERED-ONLY</body></html>".into(),
+                    html_truncated: false,
+                })
+            }
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -14549,21 +14749,21 @@ mod tests {
                 Arc::from(TEST_OWNER_ID),
             ),
         )
-        .with_url_fetcher(Canned("http"));
+        .with_url_fetcher(CannedHttpFetcher);
+        service.set_browser_render_content_port(Arc::new(CannedRenderContentPort));
 
-        // No render backend wired: every flag value resolves to HTTP (graceful
-        // fallback for rendered=true — the flag is best-effort, never fails).
-        assert_eq!(which(&service, false).await, "http", "rendered=false → HTTP");
-        assert_eq!(
-            which(&service, true).await,
-            "http",
-            "rendered=true but no browser backend → graceful HTTP fallback"
-        );
+        let plain = service
+            .prepare_snapshot_body("https://plain.example", false, None)
+            .await
+            .unwrap();
+        assert_eq!(plain.body, "HTTP-ONLY");
 
-        // Wire a browser backend.
-        service.set_render_fetcher(Arc::new(Canned("browser")));
-        assert_eq!(which(&service, false).await, "http", "rendered=false → HTTP even with browser wired");
-        assert_eq!(which(&service, true).await, "browser", "rendered=true + browser wired → render backend");
+        let rendered = service
+            .prepare_snapshot_body("https://rendered.example", true, None)
+            .await
+            .unwrap();
+        assert!(rendered.body.contains("RENDERED-ONLY"));
+        assert!(!rendered.body.contains("HTTP-ONLY"));
     }
 
     #[test]
@@ -16000,6 +16200,7 @@ mod tests {
                 source_rel_path: "second.md".into(),
                 destination_rel_path: "archive/second.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("second.md"),
                     &std::fs::metadata(vault.join("second.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -18701,8 +18902,8 @@ mod tests {
         // extra.source(live) → mounts.live_sources.
         service
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.knowledge_base_id.clone()],
@@ -18714,7 +18915,7 @@ mod tests {
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1);
         let live = &outcome.mounts[0].live_sources;
@@ -19011,27 +19212,33 @@ mod tests {
         assert!(!content.contains("xxxxxxxxxx"), "raw body must be replaced");
     }
 
-    /// **P3-K3 end-to-end routing**: a snapshot source with one `rendered`
-    /// entry and one plain entry must write the browser-backed body for the
-    /// rendered URL and the HTTP body for the plain one — proving the
-    /// `entry.rendered → fetcher_for → snapshot` chain selects per-entry.
-    /// Deterministic (canned render fetcher, mock HTTP server) — no real Chrome.
+    /// A snapshot source with one `rendered` entry and one plain entry must
+    /// write the canonical-port body for the rendered URL and the HTTP body
+    /// for the plain one. The test does not construct or reference a Browser
+    /// Hub.
     #[tokio::test]
-    async fn rendered_entry_uses_render_backend_per_source() {
-        use crate::source_url::FetchedPage;
+    async fn rendered_entry_uses_canonical_render_content_port_per_source() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest,
+        };
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Render backend stamps a marker no HTTP fetch could produce.
-        struct MarkerRenderFetcher;
+        // The headless rendering port returns raw HTML.
+        struct MarkerRenderContentPort;
         #[async_trait::async_trait]
-        impl PageFetcher for MarkerRenderFetcher {
-            async fn fetch_page(&self, raw_url: &str) -> Result<FetchedPage, AppError> {
-                Ok(FetchedPage {
-                    final_url: raw_url.to_owned(),
-                    title: Some("Rendered".into()),
-                    markdown: "RENDERED-BY-BROWSER only a headless browser sees this".into(),
-                    truncated: false,
+        impl BrowserRenderContentPort for MarkerRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><head><title>Rendered</title></head><body>\
+                        RENDERED-BY-CANONICAL-PORT\
+                        </body></html>"
+                        .into(),
+                    html_truncated: false,
                 })
             }
         }
@@ -19044,7 +19251,7 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        service.set_render_fetcher(Arc::new(MarkerRenderFetcher));
+        service.set_browser_render_content_port(Arc::new(MarkerRenderContentPort));
 
         let plain_url = format!("{}/plain", server.uri());
         let rendered_url = format!("{}/spa", server.uri());
@@ -19073,16 +19280,15 @@ mod tests {
         assert!(plain_snap.contains("PLAIN-HTTP-BODY"), "rendered=false entry must use HTTP: {plain_snap}");
         assert!(!plain_snap.contains("RENDERED-BY-BROWSER"), "rendered=false must NOT use browser backend");
         assert!(
-            rendered_snap.contains("RENDERED-BY-BROWSER"),
-            "rendered=true entry must use the wired browser backend: {rendered_snap}"
+            rendered_snap.contains("RENDERED-BY-CANONICAL-PORT"),
+            "rendered=true entry must use the canonical render-content port: {rendered_snap}"
         );
     }
 
-    /// **P3-K3 graceful fallback**: a `rendered` entry with NO render backend
-    /// wired must silently fall back to HTTP and still snapshot — the flag is
-    /// best-effort, never a hard failure that blocks the fetch.
+    /// A rendered entry without the canonical operation port must fail closed.
+    /// In particular, the ordinary HTTP fetcher must not be consulted.
     #[tokio::test]
-    async fn rendered_entry_without_render_backend_falls_back_to_http() {
+    async fn rendered_entry_without_canonical_port_fails_closed() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -19094,7 +19300,6 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        // No set_render_fetcher → render backend absent.
 
         let url = format!("{}/spa", server.uri());
         let source = KnowledgeSource {
@@ -19104,12 +19309,34 @@ mod tests {
             last_fetched_at: None,
             ..Default::default()
         };
-        let kb = service.create_base("回退库", "", None, Some(source)).await.unwrap();
+        let kb = service
+            .create_base("缺少渲染端口库", "", None, Some(source))
+            .await
+            .unwrap();
 
-        let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
-        let snap = std::fs::read_dir(&snap_dir).unwrap().flatten().next().expect("snapshot written despite no browser backend");
-        let content = std::fs::read_to_string(snap.path()).unwrap();
-        assert!(content.contains("HTTP-FALLBACK-BODY"), "rendered=true with no browser backend must degrade to HTTP: {content}");
+        let fetch = kb.source_fetch.expect("create result must expose fetch outcome");
+        assert_eq!(fetch.fetched, 0);
+        assert_eq!(fetch.failed, 1);
+        assert!(
+            fetch.errors.iter().any(|error| {
+                error.contains("headless rendering")
+                    && error.contains("unavailable")
+            }),
+            "missing canonical port must be visible: {:?}",
+            fetch.errors
+        );
+
+        let snap_dir =
+            PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
+        let snapshot_count = std::fs::read_dir(&snap_dir)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(snapshot_count, 0, "failed rendered entry must not publish a snapshot");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.is_empty(),
+            "rendered=true must not silently use HTTP: {requests:?}"
+        );
     }
 
     #[tokio::test]
@@ -19646,6 +19873,85 @@ mod tests {
         names: std::sync::Mutex<Vec<String>>,
     }
 
+    struct HeldSourceFetcher {
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl PageFetcher for HeldSourceFetcher {
+        async fn fetch_page(&self, raw_url: &str) -> Result<source_url::FetchedPage, AppError> {
+            self.entered.wait().await;
+            self.release.wait().await;
+            Ok(source_url::FetchedPage {
+                final_url: raw_url.into(),
+                title: Some("prepared after shutdown".into()),
+                markdown: "late body".into(),
+                truncated: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn background_source_quiesce_retains_create_and_resume_tasks_without_late_publication() {
+        for from_resume in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = nomifun_db::init_database_memory().await.unwrap();
+            let events = Arc::new(RecordingBroadcaster::default());
+            let (service, repository, _) = durable_sqlite_service(
+                &database, &dir.path().join("data"), events.clone(),
+            );
+            let entered = Arc::new(tokio::sync::Barrier::new(2));
+            let release = Arc::new(tokio::sync::Barrier::new(2));
+            let service = Arc::new(service.with_url_fetcher(HeldSourceFetcher {
+                entered: entered.clone(), release: release.clone(),
+            }));
+            let source = url_source(KnowledgeSourceMode::Snapshot, &["https://example.com/held"]);
+            let (info, resume_caller) = if from_resume {
+                let (_, info, _) = service.register_base("held resume", "", None, Some(source), None).await.unwrap();
+                let caller = tokio::spawn(service.clone().resume_pending_source_fetches());
+                (info, Some(caller))
+            } else {
+                (service.clone().create_base_with_background_fetch("held create", "", None, Some(source)).await.unwrap(), None)
+            };
+            entered.wait().await;
+            if let Some(caller) = resume_caller {
+                // Cancelling the boot caller cannot detach the actual source job.
+                caller.abort();
+                let _ = caller.await;
+            }
+            let mut drain = Box::pin(service.quiesce_background_tasks(Duration::from_secs(5)));
+            assert!(futures_util::poll!(&mut drain).is_pending());
+            drop(drain);
+            assert!(service.quiesce_background_tasks(Duration::from_millis(5)).await.is_err());
+            let rejected = service.clone().create_base_with_background_fetch("closed admission", "", None, None).await;
+            assert!(matches!(rejected, Err(AppError::Conflict(_))));
+            assert_eq!(repository.list_bases().await.unwrap().len(), 1, "closed admission must not leave a new row");
+
+            release.wait().await;
+            service.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+            service.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+            let sources = repository.list_sources_for_base(&info.knowledge_base_id, false).await.unwrap();
+            let items = repository.list_source_items(&sources[0].knowledge_source_id, false).await.unwrap();
+            assert_eq!(items[0].sync_status, KnowledgeSourceItemSyncStatus::Syncing);
+            assert!(items[0].last_success_at.is_none());
+            assert!(items[0].pending_published_hash.is_none());
+            let row = repository.get_base(info.knowledge_base_id.as_str()).await.unwrap().unwrap();
+            assert!(source_from_extra(&row.extra).unwrap().unwrap().last_fetched_at.is_none());
+            assert!(!Path::new(&info.root_path).join(source_url::SNAPSHOT_REL_DIR).exists());
+            assert!(!events.names.lock().unwrap().iter().any(|name| name == "knowledge.base-updated"));
+
+            // The existing retry state is still meaningful on a new owner.
+            let (fetcher, _) = MutableSourceFetcher::new("resumed after restart");
+            let (next, _, _) = durable_sqlite_service(&database, &dir.path().join("data"), events);
+            let next = Arc::new(next.with_url_fetcher(fetcher));
+            next.clone().resume_pending_source_fetches().await;
+            let items = repository.list_source_items(&sources[0].knowledge_source_id, false).await.unwrap();
+            assert_eq!(items[0].sync_status, KnowledgeSourceItemSyncStatus::Synced);
+            next.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+        }
+    }
+
     impl nomifun_realtime::UserEventSink for RecordingBroadcaster {
         fn send_to_user(
             &self,
@@ -19756,8 +20062,8 @@ mod tests {
         service.write_file(&kb.knowledge_base_id, "a.md", "# A").await.unwrap();
         service
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.knowledge_base_id.clone()],
@@ -19769,14 +20075,14 @@ mod tests {
 
         // Workspace == data root → skipped, no scaffolding created.
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &data_dir)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &data_dir)
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!data_dir.join(".nomi").exists());
 
         // Workspace is an ancestor of the data root → skipped too.
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, dir.path())
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, dir.path())
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!dir.path().join(".nomi").exists());
@@ -19786,7 +20092,7 @@ mod tests {
         // mount sweep would otherwise run inside a knowledge base's files.
         let kb_root = PathBuf::from(&kb.root_path);
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &kb_root)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &kb_root)
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!kb_root.join(".nomi").exists());
@@ -19795,7 +20101,7 @@ mod tests {
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1);
     }
@@ -19834,20 +20140,20 @@ mod tests {
         let kb_a = bind_new_base(
             &service,
             "binding-a",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
         let _kb_b = bind_new_base(
             &service,
             "binding-b",
-            "conversation",
-            TEST_CONVERSATION_ID_2,
+            "terminal",
+            TEST_SESSION_ID_2,
         )
         .await;
 
         let plan_a = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert!(
@@ -19855,25 +20161,25 @@ mod tests {
             "preparation must be read-only"
         );
         let signature_a = plan_a.binding_signature().to_owned();
-        let (_, lease_a) = plan_a.activate(TEST_CONVERSATION_ID).await.unwrap();
+        let (_, lease_a) = plan_a.activate(TEST_SESSION_ID).await.unwrap();
 
         let same_plan = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert_eq!(same_plan.binding_signature(), signature_a);
         let (_, same_lease) = same_plan
-            .activate(TEST_CONVERSATION_ID_9)
+            .activate(TEST_SESSION_ID_9)
             .await
             .expect("the exact same ordered binding can share a workspace");
 
         let conflicting_plan = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID_2, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID_2, &workspace)
             .await
             .unwrap();
         assert!(
             conflicting_plan
-                .activate(TEST_CONVERSATION_ID_2)
+                .activate(TEST_SESSION_ID_2)
                 .await
                 .is_err(),
             "a second active runtime must not replace different mounts"
@@ -19882,17 +20188,17 @@ mod tests {
         drop(same_lease);
         drop(lease_a);
         service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID_2, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID_2, &workspace)
             .await
             .unwrap()
-            .activate(TEST_CONVERSATION_ID_2)
+            .activate(TEST_SESSION_ID_2)
             .await
             .expect("the next binding can take over after every old runtime releases");
 
         // Mutable knowledge content changes the prompt metadata but not the
         // physical/logical mount binding authority.
         let before = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         service
@@ -19900,7 +20206,7 @@ mod tests {
             .await
             .unwrap();
         let after = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert_eq!(
@@ -19920,11 +20226,11 @@ mod tests {
         let key = workpath_key(&ws.to_string_lossy());
 
         let kb_workpath = bind_new_base(&service, "路径库", WORKPATH_BINDING_KIND, &key).await;
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
 
@@ -19944,11 +20250,11 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
 
@@ -19975,11 +20281,11 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
         service
@@ -20002,7 +20308,7 @@ mod tests {
         let service = make_service(&data_dir);
 
         // Temp workspace under the backend data dir → sentinel key (the
-        // same derivation the conversation/terminal services apply).
+        // same derivation the terminal service applies).
         let temp_ws = data_dir.join("conversations").join("gemini-temp-c1");
         std::fs::create_dir_all(&temp_ws).unwrap();
         let key = crate::workpath::session_workpath_key(&temp_ws, &data_dir);
@@ -20232,6 +20538,157 @@ mod tests {
         assert_eq!(decode_doc_handle("not-a-handle"), None);
         assert_eq!(decode_doc_handle("kdoc_!!!notbase64"), None);
         assert_eq!(decode_doc_handle("kdoc_"), None);
+    }
+
+    fn bound_knowledge_base(
+        kb_id: KnowledgeBaseId,
+        root: &Path,
+    ) -> BoundKnowledgeBase {
+        BoundKnowledgeBase::new(kb_id, "Bound test base", root)
+            .expect("bound knowledge base")
+    }
+
+    #[tokio::test]
+    async fn bound_knowledge_search_and_read_use_opaque_scoped_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(root.join("runbooks")).unwrap();
+        std::fs::write(
+            root.join("runbooks").join("rollback.md"),
+            "# Rollback\nUse the verified rollback checklist.",
+        )
+        .unwrap();
+        std::fs::write(root.join("ignored.txt"), "rollback").unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let service = BoundKnowledgeReadService::default();
+        let hits = service.search(&base, "rollback", 5).await.unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].resource_id, kb_id);
+        assert_eq!(hits[0].relative_path, "runbooks/rollback.md");
+        assert_eq!(hits[0].heading, "Rollback");
+        assert_eq!(
+            decode_doc_handle(&hits[0].handle),
+            Some((
+                hits[0].resource_id.clone(),
+                "runbooks/rollback.md".to_owned()
+            ))
+        );
+        let rendered = serde_json::to_string(&hits).unwrap();
+        assert!(
+            !rendered.contains(&root.to_string_lossy().to_string()),
+            "bound search must not expose its absolute root"
+        );
+
+        let document = service.read(&base, &hits[0].handle).await.unwrap();
+        assert_eq!(document.resource_id, hits[0].resource_id);
+        assert_eq!(document.relative_path, "runbooks/rollback.md");
+        assert_eq!(
+            document.content,
+            "# Rollback\nUse the verified rollback checklist."
+        );
+        assert_eq!(document.size, document.content.len() as u64);
+        assert_eq!(document.content_sha256, sha256_text(&document.content));
+    }
+
+    #[tokio::test]
+    async fn bound_knowledge_search_rejects_an_oversized_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        let oversized = std::fs::File::create(root.join("oversized.md")).unwrap();
+        oversized
+            .set_len(bound::MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES + 1)
+            .unwrap();
+
+        let base =
+            bound_knowledge_base(KnowledgeBaseId::new(), &root);
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .search(&base, "anything", 5)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn bound_knowledge_reopens_replaced_root_without_cross_call_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let original = directory.path().join("knowledge-original");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "# Marker\nold").unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let service = BoundKnowledgeReadService::default();
+        let first = service.search(&base, "marker", 5).await.unwrap();
+        assert_eq!(first.len(), 1);
+        let handle = first[0].handle.clone();
+        assert_eq!(
+            service.read(&base, &handle).await.unwrap().content,
+            "# Marker\nold"
+        );
+
+        std::fs::rename(&root, &original).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "# Marker\nnew").unwrap();
+
+        let second = service.search(&base, "marker", 5).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].handle, handle);
+        assert_eq!(
+            service.read(&base, &second[0].handle).await.unwrap().content,
+            "# Marker\nnew"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bound_knowledge_read_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "# Secret").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let handle = encode_doc_handle(&kb_id, "escape/secret.md");
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .read(&base, &handle)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bound_knowledge_read_rejects_junction_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "# Secret").unwrap();
+        junction::create(&outside, root.join("escape")).unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let handle = encode_doc_handle(&kb_id, "escape/secret.md");
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .read(&base, &handle)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     // ── write target resolver + path de-confusion (P1) ────────────────
@@ -21186,8 +21643,8 @@ mod tests {
         let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
         let error = svc
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     writeback: true,
@@ -21941,8 +22398,8 @@ mod tests {
     async fn list_consumers_returns_enabled_and_disabled_bindings() {
         let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
         svc.set_binding(
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
             KnowledgeBinding {
                 enabled: true,
                 kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
@@ -21974,9 +22431,9 @@ mod tests {
 
         let consumers = svc.list_consumers(&kb_id).await.unwrap();
         assert_eq!(consumers.len(), 2, "only bindings using this kb: {consumers:?}");
-        let conv = consumers.iter().find(|c| c.target_kind == "conversation").unwrap();
-        assert_eq!(conv.target_id.as_deref(), Some(TEST_CONVERSATION_ID));
-        assert!(conv.enabled);
+        let terminal = consumers.iter().find(|c| c.target_kind == "terminal").unwrap();
+        assert_eq!(terminal.target_id.as_deref(), Some(TEST_SESSION_ID));
+        assert!(terminal.enabled);
         assert!(!consumers.iter().find(|c| c.target_kind == "workpath").unwrap().enabled, "disabled included");
     }
 

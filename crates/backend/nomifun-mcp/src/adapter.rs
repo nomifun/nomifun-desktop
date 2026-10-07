@@ -36,9 +36,7 @@ pub struct DetectedServer {
 ///
 /// # Concurrency
 ///
-/// Implementations do **not** need to handle concurrency internally.
-/// The sync service applies per-agent serialization locks before calling
-/// adapter methods.
+/// The read-only sync service serializes scans within each service instance.
 ///
 /// # Error handling
 ///
@@ -60,113 +58,4 @@ pub trait McpAgentAdapter: Send + Sync {
     /// Returns an empty vec if the CLI is installed but has no MCP servers.
     /// Returns `McpError::AgentNotInstalled` if the CLI is not available.
     async fn detect_existing(&self) -> Result<Vec<DetectedServer>, McpError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    /// In-memory mock adapter for testing the trait interface.
-    struct MockAdapter {
-        source: McpSource,
-        installed: bool,
-        servers: Arc<Mutex<Vec<DetectedServer>>>,
-    }
-
-    impl MockAdapter {
-        fn new(source: McpSource, installed: bool) -> Self {
-            Self {
-                source,
-                installed,
-                servers: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn with_servers(self, servers: Vec<DetectedServer>) -> Self {
-            *self.servers.lock().unwrap() = servers;
-            self
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl McpAgentAdapter for MockAdapter {
-        fn source(&self) -> McpSource {
-            self.source
-        }
-
-        async fn is_installed(&self) -> Result<bool, McpError> {
-            Ok(self.installed)
-        }
-
-        async fn detect_existing(&self) -> Result<Vec<DetectedServer>, McpError> {
-            if !self.installed {
-                return Err(McpError::AgentNotInstalled(format!("{:?}", self.source)));
-            }
-            let servers = self.servers.lock().unwrap();
-            Ok(servers.clone())
-        }
-    }
-
-    fn detected(name: &str, transport: McpServerTransport) -> DetectedServer {
-        DetectedServer {
-            name: name.to_owned(),
-            transport,
-            importable: true,
-            import_skip_reason: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_source() {
-        let adapter = MockAdapter::new(McpSource::Claude, true);
-        assert_eq!(adapter.source(), McpSource::Claude);
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_is_installed() {
-        let installed = MockAdapter::new(McpSource::Gemini, true);
-        assert!(installed.is_installed().await.unwrap());
-
-        let not_installed = MockAdapter::new(McpSource::Gemini, false);
-        assert!(!not_installed.is_installed().await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_detect_returns_servers() {
-        let transport = McpServerTransport::Stdio {
-            command: "npx".into(),
-            args: vec!["-y".into(), "@test/server".into()],
-            env: HashMap::new(),
-        };
-        let adapter =
-            MockAdapter::new(McpSource::Claude, true).with_servers(vec![detected("test-mcp", transport.clone())]);
-
-        let detected = adapter.detect_existing().await.unwrap();
-        assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].name, "test-mcp");
-        assert_eq!(detected[0].transport, transport);
-    }
-
-    #[tokio::test]
-    async fn mock_adapter_detect_empty() {
-        let adapter = MockAdapter::new(McpSource::Claude, true);
-        let detected = adapter.detect_existing().await.unwrap();
-        assert!(detected.is_empty());
-    }
-
-    #[tokio::test]
-    async fn not_installed_detect_fails() {
-        let adapter = MockAdapter::new(McpSource::Qwen, false);
-        let result = adapter.detect_existing().await;
-        assert!(matches!(result, Err(McpError::AgentNotInstalled(_))));
-    }
-
-    #[tokio::test]
-    async fn trait_is_object_safe() {
-        let adapter: Arc<dyn McpAgentAdapter> = Arc::new(MockAdapter::new(McpSource::Nomifun, true));
-        assert_eq!(adapter.source(), McpSource::Nomifun);
-        assert!(adapter.is_installed().await.unwrap());
-    }
 }

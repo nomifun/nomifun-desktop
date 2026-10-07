@@ -32,6 +32,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
+mod browser_surface;
+mod native_api_plugins;
+#[cfg(windows)]
+mod headless_browser_runtime;
 mod companion_pointer;
 mod relay_pairing;
 mod updater_install_context;
@@ -46,7 +50,7 @@ mod updater_install_context;
 /// secret never leaks off-box). Runs before any page script.
 pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
     // `{:?}` emits properly quoted/escaped JS string literals.
-    format!(
+    let script = format!(
         r#"window.__backendPort = {port}; window.__os = {os:?}; window.__nomiLocalTrust = {secret:?};
 (function () {{
   var secret = {secret:?};
@@ -101,7 +105,48 @@ pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
         os = std::env::consts::OS,
         secret = trust_secret,
         port = port,
-    )
+    );
+    #[cfg(debug_assertions)]
+    let script = {
+        let mut script = script;
+        if let Ok(key) = std::env::var("NOMIFUN_RELIABILITY_DROP_TURN_ACK_KEY") {
+            if let Some(fault) = turn_ack_loss_fixture_script(port, &key) { script.push_str(&fault); }
+        }
+        script
+    };
+    script
+}
+
+/// Debug-only transport fault: a real authenticated submit must finish first.
+/// One exact durable key loses its reply; no request, receipt or authority is
+/// rewritten, and ordinary windows/releases have no opt-in flag.
+#[cfg(debug_assertions)]
+fn turn_ack_loss_fixture_script(port: u16, key: &str) -> Option<String> {
+    let valid = key.len() == 36 && key.bytes().enumerate().all(|(i, b)|
+        if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() });
+    if !valid { return None; }
+    Some(format!(r#"
+(function() {{
+  var target={key:?}, origin="http://127.0.0.1:{port}", used=false;
+  var realFetch=window.fetch.bind(window);
+  window.fetch=async function(input, init) {{
+    var candidate=false;
+    try {{
+      var url=new URL(typeof input==="string"?input:input.url, location.href);
+      candidate=!used && init && String(init.method).toUpperCase()==="POST" &&
+        url.origin===origin && /^\/api\/agent-sessions\/[0-9a-f-]{{36}}\/turns$/.test(url.pathname) &&
+        typeof init.body==="string" && JSON.parse(init.body).idempotency_key===target;
+    }} catch (_) {{}}
+    var response=await realFetch(input,init);
+    if (candidate && !used && response.ok) {{
+      used=true;
+      console.warn("MM_ACK_LOSS_FIXTURE_TRIGGERED");
+      throw new TypeError("MM_ACK_LOSS_FIXTURE: submit receipt unavailable");
+    }}
+    return response;
+  }};
+}})();
+"#))
 }
 
 /// Resolve an optional, non-empty `NOMIFUN_WEBUI_DIST` override once. Empty
@@ -296,16 +341,75 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 ///    `nomifun_app::cli::default_data_dir()`: stable builds use `NomiFun`,
 ///    non-stable builds a sibling such as `NomiFun-dev`.
 ///
-/// `resolve_startup_data_root` then maps known self-export/default locations
-/// (including values inherited from affected releases) onto the channel
-/// default and runs the one-shot legacy layout migration
-/// (`NomiFun/Nomi` → `NomiFun`).
+/// The desktop and web hosts share the canonical startup-root resolver. It
+/// rejects ambiguous legacy layouts instead of silently selecting another
+/// architecture-specific sibling.
 fn default_data_dir() -> PathBuf {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(nomifun_app::cli::default_data_dir);
     nomifun_app::bootstrap::resolve_startup_data_root(requested)
+}
+
+fn desktop_browser_profile_store(
+    data_dir: &std::path::Path,
+) -> std::result::Result<
+    nomifun_browser_platform::runtime::BrowserProfileStore,
+    Box<dyn std::error::Error>,
+> {
+    // Tauri installs the profile store before DesktopServer initializes its
+    // database. Prepare only the directory; the backend still validates the
+    // data identity, and BrowserProfileStore still rejects links/reparse roots.
+    std::fs::create_dir_all(data_dir)?;
+    Ok(nomifun_browser_platform::runtime::BrowserProfileStore::new(
+        data_dir.to_path_buf(),
+    )?)
+}
+
+#[cfg(target_os = "macos")]
+struct ExplicitDesktopDataRoot(bool);
+
+#[cfg(target_os = "macos")]
+struct MacosWebviewDataStore(Option<[u8; 16]>);
+
+/// WKWebView ignores data_directory and otherwise shares defaultDataStore.
+/// Only custom explicit backend roots receive a separate persistent store.
+/// Preserve the channel default even when a restart inherits its exported root.
+#[cfg(target_os = "macos")]
+fn macos_webview_data_store(
+    explicit_root: bool,
+    data_root: &Path,
+    channel_default: &Path,
+    custom_store_available: bool,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    use std::os::unix::ffi::OsStrExt;
+    use sha2::{Digest, Sha256};
+
+    if !explicit_root {
+        return Ok(None);
+    }
+    let canonical_root = std::fs::canonicalize(data_root)
+        .context("cannot resolve explicit WebView data root")?;
+    let default_root = std::fs::canonicalize(channel_default)
+        .unwrap_or_else(|_| channel_default.to_path_buf());
+    if canonical_root == default_root {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        custom_store_available,
+        "isolating an explicit NOMIFUN_DATA_DIR WebView profile requires macOS 14 or newer; refusing to open the default WebView profile"
+    );
+    let mut digest = Sha256::new();
+    digest.update(b"NomiFun WKWebView explicit data root v1\0");
+    digest.update(canonical_root.as_os_str().as_bytes());
+    let mut identifier = [0u8; 16];
+    identifier.copy_from_slice(&digest.finalize()[..16]);
+    Ok(Some(identifier))
+}
+
+fn announce_desktop_backend(data_dir: &Path, loopback_port: u16) {
+    nomifun_app::bootstrap::announce_bound_port(data_dir, "127.0.0.1", loopback_port);
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1353,6 +1457,8 @@ struct ExitCoordinator {
     shutdown_started: AtomicBool,
     fatal_dialog_started: AtomicBool,
     cleanup_verified: AtomicBool,
+    /// Permission to finish a bounded failed handoff, not cleanup proof.
+    forced_handoff_allowed: AtomicBool,
     /// Single-flight guard for the F42 deferred exit waiter (repeated Cmd-Q
     /// while the backend is still Starting must not stack waiter threads).
     deferred_exit_wait_started: AtomicBool,
@@ -1371,6 +1477,7 @@ impl Default for ExitCoordinator {
             shutdown_started: AtomicBool::new(false),
             fatal_dialog_started: AtomicBool::new(false),
             cleanup_verified: AtomicBool::new(false),
+            forced_handoff_allowed: AtomicBool::new(false),
             deferred_exit_wait_started: AtomicBool::new(false),
             original_code: Mutex::new(None),
             backend: Mutex::new(BackendRegistration::Starting),
@@ -1471,7 +1578,8 @@ impl ExitCoordinator {
     }
 
     fn is_exit_allowed(&self) -> bool {
-        self.cleanup_verified.load(Ordering::Acquire)
+        (self.cleanup_verified.load(Ordering::Acquire)
+            || self.forced_handoff_allowed.load(Ordering::Acquire))
             && matches!(
                 self.phase.load(Ordering::Acquire),
                 EXIT_PHASE_COMPLETE | EXIT_PHASE_FATAL
@@ -1493,6 +1601,45 @@ impl ExitCoordinator {
             .ok()
             .and_then(|code| *code)
             .unwrap_or(0)
+    }
+
+    fn allow_unverified_handoff(&self) {
+        self.forced_handoff_allowed.store(true, Ordering::Release);
+        self.phase.store(EXIT_PHASE_COMPLETE, Ordering::Release);
+    }
+
+    fn final_exit_code(&self) -> i32 {
+        let original = self.original_code();
+        if original == 0
+            && self.forced_handoff_allowed.load(Ordering::Acquire)
+            && !self.cleanup_verified.load(Ordering::Acquire)
+            && !self.is_restart_requested()
+        {
+            1
+        } else {
+            original
+        }
+    }
+
+    fn process_exit_code(&self, runtime_code: i32) -> i32 {
+        // Tauri owns restart/relaunch and run_return normally never returns
+        // for that sentinel. Do not reinterpret its handoff as a normal quit.
+        if self.is_restart_requested() {
+            return runtime_code;
+        }
+        if self.is_exit_allowed() {
+            let owned = self.final_exit_code();
+            return if owned != 0 {
+                owned
+            } else if runtime_code == 0 && self.phase.load(Ordering::Acquire) == EXIT_PHASE_FATAL {
+                1
+            } else {
+                runtime_code
+            };
+        }
+        // An event-loop return without the coordinator's terminal permission
+        // proves neither backend cleanup nor a successful desktop close.
+        if runtime_code == 0 { 1 } else { runtime_code }
     }
 
     fn mark_no_cleanup_needed(&self) {
@@ -1777,15 +1924,16 @@ where
 
 /// Force a pending exit/restart handoff to proceed after bounded cleanup
 /// attempts were exhausted (or no cleanup authority ever became available).
-/// Marks cleanup verified — the coordinator's "may proceed" signal — even
-/// though the backend cleanup is NOT verified, and returns the exit code to
-/// use. Callers must log loudly BEFORE calling this: an unkillable or
+/// Allows the handoff without claiming cleanup proof. A normal zero-code
+/// request becomes a failure status; existing failure codes and restart
+/// ownership remain unchanged. Callers must log loudly BEFORE calling this:
+/// an unkillable or
 /// permanently frozen app is strictly worse than an unclean close (the data
 /// layer is crash-safe).
 fn allow_handoff_without_verified_cleanup(coordinator: &ExitCoordinator) -> i32 {
     coordinator.mark_backend_failed_unverified();
-    coordinator.mark_cleanup_verified();
-    coordinator.original_code()
+    coordinator.allow_unverified_handoff();
+    coordinator.final_exit_code()
 }
 
 /// A restart request is a non-cancellable Tauri sentinel.  If the first
@@ -1875,7 +2023,7 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
             return;
         }
         if coordinator.is_exit_allowed() {
-            app.exit(coordinator.original_code());
+            app.exit(coordinator.final_exit_code());
             return;
         }
         tracing::error!(
@@ -1892,8 +2040,7 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
 /// return the exit code to use. Only the deferred-exit path may call this,
 /// and only after positively establishing that no cleanup authority exists.
 fn allow_exit_without_backend_cleanup(coordinator: &ExitCoordinator) -> i32 {
-    coordinator.mark_cleanup_verified();
-    coordinator.original_code()
+    allow_handoff_without_verified_cleanup(coordinator)
 }
 
 fn start_shutdown_if_needed(
@@ -2209,6 +2356,19 @@ fn complete_main_thread_setup(
     }
 
     let loopback_port = server.loopback_port();
+    #[cfg(target_os = "macos")]
+    {
+        let channel_default = nomifun_app::bootstrap::resolve_startup_data_root(
+            nomifun_app::cli::default_data_dir(),
+        );
+        let store = macos_webview_data_store(
+            app.state::<ExplicitDesktopDataRoot>().0,
+            &pairing_data_dir,
+            &channel_default,
+            objc2::available!(macos = 14.0),
+        )?;
+        app.manage(MacosWebviewDataStore(store));
+    }
 
     // Build the main window programmatically so we can inject the backend
     // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
@@ -2277,6 +2437,11 @@ fn complete_main_thread_setup(
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
             .initialization_script(&init_script);
+    #[cfg(target_os = "macos")]
+    let win_builder = match app.state::<MacosWebviewDataStore>().0 {
+        Some(identifier) => win_builder.data_store_identifier(identifier),
+        None => win_builder,
+    };
     // macOS: Overlay makes the titlebar transparent + extends content under
     // it, but it does NOT hide the native title text. With the title still
     // set to "NomiFun", AppKit draws that string next to the traffic lights,
@@ -2412,6 +2577,86 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(any(test, target_os = "macos"))]
 fn should_show_main_window_for_macos_reopen(_has_visible_windows: bool) -> bool {
     true
+}
+
+/// Replace AppKit's immediate terminate action with a coordinated quit request.
+#[cfg(target_os = "macos")]
+fn macos_menu_with_verified_quit(
+    app: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let menu = Menu::default(app)?;
+    let roots = menu.items()?;
+    let app_menu = roots.first().and_then(|item| item.as_submenu())
+        .ok_or_else(|| anyhow::anyhow!("default macOS application menu is missing"))?;
+    let items = app_menu.items()?;
+    // Tauri's default macOS application submenu ends with the native Quit
+    // item. Its terminate: action can bypass ExitRequested and our cleanup.
+    // Keep the other standard items and the existing label, but route Cmd-Q
+    // through the same app.exit request as the tray and terminal signals.
+    let native_quit = items.last().and_then(|item| item.as_predefined_menuitem())
+        .ok_or_else(|| anyhow::anyhow!("default macOS Quit item is missing"))?;
+    let label = native_quit.text()?;
+    app_menu.remove(native_quit)?;
+    app_menu.append(&MenuItem::with_id(app, "nomifun-verified-quit", label, true, Some("CmdOrCtrl+Q"))?)?;
+    Ok(menu)
+}
+
+#[cfg(target_os = "macos")]
+/// Register terminal and development-parent shutdown before backend startup.
+fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let (mut interrupt, mut terminate) = tauri::async_runtime::block_on(async {
+        Ok::<_, std::io::Error>((
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+        ))
+    })?;
+    let signal_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let received = tokio::select! {
+                value = interrupt.recv() => value,
+                value = terminate.recv() => value,
+            };
+            if received.is_none() {
+                break;
+            }
+            tracing::info!("received terminal termination signal; requesting verified desktop shutdown");
+            signal_app.exit(0);
+        }
+    });
+
+    if tauri::is_dev() {
+        if let Some(socket_path) = std::env::var_os("NOMIFUN_DEV_LIFETIME_SOCKET") {
+            let lifetime_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                match tokio::net::UnixStream::connect(PathBuf::from(socket_path)).await {
+                    Ok(mut connection) => {
+                        let mut byte = [0u8; 1];
+                        // A stop byte or EOF means the CLI/runner exited or
+                        // the developer requested stop. No process group is
+                        // signalled before the platform cleans up its tools.
+                        let _ = connection.read(&mut byte).await;
+                        tracing::info!("development runner stopped; requesting verified desktop shutdown");
+                        lifetime_app.exit(0);
+                        // Keep the socket until process exit. This lets the
+                        // runner wait for actual exit before stopping its CLI.
+                        std::future::pending::<()>().await;
+                        drop(connection);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "development runner is unavailable; requesting desktop shutdown");
+                        lifetime_app.exit(0);
+                    }
+                }
+            });
+        }
+    }
+    Ok(())
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -2612,7 +2857,7 @@ fn reconcile_companion_windows(
                 // Matches DEFAULT_DESK (characters/index.ts): figure + minimal chrome,
                 // no reserved bubble headroom (the page grows the window on demand).
                 // Keeping these in sync avoids a visible startup resize for built-ins.
-                .inner_size(240.0, 214.0)
+                .inner_size(200.0, 180.0)
                 .resizable(false)
                 .decorations(false)
                 .transparent(true)
@@ -2621,6 +2866,11 @@ fn reconcile_companion_windows(
                 .shadow(false)
                 .visible(false)
                 .initialization_script(&init_script);
+        #[cfg(target_os = "macos")]
+        let builder = match app.state::<MacosWebviewDataStore>().0 {
+            Some(identifier) => builder.data_store_identifier(identifier),
+            None => builder,
+        };
         // Show the freshly-built window from here rather than relying SOLELY on
         // the companion page's self-show (applyWindowState): on a FIRST enable
         // (no window existed, so we land in this create branch) the page init
@@ -2650,6 +2900,8 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    if let Some(code)=browser_surface::windows::user_file_picker::helper_entry() {return code;}
     // If a terminal agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE any runtime init, single-instance handling, or window creation.
@@ -2666,17 +2918,44 @@ fn main() -> std::process::ExitCode {
     // see nomifun_app::bootstrap::resolve_startup_data_root). v3 remains a
     // hard dataset cut for the historical pre-v3 temp-rooted dataset: the
     // backend quarantines any incompatible dataset found at the current root.
+    // Capture caller intent before the backend exports its effective root.
+    #[cfg(target_os = "macos")]
+    let explicit_desktop_data_root = std::env::var_os("NOMIFUN_DATA_DIR")
+        .is_some_and(|value| !value.is_empty());
     let data_dir = default_data_dir();
+    #[cfg(target_os = "macos")]
+    let prepared_cef_engine = browser_surface::macos::lifecycle::prepare(&data_dir)
+        .and_then(|engine| {
+            // SAFETY: private command-only helpers already returned, and no
+            // Tauri/Tokio/host workers have started. CEF's allocator constructor
+            // must run here, while actual engine initialization stays deferred.
+            unsafe { engine.preload_framework()?; }
+            Ok(engine)
+        });
+    #[cfg(target_os = "macos")]
+    if let Err(error) = &prepared_cef_engine {
+        eprintln!("managed macOS Browser Provider unavailable: {error}");
+        nomifun_app::bootstrap::record_boot_note(
+            nomifun_app::bootstrap::BootNoteLevel::Warn,
+            format!("macOS built-in browser is unavailable: {error}"),
+        );
+    } else {
+        nomifun_app::bootstrap::record_boot_note(
+            nomifun_app::bootstrap::BootNoteLevel::Info,
+            "macOS built-in browser framework preloaded before workers; native initialization remains deferred until first use",
+        );
+    }
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
 
     // Backend config. The desktop does NOT use `--local`: `DesktopServer::start`
-    // runs the backend under `TrustLocalToken` (trusts only its own webview via
-    // a per-boot secret) so the LAN listener can require login. Only the data
-    // dir + log level flow from here; the listeners bind their own ports.
+    // selects the explicit Nomi-core composition and runs it under
+    // `TrustLocalToken` (trusts only its own webview via a per-boot secret) so
+    // the LAN listener can require login. Only the data dir + log level flow
+    // from here; the listeners bind their own ports.
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop"]);
-    cli.data_dir = data_dir;
+    cli.data_dir = data_dir.clone();
     // Opt-in verbose backend logging without a custom build, e.g.
     //   NOMI_LOG_LEVEL=debug            (everything)
     //   NOMI_LOG_LEVEL=info             (default)
@@ -2692,28 +2971,26 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // F48: publish Tauri's authoritative resource-dir resolution for the
-    // backend's bundled Chrome-for-Testing discovery. macOS .app bundles place
-    // resources in Contents/Resources while the executable lives in
-    // Contents/MacOS, so the backend's exe-relative fallback alone can never
-    // see a packaged Chrome there. The backend crate has no Tauri dependency;
-    // this env var is the seam (see nomifun_app::browser_resource).
     let tauri_context = generated_tauri_context();
-    if let Ok(resource_dir) = tauri::utils::platform::resource_dir(
-        tauri_context.package_info(),
-        &tauri::Env::default(),
-    ) {
-        // SAFETY: same single-threaded window as `enhance_process_path`
-        // above — Tauri's runtime threads are only created by `.run()`.
-        unsafe {
-            std::env::set_var(
-                nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
-                resource_dir.join("chrome-for-testing"),
-            );
-        }
-    }
 
-    let app = tauri::Builder::default()
+    #[cfg(target_os = "macos")]
+    let cef_engine = Arc::new(std::sync::OnceLock::<
+        Result<Arc<browser_surface::macos::lifecycle::DeferredEngine>, String>,
+    >::new());
+    #[cfg(target_os = "macos")]
+    let setup_cef_engine = cef_engine.clone();
+    #[cfg(target_os = "macos")]
+    cef_engine.set(prepared_cef_engine)
+        .unwrap_or_else(|_| panic!("macOS CEF availability resolved more than once"));
+
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu_with_verified_quit).on_menu_event(|app, event| {
+        if event.id().as_ref() == "nomifun-verified-quit" {
+            app.exit(0);
+        }
+    });
+    let app = builder
         // single-instance MUST be the first plugin. With its `deep-link` feature
         // enabled (see Cargo.toml), it forwards a second instance's argv into the
         // deep-link plugin BEFORE invoking this callback, so `on_open_url` (wired
@@ -2725,8 +3002,9 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(native_api_plugins::dialog())
+        .plugin(native_api_plugins::notification())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
@@ -2736,7 +3014,45 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            #[cfg(windows)]
+            let browser_resources = Some(Arc::new(
+                nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
+                    browser_surface::host::DesktopBrowserHost::new(app_handle.clone()),
+                ))
+                .with_profile_store(
+                    desktop_browser_profile_store(&data_dir)?,
+                ),
+            ));
+            #[cfg(target_os = "macos")]
+            let browser_resources = match setup_cef_engine
+                .get()
+                .expect("macOS CEF bundle availability is resolved before app setup")
+            {
+                Ok(engine) => Some(Arc::new(
+                    nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
+                        browser_surface::macos::host::DesktopBrowserHost::new_deferred(
+                            app_handle.clone(),
+                            engine.clone(),
+                        ),
+                    ))
+                    .with_profile_store(
+                        desktop_browser_profile_store(&data_dir)?,
+                    ),
+                )),
+                Err(_) => None,
+            };
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let browser_resources = None;
+            #[cfg(any(windows, target_os = "macos"))]
+            let attached_chrome = Some(nomifun_app::AttachedChromeProviderService::new());
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let attached_chrome = None;
+            app.manage(browser_resources.clone());
+            #[cfg(target_os = "macos")]
+            app.manage(ExplicitDesktopDataRoot(explicit_desktop_data_root));
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+            #[cfg(target_os = "macos")]
+            install_macos_exit_observers(&app_handle)?;
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
@@ -2840,12 +3156,24 @@ fn main() -> std::process::ExitCode {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
+                                let host_services=nomifun_app::DesktopHostServices {
+                                    browser_resources,
+                                    attached_chrome,
+                                    ..Default::default()
+                                };
+                                #[cfg(windows)]
+                                let host_services = {
+                                    let mut host_services = host_services;
+                                    headless_browser_runtime::prepare(&mut host_services).await;
+                                    host_services
+                                };
                                 let (server, keep_alive) = match DesktopServer::start_with_outcome(
                                     &cli,
                                     &merged_path,
                                     spa_dir,
                                     dev_frontend_url,
                                     webui_asset_source,
+                                    host_services,
                                 )
                                 .await
                                 {
@@ -2879,6 +3207,7 @@ fn main() -> std::process::ExitCode {
                                     &startup_cleanup_for_run,
                                     server.clone(),
                                 );
+                                announce_desktop_backend(&cli.data_dir, server.loopback_port());
                                 let mut status_rx = server.subscribe_status();
                                 let mut failure_rx = server.subscribe_failure();
                                 let mut shutdown_rx = server.subscribe_shutdown();
@@ -3046,10 +3375,14 @@ fn main() -> std::process::ExitCode {
         // The ~38 OS-shell commands (window controls, tray, zoom, get-path,
         // feedback, auto-update status) register here as #[tauri::command]s (P3).
         .manage(AwakeState(Mutex::new(None)))
+        .manage(browser_surface::commands::BrowserSurfaceState::default())
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
+            browser_surface::commands::browser_surface_attach,
+            browser_surface::commands::browser_surface_update,
+            browser_surface::commands::browser_surface_detach,
             download_update,
             install_update,
             update_package_status,
@@ -3066,7 +3399,7 @@ fn main() -> std::process::ExitCode {
             relay_pairing_disconnect,
             set_keep_awake,
             set_tray_labels
-        ])
+        ]))
         // Close-to-tray is now the DEFAULT (and only) close behavior. Closing the
         // main window (titlebar ×, OS close, Alt+F4) hides it to the tray instead
         // of quitting — the agent, scheduled tasks, and companions keep running in
@@ -3095,16 +3428,109 @@ fn main() -> std::process::ExitCode {
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
     // manually so a Dock click after close-to-tray can surface the hidden main window.
-    app.run(handle_run_event);
-
-    std::process::ExitCode::SUCCESS
+    let exit_coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+    // The pinned Wry RequestExit path forwards the requested code to the
+    // callback but sets ControlFlow::Exit (zero). App::run then exits the
+    // process inside Tao, so the coordinator's nonzero handoff is lost. Return
+    // from the event loop and explicitly preserve the proven owner outcome;
+    // process::exit also retains the existing no-destructor exit semantics.
+    let runtime_code = app.run_return(handle_run_event);
+    std::process::exit(exit_coordinator.process_exit_code(runtime_code));
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_browser_profile_store_initializes_a_fresh_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("new").join("data");
+        assert!(!data.exists());
+        super::desktop_browser_profile_store(&data).unwrap();
+        assert!(data.is_dir());
+    }
+
+    #[test]
+    fn desktop_browser_profile_store_keeps_existing_file_and_junction_roots_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"preserve").unwrap();
+        assert!(super::desktop_browser_profile_store(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"preserve");
+        #[cfg(windows)]
+        {
+            let target = root.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("keep"), b"preserve").unwrap();
+            let link = root.path().join("link");
+            junction::create(&target, &link).unwrap();
+            assert!(super::desktop_browser_profile_store(&link).is_err());
+            assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"preserve");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn receipt_loss_fixture_is_exact_key_scoped_and_preserves_real_authenticated_fetch() {
+        let key = "0190f5fe-7c00-7a00-8000-000000000106";
+        let script = super::turn_ack_loss_fixture_script(9123, key).unwrap();
+        assert!(script.contains(key));
+        assert!(script.contains("url.origin===origin"));
+        assert!(script.contains("idempotency_key===target"));
+        assert!(script.contains("await realFetch(input,init)"));
+        assert!(script.contains("candidate && !used && response.ok"));
+        assert!(!script.contains("headers="));
+        for invalid in ["", "*", "not-a-key", "0190f5fe-7c00-7a00-8000-000000000106\n"] {
+            assert!(super::turn_ack_loss_fixture_script(9123, invalid).is_none());
+        }
+    }
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_webview_store_isolates_explicit_roots_without_changing_default_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let default = root.path().join("default");
+        for path in [&first, &second, &default] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let resolve = |explicit, path: &Path, available| {
+            macos_webview_data_store(explicit, path, &default, available)
+        };
+        assert_eq!(resolve(false, &first, false).unwrap(), None);
+        assert_eq!(resolve(true, &default, false).unwrap(), None);
+        let first_id = resolve(true, &first, true).unwrap().unwrap();
+        assert_eq!(resolve(true, &first, true).unwrap(), Some(first_id));
+        assert_ne!(resolve(true, &second, true).unwrap(), Some(first_id));
+        assert!(resolve(true, &first, false).is_err());
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        assert_eq!(resolve(true, &alias, true).unwrap(), Some(first_id));
+        let default_alias = root.path().join("default-alias");
+        std::os::unix::fs::symlink(&default, &default_alias).unwrap();
+        assert_eq!(resolve(true, &default_alias, false).unwrap(), None);
+        assert_eq!(fs::read_dir(&default).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn desktop_backend_announcement_records_the_current_process_and_port() {
+        let root = tempfile::tempdir().expect("desktop announcement root");
+
+        announce_desktop_backend(root.path(), 43123);
+
+        let announcement: nomifun_app::bootstrap::PortAnnouncement = serde_json::from_slice(
+            &fs::read(root.path().join(nomifun_app::bootstrap::PORT_FILE))
+                .expect("desktop port announcement"),
+        )
+        .expect("valid desktop port announcement");
+        assert_eq!(announcement.host, "127.0.0.1");
+        assert_eq!(announcement.port, 43123);
+        assert_eq!(announcement.pid, std::process::id());
+        assert!(!announcement.channel.is_empty());
+    }
 
     #[test]
     fn downloaded_update_cache_separates_download_from_install() {
@@ -3572,6 +3998,77 @@ mod tests {
             coordinator.backend_server().is_none(),
             "no observer may re-acquire the backend after the forced handoff"
         );
+    }
+
+    #[test]
+    fn unverified_normal_exit_does_not_claim_cleanup_or_zero_status() {
+        for handoff in [allow_handoff_without_verified_cleanup, allow_exit_without_backend_cleanup] {
+            for (requested, expected) in [(None, 1), (Some(0), 1), (Some(9), 9)] {
+                let coordinator = ExitCoordinator::default();
+                assert!(coordinator.request_normal_exit(requested));
+                let code = handoff(&coordinator);
+                assert_eq!(code, expected, "an unverified exit is not success");
+                assert!(coordinator.is_exit_allowed(), "bounded quit must still proceed");
+                assert!(!coordinator.cleanup_verified.load(Ordering::Acquire),
+                    "exit permission must not manufacture physical cleanup proof");
+                assert_eq!(coordinator.original_code(), requested.unwrap_or(0));
+                assert!(!coordinator.claim_fatal_exit(), "fatal dialogs still require cleanup proof");
+            }
+        }
+        let verified = ExitCoordinator::default();
+        assert!(verified.request_normal_exit(Some(0)));
+        verified.mark_cleanup_verified();
+        assert_eq!(verified.final_exit_code(), 0, "real cleanup still permits success");
+        assert!(verified.is_exit_allowed());
+    }
+
+    #[test]
+    fn process_exit_preserves_the_owned_cleanup_outcome_after_a_zero_runtime_return() {
+        for (requested, expected) in [(None, 1), (Some(0), 1), (Some(9), 9)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(requested));
+            allow_handoff_without_verified_cleanup(&coordinator);
+            assert_eq!(coordinator.process_exit_code(0), expected);
+            assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        }
+        for (requested, runtime, expected) in [(0, 0, 0), (0, 17, 17), (23, 0, 23)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(Some(requested)));
+            coordinator.mark_cleanup_verified();
+            assert_eq!(coordinator.process_exit_code(runtime), expected);
+        }
+    }
+
+    #[test]
+    fn process_exit_keeps_restart_ownership_and_rejects_unowned_success() {
+        let unowned = ExitCoordinator::default();
+        assert_eq!(unowned.process_exit_code(0), 1);
+        assert_eq!(unowned.process_exit_code(17), 17);
+        let fatal = ExitCoordinator::default();
+        fatal.mark_cleanup_verified();
+        assert!(fatal.claim_fatal_exit());
+        assert_eq!(fatal.process_exit_code(0), 1);
+        assert_eq!(fatal.process_exit_code(17), 17);
+        let restarting = ExitCoordinator::default();
+        assert!(restarting.request_restart());
+        restarting.allow_unverified_handoff();
+        for runtime in [0, 23, tauri::RESTART_EXIT_CODE] {
+            assert_eq!(restarting.process_exit_code(runtime), runtime);
+        }
+        assert!(!restarting.cleanup_verified.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unverified_restart_handoff_keeps_restart_ownership_without_cleanup_proof() {
+        for original in [0, 23, tauri::RESTART_EXIT_CODE] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(Some(original)));
+            assert!(!coordinator.request_restart());
+            assert_eq!(allow_handoff_without_verified_cleanup(&coordinator), original);
+            assert!(coordinator.is_restart_requested());
+            assert!(coordinator.is_exit_allowed());
+            assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        }
     }
 
     #[test]

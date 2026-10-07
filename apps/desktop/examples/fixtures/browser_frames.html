@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Frame route fixture</title>
+<style>
+  body { margin: 0; }
+  #foreign { position: absolute; left: 120px; top: 70px; width: 600px; height: 360px;
+    border: 7px solid #5353a5; padding: 4px; transform: scale(.9) rotate(3deg); transform-origin: top left; }
+  #same { position: absolute; left: 130px; top: 460px; width: 320px; height: 140px;
+    border: 3px solid #5353a5; transform: scale(.9); transform-origin: top left; }
+</style>
+<button id="root">Root button</button>
+<iframe id="foreign" src="http://localhost:__PORT__/frame-child"></iframe>
+<iframe id="same" src="/frame-same"></iframe>
+<script>
+  window.frameEvidence = [];
+  addEventListener('message', event => {
+    if (event.data?.nomiFrame) window.frameEvidence.push(event.data);
+  });
+</script>

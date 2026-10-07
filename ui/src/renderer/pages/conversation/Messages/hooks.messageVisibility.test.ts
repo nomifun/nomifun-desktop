@@ -39,6 +39,36 @@ const textMessage = (
 };
 
 describe('message visibility across batching and conversation switches', () => {
+  test('replaying a functional batch against the same snapshot never reuses a mutated index', () => {
+    const status: TMessage = {
+      id: 'status',
+      msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000041'),
+      conversation_id: conversationA,
+      type: 'agent_status',
+      position: 'left',
+      content: { backend: 'nomi', status: 'preparing' },
+    };
+    const tip: TMessage = {
+      id: 'tip',
+      msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000042'),
+      conversation_id: conversationA,
+      type: 'tips',
+      position: 'center',
+      content: { content: 'updated tip', type: 'success' },
+    };
+    const snapshot = [status, tip];
+    const pending = { current: [{ message: tip, add: false }, { message: status, add: false }] };
+    drainPendingMessageUpdates(pending, (updater) => {
+      const first = updater(snapshot);
+      expect(first).toEqual([status, tip]);
+      // React may replay an updater without committing its earlier result.
+      expect(updater(snapshot)).toEqual(first);
+      expect(updater(snapshot)).toEqual(first);
+    });
+    expect(snapshot).toEqual([status, tip]);
+    expect(pending.current).toEqual([]);
+  });
+
   test('authoritative empty replacement hides an earlier non-tail draft in place', () => {
     const segmentId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000031');
     const draft: TMessage = {
@@ -160,7 +190,7 @@ describe('message visibility across batching and conversation switches', () => {
 
   test('cleanup cancels the timer before synchronously draining without re-arming it', () => {
     const hookStart = source.indexOf('export const useAddOrUpdateMessage');
-    const hookEnd = source.indexOf('export const useKnowledgeWritebackEvents', hookStart);
+    const hookEnd = source.indexOf('export const useRemoveMessageByMsgId', hookStart);
     const hookSource = source.slice(hookStart, hookEnd);
     const cleanupStart = hookSource.indexOf('useEffect(() =>');
     const cleanupEnd = hookSource.indexOf('return useCallback(', cleanupStart);
@@ -174,16 +204,4 @@ describe('message visibility across batching and conversation switches', () => {
     expect(hookSource.match(/rafRef\.current = setTimeout\(flush\)/g)).toHaveLength(1);
   });
 
-  test('rejects an old conversation response before it can merge into the active list', () => {
-    const loadStart = source.indexOf('const loadMessages = useCallback');
-    const loadEnd = source.indexOf('// Prepend the next older window', loadStart);
-    const loadSource = source.slice(loadStart, loadEnd);
-    const activeGuard = loadSource.indexOf('activeConversationRef.current !== key');
-    const sequenceGuard = loadSource.indexOf('newestLoadSequenceRef.current !== loadSequence');
-    const merge = loadSource.indexOf('mergeIntoList(messages)');
-
-    expect(activeGuard).toBeGreaterThanOrEqual(0);
-    expect(sequenceGuard).toBeGreaterThan(activeGuard);
-    expect(merge).toBeGreaterThan(sequenceGuard);
-  });
 });

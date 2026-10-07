@@ -70,12 +70,13 @@ pub trait IRequirementRepository: Send + Sync {
     /// SQLite-allocated local technical ID.
     async fn insert(&self, row: &NewRequirementRow) -> Result<RequirementRow, DbError>;
 
-    /// Partial update by stable requirement ID. Returns `DbError::NotFound` if absent.
+    /// Atomically apply a partial update by stable requirement ID and return
+    /// the persisted row. Returns `DbError::NotFound` if absent.
     async fn update(
         &self,
         requirement_id: &str,
         params: &RequirementRowUpdate,
-    ) -> Result<(), DbError>;
+    ) -> Result<RequirementRow, DbError>;
 
     /// Stamp `updated_at` without replaying any previously-read business
     /// fields. Used for attachment-only mutations.

@@ -1,26 +1,34 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
+mod agent_store_reset;
+mod agent_store_clean_cut;
 mod database;
 mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
+mod session_projection;
+mod installation_role_bindings;
+pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
 
 pub use database::{
-    Database, MigrationLineageStatus, init_database, init_database_memory,
-    init_database_memory_with_owner, inspect_supported_migration_lineage,
-    open_database_for_backup, validate_current_migration_lineage,
+    Database, init_database, init_database_memory, init_database_memory_with_owner,
+    open_database_for_backup,
+    validate_current_migration_lineage, validate_known_migration_lineage_prefix,
 };
+pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};
+pub use agent_store_clean_cut::requires_agent_store_clean_cut;
 pub use error::DbError;
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};
+pub use session_projection::MessageDayBucket;
 pub use models::{
     AgentExecutionAttemptDetailRow, AgentExecutionAttemptRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
     AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
+    AttemptConversationEffects, PendingConversationEffect, RecoveryReviewBlock,
     AgentExecutionTemplateDetailRows, AgentExecutionTemplateParticipantRow,
     AgentExecutionTemplateRow,
     AgentMetadataRow,
-    ConversationArtifactRow, IdmmActionReservationRow,
     CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioAgentProposalReceiptRow,
     CreativeStudioProjectRow, CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, CronJobRunRow,
     CronRunReservationRow,
@@ -38,17 +46,12 @@ pub use models::{
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
     WorkshopAssetRow, ConversationExecutionLinkRow,
+    NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };
 pub use models::{
-    CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
-    PresetKnowledgeBaseRow, PresetKnowledgePolicyRow, PresetLocalizationRow,
-    PresetModelPreferenceRow, PresetRecord, PresetRow, PresetSkillBindingRow,
-    PresetTagBindingRow, PresetTagRow, PresetUserStateRow, PresetWriteParams,
-    UpdatePresetTagParams, UpsertPresetStateParams,
-};
-pub use models::{
-    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
-    NewCsAgentRow,
+    CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
+    CS_HANDOFF_STATUS_RESOLVED, CsAgentCapabilityReceiptRow, CsAgentRow, CsAuditEventRow,
+    CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow, NewCsAgentRow,
 };
 pub use models::{
     NewProviderModel, NewProviderModelCapability, ProviderConnectionRow,
@@ -57,41 +60,30 @@ pub use models::{
 };
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::customer_service::{
-    CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
+    CsDialogueKey, CsHandoffRequestResult, CsNoteWriteMutation, CsNoteWriteReceipt,
+    ICustomerServiceRepository, UpdateCsAgentParams,
 };
 pub use repository::customer_service_search::{
     CsNoteSearchHit, NoteMatchChannel, backfill_note_search_text, fts_rebuild, note_search_text,
 };
 pub use repository::SqliteCustomerServiceRepository;
-pub use repository::conversation::{
-    ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
-    CreativeStudioConversationTurnAuthority,
-    ConversationTurnAdmissionState,
-    ConversationRowUpdate, MessageDayBucket, MessageRowUpdate, MessageSearchRow, SortOrder,
-    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-    RequirementConversationTurnAuthority,
-    TurnArtifactMessageCommit, TurnLifecycleTransition, TurnReceiptCompletion,
-    UnsettledConversationTurnAdmission,
-};
 pub use repository::cron::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
     FinalizeCronRunParams, ReserveCronRunParams,
     UpdateCronJobParams,
 };
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
-pub use repository::miniapp::{CreateMiniAppParams, IMiniAppRepository, UpdateMiniAppParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::ssh_host::{
     CreateSshHostParams, ISshHostRepository, UpdateSshHostParams,
 };
-pub use repository::SqliteMiniAppRepository;
-pub use models::{MiniAppDocumentRow, MiniAppRow};
 pub use repository::SqliteSshHostRepository;
 pub use models::SshHostRow;
 pub use repository::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionAttemptRecoveryDisposition,
-    AgentExecutionAttemptRecoveryResult, AgentExecutionLeaseToken, AgentExecutionTurnAuthority,
+    AgentExecutionAttemptRecoveryResult, AgentExecutionAttemptSessionKind,
+    AgentExecutionLeaseToken, AgentExecutionTurnAuthority,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
     AppendAgentExecutionStepsParams,
     AttemptConversationEffectParams, CreateAgentExecutionAttemptParams,
@@ -101,15 +93,15 @@ pub use repository::{
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     NewAgentExecutionTemplateParticipant, UpdateAgentExecutionTemplateParams,
     LoopRepeatResetParams,
-    RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    RecoveredAgentExecutionAttemptOutput,
+    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     CreateTerminalParams,
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,
     PairingApprovalOutcome, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
     IClientPreferenceRepository, IInstanceTokenRepository, KNOWLEDGE_RETRIEVAL_KEY,
-    IConversationRepository, ICronRepository, IIdmmInterventionRepository,
-    IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
-    IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
+    ICronRepository,
+    IKnowledgeRepository,
     IKnowledgeEntryRepository, IKnowledgeSourceRepository, IKnowledgeTreeOperationRepository,
     KnowledgeEntryMutation,
     KnowledgeProjectionReplacement,
@@ -120,15 +112,12 @@ pub use repository::{
     IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
-    MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
-    ReserveIdmmActionParams, ResolveCreativeStudioAgentSessionParams,
-    ResolvedCreativeStudioAgentSession,
     SqliteAgentMetadataRepository, SqliteAttachmentRepository,
     SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteInstanceTokenRepository,
-    SqliteConversationRepository, SqliteCronRepository,
-    SqliteIdmmInterventionRepository, SqliteKnowledgeRepository,
+    SqliteCronRepository,
+    SqliteKnowledgeRepository,
     SqliteKnowledgeTreeOperationRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
@@ -138,7 +127,13 @@ pub use repository::{
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionScope, TerminalTurnEffectsStart,
-    TerminalTurnOutcome, TerminalTurnSettlement, TTL_MS,
+    TerminalTurnOutcome, TerminalTurnSettlement,
+};
+pub use repository::{
+    AppendNomiRemoteEventParams, AppendNomiRemoteEventResult, CreateRemoteBindingParams,
+    GetOrCreateRemoteSessionParams, IRemoteBindingRepository, NomiRemoteStateTransitionResult,
+    RemoteOpenResult, SqliteRemoteBindingRepository, TransitionNomiRemoteSessionParams,
+    UpdateRemoteBindingParams,
 };
 pub use repository::{
     BindManagedKnowledgeEntryParams, CreateKnowledgeSourceItemParams,
@@ -152,17 +147,12 @@ pub use repository::{
     MAX_KNOWLEDGE_TREE_OPERATION_PAGE_SIZE, PrepareKnowledgeTreeOperationParams,
     PreparedKnowledgeTreeOperation,
 };
-pub use repository::{
-    IPresetRepository, IPresetStateRepository, IPresetTagRepository,
-    SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository,
-};
-// 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
+// 创作 (Creation) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
     ApplyCreativeAgentProposalParams, AssetSort, CreateCreativeTaskParams,
-    CreationTaskPageCursorRef, CreativeAgentProposalCommit, CreativeTaskOwnerRef,
+    CreativeAgentProposalCommit, CreativeTaskOwnerRef,
     ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
-    ListStandaloneWorkbenchTasksParams, PromptLibraryAssetIdentity,
-    RetireStandaloneWorkbenchTasksParams,
+    PromptLibraryAssetIdentity,
     SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateAssetParams,
     UpdateCreationTaskParams,
 };

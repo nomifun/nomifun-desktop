@@ -8,7 +8,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use std::io::Result;
 
 /// MEMORY.md entrypoint filename.
 pub const ENTRYPOINT_NAME: &str = "MEMORY.md";

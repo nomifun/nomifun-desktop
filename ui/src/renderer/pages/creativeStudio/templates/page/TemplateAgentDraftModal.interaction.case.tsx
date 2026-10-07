@@ -94,7 +94,7 @@ const run = async (): Promise<void> => {
 
   try {
     const portalRoot = document.createElement('div');
-    portalRoot.id = 'creative-studio-portal-root';
+    portalRoot.id = 'resource-page-portal-root';
     document.body.append(portalRoot);
 
     render(
@@ -117,7 +117,7 @@ const run = async (): Promise<void> => {
     fireEvent.click(modal.getByRole('combobox', { name: 'Chat model' }));
 
     const option = await screen.findByRole('option', {
-      name: 'qa-template-chat openai.chat_text',
+      name: 'qa-template-chat',
     });
     assert.equal(dialog.contains(option), true, 'the popup must remain inside the FocusLock');
     fireEvent.click(option);

@@ -3,12 +3,9 @@ use nomi_protocol::events::{Capabilities, ProtocolEvent};
 #[test]
 fn capabilities_serialize_with_all_fields() {
     let caps = Capabilities {
-        tool_approval: true,
         thinking: true,
         effort: false,
         effort_levels: vec![],
-        modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-        current_mode: "default".into(),
         mcp: true,
     };
     let event = ProtocolEvent::Ready {
@@ -28,19 +25,15 @@ fn capabilities_serialize_with_all_fields() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(parsed["capabilities"]["modes"].as_array().unwrap().len(), 3);
-    assert_eq!(parsed["capabilities"]["current_mode"], "default");
+    assert_eq!(parsed["capabilities"].as_object().unwrap().len(), 4);
 }
 
 #[test]
 fn config_changed_event_serializes_correctly() {
     let caps = Capabilities {
-        tool_approval: true,
         thinking: false,
         effort: true,
         effort_levels: vec!["low".into(), "medium".into(), "high".into()],
-        modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-        current_mode: "default".into(),
         mcp: false,
     };
     let event = ProtocolEvent::ConfigChanged { capabilities: caps };
@@ -54,12 +47,9 @@ fn config_changed_event_serializes_correctly() {
 #[test]
 fn capabilities_with_effort_levels_roundtrip() {
     let caps = Capabilities {
-        tool_approval: true,
         thinking: false,
         effort: true,
         effort_levels: vec!["low".into(), "medium".into(), "high".into()],
-        modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-        current_mode: "default".into(),
         mcp: true,
     };
     let event = ProtocolEvent::Ready {

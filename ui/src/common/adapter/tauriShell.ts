@@ -15,8 +15,8 @@
  *   - In the WebUI browser       → providers return a web-safe fallback and
  *                                  emitters are inert (no transport, no throw).
  *
- * Operations with no Tauri equivalent (Chrome DevTools Protocol, GPU-process
- * recovery, devtools open/close, renderer-log piping, WebUI-server lifecycle,
+ * Operations with no Tauri equivalent (GPU-process recovery,
+ * WebUI-server lifecycle,
  * close-to-tray window behavior) are intentionally DEGRADED to safe stubs here
  * — marked `DEGRADE_STUB`. They no longer depend on the deleted `@/platform`
  * bridge. Each carries a TODO if a real Tauri port is wanted later.
@@ -226,6 +226,18 @@ export async function tauriSetAutostart(enabled: boolean): Promise<void> {
 }
 
 /** Native OS notification (tauri-plugin-notification). */
+export type TauriNotificationPermissionState = 'default' | 'denied' | 'granted' | 'unavailable';
+
+export async function tauriNotificationPermissionState(): Promise<TauriNotificationPermissionState> {
+  if (typeof window === 'undefined' || typeof window.Notification === 'undefined') return 'unavailable';
+  return window.Notification.permission;
+}
+
+export async function tauriRequestNotificationPermission(): Promise<TauriNotificationPermissionState> {
+  const mod = await import('@tauri-apps/plugin-notification');
+  return mod.requestPermission();
+}
+
 export async function tauriSendNotification(opts: { title: string; body: string; icon?: string }): Promise<void> {
   const mod = await import('@tauri-apps/plugin-notification');
   let granted = await mod.isPermissionGranted();

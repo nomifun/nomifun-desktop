@@ -35,7 +35,6 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         TEST_KEY,
         http_client.clone(),
         VersionCheckService::new(http_client, "0.1.0".to_owned()),
-        None,
         std::env::temp_dir(),
         std::env::temp_dir(),
         false,
@@ -151,36 +150,55 @@ async fn fetch_models_vertex_ai_rejects_the_retired_mixed_preset() {
 }
 
 #[tokio::test]
-async fn fetch_models_minimax_hardcoded() {
+async fn fetch_models_minimax_returns_the_live_catalog_including_future_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("Authorization", "Bearer minimax-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "MiniMax-M3"}, {"id": "MiniMax-future-account-model"}]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
     let (router, db) = setup().await;
-    let id = create_provider(&db, "minimax", "https://unused", "fake-key").await;
-    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let id = create_provider(&db, "minimax", &format!("{}/v1", mock_server.uri()), "minimax-key").await;
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({"try_fix": false}));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
-    assert!(models.iter().any(|model| model["id"] == "MiniMax-M2.7"));
-    assert!(!models.iter().any(|model| model["id"] == "MiniMax-Text-01"));
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["id"], "MiniMax-M3");
+    assert_eq!(models[1]["id"], "MiniMax-future-account-model");
 }
 
 #[tokio::test]
-async fn fetch_models_mimo_falls_back_to_supported_chat_models() {
+async fn fetch_models_mimo_returns_the_live_catalog_including_future_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("Authorization", "Bearer mimo-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "mimo-v2.6-pro"}, {"id": "mimo-future-account-model"}]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
     let (router, db) = setup().await;
-    let id = create_provider(&db, "mimo", "https://unused", "fake-key").await;
-    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let id = create_provider(&db, "mimo", &format!("{}/v1", mock_server.uri()), "mimo-key").await;
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({"try_fix": false}));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "mimo-v2.5-pro")
-    );
-    assert!(models.iter().any(|model| model["id"] == "mimo-v2.5"));
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["id"], "mimo-v2.6-pro");
+    assert_eq!(models[1]["id"], "mimo-future-account-model");
 }
 
 #[tokio::test]
@@ -202,21 +220,29 @@ async fn fetch_models_mimo_token_plan_falls_back_to_supported_chat_models() {
 }
 
 #[tokio::test]
-async fn fetch_models_minimax_code_falls_back_to_supported_coding_models() {
+async fn fetch_models_minimax_international_returns_the_live_catalog() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("Authorization", "Bearer minimax-international-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "MiniMax-M3"}, {"id": "MiniMax-future-international-model"}]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
     let (router, db) = setup().await;
-    let id = create_provider(&db, "minimax-code", "https://unused", "fake-key").await;
-    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let id = create_provider(&db, "minimax-code", &format!("{}/v1", mock_server.uri()), "minimax-international-key").await;
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({"try_fix": false}));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "MiniMax-M2.7-highspeed")
-    );
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["id"], "MiniMax-M3");
+    assert_eq!(models[1]["id"], "MiniMax-future-international-model");
 }
 
 #[tokio::test]
@@ -246,7 +272,9 @@ async fn fetch_models_stepfun_plan_falls_back_to_supported_coding_models() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
     let models = json["data"]["models"].as_array().unwrap();
+    assert!(models.iter().any(|model| model["id"] == "step-5-preview"));
     assert!(
         models
             .iter()
@@ -260,7 +288,38 @@ async fn fetch_models_stepfun_plan_falls_back_to_supported_coding_models() {
 }
 
 #[tokio::test]
-async fn fetch_models_glm_coding_plan_falls_back_to_supported_coding_models() {
+async fn fetch_models_anonymous_stepfun_plan_does_not_request_a_standard_catalog() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+
+    let (router, _) = setup().await;
+    let req = post_request(
+        "/api/providers/fetch-models",
+        json!({
+            "platform": "stepfun-plan",
+            "base_url": format!("{}/step_plan/v1", mock_server.uri()),
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["plan-test-only-key"]},
+            "try_fix": true,
+        }),
+    );
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
+    assert!(json["data"].get("fixed_base_url").is_none());
+    let models = json["data"]["models"].as_array().unwrap();
+    assert!(models.iter().any(|model| model["id"] == "step-3.7-flash"));
+    assert!(models.iter().any(|model| model["id"] == "step-5-preview"));
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fetch_models_glm_coding_plan_returns_current_documented_suggestions() {
     let (router, db) = setup().await;
     let id = create_provider(&db, "glm-coding-plan", "https://unused", "fake-key").await;
     let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
@@ -268,10 +327,11 @@ async fn fetch_models_glm_coding_plan_falls_back_to_supported_coding_models() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "official_documentation");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model["id"] == "glm-5.2"));
-    assert!(models.iter().any(|model| model["id"] == "glm-5-turbo"));
-    assert!(models.iter().any(|model| model["id"] == "glm-4.7"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5.3"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5.3-flash"));
+    assert!(!models.iter().any(|model| model["id"] == "glm-5.3-flashx"));
 }
 
 #[tokio::test]
@@ -312,8 +372,8 @@ async fn fetch_models_ark_coding_plan_falls_back_to_supported_coding_models() {
 
 #[tokio::test]
 async fn fetch_models_ark_agent_plan_uses_remote_catalog_when_available() {
-    // When the Agent Plan endpoint serves an OpenAI-style /models catalog,
-    // that live list is returned verbatim.
+    // A custom Agent Plan gateway can expose an OpenAI-compatible catalog.
+    // This contract does not claim the official subscription root has one.
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
@@ -331,6 +391,7 @@ async fn fetch_models_ark_agent_plan_uses_remote_catalog_when_available() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
     assert_eq!(models[0]["id"], "doubao-seed-2.0-code");
@@ -338,32 +399,65 @@ async fn fetch_models_ark_agent_plan_uses_remote_catalog_when_available() {
 }
 
 #[tokio::test]
-async fn fetch_models_ark_agent_plan_falls_back_when_catalog_unavailable() {
-    // The plan gateway commonly only routes /chat/completions and 404s on
-    // /models. That must not surface as an error — the known switchable set
-    // is returned instead, always including the ark-code-latest router alias.
+async fn fetch_models_ark_agent_custom_gateway_preserves_catalog_rejection() {
+    // An unknown custom gateway's failure cannot be replaced with an official
+    // subscription list that says nothing about this gateway's available IDs.
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
-        .respond_with(ResponseTemplate::new(404))
+        .and(header("Authorization", "Bearer plan-key"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
     let (router, db) = setup().await;
     let id = create_provider(&db, "ark-agent-plan", &mock_server.uri(), "plan-key").await;
-    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({"try_fix": false}));
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(body["data"].get("models").is_none());
+    assert!(body["data"].get("catalog_source").is_none());
+}
 
-    let json = body_json(resp).await;
-    let models = json["data"]["models"].as_array().unwrap();
-    assert!(
-        models
-            .iter()
-            .any(|model| model["id"] == "ark-code-latest")
+#[tokio::test]
+async fn fetch_models_official_ark_agent_plan_uses_documentation_without_network() {
+    let mock_server = MockServer::start().await;
+    // Any accidental request, including HTTPS CONNECT, can only reach this
+    // local proxy. The test never sends credentials to the official service.
+    let http_client = reqwest::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::all(mock_server.uri()).unwrap())
+        .build()
+        .unwrap();
+    let db = init_database_memory().await.unwrap();
+    let state = common::build_system_state(
+        &db,
+        TEST_KEY,
+        http_client.clone(),
+        VersionCheckService::new(http_client, "0.1.0".to_owned()),
+        std::env::temp_dir(),
+        std::env::temp_dir(),
+        false,
     );
-    // No fixed_base_url — the known-correct base is never auto-rewritten.
-    assert!(json["data"].get("fixed_base_url").is_none());
+    let router = system_routes(state);
+    let base_url = "https://ark.cn-beijing.volces.com/api/plan/v3";
+    let id = create_provider(&db, "ark-agent-plan", base_url, "plan-test-only-key").await;
+    let response = router.oneshot(post_request(
+        &format!("/api/providers/{id}/models"), json!({"try_fix": true}),
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["data"]["catalog_source"], "official_documentation");
+    let models = body["data"]["models"].as_array().unwrap();
+    for id in ["ark-code-latest", "glm-5.3", "minimax-m3", "doubao-seed-2.1-pro"] {
+        assert!(models.iter().any(|model| model["id"] == id));
+    }
+    assert!(body["data"].get("fixed_base_url").is_none());
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+    let stored = SqliteProviderRepository::new(db.pool().clone()).find_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(stored.base_url, base_url);
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +494,58 @@ async fn fetch_models_openai_compatible_success() {
     assert_eq!(models.len(), 2);
     assert_eq!(models[0]["id"], "gpt-4o");
     assert_eq!(models[1]["id"], "gpt-4o-mini");
+    assert!(models.iter().all(|model| model["tasks_source"] == "inferred"));
+}
+
+#[tokio::test]
+async fn fetch_models_keeps_live_ids_distinct_from_task_evidence() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id":"opaque-future-id"},
+                {"id":"custom-whisper-id"},
+                {"id":"gpt-image-1"}
+            ]
+        }))).expect(1).mount(&mock_server).await;
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "openai", &mock_server.uri(), "test-api-key").await;
+    let response = router.oneshot(post_request(
+        &format!("/api/providers/{id}/models"), json!({"try_fix":false})
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["data"]["catalog_source"], "remote");
+    let models = body["data"]["models"].as_array().unwrap();
+    assert_eq!(models[0]["tasks"], json!(["chat"]));
+    assert_eq!(models[0]["tasks_source"], "inferred");
+    assert_eq!(models[1]["tasks"], json!(["speech_recognition"]));
+    assert_eq!(models[1]["tasks_source"], "inferred");
+    assert_eq!(models[2]["tasks_source"], "official_documentation");
+}
+
+#[tokio::test]
+async fn fetch_models_preserves_native_speech_task_evidence_to_the_client() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Token test-api-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stt":[{"canonical_name":"opaque-input-id"}],
+            "tts":[{"canonical_name":"opaque-output-id"}]
+        }))).expect(1).mount(&mock_server).await;
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "deepgram", &mock_server.uri(), "test-api-key").await;
+    let response = router.oneshot(post_request(
+        &format!("/api/providers/{id}/models"), json!({"try_fix":false})
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let models = body["data"]["models"].as_array().unwrap();
+    assert_eq!(models[0]["tasks"], json!(["speech_recognition"]));
+    assert_eq!(models[1]["tasks"], json!(["speech_synthesis"]));
+    assert!(models.iter().all(|model| model["tasks_source"] == "provider_declared"));
 }
 
 #[tokio::test]
@@ -424,9 +570,41 @@ async fn fetch_models_stepfun_prefers_live_catalog() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models[0]["id"], "step-live-model");
     assert_eq!(models[1]["id"], "step-live-vision");
+}
+
+#[tokio::test]
+async fn fetch_models_anonymous_stepfun_returns_catalog_rejection_without_success() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("Authorization", "Bearer step-test-only-key"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let (router, _) = setup().await;
+    let req = post_request(
+        "/api/providers/fetch-models",
+        json!({
+            "platform": "stepfun",
+            "base_url": format!("{}/v1", mock_server.uri()),
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys":["step-test-only-key"]},
+            "try_fix": false,
+        }),
+    );
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["code"], "BAD_REQUEST");
+    assert!(json["error"].as_str().unwrap().contains("400 Bad Request"));
+    assert!(!json.to_string().contains("step-test-only-key"));
+    assert!(json.get("data").is_none_or(serde_json::Value::is_null));
 }
 
 #[tokio::test]
@@ -894,24 +1072,36 @@ async fn fetch_models_anonymous_rejects_empty_api_key() {
 }
 
 #[tokio::test]
-async fn fetch_models_anonymous_minimax_hardcoded() {
-    // Hardcoded-list platforms work without hitting any remote endpoint.
+async fn fetch_models_anonymous_minimax_returns_the_live_catalog() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("Authorization", "Bearer anonymous-minimax-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "MiniMax-M3"}, {"id": "MiniMax-future-anonymous-model"}]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
     let (router, _db) = setup().await;
     let req = post_request(
         "/api/providers/fetch-models",
         json!({
             "platform": "minimax",
-            "base_url": "https://unused",
+            "base_url": format!("{}/v1", mock_server.uri()),
             "auth_scheme": "bearer",
-            "credentials": {"api_keys":["fake"]}
+            "credentials": {"api_keys":["anonymous-minimax-key"]},
+            "try_fix": false,
         }),
     );
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
+    assert_eq!(json["data"]["catalog_source"], "remote");
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
-    assert!(!models.iter().any(|model| model["id"] == "MiniMax-Text-01"));
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["id"], "MiniMax-M3");
+    assert_eq!(models[1]["id"], "MiniMax-future-anonymous-model");
 }
 
 #[tokio::test]

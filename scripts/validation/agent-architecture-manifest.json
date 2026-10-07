@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_kind": "agent-architecture-manifest",
+  "status": "active",
+  "states": [
+    "active",
+    "complete"
+  ],
+  "platform_states": [
+    "implemented_unverified",
+    "verified",
+    "not_applicable"
+  ],
+  "tasks": [
+    {
+      "id": "AGENT-ARCHITECTURE",
+      "status": "active",
+      "depends_on": [],
+      "platforms": {
+        "windows": "verified",
+        "macos": "implemented_unverified"
+      }
+    }
+  ]
+}

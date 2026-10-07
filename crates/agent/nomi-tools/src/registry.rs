@@ -7,6 +7,10 @@ use serde_json::Value;
 
 use crate::Tool;
 
+#[path = "registry/deferred_search.rs"]
+pub(crate) mod deferred_search;
+use deferred_search::DeferredSearchSnapshot;
+
 pub(crate) const MAX_DEFERRED_SEARCH_MATCHES: usize = 5;
 const RESERVED_PROVIDER_NAME_PREFIXES: &[&str] = &["mcp__"];
 const MAX_TOOL_SCHEMA_BYTES: usize = 512 * 1024;
@@ -34,8 +38,9 @@ pub struct DeferredToolState {
 
 #[derive(Default)]
 struct DeferredToolStateInner {
+    discovery_policy: Option<Arc<dyn crate::tool_search::ToolDiscoveryPolicy>>,
     /// Search catalog keyed by the current provider-visible display name.
-    catalog: BTreeMap<String, DeferredCatalogEntry>,
+    catalog: BTreeMap<String, Arc<DeferredCatalogEntry>>,
     /// Stable activation identities, never provider-visible display aliases.
     activated: BTreeSet<String>,
     /// Restored session activations whose dynamic tools are not registered yet.
@@ -52,6 +57,34 @@ struct DeferredCatalogEntry {
 }
 
 impl DeferredToolState {
+    pub(crate) fn has_discovery_policy(&self) -> bool {
+        self.inner.read().unwrap_or_else(|p| p.into_inner()).discovery_policy.is_some()
+    }
+
+    pub(crate) async fn search_and_activate_with_policy(&self, query: &str) -> Result<Vec<ToolDef>, &'static str> {
+        let selected = {
+            let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
+            inner.discovery_policy.clone().map(|policy| (policy, DeferredSearchSnapshot::capture(&inner)))
+        };
+        let Some((policy, snapshot)) = selected else {
+            return Ok(self.search_and_activate(query));
+        };
+        let input = crate::tool_search::ToolDiscoveryInput {
+            query: query.to_owned(), candidates: snapshot.candidates(), limit: MAX_DEFERRED_SEARCH_MATCHES,
+        };
+        // Bound IPC metadata as a whole, without silently truncating candidates
+        // or substituting the built-in policy chosen by a different user.
+        if query.len() > 4096 || serde_json::to_vec(&input).map_err(|_| "Discovery input could not be encoded")?.len() > 256 * 1024 {
+            return Err("Discovery metadata exceeds the 256 KiB policy input budget (query limit 4 KiB)");
+        }
+        let names = tokio::time::timeout(std::time::Duration::from_secs(5), policy.select(input))
+            .await.map_err(|_| "Selected discovery policy timed out; no tools were activated")?
+            .map_err(|error| {
+                tracing::warn!(%error, "Selected tool discovery policy failed");
+                "Selected discovery policy failed; no tools were activated"
+            })?;
+        snapshot.activate(&mut self.inner.write().unwrap_or_else(|p| p.into_inner()), &names)
+    }
     /// Whether this tool's full schema should be sent to the provider.
     pub fn is_activated(&self, identity: &str) -> bool {
         self.inner
@@ -170,11 +203,11 @@ impl DeferredToolState {
             let display_name = definition.name.clone();
             inner.catalog.insert(
                 display_name,
-                DeferredCatalogEntry {
+                Arc::new(DeferredCatalogEntry {
                     definition,
                     activation_identity: activation_identity.clone(),
                     search_aliases,
-                },
+                }),
             );
             if inner.pending_restored.remove(&activation_identity) {
                 inner.activated.insert(activation_identity);
@@ -223,72 +256,17 @@ impl DeferredToolState {
     /// sharing that alias (bounded by the cap). Prefix/substring/description
     /// matches follow. Aliases are lookup-only and never authorize execution.
     pub(crate) fn search_and_activate(&self, query: &str) -> Vec<ToolDef> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
-            return Vec::new();
-        }
         let mut inner = self
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut ranked: Vec<(u8, DeferredCatalogEntry)> = inner
-            .catalog
-            .values()
-            .filter_map(|entry| {
-                let definition = &entry.definition;
-                let name = definition.name.to_lowercase();
-                let description = definition.description.to_lowercase();
-                let rank = if name == query {
-                    0
-                } else if entry.search_aliases.iter().any(|alias| alias == &query) {
-                    1
-                } else if name.starts_with(&query) {
-                    2
-                } else if entry
-                    .search_aliases
-                    .iter()
-                    .any(|alias| alias.starts_with(&query))
-                {
-                    3
-                } else if name.contains(&query) {
-                    4
-                } else if entry
-                    .search_aliases
-                    .iter()
-                    .any(|alias| alias.contains(&query))
-                {
-                    5
-                } else if description.contains(&query) {
-                    6
-                } else {
-                    return None;
-                };
-                Some((rank, entry.clone()))
-            })
-            .collect();
-        ranked.sort_by(|(left_rank, left), (right_rank, right)| {
-            left_rank
-                .cmp(right_rank)
-                .then_with(|| left.definition.name.cmp(&right.definition.name))
-        });
-        let exact_rank = ranked
-            .first()
-            .map(|(rank, _)| *rank)
-            .filter(|rank| *rank <= 1);
-        let matches: Vec<DeferredCatalogEntry> = ranked
-            .into_iter()
-            .take_while(|(rank, _)| exact_rank.is_none_or(|exact| *rank == exact))
-            .take(MAX_DEFERRED_SEARCH_MATCHES)
-            .map(|(_, entry)| entry)
-            .collect();
-        for entry in &matches {
-            inner.pending_restored.remove(&entry.activation_identity);
-            inner.activated.insert(entry.activation_identity.clone());
-        }
-        matches
-            .into_iter()
-            .map(|entry| entry.definition)
-            .collect()
+        // The built-in still executes under one lock. Ranking itself has no
+        // access to activation state; committing validates the whole selection
+        // against the captured entries before changing any Session identities.
+        let snapshot = DeferredSearchSnapshot::capture(&inner);
+        let names = snapshot.rank(query);
+        snapshot.activate(&mut inner, &names)
+            .expect("built-in ranking selects unique current catalog entries within the cap")
     }
 }
 
@@ -323,6 +301,7 @@ pub struct ToolRegistry {
     input_contracts: BTreeMap<String, ToolInputContract>,
     deferred_state: DeferredToolState,
     registration_policy: RegistrationPolicy,
+    forced_deferred: BTreeSet<String>,
 }
 
 /// The exact schema advertised for a registered route and its compiled
@@ -340,12 +319,24 @@ impl Default for ToolRegistry {
     }
 }
 impl ToolRegistry {
+    /// Installed by the Session host from its frozen selection, not model input.
+    /// Replacing a running Session's policy requires rebuilding that Session.
+    pub fn install_discovery_policy(&mut self, policy: Arc<dyn crate::tool_search::ToolDiscoveryPolicy>) -> Result<(), &'static str> {
+        let mut inner = self.deferred_state.inner.write().unwrap_or_else(|p| p.into_inner());
+        if inner.discovery_policy.is_some() {
+            return Err("Session discovery policy is already installed");
+        }
+        inner.discovery_policy = Some(policy);
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             tools: Vec::new(),
             input_contracts: BTreeMap::new(),
             deferred_state: DeferredToolState::default(),
             registration_policy: RegistrationPolicy::Unrestricted,
+            forced_deferred: BTreeSet::new(),
         }
     }
 
@@ -451,6 +442,26 @@ impl ToolRegistry {
         true
     }
 
+    /// Remove and return one registered route without weakening the persistent
+    /// registration policy.
+    ///
+    /// Trusted hosts use this to decorate an already-authorized route while
+    /// preserving its exact schema, activation identity, and authority. The
+    /// returned route can only be registered again if the existing persistent
+    /// allow policy still permits its provider-visible name.
+    pub fn take_registered(&mut self, name: &str) -> Option<Box<dyn Tool>> {
+        let index = self.tools.iter().position(|tool| tool.name() == name)?;
+        let tool = self.tools.remove(index);
+        self.input_contracts.remove(name);
+        let retained_names = self
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect::<BTreeSet<_>>();
+        self.deferred_state.retain_definitions(&retained_names);
+        Some(tool)
+    }
+
     fn registration_policy_allows(&self, name: &str) -> bool {
         if self.registration_policy.allows(name) {
             return true;
@@ -528,7 +539,7 @@ impl ToolRegistry {
             name: name.clone(),
             description: tool.description().to_string(),
             input_schema: input_schema.clone(),
-            deferred: tool.is_deferred(),
+            deferred: self.is_deferred_tool(tool.as_ref()),
         };
         self.tools.push(tool);
         self.input_contracts.insert(
@@ -549,6 +560,7 @@ impl ToolRegistry {
         self.input_contracts.clear();
         self.deferred_state.clear();
         self.registration_policy = RegistrationPolicy::DenyAll;
+        self.forced_deferred.clear();
     }
 
     /// Find a tool by name
@@ -655,7 +667,7 @@ impl ToolRegistry {
         self.tools
             .iter()
             .filter(|tool| {
-                tool.is_deferred()
+                self.is_deferred_tool(tool.as_ref())
                     && !self
                         .deferred_state
                         .is_activated(tool.activation_identity())
@@ -695,7 +707,7 @@ impl ToolRegistry {
             name: tool.name().to_string(),
             description: tool.description().to_string(),
             input_schema: contract.schema.clone(),
-            deferred: tool.is_deferred()
+            deferred: self.is_deferred_tool(tool)
                 && !self
                     .deferred_state
                     .is_activated(tool.activation_identity()),
@@ -710,6 +722,11 @@ impl ToolRegistry {
         if allowed.is_empty() {
             return;
         }
+        self.retain_only_named(allowed);
+    }
+
+    /// Apply an exact allowlist, including deny-all when the list is empty.
+    pub fn retain_only_named(&mut self, allowed: &[String]) {
         self.registration_policy
             .retain(allowed.iter().cloned().collect());
         let policy = &self.registration_policy;
@@ -718,7 +735,26 @@ impl ToolRegistry {
             self.tools.iter().map(|tool| tool.name().to_owned()).collect();
         self.input_contracts
             .retain(|name, _| retained_names.contains(name));
+        self.forced_deferred
+            .retain(|name| policy.allows(name));
         self.deferred_state.retain_definitions(&retained_names);
+    }
+
+    /// Mark an exact host-authorized subset as ToolSearch-activated. This is a
+    /// presentation/activation policy over already allowed routes, never a
+    /// grant: names absent from the registry or later removed by `retain_named`
+    /// remain unavailable.
+    pub fn force_deferred_named(&mut self, names: &[String]) {
+        self.forced_deferred = names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+
+    fn is_deferred_tool(&self, tool: &dyn Tool) -> bool {
+        tool.is_deferred() || self.forced_deferred.contains(tool.name())
     }
 }
 
@@ -1529,6 +1565,22 @@ fn json_value_kind(value: &Value) -> &'static str {
     }
 }
 
+/// Validate an already-authorized exact target before exposing its arguments
+/// to a hook. Uses the same bounded schema compiler as registered tools and
+/// emits a non-reflective error: invalid argument values stay at the host.
+pub fn validate_tool_input_schema(
+    tool_name: &str,
+    schema: &Value,
+    input: &Value,
+) -> Result<(), String> {
+    let validator = compile_input_validator(tool_name, schema)
+        .map_err(|_| "MCP target input schema is unavailable or invalid; refresh the authorized tool catalog".to_owned())?;
+    if !validator.is_valid(input) {
+        return Err("MCP target arguments do not match its actual input schema; correct the arguments using the discovered tool schema".to_owned());
+    }
+    Ok(())
+}
+
 fn compile_input_validator(tool_name: &str, schema: &Value) -> Result<Validator, String> {
     let Some(schema_object) = schema.as_object() else {
         return Err("tool input schema must be a JSON object".to_string());
@@ -2323,6 +2375,21 @@ mod tests {
     }
 
     #[test]
+    fn take_registered_returns_the_exact_route_without_weakening_policy() {
+        let mut registry = ToolRegistry::new();
+        assert!(registry.register(make_tool("decorated", "original")));
+        registry.retain_named(&["decorated".to_owned()]);
+
+        let tool = registry
+            .take_registered("decorated")
+            .expect("registered route");
+        assert_eq!(tool.description(), "original");
+        assert!(registry.get("decorated").is_none());
+        assert!(registry.register(tool));
+        assert!(!registry.register(make_tool("outside-policy", "denied")));
+    }
+
+    #[test]
     fn test_tool_names() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("alpha", "first tool"));
@@ -2637,6 +2704,35 @@ mod tests {
         let definition = registry.to_tool_defs().pop().unwrap();
         assert!(!definition.deferred);
         assert_eq!(definition.input_schema["properties"]["x"]["type"], "string");
+    }
+
+    #[test]
+    fn forced_deferred_policy_survives_exact_allowlist_before_late_registration() {
+        let mut registry = ToolRegistry::new();
+        registry.force_deferred_named(&["knowledge_search".to_owned()]);
+        registry.retain_only_named(&[
+            "ToolSearch".to_owned(),
+            "knowledge_search".to_owned(),
+        ]);
+
+        assert!(registry.register(make_tool(
+            "knowledge_search",
+            "late target-scoped knowledge tool",
+        )));
+        let definition = registry
+            .to_tool_defs()
+            .into_iter()
+            .find(|definition| definition.name == "knowledge_search")
+            .expect("late knowledge tool definition");
+        assert!(
+            definition.deferred,
+            "a host-deferred dynamic tool must remain hidden until ToolSearch activates it"
+        );
+        assert!(
+            registry
+                .provider_deferred_tool_names()
+                .contains("knowledge_search")
+        );
     }
 
     #[test]

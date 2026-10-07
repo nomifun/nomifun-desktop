@@ -8,10 +8,6 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const bridgeSource = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
-const managedModelSource = readFileSync(
-  new URL('../types/provider/managedModelService.ts', import.meta.url),
-  'utf8'
-);
 
 describe('named resource wire IDs', () => {
   test('does not expose generic id parameters for core resource locators', () => {
@@ -23,20 +19,11 @@ describe('named resource wire IDs', () => {
     ]) {
       expect(bridgeSource.includes(expected)).toBe(true);
     }
-    expect(managedModelSource.includes('model_id: string;')).toBe(true);
-    expect(
-      managedModelSource.includes('export interface SetManagedModelEnabledRequest {\n  id:')
-    ).toBe(false);
-    expect(
-      managedModelSource.includes('export interface CheckManagedModelHealthRequest {\n  id:')
-    ).toBe(false);
-
     for (const legacy of [
       '/api/conversations/${p.id}',
       '/api/terminals/${p.id}',
       '/api/providers/${p.id}',
       '/api/knowledge/bases/${p.id}',
-      '/api/model-services/free/models/${encodeURIComponent(p.id)}',
     ]) {
       expect(bridgeSource.includes(legacy)).toBe(false);
     }

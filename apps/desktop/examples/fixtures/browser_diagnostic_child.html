@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Frame diagnostic fixture</title>
+<script>
+window.getterCalls=0;
+if(!location.search.includes('leaf')){
+  const frame=document.createElement('iframe');
+  frame.src='http://127.0.0.1:__PORT__/diagnostic-child?leaf&generation='+(new URLSearchParams(location.search).get('generation')||0);
+  document.documentElement.append(frame);
+}
+addEventListener('message',event=>{
+  if(!Number.isInteger(event.data?.diagnostic))return;
+  const scope=location.hostname==='localhost'?'foreign':(parent===top?'same':'nested');
+  const suffix=scope+'-'+event.data.diagnostic;
+  console.error('diag-console-'+suffix,{get secret(){getterCalls++;throw new Error('getter must not run')}});
+  fetch('/diagnostic-failure/'+scope+'?secret=not-in-metadata&generation='+event.data.diagnostic).catch(()=>{});
+  setTimeout(()=>{throw new Error('diag-exception-'+suffix)},0);
+  for(const frame of document.querySelectorAll('iframe'))frame.contentWindow.postMessage(event.data,'*');
+});
+</script>

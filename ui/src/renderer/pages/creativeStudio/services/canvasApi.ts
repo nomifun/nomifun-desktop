@@ -21,7 +21,7 @@ import {
   type SaveCreativeCanvasRequest,
 } from '../domain';
 
-export const CREATIVE_STUDIO_CANVASES_ENDPOINT =
+const CREATIVE_STUDIO_CANVASES_ENDPOINT =
   '/api/creative-studio/canvases';
 
 export type CreativeStudioHttpRequest = (

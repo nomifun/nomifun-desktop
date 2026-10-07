@@ -68,6 +68,16 @@ pub trait IKnowledgeRepository: Send + Sync {
     /// for stable display.
     async fn list_bindings_using_kb(&self, kb_id: &str) -> Result<Vec<KnowledgeBindingRow>, DbError>;
 
+    /// Live canonical AgentSessions selecting this base. The boolean is the
+    /// persisted `knowledge_enabled` disposition (legacy rows default true).
+    /// Lightweight repositories without an AgentSession store return none.
+    async fn list_agent_sessions_using_kb(
+        &self,
+        _kb_id: &str,
+    ) -> Result<Vec<(String, bool)>, DbError> {
+        Ok(Vec::new())
+    }
+
     // ── Knowledge tags (user-defined tag palette) ─────────────────────────
 
     /// Return all tag definitions ordered by `sort_order` ascending, then `key`.

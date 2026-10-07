@@ -23,6 +23,7 @@ pub struct WebSocketManager {
     connections: Arc<DashMap<ConnectionId, ClientInfo>>,
     next_id: AtomicU64,
     heartbeat_started: AtomicBool,
+    heartbeat_shutdown: CancellationToken,
 }
 
 impl WebSocketManager {
@@ -31,6 +32,7 @@ impl WebSocketManager {
             connections: Arc::new(DashMap::new()),
             next_id: AtomicU64::new(1),
             heartbeat_started: AtomicBool::new(false),
+            heartbeat_shutdown: CancellationToken::new(),
         }
     }
 
@@ -41,17 +43,29 @@ impl WebSocketManager {
         token: String,
         tx: mpsc::Sender<WsOutbound>,
     ) -> ConnectionId {
+        self.register_client(user_id, token, tx).0
+    }
+
+    /// Return the close signal as part of registration, before another thread
+    /// can remove the published entry. Looking it up afterwards is racy.
+    pub(crate) fn register_client(
+        &self,
+        user_id: String,
+        token: String,
+        tx: mpsc::Sender<WsOutbound>,
+    ) -> (ConnectionId, CancellationToken) {
         let id = ConnectionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let cancellation = CancellationToken::new();
         let info = ClientInfo {
             user_id,
             token,
             last_ping: Instant::now(),
             tx,
-            cancellation: CancellationToken::new(),
+            cancellation: cancellation.clone(),
         };
         self.connections.insert(id, info);
         debug!(%id, "client added");
-        id
+        (id, cancellation)
     }
 
     /// Remove a client connection by ID.
@@ -60,15 +74,6 @@ impl WebSocketManager {
             client.cancellation.cancel();
             debug!(%conn_id, "client removed");
         }
-    }
-
-    pub(crate) fn connection_cancellation(
-        &self,
-        conn_id: ConnectionId,
-    ) -> Option<CancellationToken> {
-        self.connections
-            .get(&conn_id)
-            .map(|client| client.cancellation.clone())
     }
 
     /// Update the last heartbeat timestamp for a connection.
@@ -199,13 +204,18 @@ impl WebSocketManager {
     /// 3. Sends a `ping` message with current timestamp
     ///
     /// Returns a `JoinHandle` — abort it to stop the heartbeat loop.
+    /// Dropping the manager also signals the loop to stop.
     pub fn start_heartbeat(&self, token_authenticator: TokenAuthenticator) -> JoinHandle<()> {
         let connections = Arc::clone(&self.connections);
+        let shutdown = self.heartbeat_shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
             loop {
-                interval.tick().await;
-                heartbeat_tick(&connections, &token_authenticator);
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => heartbeat_tick(&connections, &token_authenticator),
+                }
             }
         })
     }
@@ -227,10 +237,19 @@ impl WebSocketManager {
             warn!("cannot start WebSocket heartbeat without a Tokio runtime");
             return false;
         }
-        // Dropping a Tokio JoinHandle detaches the task. The manager's shared
-        // connection map and the application runtime own its lifetime.
+        // The task does not keep the manager alive; manager Drop cancels it
+        // even if the application runtime itself continues running.
         drop(self.start_heartbeat(token_authenticator));
         true
+    }
+}
+
+impl Drop for WebSocketManager {
+    fn drop(&mut self) {
+        self.heartbeat_shutdown.cancel();
+        for client in self.connections.iter() {
+            client.cancellation.cancel();
+        }
     }
 }
 
@@ -373,15 +392,47 @@ mod tests {
     }
 
     #[test]
+    fn registration_retains_close_signal_after_immediate_removal() {
+        let mgr = WebSocketManager::new();
+        let (tx, _rx) = new_client_tx();
+        let (conn_id, cancellation) = mgr.register_client("user".into(), "token".into(), tx);
+
+        mgr.remove_client(conn_id);
+
+        assert!(cancellation.is_cancelled());
+        assert_eq!(mgr.client_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_manager_stops_running_heartbeat_and_releases_clients() {
+        let mgr = WebSocketManager::new();
+        let (tx, mut rx) = new_client_tx();
+        let (_, cancellation) = mgr.register_client("user".into(), "token".into(), tx);
+        let handle = mgr.start_heartbeat(always_valid());
+        let ping = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("heartbeat must start")
+            .unwrap();
+        assert!(matches!(ping, WsOutbound::Text(_)));
+
+        drop(mgr);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("heartbeat must stop without waiting for its next tick")
+            .unwrap();
+        assert!(cancellation.is_cancelled());
+        assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected));
+    }
+
+    #[test]
     fn update_last_ping_refreshes_timestamp() {
         let mgr = WebSocketManager::new();
         let (tx, _rx) = new_client_tx();
         let id = mgr.add_client("user".into(), "token".into(), tx);
 
-        let before = mgr.connections.get(&id).map(|c| c.last_ping).unwrap();
-
-        // Small busy-wait to ensure time advances
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        let before = Instant::now() - HEARTBEAT_TIMEOUT;
+        mgr.connections.get_mut(&id).unwrap().last_ping = before;
 
         mgr.update_last_ping(id);
 
@@ -444,8 +495,7 @@ mod tests {
         let mgr = WebSocketManager::new();
         // Use a channel with capacity 1
         let (tx, _rx) = mpsc::channel(1);
-        let conn_id = mgr.add_client("user".into(), "tok".into(), tx);
-        let cancellation = mgr.connection_cancellation(conn_id).unwrap();
+        let (_conn_id, cancellation) = mgr.register_client("user".into(), "tok".into(), tx);
 
         // Fill the channel
         mgr.broadcast_all(WebSocketMessage::new("e1", json!(null)));
@@ -475,6 +525,28 @@ mod tests {
         assert!(matches!(alice_rx_1.try_recv(), Ok(WsOutbound::Text(_))));
         assert!(matches!(alice_rx_2.try_recv(), Ok(WsOutbound::Text(_))));
         assert!(bob_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn user_backpressure_disconnects_only_the_slow_owner_connection() {
+        let mgr = WebSocketManager::new();
+        let (slow_tx, _slow_rx) = mpsc::channel(1);
+        let (_, slow_cancel) = mgr.register_client("alice".into(), "a1".into(), slow_tx);
+        let (fast_tx, mut fast_rx) = new_client_tx();
+        let (_, fast_cancel) = mgr.register_client("alice".into(), "a2".into(), fast_tx);
+        let (bob_tx, mut bob_rx) = new_client_tx();
+        let (_, bob_cancel) = mgr.register_client("bob".into(), "b1".into(), bob_tx);
+
+        for seq in [1, 2] {
+            mgr.broadcast_to_user("alice", WebSocketMessage::new("private", json!({"seq": seq})));
+            assert!(matches!(fast_rx.try_recv(), Ok(WsOutbound::Text(_))));
+        }
+
+        assert_eq!(mgr.client_count(), 2);
+        assert!(slow_cancel.is_cancelled());
+        assert!(!fast_cancel.is_cancelled());
+        assert!(!bob_cancel.is_cancelled());
+        assert_eq!(bob_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 
     #[test]

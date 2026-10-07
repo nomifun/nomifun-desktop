@@ -50,7 +50,7 @@ export function resolveLanguagePreference(
   return preference === SYSTEM_LANGUAGE ? normalizeLanguageCode(systemLanguage) : normalizeLanguageCode(preference);
 }
 
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 

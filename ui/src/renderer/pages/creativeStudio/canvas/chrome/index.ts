@@ -6,11 +6,8 @@
 
 export { default as CreativeCanvasChrome } from './CreativeCanvasChrome';
 export {
-  CreativeCanvasBackgroundMenu,
+
   CreativeCanvasNodeMenu,
-} from './CreativeCanvasChrome';
-export type {
-  CreativeCanvasBackgroundMenuProps,
-  CreativeCanvasNodeMenuProps,
+
 } from './CreativeCanvasChrome';
 export * from './types';

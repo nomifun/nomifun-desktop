@@ -147,9 +147,9 @@ describe('Creative Studio clipboard', () => {
     ]);
   });
 
-  test('remaps durable image-prompt mentions when their source is pasted together', () => {
+  test.each(['image', 'video'] as const)('remaps durable %s-prompt mentions when their source is pasted together', (kind) => {
     const source = testNode('image', 20);
-    const target = testNode('image', 21);
+    const target = testNode(kind, 21);
     target.data.composer = {
       prompt: '@人物图 出镜',
       mentions: [
@@ -162,12 +162,10 @@ describe('Creative Studio clipboard', () => {
         },
       ],
       model: null,
-      interfaceMode: 'images',
-      quality: 'auto',
-      width: 1024,
-      height: 1024,
       aspectRatio: '1:1',
-      count: 1,
+      ...(kind === 'image'
+        ? { interfaceMode: 'images' as const, quality: 'auto' as const, width: 1024, height: 1024, count: 1 }
+        : { resolution: '1080p', seconds: 5 }),
     };
     const clipboard = copyCanvasFragment(
       testDocument([source, target], [testEdge(22, source.id, target.id)]),
@@ -180,9 +178,9 @@ describe('Creative Studio clipboard', () => {
     });
     const pastedSource = pasted.nodes[0];
     const pastedTarget = pasted.nodes[1];
-    expect(pastedTarget?.type).toBe('image');
+    expect(pastedTarget?.type).toBe(kind);
     expect(
-      pastedTarget?.type === 'image'
+      pastedTarget?.type === 'image' || pastedTarget?.type === 'video'
         ? pastedTarget.data.composer?.mentions?.[0]?.sourceNodeId
         : null
     ).toBe(pastedSource?.id);

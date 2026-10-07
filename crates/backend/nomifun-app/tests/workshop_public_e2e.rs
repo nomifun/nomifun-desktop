@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use common::{body_json, build_app, get_request, json_with_token, setup_and_login};
 
 /// A text asset uploaded (with auth) is then served over the public file
-/// channel with NO credentials — 200 + bytes + Content-Type + Cache-Control.
+/// channel with NO credentials — 200 + bytes + Content-Type + no-store.
 #[tokio::test]
 async fn workshop_file_channel_serves_without_auth() {
     let (mut app, services) = build_app().await;
@@ -50,8 +50,8 @@ async fn workshop_file_channel_serves_without_auth() {
     );
     assert_eq!(
         resp.headers()[header::CACHE_CONTROL],
-        "private, max-age=3600",
-        "Cache-Control present"
+        "private, no-store",
+        "deletable user content must not remain in an HTTP cache"
     );
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], b"hello workshop");

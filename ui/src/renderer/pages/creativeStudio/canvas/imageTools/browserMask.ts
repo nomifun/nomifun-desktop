@@ -43,7 +43,7 @@ export interface CreativeImageMaskReferenceFile {
   mimeType: "image/png";
 }
 
-export const browserCreativeImageMaskCodec: CreativeImageMaskCodec = {
+const browserCreativeImageMaskCodec: CreativeImageMaskCodec = {
   load: browserCreativeImageCropCodec.load,
   decode: browserCreativeImageCropCodec.decode,
 

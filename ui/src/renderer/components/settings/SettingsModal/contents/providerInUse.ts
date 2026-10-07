@@ -6,11 +6,11 @@
 
 import {
   parseCompanionId,
-  parseConversationId,
+  parseAgentPresetId,
   parseCsAgentId,
   parseExecutionId,
   type CompanionId,
-  type ConversationId,
+  type AgentPresetId,
   type CsAgentId,
   type ExecutionId,
 } from '@/common/types/ids';
@@ -18,10 +18,10 @@ import {
 export type ProviderUsageFeature =
   | 'desktopCompanion'
   | 'customerService'
-  | 'conversation'
+  | 'agent'
   | 'agentExecution';
 
-export type ProviderUsageTargetId = CompanionId | CsAgentId | ConversationId | ExecutionId;
+export type ProviderUsageTargetId = CompanionId | CsAgentId | AgentPresetId | ExecutionId;
 
 export interface ProviderUsage {
   feature: ProviderUsageFeature;
@@ -38,8 +38,8 @@ export function featureRoute(feature: ProviderUsageFeature, targetId?: ProviderU
       return '/nomi';
     case 'customerService':
       return targetId ? `/customer-service/` : '/customer-service';
-    case 'conversation':
-      return targetId ? `/conversation/${targetId}` : '/guid';
+    case 'agent':
+      return '/agent';
     case 'agentExecution':
       return '/guid';
   }
@@ -69,7 +69,7 @@ export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
       const raw = item as { feature?: unknown; label?: unknown; targetId?: unknown };
       if (typeof raw.feature !== 'string' || typeof raw.label !== 'string') return [];
       const feature = raw.feature as ProviderUsageFeature;
-      if (!['desktopCompanion', 'customerService', 'conversation', 'agentExecution'].includes(feature)) {
+      if (!['desktopCompanion', 'customerService', 'agent', 'agentExecution'].includes(feature)) {
         return [];
       }
       if (raw.targetId == null) return [{ feature, label: raw.label }];
@@ -77,7 +77,7 @@ export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
         switch (feature) {
           case 'desktopCompanion': return parseCompanionId(raw.targetId);
           case 'customerService': return parseCsAgentId(raw.targetId);
-          case 'conversation': return parseConversationId(raw.targetId);
+          case 'agent': return parseAgentPresetId(raw.targetId);
           case 'agentExecution': return parseExecutionId(raw.targetId);
         }
       })();

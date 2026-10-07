@@ -10,28 +10,17 @@ use serde_json::Value;
 /// Image seam (matches the inward stdio bridge): a successful result object may
 /// attach `_mcp_images: [{"mime_type","data"}]`; those become proper MCP image
 /// parts and the key is stripped from its text payload. The adapter accepts
-/// exactly one top-level `result` or `error`; `needs_confirmation: true` is the
-/// gateway permission gate's sole explicit control outcome.
+/// exactly one top-level `result` or `error`.
 pub fn build_tool_result(value: Value) -> CallToolResult {
     let has_result = value.get("result").is_some();
     let has_error = value.get("error").is_some();
-    let is_confirmation = value
-        .get("needs_confirmation")
-        .and_then(Value::as_bool)
-        == Some(true);
     if has_result && has_error {
         return protocol_error("gateway response contained both `result` and `error`");
-    }
-    if is_confirmation && (has_result || has_error) {
-        return protocol_error("gateway response mixed a confirmation with a result envelope");
     }
     if let Some(error) = value.get("error") {
         return CallToolResult::error(vec![Content::text(format!("Error: {error}"))]);
     }
     let Some(result) = value.get("result") else {
-        if is_confirmation {
-            return CallToolResult::success(vec![Content::text(value.to_string())]);
-        }
         return protocol_error("gateway response was missing `result` or `error`");
     };
 
@@ -117,19 +106,10 @@ mod tests {
             serde_json::json!({"ok": true}),
             serde_json::json!(null),
             serde_json::json!({"result": "ok", "error": "failed"}),
-            serde_json::json!({"result": "ok", "needs_confirmation": true}),
+            serde_json::json!({"deferred": true}),
         ] {
             assert_eq!(build_tool_result(value).is_error, Some(true));
         }
-    }
-
-    #[test]
-    fn explicit_confirmation_outcome_is_success() {
-        let r = build_tool_result(serde_json::json!({
-            "needs_confirmation": true,
-            "tool": "nomi_delete"
-        }));
-        assert_ne!(r.is_error, Some(true));
     }
 
     #[test]

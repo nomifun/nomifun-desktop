@@ -15,7 +15,7 @@ use crate::constants::DISCORD_MESSAGE_LIMIT;
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus};
 use crate::plugins::util::truncate_message;
-use crate::plugins::callback::format_callback_data;
+use crate::plugins::callback::{format_callback_data, is_supported_callback_action};
 use crate::types::{BotInfo, PluginConfig, PluginStatus, PluginType, UnifiedOutgoingMessage};
 
 use super::api::DiscordApi;
@@ -258,10 +258,10 @@ fn build_components(message: &UnifiedOutgoingMessage) -> Option<Vec<ActionRow>> 
     let buttons = message.buttons.as_ref()?;
     let rows: Vec<ActionRow> = buttons
         .iter()
-        .take(5)
         .filter_map(|row| {
             let comps: Vec<ButtonComponent> = row
                 .iter()
+                .filter(|btn| is_supported_callback_action(&btn.action))
                 .take(5)
                 .map(|btn| ButtonComponent {
                     component_type: COMPONENT_BUTTON,
@@ -279,6 +279,7 @@ fn build_components(message: &UnifiedOutgoingMessage) -> Option<Vec<ActionRow>> 
                 })
             }
         })
+        .take(5)
         .collect();
     if rows.is_empty() { None } else { Some(rows) }
 }
@@ -385,6 +386,30 @@ mod tests {
         let comps = build_create_message_request(&m).components.unwrap();
         assert_eq!(comps.len(), 5); // max 5 rows
         assert_eq!(comps[0].components.len(), 5); // max 5 buttons/row
+    }
+
+    #[test]
+    fn unsupported_buttons_do_not_consume_the_five_button_budget() {
+        let mut m = msg("filtered");
+        let mut row = vec![ActionButton {
+            label: "Unsupported".into(),
+            action: "unknown.switch".into(),
+            params: None,
+        }];
+        row.extend((0..6).map(|i| ActionButton {
+            label: format!("valid-{i}"),
+            action: format!("chat.valid{i}"),
+            params: None,
+        }));
+        m.buttons = Some(vec![row]);
+
+        let components = build_create_message_request(&m)
+            .components
+            .expect("valid buttons remain after filtering");
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].components.len(), 5);
+        assert_eq!(components[0].components[0].label, "valid-0");
+        assert_eq!(components[0].components[4].label, "valid-4");
     }
 
     #[test]

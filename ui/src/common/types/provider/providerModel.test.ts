@@ -24,7 +24,7 @@ const response: ProviderModelResponse = {
   capabilities: [
     {
       task: 'speech_synthesis',
-      traits: ['audio_output', 'streaming'],
+      traits: [],
       protocol: 'stepfun.audio_speech',
       connection_role: 'default',
       endpoint: '/audio/speech',

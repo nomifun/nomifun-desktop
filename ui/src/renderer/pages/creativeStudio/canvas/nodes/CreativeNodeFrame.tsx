@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Check, Close, Error, Loading, Lock, Unlock } from '@icon-park/react';
+import { Check, Close, Error, Loading, Lock, Unlock, FileText, Pic, VideoTwo, Voice, Folder, SettingTwo, Timeline } from '@icon-park/react';
 import classNames from 'classnames';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -42,6 +42,7 @@ export interface CreativeNodeFrameProps {
   labels?: Partial<CreativeNodeStatusLabels>;
   onActivate?: () => void;
   onOpen?: () => void;
+  onRename?: (title: string) => void;
   onToggleLock?: () => void;
   onPointerDown?: React.PointerEventHandler<HTMLElement>;
   onContextMenu?: React.MouseEventHandler<HTMLElement>;
@@ -76,6 +77,10 @@ const statusIcon = (status: CreativeGenerationStatus) => {
 };
 
 const finiteOr = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
+const NODE_ICONS = {
+  text: FileText, image: Pic, video: VideoTwo, audio: Voice, timeline: Timeline,
+  group: Folder, config: SettingTwo,
+};
 
 const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   node,
@@ -94,11 +99,17 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   labels,
   onActivate,
   onOpen,
+  onRename,
   onToggleLock,
   onPointerDown,
   onContextMenu,
 }) => {
   const { t } = useTranslation();
+  const [editingTitle, setEditingTitle] = React.useState(false);
+  const [titleDraft, setTitleDraft] = React.useState(title);
+  const titleInputRef = React.useRef<HTMLInputElement>(null);
+  const editingTitleRef = React.useRef(false);
+  const TypeIcon = NODE_ICONS[node.type];
   const status = runtime?.status ?? 'idle';
   const statusLabels: CreativeNodeStatusLabels = {
     idle: t(DEFAULT_LABEL_KEYS.idle),
@@ -126,6 +137,29 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
       : { width: '100%', height: '100%' };
 
   const activate = () => onActivate?.();
+  const canRename = Boolean(onRename && !node.locked);
+
+  React.useLayoutEffect(() => {
+    if (!editingTitle) return;
+    titleInputRef.current?.focus();
+    titleInputRef.current?.select();
+  }, [editingTitle]);
+
+  const beginTitleEditing = () => {
+    if (!canRename || editingTitleRef.current) return;
+    setTitleDraft(title);
+    editingTitleRef.current = true;
+    setEditingTitle(true);
+  };
+
+  const finishTitleEditing = (save: boolean) => {
+    if (!editingTitleRef.current) return;
+    editingTitleRef.current = false;
+    setEditingTitle(false);
+    if (!save) return;
+    const nextTitle = titleDraft.trim();
+    if (nextTitle && nextTitle !== title) onRename?.(nextTitle);
+  };
 
   return (
     <article
@@ -156,8 +190,69 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
       {inputHandle ? <div className={styles.inputHandle}>{inputHandle}</div> : null}
       {outputHandle ? <div className={styles.outputHandle}>{outputHandle}</div> : null}
 
-      {status !== 'idle' || headerActions || onToggleLock || node.locked ? (
         <header className={styles.header}>
+          <span
+            className={styles.nodeTitle}
+            title={canRename
+              ? `${title} · ${t('creativeStudio.canvas.nodes.renameHint', {
+                  defaultValue: '双击重命名',
+                })}`
+              : title}
+            tabIndex={canRename && !editingTitle ? 0 : undefined}
+            data-node-title
+            data-renamable={canRename || undefined}
+            onDoubleClick={(event) => {
+              if (!canRename) return;
+              event.preventDefault();
+              event.stopPropagation();
+              beginTitleEditing();
+            }}
+            onKeyDown={(event) => {
+              if (!canRename || (event.key !== 'Enter' && event.key !== 'F2')) return;
+              event.preventDefault();
+              event.stopPropagation();
+              beginTitleEditing();
+            }}
+          >
+            <span className={styles.nodeTypeIcon} aria-hidden='true'>
+              <TypeIcon theme='outline' size={18} fill='currentColor' strokeWidth={3} />
+            </span>
+            {editingTitle ? (
+              <input
+                ref={titleInputRef}
+                className={styles.nodeNameInput}
+                value={titleDraft}
+                maxLength={80}
+                aria-label={t('creativeStudio.canvas.nodes.renamePlaceholder', {
+                  defaultValue: '输入节点名称',
+                })}
+                data-node-title-input
+                onChange={(event) => setTitleDraft(event.currentTarget.value)}
+                onBlur={() => finishTitleEditing(true)}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (
+                    event.nativeEvent.isComposing ||
+                    (event.nativeEvent as KeyboardEvent & { keyCode?: number }).keyCode === 229
+                  ) {
+                    return;
+                  }
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    finishTitleEditing(true);
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    finishTitleEditing(false);
+                  }
+                }}
+              />
+            ) : (
+              <span className={styles.nodeName}>{title}</span>
+            )}
+          </span>
           {status !== 'idle' ? (
             <span className={styles.status} data-status={status} title={runtime?.label ?? statusLabels[status]}>
               <span className={styles.statusIcon} aria-hidden='true'>
@@ -192,7 +287,6 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
             </span>
           ) : null}
         </header>
-      ) : null}
 
       <div className={styles.body}>{children}</div>
 

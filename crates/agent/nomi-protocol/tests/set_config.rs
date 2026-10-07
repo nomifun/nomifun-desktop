@@ -57,17 +57,11 @@ fn existing_commands_still_parse() {
     let stop = r#"{"type":"stop"}"#;
     assert!(serde_json::from_str::<ProtocolCommand>(stop).is_ok());
 
-    let approve = r#"{"type":"tool_approve","call_id":"c1"}"#;
-    assert!(serde_json::from_str::<ProtocolCommand>(approve).is_ok());
-
-    let deny = r#"{"type":"tool_deny","call_id":"c1"}"#;
-    assert!(serde_json::from_str::<ProtocolCommand>(deny).is_ok());
-
     let init = r#"{"type":"init_history","text":"ctx"}"#;
     assert!(serde_json::from_str::<ProtocolCommand>(init).is_ok());
 
-    let mode = r#"{"type":"set_mode","mode":"yolo"}"#;
-    assert!(serde_json::from_str::<ProtocolCommand>(mode).is_ok());
+    let ping = r#"{"type":"ping"}"#;
+    assert!(serde_json::from_str::<ProtocolCommand>(ping).is_ok());
 }
 
 // --- Cycle 2: Effort parsing tests ---

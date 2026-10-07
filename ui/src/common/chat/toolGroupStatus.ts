@@ -1,4 +1,4 @@
-export type ToolGroupDisplayStatus = 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending' | 'Confirming';
+export type ToolGroupDisplayStatus = 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
 
 /**
  * Normalize both the current backend wire vocabulary (`snake_case`) and the
@@ -23,9 +23,6 @@ export const normalizeToolGroupStatus = (value: unknown): ToolGroupDisplayStatus
     case 'pending':
     case 'Pending':
       return 'Pending';
-    case 'confirming':
-    case 'Confirming':
-      return 'Confirming';
     case 'running':
     case 'in_progress':
     case 'Executing':
@@ -36,5 +33,5 @@ export const normalizeToolGroupStatus = (value: unknown): ToolGroupDisplayStatus
 
 export const isToolGroupStatusActive = (value: unknown): boolean => {
   const status = normalizeToolGroupStatus(value);
-  return status === 'Executing' || status === 'Confirming' || status === 'Pending';
+  return status === 'Executing' || status === 'Pending';
 };

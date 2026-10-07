@@ -1,21 +1,101 @@
 //! HTTP router assembly for the application.
 
+pub(crate) mod agent_role_host;
+pub(crate) mod agent_wave1_host;
+pub(crate) mod agent_wave1_companion_host;
+pub(crate) mod agent_memory_authority;
+pub(crate) mod agent_wave1_memory_receipts;
+pub(crate) mod agent_wave2_host;
+pub(crate) mod agent_wave2_mcp;
+pub(crate) mod agent_wave2_vcs_push;
+pub(crate) mod agent_wave3_creation_host;
+mod automatic_collaboration_route;
+mod automatic_creation_route;
+mod automatic_turn_intent;
+mod engine_creation_tools;
+pub(crate) mod agent_wave3_host;
+pub(crate) mod agent_wave3_template_runner;
+pub(crate) mod agent_wave3_workshop_host;
+pub(crate) mod agent_wave5_host;
+pub(crate) mod nomi_core_wave4;
+pub(crate) mod chat_broker_host;
 pub mod instance_token_routes;
+pub(crate) mod remote_runtime;
+pub(crate) mod agent_binding_projection;
+pub(crate) mod nomi_core_builtins;
+mod model_management;
+mod mobile_voice_registry;
+mod mobile_voice_authority;
+mod mobile_voice_host;
+mod voice_work_host;
+mod plugin_development;
+mod plugin_authoring;
+pub(crate) mod nomi_core_tool_discovery;
+pub(crate) mod nomi_core_chat_route;
+pub(crate) mod nomi_core_control_plane;
+pub(crate) mod nomi_core_role_defaults;
+pub(crate) mod nomi_core_remote_mcp;
+pub(crate) mod nomi_core_robot;
+pub(crate) mod nomi_core_resource_bindings;
+pub(crate) mod nomi_core_session;
+pub mod official_runtime;
+pub mod engine_session_host;
+pub mod engine_journal;
+pub mod engine_history;
+pub mod engine_model_facts;
+pub mod engine_tool_host;
+pub mod engine_kernel_session;
+mod engine_plugin_bindings;
+mod engine_tool_discovery;
+mod engine_robot_tools;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_management;
+mod engine_browser_tools;
+mod workspace_file_read;
+mod engine_workspace_media;
+mod engine_computer_media;
+mod engine_mcp_media;
+pub(crate) mod unified_runtime_host;
+mod unified_runtime_history;
+mod runtime_patch_recovery;
+mod engine_process_host;
+mod engine_process_recovery;
+mod runtime_event_buffer;
+mod history_process_display;
+mod history_thinking_display;
+mod agent_tool_surface;
+mod agent_tool_presentation;
+mod runtime_attachments;
+mod runtime_skills;
+mod session_capabilities;
+pub mod engine_skills;
+pub(crate) mod nomi_core_wave2;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_login;
-mod boot_terminal_proof;
+pub(crate) mod knowledge_browser;
+mod nomi_core_mcp;
+mod mcp_effect_receipts;
+mod hosted_effect_receipts;
+mod idmm;
+mod nomi_core_mcp_catalog;
+pub(crate) mod plugin;
+pub(crate) mod plugin_ports;
+#[cfg(feature = "browser-use")]
+pub(crate) mod browser_workspace;
 mod computer_permissions;
 mod health;
+mod javascript_runtime;
 mod knowledge_registration;
 mod model_failover;
 mod routes;
 mod state;
 mod trace;
 
-pub use routes::{create_router, create_router_with_all_state, create_router_with_states};
+#[cfg(test)]
+pub(crate) use state::build_channel_state;
+
+pub use routes::{
+    create_router, create_router_with_all_state, create_router_with_states, try_create_router,
+};
 pub use state::{
-    ChannelMessageLoopComponents, ModuleStates, build_preset_state, build_conversation_state,
-    build_extension_states, build_module_states, build_ws_state,
+    ChannelMessageLoopComponents, ModuleStates, build_module_states, build_skill_state,
+    build_ws_state,
 };

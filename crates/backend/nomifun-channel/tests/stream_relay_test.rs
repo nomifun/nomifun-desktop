@@ -5,7 +5,7 @@ use nomifun_ai_agent::protocol::events::{
     ErrorEventData, FinishEventData, OutputDiscardedEventData, StartEventData, TextEventData,
     ToolCallEventData, ToolCallStatus,
 };
-use nomifun_channel::pending_decision::PendingDecisionStore;
+use nomifun_channel::pending_decision::ChannelStopConfirmationStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, MessageRecorder, RelayConfig};
 use nomifun_channel::types::{OutgoingMessageType, ParseMode, PluginType};
 use tokio::sync::broadcast;
@@ -15,19 +15,9 @@ const WEIXIN_CHANNEL_PLUGIN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000102";
 const CONVERSATION_ID: &str = "018f1234-5678-7abc-8def-012345678982";
 const LARK_CHANNEL_PLUGIN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 
-/// Builds a relay with a fresh (unshared) pending-decision store. Tests that
-/// need to inspect the store pass their own via [`relay_with_store`].
+/// Builds a relay with a fresh pending-decision store.
 fn relay(config: RelayConfig, sender: Arc<dyn ChannelSender>) -> ChannelStreamRelay {
-    ChannelStreamRelay::new(config, sender, PendingDecisionStore::new(), None)
-}
-
-/// Builds a relay sharing the caller's pending-decision store.
-fn relay_with_store(
-    config: RelayConfig,
-    sender: Arc<dyn ChannelSender>,
-    store: Arc<PendingDecisionStore>,
-) -> ChannelStreamRelay {
-    ChannelStreamRelay::new(config, sender, store, None)
+    ChannelStreamRelay::new(config, sender, ChannelStopConfirmationStore::new(), None)
 }
 
 // ── RelayConfig construction ─────────────────────────────────────
@@ -65,13 +55,11 @@ async fn relay_sends_thinking_then_final_message() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Hello".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Hello".into(),
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " World".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " World".into(),
         }))
         .unwrap();
     event_tx
@@ -111,14 +99,12 @@ async fn editable_channel_retracts_discarded_draft_and_keeps_the_steering_prefix
 
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "prefix ".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "prefix ".into(),
         }))
         .unwrap();
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "discard me".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "discard me".into(),
         }))
         .unwrap();
     event_tx
@@ -127,8 +113,7 @@ async fn editable_channel_retracts_discarded_draft_and_keeps_the_steering_prefix
         ))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "answer".into(),
         }))
         .unwrap();
     event_tx
@@ -164,16 +149,14 @@ async fn editable_channel_accepted_turn_discard_retracts_every_race_tail_pass_be
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "pass A".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "pass A".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " + pass B".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " + pass B".into(),
         }))
         .unwrap();
     event_tx
@@ -222,14 +205,12 @@ async fn send_once_channel_never_releases_discarded_draft() {
 
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "prefix ".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "prefix ".into(),
         }))
         .unwrap();
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "discard me".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "discard me".into(),
         }))
         .unwrap();
     event_tx
@@ -238,8 +219,7 @@ async fn send_once_channel_never_releases_discarded_draft() {
         ))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "answer".into(),
         }))
         .unwrap();
     event_tx
@@ -275,16 +255,14 @@ async fn send_once_channel_accepted_turn_discard_retracts_every_race_tail_pass_b
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "pass A".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "pass A".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " + pass B".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " + pass B".into(),
         }))
         .unwrap();
     event_tx
@@ -325,8 +303,7 @@ async fn relay_handles_error_event() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>private</think>partial answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>private</think>partial answer".into(),
         }))
         .unwrap();
     event_tx
@@ -362,12 +339,12 @@ async fn weixin_buffers_pending_text_through_tool_call_until_finish() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Here is the plan:".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Here is the plan:".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -418,12 +395,12 @@ async fn telegram_does_not_flush_text_before_tool_call() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Here is the plan:".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Here is the plan:".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -464,6 +441,7 @@ async fn weixin_skips_flush_when_buffer_is_empty() {
 
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -503,8 +481,7 @@ async fn relay_handles_channel_closed() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>private</think>partial".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>private</think>partial".into(),
         }))
         .unwrap();
     drop(event_tx);
@@ -539,8 +516,7 @@ async fn telegram_streaming_and_final_messages_use_html_parse_mode() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "**bold** & <raw>".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "**bold** & <raw>".into(),
         }))
         .unwrap();
     event_tx
@@ -592,6 +568,7 @@ async fn telegram_tool_call_edit_stays_plain_text() {
 
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -638,8 +615,7 @@ async fn lark_messages_have_no_parse_mode() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "**bold** text".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "**bold** text".into(),
         }))
         .unwrap();
     event_tx
@@ -656,121 +632,6 @@ async fn lark_messages_have_no_parse_mode() {
     for edit in &edits {
         assert_eq!(edit.parse_mode, None, "lark edits must not set parse mode: {edit:?}");
     }
-}
-
-// ── Decision relay (Bug 1, Case A) ───────────────────────────────────
-
-/// Builds a permission event carrying a two-option `Confirmation`.
-fn decision_event(call_id: &str, title: &str) -> AgentStreamEvent {
-    AgentStreamEvent::Permission(
-        nomifun_common::Confirmation {
-            id: format!("conf-{call_id}"),
-            call_id: call_id.into(),
-            title: Some(title.into()),
-            action: None,
-            description: String::new(),
-            command_type: None,
-            options: vec![
-                nomifun_common::ConfirmationOption {
-                    label: "Allow once".into(),
-                    value: serde_json::json!("allow"),
-                    params: None,
-                },
-                nomifun_common::ConfirmationOption {
-                    label: "Reject".into(),
-                    value: serde_json::json!("reject"),
-                    params: None,
-                },
-            ],
-            screenshot: None,
-        }
-        .into(),
-    )
-}
-
-/// A relayed decision is recorded in the shared store and forwarded as a
-/// numbered text message (a new send, not an edit of the thinking card).
-#[tokio::test]
-async fn relay_forwards_decision_and_records_pending() {
-    let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
-    let recorder = Arc::new(MessageRecorder::new());
-    let store = PendingDecisionStore::new();
-
-    let config = RelayConfig {
-        platform: PluginType::Telegram,
-        plugin_id: TELEGRAM_CHANNEL_PLUGIN_ID.to_owned(),
-        chat_id: "chat_1".into(),
-        throttle_ms: 10_000,
-        conversation_id: CONVERSATION_ID.into(),
-    };
-    let relay = relay_with_store(config, recorder.clone(), Arc::clone(&store));
-    let rx = event_tx.subscribe();
-
-    event_tx.send(decision_event("call-42", "Run rm -rf?")).unwrap();
-    event_tx
-        .send(AgentStreamEvent::Finish(FinishEventData {
-            session_id: None,
-            stop_reason: None,
-        }))
-        .unwrap();
-
-    relay.run(rx).await;
-
-    // A numbered decision message was sent as a new message.
-    let sends = recorder.take_sends();
-    let decision = sends
-        .iter()
-        .find(|m| m.text.as_deref().is_some_and(|t| t.contains("需要你的决策")))
-        .expect("a numbered decision message must be sent");
-    let text = decision.text.as_deref().unwrap();
-    assert!(text.contains("Run rm -rf?"), "prompt present: {text}");
-    assert!(text.contains("1. Allow once"), "first option numbered: {text}");
-    assert!(text.contains("2. Reject"), "second option numbered: {text}");
-    assert!(decision.buttons.is_none(), "decision is plain text, no buttons");
-
-    // The pending decision is recorded against the conversation.
-    let pending = store.peek(CONVERSATION_ID).expect("decision recorded in store");
-    assert_eq!(pending.call_id, "call-42");
-    assert_eq!(pending.options.len(), 2);
-    assert_eq!(pending.options[0].option_id, "allow");
-    assert_eq!(pending.options[1].option_id, "reject");
-}
-
-/// WeChat (no edit support) also forwards the decision as a send_message.
-#[tokio::test]
-async fn weixin_relay_forwards_decision() {
-    let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
-    let recorder = Arc::new(MessageRecorder::new());
-    let store = PendingDecisionStore::new();
-
-    let config = RelayConfig {
-        platform: PluginType::Weixin,
-        plugin_id: WEIXIN_CHANNEL_PLUGIN_ID.to_owned(),
-        chat_id: "chat_1".into(),
-        throttle_ms: 10_000,
-        conversation_id: CONVERSATION_ID.into(),
-    };
-    let relay = relay_with_store(config, recorder.clone(), Arc::clone(&store));
-    let rx = event_tx.subscribe();
-
-    event_tx.send(decision_event("call-wx", "Proceed?")).unwrap();
-    event_tx
-        .send(AgentStreamEvent::Finish(FinishEventData {
-            session_id: None,
-            stop_reason: None,
-        }))
-        .unwrap();
-
-    relay.run(rx).await;
-
-    let sends = recorder.take_sends();
-    assert!(
-        sends
-            .iter()
-            .any(|m| m.text.as_deref().is_some_and(|t| t.contains("需要你的决策"))),
-        "weixin relay must forward the decision: {sends:?}"
-    );
-    assert!(store.peek(CONVERSATION_ID).is_some(), "decision recorded for weixin");
 }
 
 // ── Inline reasoning stripping (<think>…</think> in the Text stream) ─────
@@ -799,7 +660,7 @@ async fn telegram_inline_think_across_deltas_never_leaks() {
 
     for chunk in ["<think>secret ", "reasoning</think>", "The answer."] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -840,7 +701,7 @@ async fn telegram_pure_thinking_turn_gets_no_text_output_card() {
 
     for chunk in ["<think>plan a", " plan b</think>"] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -884,7 +745,7 @@ async fn telegram_minimax_orphan_close_final_is_clean() {
 
     for chunk in ["raw reasoning\n", "</think>\n", "Answer only."] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -898,52 +759,6 @@ async fn telegram_minimax_orphan_close_final_is_clean() {
     let text = last.text.as_deref().unwrap();
     assert!(text.contains("Answer only."), "final card must keep the answer: {text}");
     assert!(!text.contains("raw reasoning"), "final card must drop the reasoning head: {text}");
-}
-
-/// Regression guard: a decision arriving on a thinking-only turn must leave the
-/// live card intact — the reasoning must NOT be rendered as a terminal card and
-/// must NOT overwrite the decision's live UX.
-#[tokio::test]
-async fn telegram_decision_with_thinking_only_leaves_card_intact() {
-    let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
-    let recorder = Arc::new(MessageRecorder::new());
-    let store = PendingDecisionStore::new();
-
-    let config = RelayConfig {
-        platform: PluginType::Telegram,
-        plugin_id: TELEGRAM_CHANNEL_PLUGIN_ID.to_owned(),
-        chat_id: "chat_1".into(),
-        throttle_ms: 10_000,
-        conversation_id: CONVERSATION_ID.into(),
-    };
-    let relay = relay_with_store(config, recorder.clone(), Arc::clone(&store));
-    let rx = event_tx.subscribe();
-
-    event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: "<think>hmm</think>".into() }))
-        .unwrap();
-    event_tx.send(decision_event("call-1", "Proceed?")).unwrap();
-    event_tx
-        .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
-        .unwrap();
-
-    relay.run(rx).await;
-
-    // The decision is forwarded as a fresh send.
-    let sends = recorder.take_sends();
-    assert!(
-        sends
-            .iter()
-            .any(|m| m.text.as_deref().is_some_and(|t| t.contains("需要你的决策"))),
-        "decision must be forwarded: {sends:?}"
-    );
-    // No terminal card overwrites the live decision, and reasoning never shows.
-    let edits = recorder.take_edits();
-    for edit in &edits {
-        let text = edit.text.as_deref().unwrap_or("");
-        assert!(!text.contains("（无文本输出）"), "must not overwrite decision with a terminal card: {text}");
-        assert!(!text.contains("hmm"), "reasoning leaked: {text}");
-    }
 }
 
 /// Send-once platforms (WeChat): buffering across tool calls must preserve all
@@ -964,12 +779,12 @@ async fn weixin_inline_think_merged_final_is_stripped() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>t1</think>Visible before tool.".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>t1</think>Visible before tool.".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -982,8 +797,7 @@ async fn weixin_inline_think_merged_final_is_stripped() {
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>t2</think>After tool.".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>t2</think>After tool.".into(),
         }))
         .unwrap();
     event_tx
@@ -1019,10 +833,11 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: "<think>only reasoning".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>only reasoning".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -1035,7 +850,7 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: " more</think>Done.".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " more</think>Done.".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
@@ -1067,7 +882,7 @@ async fn weixin_pure_thinking_turn_sends_nothing() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: "<think>x</think>".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>x</think>".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
@@ -1099,8 +914,7 @@ async fn telegram_final_answer_ending_on_lt_is_preserved() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "the less-than symbol is <".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "the less-than symbol is <".into(),
         }))
         .unwrap();
     event_tx

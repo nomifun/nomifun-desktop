@@ -21,20 +21,22 @@ async fn removed_console_home_api_is_not_registered() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// The `ExtAcpAdapter` contribution type went away with ACP itself, so
-/// extensions can no longer declare adapters and there is nothing left for this
-/// route to list.
+/// The pre-v4 Extension and Hub products were physically removed. Their
+/// top-level routes must stay absent instead of turning into a second
+/// compatibility management surface.
 #[tokio::test]
-async fn removed_extension_acp_adapters_api_is_not_registered() {
+async fn removed_extension_and_hub_apis_are_not_registered() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let resp = app
-        .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    for path in [
+        "/api/extensions",
+        "/api/extensions/acp-adapters",
+        "/api/hub/extensions",
+    ] {
+        let resp = app.clone().oneshot(get_with_token(path, &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path} must stay removed");
+    }
 }
 
 /// The remote-agent registry went away with the `remote` engine. These routes

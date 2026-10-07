@@ -1,0 +1,3 @@
+//! The Runtime consumes the same exact Skill locks as other compiled-in engines.
+//! Context strategy remains inside the Runtime; this alias preserves its host seam.
+pub(super) use super::engine_skills::SelectedSkills;

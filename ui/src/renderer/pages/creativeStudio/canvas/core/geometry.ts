@@ -24,7 +24,7 @@ export function normalizeSelectionRect(
   };
 }
 
-export function graphNodeRect(node: CanvasGraphNode): CanvasSelectionRect {
+function graphNodeRect(node: CanvasGraphNode): CanvasSelectionRect {
   return {
     x: node.position.x,
     y: node.position.y,
@@ -33,7 +33,7 @@ export function graphNodeRect(node: CanvasGraphNode): CanvasSelectionRect {
   };
 }
 
-export function rectsIntersect(a: CanvasSelectionRect, b: CanvasSelectionRect): boolean {
+function rectsIntersect(a: CanvasSelectionRect, b: CanvasSelectionRect): boolean {
   return (
     a.x < b.x + b.width &&
     a.x + a.width > b.x &&

@@ -22,11 +22,12 @@
  * it only uses `refresh` for imperative post-mutation refetches.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import { Button } from '@arco-design/web-react';
+import { Button, Result, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { ITagSummary, RequirementOrderBy, RequirementStatus } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
@@ -41,12 +42,20 @@ import { tryParseEntityId, type RequirementId } from '@/common/types/ids';
 type ViewMode = 'list' | 'board';
 
 const DEFAULT_PAGE_SIZE = 20;
-// Board groups ALL matching items by status client-side, so fetch a large page.
-const BOARD_PAGE_SIZE = 500;
+// The server caps each page at 200; the board follows has_more for all matches.
+const BOARD_PAGE_SIZE = 200;
 
 const WorkspacePage: React.FC = () => {
   const { t } = useTranslation();
-  const [, messageCtx] = useArcoMessage();
+  const [message, messageCtx] = useArcoMessage();
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const reportWriteError = useCallback((error: unknown) => {
+    if (mounted.current && !isHandledAuthExpiredHttpError(error)) message.error(String(error));
+  }, [message]);
   const [searchParams, setSearchParams] = useSearchParams();
 
   // ---- View mode (?view=board|list, default list) -------------------------
@@ -102,19 +111,25 @@ const WorkspacePage: React.FC = () => {
   }, []);
 
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const removeSelection = useCallback((ids: RequirementId[]) => {
+    const removed = new Set(ids);
+    setSelectedIds((prev) => new Set([...prev].filter((id) => !removed.has(id))));
+  }, []);
 
   // ---- Data ----------------------------------------------------------------
-  // Board groups all matching items client-side → fetch a large page and pin
-  // page=1. List uses the paginated page/pageSize.
-  const { items, total, loading, error, refresh } = useRequirements({
-    tag,
-    status,
-    q: search || undefined,
-    order_by: view === 'board' ? undefined : orderBy,
-    order: view === 'board' ? undefined : orderBy ? order : undefined,
-    page: view === 'board' ? 1 : page,
-    page_size: view === 'board' ? BOARD_PAGE_SIZE : pageSize,
-  });
+  // Board collects every matching page. List uses the paginated page/pageSize.
+  const { items, total, loading, error, refresh } = useRequirements(
+    {
+      tag,
+      status,
+      q: search || undefined,
+      order_by: view === 'board' ? undefined : orderBy,
+      order: view === 'board' ? undefined : orderBy ? order : undefined,
+      page: view === 'board' ? 1 : page,
+      page_size: view === 'board' ? BOARD_PAGE_SIZE : pageSize,
+    },
+    view === 'board'
+  );
   const { tags } = useWorkspaceTags();
   const tagOptions: ITagSummary[] = tags;
 
@@ -223,31 +238,26 @@ const WorkspacePage: React.FC = () => {
           requirement_id: requirementId,
           updates: { status: next },
         });
-        void refresh();
+        if (mounted.current) void refresh();
       } catch (e) {
-        // useArcoMessage is host-scoped; surface failures inline.
-        console.error('Failed to update requirement status', e);
+        reportWriteError(e);
       }
     },
-    [refresh]
+    [refresh, reportWriteError]
   );
 
   const handleDelete = useCallback(
     async (requirementId: RequirementId) => {
       try {
         await ipcBridge.requirements.remove.invoke({ requirement_id: requirementId });
-        setSelectedIds((prev) => {
-          if (!prev.has(requirementId)) return prev;
-          const nextSet = new Set(prev);
-          nextSet.delete(requirementId);
-          return nextSet;
-        });
+        if (!mounted.current) return;
+        removeSelection([requirementId]);
         void refresh();
       } catch (e) {
-        console.error('Failed to delete requirement', e);
+        reportWriteError(e);
       }
     },
-    [refresh]
+    [refresh, removeSelection, reportWriteError]
   );
 
   const handleBatchDelete = useCallback(async () => {
@@ -257,12 +267,13 @@ const WorkspacePage: React.FC = () => {
       await ipcBridge.requirements.batchDelete.invoke({
         requirement_ids: requirementIds,
       });
-      setSelectedIds(new Set());
+      if (!mounted.current) return;
+      removeSelection(requirementIds);
       void refresh();
     } catch (e) {
-      console.error('Failed to batch-delete requirements', e);
+      reportWriteError(e);
     }
-  }, [selectedIds, refresh]);
+  }, [selectedIds, refresh, removeSelection, reportWriteError]);
 
   // ---- View toggle items ---------------------------------------------------
   const viewItems: SegmentedTabItem[] = useMemo(
@@ -324,7 +335,19 @@ const WorkspacePage: React.FC = () => {
       {/* The view */}
       <div className={view === 'board' ? 'mt-10px flex flex-1 min-h-0' : 'mt-10px'}>
         {view === 'board' ? (
-          <RequirementBoardView items={items} onOpenDetail={openDetail} onStatusChange={handleRowStatusChange} />
+          loading ? (
+            <div className='flex w-full justify-center py-32px'>
+              <Spin />
+            </div>
+          ) : error ? (
+            <Result
+              status='error'
+              title={t('requirements.loadError')}
+              extra={<Button onClick={() => void refresh()}>{t('requirements.retry')}</Button>}
+            />
+          ) : (
+            <RequirementBoardView items={items} onOpenDetail={openDetail} onStatusChange={handleRowStatusChange} />
+          )
         ) : (
           <RequirementListView
             items={items}

@@ -1,0 +1,20 @@
+[package]
+name = "nomifun-agent-domain-wave2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
+nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
+serde_json = { workspace = true }
+serde = { workspace = true }
+jsonschema = { workspace = true }
+
+[dev-dependencies]
+nomifun-agent-domain-wave1 = { path = "../nomifun-agent-domain-wave1" }
+nomifun-agent-domain-wave3 = { path = "../nomifun-agent-domain-wave3" }
+nomifun-agent-domain-wave4 = { path = "../nomifun-agent-domain-wave4" }
+nomifun-agent-domain-wave5 = { path = "../nomifun-agent-domain-wave5" }

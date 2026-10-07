@@ -7,7 +7,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const hooksSource = readFileSync(new URL('./hooks.ts', import.meta.url), 'utf8');
 const emitterSource = readFileSync(
   new URL('../../../utils/emitter.ts', import.meta.url),
   'utf8'
@@ -31,10 +30,4 @@ describe('turn settle transcript refetch', () => {
     ).toBe(true);
   });
 
-  test('useMessageLstCache reloads messages when the current conversation settles', () => {
-    expect(hooksSource.includes("addEventListener('conversation.turn.settled'")).toBe(true);
-    expect(
-      hooksSource.includes('[useMessageLstCache] Failed to refresh messages after turn settle:')
-    ).toBe(true);
-  });
 });

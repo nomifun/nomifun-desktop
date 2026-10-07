@@ -1,0 +1,45 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "capability": {
+      "id": "knowledge"
+    },
+    "contract_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contribution_id": "module:knowledge",
+    "provenance": {
+      "owner": {
+        "owner_kind": "package",
+        "package": {
+          "id": "nomifun.knowledge",
+          "version": "1.0.0"
+        }
+      },
+      "source_kind": "platform_builtin",
+      "source_identity": "platform.knowledge",
+      "artifact_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "host_surfaces": [
+      "desktop",
+      "headless"
+    ],
+    "supported_consumers": [
+      "agent",
+      "gateway"
+    ],
+    "authoring_policy": "direct",
+    "contribution_kind": "tool",
+    "typed_resource_kinds": [
+      "knowledge_base"
+    ],
+    "availability": {
+      "agent": {
+        "status": "active"
+      },
+      "gateway": {
+        "status": "active"
+      }
+    },
+    "publication_state": "active"
+  },
+  "payload_digest": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168"
+}

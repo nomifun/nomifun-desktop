@@ -1,0 +1,603 @@
+use nomifun_agent_contracts::{
+    AgentSessionId, IdmmDecisionExplanation, IdmmDecisionNotice, SessionEventPayloadRef,
+    SessionEventRecord, digest_bytes, digest_payload,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::error::SessionStoreError;
+use crate::types::{MessageProjection, SessionHeadProjection};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionDocument {
+    projection_id: String,
+    correlation_id: String,
+    presentation_intent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_summary: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_effect: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idmm_decision: Option<IdmmDecisionExplanation>,
+}
+
+pub(crate) fn initial_head(session_id: &AgentSessionId) -> SessionHeadProjection {
+    SessionHeadProjection {
+        session_id: session_id.clone(),
+        status: "opening".to_owned(),
+        active_turn_id: None,
+        active_set_generation: 0,
+        last_seq: 0,
+        unread_count: 0,
+    }
+}
+
+pub(crate) fn reduce_head(
+    head: &mut SessionHeadProjection,
+    event: &SessionEventRecord,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    match event.kind.0.as_str() {
+        "session/opening" => {
+            head.status = "opening".to_owned();
+            head.active_turn_id = None;
+        }
+        "session/ready" => {
+            head.status = "ready".to_owned();
+            head.active_turn_id = None;
+        }
+        "session/open-failed" => {
+            head.status = "open_failed".to_owned();
+            head.active_turn_id = None;
+        }
+        "turn/started" => {
+            head.status = "running".to_owned();
+            head.active_turn_id = Some(event.correlation_id.0.clone());
+        }
+        "turn/paused" => {
+            head.status = "paused".to_owned();
+            head.active_turn_id = Some(event.correlation_id.0.clone());
+        }
+        "turn/resume-authorized" => {
+            head.status = "running".to_owned();
+            head.active_turn_id = Some(event.correlation_id.0.clone());
+        }
+        "turn/completed" | "turn/failed" | "turn/cancelled" => {
+            head.status = "ready".to_owned();
+            head.active_turn_id = None;
+        }
+        "effect/uncertain" => {
+            if payload.get("recovery").and_then(Value::as_str) == Some("native_owner_verified_reconciliation") {
+                // This uncertainty is immediately reconciled in the same
+                // owner-authorized transaction; it grants no execution.
+            } else if head.status != "paused" && head.active_turn_id.as_deref() == payload.get("turn_id").and_then(Value::as_str) {
+                head.status = "reconciliation".to_owned();
+            } else if head.active_turn_id.is_none() {
+                head.status = "failed".to_owned();
+            }
+        }
+        "message/completed" => {
+            head.unread_count = head.unread_count.saturating_add(1);
+        }
+        "capability/active-set-committed" => {
+            let generation = required_u64(payload, "generation")?;
+            validate_active_set_payload(payload)?;
+            if event.seq > 2 && generation != head.active_set_generation.saturating_add(1) {
+                return Err(SessionStoreError::InvalidEvent(format!(
+                    "active-set generation must advance from {} to {}, got {generation}",
+                    head.active_set_generation,
+                    head.active_set_generation.saturating_add(1)
+                )));
+            }
+            if event.seq <= 2 && generation != 0 {
+                return Err(SessionStoreError::InvalidEvent(
+                    "opening active-set generation must be zero".to_owned(),
+                ));
+            }
+            head.active_set_generation = generation;
+        }
+        _ => {}
+    }
+
+    head.last_seq = event.seq;
+    Ok(())
+}
+
+pub(crate) fn reduce_agent_messages(
+    existing: Option<MessageProjection>,
+    event: &SessionEventRecord,
+    payload: &Value,
+) -> Result<MessageProjection, SessionStoreError> {
+    let (projection_id, presentation_intent) = projection_identity(event);
+    let mut document = match existing.as_ref() {
+        Some(existing) => serde_json::from_value(existing.projection.clone())?,
+        None => ProjectionDocument {
+            projection_id: projection_id.clone(),
+            correlation_id: event.correlation_id.0.clone(),
+            presentation_intent: presentation_intent.clone(),
+            state: None,
+            content: None,
+            turn_id: None,
+            display_at_ms: None,
+            content_digest: None,
+            part_count: None,
+            tool_summary: None,
+            reference: None,
+            terminal_effect: None,
+            idmm_decision: None,
+        },
+    };
+
+    apply_projection_semantics(&mut document, event, payload)?;
+    let semantic_digest = digest_payload(&document)?.0;
+    let first_seq = existing.as_ref().map_or(event.seq, |row| row.first_seq);
+
+    Ok(MessageProjection {
+        session_id: event.agent_session_id.clone(),
+        projection_id,
+        first_seq,
+        last_seq: event.seq,
+        presentation_intent,
+        message_type: None,
+        message_status: None,
+        projection: serde_json::to_value(document)?,
+        semantic_digest,
+    })
+}
+
+pub(crate) fn payload_value(event: &SessionEventRecord, stored_body: Option<Value>) -> Value {
+    match &event.payload {
+        SessionEventPayloadRef::Empty => Value::Null,
+        SessionEventPayloadRef::InlineJson(value) => value.0.clone(),
+        SessionEventPayloadRef::Stored(_) => stored_body.unwrap_or(Value::Null),
+    }
+}
+
+fn projection_identity(event: &SessionEventRecord) -> (String, String) {
+    if event.kind.0 == "idmm/notice-recorded" {
+        return (format!("idmm:{}", event.correlation_id.0), "idmm_notice".to_owned());
+    }
+    if event.kind.0 == "session/agent-binding-changed" {
+        return (
+            format!("agent-transition:{}", event.correlation_id.0),
+            "agent_transition".to_owned(),
+        );
+    }
+    if event.kind.0 == "turn/steer-accepted" {
+        return (
+            format!("message:{}", event.event_id.0),
+            "message".to_owned(),
+        );
+    }
+    let prefix = event.kind.0.split('/').next().unwrap_or("event");
+    let intent = match prefix {
+        "session" => "session_status",
+        "turn" => "turn_status",
+        "message" => "message",
+        "thinking" => "thinking",
+        "context" => "context",
+        "capability" => "capability",
+        "tool" => "tool",
+        "effect" => "effect",
+        "runtime" => "runtime",
+        "compaction" => "compaction",
+        _ => "event",
+    };
+    (
+        format!("{prefix}:{}", event.correlation_id.0),
+        intent.to_owned(),
+    )
+}
+
+fn apply_projection_semantics(
+    document: &mut ProjectionDocument,
+    event: &SessionEventRecord,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    match event.kind.0.as_str() {
+        "session/opening" => document.state = Some("opening".to_owned()),
+        "session/ready" => document.state = Some("ready".to_owned()),
+        "session/open-failed" => document.state = Some("open_failed".to_owned()),
+        "session/agent-binding-changed" => {
+            document.state = Some("completed".to_owned());
+            document.reference = Some(payload.clone());
+        }
+        "turn/started" => document.state = Some("running".to_owned()),
+        "turn/paused" => { document.state = Some("paused".to_owned()); document.reference = Some(payload.clone()); }
+        "turn/resume-authorized" => { document.state = Some("running".to_owned()); document.reference = Some(payload.clone()); }
+        "turn/completed" => document.state = Some("completed".to_owned()),
+        "turn/failed" => document.state = Some("failed".to_owned()),
+        "turn/cancelled" => document.state = Some("cancelled".to_owned()),
+        "turn/steer-accepted" => {
+            document.state = Some("accepted".to_owned());
+            if let Some(content) = payload
+                .get("input")
+                .and_then(|input| input.get("content"))
+                .and_then(Value::as_str)
+            {
+                document.content = Some(content.to_owned());
+            }
+        }
+        "message/user-accepted" => {
+            document.state = Some("accepted".to_owned());
+            if let Some(content) = payload.get("content").and_then(Value::as_str) {
+                document.content = Some(content.to_owned());
+            }
+            if let Some(value) = payload.get("idmm_decision") {
+                let decision: IdmmDecisionExplanation = serde_json::from_value(value.clone()).map_err(|error| {
+                    SessionStoreError::InvalidEvent(format!("invalid IDMM input explanation: {error}"))
+                })?;
+                decision.validate().map_err(|error| SessionStoreError::InvalidEvent(error.into()))?;
+                document.idmm_decision = Some(decision);
+            }
+        }
+        "idmm/notice-recorded" => {
+            let notice: IdmmDecisionNotice = serde_json::from_value(payload.clone()).map_err(|error| {
+                SessionStoreError::InvalidEvent(format!("invalid IDMM notice: {error}"))
+            })?;
+            notice.validate().map_err(|error| SessionStoreError::InvalidEvent(error.into()))?;
+            if event.correlation_id.as_ref() != event.event_id.as_ref()
+                || event.event_id.as_ref() != notice.decision.intervention_id
+            {
+                return Err(SessionStoreError::InvalidEvent("IDMM notice identity differs from its intervention".into()));
+            }
+            document.state = Some("recorded".into());
+            document.display_at_ms = Some(notice.created_at);
+            document.reference = Some(serde_json::to_value(notice)?);
+            // This reference is a strict notice contract; generic diagnostic
+            // references must not add fields to its typed payload.
+            return Ok(());
+        }
+        "message/content-part" => {
+            if document.display_at_ms.is_none() {
+                document.display_at_ms = payload.get("display_at_ms").and_then(Value::as_i64).filter(|time| *time > 0);
+            }
+            let content = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "message/content-part requires bounded content".to_owned(),
+                    )
+                })?;
+            if let Some(turn_id) = payload.get("turn_id").and_then(Value::as_str) {
+                if document.turn_id.as_deref().is_some_and(|existing| existing != turn_id) {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "message/content-part changed its owning turn".to_owned(),
+                    ));
+                }
+                document.turn_id = Some(turn_id.to_owned());
+            }
+            document.state = Some("streaming".to_owned());
+            document
+                .content
+                .get_or_insert_with(String::new)
+                .push_str(content);
+            document.part_count = Some(
+                document
+                    .part_count
+                    .unwrap_or_default()
+                    .saturating_add(1),
+            );
+        }
+        "thinking/content-part" => {
+            let content = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "thinking/content-part requires bounded content".to_owned(),
+                    )
+                })?;
+            let turn_id = payload
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "thinking/content-part requires the owning turn".to_owned(),
+                    )
+                })?;
+            if document.turn_id.as_deref().is_some_and(|existing| existing != turn_id) {
+                return Err(SessionStoreError::InvalidEvent(
+                    "thinking/content-part changed its owning turn".to_owned(),
+                ));
+            }
+            document.state = Some("recorded".to_owned());
+            document.turn_id = Some(turn_id.to_owned());
+            document.content.get_or_insert_with(String::new).push_str(content);
+            document.part_count = Some(document.part_count.unwrap_or_default().saturating_add(1));
+        }
+        "message/completed" => {
+            let expected_part_count = document.part_count.unwrap_or_default();
+            let part_count = optional_u64(payload, "part_count").ok_or_else(|| {
+                SessionStoreError::InvalidEvent("message/completed requires part_count".to_owned())
+            })?;
+            if part_count != expected_part_count {
+                return Err(SessionStoreError::InvalidEvent(format!(
+                    "message/completed part_count {part_count} does not match {expected_part_count} committed parts"
+                )));
+            }
+            let expected_digest =
+                digest_bytes(document.content.as_deref().unwrap_or_default().as_bytes()).0;
+            let content_digest = optional_string(payload, "content_digest").ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "message/completed requires content_digest".to_owned(),
+                )
+            })?;
+            if content_digest != expected_digest {
+                return Err(SessionStoreError::InvalidEvent(
+                    "message/completed content_digest does not match committed content parts"
+                        .to_owned(),
+                ));
+            }
+            document.state = Some("completed".to_owned());
+            document.content_digest = Some(content_digest);
+            document.part_count = Some(part_count);
+        }
+        "message/assistant-projected" => {
+            document.state = Some("completed".to_owned());
+            document.content = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            document.content_digest = document
+                .content
+                .as_deref()
+                .map(|content| digest_bytes(content.as_bytes()).0);
+            document.part_count = Some(1);
+        }
+        "tool/call-started" => document.state = Some("started".to_owned()),
+        "tool/result-recorded" => document.state = Some("recorded".to_owned()),
+        "effect/started" => document.state = Some("started".to_owned()),
+        "effect/succeeded" => document.state = Some("succeeded".to_owned()),
+        "effect/failed" => document.state = Some("failed".to_owned()),
+        "effect/uncertain" => document.state = Some("uncertain".to_owned()),
+        "effect/reconciled" => {
+            document.state = payload
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| Some("reconciled".to_owned()));
+        }
+        "capability/active-set-committed" => {
+            document.state = optional_u64(payload, "generation")
+                .map(|generation| format!("generation_{generation}"));
+        }
+        "compaction/completed" => document.state = Some("completed".to_owned()),
+        "session/forked" => document.state = Some("forked".to_owned()),
+        _ => {}
+    }
+    apply_projection_summaries(
+        document,
+        event.kind.0.as_str(),
+        Some(event.event_id.0.as_str()),
+        payload,
+    )?;
+    Ok(())
+}
+
+fn apply_projection_summaries(
+    document: &mut ProjectionDocument,
+    kind: &str,
+    event_id: Option<&str>,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    match kind {
+        "tool/call-started" | "tool/result-recorded" => {
+            let summary = object_slot(&mut document.tool_summary);
+            for key in [
+                "operation_id",
+                "call_id",
+                "capability_id",
+                "action_id",
+                "name",
+                "tool",
+                "coding_surface",
+            ] {
+                copy_scalar(payload, summary, key);
+            }
+            if kind == "tool/result-recorded" {
+                summary.insert("result_state".to_owned(), json!("recorded"));
+                copy_digest(payload, summary, "output", "result_digest")?;
+                copy_bounded_error(payload, summary);
+            }
+        }
+        "effect/started"
+        | "effect/succeeded"
+        | "effect/failed"
+        | "effect/uncertain"
+        | "effect/reconciled" => {
+            let effect = object_slot(&mut document.terminal_effect);
+            for key in [
+                "effect_id",
+                "operation_id",
+                "capability_id",
+                "action_id",
+                "effect",
+                "coding_surface",
+            ] {
+                copy_scalar(payload, effect, key);
+            }
+            let state = match kind {
+                "effect/started" => "started",
+                "effect/succeeded" => "succeeded",
+                "effect/failed" => "failed",
+                "effect/uncertain" => "uncertain",
+                "effect/reconciled" => payload
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reconciled"),
+                _ => unreachable!("effect event was matched above"),
+            };
+            effect.insert("state".to_owned(), json!(state));
+            copy_digest(payload, effect, "output", "result_digest")?;
+            copy_digest(payload, effect, "receipt", "result_digest")?;
+            copy_bounded_error(payload, effect);
+        }
+        _ => {}
+    }
+
+    copy_references(document, event_id, payload)?;
+    Ok(())
+}
+
+fn object_slot(slot: &mut Option<Value>) -> &mut Map<String, Value> {
+    if !matches!(slot, Some(Value::Object(_))) {
+        *slot = Some(Value::Object(Map::new()));
+    }
+    slot.as_mut()
+        .and_then(Value::as_object_mut)
+        .expect("object slot was initialized above")
+}
+
+fn copy_scalar(payload: &Value, target: &mut Map<String, Value>, key: &str) {
+    let Some(value) = payload.get(key) else {
+        return;
+    };
+    match value {
+        Value::String(value) => {
+            if value.len() <= MAX_SUMMARY_STRING_BYTES {
+                target.insert(key.to_owned(), Value::String(value.clone()));
+            }
+        }
+        Value::Bool(_) | Value::Number(_) => {
+            target.insert(key.to_owned(), value.clone());
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
+    }
+}
+
+fn copy_digest(
+    payload: &Value,
+    target: &mut Map<String, Value>,
+    source_key: &str,
+    target_key: &str,
+) -> Result<(), SessionStoreError> {
+    if let Some(value) = payload.get(source_key) {
+        target.insert(
+            target_key.to_owned(),
+            Value::String(digest_payload(value)?.0),
+        );
+    }
+    Ok(())
+}
+
+fn copy_bounded_error(payload: &Value, target: &mut Map<String, Value>) {
+    let Some(error) = payload.get("error").and_then(Value::as_str) else {
+        return;
+    };
+    if error.len() <= MAX_SUMMARY_STRING_BYTES {
+        target.insert("error".to_owned(), Value::String(error.to_owned()));
+    }
+}
+
+fn copy_references(
+    document: &mut ProjectionDocument,
+    event_id: Option<&str>,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    let reference = object_slot(&mut document.reference);
+    if let Some(event_id) = event_id {
+        reference.insert("last_event_id".to_owned(), json!(event_id));
+    }
+    for key in [
+        "reference",
+        "ref",
+        "result_ref",
+        "output_ref",
+        "receipt_ref",
+        "artifact_ref",
+        "locator",
+        "response_id",
+        "snapshot_digest",
+        "effect_id",
+        "resource_binding_ids",
+    ] {
+        let Some(value) = payload.get(key) else {
+            continue;
+        };
+        let serialized_len = serde_json::to_vec(value)?.len();
+        if serialized_len <= MAX_REFERENCE_BYTES {
+            reference.insert(key.to_owned(), value.clone());
+        } else {
+            reference.insert(
+                format!("{key}_digest"),
+                Value::String(digest_payload(value)?.0),
+            );
+        }
+    }
+    Ok(())
+}
+
+const MAX_SUMMARY_STRING_BYTES: usize = 1024;
+const MAX_REFERENCE_BYTES: usize = 4096;
+
+fn required_u64(value: &Value, field: &str) -> Result<u64, SessionStoreError> {
+    optional_u64(value, field).ok_or_else(|| {
+        SessionStoreError::InvalidEvent(format!("event payload requires integer {field}"))
+    })
+}
+
+fn validate_active_set_payload(payload: &Value) -> Result<(), SessionStoreError> {
+    let active = payload
+        .get("active_capability_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "active-set event requires active_capability_ids".to_owned(),
+            )
+        })?;
+    let active = active
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "active_capability_ids must contain strings".to_owned(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if active.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(SessionStoreError::InvalidEvent(
+            "active_capability_ids must be sorted and unique".to_owned(),
+        ));
+    }
+    let expected = digest_payload(&active)?.0;
+    let actual = payload
+        .get("active_set_digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "active-set event requires active_set_digest".to_owned(),
+            )
+        })?;
+    if actual != expected {
+        return Err(SessionStoreError::InvalidEvent(
+            "active_set_digest does not match active_capability_ids".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn optional_u64(value: &Value, field: &str) -> Option<u64> {
+    value.get(field).and_then(Value::as_u64)
+}
+
+fn optional_string(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(Value::as_str).map(str::to_owned)
+}

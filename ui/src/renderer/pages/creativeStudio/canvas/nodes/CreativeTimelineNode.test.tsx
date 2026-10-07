@@ -1,0 +1,442 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import '../../../../../../test/setup-dom.ts';
+
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
+import CreativeTimelineNode, {
+  type CreativeTimelineAssetPresentation,
+} from './CreativeTimelineNode';
+import { downloadTimelineComposition } from './timelineExport';
+import type { CreativeNodeOfKind } from './types';
+
+const timelineNode = (): CreativeNodeOfKind<'timeline'> => ({
+  id: 'timeline-1',
+  type: 'timeline',
+  position: { x: 10, y: 20 },
+  size: { width: 680, height: 148 },
+  groupId: null,
+  zIndex: 1,
+  locked: false,
+  data: {
+    title: '时间线1',
+    muted: false,
+    clips: [{
+      id: 'clip-1',
+      assetId: 'asset-image',
+      kind: 'image',
+      startMs: 0,
+      durationMs: 5_000,
+      sourceStartMs: 0,
+      sourceDurationMs: null,
+    }],
+  },
+});
+
+const assets = new Map<string, CreativeTimelineAssetPresentation>([[
+  'asset-image',
+  {
+    assetId: 'asset-image',
+    kind: 'image',
+    title: '城市航拍',
+    src: '/assets/city.png',
+    thumbnailSrc: '/assets/city-thumb.png',
+    width: 1_200,
+    height: 800,
+  },
+]]);
+
+afterEach(cleanup);
+
+describe('CreativeTimelineNode interactions', () => {
+  test('exposes non-interactive chrome for node dragging while isolating timeline controls', () => {
+    let pointerStarts = 0;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={timelineNode()}
+        assets={assets}
+        placement='contained'
+        onPointerDown={() => { pointerStarts += 1; }}
+      />
+    ));
+
+    const dragSurface = view.container.querySelector<HTMLElement>(
+      '[data-timeline-node-drag-surface]'
+    );
+    if (!dragSurface) throw new Error('timeline node drag surface missing');
+    fireEvent.pointerDown(dragSurface, { button: 0, pointerId: 1 });
+    expect(pointerStarts).toBe(1);
+
+    fireEvent.pointerDown(view.getByRole('button', { name: '播放' }), {
+      button: 0,
+      pointerId: 2,
+    });
+    expect(pointerStarts).toBe(1);
+  });
+
+  test('renders real clip media, duration, controls, and a movable playhead', () => {
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />
+    ));
+
+    expect(view.container.querySelector('[data-timeline-node]')).not.toBeNull();
+    expect(view.container.querySelector('[data-timeline-clip-id="clip-1"]')).not.toBeNull();
+    const filmstrip = view.container.querySelector<HTMLElement>(
+      '[data-timeline-clip-filmstrip="true"]'
+    );
+    expect(filmstrip).not.toBeNull();
+    expect(filmstrip?.style.backgroundImage).toContain('/assets/city-thumb.png');
+    expect((view.getByRole('button', { name: '播放' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(view.getByRole('slider', { name: '播放头' })).not.toBeNull();
+    expect(
+      view.container.querySelector<HTMLElement>('[data-project-canvas]')?.style
+        .getPropertyValue('--timeline-project-aspect')
+    ).toBe('1.5');
+    expect(view.getAllByText('00:05').length).toBeGreaterThan(0);
+    expect(view.getByText('01:00')).not.toBeNull();
+    expect(view.queryByRole('button', { name: '删除时间线节点' })).toBeNull();
+  });
+
+  test('anchors and repeats clip thumbnails instead of stretching them with the clip', () => {
+    const css = readFileSync(
+      new URL('./CreativeTimelineNode.module.css', import.meta.url),
+      'utf8'
+    );
+
+    expect(css).toContain(".clipMedia[data-timeline-clip-filmstrip='true']");
+    expect(css).toContain('background-position: left center');
+    expect(css).toContain('background-repeat: repeat-x');
+    expect(css).toContain('background-size: auto 100%');
+  });
+
+  test('loads a gapped timeline as a continuous sequence without changing durations', () => {
+    const node = timelineNode();
+    node.data.clips = [0, 10_000, 25_000].map((startMs, index) => ({
+      ...node.data.clips[0]!,
+      id: `clip-${index + 1}`,
+      startMs,
+      durationMs: 5_000 + index * 1_000,
+    }));
+    const compacted: Array<typeof node.data> = [];
+    let mergeKey: string | undefined;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data, key) => {
+          compacted.push(data);
+          mergeKey = key;
+        }}
+      />
+    ));
+
+    expect(compacted.at(-1)?.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 5_000], [5_000, 6_000], [11_000, 7_000]]);
+    expect(mergeKey).toBe('timeline:timeline-1:compact');
+    expect([...view.container.querySelectorAll<HTMLElement>('[data-timeline-clip-id]')]
+      .map((clip) => Number.parseFloat(clip.style.left)))
+      .toEqual([0, 5_000 / 60_000 * 100, 11_000 / 60_000 * 100]);
+  });
+
+  test('persists mute changes without allowing pointer-created gaps', () => {
+    const changes: Array<{ startMs: number; muted: boolean; mergeKey?: string }> = [];
+    const node = timelineNode();
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data, mergeKey) => changes.push({
+          startMs: data.clips[0]?.startMs ?? -1,
+          muted: data.muted,
+          mergeKey,
+        })}
+      />
+    ));
+
+    fireEvent.click(view.getByRole('button', { name: '关闭声音' }));
+    expect(changes.at(-1)).toMatchObject({ muted: true, startMs: 0 });
+
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    const clip = view.container.querySelector<HTMLElement>('[data-timeline-clip-id="clip-1"]');
+    if (!track || !clip) throw new Error('timeline track fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 600,
+      bottom: 60,
+      left: 0,
+      width: 600,
+      height: 60,
+      toJSON: () => ({}),
+    });
+    clip.setPointerCapture = () => undefined;
+    clip.hasPointerCapture = () => false;
+    fireEvent.pointerDown(clip, { button: 0, pointerId: 4, clientX: 100 });
+    fireEvent.pointerMove(clip, { pointerId: 4, clientX: 160 });
+    fireEvent.pointerUp(clip, { pointerId: 4, clientX: 160 });
+
+    expect(changes.at(-1)?.startMs).toBe(0);
+    expect(changes.at(-1)?.mergeKey).toContain('timeline:timeline-1:clip-1:move');
+  });
+
+  test('inserts a dragged clip between touching clips and commits the final pointer position', () => {
+    let node = timelineNode();
+    node.data.clips = [0, 5_000, 10_000, 15_000].map((startMs, index) => ({
+      ...node.data.clips[0]!, id: `clip-${index + 1}`, startMs,
+      durationMs: index === 3 ? 7_000 : 5_000,
+    }));
+    const originalClips = structuredClone(node.data.clips);
+    const renderTimeline = () => withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data) => { node = { ...node, data }; }}
+      />
+    );
+    const view = render(renderTimeline());
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    const clip = view.container.querySelector<HTMLElement>('[data-timeline-clip-id="clip-4"]');
+    if (!track || !clip) throw new Error('timeline drag fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 100, y: 0, top: 0, right: 700, bottom: 60, left: 100,
+      width: 600, height: 60, toJSON: () => ({}),
+    });
+    clip.setPointerCapture = () => undefined;
+    clip.hasPointerCapture = () => false;
+
+    fireEvent.pointerDown(clip, { button: 0, pointerId: 4, clientX: 285 });
+    for (const [clientX, starts] of [
+      [200, [0, 5_000, 17_000, 10_000]],
+      [200, [0, 5_000, 17_000, 10_000]],
+      [150, [0, 12_000, 17_000, 5_000]],
+      [200, [0, 5_000, 17_000, 10_000]],
+      [800, [0, 5_000, 10_000, 15_000]],
+      [285, [0, 5_000, 10_000, 15_000]],
+    ] as const) {
+      fireEvent.pointerMove(clip, { pointerId: 4, clientX });
+      view.rerender(renderTimeline());
+      expect(node.data.clips).toEqual(originalClips.map((item, index) => ({
+        ...item, startMs: starts[index],
+      })));
+      expect(Number.parseFloat(clip.style.left)).toBeCloseTo(
+        starts[3] / Math.max(60_000, Math.ceil((starts[3] + 7_000) / 5_000) * 5_000) * 100
+      );
+    }
+    fireEvent.pointerUp(clip, { pointerId: 4, clientX: 200 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map((item) => item.startMs)).toEqual([0, 5_000, 17_000, 10_000]);
+
+    fireEvent.keyDown(clip, { key: 'ArrowRight', shiftKey: true });
+    view.rerender(renderTimeline());
+    expect(node.data.clips[3]?.startMs).toBe(10_000);
+    fireEvent.keyDown(clip, { key: 'ArrowLeft', shiftKey: true });
+    view.rerender(renderTimeline());
+    expect(node.data.clips[3]?.startMs).toBe(10_000);
+  });
+
+  test('pushes and pulls later clips while trimming a clip end', () => {
+    let node = timelineNode();
+    node.data.clips = [0, 5_000, 10_000].map((startMs, index) => ({
+      ...node.data.clips[0]!,
+      id: `clip-${index + 1}`,
+      startMs,
+    }));
+    const mergeKeys: Array<string | undefined> = [];
+    const renderTimeline = () => withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data, mergeKey) => {
+          node = { ...node, data };
+          mergeKeys.push(mergeKey);
+        }}
+      />
+    );
+    const view = render(renderTimeline());
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    if (!track) throw new Error('timeline trim fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, right: 600, bottom: 60, left: 0,
+      width: 600, height: 60, toJSON: () => ({}),
+    });
+
+    const trimEnd = () => view.container.querySelector<HTMLElement>(
+      '[data-timeline-clip-id="clip-1"] [aria-label="裁切片段终点"]'
+    );
+    const growHandle = trimEnd();
+    if (!growHandle) throw new Error('timeline trim-end handle missing');
+    growHandle.setPointerCapture = () => undefined;
+    growHandle.hasPointerCapture = () => false;
+    fireEvent.pointerDown(growHandle, { button: 0, pointerId: 6, clientX: 50 });
+    fireEvent.pointerMove(growHandle, { pointerId: 6, clientX: 70 });
+    fireEvent.pointerUp(growHandle, { pointerId: 6, clientX: 70 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 7_000], [7_000, 5_000], [12_000, 5_000]]);
+
+    const shrinkHandle = trimEnd();
+    if (!shrinkHandle) throw new Error('timeline trim-end handle missing after growth');
+    shrinkHandle.setPointerCapture = () => undefined;
+    shrinkHandle.hasPointerCapture = () => false;
+    fireEvent.pointerDown(shrinkHandle, { button: 0, pointerId: 7, clientX: 70 });
+    fireEvent.pointerMove(shrinkHandle, { pointerId: 7, clientX: 40 });
+    fireEvent.pointerUp(shrinkHandle, { pointerId: 7, clientX: 40 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 4_000], [4_000, 5_000], [9_000, 5_000]]);
+    expect(mergeKeys.at(-1)).toBe('timeline:timeline-1:clip-1:trim-end');
+  });
+
+  test('seeks the playhead anywhere across the visible 60-second track', () => {
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />
+    ));
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    if (!track) throw new Error('timeline track fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 600,
+      bottom: 60,
+      left: 0,
+      width: 600,
+      height: 60,
+      toJSON: () => ({}),
+    });
+    fireEvent.pointerDown(track, { button: 0, pointerId: 9, clientX: 300 });
+    expect(view.getByRole('slider', { name: '播放头' }).getAttribute('aria-valuenow')).toBe('30');
+    expect(view.getAllByText('00:30').length).toBeGreaterThan(1);
+  });
+
+  test('opens the real asset picker callback and accepts dropped image/video files', () => {
+    let requested = 0;
+    let dropped: readonly File[] = [];
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={{ ...timelineNode(), data: { ...timelineNode().data, clips: [] } }}
+        assets={new Map()}
+        placement='contained'
+        onRequestAssets={() => { requested += 1; }}
+        onUploadFiles={(files) => { dropped = files; }}
+      />
+    ));
+
+    fireEvent.click(view.getByRole('button', { name: '添加素材到时间线' }));
+    fireEvent.click(view.getByRole('menuitem', { name: '从资产库添加' }));
+    expect(requested).toBe(1);
+
+    const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
+    if (!root) throw new Error('timeline root fixture missing');
+    const image = new File(['image'], 'scene.png', { type: 'image/png' });
+    const ignored = new File(['text'], 'notes.txt', { type: 'text/plain' });
+    fireEvent.drop(root, {
+      dataTransfer: {
+        types: ['Files'],
+        files: [image, ignored],
+      },
+    });
+    expect(dropped.map((file) => file.name)).toEqual(['scene.png']);
+  });
+
+  test('passes the fullscreen root as the asset-dialog portal container', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'fullscreenElement');
+    let popupContainer: HTMLElement | null = null;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={{ ...timelineNode(), data: { ...timelineNode().data, clips: [] } }}
+        assets={new Map()}
+        placement='contained'
+        onRequestAssets={(container) => { popupContainer = container; }}
+      />
+    ));
+    const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
+    if (!root) throw new Error('timeline root fixture missing');
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: root,
+    });
+    try {
+      fireEvent.click(view.getByRole('button', { name: '添加素材到时间线' }));
+      fireEvent.click(view.getByRole('menuitem', { name: '从资产库添加' }));
+      expect(popupContainer).toBe(root);
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'fullscreenElement', descriptor);
+      else delete (document as unknown as Record<string, unknown>).fullscreenElement;
+    }
+  });
+
+  test('adds an asset-library item by click and accepts it by drag payload', () => {
+    const added: string[] = [];
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={timelineNode()}
+        assets={assets}
+        libraryAssets={[...assets.values()]}
+        placement='contained'
+        onAddAsset={(assetId) => added.push(assetId)}
+        onRequestAssets={() => undefined}
+      />
+    ));
+
+    fireEvent.click(view.getByRole('button', { name: '添加素材 城市航拍 到时间线' }));
+    expect(added).toEqual(['asset-image']);
+
+    const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
+    if (!root) throw new Error('timeline root fixture missing');
+    fireEvent.drop(root, {
+      dataTransfer: {
+        types: ['application/x-nomifun-timeline-asset'],
+        getData: () => 'asset-image',
+      },
+    });
+    expect(added).toEqual(['asset-image', 'asset-image']);
+
+    const addButton = view.getByRole('button', { name: '添加素材到时间线' });
+    fireEvent.pointerDown(addButton, { button: 0, pointerId: 12, clientX: 80 });
+    fireEvent.click(addButton);
+    expect(view.getByRole('menuitem', { name: '从资产库添加' })).not.toBeNull();
+  });
+
+  test('saves a composed video result with the timeline title', async () => {
+    const browserWindow = window as Window & { showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<unknown> };
+    const originalPicker = browserWindow.showSaveFilePicker;
+    let suggestedName: string | undefined;
+    let written: Blob | null = null;
+    browserWindow.showSaveFilePicker = async (options) => {
+      suggestedName = options.suggestedName;
+      return {
+        createWritable: async () => ({
+          write: async (blob: Blob) => { written = blob; },
+          close: async () => undefined,
+        }),
+      };
+    };
+    try {
+      await downloadTimelineComposition({
+        blob: new Blob(['video'], { type: 'video/mp4' }),
+        mimeType: 'video/mp4',
+        extension: 'mp4',
+        width: 1280,
+        height: 720,
+        durationMs: 5_000,
+      }, '时间线1');
+      expect(suggestedName).toBe('时间线1.mp4');
+      expect((written as Blob | null)?.type).toBe('video/mp4');
+    } finally {
+      if (originalPicker) browserWindow.showSaveFilePicker = originalPicker;
+      else delete browserWindow.showSaveFilePicker;
+    }
+  });
+});

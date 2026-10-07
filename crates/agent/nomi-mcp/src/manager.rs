@@ -359,6 +359,25 @@ impl McpManager {
         result
     }
 
+    /// Inspect only the connected, host-bound catalog. This never connects,
+    /// lists tools over RPC, or dispatches the target.
+    pub fn preflight_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        let server = self.servers.get(server_name).ok_or_else(||
+            "MCP server is unavailable; activate the selected MCP connection first".to_owned())?;
+        let mut matches = server.tools.iter().filter(|tool| tool.name == tool_name);
+        let tool = matches.next().ok_or_else(||
+            "MCP tool is not in the authorized server catalog; discover an exact tool first".to_owned())?;
+        if matches.next().is_some() {
+            return Err("MCP target is ambiguous; refresh the selected server catalog".to_owned());
+        }
+        nomi_tools::registry::validate_tool_input_schema(tool_name, &tool.input_schema, arguments)
+    }
+
     /// Execute a tool on a specific server.
     ///
     /// Returns a structured [`McpCallOutput`] keeping text and artifact content
@@ -1146,6 +1165,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
     #[tokio::test]
     async fn silent_streamable_http_body_times_out_and_next_request_uses_a_clean_connection() {
+        const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1205,7 +1225,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
         let manager = McpManager::new_for_test_with_request_timeout(
             vec![("silent-http", false, Box::new(transport))],
-            Duration::from_millis(60),
+            REQUEST_TIMEOUT,
         );
 
         let first = manager
@@ -1214,7 +1234,8 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             .expect_err("the first HTTP body intentionally never completes");
         assert!(matches!(
             first,
-            McpError::RequestTimeout { timeout_ms: 60 }
+            McpError::RequestTimeout { timeout_ms }
+                if timeout_ms == REQUEST_TIMEOUT.as_millis() as u64
         ));
         let second = manager
             .call_tool("silent-http", "probe", json!({}))

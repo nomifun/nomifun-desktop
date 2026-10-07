@@ -23,6 +23,9 @@ type ResolvedVerifiedImage = VerifiedImageDeliverableItem & { statPath?: string 
 interface VerifiedImageArtifactCardProps {
   item: ResolvedVerifiedImage;
   workspace?: string;
+  variant?: 'primary' | 'thumbnail';
+  selected?: boolean;
+  onSelect?: () => void;
 }
 
 /**
@@ -30,7 +33,13 @@ interface VerifiedImageArtifactCardProps {
  * The caller can only construct this prop through isVerifiedImageDeliverable;
  * no assistant Markdown URL or filename-extension inference enters this view.
  */
-const VerifiedImageArtifactCard: React.FC<VerifiedImageArtifactCardProps> = ({ item, workspace }) => {
+const VerifiedImageArtifactCard: React.FC<VerifiedImageArtifactCardProps> = ({
+  item,
+  workspace,
+  variant = 'primary',
+  selected = false,
+  onSelect,
+}) => {
   const { t } = useTranslation();
   const { launchPreview, canPreview } = usePreviewLauncher();
   const desktop = isDesktopShell();
@@ -84,27 +93,50 @@ const VerifiedImageArtifactCard: React.FC<VerifiedImageArtifactCardProps> = ({ i
   const saveLabel = t('messages.turnDeliverables.saveImage', { defaultValue: 'Save image' });
   const copyLabel = t('messages.turnDeliverables.copyImagePath', { defaultValue: 'Copy image path' });
 
+  if (variant === 'thumbnail') {
+    return (
+      <button
+        type='button'
+        data-testid='verified-image-artifact-thumbnail'
+        data-artifact-id={item.artifactId}
+        aria-pressed={selected}
+        aria-label={t('messages.turnDeliverables.selectImage', {
+          name: item.fileName,
+          defaultValue: 'Select {{name}}',
+        })}
+        className='turn-deliverable-image__thumbnail'
+        onClick={onSelect}
+      >
+        <LocalImageView
+          src={imagePath}
+          alt={item.fileName}
+          className='turn-deliverable-image__thumbnail-media'
+        />
+      </button>
+    );
+  }
+
   return (
     <article
       data-testid='verified-image-artifact-card'
       data-artifact-id={item.artifactId}
-      className='min-w-0 overflow-hidden rounded-8px border border-solid border-[var(--aou-2)] bg-2'
+      className='turn-deliverable-image'
     >
       <button
         type='button'
         aria-label={openLabel}
         disabled={!canOpen}
-        className='block w-full min-h-180px p-0 border-none bg-3 overflow-hidden cursor-pointer disabled:cursor-default'
+        className='turn-deliverable-image__preview'
         onClick={handleOpen}
       >
         <LocalImageView
           src={imagePath}
           alt={item.fileName}
-          className='block w-full max-h-420px object-contain bg-3'
+          className='turn-deliverable-image__media'
         />
       </button>
 
-      <div className='flex flex-wrap items-center justify-between gap-8px px-10px py-8px'>
+      <div className='turn-deliverable-image__meta'>
         <div className='flex min-w-120px flex-1 items-center gap-6px'>
           <Shield
             theme='outline'
@@ -122,7 +154,7 @@ const VerifiedImageArtifactCard: React.FC<VerifiedImageArtifactCardProps> = ({ i
           )}
         </div>
 
-        <div className='ml-auto flex shrink-0 flex-wrap items-center justify-end gap-4px'>
+        <div className='turn-deliverable-image__actions'>
           {canOpen && (
             <button
               type='button'

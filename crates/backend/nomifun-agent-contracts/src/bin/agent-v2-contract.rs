@@ -1,0 +1,696 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use nomifun_agent_contracts::{
+    AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
+    AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
+    AgentStoreSchemaManifestPayload,
+    IdmmDecisionExplanation, IdmmDecisionNotice,
+    CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload,
+    CanonicalErrorRegistryPayload,
+    CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
+    ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
+    D026OrderingOutcomeMatrix,
+    D027TerminalSequenceMatrix, D028PlatformMatrix,
+    AGENT_STORE_BASELINE_SQL,
+    OfficialPresetKey,
+    OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
+    PluginActionPublication, PluginArtifact, PluginManifest, PluginRegistrationMetadata,
+    RemoteBinding, UnifiedPluginContractManifest,
+    ResolvedSnapshotEnvelope, SessionEventRegistryPayload, TargetPackageInventoryPayload,
+    VersionString, digest_bytes, digest_payload,
+};
+use schemars::{JsonSchema, schema_for};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("agent-v2 contract tool failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let mode = std::env::args().nth(1).unwrap_or_else(|| "check".to_owned());
+    if mode != "check" && mode != "write" {
+        return Err(format!("usage: agent-v2-contract [check|write], got {mode:?}").into());
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contracts = root.join("contracts");
+    let generated = contracts.join("generated");
+
+    let closure_path = contracts.join("closure/contract-closure.v1.json");
+    let inventory_path = contracts.join("target-packages/first-party-agent-modules.v1.json");
+    let feature_path =
+        contracts.join("engine/platform-feature-inventory.payload.json");
+    let seed_path = contracts.join("presets/official-agent-seed-manifest.payload.json");
+    let api_path = contracts.join("presets/canonical-api-inventory.payload.json");
+    let catalog_entry_path = contracts.join("catalog/platform-module-catalog-entry.v1.json");
+    let event_path = contracts.join("events/session-event-registry.json");
+    let error_path = contracts.join("events/error-registry.json");
+    let d026_path = contracts.join("validation/d026-ordering-outcomes.matrix.json");
+    let d027_path = contracts.join("validation/d027-terminal-sequences.matrix.json");
+    let d028_path = contracts.join("validation/d028-platform-matrix.json");
+    let d026_remote_fixture_path =
+        contracts.join("remote/d026-request-admission-ordering.fixture.json");
+    let platform_path =
+        contracts.join("validation/platform-validation-manifest.payload.json");
+    let plugin_contract_path =
+        contracts.join("plugin/unified-plugin-contract.v1.json");
+
+    let closure: ContractClosurePayload = read_json(&closure_path)?;
+    validate_closure(&closure)?;
+    let closure_digest = digest_payload(&closure)?;
+
+    let plugin_contract: UnifiedPluginContractManifest =
+        read_json(&plugin_contract_path)?;
+    plugin_contract.validate()?;
+    let plugin_contract_digest = digest_payload(&plugin_contract)?;
+
+    let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
+    validate_target_inventory(&inventory)?;
+    let inventory_digest = digest_payload(&inventory)?;
+    let feature_inventory: PlatformFeatureInventoryPayload = read_json(&feature_path)?;
+    feature_inventory.validate().map_err(|error| error.message)?;
+    let feature_digest = digest_payload(&feature_inventory)?;
+
+    let mut seed: OfficialPresetSeedManifestPayload = read_json(&seed_path)?;
+    seed.target_first_party_contribution_digest = inventory_digest.clone();
+    seed.target_runtime_feature_inventory_digest = feature_digest.clone();
+    seed.validate().map_err(|error| error.message)?;
+    seed.validate_against_target_inventory(&inventory)
+        .map_err(|error| error.message)?;
+    seed.validate_against_runtime_feature_inventory(
+        &feature_digest,
+        &feature_inventory.runtime_features,
+    )
+    .map_err(|error| error.message)?;
+    let seed_digest = digest_payload(&seed)?;
+
+    let api_inventory: CanonicalApiInventoryPayload = read_json(&api_path)?;
+    validate_api_inventory(&api_inventory)?;
+    let api_digest = digest_payload(&api_inventory)?;
+
+    let catalog_entry: CapabilityCatalogEntry = read_json(&catalog_entry_path)?;
+    catalog_entry.validate()?;
+    let catalog_entry_digest = digest_payload(&catalog_entry)?;
+
+    let event_registry: SessionEventRegistryPayload = read_json(&event_path)?;
+    event_registry.validate()?;
+    let event_digest = digest_payload(&event_registry)?;
+
+    let error_registry: CanonicalErrorRegistryPayload = read_json(&error_path)?;
+    error_registry.validate()?;
+    let error_digest = digest_payload(&error_registry)?;
+
+    let d026: D026OrderingOutcomeMatrix = read_json(&d026_path)?;
+    if !d026.validate_exact_contract() {
+        return Err("D-026 ordering matrix is not the exact contract".into());
+    }
+    let d027: D027TerminalSequenceMatrix = read_json(&d027_path)?;
+    if !d027.validate_exact_contract() {
+        return Err("D-027 terminal matrix is not the exact contract".into());
+    }
+    let d028: D028PlatformMatrix = read_json(&d028_path)?;
+    d028.validate_exact_contract()?;
+    let availability_digest = digest_payload(&d028)?;
+
+    let d026_remote_fixture: Value = read_json(&d026_remote_fixture_path)?;
+    let d026_remote_fixture_digest = digest_payload(&d026_remote_fixture)?;
+    let d026_digest = digest_payload(&d026)?;
+    let d027_digest = digest_payload(&d027)?;
+
+    let schemas = generated_schemas()?;
+    validate_generated_schemas(&schemas)?;
+    let rust_contract_schema_digest = digest_payload(&schemas)?;
+    let package_schema_digest = digest_payload(&schema_subset(
+        &schemas,
+        &[
+            "package_manifest",
+            "plugin_registration",
+            "target_package_inventory",
+        ],
+    ))?;
+    // Historical manifest key, now covering the shared in-process snapshot and
+    // feature vocabulary. It no longer certifies any external RPC protocol.
+    let runtime_protocol_digest = digest_payload(&schema_subset(
+        &schemas,
+        &[
+            "agent_snapshot",
+            "runtime_feature_inventory",
+        ],
+    ))?;
+    let platform_contract_digest = digest_payload(&schema_subset(
+        &schemas,
+        &["platform_validation_manifest"],
+    ))?;
+    let plugin_schema_digest = digest_payload(&schema_subset(
+        &schemas,
+        &[
+            "plugin_action_publication",
+            "plugin_artifact",
+            "plugin_manifest",
+            "unified_plugin_contract_manifest",
+        ],
+    ))?;
+
+    let coding_seed = seed
+        .templates
+        .get(&OfficialPresetKey::CodingCodex)
+        .ok_or("coding.codex seed is missing")?;
+    let coding_contract_digest = digest_payload(&json!({
+        "seed": coding_seed,
+        "runtime_features": feature_inventory.runtime_features,
+    }))?;
+
+    let database_schema_digest = digest_bytes(AGENT_STORE_BASELINE_SQL.as_bytes());
+    let cargo_lock_digest = digest_bytes(&fs::read(root.join("../../../Cargo.lock"))?);
+
+    let canonical_manifest_payload = CanonicalAgentStoreSchemaManifestPayload {
+        manifest_version: VersionString("1.0.0".to_owned()),
+        database_schema_digest: database_schema_digest.clone(),
+        rust_contract_schema_digest: rust_contract_schema_digest.clone(),
+        package_schema_digest: package_schema_digest.clone(),
+        official_preset_seed_manifest_digest: seed_digest.clone(),
+        canonical_api_inventory_digest: api_digest.clone(),
+        session_event_registry_digest: event_digest.clone(),
+        error_registry_digest: error_digest.clone(),
+        runtime_protocol_digest: runtime_protocol_digest.clone(),
+        runtime_feature_inventory_digest: feature_digest.clone(),
+        platform_validation_contract_digest: platform_contract_digest.clone(),
+        confirmed_decision_contract_digest: closure_digest.clone(),
+    };
+    let canonical_manifest = ArtifactEnvelope::new(canonical_manifest_payload)?;
+    let canonical_manifest_digest = canonical_manifest.payload_digest.clone();
+
+    let mut platform: PlatformValidationManifestPayload = read_json(&platform_path)?;
+    platform.confirmed_decision_contract_digest.0 = closure_digest.clone();
+    platform.canonical_schema_manifest_digest = canonical_manifest_digest.clone();
+    platform.cargo_lock_digest = cargo_lock_digest.clone();
+    platform.official_preset_seed_manifest_digest = seed_digest.clone();
+    platform.capability_availability_manifest_digest = availability_digest.clone();
+    platform.coding_codex_native_contract_digest = coding_contract_digest.clone();
+    platform
+        .decision_fixture_refs
+        .d026_request_admission_ordering
+        .digest = d026_remote_fixture_digest;
+    platform
+        .decision_fixture_refs
+        .d026_validation_outcomes
+        .digest = d026_digest;
+    platform.decision_fixture_refs.d027_terminal_drain.digest = d027_digest;
+    platform.decision_fixture_refs.d028_platform_matrix.digest = availability_digest.clone();
+    platform.validate_contract()?;
+    let platform_fixture_digest = digest_payload(&platform)?;
+    let platform_envelope = ArtifactEnvelope::new(platform.clone())?;
+
+    let mut digest_map = BTreeMap::new();
+    digest_map.insert("canonical_api_inventory".to_owned(), api_digest);
+    digest_map.insert(
+        "capability_catalog_entry".to_owned(),
+        catalog_entry_digest,
+    );
+    digest_map.insert(
+        "canonical_schema_manifest".to_owned(),
+        canonical_manifest_digest,
+    );
+    digest_map.insert("cargo_lock".to_owned(), cargo_lock_digest);
+    digest_map.insert("coding_codex_native_contract".to_owned(), coding_contract_digest);
+    digest_map.insert(
+        "confirmed_decision_contract".to_owned(),
+        closure_digest.clone(),
+    );
+    digest_map.insert("database_schema".to_owned(), database_schema_digest);
+    digest_map.insert("error_registry".to_owned(), error_digest);
+    digest_map.insert("official_preset_seed_manifest".to_owned(), seed_digest);
+    digest_map.insert("package_schema".to_owned(), package_schema_digest);
+    digest_map.insert("plugin_contract".to_owned(), plugin_contract_digest);
+    digest_map.insert("plugin_schema".to_owned(), plugin_schema_digest);
+    digest_map.insert(
+        "platform_validation_contract".to_owned(),
+        platform_contract_digest,
+    );
+    digest_map.insert(
+        "platform_validation_fixture".to_owned(),
+        platform_fixture_digest.clone(),
+    );
+    digest_map.insert("runtime_feature_inventory".to_owned(), feature_digest);
+    digest_map.insert("runtime_protocol".to_owned(), runtime_protocol_digest);
+    digest_map.insert("rust_contract_schema".to_owned(), rust_contract_schema_digest);
+    digest_map.insert("session_event_registry".to_owned(), event_digest);
+    digest_map.insert("target_first_party_inventory".to_owned(), inventory_digest);
+
+    let ledger = ArtifactEnvelope::new(ContractDigestLedgerPayload {
+        ledger_version: VersionString("1.0.0".to_owned()),
+        artifacts: digest_map,
+    })?;
+
+    let outputs = BTreeMap::from([
+        (
+            "agent-store-migration-manifest.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(nomifun_agent_contracts::agent_store_schema_manifest_payload())?)?,
+        ),
+        (
+            "schemas.json".to_owned(),
+            pretty_json(&schemas)?,
+        ),
+        (
+            "canonical-agent-store-schema-manifest.envelope.json".to_owned(),
+            pretty_json(&canonical_manifest)?,
+        ),
+        (
+            "contract-digest-ledger.envelope.json".to_owned(),
+            pretty_json(&ledger)?,
+        ),
+        (
+            "contract-closure.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(closure)?)?,
+        ),
+        (
+            "first-party-agent-modules.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(inventory)?)?,
+        ),
+        (
+            "runtime-feature-inventory.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(feature_inventory)?)?,
+        ),
+        (
+            "official-agent-seed-manifest.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(seed.clone())?)?,
+        ),
+        (
+            "canonical-api-inventory.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(api_inventory)?)?,
+        ),
+        (
+            "module-catalog-entry.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(catalog_entry)?)?,
+        ),
+        (
+            "session-event-registry.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(event_registry)?)?,
+        ),
+        (
+            "error-registry.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(error_registry)?)?,
+        ),
+        (
+            "platform-validation-fixture.envelope.json".to_owned(),
+            pretty_json(&platform_envelope)?,
+        ),
+        (
+            "unified-plugin-contract.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(plugin_contract.clone())?)?,
+        ),
+    ]);
+
+    if mode == "write" {
+        fs::create_dir_all(&generated)?;
+        write_json(&seed_path, &seed)?;
+        write_json(&platform_path, &platform)?;
+        write_json(&plugin_contract_path, &plugin_contract)?;
+        for (name, contents) in &outputs {
+            fs::write(generated.join(name), contents)?;
+        }
+    } else {
+        check_json(&seed_path, &seed)?;
+        check_json(&platform_path, &platform)?;
+        check_json(&plugin_contract_path, &plugin_contract)?;
+        for (name, contents) in &outputs {
+            let path = generated.join(name);
+            let existing = fs::read_to_string(&path)
+                .map_err(|_| format!("missing generated artifact {}", path.display()))?;
+            if &existing != contents {
+                return Err(format!(
+                    "generated artifact drift: {}; run agent-v2-contract write",
+                    path.display()
+                )
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_api_inventory(
+    api_inventory: &CanonicalApiInventoryPayload,
+) -> Result<(), Box<dyn Error>> {
+    let mut operation_ids = BTreeSet::new();
+    let mut method_paths = BTreeSet::new();
+    for operation in &api_inventory.operations {
+        if !operation_ids.insert(operation.operation_id.as_str()) {
+            return Err(format!("duplicate canonical API operation {}", operation.operation_id).into());
+        }
+        let method_path = (format!("{:?}", operation.method), operation.path.as_str());
+        if !method_paths.insert(method_path) {
+            return Err(format!("duplicate canonical API method/path {}", operation.path).into());
+        }
+        let legacy_presets_path = ["/api/", "presets"].concat();
+        if operation.path == legacy_presets_path {
+            return Err(format!(
+                "legacy preset operation remains active: {}",
+                operation.operation_id
+            )
+            .into());
+        }
+        if !operation
+            .canonical_errors
+            .is_subset(&api_inventory.canonical_error_codes)
+        {
+            return Err(format!(
+                "{} references an error outside canonical_error_codes",
+                operation.operation_id
+            )
+            .into());
+        }
+    }
+
+    let required_operations = [
+        ("capabilities.list", "/api/capabilities"),
+        ("agent_catalog.skills.list", "/api/agent-catalog/skills"),
+        ("mcp_tool_mappings.list", "/api/mcp-tool-mappings"),
+        (
+            "agent_preset_templates.list_official",
+            "/api/agent-preset-templates?source=official",
+        ),
+        ("agent_presets.create", "/api/agent-presets"),
+        (
+            "agent_presets.delete",
+            "/api/agent-presets/{preset_id}",
+        ),
+        (
+            "agent_preset_revisions.create",
+            "/api/agent-presets/{preset_id}/revisions",
+        ),
+        ("agent_sessions.create", "/api/agent-sessions"),
+        (
+            "agent_bindings.get",
+            "/api/agent-bindings/{target_kind}/{target_id}",
+        ),
+        (
+            "agent_bindings.put",
+            "/api/agent-bindings/{target_kind}/{target_id}",
+        ),
+    ];
+    for (operation_id, path) in required_operations {
+        if !api_inventory
+            .operations
+            .iter()
+            .any(|operation| operation.operation_id == operation_id && operation.path == path)
+        {
+            return Err(format!("missing canonical Agent API operation {operation_id} {path}").into());
+        }
+    }
+    if !api_inventory
+        .forbidden_paths
+        .contains(&["/api/", "presets"].concat())
+    {
+        return Err("legacy preset route must remain explicitly forbidden".into());
+    }
+    Ok(())
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Box<dyn Error>> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn pretty_json<T: Serialize>(value: &T) -> Result<String, Box<dyn Error>> {
+    Ok(format!("{}\n", serde_json::to_string_pretty(value)?))
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
+    fs::write(path, pretty_json(value)?)?;
+    Ok(())
+}
+
+fn check_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
+    let expected = pretty_json(value)?;
+    let actual = fs::read_to_string(path)?;
+    if actual != expected {
+        return Err(format!(
+            "canonical payload drift: {}; run agent-v2-contract write",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_closure(payload: &ContractClosurePayload) -> Result<(), Box<dyn Error>> {
+    if payload.decisions.len() != 27
+        || !payload.unresolved_decisions.is_empty()
+        || payload.production_behavior_included
+        || payload.canonical_sources.len() != 3
+    {
+        return Err("Contract Closure payload is incomplete".into());
+    }
+    let ids = payload
+        .decisions
+        .iter()
+        .map(|decision| decision.decision_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected = (1..=28)
+        .filter(|index| *index != 22)
+        .map(|index| format!("D-{index:03}"))
+        .collect::<BTreeSet<_>>();
+    if ids != expected.iter().map(String::as_str).collect() {
+        return Err("confirmed decision exact-set is not the active D-001 through D-028 set".into());
+    }
+    Ok(())
+}
+
+fn validate_target_inventory(
+    payload: &TargetPackageInventoryPayload,
+) -> Result<(), Box<dyn Error>> {
+    let mut packages = BTreeSet::new();
+    let mut capabilities = BTreeSet::new();
+    for package in &payload.packages {
+        if !packages.insert(package.package.id.as_ref().to_owned()) {
+            return Err(format!("duplicate target package {}", package.package.id.as_ref()).into());
+        }
+        if format!("{:?}", package.source.source_kind).to_ascii_lowercase() != "bundled" {
+            return Err("target first-party inventory must contain only bundled sources".into());
+        }
+        for capability in &package.capabilities {
+            if !capabilities.insert(capability.capability.id.as_ref().to_owned()) {
+                return Err(format!(
+                    "duplicate target capability {}",
+                    capability.capability.id.as_ref()
+                )
+                .into());
+            }
+        }
+    }
+    if packages.is_empty() || capabilities.is_empty() {
+        return Err("target first-party inventory cannot be empty".into());
+    }
+    Ok(())
+}
+
+fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
+    let mut schemas = BTreeMap::new();
+    add_schema::<PackageManifest>(&mut schemas, "package_manifest")?;
+    add_schema::<PluginRegistrationMetadata>(&mut schemas, "plugin_registration")?;
+    add_schema::<TargetPackageInventoryPayload>(&mut schemas, "target_package_inventory")?;
+    add_schema::<ContributionLock>(&mut schemas, "contribution_lock")?;
+    add_schema::<AgentPresetRevisionPayload>(&mut schemas, "agent_preset_revision_payload")?;
+    add_schema::<AgentPresetRevisionDigestInput>(
+        &mut schemas,
+        "agent_preset_revision_digest_input",
+    )?;
+    add_schema::<AgentPresetRevision>(&mut schemas, "agent_preset_revision")?;
+    add_schema::<OfficialPresetSeedManifestPayload>(&mut schemas, "official_preset_seed")?;
+    add_schema::<CapabilityCatalogEntry>(&mut schemas, "capability_catalog_entry")?;
+    add_schema::<ResolvedSnapshotEnvelope>(&mut schemas, "agent_snapshot")?;
+    add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
+    add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
+    add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
+    add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
+    add_schema::<IdmmDecisionNotice>(&mut schemas, "idmm_decision_notice")?;
+    add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
+    add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
+    add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;
+    add_schema::<PlatformFeatureInventoryPayload>(
+        &mut schemas,
+        "runtime_feature_inventory",
+    )?;
+    add_schema::<PlatformValidationManifestPayload>(
+        &mut schemas,
+        "platform_validation_manifest",
+    )?;
+    add_schema::<UnifiedPluginContractManifest>(
+        &mut schemas,
+        "unified_plugin_contract_manifest",
+    )?;
+    add_schema::<PluginManifest>(&mut schemas, "plugin_manifest")?;
+    add_schema::<PluginArtifact>(&mut schemas, "plugin_artifact")?;
+    add_schema::<PluginActionPublication>(
+        &mut schemas,
+        "plugin_action_publication",
+    )?;
+    Ok(schemas)
+}
+
+fn validate_generated_schemas(
+    schemas: &BTreeMap<String, Value>,
+) -> Result<(), Box<dyn Error>> {
+    let required = [
+        "contribution_lock",
+        "agent_preset_revision_payload",
+        "agent_preset_revision_digest_input",
+        "agent_preset_revision",
+        "capability_catalog_entry",
+        "agent_snapshot",
+        "unified_plugin_contract_manifest",
+        "plugin_manifest",
+        "plugin_artifact",
+        "plugin_action_publication",
+    ];
+    for name in required {
+        if !schemas.contains_key(name) {
+            return Err(format!("missing generated schema {name}").into());
+        }
+    }
+    if schemas.contains_key("resolved_snapshot") {
+        return Err("resolved_snapshot compatibility schema must not be generated".into());
+    }
+
+    let revision = serde_json::to_string(
+        schemas
+            .get("agent_preset_revision")
+            .expect("required schema checked above"),
+    )?;
+    if !revision.contains("\"contribution_locks\"") {
+        return Err("agent_preset_revision schema does not include ContributionLock".into());
+    }
+    for field in [
+        "resource_bindings",
+        "resource_binding_refs",
+        "typed_resource_bindings",
+        "typed_resource_defaults",
+    ] {
+        if revision.contains(&format!("\"{field}\"")) {
+            return Err(format!(
+                "agent_preset_revision schema must not freeze {field}"
+            )
+            .into());
+        }
+    }
+    let official_seed = serde_json::to_string(
+        schemas
+            .get("official_preset_seed")
+            .expect("official_preset_seed schema is generated"),
+    )?;
+    if official_seed.contains("\"typed_resource_defaults\"")
+        || official_seed.contains("\"TypedResourceDefault\"")
+        || official_seed.contains("\"ResourceDefaultBindingPolicy\"")
+        || !official_seed.contains("\"required_resource_kinds\"")
+    {
+        return Err(
+            "official_preset_seed schema must declare only required_resource_kinds".into(),
+        );
+    }
+    let catalog = serde_json::to_string(
+        schemas
+            .get("capability_catalog_entry")
+            .expect("required schema checked above"),
+    )?;
+    for field in [
+        "host_surfaces",
+        "supported_consumers",
+        "availability",
+        "publication_state",
+    ] {
+        if !catalog.contains(&format!("\"{field}\"")) {
+            return Err(format!("capability_catalog_entry schema is missing {field}").into());
+        }
+    }
+    let snapshot = serde_json::to_string(
+        schemas
+            .get("agent_snapshot")
+            .expect("required schema checked above"),
+    )?;
+    if !snapshot.contains("\"snapshot_ref\"") || !snapshot.contains("\"content\"") {
+        return Err("agent_snapshot schema is not the immutable Snapshot envelope".into());
+    }
+    if snapshot.contains(&["preset_", "snapshot"].concat()) {
+        return Err("agent_snapshot schema contains a legacy snapshot alias".into());
+    }
+    for field in [
+        "resource_bindings",
+        "resource_binding_refs",
+        "typed_resource_bindings",
+        "typed_resource_defaults",
+    ] {
+        if snapshot.contains(&format!("\"{field}\"")) {
+            return Err(format!(
+                "agent_snapshot schema must not freeze {field}"
+            )
+            .into());
+        }
+    }
+    let agent_binding = serde_json::to_string(
+        schemas
+            .get("agent_binding")
+            .expect("agent_binding schema is generated"),
+    )?;
+    if !agent_binding.contains("\"typed_resource_bindings\"") {
+        return Err(
+            "agent_binding schema must retain target-scoped typed_resource_bindings".into(),
+        );
+    }
+    let package_manifest = serde_json::to_string(
+        schemas
+            .get("package_manifest")
+            .expect("package_manifest schema is generated"),
+    )?;
+    if !package_manifest.contains("\"contribution_id\"") {
+        return Err("CapabilityManifest must own explicit contribution_id".into());
+    }
+    let plugin_manifest = serde_json::to_string(
+        schemas
+            .get("plugin_manifest")
+            .expect("Unified Plugin manifest schema is generated"),
+    )?;
+    for forbidden in [
+        "package_contributions",
+        "roles",
+        "providers",
+        "consumers",
+        "release_id",
+        "candidate_id",
+        "mount_id",
+    ] {
+        if plugin_manifest.contains(&format!("\"{forbidden}\"")) {
+            return Err(format!(
+                "Unified Plugin manifest must not expose {forbidden}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn add_schema<T: JsonSchema>(
+    schemas: &mut BTreeMap<String, Value>,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    schemas.insert(name.to_owned(), serde_json::to_value(schema_for!(T))?);
+    Ok(())
+}
+
+fn schema_subset(
+    schemas: &BTreeMap<String, Value>,
+    names: &[&str],
+) -> BTreeMap<String, Value> {
+    names
+        .iter()
+        .filter_map(|name| schemas.get(*name).cloned().map(|value| ((*name).to_owned(), value)))
+        .collect()
+}

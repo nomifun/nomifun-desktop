@@ -15,7 +15,7 @@ use nomifun_common::{
     AppError, ProviderId, ProviderLifecycleBarrier, ProviderUsage, ProviderUsageFeature,
 };
 use nomifun_db::{
-    IAgentExecutionRepository, IAgentExecutionTemplateRepository, IConversationRepository,
+    IAgentExecutionRepository, IAgentExecutionTemplateRepository, SqlitePool,
 };
 use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 
@@ -28,7 +28,7 @@ pub struct AppProviderDeletionCoordinator {
     pub workshop: Arc<nomifun_workshop::WorkshopService>,
     pub execution_repo: Arc<dyn IAgentExecutionRepository>,
     pub execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository>,
-    pub conversation_repo: Arc<dyn IConversationRepository>,
+    pub pool: SqlitePool,
 }
 
 #[async_trait::async_trait]
@@ -61,19 +61,29 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         out.extend(self.companion.providers_in_use(provider_id).await);
         out.extend(self.customer_service.providers_in_use(provider_id).await);
 
-        // The top-level Conversation model is its current lead and therefore a
-        // hard provider binding. Collaborator-only pool entries remain soft
-        // references and are removed only after this guard passes.
-        let conversations = self
-            .conversation_repo
-            .list_conversations_using_model_provider(provider_id)
-            .await
-            .map_err(|e| AppError::Internal(format!("scan Conversation models: {e}")))?;
-        for (id, name) in conversations {
+        // Current Agent revisions are hard provider bindings. Session model
+        // authority is frozen through these exact revision payloads; the
+        // retired Conversation table is never consulted.
+        let agents: Vec<(String, String)> = nomifun_db::sqlx::query_as(
+            "SELECT DISTINCT preset.preset_id, \
+                    COALESCE(json_extract(preset.display_json, '$.name'), preset.preset_id) \
+             FROM agent_presets preset \
+             JOIN agent_preset_revisions revision \
+               ON revision.preset_id = preset.preset_id \
+              AND revision.revision_no = preset.current_stable_revision \
+             JOIN json_tree(revision.payload_json) route \
+               ON route.key = 'provider_id' AND route.value = ? \
+             WHERE preset.retired_at_ms IS NULL",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| AppError::Internal(format!("scan Agent model routes: {error}")))?;
+        for (id, name) in agents {
             out.push(ProviderUsage {
-                feature: ProviderUsageFeature::Conversation,
+                feature: ProviderUsageFeature::Agent,
                 label: name,
-                target_id: Some(id.to_string()),
+                target_id: Some(id),
             });
         }
 
@@ -115,7 +125,7 @@ mod tests {
     use super::*;
     use nomifun_common::{
         AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, DecisionPolicy,
-        DelegationPolicy, PlanGate, ProviderUsageFeature,
+        DelegationPolicy, ProviderUsageFeature,
     };
     use nomifun_db::{
         IAgentExecutionRepository, IAgentExecutionTemplateRepository,
@@ -139,7 +149,7 @@ mod tests {
             _model: &str,
             _system: &str,
             _user: &str,
-            _max_tokens: u32,
+            _max_tokens: Option<u32>,
         ) -> Result<String, nomifun_common::AppError> {
             Ok("{}".into())
         }
@@ -186,7 +196,7 @@ mod tests {
             Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
             &installation_owner,
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(dir, dir)),
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(dir, dir)),
         )
         .await
         .unwrap();
@@ -197,8 +207,6 @@ mod tests {
             Arc::new(SqliteAgentExecutionRepository::new(db.pool().clone()));
         let execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository> =
             Arc::new(SqliteAgentExecutionTemplateRepository::new(db.pool().clone()));
-        let conversation_repo: Arc<dyn IConversationRepository> =
-            Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
         let provider_lifecycle = Arc::new(ProviderLifecycleBarrier::new());
         (
             AppProviderDeletionCoordinator {
@@ -212,7 +220,7 @@ mod tests {
                 ),
                 execution_repo,
                 execution_template_repo,
-                conversation_repo,
+                pool: db.pool().clone(),
             },
             db,
         )
@@ -237,7 +245,6 @@ mod tests {
                 &nomifun_db::CreateAgentExecutionParams {
                     goal: "正在使用受保护模型".into(),
                     status: AgentExecutionStatus::Paused,
-                    plan_gate: PlanGate::Automatic,
                     adaptation_policy: AdaptationPolicy::Fixed,
                     decision_policy: DecisionPolicy::Automatic,
                     delegation_policy: DelegationPolicy::Automatic,
@@ -251,7 +258,7 @@ mod tests {
                     source_agent_id: NOMI_AGENT_ID.into(),
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                     provider_id: Some("0190f5fe-7c00-7a00-8000-000000000022".into()),
                     model: Some("model_in_use".into()),
                     role: None,
@@ -335,7 +342,7 @@ mod tests {
                         source_agent_id: NOMI_AGENT_ID.to_owned(),
                         preset_id: None,
                         preset_revision: None,
-                        preset_snapshot: None,
+                        agent_snapshot: None,
                         provider_id: Some("0190f5fe-7c00-7a00-8000-000000000025".to_owned()),
                         model: Some("model_template".to_owned()),
                         role: None,
@@ -396,6 +403,26 @@ mod tests {
         set_global_failover_config(&client_prefs, &cfg)
             .await
             .unwrap();
+        let idmm_key = "agent_session.idmm.0190f5fe-7c00-7a00-8000-000000000099";
+        let idmm_value = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "0190f5fe-7c00-7a00-8000-000000000099",
+            "revision": 3,
+            "config": {
+                "mode": "rule_plus_model",
+                "bypass_model": {
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000026",
+                    "model": "sidecar"
+                }
+            },
+            "last_checked_at": null,
+            "interventions": []
+        })
+        .to_string();
+        client_prefs
+            .upsert_batch(&[(idmm_key, idmm_value.as_str())])
+            .await
+            .unwrap();
 
         SqliteProviderRepository::new(db.pool().clone())
             .delete("0190f5fe-7c00-7a00-8000-000000000026")
@@ -404,130 +431,52 @@ mod tests {
         let after = get_global_failover_config(&client_prefs).await;
         assert_eq!(after.queue.len(), 1);
         assert_eq!(after.queue[0].provider_id, "0190f5fe-7c00-7a00-8000-000000000023");
+        let idmm = client_prefs.get_by_keys(&[idmm_key]).await.unwrap();
+        let idmm: serde_json::Value = serde_json::from_str(&idmm[0].value).unwrap();
+        assert_eq!(idmm["revision"], 4);
+        assert_eq!(idmm["config"]["mode"], "rule_only");
+        assert_eq!(idmm["config"]["bypass_model"], serde_json::json!({}));
     }
 
     #[tokio::test]
-    async fn active_conversation_lead_is_a_hard_provider_binding() {
-        use nomifun_db::{IConversationRepository, SqliteConversationRepository, models::ConversationRow};
-
+    async fn active_agent_revision_is_a_hard_provider_binding() {
         let dir = tempfile::tempdir().unwrap();
         let (coord, db) = coordinator(dir.path()).await;
-        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-        let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
-        let now = nomifun_common::now_ms();
-        let conversation_id = conversation_repo
-            .create(&ConversationRow {
-                id: 0,
-                conversation_id: nomifun_common::ConversationId::new().into_string(),
-                user_id: installation_owner,
-                name: "受保护主会话".into(),
-                r#type: "nomi".into(),
-                extra: "{}".into(),
-                delegation_policy: "automatic".into(),
-                execution_model_pool: None,
-                decision_policy: "automatic".into(),
-                execution_template_id: None,
-                model: Some(
-                    serde_json::json!({
-                        "provider_id": "0190f5fe-7c00-7a00-8000-000000000021",
-                        "model": "catalog-name",
-                        "use_model": "effective-name"
-                    })
-                    .to_string(),
-                ),
-                status: Some("pending".into()),
-                source: Some("nomifun".into()),
-                channel_chat_id: None,
-                pinned: false,
-                pinned_at: None,
-                cron_job_id: None,
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .unwrap();
+        let preset_id = nomifun_common::generate_id();
+        nomifun_db::sqlx::query(
+            "INSERT INTO agent_presets \
+             (preset_id, owner_ref_json, source_json, display_json, current_stable_revision, created_at) \
+             VALUES (?, '{}', '{}', '{\"name\":\"受保护 Agent\"}', 1, 1)",
+        )
+        .bind(&preset_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO agent_preset_revisions \
+             (revision_id, preset_id, revision_no, schema_version, payload_json, revision_digest, created_by, created_at) \
+             VALUES (?, ?, 1, '1.0.0', ?, ?, 'owner', 1)",
+        )
+        .bind(nomifun_common::generate_id())
+        .bind(&preset_id)
+        .bind(serde_json::json!({
+            "chat_route_records": {
+                "agent_chat": { "primary": {
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000021",
+                    "model": "catalog-name"
+                }}
+            }
+        }).to_string())
+        .bind("a".repeat(64))
+        .execute(db.pool())
+        .await
+        .unwrap();
 
         let usages = coord.usages("0190f5fe-7c00-7a00-8000-000000000021").await.unwrap();
         assert_eq!(usages.len(), 1);
-        assert_eq!(usages[0].feature, ProviderUsageFeature::Conversation);
-        assert_eq!(usages[0].label, "受保护主会话");
-        assert_eq!(usages[0].target_id, Some(conversation_id.to_string()));
-    }
-
-    #[tokio::test]
-    async fn provider_delete_atomically_strips_persisted_conversation_execution_pool() {
-        use nomifun_db::{IConversationRepository, SqliteConversationRepository, models::ConversationRow};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_coord, db) = coordinator(dir.path()).await;
-        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-        let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
-        let now = nomifun_common::now_ms();
-        let conversation_id = conversation_repo
-            .create(&ConversationRow {
-                id: 0,
-                conversation_id: nomifun_common::ConversationId::new().into_string(),
-                user_id: installation_owner,
-                name: "cleanup target".into(),
-                r#type: "nomi".into(),
-                extra: serde_json::json!({
-                    "workspace": "/keep"
-                })
-                .to_string(),
-                delegation_policy: "automatic".into(),
-                execution_model_pool: Some(serde_json::json!({
-                    "mode": "range",
-                    "models": [
-                        { "provider_id": "0190f5fe-7c00-7a00-8000-000000000026", "model": "gone" },
-                        { "provider_id": "0190f5fe-7c00-7a00-8000-000000000023", "model": "live" }
-                    ]
-                }).to_string()),
-                decision_policy: "automatic".into(),
-                execution_template_id: None,
-                model: Some(
-                    serde_json::json!({
-                        "provider_id": "0190f5fe-7c00-7a00-8000-000000000023",
-                        "model": "live"
-                    })
-                    .to_string(),
-                ),
-                status: Some("pending".into()),
-                source: Some("nomifun".into()),
-                channel_chat_id: None,
-                pinned: false,
-                pinned_at: None,
-                cron_job_id: None,
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .unwrap();
-
-        SqliteProviderRepository::new(db.pool().clone())
-            .delete("0190f5fe-7c00-7a00-8000-000000000026")
-            .await
-            .unwrap();
-
-        let cleaned = conversation_repo.get(&conversation_id).await.unwrap().unwrap();
-        let extra: serde_json::Value = serde_json::from_str(&cleaned.extra).unwrap();
-        assert_eq!(extra["workspace"], "/keep");
-        let model_pool: serde_json::Value = serde_json::from_str(
-            cleaned.execution_model_pool.as_deref().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            model_pool,
-            serde_json::json!({
-                "mode": "range",
-                "models": [{ "provider_id": "0190f5fe-7c00-7a00-8000-000000000023", "model": "live" }]
-            })
-        );
+        assert_eq!(usages[0].feature, ProviderUsageFeature::Agent);
+        assert_eq!(usages[0].label, "受保护 Agent");
+        assert_eq!(usages[0].target_id, Some(preset_id));
     }
 
     #[tokio::test]

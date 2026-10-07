@@ -199,12 +199,6 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
                   <span className={styles.optionModel} title={option.displayName ?? option.model}>
                     {option.displayName ?? option.model}
                   </span>
-                  {option.rawModelId && (
-                    <span className={styles.optionRawModel} title={option.rawModelId}>
-                      {option.rawModelId}
-                    </span>
-                  )}
-                  <span className={styles.optionProtocol}>{option.protocol}</span>
                 </span>
               </NomiSelect.Option>
             ))}
@@ -213,16 +207,12 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
       </NomiSelect>
 
       {selected && (
-        <div className={styles.selectionMeta} aria-label={`${selected.providerName} · ${selected.protocol}`}>
+        <div className={styles.selectionMeta} aria-label={`${selected.providerName} · ${selected.displayName ?? selected.model}`}>
           <span>{selected.providerName}</span>
           <span className={styles.separator} aria-hidden='true'>
             ·
           </span>
           <span>{selected.displayName ?? selected.model}</span>
-          <span className={styles.separator} aria-hidden='true'>
-            ·
-          </span>
-          <span>{selected.protocol}</span>
         </div>
       )}
 

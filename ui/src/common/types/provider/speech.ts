@@ -33,15 +33,6 @@ export type TextToSpeechConfig = {
   voice: string | null;
 };
 
-export type SpeechToTextAudioBuffer = Uint8Array | number[] | Record<string, number>;
-
-export type SpeechToTextRequest = {
-  audioBuffer: SpeechToTextAudioBuffer;
-  file_name: string;
-  languageHint?: string;
-  mimeType: string;
-};
-
 export type SpeechToTextResult = {
   language?: string;
   model: string;

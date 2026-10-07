@@ -1,0 +1,237 @@
+{
+  "schema_version": "1.0.0",
+  "decision_revision": "2026-10-04-canonical-agent-session",
+  "decisions": [
+    {
+      "decision_id": "D-001",
+      "status": "confirmed",
+      "contract": "Product uses Agent Preset; runtime instance uses AgentSession."
+    },
+    {
+      "decision_id": "D-002",
+      "status": "confirmed",
+      "contract": "FullAuto is the only execution behavior; no product approval modes."
+    },
+    {
+      "decision_id": "D-003",
+      "status": "confirmed",
+      "contract": "NomiFun owns capability, session, preset, authority, credentials, and domain facts."
+    },
+    {
+      "decision_id": "D-004",
+      "status": "confirmed",
+      "contract": "One in-process nomifun.nomi Runtime owns both Chat and Coding execution through the same canonical Session journal."
+    },
+    {
+      "decision_id": "D-005",
+      "status": "confirmed",
+      "contract": "Ordinary first-party and third-party plugins are trusted in-process code."
+    },
+    {
+      "decision_id": "D-006",
+      "status": "confirmed",
+      "contract": "The Kernel owns admission and frozen authority; domain Modules own actions and resource semantics."
+    },
+    {
+      "decision_id": "D-007",
+      "status": "confirmed",
+      "contract": "Agent revisions select Module and Action grants; Skill, MCP, Provider and typed Resource bindings retain separate owners."
+    },
+    {
+      "decision_id": "D-008",
+      "status": "confirmed",
+      "contract": "Immutable Agent revision and Session Snapshot freeze the selected execution closure before Turn admission."
+    },
+    {
+      "decision_id": "D-009",
+      "status": "confirmed",
+      "contract": "Official Agent presets are seeded from the exact current official-agent-seed-manifest."
+    },
+    {
+      "decision_id": "D-010",
+      "status": "confirmed",
+      "contract": "The Agent editor configures Module and Action grants and resources without exposing a Runtime selector."
+    },
+    {
+      "decision_id": "D-011",
+      "status": "confirmed",
+      "contract": "Chat and Coding use one adaptive Runtime; no parallel legacy engine or transcript is installed."
+    },
+    {
+      "decision_id": "D-012",
+      "status": "confirmed",
+      "contract": "The canonical Agent data generation contains no legacy Agent conversion, compatibility reader or dual write."
+    },
+    {
+      "decision_id": "D-013",
+      "status": "confirmed",
+      "contract": "Agent-only reset replaces Session, Execution, Preset and logs in the same canonical SQLite while preserving non-Agent configuration."
+    },
+    {
+      "decision_id": "D-014",
+      "status": "confirmed",
+      "contract": "Every migration slice switches all direct consumers and deletes the replaced legacy surface in the same change."
+    },
+    {
+      "decision_id": "D-015",
+      "status": "confirmed",
+      "contract": "Canonical AgentSession, Turn, Event, Effect, Payload and Resource facts are authoritative; Message and Head projections are rebuildable."
+    },
+    {
+      "decision_id": "D-016",
+      "status": "confirmed",
+      "contract": "The Unified Plugin Core is the sole plugin implementation and authorization source."
+    },
+    {
+      "decision_id": "D-017",
+      "status": "confirmed",
+      "contract": "RemoteBinding selects an exact AgentBindingValue and uses explicit open, turn, observe, and cancel."
+    },
+    {
+      "decision_id": "D-018",
+      "status": "confirmed",
+      "contract": "Lightweight Chat and complete Coding are structural conformance requirements, not a performance benchmark program."
+    },
+    {
+      "decision_id": "D-019",
+      "status": "confirmed",
+      "contract": "Parallel work is enabled only for multi-task batches with disjoint writes and net speedup; no fixed agent count or EW estimate is a delivery contract."
+    },
+    {
+      "decision_id": "D-020",
+      "status": "confirmed",
+      "contract": "One official Runtime factory is installed; replaced factories and compatibility branches are physically removed."
+    },
+    {
+      "decision_id": "D-021",
+      "status": "confirmed",
+      "contract": "AgentSessionId UUIDv7 is the sole Session identity; user-facing Conversation terminology projects that same identity."
+    },
+    {
+      "decision_id": "D-023",
+      "status": "confirmed",
+      "contract": "Official seeds are role-complete and context-minimal; exact immutable Agent revision closure governs execution."
+    },
+    {
+      "decision_id": "D-024",
+      "status": "confirmed",
+      "contract": "One irreversible delete closure uses the real Runtime dispose result, purges Session-owned content, and leaves a minimal owner-scoped tombstone; callers provide no synthetic cleanup proof."
+    },
+    {
+      "decision_id": "D-025",
+      "status": "confirmed",
+      "contract": "Native checkpoints require exact admitted build and binding; closed canonical event history may cross an explicitly validated model or Agent transition as data without granting authority."
+    },
+    {
+      "decision_id": "D-026",
+      "status": "confirmed",
+      "contract": "Remote token mutation atomically publishes generation and hash; requests authenticated before publication may finish, later old-token requests fail, and existing Sessions are not cascaded."
+    },
+    {
+      "decision_id": "D-027",
+      "status": "confirmed",
+      "contract": "Runtime disposal performs bounded cancellation, descendant cleanup and explicit unknown-effect handling before physical Session content deletion."
+    },
+    {
+      "decision_id": "D-028",
+      "status": "confirmed",
+      "contract": "Platform verification follows the current validation manifest and supported desktop viewport; one host never certifies another native platform."
+    }
+  ],
+  "canonical_sources": [
+    {
+      "source_kind": "rust_contract_types",
+      "logical_path": "crates/backend/nomifun-agent-contracts/src",
+      "owns": [
+        "dto",
+        "newtype",
+        "enum",
+        "package_plugin_spi",
+        "preset_snapshot_binding",
+        "remote_runtime_host_ports",
+        "generated_schema"
+      ]
+    },
+    {
+      "source_kind": "canonical_agent_store_schema",
+      "logical_path": "crates/backend/nomifun-db/migrations/001_canonical_baseline.sql",
+      "owns": [
+        "tables",
+        "indexes",
+        "constraints",
+        "defaults",
+        "foreign_keys",
+        "migration_lineage",
+        "schema_metadata"
+      ]
+    },
+    {
+      "source_kind": "session_event_registry",
+      "logical_path": "crates/backend/nomifun-agent-contracts/src/event.rs",
+      "owns": [
+        "event_kind",
+        "event_version",
+        "persistence_class",
+        "payload_schema",
+        "producer",
+        "predecessor",
+        "correlation",
+        "idempotency",
+        "projection_reducer",
+        "replay_rule"
+      ]
+    }
+  ],
+  "closure_resolutions": [
+    {
+      "resolution_id": "CR-001",
+      "canonical_rule": "Markdown explains generated artifacts; Rust types, the canonical Agent Store schema, and SessionEvent Registry are the only machine owners."
+    },
+    {
+      "resolution_id": "CR-002",
+      "canonical_rule": "Every digest artifact is payload plus envelope; payload digest excludes itself, status, evidence, logs, and summary."
+    },
+    {
+      "resolution_id": "CR-003",
+      "canonical_rule": "Capability search and activation are internal Runtime control operations, not Capabilities and not initial selections."
+    },
+    {
+      "resolution_id": "CR-004",
+      "canonical_rule": "capability/active-set-committed is the only persistent activation event; requested and failed are transient diagnostics."
+    },
+    {
+      "resolution_id": "CR-005",
+      "canonical_rule": "Snapshot freezes the selected execution closure; actual admitted build and binding are recorded in native TurnStarted and checked exactly for native checkpoint recovery."
+    },
+    {
+      "resolution_id": "CR-006",
+      "canonical_rule": "Manifest is the declaration source; registration metadata is derived from real handlers and services, and plugins receive only narrow declared context."
+    },
+    {
+      "resolution_id": "CR-007",
+      "canonical_rule": "Agent-only reset clears canonical AgentData tables and explicitly owned Session-bound domain relations, releases live Agent references, and preserves non-Agent business configuration and immutable external deduplication identity."
+    },
+    {
+      "resolution_id": "CR-008",
+      "canonical_rule": "Runtime checkpoints are derived recovery data; canonical event and payload facts own context. Message projections never supply missing Runtime history."
+    },
+    {
+      "resolution_id": "CR-009",
+      "canonical_rule": "Fresh initialization installs the current canonical schema, preserves non-Agent configuration at the clean-cut boundary, seeds current official Presets, and starts with empty Session and Execution collections."
+    },
+    {
+      "resolution_id": "CR-010",
+      "canonical_rule": "Canonical errors are uppercase; missing catalog materialization is CAPABILITY_NOT_MATERIALIZED and outside-ceiling is CAPABILITY_NOT_IN_PRESET."
+    },
+    {
+      "resolution_id": "CR-011",
+      "canonical_rule": "Stable promotes the exact signed RC artifact and signature envelope; any signed-envelope or content change is a new candidate."
+    },
+    {
+      "resolution_id": "CR-012",
+      "canonical_rule": "Stable may edit schema-backed config of already mounted bundled Packages but provides no user install, lifecycle, SDK, or market."
+    }
+  ],
+  "production_behavior_included": false,
+  "unresolved_decisions": []
+}

@@ -193,28 +193,24 @@ async fn list_workspace_files_rejects_outside_sandbox() {
 }
 
 #[tokio::test]
-async fn list_workspace_files_cache_hit() {
+async fn list_workspace_files_refreshes_external_changes_without_a_watcher() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "data").unwrap();
 
     let svc = make_service(dir.path());
     let root = dir.path().to_str().unwrap();
 
-    // First call populates cache
     let first = svc.list_workspace_files(root).await.unwrap();
     assert_eq!(first.len(), 1);
 
-    // Add a file — should NOT appear due to cache
     fs::write(dir.path().join("new.txt"), "new").unwrap();
     let second = svc.list_workspace_files(root).await.unwrap();
-    assert_eq!(second.len(), 1); // Still cached
+    assert_eq!(second.len(), 2, "a new explicit listing must reconcile an external creation");
 
-    // Invalidate cache
-    svc.invalidate_cache(&std::fs::canonicalize(dir.path()).unwrap().to_string_lossy());
-
-    // Now should see new file
+    fs::remove_file(dir.path().join("file.txt")).unwrap();
     let third = svc.list_workspace_files(root).await.unwrap();
-    assert_eq!(third.len(), 2);
+    assert_eq!(third.len(), 1, "a new explicit listing must reconcile an external deletion");
+    assert_eq!(third[0].relative_path, "new.txt");
 }
 
 #[tokio::test]

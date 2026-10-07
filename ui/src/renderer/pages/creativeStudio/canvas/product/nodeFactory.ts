@@ -16,6 +16,7 @@ import {
 import type { PromptLibrarySelection } from '../../prompts';
 import {
   clientToCanvas,
+  canvasMediaNodeSize,
   makeCanvasNode,
   normalizeCanvasViewport,
   type CanvasState,
@@ -24,19 +25,29 @@ import {
 import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
-  text: { width: 340, height: 240 },
-  image: { width: 340, height: 240 },
-  panorama: { width: 340, height: 170 },
-  video: { width: 420, height: 236 },
-  audio: { width: 340, height: 160 },
+  text: { width: 320, height: 320 },
+  image: { width: 320, height: 320 },
+  video: { width: 320, height: 320 },
+  audio: { width: 320, height: 320 },
+  timeline: { width: 680, height: 148 },
   config: { width: 440, height: 240 },
-  director: { width: 360, height: 320 },
-  group: { width: 760, height: 480 },
+  group: { width: 320, height: 320 },
+} as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
+
+/** Empty authoring nodes start slightly smaller; populated media keeps its 320px baseline. */
+export const CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES = {
+  text: { width: 288, height: 288 },
+  image: { width: 288, height: 288 },
+  video: { width: 288, height: 288 },
+  audio: { width: 288, height: 288 },
+  timeline: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.timeline,
+  config: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.config,
+  group: { width: 288, height: 288 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
 
 /** Repeated insertions move by this many client pixels, independent of zoom. */
 export const CREATIVE_CANVAS_PRODUCT_CASCADE_STEP = 28;
-export const CREATIVE_CANVAS_PRODUCT_CASCADE_SLOTS = 8;
+const CREATIVE_CANVAS_PRODUCT_CASCADE_SLOTS = 8;
 
 const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
   image: {
@@ -46,13 +57,6 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     fit: 'contain',
     naturalSize: null,
     composer: null,
-  },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
   },
   text: {
     text: '',
@@ -94,11 +98,10 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
-  director: {
-    sceneId: null,
-    cameraId: null,
-    timelineMs: 0,
-    durationMs: 0,
+  timeline: {
+    title: '',
+    muted: false,
+    clips: [],
   },
   group: {
     title: '',
@@ -185,7 +188,7 @@ const cascadeSlot = (requested: number): number => {
  * expressed in client pixels, so zoom never turns a 28px insertion offset into
  * an unexpectedly large or tiny screen jump.
  */
-export function creativeCanvasProductNodePosition(
+function creativeCanvasProductNodePosition(
   state: CreativeCanvasProductState,
   viewportSize: CreativeSize,
   nodeSize: CreativeSize,
@@ -205,7 +208,8 @@ export function creativeCanvasProductNodePosition(
 }
 
 const defaultDataFor = <K extends CreativeCanvasNodeKind>(
-  kind: K
+  kind: K,
+  state: CreativeCanvasProductState
 ): CreativeCanvasNodeDataByKind[K] => {
   const data = structuredClone(DEFAULT_NODE_DATA[kind]);
   if (kind === 'group') {
@@ -213,6 +217,15 @@ const defaultDataFor = <K extends CreativeCanvasNodeKind>(
       creativeStudioProductText(
         'creativeStudio.canvas.nodes.defaultGroupTitle',
         '节点组'
+      );
+  }
+  if (kind === 'timeline') {
+    const ordinal = state.document.nodes.filter((node) => node.type === 'timeline').length + 1;
+    (data as CreativeCanvasNodeDataByKind['timeline']).title =
+      creativeStudioProductText(
+        'creativeStudio.canvas.timeline.defaultTitle',
+        '时间线{{ordinal}}',
+        { ordinal }
       );
   }
   return data;
@@ -254,7 +267,7 @@ const createNodeWithData = <K extends CreativeCanvasNodeKind>(
   });
 };
 
-/** Build one of the eight canonical empty product nodes with a fresh UUIDv7. */
+/** Build one of the seven canonical empty product nodes with a fresh UUIDv7. */
 export function createCreativeCanvasProductNode<K extends CreativeCanvasNodeKind>(
   kind: K,
   state: CreativeCanvasProductState,
@@ -263,10 +276,12 @@ export function createCreativeCanvasProductNode<K extends CreativeCanvasNodeKind
 ): Extract<CreativeCanvasNode, { type: K }> {
   return createNodeWithData(
     kind,
-    defaultDataFor(kind),
+    defaultDataFor(kind, state),
     state,
     viewportSize,
-    overrides
+    overrides.size
+      ? overrides
+      : { ...overrides, size: CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[kind] }
   );
 }
 
@@ -319,6 +334,14 @@ export function creativeNodeFromHistoricalAsset(
   overrides: CreativeCanvasProductNodeOverrides = {}
 ): CreativeCanvasNode {
   const assetId = requireAssetId(asset);
+  const mediaOverrides = asset.kind === 'image' || asset.kind === 'video'
+    ? {
+        ...overrides,
+        size: canvasMediaNodeSize(
+          asset, overrides.size ?? CREATIVE_CANVAS_PRODUCT_NODE_SIZES[asset.kind]
+        ),
+      }
+    : overrides;
   switch (asset.kind) {
     case 'image':
       return createNodeWithData(
@@ -333,7 +356,7 @@ export function creativeNodeFromHistoricalAsset(
         },
         state,
         viewportSize,
-        overrides
+        mediaOverrides
       );
     case 'video':
       return createNodeWithData(
@@ -351,7 +374,7 @@ export function creativeNodeFromHistoricalAsset(
         },
         state,
         viewportSize,
-        overrides
+        mediaOverrides
       );
     case 'audio':
       return createNodeWithData(

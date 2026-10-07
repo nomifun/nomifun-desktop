@@ -18,6 +18,8 @@ pub(crate) mod linux_recovery;
 mod linux_watchdog;
 #[cfg(target_os = "macos")]
 mod macos_watchdog;
+#[cfg(target_os = "macos")]
+mod macos_session;
 #[cfg(unix)]
 mod unix_protocol;
 
@@ -31,6 +33,9 @@ pub(crate) struct ExitFact {
 #[async_trait]
 pub(crate) trait PlatformProcess: Send + Sync {
     fn pid(&self) -> u32;
+    /// Cleanup may skip an unavailable graceful stage; explicit interrupt
+    /// requests still use interrupt() and retain its real error.
+    fn supports_interrupt(&self) -> bool { true }
     async fn write(&self, bytes: &[u8]) -> io::Result<()>;
     async fn close_stdin(&self) -> io::Result<()>;
     async fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
@@ -47,35 +52,95 @@ pub(crate) trait PlatformProcess: Send + Sync {
 
 pub(crate) struct SpawnedPlatformProcess {
     pub(crate) owner: Arc<dyn PlatformProcess>,
+    /// A committed native process whose caller-facing setup failed.
+    /// The supervisor must retain this exact owner through cleanup before
+    /// returning the startup error; it is never a successful user start.
+    pub(crate) startup_failure: Option<crate::SpawnFailure>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StartCancellation {
+    #[cfg(windows)]
+    native: Arc<windows::StartCancellation>,
+    #[cfg(not(windows))]
+    native: Arc<std::sync::atomic::AtomicBool>,
+    setup_expired: tokio_util::sync::CancellationToken,
+}
+
+impl StartCancellation {
+    pub(crate) fn new() -> Self {
+        Self {
+            #[cfg(windows)]
+            native: Arc::new(windows::StartCancellation::new()),
+            #[cfg(not(windows))]
+            native: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            setup_expired: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        #[cfg(windows)]
+        self.native.cancel();
+        #[cfg(not(windows))]
+        self.native.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        #[cfg(windows)]
+        { self.native.is_cancelled() }
+        #[cfg(not(windows))]
+        { self.native.load(std::sync::atomic::Ordering::Acquire) }
+    }
+
+    pub(crate) fn setup_expired(&self) -> tokio_util::sync::CancellationToken {
+        self.setup_expired.clone()
+    }
+}
+
+pub(crate) fn setup_deadline_error() -> ProcessError {
+    ProcessError::StartLost {
+        failure: crate::SpawnFailure {
+            code: "spawn_transaction_deadline".to_owned(),
+            message: "Unix spawn transaction exceeded its single setup deadline".to_owned(),
+        },
+        last_known: None,
+        cleanup: crate::CleanupReport {
+            reaped: false,
+            errors: vec!["the supervisor still owns the original startup transaction".to_owned()],
+            ..Default::default()
+        },
+    }
 }
 
 pub(crate) async fn spawn(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     match request.transport {
-        Transport::Pipe => spawn_pipe(request, output).await,
-        Transport::Pty { cols, rows } => spawn_pty(request, output, cols, rows).await,
+        Transport::Pipe => spawn_pipe(request, output, cancellation).await,
+        Transport::Pty { cols, rows } => spawn_pty(request, output, cols, rows, cancellation).await,
     }
 }
 
 pub(crate) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pipe(request, output).await
+        unix::spawn_pipe(request, output, cancellation.native, cancellation.setup_expired).await
     }
 
     #[cfg(windows)]
     {
-        windows::spawn_pipe(request, output).await
+        windows::spawn_pipe(request, output, cancellation.native).await
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (request, output);
+        let _ = (request, output, cancellation);
         Err(ProcessError::Transport {
             reason: "platform pipe adapter is pending".to_owned(),
         })
@@ -87,20 +152,21 @@ pub(crate) async fn spawn_pty(
     output: Arc<OutputBuffer>,
     cols: u16,
     rows: u16,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pty(request, output, cols, rows).await
+        unix::spawn_pty(request, output, cols, rows, cancellation.native, cancellation.setup_expired).await
     }
 
     #[cfg(windows)]
     {
-        windows::spawn_pty(request, output, cols, rows).await
+        windows::spawn_pty(request, output, cols, rows, cancellation.native).await
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (request, output, cols, rows);
+        let _ = (request, output, cols, rows, cancellation);
         Err(ProcessError::Transport {
             reason: "platform PTY adapter is unavailable".to_owned(),
         })

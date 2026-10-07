@@ -51,7 +51,7 @@ impl AssetService {
         candidate
             .split(',')
             .map(str::trim)
-            .any(|value| value == "*" || value == expected)
+            .any(|value| value == "*" || value.strip_prefix("W/").unwrap_or(value) == expected)
     }
 }
 

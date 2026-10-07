@@ -1,0 +1,2373 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use futures::Stream;
+use nomifun_agent_contracts::{
+    ChatRouteIdentity, ConnectionConfigRef, DigestHex, ModelFailureDiagnostic, StrictJsonValue,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::contracts::{
+    ChatContentPart, ChatFinishReason, ChatMessage, ChatModelError, ChatModelErrorCode,
+    ChatModelEvent, ChatModelFeature, ChatModelRequest, ChatProtocol, ChatResponseFormat, ChatRole,
+    ChatToolCall, ChatToolChoice, ChatToolResultPart, ChatUsage, ProviderCredentialRef,
+    ProviderIdRef, ProviderResponseId, ProviderRoundId, ResolvedChatRoute, ToolCallId,
+};
+use crate::ports::CredentialLease;
+use crate::provider_reasoning::ProviderReasoningRoute;
+
+pub type ProviderWireStream =
+    Pin<Box<dyn Stream<Item = Result<ProviderWireFrame, ChatModelError>> + Send>>;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireRequest {
+    pub protocol: ChatProtocol,
+    pub provider_id: ProviderIdRef,
+    pub model: String,
+    /// Identity of the exact attempted route. For a failover candidate the
+    /// preset revision and task remain those of the selected route record,
+    /// while `route_id/route_revision` identify that candidate.
+    pub route_identity: ChatRouteIdentity,
+    pub connection_config_ref: ConnectionConfigRef,
+    pub config_revision_digest: DigestHex,
+    pub credential_ref: ProviderCredentialRef,
+    pub route_features: BTreeSet<ChatModelFeature>,
+    pub body: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireFrame {
+    pub event: String,
+    #[serde(default)]
+    pub data: Value,
+    /// Credential-redacted HTTP context for a verified native error frame.
+    /// Normal output frames carry no diagnostic metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ModelFailureDiagnostic>,
+}
+
+/// One attempt's frame accumulator. Its state is dropped on success, error,
+/// cancellation or receiver closure; it must never cross Session/route or
+/// retry boundaries, even when provider response IDs are absent or reused.
+pub trait ChatFrameDecoder: Send {
+    fn decode_frame(
+        &mut self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError>;
+}
+
+#[async_trait]
+pub trait ProviderTransport: Send + Sync {
+    /// Open exactly one provider stream. Transports do not retry; retry and
+    /// failover belong exclusively to [`crate::broker::ChatModelBroker`].
+    async fn open_stream(
+        &self,
+        request: ProviderWireRequest,
+        credential: CredentialLease,
+    ) -> Result<ProviderWireStream, ChatModelError>;
+}
+
+#[async_trait]
+pub trait ChatProtocolAdapter: Send + Sync {
+    fn protocol(&self) -> ChatProtocol;
+    fn name(&self) -> &'static str;
+    fn features(&self) -> BTreeSet<ChatModelFeature> {
+        protocol_features(self.protocol())
+    }
+    fn retry_count(&self) -> u8 {
+        0
+    }
+    /// Stateful protocol implementations should supply a fresh decoder for
+    /// every transport attempt. None preserves the legacy decode_frame API
+    /// for custom stateless adapters; official adapters always return Some.
+    fn new_frame_decoder(&self) -> Option<Box<dyn ChatFrameDecoder>> {
+        None
+    }
+    fn new_frame_decoder_for(&self, _request: &ChatModelRequest) -> Option<Box<dyn ChatFrameDecoder>> {
+        self.new_frame_decoder()
+    }
+    fn encode_request(
+        &self,
+        request: &ChatModelRequest,
+        route: &ResolvedChatRoute,
+        credential: &CredentialLease,
+    ) -> Result<ProviderWireRequest, ChatModelError>;
+    async fn open_stream(
+        &self,
+        request: ProviderWireRequest,
+        credential: CredentialLease,
+    ) -> Result<ProviderWireStream, ChatModelError>;
+    /// Legacy direct decoding. Production Broker attempts prefer the fresh
+    /// decoder returned above; callers using this stateful API themselves
+    /// must provide their own stream isolation and lifecycle.
+    fn decode_frame(
+        &self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError>;
+}
+
+trait EncodedRequestBody {
+    fn into_result(self) -> Result<Value, ChatModelError>;
+}
+
+impl EncodedRequestBody for Value {
+    fn into_result(self) -> Result<Value, ChatModelError> {
+        Ok(self)
+    }
+}
+
+impl EncodedRequestBody for Result<Value, ChatModelError> {
+    fn into_result(self) -> Result<Value, ChatModelError> {
+        self
+    }
+}
+
+/// Resolve an explicit persisted Chat protocol to its serializer. Model names
+/// and catalog suggestions never participate in transport selection.
+pub fn chat_protocol_for_id(protocol_id: &str) -> Option<ChatProtocol> {
+    match protocol_id {
+        "anthropic.messages" => Some(ChatProtocol::Anthropic),
+        "openai.chat_text" => Some(ChatProtocol::OpenaiChat),
+        "openai.responses" => Some(ChatProtocol::OpenaiResponses),
+        "gemini.generate_text" => Some(ChatProtocol::Gemini),
+        "bedrock.anthropic_messages" => Some(ChatProtocol::Bedrock),
+        "vertex.anthropic_messages" => Some(ChatProtocol::Vertex),
+        _ => None,
+    }
+}
+
+/// Request features the serializer can carry. Provider acceptance remains an
+/// upstream fact; missing catalog metadata never disables representable input.
+pub fn protocol_features(protocol: ChatProtocol) -> BTreeSet<ChatModelFeature> {
+    use ChatModelFeature as Feature;
+
+    let mut features = BTreeSet::from([
+        Feature::TextInput,
+        Feature::TextOutput,
+        Feature::ToolCalls,
+        Feature::Reasoning,
+        Feature::Streaming,
+    ]);
+    match protocol {
+        ChatProtocol::Anthropic => {
+            features.extend([
+                Feature::ImageInput,
+                Feature::ReasoningSignature,
+                Feature::PromptCache,
+            ]);
+        }
+        ChatProtocol::OpenaiChat => {
+            features.extend([
+                Feature::ImageInput,
+                Feature::AudioInput,
+                Feature::StructuredOutput,
+            ]);
+        }
+        ChatProtocol::OpenaiResponses => {
+            features.extend([
+                Feature::ImageInput,
+                Feature::AudioInput,
+                Feature::AudioOutput,
+                Feature::PromptCache,
+                Feature::StructuredOutput,
+                Feature::ProviderRoundState,
+                Feature::NativeResponsesItems,
+            ]);
+        }
+        ChatProtocol::Gemini => {
+            features.extend([
+                Feature::ImageInput,
+                Feature::AudioInput,
+                Feature::ReasoningSignature,
+                Feature::PromptCache,
+                Feature::StructuredOutput,
+            ]);
+        }
+        ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+            features.extend([
+                Feature::ImageInput,
+                Feature::ReasoningSignature,
+                Feature::PromptCache,
+            ]);
+        }
+    }
+    features
+}
+
+#[derive(Clone)]
+struct AdapterCore {
+    protocol: ChatProtocol,
+    name: &'static str,
+    transport: Arc<dyn ProviderTransport>,
+    raw_decode_state: Arc<Mutex<RawDecodeState>>,
+}
+
+impl AdapterCore {
+    fn new(
+        protocol: ChatProtocol,
+        name: &'static str,
+        transport: Arc<dyn ProviderTransport>,
+    ) -> Self {
+        Self {
+            protocol,
+            name,
+            transport,
+            raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+        }
+    }
+
+    fn encode<B: EncodedRequestBody>(
+        &self,
+        request: &ChatModelRequest,
+        route: &ResolvedChatRoute,
+        credential: &CredentialLease,
+        body: B,
+    ) -> Result<ProviderWireRequest, ChatModelError> {
+        request
+            .validate()
+            .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
+        if self.protocol != ChatProtocol::OpenaiResponses && request.input.messages.iter().any(|message| {
+            message.content.iter().any(|part| matches!(part,
+                ChatContentPart::Reasoning { encrypted_content: Some(_), .. }))
+        }) {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::UnsupportedFeature,
+                "opaque Responses reasoning cannot be sent to a different protocol",
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
+        if request.input.messages.iter().any(|message| {
+            message.content.iter().any(|part| matches!(part, ChatContentPart::ProviderReasoning { block }
+                if !block.matches_route(route)))
+        }) {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::UnsupportedFeature,
+                "provider reasoning requires the exact route that produced it",
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
+        let body = body.into_result()?;
+        route
+            .validate()
+            .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
+        if route.protocol != self.protocol {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::AdapterUnavailable,
+                format!(
+                    "adapter {} cannot encode {:?} route",
+                    self.name, route.protocol
+                ),
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
+        if !credential.validates_route(route) {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::CredentialTargetMismatch,
+                "credential reference does not match the resolved provider route",
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
+        let route_identity = request.route.with_route(
+            route.model_route_id.clone(),
+            route.model_route_revision,
+        );
+        Ok(ProviderWireRequest {
+            protocol: self.protocol,
+            provider_id: route.provider_id.clone(),
+            model: route.model.clone(),
+            route_identity,
+            connection_config_ref: route.connection_config_ref.clone(),
+            config_revision_digest: route.config_revision_digest.clone(),
+            credential_ref: route.credential_ref.clone(),
+            route_features: route.features.clone(),
+            body,
+        })
+    }
+
+    async fn open_stream(
+        &self,
+        request: ProviderWireRequest,
+        credential: CredentialLease,
+    ) -> Result<ProviderWireStream, ChatModelError> {
+        self.transport.open_stream(request, credential).await
+    }
+}
+
+macro_rules! define_adapter {
+    (
+        $name:ident,
+        $protocol:expr,
+        $label:literal,
+        $encoder:ident
+    ) => {
+        pub struct $name {
+            core: AdapterCore,
+        }
+
+        impl $name {
+            pub fn new(transport: Arc<dyn ProviderTransport>) -> Self {
+                Self {
+                    core: AdapterCore::new($protocol, $label, transport),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl ChatProtocolAdapter for $name {
+            fn protocol(&self) -> ChatProtocol {
+                self.core.protocol
+            }
+
+            fn name(&self) -> &'static str {
+                self.core.name
+            }
+
+            fn new_frame_decoder(&self) -> Option<Box<dyn ChatFrameDecoder>> {
+                Some(Box::new(AttemptFrameDecoder {
+                    protocol: self.core.protocol,
+                    raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+                    responses: crate::responses_decoder::ResponsesDecoder::new(false),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                }))
+            }
+
+            fn new_frame_decoder_for(&self, request: &ChatModelRequest) -> Option<Box<dyn ChatFrameDecoder>> {
+                Some(Box::new(AttemptFrameDecoder {
+                    protocol: self.core.protocol,
+                    raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+                    responses: crate::responses_decoder::ResponsesDecoder::new(request.input.preserve_native_responses_items),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                }))
+            }
+
+            fn encode_request(
+                &self,
+                request: &ChatModelRequest,
+                route: &ResolvedChatRoute,
+                credential: &CredentialLease,
+            ) -> Result<ProviderWireRequest, ChatModelError> {
+                self.core
+                    .encode(request, route, credential, $encoder(request, route))
+            }
+
+            async fn open_stream(
+                &self,
+                request: ProviderWireRequest,
+                credential: CredentialLease,
+            ) -> Result<ProviderWireStream, ChatModelError> {
+                self.core.open_stream(request, credential).await
+            }
+
+            fn decode_frame(
+                &self,
+                frame: ProviderWireFrame,
+            ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+                decode_frame_for_protocol(
+                    self.core.protocol,
+                    frame,
+                    &self.core.raw_decode_state,
+                )
+            }
+        }
+    };
+}
+
+define_adapter!(
+    AnthropicAdapter,
+    ChatProtocol::Anthropic,
+    "anthropic.messages",
+    encode_anthropic_request
+);
+define_adapter!(
+    OpenAiChatAdapter,
+    ChatProtocol::OpenaiChat,
+    "openai.chat",
+    encode_openai_chat_request
+);
+define_adapter!(
+    OpenAiResponsesAdapter,
+    ChatProtocol::OpenaiResponses,
+    "openai.responses",
+    encode_openai_responses_request
+);
+define_adapter!(
+    GeminiAdapter,
+    ChatProtocol::Gemini,
+    "google.gemini",
+    encode_gemini_request
+);
+define_adapter!(
+    BedrockAdapter,
+    ChatProtocol::Bedrock,
+    "amazon.bedrock",
+    encode_bedrock_request
+);
+define_adapter!(
+    VertexAdapter,
+    ChatProtocol::Vertex,
+    "google.vertex",
+    encode_vertex_request
+);
+
+fn encode_anthropic_request(
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let input = &request.input;
+    let max_tokens = input.max_output_tokens.ok_or_else(|| ChatModelError::invalid_request(
+        "Anthropic Messages requires an explicit output token ceiling",
+    ))?;
+    let system = combined_system_text(&input.instructions, &input.messages);
+    let mut body = json!({
+        "model": route.model,
+        "system": system,
+        "messages": anthropic_messages(&input.messages),
+        "stream": true,
+        "max_tokens": max_tokens,
+    });
+    if !input.tools.is_empty() {
+        body["tools"] = Value::Array(
+            input
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema.0.clone(),
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = anthropic_tool_choice(&input.tool_choice);
+        if let Some(parallel) = input.parallel_tool_calls {
+            body["tool_choice"]["disable_parallel_tool_use"] = json!(!parallel);
+        }
+    }
+    if let Some(reasoning) = &input.reasoning {
+        let budget = reasoning.max_reasoning_tokens.ok_or_else(|| ChatModelError::invalid_request(
+            "Anthropic budgeted thinking requires max_reasoning_tokens; adaptive thinking is not configured",
+        ))?;
+        if budget < 1024 || budget >= max_tokens {
+            return Err(ChatModelError::invalid_request("Anthropic thinking budget must be at least 1024 and below max_output_tokens"));
+        }
+        if reasoning.effort.is_some()
+            || matches!(reasoning.summary, crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed)
+        {
+            return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                "budgeted Anthropic thinking does not implement explicit effort or summary detail controls",
+                crate::contracts::ChatRetryDirective::Never));
+        }
+        if matches!(input.tool_choice, ChatToolChoice::Required | ChatToolChoice::Specific { .. }) {
+            return Err(ChatModelError::invalid_request("budgeted Anthropic thinking cannot force a tool choice"));
+        }
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    }
+    // Cache a static instruction prefix when present. Do not fabricate a
+    // user message, cache signed thinking, or promise a server cache hit.
+    if !matches!(input.prompt_cache, crate::contracts::PromptCachePolicy::Disabled) && !system.is_empty() {
+        body["system"] = json!([{"type":"text", "text":system, "cache_control":{"type":"ephemeral"}}]);
+    }
+    Ok(body)
+}
+
+fn encode_openai_chat_request(
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let input = &request.input;
+    if let Some(reasoning) = &input.reasoning {
+        if reasoning.max_reasoning_tokens.is_some()
+            || matches!(reasoning.summary, crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed) {
+            return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                "OpenAI Chat cannot encode a separate reasoning token budget or explicit summary detail; use Responses for summaries",
+                crate::contracts::ChatRetryDirective::Never));
+        }
+    }
+    let mut messages = Vec::new();
+    for instruction in &input.instructions {
+        messages.push(json!({"role": "system", "content": instruction}));
+    }
+    messages.extend(input.messages.iter().flat_map(openai_messages));
+    let mut body = json!({
+        "model": route.model,
+        "messages": messages,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "store": false,
+    });
+    insert_if_some(
+        &mut body,
+        "max_tokens",
+        input.max_output_tokens.map(Value::from),
+    );
+    if !input.tools.is_empty() {
+        body["tools"] = Value::Array(
+            input
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema.0.clone(),
+                        }
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = openai_tool_choice(&input.tool_choice);
+        insert_if_some(&mut body, "parallel_tool_calls", input.parallel_tool_calls.map(Value::from));
+    }
+    if let Some(reasoning) = &input.reasoning
+        && let Some(effort) = reasoning.effort
+    {
+        body["reasoning_effort"] = Value::String(effort.as_str().to_owned());
+    }
+    if !matches!(input.response_format, ChatResponseFormat::Text) {
+        body["response_format"] = response_format_value(&input.response_format);
+    }
+    Ok(body)
+}
+
+fn encode_openai_responses_request(
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let input = &request.input;
+    if input.reasoning.as_ref().is_some_and(|reasoning| reasoning.max_reasoning_tokens.is_some()) {
+        return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+            "OpenAI Responses does not expose a separate reasoning token budget; configure effort or the total output limit",
+            crate::contracts::ChatRetryDirective::Never));
+    }
+    let mut body = json!({
+        "model": route.model,
+        "instructions": input.instructions.join("\n\n"),
+        "input": responses_items(&input.messages),
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+    });
+    insert_if_some(
+        &mut body,
+        "max_output_tokens",
+        input.max_output_tokens.map(Value::from),
+    );
+    if let Some(parent) = &input.provider_round_parent {
+        body["previous_response_id"] = Value::String(parent.as_ref().to_owned());
+    }
+    if !input.tools.is_empty() {
+        body["tools"] = Value::Array(
+            input
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema.0.clone(),
+                        // Platform schemas retain optional fields and are
+                        // validated by Kernel. Do not silently rewrite them
+                        // into the provider's all-properties-required subset.
+                        "strict": false,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = openai_responses_tool_choice(&input.tool_choice);
+        insert_if_some(&mut body, "parallel_tool_calls", input.parallel_tool_calls.map(Value::from));
+    }
+    if !matches!(input.response_format, ChatResponseFormat::Text) {
+        body["text"] = json!({
+            "format": responses_format_value(&input.response_format)
+        });
+    }
+    if let Some(reasoning) = &input.reasoning {
+        let mut options = Map::new();
+        if let Some(effort) = reasoning.effort {
+            options.insert("effort".into(), Value::String(effort.as_str().into()));
+        }
+        if reasoning.summary != crate::contracts::ReasoningSummary::None {
+            options.insert("summary".into(), Value::String(format!("{:?}", reasoning.summary).to_ascii_lowercase()));
+        }
+        if !options.is_empty() { body["reasoning"] = Value::Object(options); }
+    }
+    Ok(body)
+}
+
+fn encode_gemini_request(
+    request: &ChatModelRequest,
+    _route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let input = &request.input;
+    if matches!(input.prompt_cache, crate::contracts::PromptCachePolicy::Ephemeral) {
+        return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+            "Gemini ephemeral caching requires an explicit cachedContent lifecycle; this adapter supports automatic caching",
+            crate::contracts::ChatRetryDirective::Never));
+    }
+    let call_names = input
+        .tool_call_names()
+        .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
+    let mut body = json!({
+        "systemInstruction": {
+            "parts": [{
+                "text": combined_system_text(&input.instructions, &input.messages)
+            }]
+        },
+        "contents": gemini_contents(&input.messages, &call_names)?,
+    });
+    let mut generation = Map::new();
+    if let Some(max_output_tokens) = input.max_output_tokens {
+        generation.insert("maxOutputTokens".to_owned(), Value::from(max_output_tokens));
+    }
+    if let Some(reasoning) = &input.reasoning {
+        if reasoning.effort.is_some() && reasoning.max_reasoning_tokens.is_some() {
+            return Err(ChatModelError::invalid_request(
+                "Gemini thinking cannot combine an effort level and a token budget",
+            ));
+        }
+        let mut thinking = Map::new();
+        if let Some(effort) = reasoning.effort {
+            let thinking_level = match effort {
+            crate::contracts::ReasoningEffort::Minimal => "minimal",
+            crate::contracts::ReasoningEffort::Low => "low",
+            crate::contracts::ReasoningEffort::Medium => "medium",
+            crate::contracts::ReasoningEffort::High => "high",
+            crate::contracts::ReasoningEffort::None
+            | crate::contracts::ReasoningEffort::XHigh
+            | crate::contracts::ReasoningEffort::Max
+            | crate::contracts::ReasoningEffort::Ultra => {
+                return Err(ChatModelError::new(
+                    ChatModelErrorCode::UnsupportedFeature,
+                    "Gemini thinking level does not support none, xhigh, max, or ultra",
+                    crate::contracts::ChatRetryDirective::Never,
+                ));
+            }
+            };
+            thinking.insert("thinkingLevel".into(), Value::String(thinking_level.into()));
+        }
+        if let Some(budget) = reasoning.max_reasoning_tokens {
+            thinking.insert("thinkingBudget".into(), Value::from(budget));
+        }
+        match reasoning.summary {
+            crate::contracts::ReasoningSummary::None => {}
+            crate::contracts::ReasoningSummary::Auto => { thinking.insert("includeThoughts".into(), Value::Bool(true)); }
+            crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed => {
+                return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                    "Gemini exposes a boolean thought-summary control, not concise or detailed summary levels",
+                    crate::contracts::ChatRetryDirective::Never));
+            }
+        }
+        if !thinking.is_empty() { generation.insert("thinkingConfig".into(), Value::Object(thinking)); }
+    }
+    if !matches!(input.response_format, ChatResponseFormat::Text) {
+        generation.insert("responseMimeType".to_owned(), Value::String("application/json".to_owned()));
+        if let ChatResponseFormat::JsonSchema { schema, .. } = &input.response_format {
+            generation.insert("responseSchema".to_owned(), schema.0.clone());
+        }
+    }
+    body["generationConfig"] = Value::Object(generation);
+    if !input.tools.is_empty() {
+        body["tools"] = json!([{
+            "functionDeclarations": input.tools.iter().map(|tool| json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema.0.clone(),
+            })).collect::<Vec<_>>()
+        }]);
+        body["toolConfig"] = gemini_tool_config(&input.tool_choice);
+    }
+    Ok(body)
+}
+
+fn encode_bedrock_request(
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let mut body = encode_anthropic_request(request, route)?;
+    // Bedrock selects the model and streaming operation in the request URL.
+    let object = body.as_object_mut().expect("Messages encoder returns an object");
+    object.remove("model");
+    object.remove("stream");
+    body["anthropic_version"] = Value::String("bedrock-2023-05-31".to_owned());
+    Ok(body)
+}
+
+fn encode_vertex_request(
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+) -> Result<Value, ChatModelError> {
+    let mut body = encode_anthropic_request(request, route)?;
+    body.as_object_mut().expect("Messages encoder returns an object").remove("model");
+    body["anthropic_version"] = Value::String("vertex-2023-10-16".to_owned());
+    Ok(body)
+}
+
+fn insert_if_some(object: &mut Value, key: &str, value: Option<Value>) {
+    if let Some(value) = value {
+        object[key] = value;
+    }
+}
+
+fn combined_system_text(instructions: &[String], messages: &[ChatMessage]) -> String {
+    instructions
+        .iter()
+        .map(String::as_str)
+        .chain(messages.iter().flat_map(|message| {
+            message.content.iter().filter_map(|part| {
+                if !matches!(message.role, ChatRole::System) {
+                    return None;
+                }
+                match part {
+                    ChatContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }
+            })
+        }))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .filter(|message| !matches!(message.role, ChatRole::System))
+        .map(|message| {
+            json!({
+                "role": match message.role {
+                    ChatRole::User | ChatRole::Tool => "user",
+                    ChatRole::Assistant => "assistant",
+                    ChatRole::System => "user",
+                },
+                "content": anthropic_content(&message.content),
+            })
+        })
+        .collect()
+}
+
+fn anthropic_content(content: &[ChatContentPart]) -> Vec<Value> {
+    content
+        .iter()
+        .map(|part| match part {
+            ChatContentPart::Text { text } => json!({"type": "text", "text": text}),
+            ChatContentPart::Image {
+                media_type,
+                data_base64,
+            } => json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data_base64,
+                }
+            }),
+            ChatContentPart::Audio {
+                media_type,
+                data_base64,
+            } => json!({
+                "type": "input_audio",
+                "media_type": media_type,
+                "data": data_base64,
+            }),
+            ChatContentPart::ToolCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => json!({
+                "type": "tool_use",
+                "id": call_id,
+                "name": name,
+                "input": arguments.0.clone(),
+            }),
+            ChatContentPart::ToolResult {
+                call_id,
+                output,
+                is_error,
+            } => json!({
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": anthropic_tool_result_content(output),
+                "is_error": is_error,
+            }),
+            ChatContentPart::Reasoning {
+                text,
+                signature,
+                ..
+            } => json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": signature,
+            }),
+            ChatContentPart::ProviderReasoning { block } => match block {
+                crate::ChatProviderReasoning::AnthropicThinking { text, signature, .. } =>
+                    json!({"type":"thinking", "thinking":text, "signature":signature}),
+                crate::ChatProviderReasoning::AnthropicRedactedThinking { data, .. } =>
+                    json!({"type":"redacted_thinking", "data":data}),
+            },
+        })
+        .collect()
+}
+
+fn openai_messages(message: &ChatMessage) -> Vec<Value> {
+    if matches!(message.role, ChatRole::Tool) {
+        return message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ChatContentPart::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                } => Some(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": openai_tool_result_content(output),
+                    "is_error": is_error,
+                })),
+                _ => None,
+            })
+            .collect();
+    }
+
+    let role = match message.role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    };
+    let mut value = json!({
+        "role": role,
+        "content": openai_content(&message.content, message.role == ChatRole::Assistant),
+    });
+    if let Some(round_id) = &message.provider_round_id {
+        value["provider_round_id"] = Value::String(round_id.as_ref().to_owned());
+    }
+    let tool_calls: Vec<Value> = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ChatContentPart::ToolCall {
+                call_id,
+                name,
+                arguments,
+                provider_metadata,
+            } => Some(json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(&arguments.0).unwrap_or_default(),
+                },
+                "provider_metadata": provider_metadata,
+            })),
+            _ => None,
+        })
+        .collect();
+    if !tool_calls.is_empty() {
+        value["tool_calls"] = Value::Array(tool_calls);
+    }
+    if message.role == ChatRole::Assistant
+        && value["content"].as_array().is_some_and(Vec::is_empty)
+        && value.get("tool_calls").is_none() {
+        return vec![];
+    }
+    vec![value]
+}
+
+fn openai_content(content: &[ChatContentPart], assistant: bool) -> Value {
+    let parts: Vec<Value> = content
+        .iter()
+        .filter_map(|part| match part {
+            ChatContentPart::Text { text } if assistant && text == "[Private reasoning omitted from replay]" => None,
+            ChatContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
+            ChatContentPart::Image {
+                media_type,
+                data_base64,
+            } => Some(json!({
+                "type": "image_url",
+                "image_url": {"url": format!("data:{media_type};base64,{data_base64}")}
+            })),
+            ChatContentPart::Audio {
+                media_type,
+                data_base64,
+            } => Some(json!({
+                "type": "input_audio",
+                "input_audio": {"format": media_type, "data": data_base64}
+            })),
+            ChatContentPart::Reasoning { .. } => {
+                // Chat text parts have no private-reasoning role. A sole
+                // part is flattened below, and mixed parts are ordinary
+                // assistant content too. Never turn thinking/pretend calls
+                // into public factual history on this compatible protocol.
+                None
+            }
+            // AdapterCore rejects this request before transport; never turn
+            // opaque provider state into ordinary visible text.
+            ChatContentPart::ProviderReasoning { .. }
+            | ChatContentPart::ToolCall { .. } | ChatContentPart::ToolResult { .. } => None,
+        })
+        .collect();
+    if let [part] = parts.as_slice()
+        && part.get("type").and_then(Value::as_str) == Some("text")
+        && let Some(text) = part.get("text").cloned()
+    {
+        return text;
+    }
+    Value::Array(parts)
+}
+
+fn openai_tool_result_content(parts: &[ChatToolResultPart]) -> Value {
+    let content = parts
+        .iter()
+        .map(|part| match part {
+            ChatToolResultPart::Text { text } => {
+                json!({"type": "text", "text": text})
+            }
+            ChatToolResultPart::Image {
+                media_type,
+                data_base64,
+            } => json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{media_type};base64,{data_base64}")
+                }
+            }),
+            ChatToolResultPart::Audio {
+                media_type,
+                data_base64,
+            } => json!({
+                "type": "input_audio",
+                "input_audio": {
+                    "format": media_type,
+                    "data": data_base64
+                }
+            }),
+        })
+        .collect::<Vec<_>>();
+    if let [part] = content.as_slice()
+        && part.get("type").and_then(Value::as_str) == Some("text")
+        && let Some(text) = part.get("text").cloned()
+    {
+        return text;
+    }
+    Value::Array(content)
+}
+
+fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().map(move |part| match part {
+                ChatContentPart::Text { text } => json!({
+                    "type": "message",
+                    "role": match message.role {
+                        ChatRole::Assistant => "assistant",
+                        ChatRole::System => "system",
+                        ChatRole::Tool | ChatRole::User => "user",
+                    },
+                    "content": [{
+                        "type": match message.role {
+                            ChatRole::Assistant => "output_text",
+                            ChatRole::System | ChatRole::Tool | ChatRole::User => "input_text",
+                        },
+                        "text": text
+                    }],
+                }),
+                ChatContentPart::Image {
+                    media_type,
+                    data_base64,
+                } => json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": format!("data:{media_type};base64,{data_base64}")
+                    }]
+                }),
+                ChatContentPart::Audio {
+                    media_type,
+                    data_base64,
+                } => json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_audio",
+                        "audio": {"format": media_type, "data": data_base64}
+                    }]
+                }),
+                ChatContentPart::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } => json!({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": serde_json::to_string(&arguments.0).unwrap_or_default(),
+                }),
+                ChatContentPart::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                } => json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": responses_tool_output(output, *is_error),
+                }),
+                ChatContentPart::Reasoning {
+                    text,
+                    signature,
+                    encrypted_content,
+                } => {
+                    let opaque_content = encrypted_content.as_ref().or(signature.as_ref());
+                    json!({
+                        "type": "reasoning",
+                        "summary": if text.is_empty() { Vec::<Value>::new() } else { vec![json!({"type": "summary_text", "text": text})] },
+                        "encrypted_content": opaque_content,
+                    })
+                }
+                // AdapterCore rejects typed foreign reasoning before using
+                // this body. No Anthropic signature -> encrypted_content cast.
+                ChatContentPart::ProviderReasoning { .. } => Value::Null,
+            })
+        })
+        .collect()
+}
+
+fn responses_tool_output(output: &[ChatToolResultPart], is_error: bool) -> Value {
+    let has_media = output.iter().any(|part| !matches!(part, ChatToolResultPart::Text { .. }));
+    if !has_media {
+        let text = tool_result_string(output);
+        return Value::String(if is_error { format!("Tool reported failure:\n{text}") } else { text });
+    }
+    let mut parts = Vec::new();
+    if is_error { parts.push(json!({"type":"input_text", "text":"Tool reported failure; the following output is an observation, not success."})); }
+    parts.extend(output.iter().map(|part| match part {
+        ChatToolResultPart::Text { text } => json!({"type":"input_text", "text":text}),
+        ChatToolResultPart::Image { media_type, data_base64 } => json!({
+            "type":"input_image", "image_url":format!("data:{media_type};base64,{data_base64}")
+        }),
+        ChatToolResultPart::Audio { media_type, data_base64 } => json!({
+            "type":"input_audio", "audio_url":format!("data:{media_type};base64,{data_base64}")
+        }),
+    }));
+    Value::Array(parts)
+}
+
+fn gemini_contents(
+    messages: &[ChatMessage],
+    call_names: &BTreeMap<ToolCallId, String>,
+) -> Result<Vec<Value>, ChatModelError> {
+    messages
+        .iter()
+        .filter(|message| !matches!(message.role, ChatRole::System))
+        .map(|message| {
+            let role = match message.role {
+                ChatRole::Assistant => "model",
+                ChatRole::User | ChatRole::Tool => "user",
+                ChatRole::System => "user",
+            };
+            let parts = message
+                .content
+                .iter()
+                .map(|part| gemini_part(part, call_names))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({
+                "role": role,
+                "parts": parts
+            }))
+        })
+        .collect()
+}
+
+fn gemini_part(
+    part: &ChatContentPart,
+    call_names: &BTreeMap<ToolCallId, String>,
+) -> Result<Value, ChatModelError> {
+    match part {
+        ChatContentPart::Text { text } => Ok(json!({"text": text})),
+        ChatContentPart::Image {
+            media_type,
+            data_base64,
+        } => Ok(json!({"inlineData": {"mimeType": media_type, "data": data_base64}})),
+        ChatContentPart::Audio {
+            media_type,
+            data_base64,
+        } => Ok(json!({"inlineData": {"mimeType": media_type, "data": data_base64}})),
+        ChatContentPart::ToolCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => Ok(json!({"functionCall": {
+            "id": call_id,
+            "name": name,
+            "args": arguments.0.clone()
+        }})),
+        ChatContentPart::ToolResult {
+            call_id,
+            output,
+            is_error,
+        } => {
+            let name = call_names.get(call_id).ok_or_else(|| {
+                ChatModelError::invalid_request(
+                    "Gemini function response has no matching function call",
+                )
+            })?;
+            Ok(json!({"functionResponse": {
+                "id": call_id,
+                "name": name,
+                "response": {
+                    "content": tool_result_string(output),
+                    "is_error": is_error,
+                }
+            }}))
+        }
+        ChatContentPart::Reasoning { text, .. } => Ok(json!({"text": text})),
+        ChatContentPart::ProviderReasoning { .. } => Err(ChatModelError::new(
+            ChatModelErrorCode::UnsupportedFeature,
+            "typed Anthropic reasoning cannot be encoded as Gemini content",
+            crate::contracts::ChatRetryDirective::Never,
+        )),
+    }
+}
+
+fn anthropic_tool_result_content(parts: &[ChatToolResultPart]) -> Value {
+    Value::Array(
+        parts
+            .iter()
+            .map(|part| match part {
+                ChatToolResultPart::Text { text } => {
+                    json!({"type": "text", "text": text})
+                }
+                ChatToolResultPart::Image {
+                    media_type,
+                    data_base64,
+                } => json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data_base64
+                    }
+                }),
+                ChatToolResultPart::Audio {
+                    media_type,
+                    data_base64,
+                } => json!({
+                    "type": "input_audio",
+                    "media_type": media_type,
+                    "data": data_base64
+                }),
+            })
+            .collect(),
+    )
+}
+
+fn tool_result_string(parts: &[ChatToolResultPart]) -> String {
+    if parts
+        .iter()
+        .all(|part| matches!(part, ChatToolResultPart::Text { .. }))
+    {
+        return parts
+            .iter()
+            .filter_map(|part| match part {
+                ChatToolResultPart::Text { text } => Some(text.as_str()),
+                ChatToolResultPart::Image { .. } | ChatToolResultPart::Audio { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    serde_json::to_string(parts).unwrap_or_default()
+}
+
+fn anthropic_tool_choice(choice: &ChatToolChoice) -> Value {
+    match choice {
+        ChatToolChoice::Auto => json!({"type": "auto"}),
+        ChatToolChoice::Required => json!({"type": "any"}),
+        ChatToolChoice::Specific { name } => json!({"type": "tool", "name": name}),
+        ChatToolChoice::None => Value::Null,
+    }
+}
+
+fn openai_tool_choice(choice: &ChatToolChoice) -> Value {
+    match choice {
+        ChatToolChoice::Auto => Value::String("auto".to_owned()),
+        ChatToolChoice::Required => Value::String("required".to_owned()),
+        ChatToolChoice::Specific { name } => json!({
+            "type": "function",
+            "function": {"name": name}
+        }),
+        ChatToolChoice::None => Value::String("none".to_owned()),
+    }
+}
+
+fn openai_responses_tool_choice(choice: &ChatToolChoice) -> Value {
+    match choice {
+        ChatToolChoice::Auto => Value::String("auto".to_owned()),
+        ChatToolChoice::Required => Value::String("required".to_owned()),
+        ChatToolChoice::Specific { name } => json!({
+            "type": "function",
+            "name": name
+        }),
+        ChatToolChoice::None => Value::String("none".to_owned()),
+    }
+}
+
+fn gemini_tool_config(choice: &ChatToolChoice) -> Value {
+    let function_calling_config = match choice {
+        ChatToolChoice::Auto => json!({"mode": "AUTO"}),
+        ChatToolChoice::None => json!({"mode": "NONE"}),
+        ChatToolChoice::Required => json!({"mode": "ANY"}),
+        ChatToolChoice::Specific { name } => json!({
+            "mode": "ANY",
+            "allowedFunctionNames": [name]
+        }),
+    };
+    json!({"functionCallingConfig": function_calling_config})
+}
+
+fn response_format_value(format: &ChatResponseFormat) -> Value {
+    match format {
+        ChatResponseFormat::Text => json!({"type": "text"}),
+        ChatResponseFormat::JsonObject => json!({"type": "json_object"}),
+        ChatResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": name,
+                "schema": schema.0.clone(),
+                "strict": strict,
+            }
+        }),
+    }
+}
+
+fn responses_format_value(format: &ChatResponseFormat) -> Value {
+    match format {
+        ChatResponseFormat::Text => json!({"type": "text"}),
+        ChatResponseFormat::JsonObject => json!({"type": "json_object"}),
+        ChatResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => json!({
+            "type": "json_schema",
+            "name": name,
+            "schema": schema.0.clone(),
+            "strict": strict,
+        }),
+    }
+}
+
+struct AttemptFrameDecoder {
+    protocol: ChatProtocol,
+    raw_decode_state: Arc<Mutex<RawDecodeState>>,
+    responses: crate::responses_decoder::ResponsesDecoder,
+    anthropic: crate::anthropic_decoder::AnthropicDecoder,
+}
+
+impl ChatFrameDecoder for AttemptFrameDecoder {
+    fn decode_frame(
+        &mut self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        // Cloud exception headers are normalized outside Messages. Handle them
+        // even after the native decoder has already selected a content lifecycle.
+        if let Some(error) = crate::provider_errors::decode_with_context(
+            self.protocol, &frame.event.trim().to_ascii_lowercase(), &frame.data,
+            frame.diagnostic.as_ref(),
+        ) {
+            return Err(error);
+        }
+        if self.protocol == ChatProtocol::OpenaiResponses {
+            if let Some(events) = self.responses.decode(&frame) {
+                return events;
+            }
+        }
+        if self.protocol.uses_anthropic_messages() {
+            if let Some(events) = self.anthropic.decode(&frame) {
+                return events;
+            }
+        }
+        decode_frame_for_protocol(self.protocol, frame, &self.raw_decode_state)
+    }
+}
+
+fn decode_frame_for_protocol(
+    protocol: ChatProtocol,
+    frame: ProviderWireFrame,
+    raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+    let event_name = frame.event.trim().to_ascii_lowercase();
+    if event_name.is_empty() {
+        return Err(ChatModelError::protocol_violation(
+            "provider frame has an empty event name",
+        ));
+    }
+    if let Some(error) = crate::provider_errors::decode_with_context(
+        protocol, &event_name, &frame.data, frame.diagnostic.as_ref(),
+    ) {
+        return Err(error);
+    }
+
+    if protocol == ChatProtocol::OpenaiChat
+        && (frame.data.get("choices").is_some()
+            || (event_name == "done"
+                && raw_decode_state
+                    .lock()
+                    .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?
+                    .openai
+                    .values()
+                    .any(|state| state.response_started))
+            || (is_terminal_frame(&frame.data)
+                && raw_decode_state
+                    .lock()
+                    .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?
+                    .openai
+                    .values()
+                    .any(|state| state.response_started)))
+    {
+        return decode_openai_chat_raw_frame(frame, raw_decode_state);
+    }
+    if protocol == ChatProtocol::OpenaiChat
+        && event_name == "done"
+        && frame.data.as_object().is_some_and(Map::is_empty)
+    {
+        return Ok(Vec::new());
+    }
+    if protocol == ChatProtocol::Gemini
+        && (frame.data.get("candidates").is_some()
+            || frame.data.get("usageMetadata").is_some()
+            || frame
+                .data
+                .get("promptFeedback")
+                .and_then(|feedback| feedback.get("blockReason"))
+                .and_then(Value::as_str)
+                .is_some()
+            || (event_name == "done"
+                && raw_decode_state
+                    .lock()
+                    .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?
+                    .gemini
+                    .values()
+                    .any(|state| state.response_started))
+            || (is_terminal_frame(&frame.data)
+                && raw_decode_state
+                    .lock()
+                    .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?
+                    .gemini
+                    .values()
+                    .any(|state| state.response_started)))
+    {
+        return decode_gemini_raw_frame(frame, raw_decode_state);
+    }
+    if protocol == ChatProtocol::Gemini
+        && event_name == "done"
+        && frame.data.as_object().is_some_and(Map::is_empty)
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut events = Vec::new();
+    match event_name.as_str() {
+        "response.created"
+        | "message_start"
+        | "response.start"
+        | "stream.start"
+        | "start" => {
+            let id = string_at(&frame.data, &["id", "response.id", "message.id"])
+                .map(ProviderResponseId);
+            events.push(ChatModelEvent::ResponseStarted {
+                provider_response_id: id,
+            });
+        }
+        "text.delta"
+        | "output_text.delta"
+        | "content_block_delta"
+        | "message.delta"
+        | "response.output_text.delta" => {
+            if let Some(text) = text_delta(&frame.data) {
+                events.push(ChatModelEvent::OutputTextDelta { text });
+            }
+            if let Some(reasoning) = reasoning_delta(&frame.data) {
+                events.push(ChatModelEvent::ReasoningDelta { text: reasoning });
+            }
+            if let Some(signature) = string_at(
+                &frame.data,
+                &["signature", "delta.signature", "reasoning.signature"],
+            ) {
+                events.push(ChatModelEvent::ReasoningSignature { signature });
+            }
+        }
+        "audio.delta" | "response.audio.delta" | "response.output_audio.delta" => {
+            let data_base64 = string_at(
+                &frame.data,
+                &["data_base64", "delta", "audio.delta", "audio.data"],
+            )
+            .ok_or_else(|| {
+                ChatModelError::protocol_violation(
+                    "provider audio delta is missing base64 data",
+                )
+            })?;
+            let media_type = string_at(
+                &frame.data,
+                &["media_type", "audio.media_type", "format"],
+            )
+            .unwrap_or_else(|| "audio/pcm".to_owned());
+            events.push(ChatModelEvent::OutputAudioDelta {
+                media_type,
+                data_base64,
+            });
+        }
+        "reasoning.delta"
+        | "thinking.delta"
+        | "response.reasoning_summary_text.delta" => {
+            if let Some(text) = text_delta(&frame.data) {
+                events.push(ChatModelEvent::ReasoningDelta { text });
+            }
+        }
+        "reasoning.signature" | "thinking.signature" | "signature.delta" => {
+            if let Some(signature) =
+                string_at(&frame.data, &["signature", "delta.signature", "encrypted_content"])
+            {
+                events.push(ChatModelEvent::ReasoningSignature { signature });
+            }
+        }
+        "tool_call.delta"
+        | "function_call.delta"
+        | "response.function_call_arguments.delta"
+        | "content_block_tool_delta" => {
+            let call_id = string_at(
+                &frame.data,
+                &["call_id", "id", "tool_call_id", "delta.id", "tool.id"],
+            )
+            .ok_or_else(|| {
+                ChatModelError::protocol_violation("tool-call delta is missing call id")
+            })?;
+            let name = string_at(&frame.data, &["name", "function.name", "delta.name"])
+                .unwrap_or_default();
+            let arguments_delta = string_at(
+                &frame.data,
+                &["arguments_delta", "arguments", "delta.arguments", "function.arguments"],
+            )
+            .unwrap_or_default();
+            events.push(ChatModelEvent::ToolCallDelta {
+                call_id: ToolCallId(call_id),
+                name,
+                arguments_delta,
+            });
+        }
+        "tool_call.completed"
+        | "function_call.completed"
+        | "response.function_call.done"
+        | "content_block_tool_done" => {
+            events.push(ChatModelEvent::ToolCallCompleted {
+                call: parse_tool_call(&frame.data)?,
+            });
+        }
+        "response.output_item.added" | "output_item.added" | "native.item" => {
+            let item_type = string_at(&frame.data, &["item.type", "type", "output.type"])
+                .unwrap_or_else(|| "unknown".to_owned());
+            let item = frame
+                .data
+                .get("item")
+                .or_else(|| frame.data.get("output"))
+                .cloned()
+                .unwrap_or(frame.data.clone());
+            events.push(ChatModelEvent::NativeResponsesItem {
+                item_type,
+                item: StrictJsonValue(item),
+            });
+        }
+        "provider.round" | "response.completed.round" => {
+            let round_id = string_at(&frame.data, &["round_id", "response.id", "id"])
+                .ok_or_else(|| ChatModelError::protocol_violation("round frame is missing id"))?;
+            events.push(ChatModelEvent::ProviderRoundId {
+                round_id: ProviderRoundId(round_id),
+            });
+        }
+        "usage" | "response.usage" | "message.usage" | "response.completed.usage" => {
+            events.push(ChatModelEvent::Usage {
+                usage: parse_usage(&frame.data),
+            });
+        }
+        "response.completed"
+        | "message_stop"
+        | "stream.end"
+        | "done"
+        | "finish"
+        | "response.incomplete" => {
+            let finish_reason = parse_finish_reason(protocol, &frame.data, &event_name);
+            events.push(ChatModelEvent::Completed { finish_reason });
+        }
+        _ => {
+            if let Some(text) = text_delta(&frame.data) {
+                events.push(ChatModelEvent::OutputTextDelta { text });
+            } else if let Some(usage) = usage_from_nested(&frame.data) {
+                events.push(ChatModelEvent::Usage { usage });
+            } else if is_terminal_frame(&frame.data) {
+                events.push(ChatModelEvent::Completed {
+                    finish_reason: parse_finish_reason(protocol, &frame.data, &event_name),
+                });
+            } else {
+                return Err(ChatModelError::protocol_violation(format!(
+                    "unsupported {:?} provider event `{}`",
+                    protocol, frame.event
+                )));
+            }
+        }
+    }
+    Ok(events)
+}
+
+#[derive(Default)]
+struct RawDecodeState {
+    openai: BTreeMap<String, OpenAiRawStreamState>,
+    gemini: BTreeMap<String, GeminiRawStreamState>,
+}
+
+#[derive(Default)]
+struct OpenAiRawStreamState {
+    response_started: bool,
+    tools: BTreeMap<u64, RawToolCallState>,
+    usage_seen: bool,
+    pending_usage: Option<ChatUsage>,
+    pending_finish: Option<ChatFinishReason>,
+}
+
+#[derive(Default)]
+struct GeminiRawStreamState {
+    response_started: bool,
+    has_tool_calls: bool,
+    pending_usage: Option<ChatUsage>,
+    tools: BTreeMap<ToolCallId, ChatToolCall>,
+}
+
+#[derive(Default)]
+struct RawToolCallState {
+    call_id: String,
+    name: String,
+    arguments: String,
+    emitted_arguments: usize,
+}
+
+fn decode_openai_chat_raw_frame(
+    frame: ProviderWireFrame,
+    raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+    let mut state = raw_decode_state
+        .lock()
+        .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?;
+    let explicit_response_key = frame
+        .data
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let response_key = match explicit_response_key.clone() {
+        Some(response_key) => response_key,
+        None if state.openai.len() <= 1 => state
+            .openai
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "__openai_anonymous__".to_owned()),
+        None => {
+            return Err(ChatModelError::protocol_violation(
+                "OpenAI Chat frame without response id cannot be correlated with multiple active streams",
+            ));
+        }
+    };
+    let stream = state.openai.entry(response_key.clone()).or_default();
+    let mut events = Vec::new();
+    if !stream.response_started {
+        events.push(ChatModelEvent::ResponseStarted {
+            provider_response_id: explicit_response_key.map(ProviderResponseId),
+        });
+        stream.response_started = true;
+    }
+
+    let choices = match frame.data.get("choices") {
+        Some(value) => Some(value.as_array().ok_or_else(|| {
+            ChatModelError::protocol_violation("OpenAI Chat choices is not an array")
+        })?),
+        None => None,
+    };
+    if let Some(choices) = choices {
+        if choices.len() > 1 {
+            return Err(ChatModelError::protocol_violation(
+                "OpenAI Chat streamed response contains more than one choice",
+            ));
+        }
+        if let Some(choice) = choices.first() {
+            let choice = choice.as_object().ok_or_else(|| {
+                ChatModelError::protocol_violation("OpenAI Chat choice is not an object")
+            })?;
+            let finish_reason = match choice.get("finish_reason") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(reason)) if !reason.is_empty() => Some(reason.as_str()),
+                Some(Value::String(_)) => None,
+                Some(_) => {
+                    return Err(ChatModelError::protocol_violation(
+                        "OpenAI Chat finish_reason is not a string or null",
+                    ));
+                }
+            };
+            let delta = choice
+                .get("delta")
+                .or_else(|| choice.get("message"))
+                .filter(|value| !value.is_null());
+            let delta = match delta {
+                Some(value) => Some(value.as_object().ok_or_else(|| {
+                    ChatModelError::protocol_violation(
+                        "OpenAI Chat choice delta is not an object",
+                    )
+                })?),
+                None if finish_reason.is_some() => None,
+                None => {
+                    return Err(ChatModelError::protocol_violation(
+                        "OpenAI Chat choice is missing an object delta",
+                    ));
+                }
+            };
+
+            if let Some(delta) = delta {
+                if let Some(text) = delta.get("content").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    events.push(ChatModelEvent::OutputTextDelta {
+                        text: text.to_owned(),
+                    });
+                }
+                if let Some(reasoning) = extract_openai_raw_reasoning(delta) {
+                    events.push(ChatModelEvent::ReasoningDelta { text: reasoning });
+                }
+
+                let tool_calls = delta
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .map(|calls| calls.iter().collect::<Vec<_>>());
+                let tool_calls = tool_calls.or_else(|| {
+                    delta
+                        .get("function_call")
+                        .filter(|value| value.is_object())
+                        .map(|call| vec![call])
+                });
+                if let Some(tool_calls) = tool_calls {
+                    for (position, tool_call) in tool_calls.into_iter().enumerate() {
+                        let tool_call = tool_call.as_object().ok_or_else(|| {
+                            ChatModelError::protocol_violation(
+                                "OpenAI Chat tool call is not an object",
+                            )
+                        })?;
+                        let index = tool_call
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(position as u64);
+                        let function = tool_call
+                            .get("function")
+                            .and_then(Value::as_object)
+                            .unwrap_or(tool_call);
+                        let entry = stream.tools.entry(index).or_default();
+                        if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
+                            if !id.is_empty() {
+                                entry.call_id = id.to_owned();
+                            }
+                        }
+                        if entry.call_id.is_empty() {
+                            entry.call_id = format!("openai-tool-{index}");
+                        }
+                        if let Some(name) = function.get("name").and_then(Value::as_str)
+                            && !name.is_empty()
+                        {
+                            entry.name = name.to_owned();
+                        }
+                        if let Some(arguments) = function.get("arguments") {
+                            append_raw_arguments(&mut entry.arguments, arguments);
+                        }
+                        if entry.name.is_empty() {
+                            continue;
+                        }
+                        let arguments_delta =
+                            entry.arguments[entry.emitted_arguments..].to_owned();
+                        entry.emitted_arguments = entry.arguments.len();
+                        events.push(ChatModelEvent::ToolCallDelta {
+                            call_id: ToolCallId(entry.call_id.clone()),
+                            name: entry.name.clone(),
+                            arguments_delta,
+                        });
+                    }
+                }
+            }
+
+            if let Some(reason) = finish_reason {
+                stream.pending_finish = Some(parse_finish_reason_text(reason));
+            }
+        }
+    }
+
+    let raw_usage = frame
+        .data
+        .get("usage")
+        .filter(|value| !value.is_null())
+        .map(parse_usage);
+    if let Some(usage) = raw_usage {
+        stream.pending_usage = Some(usage);
+    }
+
+    let done_marker = frame.event.eq_ignore_ascii_case("done");
+    if let Some(value) = frame.data.get("finish_reason") {
+        match value {
+            Value::Null => {}
+            Value::String(reason) if !reason.is_empty() => {
+                stream.pending_finish = Some(parse_finish_reason_text(reason));
+            }
+            Value::String(_) => {}
+            _ => {
+                return Err(ChatModelError::protocol_violation(
+                    "OpenAI Chat finish_reason is not a string or null",
+                ));
+            }
+        }
+    }
+    let choices_are_empty = choices.is_some_and(|choices| choices.is_empty());
+    let json_response = frame.event.eq_ignore_ascii_case("json");
+    let should_complete = done_marker
+        || json_response
+        || is_terminal_frame(&frame.data)
+        || (choices_are_empty && stream.pending_finish.is_some())
+        || (stream.pending_finish.is_some()
+            && frame.data.get("usage").is_some_and(|value| !value.is_null()));
+    if should_complete {
+        let finish_reason = stream.pending_finish.take().unwrap_or_else(|| {
+            if stream.tools.is_empty() { ChatFinishReason::Completed } else { ChatFinishReason::ToolCalls }
+        });
+        // A length/refusal terminal cannot complete a partially generated
+        // function. Engines may discard the proposed batch, never execute it.
+        if matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
+            append_openai_raw_tool_completions(stream, &mut events)?;
+        }
+        if let Some(usage) = stream.pending_usage.take()
+            && !stream.usage_seen
+        {
+            events.push(ChatModelEvent::Usage { usage });
+            stream.usage_seen = true;
+        }
+        events.push(ChatModelEvent::Completed { finish_reason });
+        state.openai.remove(&response_key);
+    }
+    Ok(events)
+}
+
+fn append_openai_raw_tool_completions(
+    stream: &mut OpenAiRawStreamState,
+    events: &mut Vec<ChatModelEvent>,
+) -> Result<(), ChatModelError> {
+    for tool in stream.tools.values() {
+        let arguments: Value = serde_json::from_str(&tool.arguments).map_err(|_| ChatModelError::protocol_violation(
+                "OpenAI Chat completed a tool call with invalid JSON arguments",
+            ))?;
+        if !arguments.is_object() {
+            return Err(ChatModelError::protocol_violation("OpenAI Chat tool arguments must be an object"));
+        }
+        events.push(ChatModelEvent::ToolCallCompleted {
+            call: ChatToolCall {
+                call_id: ToolCallId(tool.call_id.clone()),
+                name: tool.name.clone(),
+                arguments: StrictJsonValue(arguments),
+                provider_metadata: None,
+            },
+        });
+    }
+    Ok(())
+}
+
+fn decode_gemini_raw_frame(
+    frame: ProviderWireFrame,
+    raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+    let mut state = raw_decode_state
+        .lock()
+        .map_err(|_| ChatModelError::protocol_violation("raw decoder state poisoned"))?;
+    let explicit_response_key = frame
+        .data
+        .get("responseId")
+        .or_else(|| frame.data.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let response_key = match explicit_response_key.clone() {
+        Some(response_key) => response_key,
+        None if state.gemini.len() <= 1 => state
+            .gemini
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "__gemini_anonymous__".to_owned()),
+        None => {
+            return Err(ChatModelError::protocol_violation(
+                "Gemini frame without response id cannot be correlated with multiple active streams",
+            ));
+        }
+    };
+    let stream = state.gemini.entry(response_key.clone()).or_default();
+    let mut events = Vec::new();
+    let mut finish_reason = None;
+    let mut has_tool_calls = stream.has_tool_calls;
+    if !stream.response_started {
+        if let Some(response_id) = explicit_response_key {
+            events.push(ChatModelEvent::ResponseStarted {
+                provider_response_id: Some(ProviderResponseId(response_id)),
+            });
+        }
+        // Gemini generateContent may omit responseId. Preserve the established
+        // canonical event sequence in that case while marking the stream so a
+        // later terminal marker can still be correlated.
+        stream.response_started = true;
+    }
+
+    let candidates = match frame.data.get("candidates") {
+        Some(value) => Some(value.as_array().ok_or_else(|| {
+            ChatModelError::protocol_violation("Gemini candidates is not an array")
+        })?),
+        None => None,
+    };
+    if let Some(candidates) = candidates {
+        if candidates.len() > 1 {
+            return Err(ChatModelError::protocol_violation(
+                "Gemini response contains more than one candidate",
+            ));
+        }
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            let candidate = candidate.as_object().ok_or_else(|| {
+                ChatModelError::protocol_violation("Gemini candidate is not an object")
+            })?;
+            let parts = match candidate.get("content") {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(content)) => match content.get("parts") {
+                    None | Some(Value::Null) => None,
+                    Some(parts) => Some(parts.as_array().ok_or_else(|| {
+                        ChatModelError::protocol_violation(
+                            "Gemini content parts is not an array",
+                        )
+                    })?),
+                },
+                Some(_) => {
+                    return Err(ChatModelError::protocol_violation(
+                        "Gemini candidate content is not an object",
+                    ));
+                }
+            };
+            if let Some(parts) = parts {
+                for (part_index, part) in parts.iter().enumerate() {
+                    let part = part.as_object().ok_or_else(|| {
+                        ChatModelError::protocol_violation("Gemini content part is not an object")
+                    })?;
+                    if part.get("text").is_some() && part.get("functionCall").is_some() {
+                        return Err(ChatModelError::protocol_violation(
+                            "Gemini content part contains both text and functionCall",
+                        ));
+                    }
+                    if let Some(text) = part.get("text").and_then(Value::as_str)
+                        && !text.is_empty()
+                    {
+                        let event = if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                            ChatModelEvent::ReasoningDelta {
+                                text: text.to_owned(),
+                            }
+                        } else {
+                            ChatModelEvent::OutputTextDelta {
+                                text: text.to_owned(),
+                            }
+                        };
+                        events.push(event);
+                    }
+                    let signature = match part
+                        .get("thoughtSignature")
+                        .or_else(|| part.get("thought_signature"))
+                    {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(signature)) => Some(signature),
+                        Some(_) => {
+                            return Err(ChatModelError::protocol_violation(
+                                "Gemini thoughtSignature is not a string or null",
+                            ));
+                        }
+                    };
+                    if let Some(signature) = signature.filter(|signature| !signature.is_empty()) {
+                        events.push(ChatModelEvent::ReasoningSignature {
+                            signature: signature.to_owned(),
+                        });
+                    }
+                    if let Some(function_call) = part.get("functionCall") {
+                        has_tool_calls = true;
+                        let function_call = function_call.as_object().ok_or_else(|| {
+                            ChatModelError::protocol_violation(
+                                "Gemini functionCall is not an object",
+                            )
+                        })?;
+                        let name = function_call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .ok_or_else(|| {
+                                ChatModelError::protocol_violation(
+                                    "Gemini functionCall is missing name",
+                                )
+                            })?;
+                        let call_id = match function_call.get("id") {
+                            None | Some(Value::Null) => {
+                                format!("gemini-tool-{candidate_index}-{part_index}")
+                            }
+                            Some(Value::String(id)) if !id.is_empty() => id.to_owned(),
+                            Some(Value::String(_)) => {
+                                format!("gemini-tool-{candidate_index}-{part_index}")
+                            }
+                            Some(_) => {
+                                return Err(ChatModelError::protocol_violation(
+                                    "Gemini functionCall id is not a string or null",
+                                ));
+                            }
+                        };
+                        let arguments = match function_call.get("args") {
+                            None | Some(Value::Null) => json!({}),
+                            Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
+                            Some(_) => {
+                                return Err(ChatModelError::protocol_violation(
+                                    "Gemini functionCall args is not an object or null",
+                                ));
+                            }
+                        };
+                        let tool_id = ToolCallId(call_id.clone());
+                        if let Some(existing) = stream.tools.get(&tool_id)
+                            && existing.name != name
+                        {
+                            return Err(ChatModelError::protocol_violation(
+                                "Gemini functionCall name changed for one call id",
+                            ));
+                        }
+                        stream.tools.insert(
+                            tool_id.clone(),
+                            ChatToolCall {
+                                call_id: tool_id,
+                                name: name.to_owned(),
+                                arguments: StrictJsonValue(arguments),
+                                provider_metadata: signature
+                                    .map(|signature| {
+                                        StrictJsonValue(json!({"thoughtSignature": signature}))
+                                    }),
+                            },
+                        );
+                    }
+                }
+            }
+            if let Some(value) = candidate
+                .get("finishReason")
+                .or_else(|| candidate.get("finish_reason"))
+            {
+                match value {
+                    Value::Null => {}
+                    Value::String(reason) if !is_unspecified_finish_reason(reason) => {
+                        finish_reason = Some(parse_finish_reason_text(reason));
+                    }
+                    Value::String(_) => {}
+                    _ => {
+                        return Err(ChatModelError::protocol_violation(
+                            "Gemini finishReason is not a string or null",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(usage) = frame.data.get("usageMetadata").filter(|value| !value.is_null()) {
+        stream.pending_usage = Some(parse_usage(usage));
+    }
+    if frame
+        .data
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Err(ChatModelError::provider_unavailable(
+            "Gemini blocked the prompt",
+        ));
+    }
+    if candidates.is_some_and(|candidates| candidates.is_empty())
+        && frame.data.get("usageMetadata").is_none()
+        && !is_terminal_frame(&frame.data)
+    {
+        return Err(ChatModelError::protocol_violation(
+            "Gemini raw frame has an empty candidates array without usage metadata",
+        ));
+    }
+    let done_marker = frame.event.eq_ignore_ascii_case("done");
+    if let Some(value) = frame
+        .data
+        .get("finishReason")
+        .or_else(|| frame.data.get("finish_reason"))
+    {
+        match value {
+            Value::Null => {}
+            Value::String(reason) if !is_unspecified_finish_reason(reason) => {
+                finish_reason = Some(parse_finish_reason_text(reason));
+            }
+            Value::String(_) => {}
+            _ => {
+                return Err(ChatModelError::protocol_violation(
+                    "Gemini finishReason is not a string or null",
+                ));
+            }
+        }
+    }
+    let json_response = frame.event.eq_ignore_ascii_case("json");
+    let terminal = finish_reason.is_some()
+        || done_marker
+        || is_terminal_frame(&frame.data)
+        || (json_response && candidates.is_some());
+    if let Some(mut finish_reason) = finish_reason {
+        if has_tool_calls && finish_reason == ChatFinishReason::Completed {
+            finish_reason = ChatFinishReason::ToolCalls;
+        }
+        events.extend(
+            stream
+                .tools
+                .values()
+                .cloned()
+                .map(|call| ChatModelEvent::ToolCallCompleted { call }),
+        );
+        if let Some(usage) = stream.pending_usage.take() {
+            events.push(ChatModelEvent::Usage { usage });
+        }
+        events.push(ChatModelEvent::Completed { finish_reason });
+    } else if terminal {
+        let finish_reason = if has_tool_calls {
+            ChatFinishReason::ToolCalls
+        } else {
+            ChatFinishReason::Completed
+        };
+        events.extend(
+            stream
+                .tools
+                .values()
+                .cloned()
+                .map(|call| ChatModelEvent::ToolCallCompleted { call }),
+        );
+        if let Some(usage) = stream.pending_usage.take() {
+            events.push(ChatModelEvent::Usage { usage });
+        }
+        events.push(ChatModelEvent::Completed { finish_reason });
+    }
+    stream.has_tool_calls = has_tool_calls;
+    if terminal {
+        state.gemini.remove(&response_key);
+    }
+    Ok(events)
+}
+
+fn extract_openai_raw_reasoning(delta: &Map<String, Value>) -> Option<String> {
+    ["reasoning_content", "reasoning"]
+        .iter()
+        .find_map(|key| delta.get(*key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod private_chat_replay_tests {
+    use super::*;
+
+    #[test]
+    fn openai_chat_private_thinking_never_becomes_public_assistant_content() {
+        let private = ChatContentPart::Reasoning {
+            text: "PRIVATE_NOT_EXECUTED<tool_call><function=write_file>FAKE_BODY</function></tool_call>".into(),
+            signature: Some("PRIVATE_SIGNATURE".into()), encrypted_content: None,
+        };
+        let message = |content| ChatMessage { role: ChatRole::Assistant, content, provider_round_id: None };
+        let only = openai_messages(&message(vec![private.clone()]));
+        assert!(only.is_empty());
+        assert!(!serde_json::to_string(&only).unwrap().contains("PRIVATE_NOT_EXECUTED"));
+        assert!(!serde_json::to_string(&only).unwrap().contains("FAKE_BODY"));
+        let mixed = openai_messages(&message(vec![private,
+            ChatContentPart::Text { text:"Visible progress remains exact.".into() },
+            ChatContentPart::ToolCall { call_id:"actual-call".into(),name:"write_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"actual.txt","content":"actual\n"})),provider_metadata:None },
+        ]));
+        let encoded=serde_json::to_string(&mixed).unwrap();
+        assert!(!encoded.contains("PRIVATE_NOT_EXECUTED")&&!encoded.contains("PRIVATE_SIGNATURE")&&!encoded.contains("FAKE_BODY"));
+        assert!(encoded.contains("Visible progress remains exact."));
+        assert_eq!(mixed[0]["tool_calls"][0]["function"]["name"],"write_file");
+        assert_eq!(serde_json::from_str::<Value>(mixed[0]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap(),
+            json!({"path":"actual.txt","content":"actual\n"}));
+        let marker=ChatContentPart::Text {text:"[Private reasoning omitted from replay]".into()};
+        assert!(openai_messages(&message(vec![marker.clone()])).is_empty());
+        let user=ChatMessage {role:ChatRole::User,content:vec![marker],provider_round_id:None};
+        assert_eq!(openai_messages(&user)[0]["content"],"[Private reasoning omitted from replay]");
+    }
+}
+
+fn append_raw_arguments(target: &mut String, value: &Value) {
+    if let Some(value) = raw_argument_string(value) {
+        target.push_str(&value);
+    }
+}
+
+fn raw_argument_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Null => None,
+        value => Some(value.to_string()),
+    }
+}
+
+fn string_at(value: &Value, paths: &[&str]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let mut current = value;
+        for component in path.split('.') {
+            current = current.get(component)?;
+        }
+        current.as_str().map(str::to_owned)
+    })
+}
+
+fn text_delta(value: &Value) -> Option<String> {
+    string_at(
+        value,
+        &[
+            "text",
+            "delta",
+            "delta.text",
+            "delta.content",
+            "content",
+            "output_text",
+            "part.text",
+        ],
+    )
+}
+
+fn reasoning_delta(value: &Value) -> Option<String> {
+    string_at(
+        value,
+        &[
+            "reasoning",
+            "reasoning_content",
+            "thinking",
+            "delta.reasoning",
+            "delta.reasoning_content",
+            "delta.thinking",
+        ],
+    )
+}
+
+fn parse_tool_call(value: &Value) -> Result<ChatToolCall, ChatModelError> {
+    let call_id = string_at(value, &["call_id", "id", "tool_call_id", "tool.id"])
+        .ok_or_else(|| ChatModelError::protocol_violation("completed tool call is missing id"))?;
+    let name = string_at(value, &["name", "function.name", "tool.name"])
+        .ok_or_else(|| ChatModelError::protocol_violation("completed tool call is missing name"))?;
+    let arguments = value
+        .get("arguments")
+        .or_else(|| value.get("input"))
+        .or_else(|| value.get("function").and_then(|f| f.get("arguments")))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let arguments = if let Value::String(arguments) = arguments {
+        serde_json::from_str(&arguments).unwrap_or_else(|_| json!({"raw": arguments}))
+    } else {
+        arguments
+    };
+    Ok(ChatToolCall {
+        call_id: ToolCallId(call_id),
+        name,
+        arguments: StrictJsonValue(arguments),
+        provider_metadata: value
+            .get("provider_metadata")
+            .cloned()
+            .map(StrictJsonValue),
+    })
+}
+
+pub(crate) fn parse_usage(value: &Value) -> ChatUsage {
+    let source = value.get("usage").unwrap_or(value);
+    let mut provider_reported = std::collections::BTreeMap::new();
+    if let Some(object) = source.as_object() {
+        for (key, value) in object {
+            if let Some(number) = value.as_u64()
+                && !matches!(
+                    key.as_str(),
+                    "input_tokens"
+                        | "output_tokens"
+                        | "reasoning_tokens"
+                        | "cache_write_tokens"
+                        | "cache_read_tokens"
+                        | "audio_input_tokens"
+                        | "audio_output_tokens"
+                        | "prompt_tokens"
+                        | "completion_tokens"
+                        | "total_tokens"
+                        | "input"
+                        | "output"
+                        | "promptTokenCount"
+                        | "candidatesTokenCount"
+                        | "thoughtsTokenCount"
+                        | "cacheCreationInputTokens"
+                        | "cacheReadInputTokens"
+                        | "cachedContentTokenCount"
+                        | "audioInputTokens"
+                        | "audioOutputTokens"
+                )
+            {
+                provider_reported.insert(key.clone(), number);
+            }
+        }
+    }
+    ChatUsage {
+        input_tokens: first_u64(
+            source,
+            &["input_tokens", "prompt_tokens", "input", "promptTokenCount"],
+        ),
+        output_tokens: first_u64(
+            source,
+            &["output_tokens", "completion_tokens", "output", "candidatesTokenCount"],
+        ),
+        reasoning_tokens: first_u64(source, &["reasoning_tokens", "reasoning", "thoughtsTokenCount"])
+            .max(nested_u64(
+                source,
+                &["completion_tokens_details", "reasoning_tokens"],
+            ))
+            .max(nested_u64(source, &["output_tokens_details", "reasoning_tokens"])),
+        cache_write_tokens: first_u64(
+            source,
+            &["cache_write_tokens", "cache_creation_input_tokens", "cacheCreationInputTokens"],
+        ),
+        cache_read_tokens: first_u64(
+            source,
+            &[
+                "cache_read_tokens",
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "cachedContentTokenCount",
+            ],
+        )
+        .max(nested_u64(
+            source,
+            &["prompt_tokens_details", "cached_tokens"],
+        ))
+        .max(nested_u64(source, &["input_tokens_details", "cached_tokens"])),
+        audio_input_tokens: first_u64(source, &["audio_input_tokens", "audioInputTokens"]),
+        audio_output_tokens: first_u64(source, &["audio_output_tokens", "audioOutputTokens"]),
+        provider_reported,
+    }
+}
+
+fn usage_from_nested(value: &Value) -> Option<ChatUsage> {
+    value.get("usage").map(parse_usage)
+}
+
+fn first_u64(value: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn nested_u64(value: &Value, path: &[&str]) -> u64 {
+    let Some(nested) = path
+        .iter()
+        .try_fold(value, |current, key| current.get(*key))
+    else {
+        return 0;
+    };
+    nested.as_u64().unwrap_or(0)
+}
+
+fn parse_finish_reason(
+    _protocol: ChatProtocol,
+    value: &Value,
+    event_name: &str,
+) -> ChatFinishReason {
+    let reason = string_at(
+        value,
+        &[
+            "finish_reason",
+            "stop_reason",
+            "finishReason",
+            "response.status",
+            "status",
+        ],
+    )
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+    if reason.contains("unexpected_tool") {
+        ChatFinishReason::Refusal
+    } else if reason.contains("tool") || reason == "function_call" {
+        ChatFinishReason::ToolCalls
+    } else if reason.contains("length")
+        || reason.contains("max")
+        || reason == "max_output_tokens"
+    {
+        ChatFinishReason::MaxOutputTokens
+    } else if reason.contains("refusal")
+        || reason.contains("safety")
+        || reason.contains("blocked")
+        || reason.contains("content_filter")
+        || reason.contains("recitation")
+        || reason.contains("blocklist")
+        || reason.contains("image_safety")
+        || reason.contains("prohibited")
+        || reason.contains("spii")
+        || reason.contains("unexpected_tool")
+        || reason.contains("malformed")
+    {
+        ChatFinishReason::Refusal
+    } else if reason.contains("cancel") || reason.contains("abort") {
+        ChatFinishReason::Cancelled
+    } else if event_name == "response.incomplete" {
+        ChatFinishReason::MaxOutputTokens
+    } else {
+        ChatFinishReason::Completed
+    }
+}
+
+fn parse_finish_reason_text(reason: &str) -> ChatFinishReason {
+    parse_finish_reason(
+        ChatProtocol::OpenaiChat,
+        &json!({"finish_reason": reason}),
+        "finish",
+    )
+}
+
+fn is_unspecified_finish_reason(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        ""
+            | "finish_reason_unspecified"
+            | "unspecified"
+            | "none"
+            | "null"
+    )
+}
+
+fn is_terminal_frame(value: &Value) -> bool {
+    value
+        .get("done")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}

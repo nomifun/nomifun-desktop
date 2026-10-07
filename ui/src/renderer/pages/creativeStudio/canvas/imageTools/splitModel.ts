@@ -11,7 +11,7 @@ import type {
 import { translateCreativeImageTool } from "./imageToolI18n";
 
 export const CREATIVE_IMAGE_SPLIT_MAX_GRID = 12;
-export const CREATIVE_IMAGE_SPLIT_MIN_GAP = 0.01;
+const CREATIVE_IMAGE_SPLIT_MIN_GAP = 0.01;
 
 export type CreativeImageSplitAxis = "horizontal" | "vertical";
 

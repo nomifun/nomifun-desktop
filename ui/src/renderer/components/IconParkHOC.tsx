@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Runtime-imported by the IconPark transform in ui/vite.config.ts. Source-only
+// reachability scanners cannot see the generated import, so keep the matching
+// repository guard in scripts/check-icon-imports.mjs.
 import React from 'react';
 import { IconProvider, DEFAULT_ICON_CONFIGS } from '@icon-park/react/es/runtime';
-import { theme } from '@/platform';
 import { iconColors } from '@/renderer/styles/colors';
+
+const DEFAULT_ICON_SIZE = 16;
 
 const IconParkHOC = <T extends Record<string, any>>(Component: React.FunctionComponent<T>): React.FC<T> => {
   return (props) => {
@@ -16,7 +20,7 @@ const IconParkHOC = <T extends Record<string, any>>(Component: React.FunctionCom
       {
         value: {
           ...DEFAULT_ICON_CONFIGS,
-          size: theme.Size.IconSize.normal,
+          size: DEFAULT_ICON_SIZE,
         },
       },
       [

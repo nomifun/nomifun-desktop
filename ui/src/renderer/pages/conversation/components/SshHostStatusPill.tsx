@@ -7,6 +7,8 @@
 import { ipcBridge } from '@/common';
 import type { IApiSshStatus, ISshLinkPhase } from '@/common/adapter/ipcBridge';
 import type { ConversationId, SshHostId } from '@/common/types/ids';
+import type { TChatConversation } from '@/common/config/storage';
+import { conversationSshHostId } from '../utils/conversationSshBinding';
 import { SSH_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import type { I18nKey } from '@/renderer/services/i18n';
 import { Button, Popover, Tooltip } from '@arco-design/web-react';
@@ -63,7 +65,7 @@ function useRetryCountdown(status: IApiSshStatus | null): number | null {
 
 interface Props {
   conversationId: ConversationId;
-  /** `extra.ssh_host_id` of the conversation this header belongs to. */
+  /** Host identity from the current canonical session binding. */
   sshHostId: SshHostId;
 }
 
@@ -87,7 +89,7 @@ interface Props {
  * The host name comes from the host book under the same SWR key the settings
  * page and the sidebar group use, so the pill costs no extra round-trip.
  */
-const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
+const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
   const { t } = useTranslation();
   const { data: hosts } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
   const status = useSshLinkStatus(conversationId, sshHostId);
@@ -215,7 +217,7 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
     >
       <span className='inline-flex items-center gap-6px leading-none'>
         {/* The icon carries the phase colour, matching the sidebar host icon —
-            the same "no separate dot" treatment AutoWork / IDMM use. */}
+            the same "no separate dot" treatment as other capability controls. */}
         <Server theme='outline' size='14' fill={dotColor} className='block' style={{ lineHeight: 0 }} />
         <span className='text-12px max-w-140px truncate'>{host.name}</span>
       </span>
@@ -238,6 +240,16 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
       {button}
     </Popover>
   );
+};
+
+const SshHostStatusPill: React.FC<{
+  conversation: Pick<TChatConversation, 'id' | 'agent_snapshot'>;
+}> = ({ conversation }) => {
+  const sshHostId = conversationSshHostId(conversation);
+  // A new host must never inherit the previous host's link state or retry clock.
+  return sshHostId ? (
+    <BoundSshHostStatusPill key={`${conversation.id}:${sshHostId}`} conversationId={conversation.id} sshHostId={sshHostId} />
+  ) : null;
 };
 
 export default SshHostStatusPill;

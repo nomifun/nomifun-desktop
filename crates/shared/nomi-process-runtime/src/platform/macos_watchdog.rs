@@ -4,6 +4,29 @@ use super::unix_protocol::{
     Deadline, Frame, FrameKind, Nonce, recv_expected, recv_frame, send_frame,
 };
 
+static HOST_NOTIFICATIONS_INITIALIZED: std::sync::Once = std::sync::Once::new();
+
+unsafe extern "C" {
+    fn notify_is_valid_token(token: libc::c_int) -> bool;
+}
+
+/// Finish libnotify's lazy globals in the parent, before any watchdog fork.
+/// Darwin's own `_notify_fork_child` accesses these globals before fork returns;
+/// an initializer inherited in flight can abort the child with corrupt os_once.
+/// A negative-token query creates no registration and changes no permissions.
+/// See apple-oss-distributions/Libnotify, notify_client.c (_notify_fork_child).
+pub(super) fn prepare_host_for_fork() {
+    prepare_host_for_fork_with(&HOST_NOTIFICATIONS_INITIALIZED);
+}
+
+pub(super) fn prepare_host_for_fork_with(initialized: &std::sync::Once) {
+    initialized.call_once(|| {
+        // SAFETY: this public API is called only in the ordinary parent context.
+        // Its false result is expected for the documented invalid negative token.
+        let _ = unsafe { notify_is_valid_token(-1) };
+    });
+}
+
 const FIRST_NON_STDIO_FD: RawFd = 3;
 const FD_LIST_BATCH: usize = 64;
 const FINAL_KILL_RETRY_MS: libc::c_int = 100;
@@ -1081,6 +1104,17 @@ unsafe fn try_final_group_kill(
 ) -> libc::c_int {
     #[cfg(test)]
     if config.fault == FAULT_FAIL_FINAL_GROUP_KILL_ONCE && _attempt == 0 {
+        return -1;
+    }
+    // While the original host is alive it retains the exact unreaped PTY
+    // session leader until we exit. Job-control shells place background and
+    // foreground jobs in different process groups; seal those as well. After
+    // abrupt host death that lease is unavailable, so do not widen a cached
+    // PGID into authority over a numeric session ID.
+    if config.external_session
+        && unsafe { parent_is_original(config.parent_pid) }
+        && unsafe { super::macos_session::seal_owned_session(leader, Some(config.parent_pid)) }.is_err()
+    {
         return -1;
     }
     let result = unsafe { libc::kill(-leader, libc::SIGKILL) };

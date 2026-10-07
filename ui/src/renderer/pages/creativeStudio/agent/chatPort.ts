@@ -6,6 +6,8 @@
 
 import type { CreativeModelSelectionRef } from '../models';
 import type { CreativeStudioAgentMessage } from './types';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
 
 export interface CreativeStudioAgentTurnRequest {
   canvasId: string;
@@ -26,8 +28,10 @@ export type CreativeStudioAgentTurnEvent =
   | { type: 'activity'; label: string }
   | { type: 'assistant-delta'; delta: string }
   | { type: 'history-reconciled'; history: readonly CreativeStudioAgentMessage[] }
+  | { type: 'paused'; pause: ConversationPauseNotice }
   | { type: 'completed'; assistantMessageId?: string }
-  | { type: 'failed'; message: string; code?: string; retryable?: boolean };
+  | { type: 'stopped' }
+  | { type: 'failed'; message: string; code?: string; retryable?: boolean; error?: AgentStreamErrorInfo; turnId?: string; timestamp?: number };
 
 /**
  * Adapter point for the existing NomiFun conversation/agent runtime. The port
@@ -41,7 +45,7 @@ export interface CreativeStudioAgentChatPort {
     | Promise<AsyncIterable<CreativeStudioAgentTurnEvent>>;
 }
 
-export type CreativeStudioAgentTurnStatus =
+type CreativeStudioAgentTurnStatus =
   | { state: 'running' }
   | { state: 'completed' }
   | { state: 'stopped' }
@@ -54,7 +58,7 @@ export interface CreativeStudioAgentTurnObserver {
 
 export type CreativeStudioAgentTurnOutcome = Exclude<CreativeStudioAgentTurnStatus, { state: 'running' }>;
 
-export class CreativeStudioAgentBusyError extends Error {
+class CreativeStudioAgentBusyError extends Error {
   constructor() {
     super('Creative Studio Agent already has an active turn');
     this.name = 'CreativeStudioAgentBusyError';
@@ -68,7 +72,7 @@ export class CreativeStudioAgentProtocolError extends Error {
   }
 }
 
-export class CreativeStudioAgentRemoteError extends Error {
+class CreativeStudioAgentRemoteError extends Error {
   readonly code?: string;
   readonly retryable: boolean;
 
@@ -123,6 +127,11 @@ export class CreativeStudioAgentChatController {
         }
         observer.onEvent?.(event);
         if (event.type === 'failed') throw new CreativeStudioAgentRemoteError(event);
+        if (event.type === 'stopped') {
+          const outcome = { state: 'stopped' } as const;
+          observer.onStatusChange?.(outcome);
+          return outcome;
+        }
         if (event.type === 'completed') completed = true;
       }
 

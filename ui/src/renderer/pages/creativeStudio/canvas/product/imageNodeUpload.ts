@@ -11,12 +11,11 @@ import type {
 } from '../../assets';
 import { CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES } from '../../assets/page/model';
 import type { CreativeCanvasNode, CreativeSize } from '../../domain';
+import { canvasMediaNodeSize } from '../core/mediaNodeSize';
 import { clearCanvasImageComposeDraftModel } from './canvasImageComposerCanvas';
 import { creativeStudioProductText } from './i18n';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
-
-export const CREATIVE_CANVAS_IMAGE_UPLOAD_MAX_SIZE = 640;
 
 export interface UploadCanvasImageNodeAssetInput {
   port: CreativeAssetPort;
@@ -116,16 +115,7 @@ export function uploadedCanvasImageNodeSize(
   asset: CreativeAsset,
   fallback: CreativeSize
 ): CreativeSize {
-  if (!positive(asset.width) || !positive(asset.height)) return { ...fallback };
-  const scale = Math.min(
-    1,
-    CREATIVE_CANVAS_IMAGE_UPLOAD_MAX_SIZE / asset.width,
-    CREATIVE_CANVAS_IMAGE_UPLOAD_MAX_SIZE / asset.height
-  );
-  return {
-    width: asset.width * scale,
-    height: asset.height * scale,
-  };
+  return canvasMediaNodeSize(asset, fallback);
 }
 
 /** Fill one still-empty image node with a real uploaded NomiFun asset. */

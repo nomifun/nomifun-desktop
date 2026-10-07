@@ -25,14 +25,14 @@ export type CreativeCanvasAgentOpResult =
   | { type: 'nodes_connected'; connection_id: string }
   | { type: 'nodes_disconnected'; connection_id: string };
 
-export interface CreativeCanvasAgentOpsApplyInput {
+interface CreativeCanvasAgentOpsApplyInput {
   canvasId: string;
   assistantMessageId: string;
   expectedRevision: string;
   ops: readonly CreativeCanvasAgentOp[];
 }
 
-export interface CreativeCanvasAgentOpsApplyResult {
+interface CreativeCanvasAgentOpsApplyResult {
   canvas: CreativeCanvasSummary;
   ops: CreativeCanvasAgentOpResult[];
   replayed: boolean;

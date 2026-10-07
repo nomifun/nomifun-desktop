@@ -1,0 +1,17 @@
+/* One reading column for the transcript, generated results and composer. */
+.column {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 800px;
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.scroller {
+  /* Keep the reading axis centered when desktop scrollbars occupy space. */
+  scrollbar-gutter: stable both-edges;
+}
+
+.composer {
+  max-width: min(800px, var(--conversation-content-width, 100%));
+}

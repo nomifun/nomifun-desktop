@@ -5,4 +5,4 @@
  * external protocol's own stop-reason enum, so the shared event type stays
  * engine-neutral; each backend maps its own outcome.
  */
-export type TurnStopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
+export type TurnStopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | "paused";

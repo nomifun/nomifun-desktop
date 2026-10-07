@@ -6,11 +6,8 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { TFunction } from 'i18next';
-import React from 'react';
-
 import { CAPABILITY_COLORS } from '@/renderer/components/capability/CapabilityIcon';
-import { AUTOWORK_STATUS_COLOR, IDMM_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
-import { renderIdmmCapabilityIcon } from '@/renderer/components/capability/idmmCapabilityIcon';
+import { AUTOWORK_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 
 import { buildSessionCapabilityItems, type SessionCronStatus } from './sessionCapabilityItems';
 
@@ -32,17 +29,8 @@ describe('buildSessionCapabilityItems', () => {
     expect(cronItem?.color).toBe(CAPABILITY_COLORS.danger);
   });
 
-  test('uses the shared smart-decision icon for IDMM markers', () => {
-    const idmmItem = buildSessionCapabilityItems(t, { idmmState: 'armed' }).find((item) => item.key === 'idmm');
-    const sharedIcon = renderIdmmCapabilityIcon({ size: 13 });
-
-    expect(React.isValidElement(idmmItem?.icon)).toBe(true);
-    expect((idmmItem?.icon as React.ReactElement).type).toBe(sharedIcon.type);
-  });
-
-  // The sidebar icon and the conversation-header control must read the SAME
-  // per-capability state→colour map, so the two surfaces never drift (the bug
-  // where IDMM `off` resolved to blue in the sidebar but gray in the header).
+  // The sidebar icon and conversation-header control read the same shared
+  // state→colour map so the two surfaces never drift.
   test('colours AutoWork icon from the shared map (active→active, idle→idle)', () => {
     const active = buildSessionCapabilityItems(t, { autoworkState: 'active' }).find((i) => i.key === 'autowork');
     const idle = buildSessionCapabilityItems(t, { autoworkState: 'idle' }).find((i) => i.key === 'autowork');
@@ -50,25 +38,4 @@ describe('buildSessionCapabilityItems', () => {
     expect(idle?.color).toBe(AUTOWORK_STATUS_COLOR.idle);
   });
 
-  test('colours IDMM icon from the shared map (intervening→active, armed→armed)', () => {
-    const intervening = buildSessionCapabilityItems(t, { idmmState: 'intervening' }).find((i) => i.key === 'idmm');
-    const armed = buildSessionCapabilityItems(t, { idmmState: 'armed' }).find((i) => i.key === 'idmm');
-    expect(intervening?.color).toBe(IDMM_STATUS_COLOR.intervening);
-    expect(armed?.color).toBe(IDMM_STATUS_COLOR.armed);
-  });
-
-  test('routes IDMM via the shared map so off resolves to off (not the old sidebar-only primary)', () => {
-    const item = buildSessionCapabilityItems(t, { idmmState: 'off' }).find((i) => i.key === 'idmm');
-    expect(item?.color).toBe(IDMM_STATUS_COLOR.off);
-    expect(item?.color).toBe(CAPABILITY_COLORS.off);
-  });
-
-  test('spins the IDMM icon while intervening so the session row visibly reflects it (matches the header)', () => {
-    const cls = (state: 'armed' | 'intervening') => {
-      const item = buildSessionCapabilityItems(t, { idmmState: state }).find((i) => i.key === 'idmm');
-      return ((item?.icon as React.ReactElement).props as { className?: string }).className ?? '';
-    };
-    expect(cls('intervening').includes('autowork-spin')).toBe(true);
-    expect(cls('armed').includes('autowork-spin')).toBe(false);
-  });
 });

@@ -386,7 +386,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     try {
       let caught: unknown;
       try {
-        await httpRequest('PUT', '/api/nomi/summon', { enabled: false });
+        await httpRequest('PUT', '/api/settings/preferences', { enabled: false });
       } catch (e) {
         caught = e;
       }
@@ -618,6 +618,72 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     } finally {
       globalThis.fetch = realFetch;
       console.error = realConsoleError;
+    }
+  });
+
+  test('recursively redacts the Unified Plugin Surface session from HTTP debug logs', async () => {
+    const realConsoleDebug = console.debug;
+    const localStorageDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      'localStorage'
+    );
+    const storage = new Map<string, string>([['debug:http', '1']]);
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        get length() {
+          return storage.size;
+        },
+        clear: () => storage.clear(),
+        getItem: (key: string) => storage.get(key) ?? null,
+        key: (index: number) => [...storage.keys()][index] ?? null,
+        removeItem: (key: string) => storage.delete(key),
+        setItem: (key: string, value: string) => storage.set(key, value),
+      } satisfies Storage,
+    });
+    const consoleCalls: unknown[][] = [];
+    const surfaceSession = '0123456789abcdef'.repeat(4);
+    const artifactDigest =
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    let requestBody = '';
+    globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = String(init?.body);
+      return Promise.resolve(
+        new Response(JSON.stringify({ success: true, data: { accepted: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }) as typeof fetch;
+    console.debug = (...args: unknown[]) => {
+      consoleCalls.push(args);
+    };
+
+    try {
+      await httpRequest('POST', '/api/plugins/plugin-1/surface/bridge', {
+        artifact_digest: artifactDigest,
+        request: {
+          targets: [{ transport: { surface_session_id: surfaceSession } }],
+        },
+      });
+
+      const exposed = JSON.stringify(consoleCalls);
+      expect(requestBody.includes(surfaceSession)).toBe(true);
+      expect(exposed.includes(surfaceSession)).toBe(false);
+      expect(exposed.includes('[REDACTED]')).toBe(true);
+      expect(exposed.includes(artifactDigest)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+      console.debug = realConsoleDebug;
+      if (localStorageDescriptor) {
+        Object.defineProperty(
+          globalThis,
+          'localStorage',
+          localStorageDescriptor
+        );
+      } else {
+        Reflect.deleteProperty(globalThis, 'localStorage');
+      }
     }
   });
 });

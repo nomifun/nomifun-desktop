@@ -9,7 +9,6 @@ import React, { useState } from 'react';
 import ReactDOM from 'react-dom';
 import { addImportantToAll } from '@renderer/utils/theme/customCssProcessor';
 import { configService } from '@/common/config/configService';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import markdownTypographyCss from './MarkdownTypography.css?raw';
 
 /**
@@ -19,7 +18,6 @@ const createInitStyle = (
   currentTheme = 'light',
   cssVars?: Record<string, string>,
   customCss?: string,
-  isMobile?: boolean,
   fontSize?: string,
   lineHeight?: string
 ) => {
@@ -31,8 +29,8 @@ const createInitStyle = (
         .join('\n    ')
     : '';
 
-  const resolvedFontSize = fontSize ?? (isMobile ? '14px' : '16px');
-  const resolvedLineHeight = lineHeight ?? (isMobile ? '19.6px' : '28px');
+  const resolvedFontSize = fontSize ?? '16px';
+  const resolvedLineHeight = lineHeight ?? '28px';
 
   style.innerHTML = `
   /* Shadow DOM CSS variable definitions */
@@ -156,9 +154,6 @@ const ShadowView = ({
   const [root, setRoot] = useState<ShadowRoot | null>(null);
   const styleRef = React.useRef<HTMLStyleElement | null>(null);
   const [customCss, setCustomCss] = useState<string>('');
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
-
   React.useEffect(() => {
     const css = configService.get('customCss');
     if (css) {
@@ -204,7 +199,7 @@ const ShadowView = ({
       if (styleRef.current) {
         styleRef.current.remove();
       }
-      const newStyle = createInitStyle(currentTheme, cssVars, customCss, isMobile, fontSize, lineHeight);
+      const newStyle = createInitStyle(currentTheme, cssVars, customCss, fontSize, lineHeight);
       styleRef.current = newStyle;
       shadowRoot.appendChild(newStyle);
 
@@ -215,7 +210,7 @@ const ShadowView = ({
         shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, katexSheet];
       }
     },
-    [customCss, fontSize, isMobile, lineHeight]
+    [customCss, fontSize, lineHeight]
   );
 
   React.useEffect(() => {

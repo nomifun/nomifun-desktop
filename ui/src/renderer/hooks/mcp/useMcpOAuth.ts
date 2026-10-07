@@ -2,6 +2,7 @@ import type { McpServerId } from '@/common/types/ids';
 import { useState, useCallback } from 'react';
 import { mcpService } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
+import { supportsMcpOAuthLogin } from './mcpAuthConfig';
 
 export interface McpOAuthStatus {
   isAuthenticated: boolean;
@@ -19,11 +20,7 @@ export const useMcpOAuth = () => {
   const [loggingIn, setLoggingIn] = useState<Record<string, boolean>>({});
 
   const getOAuthServerUrl = useCallback((server: IMcpServer): string | null => {
-    if (
-      server.transport.type === 'http' ||
-      server.transport.type === 'sse' ||
-      server.transport.type === 'streamable_http'
-    ) {
+    if (supportsMcpOAuthLogin(server.transport) && server.transport.type !== 'stdio') {
       return server.transport.url;
     }
     return null;

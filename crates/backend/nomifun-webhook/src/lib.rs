@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod notifier;
+pub mod platform;
 pub mod routes;
 pub mod sender;
 pub mod service;
@@ -14,6 +15,10 @@ pub mod state;
 
 pub use error::WebhookError;
 pub use notifier::CompletionNotifierImpl;
+pub use platform::{
+    NOTIFICATION_AGENT_ACTION_IDS, NOTIFICATION_PLATFORM_SERVICE_ID,
+    NotificationBindingState, NotificationDeliveryStatus,
+};
 pub use routes::webhook_routes;
 pub use sender::{DefaultWebhookSender, WebhookSender};
 pub use service::WebhookService;

@@ -1,0 +1,2470 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+
+use nomifun_agent_contracts::{
+    ActionId, CanonicalSchemaRef, CapabilityConsumer, CapabilityId, CapabilityKind, DigestHex,
+    ExecutionRoleId, PackageRef, AgentModuleId, ResolvedRoleProviderLock, ResourceBindingId,
+    ScopeKey, TypedResourceBinding,
+};
+
+use crate::service::build_service_bindings;
+use crate::{
+    ActiveCapabilitySetSnapshot, CapabilityAccessRequest,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, CapabilityInvocationRequest,
+    CapabilityOperationHandler, CapabilityOperationInvocationContext, CapabilityOperationRequest,
+    CapabilityResourceProviderFactory, CapabilityResourceProviderRequest,
+    CompiledSnapshot, ContextContributionFactory, ContextContributionRequest,
+    ContextContributionResult, DeclaredServiceView, KernelError, MaterializationPolicy,
+    MaterializedRegistry, Materializer, PluginRegistration, PluginStateError,
+    PluginStateHandle, PluginStatePersistence, PluginStateStore, ProviderMountContext,
+    ResolvedCapabilityContext, ResolvedCapabilityOperationContext, ResolvedRoleMemberContext, ResourceHandle,
+    ResourceProviderFactory, ResourceProviderRequest, ResourceProviderResult,
+    RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
+    RoleToolInvocationContext, RoleToolOperationRequest, ThinAuthority,
+};
+
+#[derive(Clone)]
+struct HandlerBinding {
+    mount_id: AgentModuleId,
+    handler: Arc<dyn CapabilityHandler>,
+}
+
+#[derive(Clone)]
+struct OperationHandlerBinding {
+    mount_id: AgentModuleId,
+    handler: Arc<dyn CapabilityOperationHandler>,
+}
+
+#[derive(Clone)]
+struct ContextFactoryBinding {
+    mount_id: AgentModuleId,
+    factory: Arc<dyn CapabilityContextContributionFactory>,
+}
+
+#[derive(Clone)]
+struct ResourceFactoryBinding {
+    mount_id: AgentModuleId,
+    factory: Arc<dyn CapabilityResourceProviderFactory>,
+}
+
+#[derive(Clone)]
+struct PublishedRegistry {
+    materialized: Arc<MaterializedRegistry>,
+    handlers: BTreeMap<CapabilityId, HandlerBinding>,
+    operation_handlers: BTreeMap<CapabilityId, OperationHandlerBinding>,
+    context_factories: BTreeMap<CapabilityId, ContextFactoryBinding>,
+    resource_factories: BTreeMap<CapabilityId, ResourceFactoryBinding>,
+    role_handlers:
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), HandlerBinding>,
+    role_tool_handlers:
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn RoleToolHandler>>,
+    role_context_factories:
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn ContextContributionFactory>>,
+    role_resource_factories:
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn ResourceProviderFactory>>,
+    service_views: BTreeMap<AgentModuleId, DeclaredServiceView>,
+    state_handles: BTreeMap<AgentModuleId, PluginStateHandle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ResourceHandleKey {
+    scope_key: ScopeKey,
+    role_id: Option<ExecutionRoleId>,
+    mount_id: AgentModuleId,
+    target_digest: DigestHex,
+    binding_id: ResourceBindingId,
+}
+
+impl PublishedRegistry {
+    fn empty() -> Self {
+        Self {
+            materialized: Arc::new(MaterializedRegistry::empty()),
+            handlers: BTreeMap::new(),
+            operation_handlers: BTreeMap::new(),
+            context_factories: BTreeMap::new(),
+            resource_factories: BTreeMap::new(),
+            role_handlers: BTreeMap::new(),
+            role_tool_handlers: BTreeMap::new(),
+            role_context_factories: BTreeMap::new(),
+            role_resource_factories: BTreeMap::new(),
+            service_views: BTreeMap::new(),
+            state_handles: BTreeMap::new(),
+        }
+    }
+}
+
+/// Clones share one publication authority, state store and resource ledger.
+#[derive(Clone)]
+pub struct KernelRegistry {
+    policy: MaterializationPolicy,
+    state_store: Arc<PluginStateStore>,
+    published: Arc<RwLock<Arc<PublishedRegistry>>>,
+    resource_handles: Arc<tokio::sync::Mutex<
+        BTreeMap<ResourceHandleKey, Arc<dyn ResourceHandle>>,
+    >>,
+}
+
+impl KernelRegistry {
+    pub fn new(
+        policy: MaterializationPolicy,
+        persistence: Arc<dyn PluginStatePersistence>,
+    ) -> Result<Self, PluginStateError> {
+        Ok(Self::from_state_store(
+            policy,
+            PluginStateStore::new(persistence)?,
+        ))
+    }
+
+    pub(crate) fn from_state_store(
+        policy: MaterializationPolicy,
+        state_store: Arc<PluginStateStore>,
+    ) -> Self {
+        Self {
+            policy,
+            state_store,
+            published: Arc::new(RwLock::new(Arc::new(PublishedRegistry::empty()))),
+            resource_handles: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub fn snapshot(&self) -> Result<Arc<MaterializedRegistry>, KernelError> {
+        self.published
+            .read()
+            .map(|published| Arc::clone(&published.materialized))
+            .map_err(|_| KernelError::RegistryPoisoned)
+    }
+
+    pub fn declared_service_view(
+        &self,
+        mount_id: &AgentModuleId,
+    ) -> Result<Option<DeclaredServiceView>, KernelError> {
+        self.published
+            .read()
+            .map(|published| published.service_views.get(mount_id).cloned())
+            .map_err(|_| KernelError::RegistryPoisoned)
+    }
+
+    /// Validate and materialize an entire host generation, then publish it with
+    /// one lock swap. Any error leaves the previous generation untouched.
+    pub fn replace_all(
+        &self,
+        registrations: Vec<PluginRegistration>,
+    ) -> Result<Arc<MaterializedRegistry>, KernelError> {
+        let registrations = registrations
+            .iter()
+            .map(PluginRegistration::canonicalized)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut guard = self
+            .published
+            .write()
+            .map_err(|_| KernelError::RegistryPoisoned)?;
+        let generation = guard
+            .materialized
+            .generation
+            .checked_add(1)
+            .ok_or(KernelError::RegistryGenerationExhausted)?;
+        let materialized =
+            Arc::new(Materializer::materialize_canonical(
+                &self.policy,
+                &registrations,
+                generation,
+            )?);
+
+        let services = build_service_bindings(
+            registrations.iter().map(|registration| {
+                let manifest = &registration.metadata.manifest.payload;
+                (
+                    PackageRef {
+                        id: manifest.package_id.clone(),
+                        version: manifest.package_version.clone(),
+                    },
+                    registration.metadata.mount_id.clone(),
+                    registration.services().clone(),
+                )
+            }),
+        )?;
+
+        let mut handlers = BTreeMap::new();
+        let mut operation_handlers = BTreeMap::new();
+        let mut context_factories = BTreeMap::new();
+        let mut resource_factories = BTreeMap::new();
+        let mut role_handlers = BTreeMap::new();
+        let mut role_tool_handlers = BTreeMap::new();
+        let mut role_context_factories = BTreeMap::new();
+        let mut role_resource_factories = BTreeMap::new();
+        let mut state_handles = BTreeMap::new();
+        let mut service_views = BTreeMap::new();
+        for registration in &registrations {
+            let manifest = &registration.metadata.manifest.payload;
+            for (capability_id, handler) in registration.handlers() {
+                if handlers
+                    .insert(
+                        capability_id.clone(),
+                        HandlerBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            handler: Arc::clone(handler),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, handler) in registration.operation_handlers() {
+                if operation_handlers
+                    .insert(
+                        capability_id.clone(),
+                        OperationHandlerBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            handler: Arc::clone(handler),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, factory) in registration.context_factories() {
+                if context_factories
+                    .insert(
+                        capability_id.clone(),
+                        ContextFactoryBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            factory: Arc::clone(factory),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, factory) in registration.resource_factories() {
+                if resource_factories
+                    .insert(
+                        capability_id.clone(),
+                        ResourceFactoryBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            factory: Arc::clone(factory),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for ((role_id, capability_id), handler) in registration.role_action_handlers() {
+                let key = (
+                    role_id.clone(),
+                    registration.metadata.mount_id.clone(),
+                    capability_id.clone(),
+                );
+                if role_handlers
+                    .insert(
+                        key,
+                        HandlerBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            handler: Arc::clone(handler),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateRoleProvider {
+                        role_id: role_id.clone(),
+                        mount_id: registration.metadata.mount_id.clone(),
+                    });
+                }
+            }
+            for ((role_id, capability_id), handler) in registration.role_tool_handlers() {
+                let key = (
+                    role_id.clone(),
+                    registration.metadata.mount_id.clone(),
+                    capability_id.clone(),
+                );
+                if role_tool_handlers
+                    .insert(key, Arc::clone(handler))
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateRoleProvider {
+                        role_id: role_id.clone(),
+                        mount_id: registration.metadata.mount_id.clone(),
+                    });
+                }
+            }
+            for ((role_id, capability_id), factory) in registration.role_context_factories() {
+                let key = (
+                    role_id.clone(),
+                    registration.metadata.mount_id.clone(),
+                    capability_id.clone(),
+                );
+                if role_context_factories
+                    .insert(key, Arc::clone(factory))
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateRoleProvider {
+                        role_id: role_id.clone(),
+                        mount_id: registration.metadata.mount_id.clone(),
+                    });
+                }
+            }
+            for ((role_id, capability_id), factory) in registration.role_resource_factories() {
+                let key = (
+                    role_id.clone(),
+                    registration.metadata.mount_id.clone(),
+                    capability_id.clone(),
+                );
+                if role_resource_factories
+                    .insert(key, Arc::clone(factory))
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateRoleProvider {
+                        role_id: role_id.clone(),
+                        mount_id: registration.metadata.mount_id.clone(),
+                    });
+                }
+            }
+            state_handles.insert(
+                registration.metadata.mount_id.clone(),
+                self.state_store.handle(
+                    manifest.package_id.clone(),
+                    registration.metadata.mount_id.clone(),
+                    manifest.package_version.clone(),
+                ),
+            );
+            service_views.insert(
+                registration.metadata.mount_id.clone(),
+                DeclaredServiceView::from_bindings(
+                    &registration
+                        .metadata
+                        .context
+                        .declared_services
+                        .required_service_handles,
+                    &services,
+                )?,
+            );
+        }
+        for ((role_id, mount_id), provider) in &materialized.role_providers {
+            for capability_id in provider.contribution.members.keys() {
+                let Some(capability) = materialized.capability(capability_id) else {
+                    return Err(KernelError::RoleProviderMemberUnavailable {
+                        role_id: role_id.clone(),
+                        capability_id: capability_id.clone(),
+                    });
+                };
+                if !capability.manifest.contributions.actions.is_empty()
+                    && !role_handlers.contains_key(&(
+                        role_id.clone(),
+                        mount_id.clone(),
+                        capability_id.clone(),
+                    ))
+                {
+                    return Err(KernelError::RoleProviderMemberUnavailable {
+                        role_id: role_id.clone(),
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+        }
+        validate_role_exports(
+            &materialized,
+            &handlers,
+            &role_handlers,
+            &role_tool_handlers,
+            &role_context_factories,
+            &role_resource_factories,
+        )?;
+
+        let next = Arc::new(PublishedRegistry {
+            materialized: Arc::clone(&materialized),
+            handlers,
+            operation_handlers,
+            context_factories,
+            resource_factories,
+            role_handlers,
+            role_tool_handlers,
+            role_context_factories,
+            role_resource_factories,
+            service_views,
+            state_handles,
+        });
+        *guard = next;
+        Ok(materialized)
+    }
+
+    /// Recheck the current invocation owner without acquiring resources or
+    /// dispatching a handler. This is evidence for a pre-tool gate, not an
+    /// authorization token: `invoke` still performs its own final checks.
+    pub fn preflight_invocation(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: &CapabilityInvocationRequest,
+    ) -> Result<(), KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.validate_invocation_admission(snapshot, active, request)
+    }
+
+    fn validate_invocation_admission(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: &CapabilityInvocationRequest,
+    ) -> Result<(), KernelError> {
+        ThinAuthority::enforce(snapshot, active, request)?;
+        let published = self.published.read()
+            .map_err(|_| KernelError::RegistryPoisoned)?;
+        validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+        if published.materialized.role_for_capability(&request.capability_id).is_some() {
+            resolve_role_member_dispatch(
+                &published,
+                RoleAdmissionEvidence::Agent { snapshot, active },
+                &agent_role_request(request),
+                RoleMemberDispatchKind::AgentTool { action_id: &request.action_id },
+            )?;
+        } else {
+            resolve_agent_tool_handler(&published, snapshot, &request.capability_id)?;
+        }
+        Ok(())
+    }
+
+    pub async fn invoke(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        self.invoke_shared(Arc::new(snapshot.clone()), active, request)
+            .await
+    }
+
+    /// The Session-owned plan is shared with nested calls rather than copied
+    /// for every Tool. This is the same admission/dispatch as `invoke`.
+    pub async fn invoke_shared(
+        &self,
+        snapshot: Arc<CompiledSnapshot>,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.invoke_scoped(
+            snapshot, Arc::new(active.clone()), request, Arc::new(Vec::new()),
+        )
+        .await
+    }
+
+    pub(crate) fn invoke_scoped(
+        &self,
+        snapshot: Arc<CompiledSnapshot>,
+        active: Arc<ActiveCapabilitySetSnapshot>,
+        request: CapabilityInvocationRequest,
+        ancestry: Arc<Vec<crate::dependency_call::DependencyAncestor>>,
+    ) -> std::pin::Pin<Box<
+        dyn std::future::Future<Output = Result<nomifun_agent_contracts::StrictJsonValue, KernelError>>
+            + Send + '_,
+    >> {
+        Box::pin(async move {
+            let mut lineage = ancestry.as_ref().clone();
+            // Ancestry is authority evidence, not another copy of Tool input.
+            let mut request = request;
+            let input = std::mem::replace(
+                &mut request.input,
+                nomifun_agent_contracts::StrictJsonValue(serde_json::Value::Null),
+            );
+            lineage.push(crate::dependency_call::DependencyAncestor::Tool(request.clone()));
+            request.input = input;
+            let (dependencies, _guard) = crate::CapabilityDependencyCaller::scoped(
+                self.clone(),
+                Arc::clone(&snapshot),
+                Arc::clone(&active),
+                Arc::new(lineage),
+            );
+            self.invoke_admitted(&snapshot, &active, request, dependencies)
+                .await
+        })
+    }
+
+    async fn invoke_admitted(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+        dependencies: crate::CapabilityDependencyCaller,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        self.validate_invocation_admission(snapshot, active, &request)?;
+        let role_request = agent_role_request(&request);
+        if snapshot
+            .content()
+            .resolved_role_providers
+            .values()
+            .any(|provider| {
+                provider.supported_members.contains(&request.capability_id)
+            })
+        {
+            self.ensure_role_resources_for_member(
+                RoleAdmissionEvidence::Agent { snapshot, active },
+                &role_request,
+                CapabilityKind::Tool,
+            )
+            .await?;
+        }
+        let role_dispatch = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            if published
+                .materialized
+                .role_for_capability(&request.capability_id)
+                .is_some()
+            {
+                let resolved = resolve_role_member_dispatch(
+                    &published,
+                    RoleAdmissionEvidence::Agent { snapshot, active },
+                    &role_request,
+                    RoleMemberDispatchKind::AgentTool {
+                        action_id: &request.action_id,
+                    },
+                )?;
+                let RoleMemberDispatchTarget::AgentTool(handler) = resolved.target else {
+                    return Err(KernelError::RegistryPoisoned);
+                };
+                Some((handler, resolved.member.context))
+            } else {
+                None
+            }
+        };
+        if let Some((handler, context)) = role_dispatch {
+            return dispatch_resolved_role_tool(
+                RoleMemberDispatchTarget::AgentTool(handler),
+                context,
+                Some(request.turn_id),
+                request.action_id,
+                request.idempotency_key,
+                request.input,
+                Some(dependencies),
+            )
+            .await;
+        }
+        let (handler, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+            let binding = resolve_agent_tool_handler(&published, snapshot, &request.capability_id)?;
+            let frozen = snapshot
+                .resolved_capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            let state = published
+                .state_handles
+                .get(&binding.mount_id)
+                .cloned()
+                .ok_or(KernelError::RegistryPoisoned)?;
+            let services = published
+                .service_views
+                .get(&binding.mount_id)
+                .cloned()
+                .unwrap_or_default();
+            let mut resource_bindings = request
+                .resource_binding_ids
+                .iter()
+                .filter_map(|binding_id| snapshot.binding(binding_id).cloned())
+                .collect::<Vec<TypedResourceBinding>>();
+            resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+            let mcp_tool_lock = snapshot
+                .content()
+                .mcp_tool_locks
+                .iter()
+                .find(|lock| lock.capability_id == request.capability_id)
+                .cloned();
+            (
+                Arc::clone(&binding.handler),
+                CapabilityInvocationContext {
+                    dependencies,
+                    principal: request.principal,
+                    agent_session_id: request.agent_session_id,
+                    turn_id: request.turn_id,
+                    operation_id: request.operation_id,
+                    idempotency_key: request.idempotency_key,
+                    correlation_id: request.correlation_id,
+                    resolved_snapshot_ref: request.resolved_snapshot_ref,
+                    registry_generation: published.materialized.generation,
+                    capability_id: request.capability_id,
+                    resolved_capability: frozen.clone(),
+                    action_id: request.action_id,
+                    resource_bindings,
+                    role_provider: None,
+                    state_scope_key: request.state_scope_key,
+                    state,
+                    services,
+                    mcp_tool_lock,
+                },
+            )
+        };
+        handler.invoke(context, request.input).await
+    }
+
+    pub(crate) fn invocation_dependencies(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        ancestor: &crate::dependency_call::DependencyAncestor,
+    ) -> Result<Vec<nomifun_agent_contracts::CapabilityRef>, KernelError> {
+        use crate::dependency_call::DependencyAncestor;
+        let request = ancestor.access();
+        let kind = match ancestor {
+            DependencyAncestor::Tool(tool) => {
+                ThinAuthority::enforce(snapshot, active, tool)?;
+                RoleMemberDispatchKind::AgentTool { action_id: &tool.action_id }
+            }
+            DependencyAncestor::Context(_) => {
+                ThinAuthority::enforce_access(snapshot, active, &request)?;
+                RoleMemberDispatchKind::Context
+            }
+        };
+        let published = self.published.read()
+            .map_err(|_| KernelError::RegistryPoisoned)?;
+        validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+        let capability = published.materialized.capability(&request.capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                capability_id: request.capability_id.clone(),
+            })?;
+        if published.materialized.role_for_capability(&request.capability_id).is_some() {
+            let member = resolve_role_member_dispatch(
+                &published,
+                RoleAdmissionEvidence::Agent { snapshot, active },
+                &role_request_from_access(request.clone()),
+                kind,
+            )?.member;
+            let provider = published.materialized.role_provider(
+                &member.role_id, &member.provider_lock.provider.mount_id,
+            )
+                .ok_or(KernelError::RegistryPoisoned)?;
+            let provider_member = provider.contribution.members.get(&request.capability_id)
+                .ok_or(KernelError::RegistryPoisoned)?;
+            if let Some(implementation) = &provider_member.implementation {
+                return published.materialized.capability(&implementation.id)
+                    .map(|value| value.manifest.requires.clone())
+                    .ok_or(KernelError::RegistryPoisoned);
+            }
+        }
+        Ok(capability.manifest.requires.clone())
+    }
+
+    /// Invoke one ordinary Tool contribution from a non-Agent consumer.
+    ///
+    /// The operation lock is source-exact and remains valid across unrelated
+    /// Registry publications. Any change to the selected contribution, Mount,
+    /// contract, or target Artifact fails before the handler is called.
+    pub async fn invoke_operation(
+        &self,
+        request: CapabilityOperationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        request
+            .operation_lock
+            .validate()
+            .map_err(|error| KernelError::InvalidRegistration {
+                mount_id: request
+                    .operation_lock
+                    .contribution
+                    .mount_id
+                    .clone()
+                    .unwrap_or_else(|| AgentModuleId::from("missing")),
+                reason: error.to_string(),
+            })?;
+        if request.operation_lock.consumer == CapabilityConsumer::Agent {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Agent consumer must use Snapshot-bound invocation".to_owned(),
+            });
+        }
+        let (handler, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let materialized = published
+                .materialized
+                .capability(&request.operation_lock.capability.id)
+                .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                    capability_id: request.operation_lock.capability.id.clone(),
+                })?;
+            validate_operation_lock(materialized, &request)?;
+            let binding = published
+                .operation_handlers
+                .get(&materialized.manifest.id)
+                .ok_or_else(|| KernelError::MissingCapabilityHandler {
+                    mount_id: materialized.mount_id.clone(),
+                    capability_id: materialized.manifest.id.clone(),
+                })?;
+            if binding.mount_id != materialized.mount_id {
+                return capability_provenance_drift(
+                    &materialized.manifest.id,
+                    "operation handler binding does not match the exact Mount",
+                );
+            }
+            let state = published
+                .state_handles
+                .get(&binding.mount_id)
+                .cloned()
+                .ok_or(KernelError::RegistryPoisoned)?;
+            let services = published
+                .service_views
+                .get(&binding.mount_id)
+                .cloned()
+                .unwrap_or_default();
+            let metadata = published
+                .materialized
+                .plugins
+                .get(&binding.mount_id)
+                .ok_or(KernelError::RegistryPoisoned)?;
+            (
+                Arc::clone(&binding.handler),
+                ResolvedCapabilityOperationContext {
+                    operation_lock: request.operation_lock.clone(),
+                    principal: request.principal.clone(),
+                    operation_id: request.operation_id.clone(),
+                    correlation_id: request.correlation_id.clone(),
+                    registry_generation: published.materialized.generation,
+                    registry_digest: published.materialized.registry_digest.clone(),
+                    resource_bindings: request.resource_bindings.clone(),
+                    state_scope_key: request.state_scope_key.clone(),
+                    mount: ProviderMountContext {
+                        identity: metadata.context.identity.clone(),
+                        config: metadata.context.validated_config.clone(),
+                        state,
+                        services,
+                    },
+                },
+            )
+        };
+        handler
+            .invoke(
+                CapabilityOperationInvocationContext {
+                    context,
+                    action_id: request.action_id,
+                    idempotency_key: request.idempotency_key,
+                },
+                request.input,
+            )
+            .await
+    }
+
+    /// Assemble a ContextContributor selected by an Agent Snapshot.
+    ///
+    /// Ordinary Plugin capabilities dispatch directly to their owning Mount.
+    /// Canonical façade members continue through the exact Role Provider lock.
+    pub async fn contribute_context(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        self.contribute_context_with_input(snapshot, active, request, Default::default()).await
+    }
+
+    pub async fn contribute_context_with_input(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<ContextContributionResult, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        ThinAuthority::enforce_access(snapshot, active, &request)?;
+        self.validate_context_input(&request.capability_id, &input)?;
+        let role_backed = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(
+                &published,
+                snapshot,
+                &request.capability_id,
+            )?;
+            let capability = published
+                .materialized
+                .capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            if !capability.manifest.contributes_context() {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "capability module {} does not publish Context",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            }
+            published
+                .materialized
+                .role_for_capability(&request.capability_id)
+                .is_some()
+        };
+        if role_backed {
+            return self
+                .contribute_role_context_with_input(
+                    snapshot,
+                    active,
+                    role_request_from_access(request),
+                    input,
+                )
+                .await;
+        }
+
+        let (factory, context, schema_ref) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let binding = published
+                .context_factories
+                .get(&request.capability_id)
+                .ok_or_else(|| KernelError::MissingCapabilityContextFactory {
+                    mount_id: published.materialized.capabilities
+                        [&request.capability_id]
+                        .mount_id
+                        .clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            let capability = &published.materialized.capabilities
+                [&request.capability_id];
+            let [schema_ref] =
+                capability.manifest.contributions.context_schema_refs.as_slice()
+            else {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "ContextContributor {} must declare exactly one context schema",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            };
+            (
+                Arc::clone(&binding.factory),
+                resolve_direct_capability_context(
+                    &published,
+                    snapshot,
+                    &request,
+                    &binding.mount_id,
+                )?,
+                schema_ref.clone(),
+            )
+        };
+        let (dependencies, _guard) = self.context_dependency_scope(snapshot, active, request);
+        factory
+            .contribute(CapabilityContextContributionRequest {
+                dependencies,
+                context,
+                schema_ref,
+                input,
+            })
+            .await
+    }
+
+    /// Acquire a ResourceProvider selected by an Agent Snapshot.
+    pub async fn acquire_resource(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        ThinAuthority::enforce_access(snapshot, active, &request)?;
+        let role_backed = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(
+                &published,
+                snapshot,
+                &request.capability_id,
+            )?;
+            let capability = published
+                .materialized
+                .capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            if capability.manifest.kind != CapabilityKind::ResourceProvider {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "capability {} is not a ResourceProvider",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            }
+            published
+                .materialized
+                .role_for_capability(&request.capability_id)
+                .is_some()
+        };
+        if role_backed {
+            return self
+                .acquire_role_resource(
+                    snapshot,
+                    active,
+                    role_request_from_access(request),
+                )
+                .await;
+        }
+
+        let (factory, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let binding = published
+                .resource_factories
+                .get(&request.capability_id)
+                .ok_or_else(|| KernelError::MissingCapabilityResourceFactory {
+                    mount_id: published.materialized.capabilities
+                        [&request.capability_id]
+                        .mount_id
+                        .clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            (
+                Arc::clone(&binding.factory),
+                resolve_direct_capability_context(
+                    &published,
+                    snapshot,
+                    &request,
+                    &binding.mount_id,
+                )?,
+            )
+        };
+        let key = direct_resource_handle_key(&context)?;
+        if let Some(handle) = self.resource_handles.lock().await.get(&key).cloned() {
+            return Ok(ResourceProviderResult { handle });
+        }
+        let result = factory
+            .acquire(CapabilityResourceProviderRequest {
+                context: context.clone(),
+            })
+            .await?;
+        self.retain_direct_resource_handle(&context, result).await
+    }
+
+    /// Invoke a role-backed Tool from a non-Agent operation admission.
+    ///
+    /// Unlike [`Self::invoke`], this route does not accept or synthesize an
+    /// AgentSession/Snapshot. The operation's exact Provider lock and typed
+    /// resource projection are resolved once and passed to the operation
+    /// handler.
+    pub async fn invoke_role_tool(
+        &self,
+        request: RoleToolOperationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        if !matches!(
+            request.member.admission,
+            RoleMemberAdmission::Operation { .. }
+        ) {
+            return Err(KernelError::CapabilityExecution {
+                reason: "invoke_role_tool requires Operation admission".to_owned(),
+            });
+        }
+        self.ensure_role_resources_for_member(
+            RoleAdmissionEvidence::Operation,
+            &request.member,
+            CapabilityKind::Tool,
+        )
+        .await?;
+        let (target, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let resolved = resolve_role_member_dispatch(
+                &published,
+                RoleAdmissionEvidence::Operation,
+                &request.member,
+                RoleMemberDispatchKind::OperationTool {
+                    action_id: &request.action_id,
+                },
+            )?;
+            (resolved.target, resolved.member.context)
+        };
+        dispatch_resolved_role_tool(
+            target,
+            context,
+            None,
+            request.action_id,
+            request.idempotency_key,
+            request.input,
+            None,
+        )
+        .await
+    }
+
+    /// Assemble one ContextContributor member through the exact frozen Role
+    /// Provider. This is intentionally separate from action invocation: a
+    /// context factory cannot be reached through the action handler map.
+    pub async fn contribute_role_context(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: RoleMemberInvocationRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        self.contribute_role_context_with_input(snapshot, active, request, Default::default()).await
+    }
+
+    pub async fn contribute_role_context_with_input(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: RoleMemberInvocationRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<ContextContributionResult, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.validate_context_input(&request.capability_id, &input)?;
+        self.ensure_role_resources_for_member(
+            RoleAdmissionEvidence::Agent { snapshot, active },
+            &request,
+            CapabilityKind::ContextContributor,
+        )
+        .await?;
+        let RoleMemberAdmission::Agent { agent_session_id, resolved_snapshot_ref, active_set_generation } = &request.admission else {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Agent Context requires Agent admission".into(),
+            });
+        };
+        let (dependencies, _guard) = self.context_dependency_scope(snapshot, active, CapabilityAccessRequest {
+            principal: request.principal.clone(),
+            session_owner: request.session_owner.clone(),
+            agent_session_id: agent_session_id.clone(),
+            turn_id: request.turn_id.clone(),
+            operation_id: request.operation_id.clone(),
+            correlation_id: request.correlation_id.clone(),
+            resolved_snapshot_ref: resolved_snapshot_ref.clone(),
+            active_set_generation: *active_set_generation,
+            capability_id: request.capability_id.clone(),
+            resource_binding_ids: request.resource_binding_ids.clone(),
+            state_scope_key: request.state_scope_key.clone(),
+        });
+        self.contribute_role_context_with_evidence(
+            RoleAdmissionEvidence::Agent { snapshot, active },
+            request,
+            input,
+            Some(dependencies),
+        )
+        .await
+    }
+
+    /// Assemble a ContextContributor through a non-Agent operation admission.
+    pub async fn contribute_role_context_operation(
+        &self,
+        request: RoleMemberInvocationRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        if !matches!(
+            request.admission,
+            RoleMemberAdmission::Operation { .. }
+        ) {
+            return Err(KernelError::CapabilityExecution {
+                reason: "contribute_role_context_operation requires Operation admission"
+                    .to_owned(),
+            });
+        }
+        self.validate_context_input(&request.capability_id, &Default::default())?;
+        self.ensure_role_resources_for_member(
+            RoleAdmissionEvidence::Operation,
+            &request,
+            CapabilityKind::ContextContributor,
+        )
+        .await?;
+        self.contribute_role_context_with_evidence(
+            RoleAdmissionEvidence::Operation,
+            request,
+            Default::default(),
+            None,
+        )
+        .await
+    }
+
+    async fn contribute_role_context_with_evidence(
+        &self,
+        evidence: RoleAdmissionEvidence<'_>,
+        request: RoleMemberInvocationRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<crate::CapabilityDependencyCaller>,
+    ) -> Result<ContextContributionResult, KernelError> {
+        let (factory, context, schema_ref) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let resolved = resolve_role_member_dispatch(
+                &published,
+                evidence,
+                &request,
+                RoleMemberDispatchKind::Context,
+            )?;
+            let RoleMemberDispatchTarget::Context(factory) = resolved.target else {
+                return Err(KernelError::RegistryPoisoned);
+            };
+            let schema_ref = resolved.member.context_schema_ref.ok_or_else(|| {
+                KernelError::InvalidRoleProvider {
+                    role_id: resolved.member.role_id.clone(),
+                    mount_id: resolved
+                        .member
+                        .provider_lock
+                        .provider
+                        .mount_id
+                        .clone(),
+                    reason: format!(
+                        "context member {} does not declare exactly one context schema",
+                        request.capability_id.as_ref()
+                    ),
+                }
+            })?;
+            (factory, resolved.member.context, schema_ref)
+        };
+        factory
+            .contribute(ContextContributionRequest {
+                dependencies,
+                context,
+                schema_ref,
+                input,
+            })
+            .await
+    }
+
+    fn context_dependency_scope(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> (crate::CapabilityDependencyCaller, crate::dependency_call::DependencyInvocationGuard) {
+        crate::CapabilityDependencyCaller::scoped(
+            self.clone(), Arc::new(snapshot.clone()), Arc::new(active.clone()),
+            Arc::new(vec![crate::dependency_call::DependencyAncestor::Context(request)]),
+        )
+    }
+
+    fn validate_context_input(
+        &self,
+        capability_id: &nomifun_agent_contracts::CapabilityId,
+        input: &nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<(), KernelError> {
+        input.validate().map_err(|reason| KernelError::CapabilityExecution { reason })?;
+        let published = self.published.read().map_err(|_| KernelError::RegistryPoisoned)?;
+        let capability = published.materialized.capability(capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotInPreset { capability_id: capability_id.clone() })?;
+        if capability.manifest.contributions.context_phase != input.phase() {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!("Context {} cannot consume {:?} input", capability_id.as_ref(), input.phase()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Acquire one ResourceProvider member through the exact frozen Role
+    /// Provider. The returned descriptor is provider-owned; lifecycle-specific
+    /// handles remain inside the provider implementation and are not exposed
+    /// as a second generic action route.
+    pub async fn acquire_role_resource(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: RoleMemberInvocationRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        self.acquire_role_resource_with_evidence(
+            RoleAdmissionEvidence::Agent { snapshot, active },
+            request,
+        )
+        .await
+    }
+
+    /// Acquire a ResourceProvider through a non-Agent operation admission.
+    pub async fn acquire_role_resource_operation(
+        &self,
+        request: RoleMemberInvocationRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        if !matches!(
+            request.admission,
+            RoleMemberAdmission::Operation { .. }
+        ) {
+            return Err(KernelError::CapabilityExecution {
+                reason: "acquire_role_resource_operation requires Operation admission"
+                    .to_owned(),
+            });
+        }
+        self.acquire_role_resource_with_evidence(
+            RoleAdmissionEvidence::Operation,
+            request,
+        )
+        .await
+    }
+
+    async fn acquire_role_resource_with_evidence(
+        &self,
+        evidence: RoleAdmissionEvidence<'_>,
+        request: RoleMemberInvocationRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let (factory, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let resolved = resolve_role_member_dispatch(
+                &published,
+                evidence,
+                &request,
+                RoleMemberDispatchKind::Resource,
+            )?;
+            let RoleMemberDispatchTarget::Resource(factory) = resolved.target else {
+                return Err(KernelError::RegistryPoisoned);
+            };
+            (factory, resolved.member.context)
+        };
+        let key = resource_handle_key(&context)?;
+        if let Some(handle) = self.resource_handles.lock().await.get(&key).cloned() {
+            return Ok(ResourceProviderResult { handle });
+        }
+        let result = factory
+            .acquire(ResourceProviderRequest {
+                context: context.clone(),
+            })
+            .await?;
+        self.retain_resource_handle(&context, result).await
+    }
+
+    async fn retain_resource_handle(
+        &self,
+        context: &ResolvedRoleMemberContext,
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        self.retain_bound_resource_handle(
+            resource_handle_key(context)?,
+            &context.resource_bindings,
+            result,
+        )
+        .await
+    }
+
+    async fn retain_direct_resource_handle(
+        &self,
+        context: &ResolvedCapabilityContext,
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        self.retain_bound_resource_handle(
+            direct_resource_handle_key(context)?,
+            &context.resource_bindings,
+            result,
+        )
+        .await
+    }
+
+    async fn retain_bound_resource_handle(
+        &self,
+        key: ResourceHandleKey,
+        bindings: &[TypedResourceBinding],
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let identity = result.handle.identity();
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.binding_id == identity.binding_id);
+        let invalid_reason = match binding {
+            None => Some("resource provider returned a handle for an unbound resource"),
+            Some(binding)
+                if binding.resource_kind != identity.resource_kind
+                    || binding.resource_id != identity.resource_id =>
+            {
+                Some("resource provider returned a handle with mismatched resource identity")
+            }
+            Some(_) => None,
+        };
+        if let Some(reason) = invalid_reason {
+            // The factory has already acquired the resource. Rejecting its
+            // identity must not orphan the handle outside the registry.
+            let reason = match result.handle.release().await {
+                Ok(()) => reason.to_owned(),
+                Err(error) => format!("{reason}; releasing rejected handle failed: {error}"),
+            };
+            return Err(KernelError::CapabilityExecution { reason });
+        }
+        let mut handles = self.resource_handles.lock().await;
+        if let Some(existing) = handles.get(&key).cloned() {
+            drop(handles);
+            if !Arc::ptr_eq(&existing, &result.handle) {
+                result.handle.release().await?;
+            }
+            return Ok(ResourceProviderResult { handle: existing });
+        }
+        handles.insert(key, Arc::clone(&result.handle));
+        Ok(result)
+    }
+
+    async fn ensure_role_resources_for_member(
+        &self,
+        evidence: RoleAdmissionEvidence<'_>,
+        request: &RoleMemberInvocationRequest,
+        expected_kind: CapabilityKind,
+    ) -> Result<(), KernelError> {
+        let acquisitions = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let resolved = resolve_role_member(
+                &published,
+                evidence,
+                request,
+                expected_kind,
+            )?;
+            let provider = published
+                .materialized
+                .role_provider(
+                    &resolved.role_id,
+                    &resolved.provider_lock.provider.mount_id,
+                )
+                .ok_or_else(|| KernelError::RoleProviderUnavailable {
+                    role_id: resolved.role_id.clone(),
+                    mount_id: resolved.provider_lock.provider.mount_id.clone(),
+                })?;
+            let mut acquisitions = Vec::new();
+            for (resource_capability_id, resource_member) in
+                published.materialized.role_resource_members(
+                    provider, &request.capability_id,
+                )
+            {
+                let factory = published
+                    .role_resource_factories
+                    .get(&(
+                        resolved.role_id.clone(),
+                        resolved.provider_lock.provider.mount_id.clone(),
+                        resource_capability_id.clone(),
+                    ))
+                    .cloned()
+                    .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                        role_id: resolved.role_id.clone(),
+                        capability_id: resource_capability_id.clone(),
+                    })?;
+                let resource_bindings = resolved
+                    .context
+                    .resource_bindings
+                    .iter()
+                    .filter(|binding| {
+                        resource_member
+                            .required_resource_kinds
+                            .contains(&binding.resource_kind)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if resource_bindings.is_empty() {
+                    return Err(KernelError::ResourceBindingMissing {
+                        binding_id: ResourceBindingId::from(
+                            resource_member
+                                .required_resource_kinds
+                                .iter()
+                                .next()
+                                .map(AsRef::as_ref)
+                                .unwrap_or("resource"),
+                        ),
+                    });
+                }
+                let mut context = resolved.context.clone();
+                context.member_id = resource_capability_id.clone();
+                context.resource_bindings = resource_bindings;
+                acquisitions.push((factory, context));
+            }
+            acquisitions
+        };
+        for (factory, context) in acquisitions {
+            let key = resource_handle_key(&context)?;
+            if self.resource_handles.lock().await.contains_key(&key) {
+                continue;
+            }
+            let result = factory
+                .acquire(ResourceProviderRequest {
+                    context: context.clone(),
+                })
+                .await?;
+            self.retain_resource_handle(&context, result).await?;
+        }
+        Ok(())
+    }
+
+    /// Release all lazily acquired direct or Role-backed handles for one
+    /// session scope. Providers remain responsible for concrete cleanup; the
+    /// Kernel only owns exact-handle identity and de-duplication.
+    pub async fn release_resources(
+        &self,
+        scope_key: &ScopeKey,
+    ) -> Result<(), KernelError> {
+        self.release_matching_resources(|key| &key.scope_key == scope_key)
+            .await
+    }
+
+    pub async fn release_resources_for_mount(
+        &self,
+        mount_id: &AgentModuleId,
+    ) -> Result<(), KernelError> {
+        self.release_matching_resources(|key| &key.mount_id == mount_id)
+            .await
+    }
+
+    pub async fn release_all_resources(&self) -> Result<(), KernelError> {
+        self.release_matching_resources(|_| true).await
+    }
+
+    async fn release_matching_resources(
+        &self,
+        matches: impl Fn(&ResourceHandleKey) -> bool,
+    ) -> Result<(), KernelError> {
+        let handles = {
+            let mut guard = self.resource_handles.lock().await;
+            let keys = guard
+                .keys()
+                .filter(|key| matches(key))
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| guard.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        // Release outside the registry lock, and attempt every handle even if
+        // a provider fails. All of these handles have already been removed.
+        let mut first_error = None;
+        for handle in handles {
+            if let Err(error) = handle.release().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+#[cfg(test)]
+#[path = "registry_resource_tests.rs"]
+mod resource_tests;
+
+fn resolve_agent_tool_handler<'a>(
+    published: &'a PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    capability_id: &CapabilityId,
+) -> Result<&'a HandlerBinding, KernelError> {
+    let current = published.materialized.capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
+            capability_id: capability_id.clone(),
+            reason: "the frozen target is no longer materialized".to_owned(),
+        })?;
+    let binding = published.handlers.get(capability_id).ok_or_else(|| {
+        KernelError::MissingCapabilityHandler {
+            mount_id: current.mount_id.clone(),
+            capability_id: capability_id.clone(),
+        }
+    })?;
+    let frozen = snapshot.resolved_capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: capability_id.clone(),
+        })?;
+    if frozen.resolved_mount_id.as_ref() != Some(&binding.mount_id) {
+        return capability_provenance_drift(
+            capability_id,
+            "handler binding does not match the frozen mount",
+        );
+    }
+    if !published.state_handles.contains_key(&binding.mount_id) {
+        return Err(KernelError::RegistryPoisoned);
+    }
+    Ok(binding)
+}
+
+fn validate_exact_capability_target(
+    published: &PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    capability_id: &CapabilityId,
+) -> Result<(), KernelError> {
+    let frozen = snapshot
+        .resolved_capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: capability_id.clone(),
+        })?;
+    let current = published
+        .materialized
+        .capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
+            capability_id: capability_id.clone(),
+            reason: "the frozen target is no longer materialized".to_owned(),
+        })?;
+    if frozen.source_package != current.manifest.package {
+        return capability_provenance_drift(capability_id, "source package changed");
+    }
+    if frozen.contribution_id != current.contribution_id
+        || frozen.contribution_lock != current.contribution_lock
+    {
+        return capability_provenance_drift(capability_id, "contribution lock changed");
+    }
+    if frozen.resolved_mount_id.as_ref() != Some(&current.mount_id) {
+        return capability_provenance_drift(capability_id, "resolved mount changed");
+    }
+    if frozen.resolved_source != current.source {
+        return capability_provenance_drift(capability_id, "resolved source changed");
+    }
+    if frozen.target_artifact_digest != current.target_artifact_digest {
+        return capability_provenance_drift(capability_id, "target artifact changed");
+    }
+    if frozen.schema_digest != current.schema_digest {
+        return capability_provenance_drift(capability_id, "capability contract changed");
+    }
+    Ok(())
+}
+
+fn role_request_from_access(
+    request: CapabilityAccessRequest,
+) -> RoleMemberInvocationRequest {
+    RoleMemberInvocationRequest {
+        principal: request.principal,
+        session_owner: request.session_owner,
+        turn_id: request.turn_id,
+        operation_id: request.operation_id,
+        correlation_id: request.correlation_id,
+        capability_id: request.capability_id,
+        resource_binding_ids: request.resource_binding_ids,
+        state_scope_key: request.state_scope_key,
+        admission: RoleMemberAdmission::Agent {
+            agent_session_id: request.agent_session_id,
+            resolved_snapshot_ref: request.resolved_snapshot_ref,
+            active_set_generation: request.active_set_generation,
+        },
+    }
+}
+
+fn resolve_direct_capability_context(
+    published: &PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    request: &CapabilityAccessRequest,
+    mount_id: &AgentModuleId,
+) -> Result<ResolvedCapabilityContext, KernelError> {
+    let frozen = snapshot
+        .resolved_capability(&request.capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: request.capability_id.clone(),
+        })?;
+    if frozen.resolved_mount_id.as_ref() != Some(mount_id) {
+        return capability_provenance_drift(
+            &request.capability_id,
+            "typed export binding does not match the frozen mount",
+        );
+    }
+    let state = published
+        .state_handles
+        .get(mount_id)
+        .cloned()
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let services = published
+        .service_views
+        .get(mount_id)
+        .cloned()
+        .unwrap_or_default();
+    let metadata = published
+        .materialized
+        .plugins
+        .get(mount_id)
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let mut resource_bindings = request
+        .resource_binding_ids
+        .iter()
+        .filter_map(|binding_id| snapshot.binding(binding_id).cloned())
+        .collect::<Vec<_>>();
+    resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    Ok(ResolvedCapabilityContext {
+        resolved_capability: frozen.clone(),
+        principal: request.principal.clone(),
+        agent_session_id: request.agent_session_id.clone(),
+        operation_id: request.operation_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
+        registry_generation: published.materialized.generation,
+        registry_digest: published.materialized.registry_digest.clone(),
+        resource_bindings,
+        state_scope_key: request.state_scope_key.clone(),
+        mount: ProviderMountContext {
+            identity: metadata.context.identity.clone(),
+            config: metadata.context.validated_config.clone(),
+            state,
+            services,
+        },
+    })
+}
+
+fn validate_operation_lock(
+    materialized: &crate::MaterializedCapability,
+    request: &CapabilityOperationRequest,
+) -> Result<(), KernelError> {
+    let capability_id = &materialized.manifest.id;
+    if !materialized.manifest.declares_actions() {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "capability module {} does not publish Actions",
+                capability_id.as_ref()
+            ),
+        });
+    }
+    if request.operation_lock.capability.id != *capability_id
+        || request.operation_lock.contribution != materialized.contribution_lock
+        || request.operation_lock.target_artifact_digest.as_ref()
+            != Some(&materialized.target_artifact_digest)
+    {
+        return capability_provenance_drift(
+            capability_id,
+            "operation lock differs from the current exact contribution target",
+        );
+    }
+    if !materialized
+        .manifest
+        .supports_consumer(request.operation_lock.consumer)
+    {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "capability {} does not support consumer {:?}",
+                capability_id.as_ref(),
+                request.operation_lock.consumer
+            ),
+        });
+    }
+    if !materialized
+        .manifest
+        .contributions
+        .actions
+        .iter()
+        .any(|action| action.action_id == request.action_id)
+    {
+        return Err(KernelError::ActionNotDeclared {
+            capability_id: capability_id.clone(),
+            action_id: request.action_id.clone(),
+        });
+    }
+    if request.principal.principal_kind.trim().is_empty()
+        || request.principal.principal_id.trim().is_empty()
+        || request.operation_id.as_ref().trim().is_empty()
+        || request.idempotency_key.as_ref().trim().is_empty()
+        || request.correlation_id.as_ref().trim().is_empty()
+        || request.state_scope_key.as_ref().trim().is_empty()
+    {
+        return Err(KernelError::CapabilityExecution {
+            reason: "operation identity, principal, correlation, and state scope are required"
+                .to_owned(),
+        });
+    }
+    let mut binding_ids = std::collections::BTreeSet::new();
+    let mut resource_kinds = std::collections::BTreeSet::new();
+    for binding in &request.resource_bindings {
+        if !binding_ids.insert(binding.binding_id.clone()) {
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: capability_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                resource_kind: binding.resource_kind.as_ref().to_owned(),
+            });
+        }
+        if binding.owner_id != request.principal.principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
+        resource_kinds.insert(binding.resource_kind.clone());
+    }
+    if resource_kinds != materialized.manifest.contributions.resource_kinds {
+        if let Some(missing) = materialized
+            .manifest
+            .contributions
+            .resource_kinds
+            .difference(&resource_kinds)
+            .next()
+        {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: missing.as_ref().to_owned(),
+            });
+        }
+        let unexpected = request
+            .resource_bindings
+            .iter()
+            .find(|binding| {
+                !materialized
+                    .manifest
+                    .contributions
+                    .resource_kinds
+                    .contains(&binding.resource_kind)
+            })
+            .ok_or(KernelError::RegistryPoisoned)?;
+        return Err(KernelError::UnexpectedResourceBinding {
+            capability_id: capability_id.clone(),
+            binding_id: unexpected.binding_id.clone(),
+            resource_kind: unexpected.resource_kind.as_ref().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn capability_provenance_drift<T>(
+    capability_id: &CapabilityId,
+    reason: impl Into<String>,
+) -> Result<T, KernelError> {
+    Err(KernelError::CapabilityProvenanceDrift {
+        capability_id: capability_id.clone(),
+        reason: reason.into(),
+    })
+}
+
+fn agent_role_request(request: &CapabilityInvocationRequest) -> RoleMemberInvocationRequest {
+    RoleMemberInvocationRequest {
+        principal: request.principal.clone(),
+        session_owner: request.session_owner.clone(),
+        turn_id: Some(request.turn_id.clone()),
+        operation_id: request.operation_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        capability_id: request.capability_id.clone(),
+        resource_binding_ids: request.resource_binding_ids.clone(),
+        state_scope_key: request.state_scope_key.clone(),
+        admission: RoleMemberAdmission::Agent {
+            agent_session_id: request.agent_session_id.clone(),
+            resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
+            active_set_generation: request.active_set_generation,
+        },
+    }
+}
+
+async fn dispatch_resolved_role_tool(
+    target: RoleMemberDispatchTarget,
+    context: ResolvedRoleMemberContext,
+    turn_id: Option<nomifun_agent_contracts::OperationId>,
+    action_id: ActionId,
+    idempotency_key: nomifun_agent_contracts::IdempotencyKey,
+    input: nomifun_agent_contracts::StrictJsonValue,
+    dependencies: Option<crate::CapabilityDependencyCaller>,
+) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+    match target {
+        RoleMemberDispatchTarget::AgentTool(handler) => {
+            let agent_session_id = context.agent_session_id.ok_or_else(|| {
+                KernelError::CapabilityExecution {
+                    reason: "Agent Tool dispatch resolved without an AgentSession".to_owned(),
+                }
+            })?;
+            let resolved_snapshot_ref = context.resolved_snapshot_ref.ok_or_else(|| {
+                KernelError::CapabilityExecution {
+                    reason: "Agent Tool dispatch resolved without a Snapshot".to_owned(),
+                }
+            })?;
+            let resolved_capability = context.resolved_capability.ok_or_else(|| {
+                KernelError::CapabilityExecution {
+                    reason: "Agent Tool dispatch resolved without an exact Capability lock"
+                        .to_owned(),
+                }
+            })?;
+            handler
+                .invoke(
+                    CapabilityInvocationContext {
+                        dependencies: dependencies.ok_or(KernelError::RegistryPoisoned)?,
+                        principal: context.principal,
+                        agent_session_id,
+                        turn_id: turn_id.ok_or_else(|| KernelError::CapabilityExecution {
+                            reason: "Agent Tool dispatch resolved without a canonical Turn"
+                                .to_owned(),
+                        })?,
+                        operation_id: context.operation_id,
+                        idempotency_key,
+                        correlation_id: context.correlation_id,
+                        resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        capability_id: context.member_id,
+                        resolved_capability,
+                        action_id,
+                        resource_bindings: context.resource_bindings,
+                        role_provider: Some(context.provider_lock),
+                        state_scope_key: context.state_scope_key,
+                        state: context.mount.state,
+                        services: context.mount.services,
+                        mcp_tool_lock: None,
+                    },
+                    input,
+                )
+                .await
+        }
+        RoleMemberDispatchTarget::OperationTool(handler) => {
+            handler
+                .invoke(
+                    RoleToolInvocationContext {
+                        context,
+                        action_id,
+                        idempotency_key,
+                    },
+                    input,
+                )
+                .await
+        }
+        RoleMemberDispatchTarget::Context(_)
+        | RoleMemberDispatchTarget::Resource(_) => Err(KernelError::CapabilityExecution {
+            reason: "role member dispatch target is not a Tool".to_owned(),
+        }),
+    }
+}
+
+fn resource_handle_key(
+    context: &ResolvedRoleMemberContext,
+) -> Result<ResourceHandleKey, KernelError> {
+    let [binding] = context.resource_bindings.as_slice() else {
+        return Err(KernelError::InvalidPresetRevision {
+            reason: format!(
+                "resource provider {} requires exactly one frozen resource binding",
+                context.member_id.as_ref()
+            ),
+        });
+    };
+    Ok(ResourceHandleKey {
+        scope_key: context.state_scope_key.clone(),
+        role_id: Some(context.role_id.clone()),
+        mount_id: context.provider_lock.provider.mount_id.clone(),
+        target_digest: context
+            .provider_lock
+            .source
+            .source_digest
+            .clone()
+            .unwrap_or_else(|| {
+                context
+                    .provider_lock
+                    .provider
+                    .contribution_digest
+                    .clone()
+            }),
+        binding_id: binding.binding_id.clone(),
+    })
+}
+
+fn direct_resource_handle_key(
+    context: &ResolvedCapabilityContext,
+) -> Result<ResourceHandleKey, KernelError> {
+    let [binding] = context.resource_bindings.as_slice() else {
+        return Err(KernelError::InvalidPresetRevision {
+            reason: format!(
+                "resource provider {} requires exactly one frozen resource binding",
+                context.resolved_capability.capability.id.as_ref()
+            ),
+        });
+    };
+    Ok(ResourceHandleKey {
+        scope_key: context.state_scope_key.clone(),
+        role_id: None,
+        mount_id: context.mount.identity.mount_id.clone(),
+        target_digest: context
+            .resolved_capability
+            .target_artifact_digest
+            .clone(),
+        binding_id: binding.binding_id.clone(),
+    })
+}
+
+fn validate_role_exports(
+    materialized: &MaterializedRegistry,
+    generic_handlers: &BTreeMap<CapabilityId, HandlerBinding>,
+    action_handlers: &BTreeMap<
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
+        HandlerBinding,
+    >,
+    operation_tool_handlers: &BTreeMap<
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
+        Arc<dyn RoleToolHandler>,
+    >,
+    context_factories: &BTreeMap<
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
+        Arc<dyn ContextContributionFactory>,
+    >,
+    resource_factories: &BTreeMap<
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
+        Arc<dyn ResourceProviderFactory>,
+    >,
+) -> Result<(), KernelError> {
+    for ((role_id, mount_id), provider) in &materialized.role_providers {
+        for capability_id in provider.contribution.members.keys() {
+            let capability = materialized.capability(capability_id).ok_or_else(|| {
+                KernelError::RoleProviderMemberUnavailable {
+                    role_id: role_id.clone(),
+                    capability_id: capability_id.clone(),
+                }
+            })?;
+            let key = (role_id.clone(), mount_id.clone(), capability_id.clone());
+            let has_action = action_handlers.contains_key(&key);
+            let has_operation_tool = operation_tool_handlers.contains_key(&key);
+            let has_context = context_factories.contains_key(&key);
+            let has_resource = resource_factories.contains_key(&key);
+            let expected = (
+                capability.manifest.declares_actions(),
+                capability.manifest.contributes_context(),
+                capability.manifest.kind == CapabilityKind::ResourceProvider,
+            );
+            if has_operation_tool && !capability.manifest.declares_actions() {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id: role_id.clone(),
+                    mount_id: mount_id.clone(),
+                    reason: format!(
+                        "operation Tool export {} does not target an Action module",
+                        capability_id.as_ref()
+                    ),
+                });
+            }
+            if (has_action, has_context, has_resource) != expected {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id: role_id.clone(),
+                    mount_id: mount_id.clone(),
+                    reason: format!(
+                        "role member {} exports do not match its declared contribution sets",
+                        capability_id.as_ref()
+                    ),
+                });
+            }
+        }
+    }
+    for (role_id, mount_id, capability_id) in action_handlers
+        .keys()
+        .chain(operation_tool_handlers.keys())
+        .chain(context_factories.keys())
+        .chain(resource_factories.keys())
+    {
+        if !materialized.role_providers.contains_key(&(
+            role_id.clone(),
+            mount_id.clone(),
+        )) {
+            return Err(KernelError::InvalidRoleProvider {
+                role_id: role_id.clone(),
+                mount_id: mount_id.clone(),
+                reason: format!(
+                    "typed export {} has no materialized provider contribution",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+    }
+    for (capability_id, capability) in &materialized.capabilities {
+        if let Some(role_id) = materialized.role_for_capability(capability_id)
+            && generic_handlers.contains_key(capability_id)
+        {
+            return Err(KernelError::InvalidRoleProvider {
+                role_id: role_id.clone(),
+                mount_id: capability.mount_id.clone(),
+                reason: format!(
+                    "role-backed capability {} is also registered in the generic handler map",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+struct ResolvedRoleMember {
+    role_id: ExecutionRoleId,
+    provider_lock: ResolvedRoleProviderLock,
+    context: ResolvedRoleMemberContext,
+    context_schema_ref: Option<CanonicalSchemaRef>,
+}
+
+#[derive(Clone, Copy)]
+enum RoleAdmissionEvidence<'a> {
+    Agent {
+        snapshot: &'a CompiledSnapshot,
+        active: &'a ActiveCapabilitySetSnapshot,
+    },
+    Operation,
+}
+
+enum RoleMemberDispatchKind<'a> {
+    AgentTool { action_id: &'a ActionId },
+    OperationTool { action_id: &'a ActionId },
+    Context,
+    Resource,
+}
+
+impl RoleMemberDispatchKind<'_> {
+    fn capability_kind(&self) -> CapabilityKind {
+        match self {
+            Self::AgentTool { .. } | Self::OperationTool { .. } => CapabilityKind::Tool,
+            Self::Context => CapabilityKind::ContextContributor,
+            Self::Resource => CapabilityKind::ResourceProvider,
+        }
+    }
+}
+
+enum RoleMemberDispatchTarget {
+    AgentTool(Arc<dyn CapabilityHandler>),
+    OperationTool(Arc<dyn RoleToolHandler>),
+    Context(Arc<dyn ContextContributionFactory>),
+    Resource(Arc<dyn ResourceProviderFactory>),
+}
+
+struct ResolvedRoleMemberDispatch {
+    member: ResolvedRoleMember,
+    target: RoleMemberDispatchTarget,
+}
+
+fn resolve_role_member_dispatch(
+    published: &PublishedRegistry,
+    evidence: RoleAdmissionEvidence<'_>,
+    request: &RoleMemberInvocationRequest,
+    dispatch_kind: RoleMemberDispatchKind<'_>,
+) -> Result<ResolvedRoleMemberDispatch, KernelError> {
+    let member = resolve_role_member(
+        published,
+        evidence,
+        request,
+        dispatch_kind.capability_kind(),
+    )?;
+    if let RoleMemberDispatchKind::AgentTool { action_id }
+    | RoleMemberDispatchKind::OperationTool { action_id } = &dispatch_kind
+    {
+        let capability = published
+            .materialized
+            .capability(&request.capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                capability_id: request.capability_id.clone(),
+            })?;
+        if !capability
+            .manifest
+            .contributions
+            .actions
+            .iter()
+            .any(|action| &action.action_id == *action_id)
+        {
+            return Err(KernelError::ActionNotDeclared {
+                capability_id: request.capability_id.clone(),
+                action_id: (*action_id).clone(),
+            });
+        }
+    }
+    let key = (
+        member.role_id.clone(),
+        member.provider_lock.provider.mount_id.clone(),
+        request.capability_id.clone(),
+    );
+    let target = match dispatch_kind {
+        RoleMemberDispatchKind::AgentTool { .. } => {
+            let handler = published
+                .role_handlers
+                .get(&key)
+                .map(|binding| Arc::clone(&binding.handler))
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: member.role_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            RoleMemberDispatchTarget::AgentTool(handler)
+        }
+        RoleMemberDispatchKind::OperationTool { .. } => {
+            let handler = published
+                .role_tool_handlers
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: member.role_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            RoleMemberDispatchTarget::OperationTool(handler)
+        }
+        RoleMemberDispatchKind::Context => {
+            let factory = published
+                .role_context_factories
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: member.role_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            RoleMemberDispatchTarget::Context(factory)
+        }
+        RoleMemberDispatchKind::Resource => {
+            let factory = published
+                .role_resource_factories
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: member.role_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            RoleMemberDispatchTarget::Resource(factory)
+        }
+    };
+    Ok(ResolvedRoleMemberDispatch { member, target })
+}
+
+fn resolve_role_member(
+    published: &PublishedRegistry,
+    evidence: RoleAdmissionEvidence<'_>,
+    request: &RoleMemberInvocationRequest,
+    expected_kind: CapabilityKind,
+) -> Result<ResolvedRoleMember, KernelError> {
+    if request.principal != request.session_owner {
+        return Err(KernelError::ResourceOwnerMismatch {
+            binding_id: ResourceBindingId::from("session-owner"),
+        });
+    }
+    let (
+        agent_session_id,
+        resolved_snapshot_ref,
+        agent_snapshot,
+        operation_provider_lock,
+        operation_resource_bindings,
+        expected_registry_generation,
+        expected_registry_digest,
+    ) = match (evidence, &request.admission) {
+        (
+            RoleAdmissionEvidence::Agent { snapshot, active },
+            RoleMemberAdmission::Agent {
+                agent_session_id,
+                resolved_snapshot_ref,
+                active_set_generation,
+            },
+        ) => {
+            if resolved_snapshot_ref != snapshot.snapshot_ref()
+                || active.resolved_snapshot_ref != *resolved_snapshot_ref
+                || !snapshot
+                    .content()
+                    .capability_allowlist
+                    .contains(&request.capability_id)
+            {
+                return Err(KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                });
+            }
+            if active.generation != *active_set_generation
+                || !active.active.contains(&request.capability_id)
+            {
+                return Err(KernelError::CapabilityNotActive {
+                    capability_id: request.capability_id.clone(),
+                });
+            }
+            (
+                Some(agent_session_id.clone()),
+                Some(resolved_snapshot_ref.clone()),
+                Some(snapshot),
+                None,
+                None,
+                snapshot.registry_generation,
+                snapshot.registry_digest.clone(),
+            )
+        }
+        (
+            RoleAdmissionEvidence::Operation,
+            RoleMemberAdmission::Operation {
+                provider_lock,
+                registry_generation,
+                registry_digest,
+                resource_bindings,
+            },
+        ) => (
+            None,
+            None,
+            None,
+            Some(provider_lock.clone()),
+            Some(resource_bindings.clone()),
+            *registry_generation,
+            registry_digest.clone(),
+        ),
+        _ => {
+            return Err(KernelError::CapabilityExecution {
+                reason: "role member admission does not match the requested dispatch path"
+                    .to_owned(),
+            });
+        }
+    };
+    if agent_snapshot.is_none()
+        && (expected_registry_generation != published.materialized.generation
+            || expected_registry_digest != published.materialized.registry_digest)
+    {
+        return Err(KernelError::RegistryGenerationMismatch {
+            expected_generation: expected_registry_generation,
+            expected_digest: expected_registry_digest,
+            actual_generation: published.materialized.generation,
+            actual_digest: published.materialized.registry_digest.clone(),
+        });
+    }
+    if let Some(snapshot) = agent_snapshot {
+        validate_exact_capability_target(
+            published,
+            snapshot,
+            &request.capability_id,
+        )?;
+    }
+    let resolved_capability = agent_snapshot
+        .and_then(|snapshot| {
+            snapshot
+                .resolved_capability(&request.capability_id)
+                .cloned()
+        });
+    let capability = published
+        .materialized
+        .capability(&request.capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+            capability_id: request.capability_id.clone(),
+        })?;
+    let supports_expected = match expected_kind {
+        CapabilityKind::Tool => capability.manifest.declares_actions(),
+        CapabilityKind::ContextContributor => capability.manifest.contributes_context(),
+        CapabilityKind::ResourceProvider => {
+            capability.manifest.kind == CapabilityKind::ResourceProvider
+        }
+        _ => capability.manifest.kind == expected_kind,
+    };
+    if !supports_expected {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "{} does not publish the requested {:?} role contribution",
+                request.capability_id.as_ref(),
+                expected_kind
+            ),
+        });
+    }
+    let role_id = published
+        .materialized
+        .role_for_capability(&request.capability_id)
+        .cloned()
+        .ok_or_else(|| KernelError::RoleProviderNotBound {
+            role_id: ExecutionRoleId::from(request.capability_id.as_ref()),
+        })?;
+    let provider_lock = match (agent_snapshot, operation_provider_lock) {
+        (Some(snapshot), None) => snapshot
+            .role_provider(&role_id)
+            .cloned()
+            .ok_or_else(|| KernelError::RoleProviderNotBound {
+                role_id: role_id.clone(),
+            })?,
+        (None, Some(provider_lock)) => provider_lock,
+        _ => {
+            return Err(KernelError::CapabilityExecution {
+                reason: "role member admission resolved inconsistent Provider evidence"
+                    .to_owned(),
+            });
+        }
+    };
+    if provider_lock.provider.role.key.role_id != role_id {
+        return Err(KernelError::RoleProviderUnavailable {
+            role_id,
+            mount_id: provider_lock.provider.mount_id.clone(),
+        });
+    }
+    if !provider_lock
+        .supported_members
+        .contains(&request.capability_id)
+    {
+        return Err(KernelError::RoleProviderMemberUnavailable {
+            role_id,
+            capability_id: request.capability_id.clone(),
+        });
+    }
+    let provider = published
+        .materialized
+        .role_provider(&role_id, &provider_lock.provider.mount_id)
+        .ok_or_else(|| KernelError::RoleProviderUnavailable {
+            role_id: role_id.clone(),
+            mount_id: provider_lock.provider.mount_id.clone(),
+        })?;
+    if provider.provider != provider_lock.provider {
+        return Err(KernelError::RoleProviderUnavailable {
+            role_id,
+            mount_id: provider_lock.provider.mount_id.clone(),
+        });
+    }
+    if provider.source != provider_lock.source
+        || provider_lock.supported_members
+            != provider.contribution.members.keys().cloned().collect()
+    {
+        return Err(KernelError::RoleProviderUnavailable {
+            role_id: role_id.clone(),
+            mount_id: provider_lock.provider.mount_id.clone(),
+        });
+    }
+    let provider_member = provider
+        .contribution
+        .members
+        .get(&request.capability_id)
+        .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+            role_id: role_id.clone(),
+            capability_id: request.capability_id.clone(),
+        })?;
+    let mut resource_bindings = if let Some(snapshot) = agent_snapshot {
+        let policy = snapshot
+            .policy(&request.capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                capability_id: request.capability_id.clone(),
+            })?;
+        if request.resource_binding_ids != policy.resource_binding_ids {
+            let unexpected = request
+                .resource_binding_ids
+                .difference(&policy.resource_binding_ids)
+                .next()
+                .cloned()
+                .unwrap_or_else(|| ResourceBindingId::from("missing"));
+            let kind = snapshot
+                .binding(&unexpected)
+                .map(|binding| binding.resource_kind.as_ref().to_owned())
+                .unwrap_or_else(|| "unknown".to_owned());
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: request.capability_id.clone(),
+                binding_id: unexpected,
+                resource_kind: kind,
+            });
+        }
+        request
+            .resource_binding_ids
+            .iter()
+            .map(|binding_id| {
+                snapshot
+                    .binding(binding_id)
+                    .cloned()
+                    .ok_or_else(|| KernelError::ResourceBindingMissing {
+                        binding_id: binding_id.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let bindings = operation_resource_bindings.ok_or_else(|| {
+            KernelError::InvalidPresetRevision {
+                reason: "operation admission is missing typed resource bindings".to_owned(),
+            }
+        })?;
+        let actual_binding_ids = bindings
+            .iter()
+            .map(|binding| binding.binding_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual_binding_ids.len() != bindings.len() {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: "operation admission contains duplicate resource binding IDs"
+                    .to_owned(),
+            });
+        }
+        if actual_binding_ids != request.resource_binding_ids {
+            let unexpected = request
+                .resource_binding_ids
+                .difference(&actual_binding_ids)
+                .next()
+                .cloned()
+                .or_else(|| {
+                    actual_binding_ids
+                        .difference(&request.resource_binding_ids)
+                        .next()
+                        .cloned()
+                })
+                .unwrap_or_else(|| ResourceBindingId::from("missing"));
+            let kind = bindings
+                .iter()
+                .find(|binding| binding.binding_id == unexpected)
+                .map(|binding| binding.resource_kind.as_ref().to_owned())
+                .unwrap_or_else(|| "unknown".to_owned());
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: request.capability_id.clone(),
+                binding_id: unexpected,
+                resource_kind: kind,
+            });
+        }
+        bindings
+    };
+    for binding in &resource_bindings {
+        if binding.owner_id != request.principal.principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
+    }
+    for resource_kind in &provider_member.required_resource_kinds {
+        let matches = resource_bindings
+            .iter()
+            .filter(|binding| &binding.resource_kind == resource_kind)
+            .count();
+        if matches == 0 {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: request.capability_id.clone(),
+                resource_kind: resource_kind.as_ref().to_owned(),
+            });
+        }
+        if matches > 1 {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: format!(
+                    "role member {} has multiple bindings for resource kind {}",
+                    request.capability_id.as_ref(),
+                    resource_kind.as_ref()
+                ),
+            });
+        }
+    }
+    if agent_snapshot.is_none() {
+        if let Some(binding) = resource_bindings.iter().find(|binding| {
+            !provider_member
+                .required_resource_kinds
+                .contains(&binding.resource_kind)
+        }) {
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: request.capability_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                resource_kind: binding.resource_kind.as_ref().to_owned(),
+            });
+        }
+    }
+    resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    let state = published
+        .state_handles
+        .get(&provider_lock.provider.mount_id)
+        .cloned()
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let services = published
+        .service_views
+        .get(&provider_lock.provider.mount_id)
+        .cloned()
+        .unwrap_or_default();
+    let metadata = published
+        .materialized
+        .plugins
+        .get(&provider_lock.provider.mount_id)
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let context_schema_ref = match expected_kind {
+        CapabilityKind::ContextContributor => {
+            let [schema_ref] = capability.manifest.contributions.context_schema_refs.as_slice()
+            else {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id: role_id.clone(),
+                    mount_id: provider_lock.provider.mount_id.clone(),
+                    reason: format!(
+                        "context member {} must declare exactly one context schema",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            };
+            Some(schema_ref.clone())
+        }
+        _ => None,
+    };
+    Ok(ResolvedRoleMember {
+        role_id,
+        provider_lock: provider_lock.clone(),
+        context: ResolvedRoleMemberContext {
+            role_id: provider_lock.provider.role.key.role_id.clone(),
+            member_id: request.capability_id.clone(),
+            provider_lock,
+            principal: request.principal.clone(),
+            agent_session_id,
+            operation_id: request.operation_id.clone(),
+            correlation_id: request.correlation_id.clone(),
+            resolved_snapshot_ref,
+            resolved_capability,
+            registry_generation: published.materialized.generation,
+            registry_digest: published.materialized.registry_digest.clone(),
+            resource_bindings,
+            state_scope_key: request.state_scope_key.clone(),
+            mount: ProviderMountContext {
+                identity: metadata.context.identity.clone(),
+                config: metadata.context.validated_config.clone(),
+                state,
+                services,
+            },
+        },
+        context_schema_ref,
+    })
+}

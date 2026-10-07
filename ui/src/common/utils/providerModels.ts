@@ -6,7 +6,12 @@
 
 /** Readers and request mappers for the one authoritative nested model shape. */
 
-import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type {
+  IProvider,
+  ModelTask,
+  ModelTechnicalCapability,
+  ModelTrait,
+} from '@/common/config/storage';
 import type {
   CapabilityHealth,
   ProviderModelCapabilityInput,
@@ -15,7 +20,7 @@ import type {
   ProviderModelResponse,
 } from '@/common/types/provider/providerModel';
 
-export const modelOf = (
+const modelOf = (
   provider: Pick<IProvider, 'models'> | undefined,
   model: string
 ): ProviderModelResponse | undefined => provider?.models.find((row) => row.model === model);
@@ -38,19 +43,69 @@ export const modelHealthOf = (
 export const modelNamesOf = (provider: Pick<IProvider, 'models'>): string[] =>
   provider.models.map((row) => row.model);
 
+/**
+ * Input/search representation supplied by the configured Chat adapter. Saved
+ * catalog traits are descriptive metadata; an omitted trait never disables a
+ * native model feature. Unknown model IDs may use any supported adapter, while
+ * unknown adapters cannot claim to encode inputs they do not implement.
+ *
+ * Keep the input protocol facts aligned with
+ * `nomifun-chat-model-broker::adapter::protocol_features`.
+ * Provider-native search is available through the Responses search executor.
+ */
+export const capabilitySupportsTrait = (
+  capability: ProviderModelCapabilityResponse | undefined,
+  trait: ModelTrait
+): boolean => {
+  if (capability?.task !== 'chat') return false;
+  const protocol = capability.protocol;
+  switch (trait) {
+    case 'vision_input':
+      return [
+        'openai.chat_text',
+        'openai.responses',
+        'anthropic.messages',
+        'gemini.generate_text',
+        'bedrock.anthropic_messages',
+        'vertex.anthropic_messages',
+      ].includes(protocol);
+    case 'audio_input':
+      return ['openai.chat_text', 'openai.responses', 'gemini.generate_text'].includes(protocol);
+    case 'web_search':
+      return protocol === 'openai.responses';
+    case 'video_input':
+      return false;
+  }
+};
+
 export const modelSupportsTask = (
   model: ProviderModelResponse,
   task: ModelTask,
-  requiredTraits: readonly ModelTrait[] = []
+  requiredTraits: readonly ModelTrait[] = [],
+  requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = []
 ): boolean => {
   const capability = model.capabilities.find((item) => item.task === task);
   return Boolean(
-    capability && requiredTraits.every((trait) => capability.traits.includes(trait))
+    capability &&
+      requiredTraits.every((trait) => capabilitySupportsTrait(capability, trait)) &&
+      requiredTechnicalCapabilities.every(
+        (technical) =>
+          !capability.health?.unsupported_technical_capabilities?.includes(technical)
+      )
   );
 };
 
+export const capabilitySupportsTechnicalCapability = (
+  capability: ProviderModelCapabilityResponse | undefined,
+  technical: ModelTechnicalCapability
+): boolean =>
+  Boolean(
+    capability &&
+      !capability.health?.unsupported_technical_capabilities?.includes(technical)
+  );
+
 /** Strip response-only health/timestamps when saving a complete model. */
-export const toProviderModelCapabilityInput = (
+const toProviderModelCapabilityInput = (
   capability: ProviderModelCapabilityResponse
 ): ProviderModelCapabilityInput => ({
   task: capability.task,
@@ -66,6 +121,7 @@ export const toProviderModelCapabilityInput = (
   provider_params: capability.provider_params,
   context_limit: capability.context_limit,
   output_limit: capability.output_limit,
+  compaction_threshold_pct: capability.compaction_threshold_pct,
 });
 
 /** Convert a response row into the full-replacement save input. */

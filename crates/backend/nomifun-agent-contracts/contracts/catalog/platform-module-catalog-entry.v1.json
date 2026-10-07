@@ -1,0 +1,42 @@
+{
+  "capability": {
+    "id": "knowledge"
+  },
+  "contract_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contribution_id": "module:knowledge",
+  "provenance": {
+    "owner": {
+      "owner_kind": "package",
+      "package": {
+        "id": "nomifun.knowledge",
+        "version": "1.0.0"
+      }
+    },
+    "source_kind": "platform_builtin",
+    "source_identity": "platform.knowledge",
+    "artifact_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "host_surfaces": [
+    "desktop",
+    "headless"
+  ],
+  "supported_consumers": [
+    "agent",
+    "gateway"
+  ],
+  "authoring_policy": "direct",
+  "contribution_kind": "tool",
+  "required_runtime_features": [],
+  "typed_resource_kinds": [
+    "knowledge_base"
+  ],
+  "availability": {
+    "agent": {
+      "status": "active"
+    },
+    "gateway": {
+      "status": "active"
+    }
+  },
+  "publication_state": "active"
+}

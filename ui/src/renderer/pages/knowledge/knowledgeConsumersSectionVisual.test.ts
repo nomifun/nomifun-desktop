@@ -18,4 +18,11 @@ describe('Knowledge consumers section visual style', () => {
     expect(consumersSource.includes('Unlink')).toBe(true);
     expect(consumersSource.includes('Delete')).toBe(false);
   });
+
+  test('unmounts conversations through the dedicated AgentSession command', () => {
+    expect(consumersSource.includes("'conversation',")).toBe(true);
+    expect(consumersSource.includes("targetKind === 'conversation'")).toBe(true);
+    expect(consumersSource.includes('sessions.getKnowledge.invoke')).toBe(true);
+    expect(consumersSource.includes('sessions.updateKnowledge.invoke')).toBe(true);
+  });
 });

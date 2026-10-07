@@ -4,28 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
-import type { Preset, PresetTag } from '@/common/types/agent/presetTypes';
-import { presetSupportsTarget } from '@/common/types/agent/presetTypes';
-
 import type {
   CreativeAsset,
   CreativeAssetLibraryPort,
-  CreativePromptLibrarySource,
 } from '../assets';
 import type { PromptLibraryItem, PromptLibraryPort } from './types';
 
 export interface NomiPromptLibraryPortOptions {
   locale?: string;
-  includePresets?: boolean;
   assets?: CreativeAssetLibraryPort | null;
   catalog?: PromptLibraryPort | null;
   assetPageSize?: number;
-  loadPresets?: () => Promise<Preset[]>;
-  loadPresetTags?: () => Promise<PresetTag[]>;
 }
-const defaultPresetLoader = (): Promise<Preset[]> => ipcBridge.presets.list.invoke();
-const defaultPresetTagLoader = (): Promise<PresetTag[]> => ipcBridge.presetTags.list.invoke();
 
 function abortError(): Error {
   const error = new Error('Prompt library request was aborted');
@@ -37,96 +27,21 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
 }
 
-function localeCandidates(locale: string): string[] {
-  const normalized = locale.trim();
-  const language = normalized.split('-')[0]?.toLowerCase();
-  const regional = language === 'zh' ? 'zh-CN' : language === 'en' ? 'en-US' : '';
-  return [...new Set([normalized, regional, 'zh-CN', 'en-US'].filter(Boolean))];
-}
-
-function localized(
-  values: Record<string, string> | undefined,
-  locale: string,
-  fallback: string | undefined
-): string {
-  for (const candidate of localeCandidates(locale)) {
-    const value = values?.[candidate]?.trim();
-    if (value) return value;
-  }
-  return fallback?.trim() ?? '';
-}
-
-function tagLabels(tags: readonly PresetTag[], locale: string): Map<string, string> {
-  return new Map(
-    tags.map((tag) => [
-      tag.preset_tag_id,
-      localized(tag.label_i18n, locale, tag.label),
-    ])
-  );
-}
-
-export function mapNomiPresetToPromptLibraryItem(
-  preset: Preset,
-  tags: readonly PresetTag[],
-  locale = 'zh-CN'
-): PromptLibraryItem | null {
-  if (!preset.enabled || !presetSupportsTarget(preset, 'conversation')) return null;
-  const prompt = localized(preset.instructions_i18n, locale, preset.instructions);
-  if (!prompt) return null;
-  const labels = tagLabels(tags, locale);
-  const scenarioTags = preset.scenario_tag_ids
-    .map((id) => labels.get(id))
-    .filter((label): label is string => Boolean(label));
-  const audienceTags = preset.audience_tag_ids
-    .map((id) => labels.get(id))
-    .filter((label): label is string => Boolean(label));
-
-  return {
-    id: preset.preset_id,
-    source: 'preset',
-    title: localized(preset.name_i18n, locale, preset.name),
-    description: localized(preset.description_i18n, locale, preset.description) || null,
-    prompt,
-    category: scenarioTags[0] ?? null,
-    tags: [...new Set([...scenarioTags, ...audienceTags])],
-    knowledgeBaseIds: preset.knowledge_bases.map((binding) => binding.knowledge_base_id),
-    coverUrl: null,
-    preview: null,
-    sourceUrl: null,
-    license: null,
-    licenseUrl: null,
-    createdAt: null,
-    updatedAt: null,
-    savedToAssets: false,
-  };
-}
-
-export interface PromptAssetIdentity {
-  source: CreativePromptLibrarySource;
-  id: string;
-}
-
-function promptIdentityKey(source: CreativePromptLibrarySource, id: string): string {
+function promptIdentityKey(source: 'catalog', id: string): string {
   return `${source}\u0000${id}`;
 }
 
-/** Resolve both current and legacy provenance written by "Add to My Assets". */
-export function promptAssetIdentity(asset: CreativeAsset): PromptAssetIdentity | null {
+/** Resolve the provenance of a prompt copied into My Assets. */
+export function promptAssetIdentity(asset: CreativeAsset): { source: 'catalog'; id: string } | null {
   const source = asset.origin?.promptLibrarySource;
   const id = asset.origin?.promptLibraryId?.trim();
-  if ((source === 'catalog' || source === 'preset') && id) return { source, id };
-
-  const legacyCatalogId = asset.origin?.promptCatalogId?.trim();
-  return legacyCatalogId ? { source: 'catalog', id: legacyCatalogId } : null;
+  return source === 'catalog' && id ? { source, id } : null;
 }
 
 export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): PromptLibraryItem | null {
   if (asset.kind !== 'text' || !asset.inLibrary || !asset.textContent?.trim()) return null;
-  // A saved prompt is a My Assets record, not a new prompt-library source.
-  // Keeping this boundary explicit prevents the library from feeding its own
-  // output back into itself while preserving independently-authored text assets.
   if (promptAssetIdentity(asset)) return null;
-  const promptOrigin = asset.origin;
+
   return {
     id: asset.id,
     source: 'asset',
@@ -138,27 +53,24 @@ export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): Promp
     knowledgeBaseIds: [],
     coverUrl: null,
     preview: null,
-    sourceUrl: promptOrigin?.sourceUrl ?? null,
-    license: promptOrigin?.license ?? null,
-    licenseUrl: promptOrigin?.licenseUrl ?? null,
+    sourceUrl: asset.origin?.sourceUrl ?? null,
+    license: asset.origin?.license ?? null,
+    licenseUrl: asset.origin?.licenseUrl ?? null,
     createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
     savedToAssets: true,
   };
 }
 
-function markSavedPrompt(
-  value: unknown,
-  saved: ReadonlySet<string>
-): unknown {
+function markSavedPrompt(value: unknown, saved: ReadonlySet<string>): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
   const item = value as Record<string, unknown>;
   const source = item.source;
   const id = typeof item.id === 'string' ? item.id.trim() : '';
-  if ((source !== 'catalog' && source !== 'preset') || !id) return value;
+  if (source !== 'catalog' || !id) return value;
   return {
     ...item,
-    savedToAssets: saved.has(promptIdentityKey(source, id)),
+    savedToAssets: saved.has(promptIdentityKey('catalog', id)),
   };
 }
 
@@ -172,7 +84,11 @@ async function loadTextAssets(
     throwIfAborted(signal);
     const response = await assets.list({ kind: 'text', inLibrary: true, page, pageSize });
     result.push(...response.items);
-    if (response.items.length === 0 || result.length >= response.total || response.items.length < pageSize) {
+    if (
+      response.items.length === 0 ||
+      result.length >= response.total ||
+      response.items.length < pageSize
+    ) {
       break;
     }
   }
@@ -180,45 +96,36 @@ async function loadTextAssets(
 }
 
 /**
- * Read prompt material from NomiFun-owned services only. Presets are the stable
- * built-in source; callers may opt into the existing Creative Asset port to
- * include user-owned text assets without adding a parallel backend.
+ * The Creative Studio prompt library is intentionally independent from Agent
+ * authoring. It combines the dedicated prompt catalog with user-owned text
+ * assets; Agent documents are not prompt records.
  */
 export function createNomiPromptLibraryPort(
   options: NomiPromptLibraryPortOptions = {}
 ): PromptLibraryPort {
-  const locale = options.locale ?? 'zh-CN';
-  const includePresets = options.includePresets ?? true;
-  const loadPresets = options.loadPresets ?? defaultPresetLoader;
-  const loadPresetTags = options.loadPresetTags ?? defaultPresetTagLoader;
   const pageSize = Math.max(1, Math.min(200, Math.trunc(options.assetPageSize ?? 100)));
 
   return {
     async list(signal) {
       throwIfAborted(signal);
-      const [catalogData, presetData, assetData] = await Promise.all([
+      const [catalogData, assetData] = await Promise.all([
         options.catalog ? options.catalog.list(signal) : Promise.resolve([]),
-        includePresets
-          ? Promise.all([loadPresets(), loadPresetTags()])
-          : Promise.resolve<[Preset[], PresetTag[]]>([[], []]),
         options.assets ? loadTextAssets(options.assets, pageSize, signal) : Promise.resolve([]),
       ]);
       throwIfAborted(signal);
       if (!Array.isArray(catalogData)) {
         throw new TypeError('Prompt catalog adapter must return an array');
       }
-      const [presets, tags] = presetData;
+
       const savedPrompts = new Set(
         assetData
           .map(promptAssetIdentity)
-          .filter((identity): identity is PromptAssetIdentity => identity !== null)
+          .filter((identity): identity is { source: 'catalog'; id: string } => identity !== null)
           .map((identity) => promptIdentityKey(identity.source, identity.id))
       );
+
       return [
         ...catalogData.map((item) => markSavedPrompt(item, savedPrompts)),
-        ...presets
-          .map((preset) => mapNomiPresetToPromptLibraryItem(preset, tags, locale))
-          .filter((item): item is PromptLibraryItem => item !== null),
         ...assetData
           .map(mapNomiTextAssetToPromptLibraryItem)
           .filter((item): item is PromptLibraryItem => item !== null),

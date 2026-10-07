@@ -83,9 +83,8 @@ pub struct McpToolDef {
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
     /// Optional behaviour hints declared by the server (MCP `annotations`).
-    /// Drives approval classification (see `McpToolProxy::category`). Absent on
+    /// Drives effect classification (see `McpToolProxy::category`). Absent on
     /// servers that predate the annotations field — `None` is then treated as
-    /// "no hints", i.e. the from-strict default (approval required).
     #[serde(default)]
     pub annotations: Option<ToolAnnotations>,
 }
@@ -93,7 +92,6 @@ pub struct McpToolDef {
 /// MCP `ToolAnnotations` — behaviour hints a server may attach to each tool.
 ///
 /// All fields are advisory `Option<bool>` per the MCP spec (camelCase on the
-/// wire). We only act on `read_only_hint` / `destructive_hint` for approval
 /// gating today, but parse and retain the full set so future policy (and the
 /// human-readable `title`) is available without another protocol change.
 #[derive(Debug, Clone, Default, Deserialize)]

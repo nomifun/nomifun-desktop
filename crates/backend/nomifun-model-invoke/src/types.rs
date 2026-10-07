@@ -41,6 +41,7 @@ pub struct ImageEditRequest {
     pub prompt: String,
     pub count: u32,
     pub size: Option<String>,
+    pub quality: Option<String>,
     pub inputs: Vec<InputAsset>,
     pub extra: serde_json::Value,
 }
@@ -51,7 +52,19 @@ pub struct VideoGenRequest {
     pub prompt: String,
     pub seconds: Option<u32>,
     pub size: Option<String>,
+    pub resolution: Option<String>,
     pub inputs: Vec<InputAsset>,
+    pub extra: serde_json::Value,
+}
+
+/// A newly composed instrumental or vocal music track. Provider adapters must
+/// reject unsupported controls rather than reinterpret them as speech input.
+#[derive(Clone)]
+pub struct MusicGenRequest {
+    pub prompt: String,
+    pub lyrics: Option<String>,
+    pub instrumental: bool,
+    pub format: Option<String>,
     pub extra: serde_json::Value,
 }
 
@@ -103,6 +116,7 @@ pub enum TaskRequest {
     ImageGeneration(ImageGenRequest),
     ImageEdit(ImageEditRequest),
     VideoGeneration(VideoGenRequest),
+    MusicGeneration(MusicGenRequest),
     SpeechSynthesis(TtsRequest),
     SpeechRecognition(AsrRequest),
     Embedding(EmbedRequest),
@@ -119,6 +133,7 @@ impl TaskRequest {
             Self::ImageGeneration(_) => ModelTask::ImageGeneration,
             Self::ImageEdit(_) => ModelTask::ImageEdit,
             Self::VideoGeneration(_) => ModelTask::VideoGeneration,
+            Self::MusicGeneration(_) => ModelTask::MusicGeneration,
             Self::SpeechSynthesis(_) => ModelTask::SpeechSynthesis,
             Self::SpeechRecognition(_) => ModelTask::SpeechRecognition,
             Self::Embedding(_) => ModelTask::Embedding,
@@ -208,6 +223,7 @@ mod tests {
                     prompt: "p".into(),
                     count: 1,
                     size: None,
+                    quality: None,
                     inputs: vec![],
                     extra: json!({}),
                 }),
@@ -218,6 +234,7 @@ mod tests {
                     prompt: "p".into(),
                     seconds: None,
                     size: None,
+                    resolution: None,
                     inputs: vec![],
                     extra: json!({}),
                 }),

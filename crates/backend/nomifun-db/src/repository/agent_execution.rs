@@ -3,7 +3,7 @@ use nomifun_common::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind,
-    ExecutionStepStatus, ParticipantAssignmentSource, PlanGate, StepFailurePolicy,
+    ExecutionStepStatus, ParticipantAssignmentSource, StepFailurePolicy,
 };
 
 use crate::error::DbError;
@@ -11,10 +11,7 @@ use crate::models::{
     AgentExecutionAttemptDetailRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionRow,
     AgentExecutionStepDetailRow, AgentExecutionStepRow,
-    ConversationDeliveryReceiptRow, ConversationExecutionLinkRow,
-};
-use crate::repository::conversation::{
-    ConversationDeliveryReceiptClaim, TurnLifecycleTransition,
+    ConversationExecutionLinkRow,
 };
 
 /// Validate the canonical JSON form shared by executable templates and
@@ -95,11 +92,10 @@ impl std::fmt::Debug for AgentExecutionLeaseToken {
 
 /// Durable authority for one Agent Execution-owned Conversation turn.
 ///
-/// The scheduler lease owner is the aggregate generation. Step and attempt
-/// versions bind the effect to the exact invocation generation, while the
-/// active attempt link binds it to one Conversation. The SQLite claim path
-/// validates every field and inserts the Conversation delivery receipt in the
-/// same transaction.
+/// The scheduler lease owner is the aggregate generation. Exact Step version,
+/// immutable Attempt identity/status and active link bind the invocation to
+/// one Session. Attempt version is an optimistic metadata revision: enqueue
+/// and acknowledgement of a steer may advance it without replacing the Turn.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionTurnAuthority {
@@ -107,8 +103,29 @@ pub struct AgentExecutionTurnAuthority {
     pub step_id: String,
     pub attempt_id: String,
     pub expected_step_version: i64,
+    /// Minimum observed metadata revision, not a Turn-generation identity.
     pub expected_attempt_version: i64,
     pub lease_owner: String,
+}
+
+/// How an AgentExecution Attempt obtains its canonical AgentSession.
+///
+/// Ordinary collaboration creates a dedicated immutable Attempt transcript.
+/// AutoWork instead drives the already-bound lead AgentSession so its main
+/// Agent, history, and visible conversation remain the actual work surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentExecutionAttemptSessionKind {
+    ChildAttempt,
+    AutomationLead,
+}
+
+impl AgentExecutionAttemptSessionKind {
+    pub const fn relation(self) -> &'static str {
+        match self {
+            Self::ChildAttempt => "attempt",
+            Self::AutomationLead => "automation",
+        }
+    }
 }
 
 impl std::fmt::Debug for AgentExecutionTurnAuthority {
@@ -143,11 +160,25 @@ pub struct AgentExecutionAttemptRecoveryResult {
     pub disposition: AgentExecutionAttemptRecoveryDisposition,
 }
 
+/// Exact terminal output read through the canonical Session owner. This is
+/// transient reconciliation input, not a second completion receipt or log.
+#[derive(Debug, Clone)]
+pub struct RecoveredAgentExecutionAttemptOutput {
+    pub attempt_id: String,
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+    pub terminal_event_id: String,
+    pub ok: bool,
+    pub text: Option<String>,
+    pub output_files: Vec<String>,
+    pub error: Option<String>,
+    pub tokens: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateAgentExecutionParams {
     pub goal: String,
     pub status: AgentExecutionStatus,
-    pub plan_gate: PlanGate,
     pub adaptation_policy: AdaptationPolicy,
     pub decision_policy: DecisionPolicy,
     pub delegation_policy: DelegationPolicy,
@@ -163,9 +194,11 @@ pub struct CreateAgentExecutionParams {
 pub struct NewAgentExecutionParticipant {
     pub participant_id: String,
     pub source_agent_id: String,
+    /// Serialized canonical AgentResolvedSnapshot. It is immutable after the
+    /// participant is materialized; provider/model are the concrete binding.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,
@@ -255,7 +288,6 @@ pub struct AppendAgentExecutionStepsParams {
 #[derive(Debug, Clone)]
 pub struct ReconcileAgentExecutionPlanParams {
     pub goal: Option<String>,
-    pub plan_gate: Option<PlanGate>,
     pub adaptation_policy: Option<AdaptationPolicy>,
     pub decision_policy: Option<DecisionPolicy>,
     pub delegation_policy: Option<DelegationPolicy>,
@@ -320,8 +352,17 @@ pub struct LoopRepeatResetParams {
     pub expected_steps: Vec<RetryAgentExecutionStep>,
 }
 
+/// Transient command precondition for a Native Agent decision request. It is
+/// checked in the settlement transaction and is never persisted as a ledger.
+#[derive(Debug, Clone)]
+pub struct AgentExecutionActiveTurnGuard {
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SettleAgentExecutionAttemptParams {
+    pub expected_active_session_turn: Option<AgentExecutionActiveTurnGuard>,
     pub attempt_status: ExecutionAttemptStatus,
     pub step_status: ExecutionStepStatus,
     pub execution_status: Option<AgentExecutionStatus>,
@@ -398,15 +439,15 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &UpdateAgentExecutionParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
-    /// Atomically freezes dispatch: queued attempts are cancelled, running
-    /// attempts are interrupted, their active links become cleanup work, and
-    /// running steps return to Pending. WaitingInput attempts/questions remain
-    /// durable so Resume can restore the correct aggregate attention state.
+    /// Pause revokes the scheduler lease atomically. Already closed Turns are
+    /// settled only from exact typed canonical outputs; ambiguous running
+    /// effects are review blocked instead of being returned to Pending.
     async fn pause_execution(
         &self,
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
+        recovered_outputs: &[RecoveredAgentExecutionAttemptOutput],
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
     /// Resume from Paused to WaitingInput when any durable question remains,
@@ -500,9 +541,9 @@ pub trait IAgentExecutionRepository: Send + Sync {
         event: &NewAgentExecutionEvent,
     ) -> Result<AppendAgentExecutionStepsFromAttemptResult, DbError>;
 
-    /// Versioned user/lead append. It supports approval-gated, running,
-    /// paused, and waiting aggregates, and reopens a settled non-cancelled
-    /// result to Running. Existing Steps/dependencies are append-only history.
+    /// Versioned user/lead append. It supports running, paused, and waiting
+    /// aggregates, and reopens a settled non-cancelled result to Running.
+    /// Existing Steps/dependencies are append-only history.
     async fn append_steps(
         &self,
         user_id: &str,
@@ -610,9 +651,12 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &CreateAgentExecutionAttemptParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
-    /// Atomically starts a queued Agent attempt and creates its conversation
-    /// link. Only step/attempt versions are CASed; the aggregate version is
-    /// advanced unconditionally to avoid parallel-step false conflicts.
+    /// Atomically starts a queued Agent attempt and creates its typed Session
+    /// link. Ordinary collaboration links a child Attempt transcript;
+    /// AutoWork links the exact existing lead without making it disposable
+    /// Attempt-session data. Only step/attempt versions are CASed; the
+    /// aggregate version is advanced unconditionally to avoid parallel-step
+    /// false conflicts.
     async fn start_attempt(
         &self,
         user_id: &str,
@@ -622,75 +666,14 @@ pub trait IAgentExecutionRepository: Send + Sync {
         attempt_id: &str,
         expected_attempt_version: i64,
         conversation_id: &str,
+        session_kind: AgentExecutionAttemptSessionKind,
         lease: Option<&AgentExecutionLeaseToken>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
 
-    /// Atomically validates one exact live Agent Execution invocation and
-    /// claims its Conversation receipt. Existing accepted/completed receipts
-    /// are absorbing; only `claimed_new` grants effect authority.
-    async fn claim_attempt_turn_delivery_receipt(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admission_epoch: i64,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot atomically claim a turn receipt".to_owned(),
-        ))
-    }
-
-    /// Settle only the exact Agent Execution admission won by
-    /// `candidate_message_id`.
-    ///
-    /// The implementation must validate the immutable receipt identity, the
-    /// Conversation generation, and the scheduler/step/attempt authority in
-    /// one writer transaction. A claim loser or displaced generation returns
-    /// [`TurnLifecycleTransition::Stale`] without changing the winner.
-    async fn abandon_exact_attempt_turn_admission(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admitted_epoch: i64,
-        _reason: &str,
-        _completed_at: i64,
-    ) -> Result<TurnLifecycleTransition, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot abandon an exact turn admission".to_owned(),
-        ))
-    }
-
-    /// Revalidates the same exact invocation after receipt claim and before
-    /// entering the process-local model/tool effect path.
-    async fn validate_attempt_turn_effect_authority(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptRow, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot validate turn effect authority".to_owned(),
-        ))
-    }
-
-    /// Recovery seam shared by boot recovery and lease-loss successors.
-    /// Running attempts never return to Pending: a completed initial-turn
-    /// receipt is adopted, while accepted, missing, malformed, or legacy
-    /// receipt state is parked for review.
+    /// Reconcile one interrupted invocation. Queued reservations can return
+    /// to Pending; started invocations require exact canonical terminal
+    /// output or are parked for review without automatic effect replay.
     async fn reconcile_recovered_attempt(
         &self,
         _user_id: &str,
@@ -700,6 +683,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
         _attempt_id: &str,
         _expected_attempt_version: i64,
         _lease: &AgentExecutionLeaseToken,
+        _recovered_output: Option<&RecoveredAgentExecutionAttemptOutput>,
         _event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionAttemptRecoveryResult, DbError> {
         Err(DbError::Init(
@@ -769,15 +753,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
     /// Acknowledge every still-pending inactive row for this Conversation
     /// only when the exact validated generation remains pending and no active
     /// replacement link exists. Duplicate inactive rows are one cancel unit.
-    async fn mark_conversation_cleanup_completed(
-        &self,
-        execution_id: &str,
-        conversation_id: &str,
-        completed_at: i64,
-    ) -> Result<bool, DbError>;
-    /// Exact-generation variant used by the scheduler. The legacy
-    /// execution/conversation form above remains source-compatible for other
-    /// repository consumers.
     async fn mark_conversation_cleanup_completed_exact(
         &self,
         cleanup: &PendingConversationCleanup,

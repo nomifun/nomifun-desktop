@@ -2,8 +2,8 @@
 
 `CreativeCanvasChrome` is a controlled, source-shaped three-column shell. The
 left and right panels consume real layout width, so the center Canvas becomes
-narrower exactly as it does in the reference product. The bottom tool dock then
-scrolls horizontally when the remaining center column is compact.
+narrower exactly as it does in the reference product. The editor-owned bottom
+tool dock scrolls horizontally when the remaining center column is compact.
 
 Compose the editor through the `canvas` slot and inject product surfaces into
 the panel slots:
@@ -17,7 +17,6 @@ the panel slots:
   canRedo={canRedo}
   leftView={leftView}
   rightView={rightView}
-  bottomView={bottomView}
   slots={{
     canvas: (
       <CreativeCanvasEditor
@@ -36,10 +35,6 @@ the panel slots:
       assistant: <CreativeStudioAgentPanel {...agentProps} />,
       properties: <CreativeNodeProperties />,
     },
-    bottom: {
-      history: <CreativeCanvasHistory />,
-      timeline: <CreativeCanvasTimeline />,
-    },
   }}
   {...callbacks}
 />
@@ -54,17 +49,15 @@ persists a Canvas document, invokes a model, resolves assets, or fabricates
 panel content.
 
 The hand icon is a pressed-state toggle: pressed selects the existing pan tool,
-while unpressed leaves the editor in its default selection mode. The bottom
-toolbar exposes one History icon for opening or closing the shared bottom
-panel; History and Timeline remain tabs inside that panel.
+while unpressed leaves the editor in its default selection mode.
 
-The bottom dock exposes text, image, video, audio, panorama, Director, and
+The bottom dock exposes text, image, video, audio, timeline, and
 generation-config creation directly in the reference order. Group creation is
 intentionally not a node-creation tool; it remains a selection action.
 
-`rightView` and `bottomView` use `null` for a closed panel. The zoom dock owns
-its transient percentage/background popover and closes it when focus moves
-outside the control.
+`rightView` uses `null` for a closed panel. The zoom dock owns its transient
+percentage/background popover and closes it when focus moves outside the
+control.
 
 Canvas owner identity is supplied by the route. When an owner is needed, use
 the canonical `CanvasNode { canvasId, nodeId }` shape and serialize it as

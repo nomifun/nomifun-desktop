@@ -41,7 +41,7 @@ members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", 
 | [`apps/desktop`](../../apps/desktop) | `nomifun-desktop` | Tauri 桌面壳。进程内启动同一个后端，选择空闲 localhost 端口，注入 `window.__backendPort` 与 `window.__nomiLocalTrust`，WebView 通过本地信任 token 访问后端。 |
 
 两个 host 都直接链接 `nomifun-app`。`nomicore` 仍作为 `nomifun-app` 的独立
-binary 存在，用于诊断、stdio MCP bridge、公开能力调用和无头场景；桌面/Web host
+binary 存在，用于诊断、stdio MCP bridge、canonical Remote 调用和无头场景；桌面/Web host
 不会 spawn 它。
 
 ## Crate 分组

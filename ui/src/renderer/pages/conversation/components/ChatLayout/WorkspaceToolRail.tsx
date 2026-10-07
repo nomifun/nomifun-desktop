@@ -7,7 +7,7 @@
 import type { SessionTarget } from '@/common/types/ids';
 import type { WorkspaceExtraTab, WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import { Tooltip } from '@arco-design/web-react';
-import { Branch, Change, ChartHistogram, FolderOpen } from '@icon-park/react';
+import { Branch, Change, ChartHistogram, Earth, FolderOpen } from '@icon-park/react';
 import classNames from 'classnames';
 import type { TFunction } from 'i18next';
 import React from 'react';
@@ -60,14 +60,24 @@ export type WorkspaceToolRailCollaboration = {
   onClick: () => void;
 };
 
+export type SessionBrowserTool = {
+  active: boolean;
+  label: React.ReactNode;
+  controls: string;
+  buttonRef?: React.Ref<HTMLButtonElement>;
+  onClick: () => void;
+};
+
 type WorkspaceToolRailProps = {
   t: TFunction;
+  workspaceAvailable?: boolean;
   activeTab: WorkspaceTab;
   expanded: boolean;
   onSelect: (tab: WorkspaceTab) => void;
   changeCount?: number;
   extraTabs?: WorkspaceExtraTab[];
   collaboration?: WorkspaceToolRailCollaboration;
+  browser?: SessionBrowserTool;
   footer?: React.ReactNode;
 };
 
@@ -77,17 +87,22 @@ type ToolRailItemProps = {
   icon: React.ReactNode;
   badge?: React.ReactNode;
   statusColor?: string;
+  controls?: string;
+  buttonRef?: React.Ref<HTMLButtonElement>;
   onClick: () => void;
 };
 
-const ToolRailItem: React.FC<ToolRailItemProps> = ({ active, label, icon, badge, statusColor, onClick }) => (
+const ToolRailItem: React.FC<ToolRailItemProps> = ({ active, label, icon, badge, statusColor, controls, buttonRef, onClick }) => (
   <Tooltip position='left' content={label} mini className='workspace-tool-rail__tooltip'>
     <button
+      ref={buttonRef}
       type='button'
       className={classNames('workspace-tool-rail__item', {
         'workspace-tool-rail__item--active': active,
       })}
       aria-pressed={active}
+      aria-expanded={controls ? active : undefined}
+      aria-controls={controls}
       onClick={onClick}
     >
       <span className='workspace-tool-rail__icon'>{icon}</span>
@@ -100,32 +115,34 @@ const ToolRailItem: React.FC<ToolRailItemProps> = ({ active, label, icon, badge,
 
 const WorkspaceToolRail: React.FC<WorkspaceToolRailProps> = ({
   t,
+  workspaceAvailable = true,
   activeTab,
   expanded,
   onSelect,
   changeCount = 0,
   extraTabs,
   collaboration,
+  browser,
   footer,
 }) => (
   <aside
     className='workspace-tool-rail'
-    aria-label={t('conversation.workspace.toolsLabel', { defaultValue: '侧边工具' })}
+    aria-label={t('conversation.workspace.toolsLabel', { defaultValue: 'Session tools' })}
   >
-    <ToolRailItem
+    {workspaceAvailable && <ToolRailItem
       active={expanded && activeTab === 'files'}
       label={t('conversation.workspace.changes.filesTab')}
       icon={<FolderOpen size={18} />}
       onClick={() => onSelect('files')}
-    />
-    <ToolRailItem
+    />}
+    {workspaceAvailable && <ToolRailItem
       active={expanded && activeTab === 'changes'}
       label={t('conversation.workspace.changes.tab')}
       icon={<Change size={18} />}
       badge={changeCount > 0 ? <span className='workspace-tool-rail__badge' /> : undefined}
       onClick={() => onSelect('changes')}
-    />
-    {extraTabs?.map((tab) => (
+    />}
+    {workspaceAvailable && extraTabs?.map((tab) => (
       <ToolRailItem
         key={tab.key}
         active={expanded && activeTab === tab.key}
@@ -143,6 +160,19 @@ const WorkspaceToolRail: React.FC<WorkspaceToolRailProps> = ({
           icon={<Branch size={18} />}
           statusColor={collaboration.statusColor}
           onClick={collaboration.onClick}
+        />
+      </>
+    )}
+    {browser && (
+      <>
+        {(workspaceAvailable || collaboration?.available) && <span className='workspace-tool-rail__divider' />}
+        <ToolRailItem
+          active={browser.active}
+          label={browser.label}
+          icon={<Earth size={18} />}
+          controls={browser.controls}
+          buttonRef={browser.buttonRef}
+          onClick={browser.onClick}
         />
       </>
     )}

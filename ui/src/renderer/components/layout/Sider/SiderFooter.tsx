@@ -14,7 +14,6 @@ import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import SiderThemeControl from './SiderThemeControl';
 
 interface SiderFooterProps {
-  isMobile: boolean;
   isSettings: boolean;
   collapsed?: boolean;
   siderTooltipProps: SiderTooltipProps;
@@ -25,7 +24,6 @@ interface SiderFooterProps {
 }
 
 const SiderFooter: React.FC<SiderFooterProps> = ({
-  isMobile,
   isSettings,
   collapsed = false,
   siderTooltipProps,
@@ -65,7 +63,6 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
             className={classNames(
               'group h-28px flex items-center rd-0.5rem cursor-pointer transition-colors',
               collapsed ? 'w-full justify-center' : 'flex-1 min-w-0 justify-start gap-8px pl-10px pr-8px',
-              isMobile && 'sider-footer-btn-mobile',
               {
                 '!bg-primary-1 !text-primary-6': isSettings,
                 'hover:bg-fill-2 active:bg-fill-3': !isSettings,
@@ -81,7 +78,6 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
 
         {/* 主题（明暗 + 缩放 + CSS 预设）/ Theme (light-dark + scaling + CSS preset) */}
         <SiderThemeControl
-          isMobile={isMobile}
           collapsed={collapsed}
           siderTooltipProps={siderTooltipProps}
         />
@@ -93,7 +89,6 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
               className={classNames(
                 'h-28px flex items-center rd-0.5rem cursor-pointer transition-colors hover:bg-[rgba(var(--primary-6),0.14)] active:bg-fill-2',
                 collapsed ? 'w-full justify-center' : 'flex-1 min-w-0 justify-start gap-10px px-14px',
-                isMobile && 'sider-footer-btn-mobile'
               )}
             >
               <span className='size-20px flex items-center justify-center shrink-0'>

@@ -321,7 +321,17 @@ impl OpenAIProvider {
             ));
         }
 
-        if let Some(effort) = &request.reasoning_effort {
+        // StepFun reasoning models default to a large private-reasoning budget
+        // when the caller omits the field. Agent turns need concise tool use,
+        // so choose the provider's low mode unless the user/config explicitly
+        // selected another effort. Other OpenAI-compatible models retain their
+        // provider default because support for this extension is not universal.
+        let reasoning_effort = request
+            .reasoning_effort
+            .as_deref()
+            .or(self.compat.reasoning_effort.as_deref())
+            .or_else(|| request.model.starts_with("step-").then_some("low"));
+        if let Some(effort) = reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
 
@@ -338,7 +348,7 @@ impl OpenAIProvider {
         if request.tools.is_empty() {
             object.remove("tools");
         }
-        if request.reasoning_effort.is_none() {
+        if reasoning_effort.is_none() {
             object.remove("reasoning_effort");
         }
         if !include_stream_usage {
@@ -3824,7 +3834,7 @@ mod tests {
     }
 
     #[test]
-    fn stepfun_explicit_reasoning_effort_is_forwarded_and_none_is_omitted() {
+    fn request_effort_overrides_model_default_before_stepfun_fallback() {
         let provider = OpenAIProvider::new("key", "http://localhost", openai_compat());
         let mut request = simple_request();
         request.model = "step-3.7-flash".into();
@@ -3843,7 +3853,33 @@ mod tests {
             provider.should_sanitize_tool_schemas(),
             true,
         );
-        assert!(provider_default.get("reasoning_effort").is_none());
+        assert_eq!(provider_default["reasoning_effort"], "low");
+
+        request.model = "ordinary-chat-model".into();
+        let ordinary_default = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
+        assert!(ordinary_default.get("reasoning_effort").is_none());
+
+        let mut compat = openai_compat();
+        compat.reasoning_effort = Some("high".into());
+        let configured_provider = OpenAIProvider::new("key", "http://localhost", compat);
+        let configured_default = configured_provider.build_request_body(
+            &request,
+            configured_provider.should_sanitize_tool_schemas(),
+            true,
+        );
+        assert_eq!(configured_default["reasoning_effort"], "high");
+
+        request.reasoning_effort = Some("medium".into());
+        let request_override = configured_provider.build_request_body(
+            &request,
+            configured_provider.should_sanitize_tool_schemas(),
+            true,
+        );
+        assert_eq!(request_override["reasoning_effort"], "medium");
     }
 
     // --- merge_assistant_messages ---

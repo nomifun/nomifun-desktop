@@ -13,7 +13,7 @@ import styles from './CreativeAssetLibrary.module.css';
 
 export { creativeAssetKindIcon } from './CreativeMediaPreview';
 
-export interface CreativeAssetMediaProps {
+interface CreativeAssetMediaProps {
   asset: CreativeAsset;
   unavailableLabel: string;
   compact?: boolean;

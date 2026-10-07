@@ -18,9 +18,9 @@ const QRCodeSVGLazy = React.lazy(async () => {
   return { default: mod.QRCodeSVG };
 });
 
-export const RELAY_PAIRING_PREFIX = 'nomifun-relay-pair:v1:';
+const RELAY_PAIRING_PREFIX = 'nomifun-relay-pair:v1:';
 
-export function isSafeRelayPairingUrl(value: string | undefined): value is string {
+function isSafeRelayPairingUrl(value: string | undefined): value is string {
   return typeof value === 'string' && value.startsWith('nomi://pair');
 }
 

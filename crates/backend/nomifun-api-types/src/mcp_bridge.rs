@@ -3,7 +3,7 @@
 //! Requirement, knowledge, and Gateway bridges use a two-stage contract: an
 //! opaque, non-serializable issuer config stays in the backend process, while
 //! each child receives only a short-lived signed capability. Stateless bridge
-//! configs (`OpenMcpConfig`, `ComputerMcpConfig`) and the process-private
+//! config (`OpenMcpConfig`) and the process-private
 //! browser issuer config live here too so downstream crates
 //! (`nomifun-ai-agent` deserializing its build extras, etc.) can reference the
 //! same shape from a leaf crate.
@@ -422,8 +422,6 @@ pub struct GatewayCapabilityScope {
     pub companion_id: Option<CompanionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_platform: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_mode: Option<String>,
     pub profile: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_tools: Vec<String>,
@@ -440,7 +438,6 @@ impl GatewayCapabilityScope {
         }
 
         if !canonical_optional(self.channel_platform.as_deref())
-            || !canonical_optional(self.session_mode.as_deref())
             || !canonical(&self.profile)
             || !GatewayMcpConfig::is_known_profile(&self.profile)
             || self.excluded_tools.iter().any(|name| !canonical(name))
@@ -623,7 +620,6 @@ impl GatewayMcpConfig {
         conversation_id: &str,
         companion_id: Option<&str>,
         channel_platform: Option<&str>,
-        session_mode: Option<&str>,
         excluded_tools: &[String],
     ) -> Result<GatewayMcpChildConfig, LoopbackCapabilityError> {
         let channel_platform = channel_platform.map(str::to_owned);
@@ -638,7 +634,6 @@ impl GatewayMcpConfig {
                 .map_err(|_| LoopbackCapabilityError::InvalidIdentity)?,
             profile: Self::default_profile_for_session(channel_platform.as_deref()).to_owned(),
             channel_platform,
-            session_mode: session_mode.map(str::to_owned),
             excluded_tools,
             instance_owner: user_id == self.authoritative_user_id.as_ref(),
         };
@@ -693,32 +688,6 @@ impl OpenMcpConfig {
     /// `mcp__nomifun-open__open` (23 chars) stays well within Anthropic's
     /// 64-char tool-name limit.
     pub const SERVER_NAME: &'static str = "nomifun-open";
-}
-
-/// Connection config for the computer-use discrete-tool MCP stdio bridge.
-///
-/// Passed through `NomiBuildExtra::computer_mcp_config` by the factory on every
-/// desktop OS (macOS / Windows / Linux) when the host binary was built with the
-/// `computer-use` feature. The session assembler injects `nomicore
-/// mcp-computer-stdio` — an MCP server exposing the desktop computer-use
-/// capability as discrete tools (snapshot / click / type / launch / …), a thin
-/// facade over the in-tree `ComputerTool`, so any stdio-bridged child gets the
-/// same automation the nomi engine has (macOS AX / Windows UIA / Linux AT-SPI
-/// via `nomi-a11y`).
-///
-/// Like the open bridge this is STATELESS at the protocol level (no HTTP
-/// callback): it drives the local desktop directly, so it needs only the
-/// `nomicore` binary path to re-spawn the subcommand.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ComputerMcpConfig {
-    pub binary_path: String,
-}
-
-impl ComputerMcpConfig {
-    /// Wire-level MCP server name. Kept short so the longest wire-level tool name
-    /// `mcp__nomifun-computer__cursor_position` (39 chars) stays within
-    /// Anthropic's 64-char tool-name limit.
-    pub const SERVER_NAME: &'static str = "nomifun-computer";
 }
 
 #[cfg(test)]
@@ -979,7 +948,6 @@ mod tests {
                 "0190f5fe-7c00-7a00-8abc-012345678901",
                 Some(TEST_COMPANION_ID),
                 Some("lark"),
-                Some("yolo"),
                 &["nomi_delegate".into(), "nomi_delegate".into()],
             )
             .unwrap();
@@ -1042,7 +1010,6 @@ mod tests {
                 "0190f5fe-7c00-7a00-8abc-012345678901",
                 None,
                 None,
-                None,
                 &[],
             )
             .unwrap();
@@ -1060,7 +1027,6 @@ mod tests {
                 TEST_USER_ID,
                 "0190f5fe-7c00-7a00-8abc-012345678902",
                 Some(TEST_COMPANION_ID),
-                None,
                 None,
                 &[],
             )
@@ -1082,7 +1048,6 @@ mod tests {
             .issue_for_conversation(
                 TEST_USER_ID,
                 "0190f5fe-7c00-7a00-8abc-012345678901",
-                None,
                 None,
                 None,
                 &[],
@@ -1183,32 +1148,6 @@ mod tests {
     #[test]
     fn open_mcp_tool_name_stays_within_anthropic_64_char_limit() {
         let wire_name = format!("mcp__{}__{}", OpenMcpConfig::SERVER_NAME, "open");
-        assert!(
-            wire_name.len() <= 64,
-            "{wire_name} ({} chars)",
-            wire_name.len()
-        );
-    }
-
-    #[test]
-    fn computer_mcp_config_json_roundtrip() {
-        let cfg = ComputerMcpConfig {
-            binary_path: "/usr/bin/nomicore".into(),
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let parsed: ComputerMcpConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg, parsed);
-    }
-
-    /// The computer bridge's longest discrete tool name must stay within
-    /// Anthropic's 64-char wire-level tool-name limit.
-    #[test]
-    fn computer_mcp_tool_name_stays_within_anthropic_64_char_limit() {
-        let wire_name = format!(
-            "mcp__{}__{}",
-            ComputerMcpConfig::SERVER_NAME,
-            "cursor_position"
-        );
         assert!(
             wire_name.len() <= 64,
             "{wire_name} ({} chars)",

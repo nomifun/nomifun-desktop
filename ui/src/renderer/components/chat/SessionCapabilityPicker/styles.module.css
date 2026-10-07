@@ -1,0 +1,432 @@
+.composerLayout {
+  --composer-tool-ink: var(--color-text-2);
+  --composer-tool-surface: color-mix(in srgb, var(--color-text-2) 10%, var(--bg-base));
+  --composer-badge-surface: color-mix(in srgb, var(--color-text-2) 16%, var(--bg-base));
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.composerMain {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 6px 5px 14px;
+}
+
+.composerMain :global(.sendbox-bottom-row) {
+  margin-top: auto;
+}
+
+.composerMain :global(.nomi-sendbox-model-btn) {
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.rail {
+  position: relative;
+  width: 36px;
+  flex: 0 0 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0 1px;
+  box-sizing: border-box;
+  border-radius: 0 21px 21px 0;
+  background: color-mix(in srgb, var(--color-fill-1) 45%, var(--bg-base));
+}
+
+.rail::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 0;
+  width: 1px;
+  background: var(--color-border-2);
+}
+
+.railButton {
+  position: relative;
+  width: 32px;
+  height: 28px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-text-2);
+  background: transparent;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.railButton::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+  border-radius: 7px;
+  pointer-events: none;
+  transition: background-color 140ms ease;
+}
+
+.railButton:hover,
+.railButton:focus-visible,
+.railButton.active {
+  color: var(--composer-tool-ink, var(--color-text-2));
+}
+
+.railButton:hover::before,
+.railButton:focus-visible::before,
+.railButton.active::before {
+  background: var(--composer-tool-surface, var(--color-fill-2));
+}
+
+.railButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.railButton:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 0;
+}
+
+.railButton :global(.i-icon),
+.panel :global(.i-icon) {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  line-height: 0;
+}
+
+.railButton :global(.i-icon) > svg,
+.panel :global(.i-icon) > svg {
+  display: block;
+}
+
+.badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  border-radius: 999px;
+  color: var(--color-text-1);
+  background: var(--composer-badge-surface, var(--color-fill-2));
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.statusDot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--composer-tool-ink);
+  box-shadow: 0 0 0 2px var(--bg-base);
+  pointer-events: none;
+}
+
+.panel {
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  width: min(300px, calc(100vw - 24px));
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  color: var(--color-text-1);
+  background: var(--bg-base);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-text-1) 12%, transparent);
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  box-sizing: border-box;
+}
+
+.header h3,
+.header p {
+  margin: 0;
+}
+
+.header h3 {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 21px;
+}
+
+.header p {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.list {
+  min-height: 0;
+  max-height: 248px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 7px 4px;
+}
+
+.row {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--color-fill-1);
+}
+
+.rowDisabled {
+  cursor: not-allowed;
+}
+
+.checkboxCell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+/* Remove Arco's inline-baseline offset; center the mask against both text lines. */
+.checkboxCell :global(.arco-checkbox) {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  line-height: 0;
+}
+
+.checkboxCell :global(.arco-checkbox-mask-wrapper) {
+  top: 0;
+  display: flex;
+  align-items: center;
+}
+
+.checkboxCell :global(.arco-checkbox-text) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.checkboxCell :global(.arco-checkbox-mask) {
+  width: 12px;
+  height: 12px;
+  border-width: 1px;
+}
+
+.checkboxCell :global(.arco-checkbox-mask-icon) {
+  width: 8px;
+}
+
+.checkboxCell :global(.arco-checkbox-icon-hover)::before {
+  width: 22px;
+  height: 22px;
+}
+
+.copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+}
+
+.copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.copy small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.descriptionTooltip {
+  max-width: min(320px, calc(100vw - 24px));
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* Keep the hit area while reducing the painted circle. Scoped to this composer. */
+.composerLayout .composerMain :global(button.arco-btn[data-composer-action]) {
+  --button-primary-bg: transparent;
+  --button-primary-border: transparent;
+  --button-primary-text: rgb(var(--primary-6));
+  --button-primary-disabled-bg: transparent;
+  --button-primary-disabled-border: transparent;
+  --button-primary-disabled-text: var(--color-text-4);
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--composer-tool-ink) !important;
+}
+
+.composerMain :global([data-composer-action])::before {
+  content: '';
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: var(--composer-tool-surface);
+  pointer-events: none;
+}
+
+.composerMain :global([data-composer-action]:not(:disabled):hover)::before {
+  background: var(--composer-badge-surface);
+}
+
+.composerMain :global([data-composer-action='send']:not(:disabled)) {
+  color: rgb(var(--primary-6)) !important;
+}
+
+.composerMain :global([data-composer-action='send']:disabled) {
+  color: var(--color-text-4) !important;
+}
+
+.composerMain :global([data-composer-action] .arco-btn-icon),
+.composerMain :global([data-composer-action] .i-icon) {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.composerMain :global([data-composer-action] svg) {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.composerMain :global([data-composer-action='attach'] .i-icon svg path) {
+  stroke-width: 2.7;
+  stroke: currentColor;
+}
+
+.status {
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.status.available {
+  color: rgb(var(--success-6));
+}
+
+.status.error {
+  color: rgb(var(--danger-6));
+}
+
+.status.disabled {
+  color: var(--color-text-4);
+}
+
+.feedback {
+  min-height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 10px 3px 14px;
+  border-top: 1px solid var(--color-border-2);
+  color: var(--color-text-3);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.footer :global(.arco-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .railButton,
+  .railButton::before {
+    transition: none;
+  }
+}

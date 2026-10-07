@@ -15,6 +15,7 @@ use tokio::time::{Duration, interval};
 
 use crate::audio::OpusStreamEncoder;
 use crate::link::{AcceptedLink, Frame, RobotLinkSink};
+use crate::lifecycle::{OwnedTask, OwnedTasks, TaskScope};
 use crate::pipeline::{
     DownlinkPacer, SentenceSplitter, UplinkOutcome, UplinkPipeline, encode_for_downlink,
     sanitize_for_display, sanitize_for_speech,
@@ -24,7 +25,7 @@ use crate::protocol::{
     serialize_server_message,
 };
 use crate::registry::RobotRegistry;
-use crate::services::{CompanionTurnDispatcher, SpeechContext, SpeechServices, TurnEvent};
+use crate::services::{CompanionTurnDispatcher, RobotTurnRequest, SpeechContext, SpeechServices, TurnEvent};
 use crate::status::{RobotPhase, RobotStatusRegistry};
 use crate::vad::build_engine;
 
@@ -43,7 +44,8 @@ pub struct SessionDeps {
     pub status: Arc<RobotStatusRegistry>,
     pub speech: Arc<dyn SpeechServices>,
     pub dispatcher: Arc<dyn CompanionTurnDispatcher>,
-    /// Where discovered device tools are published for the MCP proxy.
+    /// Where discovered device tools are published for the canonical Robot
+    /// Action owner.
     pub tools: Arc<crate::tool_registry::RobotToolRegistry>,
 }
 
@@ -91,7 +93,6 @@ pub struct TurnFailure {
 #[derive(Debug, Clone)]
 pub struct TurnOutcome {
     pub failed: Option<TurnFailure>,
-    pub used_fallback: bool,
 }
 
 /// A short line the DEVICE can display when the voice link cannot do its job,
@@ -256,7 +257,6 @@ async fn drive_turn(
     writer: Writer,
     session_id: String,
     generation: u64,
-    used_fallback: bool,
 ) -> TurnOutcome {
     let mut splitter = SentenceSplitter::default();
     let mut encoder = match OpusStreamEncoder::new_downlink() {
@@ -267,7 +267,6 @@ async fn drive_turn(
                     message: error.to_string(),
                     provider_fault: false,
                 }),
-                used_fallback,
             };
         }
     };
@@ -352,7 +351,6 @@ async fn drive_turn(
     }
     TurnOutcome {
         failed: failure,
-        used_fallback,
     }
 }
 
@@ -391,35 +389,56 @@ async fn start_turn(
     deps: &SessionDeps,
     pacer: &Arc<DownlinkPacer>,
     writer: &Writer,
-    turn_tx: &mpsc::Sender<TurnOutcome>,
-    turn_task: &mut Option<tokio::task::JoinHandle<()>>,
+    turn_tx: &mpsc::Sender<(String, TurnOutcome)>,
+    turn_task: &mut Option<OwnedTask>,
+    active_request: &mut Option<RobotTurnRequest>,
     robot_id: &str,
     companion_id: &str,
     conversation_id: &str,
     session_id: &str,
     text: &str,
-    use_fallback: bool,
+    tasks: &TaskScope,
+    stopped: &tokio::sync::watch::Receiver<bool>,
+    cleanup_errors: &mut Vec<String>,
 ) {
+    if *stopped.borrow() { return; }
+    let request = RobotTurnRequest {
+        robot_id: robot_id.to_owned(), companion_id: companion_id.to_owned(),
+        conversation_id: conversation_id.to_owned(), connection_id: session_id.to_owned(),
+        request_id: uuid::Uuid::now_v7().to_string(), text: text.to_owned(),
+    };
+    let request_id = request.request_id.clone();
+    *active_request = Some(request.clone());
     let events = match deps
         .dispatcher
-        .dispatch(conversation_id, text, use_fallback)
+        .dispatch(request)
         .await
     {
         Ok(rx) => rx,
         Err(error) => {
             tracing::error!(%robot_id, %error, "robot: dispatch failed");
             let _ = turn_tx
-                .send(TurnOutcome {
+                .send((request_id, TurnOutcome {
                     failed: Some(TurnFailure {
                         message: error.to_string(),
-                        provider_fault: true,
+                        provider_fault: false,
                     }),
-                    used_fallback: use_fallback,
-                })
+                }))
                 .await;
             return;
         }
     };
+    // Dispatch may have admitted a canonical Turn before stop. Keep that
+    // future's result, then cancel the exact admitted request; dropping it or
+    // starting the speech projection would lose its ownership boundary.
+    if *stopped.borrow() {
+        if let Some(request) = active_request.take()
+            && let Err(error) = deps.dispatcher.cancel(&request).await
+        {
+            cleanup_errors.push(format!("Robot admitted turn cancellation failed: {error}"));
+        }
+        return;
+    }
     let ctx = SpeechContext {
         robot_id: robot_id.to_owned(),
         companion_id: companion_id.to_owned(),
@@ -432,100 +451,187 @@ async fn start_turn(
         session_id.to_owned(),
         turn_tx.clone(),
     );
-    *turn_task = Some(tokio::spawn(async move {
-        let outcome = drive_turn(
-            events,
-            ctx,
-            speech,
-            pacer,
-            writer,
-            session_id,
-            generation,
-            use_fallback,
-        )
-        .await;
-        let _ = turn_tx.send(outcome).await;
+    let registry = deps.registry.clone();
+    *turn_task = Some(tasks.spawn(async move {
+        let watch = async {
+            loop {
+                if !registry.connection_matches(&ctx.robot_id, &session_id).await
+                    || !registry.get(&ctx.robot_id).await.is_some_and(|record| record.companion_id.as_deref() == Some(ctx.companion_id.as_str())) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let outcome = tokio::select! {
+            outcome = drive_turn(events, ctx.clone(), speech, pacer.clone(), writer.clone(), session_id.clone(), generation) => outcome,
+            _ = watch => {
+                pacer.flush();
+                writer.send_json(&ServerMessage::TtsStop { session_id: session_id.clone() }).await;
+                TurnOutcome { failed: Some(TurnFailure { message: "robot endpoint is no longer bound".to_owned(), provider_fault: false }) }
+            }
+        };
+        let _ = turn_tx.send((request_id, outcome)).await;
     }));
 }
 
 /// Run one robot session to completion. Returns when the inbound stream ends.
 pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let tasks = Arc::new(OwnedTasks::default());
+    if let Err(error) = run_session_owned(link, deps, stopped, tasks.clone()).await {
+        tasks.record_error(error);
+    }
+    if let Err(error) = tasks.abort_and_join().await { tracing::error!(%error, "robot session stopped uncleanly"); }
+}
+
+pub(crate) async fn run_session_owned(
+    link: AcceptedLink,
+    deps: SessionDeps,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
+    owned: Arc<OwnedTasks>,
+) -> Result<(), String> {
     let AcceptedLink {
         identity,
         sink,
         mut stream,
     } = link;
     let robot_id = identity.robot_id.clone();    let (writer, writer_task) = Writer::spawn(sink);
+    let writer_task = owned.track(writer_task);
+    let tasks = TaskScope::new(owned);
+    let mut cleanup_errors = Vec::new();
 
     let mut session_id: Option<String> = None;
     let mut companion_id: Option<String> = None;
     let mut uplink: Option<UplinkPipeline> = None;
     let mut mcp: Option<Arc<crate::mcp_bridge::RobotMcpClient>> = None;
-    let mut discovery_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut discovery_task: Option<OwnedTask> = None;
     let mut conversation_id: Option<String> = None;
     let (pacer, pacer_task) = DownlinkPacer::spawn(writer.tx.clone());
+    let pacer_task = tasks.track(pacer_task);
     let pacer = Arc::new(pacer);
-    let (turn_tx, mut turn_rx) = mpsc::channel::<TurnOutcome>(4);
-    let mut turn_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut pending_text: Option<String> = None;
+    let (turn_tx, mut turn_rx) = mpsc::channel::<(String, TurnOutcome)>(4);
+    let mut turn_task: Option<OwnedTask> = None;
+    let mut active_request: Option<RobotTurnRequest> = None;
+    let mut active_playback: Option<String> = None;
+    let mut playback: Option<mpsc::Receiver<crate::registry::RobotPlaybackCommand>> = None;
+    let mut utterance_queue = std::collections::VecDeque::<String>::new();
     let mut ping = interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.tick().await; // the first tick is immediate; skip it
 
     loop {
+        if *stopped.borrow_and_update() { break; }
+        if let Some(sid) = session_id.as_deref()
+            && !deps.registry.connection_matches(&robot_id, sid).await { break; }
+        if active_request.is_none() && turn_task.is_none()
+            && let (Some(conversation), Some(sid), Some(bound)) = (
+                conversation_id.as_deref(), session_id.as_deref(), companion_id.as_deref(),
+            )
+            && let Some(text) = utterance_queue.pop_front()
+        {
+            start_turn(&deps, &pacer, &writer, &turn_tx, &mut turn_task, &mut active_request,
+                &robot_id, bound, conversation, sid, &text, &tasks, &stopped, &mut cleanup_errors).await;
+        }
         // Set by whichever branch decided the user stopped talking; handled at
         // the end of the iteration so the read loop stays one flat match.
         let mut utterance: Option<Vec<u8>> = None;
 
         tokio::select! {
+            biased;
+            changed = stopped.changed() => {
+                if changed.is_err() { cleanup_errors.push("Robot session stop channel was lost".into()); }
+                break;
+            }
+            command = async {
+                match playback.as_mut() { Some(receiver) => receiver.recv().await, None => std::future::pending().await }
+            } => {
+                let Some(command) = command else { playback = None; continue; };
+                if command.accepted.is_closed() { continue; }
+                let (Some(sid), Some(bound)) = (session_id.clone(), companion_id.clone()) else {
+                    let _ = command.accepted.send(Err("device is not connected".to_owned())); continue;
+                };
+                let record = deps.registry.get(&robot_id).await;
+                let Some(record) = record.filter(|record| record.permissions.proactive_speech
+                    && record.companion_id.as_deref() == Some(bound.as_str())) else {
+                    let _ = command.accepted.send(Err("desktop playback is not allowed".to_owned())); continue;
+                };
+                if turn_task.is_some() || active_request.is_some() {
+                    let _ = command.accepted.send(Err("device is busy".to_owned())); continue;
+                }
+                if !deps.registry.connection_matches(&robot_id, &sid).await {
+                    let _ = command.accepted.send(Err("device connection changed".to_owned())); continue;
+                }
+                let request_id = uuid::Uuid::now_v7().to_string();
+                active_playback = Some(request_id.clone());
+                let (events_tx, events) = mpsc::channel(2);
+                let _ = events_tx.try_send(TurnEvent::Text(command.text));
+                let _ = events_tx.try_send(TurnEvent::Done);
+                drop(events_tx);
+                let (speech, pacer, writer, registry, robot_id, turn_tx) = (
+                    deps.speech.clone(), pacer.clone(), writer.clone(), deps.registry.clone(), robot_id.clone(), turn_tx.clone(),
+                );
+                deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Speaking, now_ms()).await;
+                let _ = command.accepted.send(Ok(()));
+                turn_task = Some(tasks.spawn(async move {
+                    let generation = pacer.generation();
+                    let watch = async {
+                        loop {
+                            let valid = registry.get(&robot_id).await.is_some_and(|current| current.permissions.proactive_speech
+                                && current.authorization_revision == record.authorization_revision
+                                && current.companion_id.as_deref() == Some(bound.as_str()))
+                                && registry.connection_matches(&robot_id, &sid).await;
+                            if !valid { break; }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    };
+                    let outcome = tokio::select! {
+                        outcome = drive_turn(events, SpeechContext { robot_id: robot_id.clone(), companion_id: bound.clone() },
+                            speech, pacer.clone(), writer.clone(), sid.clone(), generation) => outcome,
+                        _ = watch => {
+                            pacer.flush();
+                            writer.send_json(&ServerMessage::TtsStop { session_id: sid.clone() }).await;
+                            TurnOutcome { failed: Some(TurnFailure { message: "desktop playback authorization revoked".to_owned(), provider_fault: false }) }
+                        }
+                    };
+                    let _ = turn_tx.send((request_id, outcome)).await;
+                }));
+            }
             _ = ping.tick() => {
                 if let Some(sid) = &session_id {
                     writer.send_json(&ServerMessage::Ping { session_id: sid.clone() }).await;
                 }
             }
             outcome = turn_rx.recv() => {
-                let Some(outcome) = outcome else { continue };
-                turn_task = None;
+                let Some((request_id, outcome)) = outcome else { continue };
+                if let Some(sid) = session_id.as_deref()
+                    && !deps.registry.connection_matches(&robot_id, sid).await { break; }
+                if !active_request.as_ref().is_some_and(|request| request.request_id == request_id)
+                    && active_playback.as_deref() != Some(request_id.as_str()) {
+                    continue;
+                }
+                active_request = None;
+                active_playback = None;
+                if let Some(task) = turn_task.take() {
+                    if let Err(error) = task.join().await { cleanup_errors.push(error); }
+                }
                 let Some(failure) = outcome.failed else {
                     if let Some(bound) = &companion_id {
-                        deps.status.publish(&robot_id, Some(bound), RobotPhase::Idle, now_ms()).await;
+                        deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Idle, now_ms()).await;
                     }
-                    pending_text = None;
                     continue;
                 };
                 tracing::warn!(%robot_id, message = %failure.message, "robot: turn failed");
-                let retryable = failure.provider_fault && !outcome.used_fallback;
-                let has_fallback = match &companion_id {
-                    Some(bound) => deps.dispatcher.has_fallback_model(bound).await,
-                    None => false,
-                };
-                if retryable
-                    && has_fallback
-                    && let (Some(text), Some(conversation), Some(sid), Some(bound)) = (
-                        pending_text.clone(),
-                        conversation_id.clone(),
-                        session_id.clone(),
-                        companion_id.clone(),
-                    )
-                {
-                    tracing::info!(%robot_id, "robot: retrying the turn on the fallback model");
-                    start_turn(
-                        &deps, &pacer, &writer, &turn_tx, &mut turn_task,
-                        &robot_id, &bound, &conversation, &sid, &text, true,
-                    )
-                    .await;
-                    continue;
-                }
                 if let Some(sid) = &session_id {
                     report_turn_failure(&writer, sid).await;
                 }
-                pending_text = None;
                 if let Some(bound) = &companion_id {
-                    deps.status.publish(&robot_id, Some(bound), RobotPhase::Idle, now_ms()).await;
+                    deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Idle, now_ms()).await;
                 }
             }
             frame = stream.next() => {
                 let Some(frame) = frame else { break };
                 let Ok(frame) = frame else { break };
+                if let Some(sid) = session_id.as_deref()
+                    && !deps.registry.connection_matches(&robot_id, sid).await { break; }
                 match frame {
                     Frame::Binary(_) if session_id.is_none() => {
                         // Wake-word audio can arrive before `listen start`; before
@@ -562,9 +668,13 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     mcp = hello.mcp,
                                     "robot: session established"
                                 );
+                                if deps.registry.connect(&robot_id, &bound, &sid).await.is_err() {
+                                    break;
+                                }
+                                playback = deps.registry.open_playback(&robot_id, &sid).await.ok();
                                 writer.send_json(&ServerMessage::Hello { session_id: sid.clone() }).await;
                                 deps.status
-                                    .publish(&robot_id, Some(&bound), RobotPhase::Idle, now_ms())
+                                    .publish_for_connection(&deps.registry, &robot_id, Some(&sid), Some(&bound), RobotPhase::Idle, now_ms())
                                     .await;
                                 let tuning = deps.dispatcher.vad_tuning(&bound).await;
                                 // The profile picks the engine; `build_engine`
@@ -582,7 +692,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                 uplink = UplinkPipeline::new(engine).ok();
                                 conversation_id = deps
                                     .dispatcher
-                                    .ensure_thread(&robot_id, &bound)
+                                    .ensure_companion_session(&bound)
                                     .await
                                     .inspect_err(|error| {
                                         tracing::error!(%robot_id, %error, "robot: could not open a companion thread");
@@ -598,7 +708,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     let device_token = identity.device_token.clone();
                                     let discovering = robot_id.clone();
                                     let tool_registry = deps.tools.clone();
-                                    discovery_task = Some(tokio::spawn(async move {
+                                    discovery_task = Some(tasks.spawn(async move {
                                         let url = vision_base
                                             .map(|base| format!("{base}{}", crate::endpoint::VISION_PATH));
                                         if let Err(error) =
@@ -617,7 +727,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                                 );
                                                 // Publishing here is what makes the
                                                 // tools reachable from the model, via
-                                                // the loopback MCP proxy.
+                                                // the canonical Robot Action owner.
                                                 tool_registry
                                                     .attach(&discovering, client.clone(), tools)
                                                     .await;
@@ -636,7 +746,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                         pipeline.begin(mode.unwrap_or(ListeningMode::Auto));
                                         if let Some(bound) = &companion_id {
                                             deps.status
-                                                .publish(&robot_id, Some(bound), RobotPhase::Listening, now_ms())
+                                                .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Listening, now_ms())
                                                 .await;
                                         }
                                     }
@@ -654,22 +764,26 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                 // Order matters: stop our own queue first, because
                                 // the device will play anything we hand over.
                                 pacer.flush();
+                                active_playback = None;
                                 if let Some(task) = turn_task.take() {
                                     task.abort();
+                                    if let Err(error) = task.join().await { cleanup_errors.push(error); }
                                 }
                                 if let Some(pipeline) = uplink.as_mut() {
                                     pipeline.abort();
                                 }
-                                if let Some(conversation) = &conversation_id
-                                    && let Err(error) = deps.dispatcher.cancel(conversation).await
+                                utterance_queue.clear();
+                                if let Some(request) = active_request.take()
+                                    && let Err(error) = deps.dispatcher.cancel(&request).await
                                 {
                                     tracing::warn!(%robot_id, %error, "robot: turn cancel failed");
+                                    cleanup_errors.push(format!("Robot turn cancellation failed: {error}"));
                                 }
                                 if let Some(sid) = &session_id {
                                     writer.send_json(&ServerMessage::TtsStop { session_id: sid.clone() }).await;
                                 }
                                 if let Some(bound) = &companion_id {
-                                    deps.status.publish(&robot_id, Some(bound), RobotPhase::Idle, now_ms()).await;
+                                    deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Idle, now_ms()).await;
                                 }
                             }
                             DeviceMessage::Goodbye => {
@@ -691,7 +805,18 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
         }
 
         if let Some(wav) = utterance.take() {
-            let (Some(sid), Some(bound), Some(conversation)) = (
+            if conversation_id.is_none() && let Some(bound) = companion_id.as_deref() {
+                conversation_id = deps.dispatcher.ensure_companion_session(bound).await.ok();
+            }
+            if conversation_id.is_none() {
+                if let Some(sid) = session_id.as_deref() {
+                    if deps.registry.connection_matches(&robot_id, sid).await {
+                        show_voice_notice(&writer, sid, "请先在伙伴设置中配置对话模型").await;
+                    }
+                }
+                continue;
+            }
+            let (Some(sid), Some(bound), Some(_conversation)) = (
                 session_id.clone(),
                 companion_id.clone(),
                 conversation_id.clone(),
@@ -702,21 +827,25 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                 robot_id: robot_id.clone(),
                 companion_id: bound.clone(),
             };
-            let transcript = match deps.speech.transcribe(&ctx, wav).await {
-                Ok(text) => text,
+            let transcript = match transcribe_until_stopped(deps.speech.as_ref(), &ctx, wav, &mut stopped).await {
+                Ok(Some(text)) => text,
+                Ok(None) => break,
                 Err(error) => {
                     tracing::warn!(%robot_id, %error, "robot: ASR failed");
+                    if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
                     // Do not vanish: put a short notice on the device screen so a
                     // missing/broken ASR model reads as a problem, not as a mute
                     // robot. A genuinely silent round returns Ok("") and still
                     // idles quietly in the branch below.
                     show_voice_notice(&writer, &sid, &asr_notice_for(&error)).await;
                     deps.status
-                        .publish(&robot_id, Some(&bound), RobotPhase::Idle, now_ms())
+                        .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Idle, now_ms())
                         .await;
                     continue;
                 }
             };
+            if *stopped.borrow() { break; }
+            if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
             if transcript.trim().is_empty() {
                 // An empty round: hand the device straight back to listening
                 // without spending a model turn on noise. This is the normal
@@ -736,7 +865,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                     })
                     .await;
                 deps.status
-                    .publish(&robot_id, Some(&bound), RobotPhase::Idle, now_ms())
+                    .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Idle, now_ms())
                     .await;
                 continue;
             }
@@ -747,23 +876,13 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                 })
                 .await;
             deps.status
-                .publish(&robot_id, Some(&bound), RobotPhase::Speaking, now_ms())
+                .publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Speaking, now_ms())
                 .await;
-            pending_text = Some(transcript.clone());
-            start_turn(
-                &deps,
-                &pacer,
-                &writer,
-                &turn_tx,
-                &mut turn_task,
-                &robot_id,
-                &bound,
-                &conversation,
-                &sid,
-                &transcript,
-                false,
-            )
-            .await;
+            if utterance_queue.len() < 16 {
+                utterance_queue.push_back(transcript);
+            } else {
+                show_voice_notice(&writer, &sid, "等待处理的消息过多，请稍后再说").await;
+            }
         }
     }
 
@@ -773,22 +892,54 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
     // close and finish.
     if let Some(task) = turn_task.take() {
         task.abort();
-        let _ = task.await;
+        if let Err(error) = task.join().await { cleanup_errors.push(error); }
+    }
+    if *stopped.borrow() {
+        if let Some(request) = active_request.take()
+            && let Err(error) = deps.dispatcher.cancel(&request).await
+        {
+            cleanup_errors.push(format!("Robot active turn cancellation failed: {error}"));
+        }
     }
     if let Some(task) = discovery_task.take() {
         task.abort();
-        let _ = task.await;
+        if let Err(error) = task.join().await { cleanup_errors.push(error); }
     }
-    deps.tools.detach(&robot_id).await;
+    if let Some(sid) = session_id.as_deref() {
+        deps.registry.disconnect(&robot_id, sid).await;
+        deps.tools.detach_connection(&robot_id, sid).await;
+    }
     drop(mcp);
     pacer.flush();
     pacer_task.abort();
-    let _ = pacer_task.await;
+    if let Err(error) = pacer_task.join().await { cleanup_errors.push(error); }
+    // Includes old/replaced turns and discovery tasks, not only the latest.
+    if let Err(error) = tasks.abort_and_join().await { cleanup_errors.push(error); }
     drop(pacer);
-    deps.status.mark_offline(&robot_id, now_ms()).await;
+    deps.status.mark_offline_if_disconnected(&deps.registry, &robot_id, now_ms()).await;
     drop(writer);
-    let _ = writer_task.await;
+    if let Err(error) = writer_task.join().await { cleanup_errors.push(error); }
     tracing::info!(%robot_id, "robot: session ended");
+    if cleanup_errors.is_empty() { Ok(()) } else { Err(cleanup_errors.join("; ")) }
+}
+
+async fn transcribe_until_stopped(
+    speech: &dyn SpeechServices,
+    context: &SpeechContext,
+    wav: Vec<u8>,
+    stopped: &mut tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<Option<String>> {
+    if *stopped.borrow() { return Ok(None); }
+    tokio::select! {
+        biased;
+        result = async {
+            loop {
+                if *stopped.borrow_and_update() { return Ok::<(), anyhow::Error>(()); }
+                stopped.changed().await.map_err(|_| anyhow::anyhow!("Robot ASR stop channel was lost"))?;
+            }
+        } => { result?; Ok(None) }
+        result = speech.transcribe(context, wav) => result.map(Some),
+    }
 }
 
 #[cfg(test)]
@@ -803,6 +954,96 @@ mod tests {
     use crate::services::mock::{MockDispatcher, MockSpeech};
     use nomifun_api_types::WebSocketMessage;
     use nomifun_realtime::UserEventSink;
+
+    struct HeldTranscribe {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl SpeechServices for HeldTranscribe {
+        async fn transcribe(&self, _: &SpeechContext, _: Vec<u8>) -> anyhow::Result<String> {
+            struct Guard(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Guard { fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Release); } }
+            let _guard = Guard(self.dropped.clone());
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+        async fn synthesize(&self, _: &SpeechContext, _: &str) -> anyhow::Result<crate::audio::AudioBuffer> { anyhow::bail!("unused fixture") }
+        async fn explain_image(&self, _: &SpeechContext, _: Vec<u8>, _: &str) -> anyhow::Result<String> { anyhow::bail!("unused fixture") }
+    }
+
+    #[tokio::test]
+    async fn host_stop_cancels_held_asr_without_late_transcript() {
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let speech = HeldTranscribe { entered: entered.clone(), dropped: dropped.clone() };
+        let task = tokio::spawn(async move {
+            transcribe_until_stopped(&speech, &SpeechContext { robot_id: "fixture".into(), companion_id: "fixture".into() }, vec![], &mut stopped).await
+        });
+        entered.notified().await;
+        stop.send_replace(true);
+        assert_eq!(task.await.unwrap().unwrap(), None);
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    struct HeldDispatch {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        accepted: Mutex<Vec<RobotTurnRequest>>,
+        cancelled: Mutex<Vec<RobotTurnRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl CompanionTurnDispatcher for HeldDispatch {
+        async fn ensure_companion_session(&self, _: &str) -> anyhow::Result<String> { Ok("conversation".into()) }
+        async fn dispatch(&self, request: RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
+            self.accepted.lock().unwrap().push(request);
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            Ok(mpsc::channel(1).1)
+        }
+        async fn cancel(&self, request: &RobotTurnRequest) -> anyhow::Result<()> { self.cancelled.lock().unwrap().push(request.clone()); Ok(()) }
+        async fn vad_tuning(&self, _: &str) -> crate::vad::VadTuning { Default::default() }
+        async fn vad_engine(&self, _: &str) -> String { crate::vad::DEFAULT_VAD_ENGINE.into() }
+    }
+
+    #[tokio::test]
+    async fn host_stop_joins_dispatch_result_then_cancels_exact_request_without_projection() {
+        let (mut harness, _link, _tx, written, _directory) = harness(true).await;
+        let dispatcher = Arc::new(HeldDispatch {
+            entered: Arc::new(tokio::sync::Notify::new()), release: Arc::new(tokio::sync::Semaphore::new(0)),
+            accepted: Default::default(), cancelled: Default::default(),
+        });
+        harness.deps.dispatcher = dispatcher.clone();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let owned = Arc::new(OwnedTasks::default());
+        let cleanup = owned.clone();
+        let task = tokio::spawn(async move {
+            let tasks = TaskScope::new(owned.clone());
+            let (writer, writer_task) = Writer::spawn(Box::new(RecordingSink(written)));
+            owned.track(writer_task);
+            let (pacer, pacer_task) = DownlinkPacer::spawn(writer.tx.clone());
+            tasks.track(pacer_task);
+            let (turn_tx, _turn_rx) = mpsc::channel(1);
+            let mut active = None; let mut turn = None; let mut errors = Vec::new();
+            start_turn(&harness.deps, &Arc::new(pacer), &writer, &turn_tx, &mut turn, &mut active,
+                "robot", "companion", "conversation", "connection", "utterance", &tasks, &stopped, &mut errors).await;
+            assert!(turn.is_none() && active.is_none());
+            assert!(errors.is_empty());
+        });
+        dispatcher.entered.notified().await;
+        stop.send_replace(true);
+        assert!(!task.is_finished(), "submitted dispatch is still owned until it returns");
+        dispatcher.release.add_permits(1);
+        task.await.unwrap();
+        let accepted = dispatcher.accepted.lock().unwrap();
+        let cancelled = dispatcher.cancelled.lock().unwrap();
+        assert_eq!(accepted.len(), 1); assert_eq!(cancelled.len(), 1);
+        assert_eq!(accepted[0].request_id, cancelled[0].request_id);
+        assert_eq!(accepted[0].connection_id, cancelled[0].connection_id);
+        drop(accepted); drop(cancelled);
+        cleanup.abort_and_join().await.unwrap();
+    }
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
@@ -928,6 +1169,38 @@ mod tests {
                 Frame::Binary(_) => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn desktop_playback_uses_existing_text_and_stops_when_permission_is_revoked() {
+        let (deps, link, tx, written, _dir) = harness(true).await;
+        let registry = deps.deps.registry.clone();
+        let robot_id = "aa:bb:cc:dd:ee:ff";
+        let mut permissions = crate::registry::RobotPermissions::default();
+        permissions.proactive_speech = true;
+        registry.set_permissions(robot_id, permissions).await.unwrap();
+        let task = tokio::spawn(run_session(link, deps.deps.clone()));
+        tx.send(Frame::Text(r#"{"type":"hello","version":1,"transport":"websocket"}"#.to_owned())).await.unwrap();
+        let connection = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(connection) = registry.current_connection(robot_id).await { break connection; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        registry.speak(robot_id, &connection, "已有回复。".repeat(100)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while deps.speech.synthesized_text().is_empty() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        registry.set_permissions(robot_id, crate::registry::RobotPermissions::default()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !texts(&written).iter().any(|event| event["type"] == "tts" && event["state"] == "stop") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(deps.dispatcher.dispatched_text().is_empty(), "playback must never start a model turn");
+        assert!(deps.dispatcher.cancelled().is_empty(), "stopping playback must not cancel conversation work");
+        drop(tx);
+        task.await.unwrap();
     }
 
     /// Poll until a written frame satisfies `predicate`, or fail loudly.
@@ -1519,7 +1792,11 @@ mod tests {
         .unwrap();
         send_audio(&tx, 300, true).await;
         send_audio(&tx, 900, false).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while dispatcher.dispatched_text().is_empty() || speech.synthesized_text().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the turn must actually start before testing its cancellation");
 
         tx.send(Frame::Text(
             r#"{"session_id":"s","type":"abort","reason":"wake_word_detected"}"#.into(),
@@ -1550,54 +1827,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_provider_failure_retries_once_on_the_fallback_model() {
-        let (deps, link, tx, written, _dir) = harness(true).await;
-        let speech = deps.speech_mock();
-        let dispatcher = deps.dispatcher_mock();
-        speech.push_transcript("你好");
-        dispatcher.set_has_fallback(true);
-        dispatcher.script_turn(vec![TurnEvent::Failed {
-            message: "upstream 503".into(),
-            provider_fault: true,
-        }]);
-        dispatcher.script_turn(vec![TurnEvent::Text("我在。".into()), TurnEvent::Done]);
-
-        let task = tokio::spawn(run_session(link, deps.deps.clone()));
-        tx.send(Frame::Text(
-            r#"{"type":"hello","version":1,"transport":"websocket"}"#.into(),
-        ))
-        .await
-        .unwrap();
-        tx.send(Frame::Text(
-            r#"{"session_id":"s","type":"listen","state":"start","mode":"auto"}"#.into(),
-        ))
-        .await
-        .unwrap();
-        send_audio(&tx, 300, true).await;
-        send_audio(&tx, 900, false).await;
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        drop(tx);
-        task.await.unwrap();
-
-        assert_eq!(
-            dispatcher.fallback_dispatches(),
-            1,
-            "exactly one fallback retry"
-        );
-        assert_eq!(
-            dispatcher.dispatched_text().len(),
-            2,
-            "the same text, twice"
-        );
-        let sent = texts(&written);
-        assert!(
-            sent.iter().any(
-                |m| m["type"] == "tts" && m["state"] == "sentence_start" && m["text"] == "我在。"
-            ),
-            "the fallback reply reaches the device"
-        );
-    }
 
     #[tokio::test]
     async fn a_failure_with_no_fallback_reports_sadly_and_stops() {
@@ -1605,7 +1834,6 @@ mod tests {
         let speech = deps.speech_mock();
         let dispatcher = deps.dispatcher_mock();
         speech.push_transcript("你好");
-        dispatcher.set_has_fallback(false);
         dispatcher.script_turn(vec![TurnEvent::Failed {
             message: "upstream 503".into(),
             provider_fault: true,
@@ -1628,7 +1856,7 @@ mod tests {
         drop(tx);
         task.await.unwrap();
 
-        assert_eq!(dispatcher.fallback_dispatches(), 0);
+        assert_eq!(dispatcher.dispatched_text().len(), 1, "device failures must not replay user input");
         let sent = texts(&written);
         assert!(
             sent.iter().any(|m| m["type"] == "llm" && m["emotion"] == "sad"),

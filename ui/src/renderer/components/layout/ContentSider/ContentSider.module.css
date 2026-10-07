@@ -1,3 +1,9 @@
+.surface {
+  background: var(--bg-2);
+  /* A recessed surface with a soft edge, shared by content-area side panels. */
+  box-shadow: 6px 0 14px -8px rgba(0, 0, 0, 0.14);
+}
+
 /* Overlay-style scroll area: scrollbar takes zero layout width so the list
    aligns flush with the panel edge. Mirrors Sider.module.css / macOS native
    overlay scrollbars. */

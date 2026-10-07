@@ -25,6 +25,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nomifun_common::{AppError, KnowledgeBaseId, TimestampMs, now_ms, zip_safe};
 use serde::{Deserialize, Serialize};
@@ -78,7 +79,7 @@ struct ExportMeta {
 // ── Export ──────────────────────────────────────────────────────────
 
 /// Package the base `kb_id` into a zip at `dest_path` (written atomically
-/// via `{dest}.tmp` + rename).
+/// via a securely-created same-directory tempfile).
 pub async fn export_base(
     service: &KnowledgeService,
     kb_id: &str,
@@ -113,38 +114,31 @@ pub async fn export_base(
 }
 
 /// Blocking core of the export: walk `root` for `.md` files and write the
-/// package to `dest` via a `.tmp` sibling. Returns `(file_count, total_bytes)`.
+/// package to `dest` via a unique tempfile. Returns `(file_count, total_bytes)`.
 fn build_zip(root: &Path, meta: &ExportMeta, dest: &Path) -> Result<(u64, u64), AppError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| AppError::Internal(format!("failed to create export dir: {e}")))?;
     }
-    let mut tmp_name = dest.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-
-    let counts = match write_zip_to(root, meta, &tmp) {
-        Ok(counts) => counts,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AppError::Internal(format!("failed to finalize export file: {e}")));
-    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".nomifun-export.")
+        .tempfile_in(dest.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|e| AppError::Internal(format!("failed to create export tempfile: {e}")))?;
+    let counts = write_zip_to(root, meta, tmp.as_file_mut())?;
+    tmp.as_file().sync_all()
+        .map_err(|e| AppError::Internal(format!("failed to sync export file: {e}")))?;
+    tmp.persist(dest)
+        .map_err(|e| AppError::Internal(format!("failed to finalize export file: {}", e.error)))?;
     Ok(counts)
 }
 
-fn write_zip_to(root: &Path, meta: &ExportMeta, tmp: &Path) -> Result<(u64, u64), AppError> {
+fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Result<(u64, u64), AppError> {
     let io_err = |what: &str| {
         let what = what.to_owned();
         move |e: std::io::Error| AppError::Internal(format!("{what}: {e}"))
     };
     let zip_err = |e: zip::result::ZipError| AppError::Internal(format!("failed to write zip: {e}"));
 
-    let file = std::fs::File::create(tmp).map_err(io_err("failed to create export file"))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
 
@@ -163,28 +157,28 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, tmp: &Path) -> Result<(u64, u64)
         .map_err(io_err("failed to write meta"))?;
 
     // Sorted relative paths → deterministic packages (friendlier diffing).
-    let mut rels: Vec<String> = walkdir::WalkDir::new(root)
+    let mut rels = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_entry(|entry| !crate::service::is_machinery_dir(entry))
-        .flatten()
-        .filter(|e| e.file_type().is_file() && is_md(e.path()))
-        .filter_map(|e| {
-            e.path()
-                .strip_prefix(root)
-                .ok()
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        })
-        .collect();
+    {
+        let entry = entry.map_err(|e| AppError::Internal(format!("failed to walk export files: {e}")))?;
+        if entry.file_type().is_file() && is_md(entry.path()) {
+            let rel = entry.path().strip_prefix(root)
+                .map_err(|e| AppError::Internal(format!("failed to relativize export file: {e}")))?;
+            rels.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
     rels.sort();
 
     let mut file_count = 0u64;
     let mut total_bytes = 0u64;
     for rel in rels {
-        let bytes = std::fs::read(root.join(&rel)).map_err(io_err(&format!("failed to read {rel}")))?;
+        let mut input = std::fs::File::open(root.join(&rel)).map_err(io_err(&format!("failed to read {rel}")))?;
         zip.start_file(format!("files/{rel}"), options).map_err(zip_err)?;
-        zip.write_all(&bytes).map_err(io_err(&format!("failed to package {rel}")))?;
+        total_bytes += std::io::copy(&mut input, &mut zip)
+            .map_err(io_err(&format!("failed to package {rel}")))?;
         file_count += 1;
-        total_bytes += bytes.len() as u64;
     }
 
     zip.finish().map_err(zip_err)?;
@@ -209,25 +203,22 @@ pub async fn import_base(service: &KnowledgeService, src_path: &Path) -> Result<
     // Extraction temp lives next to the managed bases (same volume → the
     // final move is a cheap rename), namespaced to avoid collisions.
     let tmp_root = service.data_dir().join(KB_MANAGED_REL_DIR).join(".import-tmp");
-    let extract_dir = tmp_root.join(format!("kb-{}-{}", std::process::id(), now_ms()));
-    tokio::fs::create_dir_all(&extract_dir)
-        .await
+    tokio::fs::create_dir_all(&tmp_root).await
+        .map_err(|e| AppError::Internal(format!("failed to create import temp root: {e}")))?;
+    let extract_dir = tempfile::Builder::new().prefix("kb-").tempdir_in(&tmp_root)
         .map_err(|e| AppError::Internal(format!("failed to create import temp dir: {e}")))?;
-
-    let result = import_extracted(service, src_path, &extract_dir).await;
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let _ = tokio::fs::remove_dir(&tmp_root).await; // best-effort, only when empty
-    result
+    import_extracted(service, src_path, Arc::new(extract_dir)).await
 }
 
 async fn import_extracted(
     service: &KnowledgeService,
     src_path: &Path,
-    extract_dir: &Path,
+    extract_dir: Arc<tempfile::TempDir>,
 ) -> Result<ImportSummary, AppError> {
     let src = src_path.to_path_buf();
-    let dest = extract_dir.to_path_buf();
-    let meta = tokio::task::spawn_blocking(move || extract_zip_validated(&src, &dest))
+    // Blocking work keeps the directory alive if its async caller is cancelled.
+    let dest = Arc::clone(&extract_dir);
+    let meta = tokio::task::spawn_blocking(move || extract_zip_validated(&src, dest.path()))
         .await
         .map_err(|e| AppError::Internal(format!("import task join error: {e}")))??;
 
@@ -248,9 +239,10 @@ async fn import_extracted(
     // source — `extra` starts empty.)
     let info = service.create_base(&final_name, &meta.description, None, None).await?;
 
-    let files_src = extract_dir.join("files");
     let files_dest = PathBuf::from(&info.root_path);
-    let moved = tokio::task::spawn_blocking(move || move_file_tree(&files_src, &files_dest))
+    let moved = tokio::task::spawn_blocking(move || {
+        move_file_tree(&extract_dir.path().join("files"), &files_dest)
+    })
         .await
         .map_err(|e| AppError::Internal(format!("import move task join error: {e}")));
     let file_count = match moved {
@@ -283,12 +275,19 @@ async fn import_extracted(
 /// Returns the parsed meta after the manifest passed format/kind/version
 /// checks.
 fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<ExportMeta, AppError> {
+    extract_zip_with_budget(archive_path, destination, zip_safe::ZipExtractionBudget::default())
+}
+
+fn extract_zip_with_budget(
+    archive_path: &Path,
+    destination: &Path,
+    mut budget: zip_safe::ZipExtractionBudget,
+) -> Result<ExportMeta, AppError> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| AppError::BadRequest(format!("failed to open import file: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|_| AppError::BadRequest("不是知识库导出包".into()))?;
 
-    let mut budget = zip_safe::ZipExtractionBudget::default();
     budget
         .check_entry_count(archive.len())
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -330,11 +329,10 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Expo
         }
         let mut output = std::fs::File::create(&output_path)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        let written = std::io::copy(&mut entry, &mut output)
-            .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        budget
-            .record_written(written)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        budget.copy_entry(&mut entry, &mut output).map_err(|error| match error {
+            zip_safe::ZipCopyError::Budget(error) => AppError::BadRequest(error.to_string()),
+            zip_safe::ZipCopyError::Io(error) => AppError::Internal(format!("failed to extract file: {error}")),
+        })?;
     }
 
     let manifest_bytes = std::fs::read(destination.join("manifest.json"))
@@ -433,6 +431,43 @@ fn dedup_name(existing: &HashSet<String>, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::make_service;
+
+    #[test]
+    fn export_does_not_overwrite_a_preexisting_tmp_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("note.md"), "note").unwrap();
+        let dest = dir.path().join("bundle.zip");
+        let sibling = dir.path().join("bundle.zip.tmp");
+        std::fs::write(&sibling, "unrelated work").unwrap();
+        assert_eq!(build_zip(&source, &ExportMeta::default(), &dest).unwrap(), (1, 4));
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated work");
+        assert!(zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn export_walk_error_preserves_the_previous_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bundle.zip");
+        std::fs::write(&dest, "previous package").unwrap();
+        assert!(build_zip(&dir.path().join("missing"), &ExportMeta::default(), &dest).is_err());
+        assert_eq!(std::fs::read(dest).unwrap(), b"previous package");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn extraction_budget_stops_writes_before_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("large.zip");
+        write_test_zip(&archive, &[("files/big.md", &"x".repeat(64 * 1024))]);
+        let destination = tmp.path().join("output");
+        let error = extract_zip_with_budget(
+            &archive, &destination, zip_safe::ZipExtractionBudget::new(4096, 4),
+        ).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(ref message) if message.contains("decompression bomb")));
+        assert!(std::fs::metadata(destination.join("files/big.md")).unwrap().len() <= 4096);
+    }
 
     fn write_test_zip(path: &Path, entries: &[(&str, &str)]) {
         let file = std::fs::File::create(path).unwrap();
@@ -571,6 +606,63 @@ mod tests {
         let err = import_base(&service, &zip_path).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert!(service.list_bases().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_import_keeps_queued_extraction_alive_until_cleanup() {
+        use futures_util::FutureExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(1).build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let service = make_service(&dir.path().join("data"));
+            let archive = dir.path().join("input.zip");
+            write_test_zip(&archive, &[("manifest.json", &manifest_json(1, EXPORT_KIND))]);
+            let extraction = Arc::new(tempfile::tempdir_in(dir.path()).unwrap());
+            let output = extraction.path().to_owned();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv(); // Dropping the sender also releases on test failure.
+            });
+            started_rx.await.unwrap();
+            let mut import = Box::pin(import_extracted(&service, &archive, extraction));
+            assert!(import.as_mut().now_or_never().is_none());
+            drop(import);
+            assert!(output.exists(), "queued extraction must retain its directory");
+            drop(release_tx);
+            blocker.await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while output.exists() { tokio::task::yield_now().await; }
+            }).await.expect("completed extraction must clean up after cancellation");
+            assert!(service.list_bases().await.unwrap().is_empty());
+        });
+    }
+
+    #[tokio::test]
+    async fn concurrent_imports_keep_each_archive_in_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let archives: Vec<_> = (0..16).map(|index| {
+            let path = dir.path().join(format!("input-{index}.zip"));
+            let content = format!("document-{index}");
+            write_test_zip(&path, &[
+                ("manifest.json", &manifest_json(1, EXPORT_KIND)),
+                ("meta.json", &serde_json::json!({"name": format!("import-{index}")}).to_string()),
+                ("files/document.md", &content),
+            ]);
+            (path, content)
+        }).collect();
+        let results = futures_util::future::join_all(archives.iter().map(|(path, _)| {
+            import_base(&service, path)
+        })).await;
+        for ((_, expected), imported) in archives.iter().zip(results) {
+            let imported = imported.expect("concurrent import must not share or remove another import's files");
+            assert_eq!(service.read_file(&imported.kb_id, "document.md").await.unwrap().content, *expected);
+        }
+        let tmp_root = service.data_dir().join(KB_MANAGED_REL_DIR).join(".import-tmp");
+        assert_eq!(std::fs::read_dir(tmp_root).unwrap().count(), 0);
     }
 
     #[tokio::test]

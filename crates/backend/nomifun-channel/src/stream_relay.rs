@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::ChannelError;
 use crate::formatter::format_text_for_platform;
 use crate::message_service::{ChannelMessageService, StreamAction};
-use crate::pending_decision::{PendingDecision, PendingDecisionStore};
+use crate::pending_decision::{ChannelStopConfirmation, ChannelStopConfirmationStore};
 use crate::think_filter::{Stage, strip_reasoning};
 use crate::types::{OutgoingMessageType, ParseMode, PluginType, UnifiedOutgoingMessage};
 
@@ -65,9 +65,8 @@ pub trait ChannelSender: Send + Sync {
 pub struct ChannelStreamRelay {
     config: RelayConfig,
     sender: Arc<dyn ChannelSender>,
-    /// Shared store: a relayed decision is recorded here so the inbound
-    /// numeric reply can be mapped back to the right `call_id`/option.
-    pending: Arc<PendingDecisionStore>,
+    /// Shared store for the channel-owned remote-stop confirmation.
+    stop_confirmations: Arc<ChannelStopConfirmationStore>,
     /// Resolves workshop asset UUIDv7 ids to bytes for outbound media. `None`
     /// disables sending.
     asset_resolver: Option<Arc<dyn crate::message_service::AssetResolver>>,
@@ -101,13 +100,13 @@ impl ChannelStreamRelay {
     pub fn new(
         config: RelayConfig,
         sender: Arc<dyn ChannelSender>,
-        pending: Arc<PendingDecisionStore>,
+        stop_confirmations: Arc<ChannelStopConfirmationStore>,
         asset_resolver: Option<Arc<dyn crate::message_service::AssetResolver>>,
     ) -> Self {
         Self {
             config,
             sender,
-            pending,
+            stop_confirmations,
             asset_resolver,
         }
     }
@@ -485,12 +484,6 @@ impl ChannelStreamRelay {
                     // required tool/artifact fails. Keep every assistant chunk
                     // buffered until the authoritative successful Finish.
                     Some(StreamAction::ToolCall { .. }) => {}
-                    // A blocking decision: record it and forward a numbered
-                    // list as a new message. WeChat cannot edit, so this is a
-                    // fresh send_message either way.
-                    Some(StreamAction::Decision { call_id, prompt, options }) => {
-                        self.record_and_send_decision(call_id, prompt, options).await;
-                    }
                     // Denied remote stop: the channel owns the confirmation.
                     Some(StreamAction::StopDenied { target_conversation_id }) => {
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
@@ -649,11 +642,9 @@ impl ChannelStreamRelay {
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
-        // Whether a blocking decision was forwarded during this turn. When a
-        // decision is pending, the thinking/streaming card is deliberately left
-        // intact so the turn stays live (see `record_and_send_decision`); we
-        // must not replace it with a terminal "(no text output)" card on Finish.
-        let mut decision_forwarded = false;
+        // A pending channel-owned stop confirmation keeps the live card intact
+        // until the user answers it.
+        let mut stop_confirmation_forwarded = false;
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut artifacts = Vec::new();
@@ -768,16 +759,9 @@ impl ChannelStreamRelay {
                             .edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id, msg)
                             .await;
                     }
-                    // A blocking decision: record it and forward a numbered
-                    // list as a new message; the thinking/streaming card is
-                    // left intact and the turn stays live.
-                    Some(StreamAction::Decision { call_id, prompt, options }) => {
-                        decision_forwarded = true;
-                        self.record_and_send_decision(call_id, prompt, options).await;
-                    }
                     // Denied remote stop: the channel owns the confirmation.
                     Some(StreamAction::StopDenied { target_conversation_id }) => {
-                        decision_forwarded = true;
+                        stop_confirmation_forwarded = true;
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
                     Some(StreamAction::Finish) => {
@@ -815,7 +799,11 @@ impl ChannelStreamRelay {
                                 .await;
                             break;
                         }
-                        self.send_final_edit(&text_buffer, decision_forwarded, &thinking_msg_id)
+                        self.send_final_edit(
+                            &text_buffer,
+                            stop_confirmation_forwarded,
+                            &thinking_msg_id,
+                        )
                             .await;
                         info!(
                             plugin_id = %self.config.plugin_id,
@@ -901,16 +889,22 @@ impl ChannelStreamRelay {
     /// turn that produced only inline `<think>` reasoning counts as no-text.
     ///
     /// - With visible text: render the formatted final card.
-    /// - Without visible text but a decision was forwarded: leave the card intact
-    ///   — the decision flow owns the live UX and the turn stays interactive.
-    /// - Without visible text and no decision (tool-only / pure-thinking / empty
-    ///   completion): the agent reported a finished turn that produced no visible
+    /// - Without visible text but a stop confirmation was forwarded: leave the
+    ///   card intact while the channel-owned stop flow is interactive.
+    /// - Without visible text and no stop confirmation (tool-only /
+    ///   pure-thinking / empty completion): the agent reported a finished turn
+    ///   that produced no visible
     ///   `Text`. The placeholder must still be replaced with a terminal card,
     ///   otherwise the user is left staring at "Thinking..." forever on an
     ///   already-completed turn (the silent-empty-reply failure class). Emit a
     ///   neutral "(no text output)" final card so the action buttons are
     ///   delivered and the card is终态.
-    async fn send_final_edit(&self, text_buffer: &str, decision_forwarded: bool, msg_id: &str) {
+    async fn send_final_edit(
+        &self,
+        text_buffer: &str,
+        stop_confirmation_forwarded: bool,
+        msg_id: &str,
+    ) {
         let visible = strip_reasoning(text_buffer, Stage::Final);
         if !visible.trim().is_empty() {
             let formatted = format_text_for_platform(&visible, self.config.platform);
@@ -920,7 +914,7 @@ impl ChannelStreamRelay {
                 .sender
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
                 .await;
-        } else if !decision_forwarded {
+        } else if !stop_confirmation_forwarded {
             // Plain text — no formatter output here, so no parse mode.
             let final_msg = ChannelMessageService::build_final_message("（无文本输出）");
             let _ = self
@@ -928,30 +922,6 @@ impl ChannelStreamRelay {
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
                 .await;
         }
-    }
-
-    /// Records a blocking decision against its conversation and forwards the
-    /// numbered choice list as a new message. The streaming/thinking card is
-    /// untouched and the turn stays live until the user answers (the inbound
-    /// numeric reply resolves it via `ConversationService::confirm`).
-    async fn record_and_send_decision(
-        &self,
-        call_id: String,
-        prompt: String,
-        options: Vec<crate::types::DecisionOption>,
-    ) {
-        self.pending.put(PendingDecision {
-            conversation_id: self.config.conversation_id.clone(),
-            call_id,
-            kind: crate::pending_decision::PendingDecisionKind::AgentConfirm,
-            prompt: prompt.clone(),
-            options: options.clone(),
-        });
-        let msg = ChannelMessageService::build_decision_message(&prompt, &options);
-        let _ = self
-            .sender
-            .send_message(&self.config.plugin_id, &self.config.chat_id, msg)
-            .await;
     }
 
     /// Records the channel-owned remote-stop confirmation (batch-1 handover
@@ -962,25 +932,23 @@ impl ChannelStreamRelay {
             "确认停止会话 {target_conversation_id} 的当前任务？（远程停止需要你确认）"
         );
         let options = vec![
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "confirm-stop".to_owned(),
                 label: "确认停止".to_owned(),
             },
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "cancel".to_owned(),
                 label: "取消".to_owned(),
             },
         ];
-        self.pending.put(PendingDecision {
-            conversation_id: self.config.conversation_id.clone(),
-            call_id: format!("channel-stop:{target_conversation_id}"),
-            kind: crate::pending_decision::PendingDecisionKind::StopConversation {
+        self.stop_confirmations
+            .put(ChannelStopConfirmation::new(
+                self.config.conversation_id.clone(),
                 target_conversation_id,
-            },
-            prompt: prompt.clone(),
-            options: options.clone(),
-        });
-        let msg = ChannelMessageService::build_decision_message(&prompt, &options);
+                prompt.clone(),
+                options.clone(),
+            ));
+        let msg = ChannelMessageService::build_stop_confirmation_message(&prompt, &options);
         let _ = self
             .sender
             .send_message(&self.config.plugin_id, &self.config.chat_id, msg)
@@ -1226,7 +1194,7 @@ mod media_tests {
         use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData, ToolCallEventData, ToolCallStatus};
 
         let recorder = Arc::new(MessageRecorder::new());
-        let pending = crate::pending_decision::PendingDecisionStore::new();
+        let pending = crate::pending_decision::ChannelStopConfirmationStore::new();
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
@@ -1235,10 +1203,11 @@ mod media_tests {
         );
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);
-        tx.send(AgentStreamEvent::Text(TextEventData { content: "图来咯～".into() })).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "图来咯～".into() })).unwrap();
         // Two completed tool calls returning the SAME asset id → must dedupe to one send.
         for _ in 0..2 {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "t".into(),
                 name: "nomi_creative_studio_get_task".into(),
                 args: serde_json::Value::Null,
@@ -1275,11 +1244,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(MissingResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "missing-workshop-asset".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1331,11 +1301,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(StubResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-upload-fallback-ok".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1390,11 +1361,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(StubResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-delivery-failed".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1441,11 +1413,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-no-resolver".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1513,11 +1486,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1570,11 +1544,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "artifact-fallback-ok".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1631,11 +1606,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "artifact-delivery-failed".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1688,11 +1664,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1757,11 +1734,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-failed".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1810,11 +1788,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-partial".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1861,6 +1840,7 @@ mod media_tests {
         };
         let event = |status, artifacts| {
             AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "same-call".into(),
                 name: "mcp__reports__export".into(),
                 args: serde_json::Value::Null,
@@ -1876,7 +1856,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1907,11 +1887,12 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "orphan-call".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1952,15 +1933,15 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Weixin),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "Image generated successfully".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "Image generated successfully".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "failed-after-text".into(),
             name: "ImageGeneration".into(),
             args: serde_json::Value::Null,
@@ -1999,12 +1980,11 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "unverified partial success".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData {
@@ -2033,12 +2013,11 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Weixin),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "unverified partial success".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData {
@@ -2072,11 +2051,12 @@ mod media_tests {
         use nomifun_ai_agent::protocol::events::{FinishEventData, ToolCallEventData, ToolCallStatus};
 
         let recorder = Arc::new(MessageRecorder::new());
-        let pending = crate::pending_decision::PendingDecisionStore::new();
+        let pending = crate::pending_decision::ChannelStopConfirmationStore::new();
         let relay = ChannelStreamRelay::new(cfg(PluginType::Telegram), recorder.clone(), pending, None);
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "t".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,

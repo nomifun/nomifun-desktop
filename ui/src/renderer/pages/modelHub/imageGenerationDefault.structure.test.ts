@@ -21,13 +21,29 @@ describe('default image-generation model', () => {
         "defaultModelPreferenceKey='models.default.imageGeneration'",
       ),
     ).toBe(true);
-    expect(panel.includes("task='image_generation'")).toBe(true);
-    expect(panel.includes("useModelsForTask('image_generation')")).toBe(true);
+    expect(panel.includes("'models.default.imageGeneration': { task: 'image_generation', traits: [], technical: [] }")).toBe(true);
+    expect(panel.includes('task={spec.task}')).toBe(true);
+    expect(panel.includes('[...spec.traits]')).toBe(true);
+    expect(panel.includes('[...spec.technical]')).toBe(true);
     expect(panel.includes('disabled={noCandidates || isSavingDefault}')).toBe(
       true,
     );
+    expect(panel.includes("'settings.modelHub.creation.defaultNoModels'")).toBe(true);
+  });
+
+  test('the vision section stores an exact vision-and-tools auxiliary route', () => {
+    const keys = readSource('../../../common/config/configKeys.ts');
+    const visionSection = readSource('./VisionModelsContent.tsx');
+    const panel = readSource('./ModalityModelsPanel.tsx');
+
+    expect(keys.includes("'models.default.vision'")).toBe(true);
     expect(
-      panel.includes("t('settings.modelHub.creation.defaultNoModels')"),
+      visionSection.includes("defaultModelPreferenceKey='models.default.vision'"),
+    ).toBe(true);
+    expect(
+      panel.includes("task: 'chat'")
+        && panel.includes("traits: ['vision_input']")
+        && panel.includes("technical: ['function_calling']"),
     ).toBe(true);
   });
 

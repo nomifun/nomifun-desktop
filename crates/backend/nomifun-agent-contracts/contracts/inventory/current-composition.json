@@ -1,0 +1,54 @@
+{
+  "schema_version": "2.0.0",
+  "inventory_id": "canonical-agent-composition",
+  "evidence_kind": "source_inventory_not_execution_evidence",
+  "status_source": "docs/architecture/agent-session.zh.md",
+  "roots": [
+    {
+      "owner": "NomiCoreApplication",
+      "path": "crates/backend/nomifun-app/src/bootstrap/nomi_core.rs",
+      "responsibility": "Compose the one official Nomi Runtime and canonical Session owner before admission opens."
+    },
+    {
+      "owner": "CanonicalAgentSessionOwner",
+      "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
+      "responsibility": "Expose the product-facing command/query facade over the sole current canonical AgentSession Store; no Conversation rows, Message rows, or second Session authority remain."
+    },
+    {
+      "owner": "AgentSessionStore",
+      "path": "crates/backend/nomifun-agent-session/src/store.rs",
+      "responsibility": "Own canonical AgentSession facts, semantic events, projections, turn receipts, effects, resources, deletion fences and replay."
+    },
+    {
+      "owner": "OfficialRuntimeHost",
+      "path": "crates/backend/nomifun-app/src/router/official_runtime.rs",
+      "responsibility": "Install the one official nomifun.nomi factory and freeze its exact build identity. No runtime registration, selection, post-package mounting or fallback."
+    },
+    {
+      "owner": "Agent revision and Session binding",
+      "path": "crates/backend/nomifun-app/src/router/nomi_core_session.rs",
+      "responsibility": "Immutable Agent revision resolves to the current official Session build. Build identity is host-written recovery evidence, never a user or Preset selection."
+    },
+    {
+      "owner": "EngineSessionHost",
+      "path": "crates/backend/nomifun-app/src/router/engine_session_host.rs",
+      "responsibility": "Expose admitted platform model, tool, resource, journal and lifecycle ports to the one source-integrated Driver."
+    },
+    {
+      "owner": "Unified Nomi Runtime",
+      "path": "crates/backend/nomifun-agent-runtime/src/turn.rs",
+      "responsibility": "The sole adaptive execution loop, including planning, bounded context, continuation and completion evidence; invokes shared host ports without taking platform ownership."
+    },
+    {
+      "owner": "Shared Wave1 capabilities",
+      "path": "crates/backend/nomifun-app/src/router/agent_wave1_host.rs",
+      "responsibility": "Keep shared domain adapters independent from the deleted external Wrapper."
+    }
+  ],
+  "preserved_contracts": [
+    "Kernel authority",
+    "persisted snapshot and checkpoint compatibility",
+    "persisted Session event envelopes",
+    "platform feature vocabulary, not Engine execution grants"
+  ]
+}

@@ -38,35 +38,7 @@ impl SessionManager {
         Self { repo }
     }
 
-    /// Finds an existing session for the channel+user+chat triple, or
-    /// creates one.
-    ///
-    /// - If found: updates `last_activity` and returns the existing session.
-    /// - If not found: creates a new session with the given `agent_type`.
-    ///
-    /// The `workspace` parameter is optional and may be set later by
-    /// the `ChannelManager` when it knows the active workspace path.
-    pub async fn get_or_create_session(
-        &self,
-        channel_user_id: &str,
-        chat_id: &str,
-        channel_plugin_id: &str,
-        agent_type: &str,
-        workspace: Option<&str>,
-    ) -> Result<ChannelSessionRow, ChannelError> {
-        self.get_or_create_session_for_chat(
-            channel_user_id,
-            chat_id,
-            channel_plugin_id,
-            agent_type,
-            ChatKind::Unknown,
-            workspace,
-        )
-        .await
-    }
-
-    /// Chat-kind-aware form used by normalized inbound messages. The legacy
-    /// wrapper remains for internal callers that do not possess provider scope.
+    /// Resolve the canonical session for an explicitly classified chat scope.
     pub async fn get_or_create_session_for_chat(
         &self,
         channel_user_id: &str,
@@ -112,31 +84,7 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    /// Deletes the existing session for a channel+user+chat triple and
-    /// creates a fresh one. Returns the newly created session.
-    ///
-    /// Used by `session.new` to give the user a clean slate in a chat.
-    pub async fn reset_session(
-        &self,
-        channel_user_id: &str,
-        chat_id: &str,
-        channel_plugin_id: &str,
-        agent_type: &str,
-        workspace: Option<&str>,
-    ) -> Result<ChannelSessionRow, ChannelError> {
-        self.reset_session_for_chat(
-            channel_user_id,
-            chat_id,
-            channel_plugin_id,
-            agent_type,
-            ChatKind::Unknown,
-            workspace,
-        )
-        .await
-    }
-
-    /// Chat-kind-aware reset used by action callbacks originating in a known
-    /// direct or group conversation.
+    /// Replace the canonical session for an explicitly classified chat scope.
     pub async fn reset_session_for_chat(
         &self,
         channel_user_id: &str,
@@ -606,7 +554,7 @@ mod tests {
     async fn creates_new_session() {
         let (mgr, repo) = make_manager();
         let session = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -650,11 +598,11 @@ mod tests {
         let (mgr, repo) = make_manager();
 
         let s1 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         let s2 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -667,11 +615,11 @@ mod tests {
         let (mgr, repo) = make_manager();
 
         let s1 = mgr
-            .get_or_create_session(USER_1, "chatA", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chatA", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         let s2 = mgr
-            .get_or_create_session(USER_1, "chatB", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chatB", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -684,11 +632,11 @@ mod tests {
         let (mgr, repo) = make_manager();
 
         let s1 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         let s2 = mgr
-            .get_or_create_session(USER_2, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_2, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -701,11 +649,11 @@ mod tests {
         let (mgr, repo) = make_manager();
 
         let s1 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         let s2 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_2, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_2, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -716,7 +664,7 @@ mod tests {
 
         // Same channel again → reuse, no third session.
         let s3 = mgr
-            .get_or_create_session(USER_1, "chat1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "chat1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         assert_eq!(s3.channel_session_id, s1.channel_session_id);
@@ -727,7 +675,7 @@ mod tests {
     async fn session_with_workspace() {
         let (mgr, _repo) = make_manager();
         let session = mgr
-            .get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", Some("/workspace"))
+            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, Some("/workspace"))
             .await
             .unwrap();
 
@@ -746,10 +694,10 @@ mod tests {
     #[tokio::test]
     async fn get_active_sessions_returns_all() {
         let (mgr, _repo) = make_manager();
-        mgr.get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
-        mgr.get_or_create_session(USER_2, "c2", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_2, "c2", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -762,13 +710,13 @@ mod tests {
     #[tokio::test]
     async fn cleanup_removes_user_sessions() {
         let (mgr, repo) = make_manager();
-        mgr.get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
-        mgr.get_or_create_session(USER_1, "c2", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_1, "c2", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
-        mgr.get_or_create_session(USER_2, "c1", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_2, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -782,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_noop_for_unknown_user() {
         let (mgr, repo) = make_manager();
-        mgr.get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+        mgr.get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -797,7 +745,7 @@ mod tests {
     async fn bind_conversation_persists_conversation_id() {
         let (mgr, repo) = make_manager();
         let session = mgr
-            .get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         assert!(session.conversation_id.is_none());
@@ -829,7 +777,7 @@ mod tests {
     async fn bind_conversation_rejects_noncanonical_id() {
         let (mgr, repo) = make_manager();
         let session = mgr
-            .get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -850,12 +798,12 @@ mod tests {
     async fn reset_session_creates_fresh_session() {
         let (mgr, repo) = make_manager();
         let s1 = mgr
-            .get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
         let s2 = mgr
-            .reset_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .reset_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -874,7 +822,7 @@ mod tests {
     async fn reset_session_noop_when_no_existing() {
         let (mgr, repo) = make_manager();
         let session = mgr
-            .reset_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .reset_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
 
@@ -888,7 +836,7 @@ mod tests {
     async fn update_agent_type_persists() {
         let (mgr, repo) = make_manager();
         let session = mgr
-            .get_or_create_session(USER_1, "c1", PLUGIN_1, "acp", None)
+            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
             .await
             .unwrap();
         assert_eq!(session.agent_type, "acp");

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nomifun_api_types::ModelTask;
+use nomifun_api_types::{MODEL_GATEWAY_CATALOG_BASELINE_PARAM, ModelTask};
 pub use nomifun_api_types::{
     AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,
     PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
@@ -16,23 +16,58 @@ pub use nomifun_api_types::{
 
 use crate::adapter::AdapterRegistry;
 use crate::adapters::{
-    default_adapters, default_realtime_adapters, is_reserved_local_transport_param_key,
+    default_adapters, default_realtime_adapters, is_local_provider_metadata_param_key,
+    is_reserved_local_transport_param_key,
 };
 use crate::error::InvokeError;
 use crate::realtime::RealtimeAdapterRegistry;
 use crate::routes_table::preset_protocol_recommendation;
 
-pub const ALL_MODEL_TASKS: [ModelTask; 9] = [
+pub const ALL_MODEL_TASKS: [ModelTask; 10] = [
     ModelTask::Chat,
     ModelTask::RealtimeConversation,
     ModelTask::ImageGeneration,
     ModelTask::ImageEdit,
     ModelTask::VideoGeneration,
+    ModelTask::MusicGeneration,
     ModelTask::SpeechSynthesis,
     ModelTask::SpeechRecognition,
     ModelTask::Embedding,
     ModelTask::Rerank,
 ];
+
+/// Vertex Claude uses a provider-native URL that requires three independent
+/// values:
+/// `projects/{project_id}/locations/{location}/.../{model}`. The generic
+/// endpoint contract only expands every placeholder from one runtime value
+/// (the model id), so advertising this protocol would either substitute the
+/// model into project/location or require an unvalidated second URL builder.
+pub const VERTEX_ANTHROPIC_MESSAGES_PROTOCOL: &str = "vertex.anthropic_messages";
+
+const VERTEX_UNSUPPORTED_REASON: &str = "Vertex Anthropic Messages is not supported by the generic route target contract: its URL requires independently injected project_id and location/region values, while endpoint expansion only supplies the model value";
+
+/// Reject protocols which are known to exist in another provider layer but
+/// cannot be represented safely by this crate's persisted route contract.
+///
+/// This is intentionally separate from [`protocol_task_descriptor`]: an
+/// unsupported protocol must not be represented as a normal descriptor, or
+/// configuration discovery would present it as executable.
+pub fn validate_protocol_support(
+    protocol_id: &str,
+    task: ModelTask,
+) -> Result<(), InvokeError> {
+    if protocol_id == VERTEX_ANTHROPIC_MESSAGES_PROTOCOL {
+        return Err(InvokeError::config(format!(
+            "{VERTEX_UNSUPPORTED_REASON}; refusing task {task:?}"
+        )));
+    }
+    if protocol_task_descriptor(protocol_id, task).is_none() {
+        return Err(InvokeError::config(format!(
+            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct ProtocolManifestRegistry {
@@ -215,6 +250,7 @@ impl From<ModelTask> for TaskOrdinal {
             ModelTask::SpeechRecognition => 6,
             ModelTask::Embedding => 7,
             ModelTask::Rerank => 8,
+            ModelTask::MusicGeneration => 9,
         })
     }
 }
@@ -245,7 +281,9 @@ const fn preset(
 const PRESETS: &[PresetSpec] = &[
     PresetSpec { preset: "custom", platform: "custom", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "new-api", platform: "new-api", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
+    PresetSpec { preset: "nomifun-model-gateway", platform: "nomifun-model-gateway", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "gemini", platform: "gemini", base_url: Some("https://generativelanguage.googleapis.com"), requires_user_input: false, auth_scheme: Some("header_key:x-goog-api-key") },
+    preset("Agnes", "agnes", "https://apihub.agnes-ai.com/v1"),
     preset("OpenAI", "openai", "https://api.openai.com/v1"),
     PresetSpec { preset: "Anthropic", platform: "anthropic", base_url: Some("https://api.anthropic.com"), requires_user_input: false, auth_scheme: Some("header_key:x-api-key") },
     PresetSpec { preset: "AWS-Bedrock", platform: "bedrock", base_url: None, requires_user_input: true, auth_scheme: Some("bedrock") },
@@ -426,7 +464,7 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
         // Agent executors enforce these exact schemes before constructing the
         // provider client; advertising broader transport vocabulary would make
         // a model save successfully and fail on its first invocation.
-        "openai.chat_text" | "openai.responses" => &["bearer"],
+        "openai.chat_text" | "openai.responses" | "agnes.images" | "agnes.video_jobs" => &["bearer"],
         "anthropic.messages" => &["header_key:x-api-key"],
         "gemini.generate_text" => &["header_key:x-goog-api-key"],
         "bedrock.anthropic_messages" => &["bedrock"],
@@ -455,17 +493,17 @@ pub fn protocol_requires_output_ceiling(protocol_id: &str) -> bool {
 }
 
 const OPENAI_CHAT_PLATFORMS: &[&str] = &[
-    "openai", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
+    "openai", "agnes", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
     "mimo-token-plan-ams", "minimax", "minimax-code", "minimax-coding-plan", "novita",
     "openrouter", "dashscope", "dashscope-coding", "siliconflow", "zhipu", "glm-coding-plan",
     "moonshot-cn", "moonshot-global", "xai", "ark", "ark-coding-plan", "ark-agent-plan",
     "qianfan", "qianfan-coding-plan", "hunyuan", "hunyuan-global", "lingyi", "poe", "ppio",
-    "modelscope", "infiniai", "ctyun", "stepfun", "stepfun-plan",
+    "modelscope", "infiniai", "ctyun", "stepfun", "stepfun-plan", "nomifun-model-gateway",
 ];
 
 use ModelTask::{
     Chat, Embedding, ImageEdit, ImageGeneration, RealtimeConversation, Rerank, SpeechRecognition,
-    SpeechSynthesis, VideoGeneration,
+    SpeechSynthesis, VideoGeneration, MusicGeneration,
 };
 use ProtocolEndpointPurpose::{Content, Poll, Session, Submit};
 use ProtocolExecutorKind::{Agent, AsyncJob, ModelInvoke, RealtimeSession};
@@ -473,11 +511,11 @@ use ProtocolTransportKind::{Http, Sdk, Websocket};
 
 const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "openai.chat_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: ALL_SCOPES, platforms: OPENAI_CHAT_PLATFORMS, connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/chat/completions")] },
-    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
-    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
+    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
+    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
     ProtocolSpec { id: "bedrock.anthropic_messages", tasks: &[Chat], executor: Agent, transport: Sdk, scopes: NATIVE_ONLY, platforms: &["bedrock"], connection_role: None, endpoints: &[] },
-    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
-    ProtocolSpec { id: "openai.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "ctyun"], connection_role: None, endpoints: &[
+    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
+    ProtocolSpec { id: "openai.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "ctyun", "nomifun-model-gateway"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
         endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/edits"),
     ] },
@@ -486,10 +524,18 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
         endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/videos/{id}"),
         endpoint(VideoGeneration, "content_endpoint", Content, "GET", "/videos/{id}/content"),
     ] },
-    ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
-    ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
-    ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
-    ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
+    ProtocolSpec { id: "agnes.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["agnes"], connection_role: None, endpoints: &[
+        endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
+        endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/generations"),
+    ] },
+    ProtocolSpec { id: "agnes.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["agnes"], connection_role: None, endpoints: &[
+        endpoint(VideoGeneration, "endpoint", Submit, "POST", "/videos"),
+        endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "https://apihub.agnes-ai.com/agnesapi?video_id={id}"),
+    ] },
+    ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
+    ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
+    ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
+    ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
     ProtocolSpec { id: "gemini.generate_content", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[
         origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
         origin_endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
@@ -515,6 +561,7 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "dashscope.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[origin_endpoint(Embedding, "endpoint", Submit, "POST", "/api/v1/services/embeddings/text-embedding/text-embedding")] },
     ProtocolSpec { id: "minimax.t2a", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/t2a_v2")] },
+    ProtocolSpec { id: "minimax.music", tasks: &[MusicGeneration], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(MusicGeneration, "endpoint", Submit, "POST", "/music_generation")] },
     ProtocolSpec { id: "mimo.chat_asr", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "mimo.chat_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "siliconflow.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
@@ -626,11 +673,9 @@ pub fn validate_endpoint_template(
             "protocol {protocol_id:?} endpoint field {field:?} cannot be blank"
         )));
     }
-    let descriptor = protocol_task_descriptor(protocol_id, task).ok_or_else(|| {
-        InvokeError::config(format!(
-            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
-        ))
-    })?;
+    validate_protocol_support(protocol_id, task)?;
+    let descriptor = protocol_task_descriptor(protocol_id, task)
+        .expect("validate_protocol_support checked the descriptor");
     let endpoint = descriptor
         .endpoints
         .iter()
@@ -735,6 +780,8 @@ fn provider_params_encoding(
         | ("gemini.generate_text", Chat)
         | ("openai.images", ImageGeneration)
         | ("openai.embeddings", Embedding)
+        | ("agnes.images", ImageGeneration | ImageEdit)
+        | ("agnes.video_jobs", VideoGeneration)
         | ("generic.rerank", Rerank)
         | ("openai.audio_speech", SpeechSynthesis)
         | ("gemini.generate_content", ImageGeneration | ImageEdit)
@@ -745,6 +792,7 @@ fn provider_params_encoding(
         | ("dashscope.images", ImageGeneration)
         | ("dashscope.embeddings", Embedding)
         | ("minimax.t2a", SpeechSynthesis)
+        | ("minimax.music", MusicGeneration)
         | ("mimo.chat_asr", SpeechRecognition)
         | ("mimo.chat_tts", SpeechSynthesis)
         | ("siliconflow.audio_speech", SpeechSynthesis)
@@ -772,11 +820,7 @@ pub fn validate_provider_params_for_protocol(
     task: ModelTask,
     params: &serde_json::Value,
 ) -> Result<(), InvokeError> {
-    if protocol_task_descriptor(protocol_id, task).is_none() {
-        return Err(InvokeError::config(format!(
-            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
-        )));
-    }
+    validate_protocol_support(protocol_id, task)?;
     let object = params.as_object().ok_or_else(|| {
         InvokeError::config("capability provider_params must be a JSON object")
     })?;
@@ -786,6 +830,21 @@ pub fn validate_provider_params_for_protocol(
     {
         return Err(InvokeError::config(format!(
             "capability provider_params contains reserved local transport/auth field {key:?}"
+        )));
+    }
+    if let Some(kind) = object.get("_nomifun_context_limit_kind") {
+        if task != Chat || !matches!(kind.as_str(), Some("input_only" | "combined")) {
+            return Err(InvokeError::config(
+                "_nomifun_context_limit_kind is local Chat context metadata and must be input_only or combined",
+            ));
+        }
+    }
+    if object
+        .get(MODEL_GATEWAY_CATALOG_BASELINE_PARAM)
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(InvokeError::config(format!(
+            "{MODEL_GATEWAY_CATALOG_BASELINE_PARAM} is local catalog synchronization metadata and must be a JSON object"
         )));
     }
     // This historical StepFun adapter-control hint is deliberately consumed
@@ -805,6 +864,20 @@ pub fn validate_provider_params_for_protocol(
         if !chain_rounds.is_boolean() {
             return Err(InvokeError::config(
                 "openai.responses provider_params.chain_rounds must be a boolean",
+            ));
+        }
+    }
+    if let Some(reasoning_effort) = object.get("reasoning_effort") {
+        if task != Chat || !protocol_supports_reasoning_effort(protocol_id) {
+            return Err(InvokeError::config(
+                "provider_params.reasoning_effort is supported only by compatible Chat protocols",
+            ));
+        }
+        if !reasoning_effort.as_str().is_some_and(|value| {
+            protocol_supports_reasoning_effort_value(protocol_id, value)
+        }) {
+            return Err(InvokeError::config(
+                "provider_params.reasoning_effort is not supported by the selected Chat protocol",
             ));
         }
     }
@@ -864,6 +937,11 @@ pub fn validate_provider_params_for_protocol(
         ProviderParamsEncoding::Json => Ok(()),
         ProviderParamsEncoding::ScalarFields => {
             if let Some((key, value)) = object.iter().find(|(key, value)| {
+                // Local metadata is persisted for catalog synchronization and
+                // removed by adapters before provider form/query encoding.
+                if is_local_provider_metadata_param_key(key) {
+                    return false;
+                }
                 if protocol_id == "xai.stt" && key.as_str() == "keyterm" {
                     return match value {
                         serde_json::Value::String(_) => false,
@@ -892,6 +970,28 @@ pub fn validate_provider_params_for_protocol(
             }
             Ok(())
         }
+    }
+}
+
+/// Whether a persisted Chat protocol accepts the normalized reasoning effort
+/// control used by both model defaults and per-session overrides.
+pub fn protocol_supports_reasoning_effort(protocol_id: &str) -> bool {
+    matches!(
+        protocol_id,
+        "openai.chat_text" | "openai.responses" | "gemini.generate_text"
+    )
+}
+
+/// Protocol-level effort envelope. Individual provider models may narrow it.
+/// `ultra` is retained as an OpenAI-compatible extension for vendors that
+/// expose a tier beyond the official OpenAI `max` level.
+pub fn protocol_supports_reasoning_effort_value(protocol_id: &str, value: &str) -> bool {
+    match protocol_id {
+        "openai.chat_text" | "openai.responses" => {
+            matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")
+        }
+        "gemini.generate_text" => matches!(value, "minimal" | "low" | "medium" | "high"),
+        _ => false,
     }
 }
 
@@ -1350,6 +1450,25 @@ mod tests {
     }
 
     #[test]
+    fn vertex_anthropic_messages_is_typed_unsupported_without_a_descriptor() {
+        let error = validate_protocol_support(VERTEX_ANTHROPIC_MESSAGES_PROTOCOL, Chat)
+            .expect_err("Vertex must not be advertised by the generic route contract");
+        assert_eq!(error.kind, crate::error::InvokeErrorKind::Config);
+        assert!(error.message.contains("project_id"));
+        assert!(error.message.contains("location/region"));
+        assert!(protocol_descriptor(VERTEX_ANTHROPIC_MESSAGES_PROTOCOL).is_none());
+        assert!(
+            validate_endpoint_template(
+                VERTEX_ANTHROPIC_MESSAGES_PROTOCOL,
+                Chat,
+                "endpoint",
+                "/v1/projects/{project_id}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn every_manifest_protocol_task_has_a_provider_params_encoding_contract() {
         let registry = default_protocol_registry();
         for descriptor in registry.descriptors() {
@@ -1476,6 +1595,20 @@ mod tests {
             &serde_json::json!({"max_tokens":128}),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn local_context_kind_metadata_accepts_only_declared_chat_semantics() {
+        for kind in ["input_only", "combined"] {
+            validate_provider_params_for_protocol("gemini.generate_text", Chat,
+                &serde_json::json!({"_nomifun_context_limit_kind": kind})).unwrap();
+        }
+        for kind in [serde_json::json!("unknown"), serde_json::json!(true), serde_json::json!(0)] {
+            assert!(validate_provider_params_for_protocol("openai.chat_text", Chat,
+                &serde_json::json!({"_nomifun_context_limit_kind": kind})).is_err());
+        }
+        assert!(validate_provider_params_for_protocol("openai.images", ImageGeneration,
+            &serde_json::json!({"_nomifun_context_limit_kind": "input_only"})).is_err());
     }
 
     #[test]
@@ -1656,6 +1789,8 @@ mod tests {
         for (protocol, expected) in [
             ("openai.chat_text", vec!["bearer"]),
             ("openai.responses", vec!["bearer"]),
+            ("agnes.images", vec!["bearer"]),
+            ("agnes.video_jobs", vec!["bearer"]),
             ("anthropic.messages", vec!["header_key:x-api-key"]),
             ("gemini.generate_text", vec!["header_key:x-goog-api-key"]),
             ("bedrock.anthropic_messages", vec!["bedrock"]),
@@ -1754,6 +1889,137 @@ mod tests {
         );
         let recommendation = view.recommendation.expect("OpenAI Chat recommendation");
         assert_eq!(recommendation.protocol_id, "openai.chat_text");
+    }
+
+    #[test]
+    fn model_gateway_requires_an_operator_address_and_explicit_catalog_protocols() {
+        let preset = platform_presets()
+            .into_iter()
+            .find(|preset| preset.platform == "nomifun-model-gateway")
+            .expect("model gateway preset");
+        assert_eq!(preset.preset, "nomifun-model-gateway");
+        assert!(preset.platform_default_base_url.is_none());
+        assert!(preset.requires_user_input);
+        assert_eq!(preset.default_auth_scheme.as_deref(), Some("bearer"));
+
+        for task in ALL_MODEL_TASKS {
+            let view = protocol_manifest_for_connection(
+                "nomifun-model-gateway",
+                Some("https://operator.example/v1"),
+                task,
+            );
+            assert!(view.recommendation.is_none(), "must use catalog protocol for {task:?}");
+            assert!(view.platform_default_base_url.is_none());
+            assert!(view.protocols.iter().all(|protocol| protocol.default_connections.is_empty()));
+        }
+    }
+
+    #[test]
+    fn model_gateway_exposes_every_catalog_protocol_with_native_auth_contracts() {
+        for (protocol, task) in [
+            ("openai.chat_text", Chat),
+            ("openai.responses", Chat),
+            ("anthropic.messages", Chat),
+            ("gemini.generate_text", Chat),
+            ("openai.images", ImageGeneration),
+            ("openai.images", ImageEdit),
+            ("openai.embeddings", Embedding),
+            ("generic.rerank", Rerank),
+            ("openai.audio_speech", SpeechSynthesis),
+            ("openai.audio_transcriptions", SpeechRecognition),
+        ] {
+            let view = protocol_manifest_for("nomifun-model-gateway", task);
+            let descriptor = view.protocols.iter()
+                .find(|descriptor| descriptor.protocol_id == protocol)
+                .unwrap_or_else(|| panic!("missing {protocol} for {task:?}"));
+            assert!(descriptor.platforms.iter().any(|platform| platform == "nomifun-model-gateway"));
+        }
+
+        for (protocol, auth) in [
+            ("openai.chat_text", "bearer"),
+            ("openai.responses", "bearer"),
+            ("anthropic.messages", "header_key:x-api-key"),
+            ("gemini.generate_text", "header_key:x-goog-api-key"),
+        ] {
+            let descriptor = protocol_descriptor(protocol).unwrap();
+            assert_eq!(descriptor.allowed_auth_schemes, vec![auth.to_owned()]);
+            assert_eq!(descriptor.requires_output_ceiling, protocol == "anthropic.messages");
+        }
+    }
+
+    #[test]
+    fn model_gateway_responses_is_explicit_opt_in_without_widening_custom_scope() {
+        let descriptor = protocol_descriptor("openai.responses").unwrap();
+        assert_eq!(descriptor.scopes, vec![ProtocolScope::Native]);
+        for platform in ["custom", "new-api", "typo-provider"] {
+            let view = protocol_manifest_for(platform, Chat);
+            assert!(view.protocols.iter().all(|protocol| protocol.protocol_id != "openai.responses"));
+        }
+        assert!(protocol_manifest_for("nomifun-model-gateway", Chat)
+            .protocols.iter().any(|protocol| protocol.protocol_id == "openai.responses"));
+    }
+
+    #[test]
+    fn model_gateway_catalog_baseline_is_local_metadata_for_every_catalog_task() {
+        let params = serde_json::json!({
+            MODEL_GATEWAY_CATALOG_BASELINE_PARAM: {
+                "alias": "Gateway model", "context_window": 128000,
+                "provider_params": {"generationConfig": {"temperature": 0.2}}
+            }
+        });
+        for (protocol, task) in [
+            ("openai.chat_text", Chat),
+            ("openai.responses", Chat),
+            ("anthropic.messages", Chat),
+            ("gemini.generate_text", Chat),
+            ("openai.images", ImageGeneration),
+            ("openai.images", ImageEdit),
+            ("openai.embeddings", Embedding),
+            ("generic.rerank", Rerank),
+            ("openai.audio_speech", SpeechSynthesis),
+            ("openai.audio_transcriptions", SpeechRecognition),
+        ] {
+            validate_provider_params_for_protocol(protocol, task, &params)
+                .unwrap_or_else(|error| panic!("{protocol} {task:?}: {error}"));
+        }
+        for baseline in [
+            serde_json::json!(null), serde_json::json!([]),
+            serde_json::json!("invalid"), serde_json::json!(1),
+        ] {
+            assert!(validate_provider_params_for_protocol(
+                "openai.audio_transcriptions", SpeechRecognition,
+                &serde_json::json!({MODEL_GATEWAY_CATALOG_BASELINE_PARAM: baseline}),
+            ).is_err());
+        }
+    }
+
+    #[test]
+    fn agnes_preset_owns_image_and_video_lifecycles() {
+        let images = protocol_manifest_for("Agnes", ImageGeneration);
+        let image_recommendation = images.recommendation.expect("Agnes image recommendation");
+        assert_eq!(image_recommendation.protocol_id, "agnes.images");
+        assert_eq!(
+            image_recommendation.default_base_url.as_deref(),
+            Some("https://apihub.agnes-ai.com/v1")
+        );
+        assert_eq!(
+            image_recommendation.default_auth_scheme.as_deref(),
+            Some("bearer")
+        );
+
+        let videos = protocol_manifest_for("Agnes", VideoGeneration);
+        let video_recommendation = videos.recommendation.expect("Agnes video recommendation");
+        assert_eq!(video_recommendation.protocol_id, "agnes.video_jobs");
+        let descriptor = protocol_task_descriptor("agnes.video_jobs", VideoGeneration)
+            .expect("Agnes video descriptor");
+        assert_eq!(
+            descriptor
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.purpose == Poll)
+                .map(|endpoint| endpoint.default_value.as_str()),
+            Some("https://apihub.agnes-ai.com/agnesapi?video_id={id}")
+        );
     }
 
     #[test]
@@ -1901,7 +2167,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 15_708_070_195_996_868_304,
+            hash, 4_581_283_236_433_659_689,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }
@@ -1963,6 +2229,44 @@ mod tests {
                 recommendation.default_base_url.as_deref(),
                 Some("https://api.stepfun.com/step_plan/v1")
             );
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_is_a_typed_control_for_compatible_chat_protocols() {
+        for protocol in ["openai.chat_text", "openai.responses"] {
+            for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+                validate_provider_params_for_protocol(
+                    protocol,
+                    Chat,
+                    &serde_json::json!({"reasoning_effort": effort}),
+                )
+                .unwrap();
+            }
+        }
+        for effort in ["minimal", "low", "medium", "high"] {
+            validate_provider_params_for_protocol(
+                "gemini.generate_text",
+                Chat,
+                &serde_json::json!({"reasoning_effort": effort}),
+            )
+            .unwrap();
+        }
+
+        for (protocol, task, effort) in [
+            ("anthropic.messages", Chat, serde_json::json!("high")),
+            ("gemini.generate_text", Chat, serde_json::json!("max")),
+            ("openai.chat_text", Chat, serde_json::json!("extreme")),
+            ("openai.chat_text", Chat, serde_json::json!(1)),
+            ("openai.images", ImageGeneration, serde_json::json!("low")),
+        ] {
+            let error = validate_provider_params_for_protocol(
+                protocol,
+                task,
+                &serde_json::json!({"reasoning_effort": effort}),
+            )
+            .unwrap_err();
+            assert!(error.message.contains("reasoning_effort"), "{error:?}");
         }
     }
 }

@@ -4,22 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { Message, Modal, Spin } from '@arco-design/web-react';
-import { AddOne, Left, Pic } from '@icon-park/react';
+import { AddOne, Left } from '@icon-park/react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
+import { useContentSiderCollapse } from '@/renderer/components/layout/ContentSider';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import NomiSelect from '@/renderer/components/base/NomiSelect';
+import { NOMI_SIDER_TOGGLE_EVENT, dispatchNomiSiderStateEvent } from '@/renderer/utils/workspace/nomiSiderEvents';
 import CompanionSidebar from './CompanionSidebar';
 import CreateCompanionModal from './CompanionSidebar/CreateCompanionModal';
 import FigureLibraryPage from './FigureLibraryPage';
 import { AsideHost } from './workspace/AsideHost';
 import WorkspaceHeader from './workspace/WorkspaceHeader';
+import type { CompanionWorkspaceMode } from './workspace/WorkspaceHeader';
+import CompanionCohabitView from './workspace/CompanionCohabitView';
 import { WORKSPACE_TABS, isWorkspaceTabKey } from './workspace/types';
 import type { WorkspaceTabKey } from './workspace/types';
 import OverviewTab from './workspace/tabs/OverviewTab';
@@ -32,8 +34,12 @@ import OtherTab from './workspace/tabs/OtherTab';
 import { useCompanion, useCompanions } from './useNomi';
 import type { ICompanionProfile, ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
+import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
+import styles from './NomiWorkspace.module.css';
 
-const SIDER_STORAGE_KEY = 'nomifun:nomi-sider-width';
+const SIDER_COLLAPSE_STORAGE_KEY = 'nomifun:nomi-sider-collapsed';
+const SIDER_WIDTH_STORAGE_KEY = 'nomifun:nomi-sider-width';
+const INFO_PANEL_COLLAPSE_STORAGE_KEY = 'nomifun:nomi-info-panel-collapsed';
 
 type AttentionFlags = Partial<Record<WorkspaceTabKey, boolean>>;
 const EMPTY_ATTENTION: AttentionFlags = {};
@@ -46,6 +52,23 @@ const TAB_COMPONENTS: Record<WorkspaceTabKey, React.ComponentType<import('./work
   skills: SkillsTab,
   history: HistoryTab,
   other: OtherTab,
+};
+
+const MANAGE_NAV: Array<{ labelKey: string; fallback: string; tabs: WorkspaceTabKey[] }> = [
+  { labelKey: 'nomi.workspace.sections.profile', fallback: '伙伴档案', tabs: ['overview'] },
+  { labelKey: 'nomi.workspace.sections.growth', fallback: '成长与能力', tabs: ['memory', 'evolution', 'skills'] },
+  { labelKey: 'nomi.workspace.sections.reach', fallback: '触达', tabs: ['remote'] },
+  { labelKey: 'nomi.workspace.sections.records', fallback: '记录与安全', tabs: ['history', 'other'] },
+];
+
+const MANAGE_LABELS: Record<WorkspaceTabKey, { key: string; fallback: string }> = {
+  overview: { key: 'nomi.tabs.overview', fallback: '总览' },
+  memory: { key: 'nomi.tabs.memory', fallback: '记忆与知识' },
+  remote: { key: 'nomi.tabs.remote', fallback: '连接与设备' },
+  evolution: { key: 'nomi.tabs.evolution', fallback: '进化' },
+  skills: { key: 'nomi.tabs.skills', fallback: '技能' },
+  history: { key: 'nomi.tabs.history', fallback: '聊天历史' },
+  other: { key: 'nomi.tabs.other', fallback: '迁移与删除' },
 };
 
 /**
@@ -61,9 +84,6 @@ const TAB_COMPONENTS: Record<WorkspaceTabKey, React.ComponentType<import('./work
  */
 const NomiWorkspacePage: React.FC = () => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [searchParams, setSearchParams] = useSearchParams();
   const { companions, loading, refresh } = useCompanions();
 
@@ -73,13 +93,35 @@ const NomiWorkspacePage: React.FC = () => {
     flags: EMPTY_ATTENTION,
   });
 
+  const {
+    collapsed: siderCollapsed,
+    toggle: toggleSider,
+  } = useContentSiderCollapse(SIDER_COLLAPSE_STORAGE_KEY, false);
+  const {
+    collapsed: infoPanelCollapsed,
+    toggle: toggleInfoPanel,
+  } = useContentSiderCollapse(INFO_PANEL_COLLAPSE_STORAGE_KEY, false);
+
   const resize = useResizableSplit({
     unit: 'px',
     defaultWidth: 248,
     minWidth: 200,
     maxWidth: 360,
-    storageKey: SIDER_STORAGE_KEY,
+    storageKey: SIDER_WIDTH_STORAGE_KEY,
   });
+
+  // ContentSider state belongs to this page; the stable control lives in the
+  // app titlebar so it remains reachable in both the expanded and collapsed states.
+  useEffect(() => {
+    dispatchNomiSiderStateEvent(siderCollapsed);
+  }, [siderCollapsed]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleToggle = () => toggleSider();
+    window.addEventListener(NOMI_SIDER_TOGGLE_EVENT, handleToggle);
+    return () => window.removeEventListener(NOMI_SIDER_TOGGLE_EVENT, handleToggle);
+  }, [toggleSider]);
 
   // Pane padding follows the PANE width, not the viewport: inside a three-column
   // shell the content column is far narrower than the window.
@@ -89,6 +131,9 @@ const NomiWorkspacePage: React.FC = () => {
   const figuresActive = searchParams.get('view') === 'figures';
   const tabParam = searchParams.get('tab');
   const activeTab: WorkspaceTabKey = isWorkspaceTabKey(tabParam) ? tabParam : 'overview';
+  const modeParam = searchParams.get('mode');
+  const activeMode: CompanionWorkspaceMode =
+    modeParam === 'manage' || (modeParam !== 'cohabit' && isWorkspaceTabKey(tabParam)) ? 'manage' : 'cohabit';
 
   const companionParam = searchParams.get('companion');
   const selectedCompanionId = useMemo(() => {
@@ -107,7 +152,24 @@ const NomiWorkspacePage: React.FC = () => {
       setSearchParams(
         (prev) => {
           prev.set('tab', key);
+          prev.set('mode', 'manage');
           prev.delete('view');
+          return prev;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
+  const setMode = useCallback(
+    (mode: CompanionWorkspaceMode) => {
+      setSearchParams(
+        (prev) => {
+          prev.set('mode', mode);
+          prev.delete('view');
+          if (mode === 'cohabit') prev.delete('tab');
+          else if (!isWorkspaceTabKey(prev.get('tab'))) prev.set('tab', 'overview');
           return prev;
         },
         { replace: true }
@@ -150,6 +212,7 @@ const NomiWorkspacePage: React.FC = () => {
         (prev) => {
           prev.set('companion', profile.companion_id);
           prev.set('tab', 'overview');
+          prev.set('mode', 'manage');
           prev.delete('view');
           return prev;
         },
@@ -221,17 +284,29 @@ const NomiWorkspacePage: React.FC = () => {
     [refresh]
   );
 
-  const openChat = useCallback(async () => {
+  const openQuickWindow = useCallback(async () => {
     if (!selectedCompanionId) return;
-    try {
-      const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: selectedCompanionId });
-      void navigate(`/conversation/${thread.conversation_id}`);
-    } catch {
-      // A companion with no model configured cannot mint a session — keep the
-      // user here, where they can configure it.
-      Message.info(t('nomi.chat.modelMissing'));
+    if (!isTauriRuntime()) {
+      Message.info(t('nomi.companion.desktopOnly'));
+      return;
     }
-  }, [navigate, selectedCompanionId, t]);
+    try {
+      if (!companion.profile?.appearance.companion_enabled) {
+        await companion.patchCompanion({ appearance: { companion_enabled: true } });
+      }
+      const { Window } = await import('@tauri-apps/api/window');
+      let target = await Window.getByLabel(`companion-${selectedCompanionId}`);
+      for (let attempt = 0; !target && attempt < 6; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        target = await Window.getByLabel(`companion-${selectedCompanionId}`);
+      }
+      if (!target) throw new Error(t('nomi.companion.windowUnavailable', { defaultValue: '桌面伙伴窗口暂时不可用' }));
+      await target.show();
+      await target.setFocus();
+    } catch (error) {
+      Message.error(String(error));
+    }
+  }, [companion, selectedCompanionId, t]);
 
   const reportAttention = useMemo(
     () =>
@@ -280,8 +355,8 @@ const NomiWorkspacePage: React.FC = () => {
 
   const workspace = figuresActive ? (
     <>
-      {/* 形象库 takes over the workspace rather than opening a route of its own, so
-          it needs its own way back — on mobile there is no sidebar to click. */}
+      {/* 形象库 takes over the workspace rather than opening a route of its own,
+          so it keeps an explicit way back. */}
       <div className={classNames('shrink-0 pt-20px pb-12px', panePadX)}>
         <div className='mx-auto w-full max-w-1100px box-border flex items-center gap-8px'>
           <div
@@ -310,64 +385,54 @@ const NomiWorkspacePage: React.FC = () => {
     </>
   ) : selectedCompanionId ? (
     <>
-      <div className={classNames('shrink-0 pt-20px pb-12px', panePadX)}>
-        <div className='mx-auto w-full max-w-1100px box-border'>
-          {isMobile && (
-            <div className='mb-12px flex items-center gap-8px'>
-              {companions.length > 1 && (
-                <NomiSelect
-                  className='flex-1 min-w-0'
-                  value={selectedCompanionId}
-                  onChange={(id: CompanionId) => selectCompanion(id)}
-                >
-                  {companions.map((c) => (
-                    <NomiSelect.Option key={c.companion_id} value={c.companion_id}>
-                      {c.name}
-                    </NomiSelect.Option>
-                  ))}
-                </NomiSelect>
-              )}
-              {/* The sidebar is hidden on mobile, so its two entries need to exist
-                  here or 新建伙伴 / 形象库 become unreachable. */}
-              <div
-                role='button'
-                tabIndex={0}
-                aria-label={t('nomi.companions.create')}
-                onClick={() => setCreateOpen(true)}
-                className='shrink-0 flex items-center justify-center w-32px h-32px rd-8px cursor-pointer text-t-secondary hover:text-t-primary hover:bg-fill-2 transition-colors outline-none'
-              >
-                <AddOne theme='outline' size='16' fill='currentColor' strokeWidth={3} />
-              </div>
-              <div
-                role='button'
-                tabIndex={0}
-                aria-label={t('nomi.customFigure.libraryTitle')}
-                onClick={openFigures}
-                className='shrink-0 flex items-center justify-center w-32px h-32px rd-8px cursor-pointer text-t-secondary hover:text-t-primary hover:bg-fill-2 transition-colors outline-none'
-              >
-                <Pic theme='outline' size='16' fill='currentColor' strokeWidth={3} />
-              </div>
+      <WorkspaceHeader
+        companion={companion}
+        mode={activeMode}
+        onModeChange={setMode}
+        onOpenQuickWindow={() => void openQuickWindow()}
+        infoPanelCollapsed={infoPanelCollapsed}
+        onToggleInfoPanel={toggleInfoPanel}
+      />
+      {activeMode === 'cohabit' ? (
+        <CompanionCohabitView
+          companionId={selectedCompanionId}
+          companion={companion}
+          onManage={setTab}
+          infoPanelCollapsed={infoPanelCollapsed}
+        />
+      ) : (
+        <div className={styles.manageLayout}>
+          <nav className={styles.manageNav} aria-label={t('nomi.workspace.manage', { defaultValue: '伙伴管理' })}>
+            {MANAGE_NAV.map((group) => (
+              <React.Fragment key={group.labelKey}>
+                <span className={styles.manageSectionLabel}>{t(group.labelKey, { defaultValue: group.fallback })}</span>
+                {group.tabs.map((key) => (
+                  <button
+                    key={key}
+                    type='button'
+                    className={styles.manageNavButton}
+                    aria-selected={activeTab === key}
+                    onClick={() => setTab(key)}
+                  >
+                    <span>{t(MANAGE_LABELS[key].key, { defaultValue: MANAGE_LABELS[key].fallback })}</span>
+                    {attentionFlags[key] && <span className={styles.attentionDot} aria-label={t('nomi.workspace.needsAttention', { defaultValue: '需要处理' })} />}
+                  </button>
+                ))}
+              </React.Fragment>
+            ))}
+          </nav>
+          <div ref={paneRef} className={styles.manageContent}>
+            <div className={classNames(styles.manageInner, 'box-border pb-32px', panePadX)}>
+              <ActiveTab
+                key={`${selectedCompanionId}:${activeTab}`}
+                companionId={selectedCompanionId}
+                companion={companion}
+                onAttentionChange={reportAttention[activeTab]}
+              />
             </div>
-          )}
-          <WorkspaceHeader
-            companion={companion}
-            activeTab={activeTab}
-            onTabChange={setTab}
-            attention={attentionFlags}
-            onOpenChat={() => void openChat()}
-          />
+          </div>
         </div>
-      </div>
-      <div className='flex-1 min-h-0 overflow-y-auto'>
-        <div className={classNames('mx-auto w-full max-w-1100px box-border pb-32px', panePadX)}>
-          <ActiveTab
-            key={`${selectedCompanionId}:${activeTab}`}
-            companionId={selectedCompanionId}
-            companion={companion}
-            onAttentionChange={reportAttention[activeTab]}
-          />
-        </div>
-      </div>
+      )}
     </>
   ) : (
     <div className='flex-1 flex flex-col items-center justify-center gap-14px py-64px px-24px text-center'>
@@ -405,7 +470,7 @@ const NomiWorkspacePage: React.FC = () => {
           detail pane becomes a third column rather than a sibling of the row. */}
       <div className='relative flex size-full min-h-0'>
         <AsideHost>
-          {!isMobile && (
+          {!siderCollapsed && (
             <CompanionSidebar
               companions={companions}
               selectedId={selectedCompanionId}
@@ -419,7 +484,7 @@ const NomiWorkspacePage: React.FC = () => {
               resizeHandle={resize.createDragHandle({ className: 'right-0' })}
             />
           )}
-          <div ref={paneRef} className='flex-1 min-w-0 min-h-0 flex flex-col'>
+          <div className={styles.workspaceColumn}>
             {workspace}
           </div>
         </AsideHost>

@@ -11,7 +11,6 @@ import type { CreativeCanvasNode } from '../../domain';
 import type { CanvasState } from '../core';
 import {
   CreativeCanvasAssistantUnwiredPanel,
-  CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
   CreativeCanvasTemplateUnwiredPanel,
@@ -189,19 +188,6 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('aria-label="编辑节点属性"')).toBe(false);
   });
 
-  test('history exposes only actual undo and redo snapshot counts', () => {
-    const html = renderToStaticMarkup(
-      <CreativeCanvasHistoryPanel state={state()} onUndo={noop} onRedo={noop} />
-    );
-
-    expect(html.includes('data-canvas-product-panel="history"')).toBe(true);
-    expect(html.includes('可撤销')).toBe(true);
-    expect(html.includes('>2<')).toBe(true);
-    expect(html.includes('可重做')).toBe(true);
-    expect(html.includes('>1<')).toBe(true);
-    expect(html.includes('不会臆造历史记录')).toBe(true);
-  });
-
   test('keeps remaining unavailable agent and template adapters explicit', () => {
     const html = renderToStaticMarkup(
       <>
@@ -220,6 +206,7 @@ describe('Creative Canvas product presentation panels', () => {
   test('projects display names only from canonical node data', () => {
     expect(creativeCanvasNodeDisplayName(groupNode)).toBe('第一幕素材');
     expect(creativeCanvasNodeDisplayName(textNode)).toBe('雨夜里的第一幕');
+    expect(creativeCanvasNodeDisplayName({ ...textNode, name: '旁白文案' })).toBe('旁白文案');
     expect(
       creativeCanvasNodeDisplayName({
         ...textNode,

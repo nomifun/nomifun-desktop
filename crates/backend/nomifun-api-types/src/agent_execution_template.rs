@@ -3,13 +3,13 @@
 //! A template is authoring data only. Instantiation copies its participants
 //! into an Agent Execution and never leaves a live template reference behind.
 
-use nomifun_common::{AdaptationPolicy, DecisionPolicy, DelegationPolicy, PlanGate};
+use nomifun_common::{AdaptationPolicy, DecisionPolicy, DelegationPolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::webhook::double_option;
 use crate::{
     ExecutionModelRef, ParticipantCapability, ParticipantConstraints, PlannedExecutionStep,
-    PresetOverrides, ResolvedPresetSnapshot,
+    AgentResolvedSnapshot,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +27,9 @@ pub struct AgentExecutionTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentExecutionTemplateParticipant {
-    #[serde(deserialize_with = "crate::agent_execution::deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "crate::serde_util::deserialize_uuidv7")]
     pub template_participant_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_agent_id")]
     pub source_agent_id: String,
@@ -38,7 +39,7 @@ pub struct AgentExecutionTemplateParticipant {
     )]
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<AgentResolvedSnapshot>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -71,8 +72,8 @@ pub struct AgentExecutionTemplateDetail {
 }
 
 /// Authoring input for one candidate Agent. A caller may either round-trip an
-/// existing frozen `preset_snapshot`, or provide `preset_id` + overrides and
-/// let the server resolve a fresh execution-step snapshot before persistence.
+/// existing frozen `agent_snapshot`, or provide `preset_id` and let the server
+/// resolve a fresh execution-step snapshot before persistence.
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionTemplateParticipantInput {
@@ -87,9 +88,7 @@ pub struct AgentExecutionTemplateParticipantInput {
     )]
     pub preset_id: Option<String>,
     #[serde(default)]
-    pub preset_snapshot: Option<ResolvedPresetSnapshot>,
-    #[serde(default)]
-    pub preset_overrides: Option<PresetOverrides>,
+    pub agent_snapshot: Option<AgentResolvedSnapshot>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -137,9 +136,7 @@ impl<'de> Deserialize<'de> for AgentExecutionTemplateParticipantInput {
             )]
             preset_id: Option<String>,
             #[serde(default)]
-            preset_snapshot: Option<ResolvedPresetSnapshot>,
-            #[serde(default)]
-            preset_overrides: Option<PresetOverrides>,
+            agent_snapshot: Option<AgentResolvedSnapshot>,
             #[serde(
                 default,
                 deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -177,8 +174,7 @@ impl<'de> Deserialize<'de> for AgentExecutionTemplateParticipantInput {
         Ok(Self {
             source_agent_id: wire.source_agent_id,
             preset_id: wire.preset_id,
-            preset_snapshot: wire.preset_snapshot,
-            preset_overrides: wire.preset_overrides,
+            agent_snapshot: wire.agent_snapshot,
             provider_id: wire.provider_id,
             model: wire.model,
             role: wire.role,
@@ -238,8 +234,6 @@ pub struct CreateExecutionFromTemplateRequest {
     pub max_parallel: Option<i64>,
     #[serde(default)]
     pub delegation_policy: DelegationPolicy,
-    #[serde(default)]
-    pub plan_gate: PlanGate,
     #[serde(default)]
     pub adaptation_policy: AdaptationPolicy,
     #[serde(default)]
@@ -311,6 +305,13 @@ mod tests {
             serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
                 "goal": "ship",
                 "lead_conversation_id": "conversation-1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
+                "goal": "ship",
+                "plan_gate": "automatic"
             }))
             .is_err()
         );

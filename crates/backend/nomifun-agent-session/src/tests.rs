@@ -1,0 +1,3781 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use nomifun_agent_contracts::{
+    ActionId, AgentBindingValue, AgentHandoffBindingRefV1, AgentHandoffEnvelopeV1,
+    AgentHandoffInputCitationV1, AgentHandoffMode, AgentHandoffRequirementV1, AgentPresetId,
+    AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId, CapabilityId,
+    CompactionCompletedPayload, CorrelationId,
+    ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
+    IdempotencyKey, OperationId, PresetRevisionRef, PrincipalRef,
+    ReasoningEffort,
+    RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
+    ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
+    RuntimeCapabilityExecutionContract,
+    RuntimeExecutionCeiling, RuntimeExecutorSupport, RuntimeProfileKind,
+    SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
+    SessionEventRecord, SessionPayloadBody, SessionPayloadRecord, SnapshotCompatibilityAdmissionInput,
+    SnapshotCompatibilityAdmissionResult, StrictJsonValue, VersionString, canonical_json_bytes,
+    digest_bytes,
+};
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::{
+    AgentEffectState, AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest,
+    EffectEventRequest, EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest,
+    ReplaceSessionAgentBinding, SessionStoreError, TurnReceiptStatus,
+    evaluate_snapshot_compatibility,
+};
+use crate::projector::reduce_agent_messages;
+
+#[path = "native_checkpoint_tests.rs"]
+mod native_checkpoint_tests;
+#[path = "native_execution_tests.rs"]
+mod native_execution_tests;
+#[path = "runtime_state_tests.rs"]
+mod runtime_state_tests;
+#[path = "native_mutation_fence_tests.rs"]
+mod native_mutation_fence_tests;
+#[path = "idmm_tests.rs"]
+mod idmm_tests;
+
+fn session_id() -> AgentSessionId {
+    AgentSessionId(Uuid::now_v7().to_string())
+}
+
+fn event_id(value: &str) -> EventId {
+    EventId(value.to_owned())
+}
+
+fn digest(byte: char) -> DigestHex {
+    DigestHex(byte.to_string().repeat(64))
+}
+
+#[test]
+fn effect_classes_collapse_to_exactly_three_lifecycle_strategies() {
+    for class in [
+        EffectClass::Pure,
+        EffectClass::ReadLocal,
+        EffectClass::ReadSensitive,
+    ] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ReadOnly
+        );
+    }
+    for class in [
+        EffectClass::WriteReversible,
+        EffectClass::WriteDurable,
+        EffectClass::ExecuteLocal,
+        EffectClass::Destructive,
+        EffectClass::Irreversible,
+    ] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ManagedEffect
+        );
+    }
+    for class in [EffectClass::ExternalTransmit, EffectClass::Physical] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ExternalUncertainEffect
+        );
+    }
+}
+
+fn owner() -> PrincipalRef {
+    PrincipalRef {
+        principal_kind: "user".to_owned(),
+        principal_id: "user-001".to_owned(),
+    }
+}
+
+fn snapshot_ref() -> ResolvedSnapshotRef {
+    ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId("snapshot-001".to_owned()),
+        snapshot_digest: digest('b'),
+    }
+}
+
+fn binding() -> AgentBindingValue {
+    AgentBindingValue {
+        preset_revision_ref: PresetRevisionRef {
+            preset_id: AgentPresetId("coding.codex".to_owned()),
+            revision: 1,
+            revision_digest: digest('a'),
+        },
+        resolved_snapshot_ref: snapshot_ref(),
+        typed_resource_bindings: Vec::new(),
+        binding_version: 1,
+    }
+}
+
+fn agent_replacement(expected: &AgentBindingValue, suffix: &str) -> AgentBindingValue {
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref = PresetRevisionRef {
+        preset_id: AgentPresetId(format!("agent-{suffix}")),
+        revision: 1,
+        revision_digest: digest('c'),
+    };
+    replacement.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId(format!("snapshot-agent-{suffix}")),
+        snapshot_digest: digest('d'),
+    };
+    replacement.binding_version += 1;
+    replacement
+}
+
+fn agent_switch(
+    expected: AgentBindingValue,
+    replacement: AgentBindingValue,
+    key: &str,
+) -> ReplaceSessionAgentBinding {
+    ReplaceSessionAgentBinding {
+        expected,
+        replacement,
+        previous_agent_label: "Source Agent".to_owned(),
+        next_agent_label: "Target Agent".to_owned(),
+        transition_id: OperationId::from(Uuid::now_v7().to_string()),
+        request_digest: digest('9'),
+        idempotency_key: IdempotencyKey::from(format!("agent-switch-{key}")),
+        handoff_mode: AgentHandoffMode::ContextOnly,
+        handoff: None,
+        initial_active_capability_ids: vec!["agent.collaboration".to_owned()],
+    }
+}
+
+fn live_session(id: AgentSessionId) -> AgentSessionLiveRecord {
+    AgentSessionLiveRecord {
+        agent_session_id: id,
+        owner_ref: owner(),
+        metadata: AgentSessionMetadata {
+            title: Some("Session fixture".to_owned()),
+            archived: false,
+            pinned: false,
+            reasoning_effort: None,
+        },
+        agent_binding: binding(),
+        remote_binding_provenance: None,
+        parent_session_id: None,
+        fork_base_payload_id: None,
+        next_seq: 1,
+    }
+}
+
+fn create_request(session: AgentSessionLiveRecord, key: &str) -> CreateSessionRequest {
+    CreateSessionRequest {
+        session,
+        created_at: 1_788_000_000_000,
+        operation_id: OperationId(format!("operation-{key}")),
+        producer_id: EventProducerId("session-api".to_owned()),
+        idempotency_key: IdempotencyKey(key.to_owned()),
+        correlation_id: CorrelationId(format!("session-{key}")),
+        initial_input: None,
+        opening_event_id: Some(event_id(&format!("event-opening-{key}"))),
+        activation_event_id: Some(event_id(&format!("event-active-{key}"))),
+        initial_active_capability_ids: vec!["coding.workspace".to_owned()],
+    }
+}
+
+fn append(
+    session_id: &AgentSessionId,
+    event: &str,
+    producer: &str,
+    key: &str,
+    kind: &str,
+    correlation: &str,
+    causation: Option<EventId>,
+    payload: serde_json::Value,
+) -> SessionEventAppend {
+    SessionEventAppend {
+        agent_session_id: session_id.clone(),
+        event_id: event_id(event),
+        producer_id: EventProducerId(producer.to_owned()),
+        idempotency_key: IdempotencyKey(key.to_owned()),
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind(kind.to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId(correlation.to_owned()),
+            causation_event_id: causation,
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
+        },
+    }
+}
+
+fn projection_event(
+    session_id: &AgentSessionId,
+    seq: u64,
+    event: &str,
+    kind: &str,
+    correlation: &str,
+    payload: serde_json::Value,
+) -> SessionEventRecord {
+    SessionEventRecord {
+        agent_session_id: session_id.clone(),
+        seq,
+        event_id: event_id(event),
+        producer_id: EventProducerId("projection-test".to_owned()),
+        idempotency_key: IdempotencyKey(format!("projection-{event}")),
+        kind: SessionEventKind(kind.to_owned()),
+        kind_version: 1,
+        correlation_id: CorrelationId(correlation.to_owned()),
+        causation_event_id: None,
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
+    }
+}
+
+async fn create_ready(store: &AgentSessionStore, key: &str) -> (AgentSessionLiveRecord, EventId) {
+    let session = live_session(session_id());
+    let created = store
+        .create_session(create_request(session, key))
+        .await
+        .unwrap();
+    let ready = append(
+        &created.session.agent_session_id,
+        &format!("event-ready-{key}"),
+        "runtime-supervisor",
+        &format!("ready-{key}"),
+        "session/ready",
+        &format!("session-{key}"),
+        Some(created.opening_ack.event_id.clone()),
+        json!({}),
+    );
+    let ready_ack = store.append_event(&ready).await.unwrap().ack.unwrap();
+    (created.session, ready_ack.event_id)
+}
+
+async fn create_turn(
+    store: &AgentSessionStore,
+    key: &str,
+    operation: &str,
+) -> (AgentSessionLiveRecord, EventId) {
+    let (session, ready_event) = create_ready(store, key).await;
+    let turn = append(
+        &session.agent_session_id,
+        &format!("event-turn-started-{key}"),
+        "session-api",
+        &format!("turn-started-{key}"),
+        "turn/started",
+        operation,
+        Some(ready_event),
+        json!({"operation_id": operation}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    (session, turn_ack.event_id)
+}
+
+async fn create_pending_effect(
+    store: &AgentSessionStore,
+    key: &str,
+    strategy: EffectStrategy,
+) -> (AgentSessionLiveRecord, EffectEventRequest, EventId) {
+    let operation_id = format!("effect-operation-{key}");
+    let turn_id = format!("effect-turn-{key}");
+    let (session, ready_event) = create_ready(store, key).await;
+    let turn = append(
+        &session.agent_session_id,
+        &format!("event-effect-turn-{key}"),
+        "session-api",
+        &format!("effect-turn-{key}"),
+        "turn/started",
+        &turn_id,
+        Some(ready_event),
+        json!({"operation_id": turn_id}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        &format!("event-effect-tool-{key}"),
+        "runtime-supervisor",
+        &format!("effect-tool-{key}"),
+        "tool/call-started",
+        &format!("tool-{key}"),
+        Some(turn_ack.event_id),
+        json!({
+            "operation_id": operation_id,
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+    let request = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: format!("effect-{key}"),
+        turn_id: OperationId::from(turn_id),
+        operation_id: OperationId::from(operation_id),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId::from("workspace.files"),
+        action_id: ActionId::from("workspace.files/write"),
+        resource_binding_id: None,
+        resource_key: Some(format!("workspace:{key}")),
+        input_digest: digest('7'),
+        recorded_at: 1_788_000_000_010,
+        event_id: event_id(&format!("event-effect-started-{key}")),
+        producer_id: EventProducerId::from("capability-host"),
+        idempotency_key: IdempotencyKey::from(format!("effect-started-{key}")),
+        correlation_id: CorrelationId::from(format!("effect-{key}")),
+        strategy,
+        causation_event_id: Some(tool_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let started = store
+        .record_effect_started(request.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    (session, request, started.event_id)
+}
+
+#[tokio::test]
+async fn shared_agent_store_schema_and_session_creation_are_exact_and_idempotent() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let tables: BTreeSet<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema \
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .fetch_all(store.test_pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .collect();
+    let canonical_tables = nomifun_agent_contracts::agent_store_schema_manifest_payload()
+        .tables
+        .into_iter()
+        .map(|table| table.table_name)
+        .collect::<BTreeSet<_>>();
+    assert!(canonical_tables.is_subset(&tables), "the owner/reset manifest describes a controlled subset of the shared database");
+    let main = nomifun_db::init_database_memory().await.unwrap();
+    let main_tables: BTreeSet<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'")
+        .fetch_all(main.pool()).await.unwrap().into_iter().collect();
+    assert_eq!(tables, main_tables, "fixtures and product initialization must use exactly the same complete baseline");
+    for owned in [
+        "agent_sessions",
+        "agent_turns",
+        "agent_effects",
+        "agent_session_resources",
+        "agent_messages",
+        "agent_events",
+        "agent_session_heads",
+        "agent_payloads",
+    ] {
+        assert!(tables.contains(owned));
+    }
+    let remote_fk: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT \"table\", \"from\", \"to\" \
+         FROM pragma_foreign_key_list('agent_sessions') \
+         WHERE \"from\" = 'remote_binding_id'",
+    )
+    .fetch_optional(store.test_pool())
+    .await
+    .unwrap();
+    assert!(
+        remote_fk.is_none(),
+        "Session provenance must not have a reverse foreign key to RemoteBinding"
+    );
+    AgentSessionStore::from_pool(store.test_pool().clone())
+        .await
+        .expect("the non-session canonical Agent Store tables must not be rejected");
+
+    let request = create_request(live_session(session_id()), "create-1");
+    let created = store.create_session(request.clone()).await.unwrap();
+    assert!(!created.duplicate);
+    assert_eq!(created.opening_ack.seq, 1);
+    assert_eq!(created.activation_ack.seq, 2);
+    assert_eq!(created.session.next_seq, 3);
+    assert_eq!(
+        store
+            .head(&created.session.agent_session_id)
+            .await
+            .unwrap()
+            .last_seq,
+        2
+    );
+
+    let replay = store.create_session(request).await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(
+        replay.session.agent_session_id,
+        created.session.agent_session_id
+    );
+    assert_eq!(replay.activation_ack.cursor, created.activation_ack.cursor);
+}
+
+#[tokio::test]
+async fn session_reasoning_effort_is_persisted_and_updated_independently() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let mut session = live_session(session_id());
+    session.metadata.reasoning_effort = Some(ReasoningEffort::High);
+    let session_id = session.agent_session_id.clone();
+    let frozen_binding = session.agent_binding.clone();
+    let frozen_title = session.metadata.title.clone();
+
+    store
+        .create_session(create_request(session, "session-reasoning"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_live_session(&session_id)
+            .await
+            .unwrap()
+            .metadata
+            .reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+
+    store
+        .update_session_reasoning_effort(&owner(), &session_id, Some(ReasoningEffort::Low))
+        .await
+        .unwrap();
+    let updated = store.get_live_session(&session_id).await.unwrap();
+    assert_eq!(updated.metadata.reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(updated.metadata.title, frozen_title);
+    assert_eq!(updated.agent_binding, frozen_binding);
+
+    for effort in [
+        ReasoningEffort::None,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::Ultra,
+    ] {
+        store
+            .update_session_reasoning_effort(&owner(), &session_id, Some(effort))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_live_session(&session_id)
+                .await
+                .unwrap()
+                .metadata
+                .reasoning_effort,
+            Some(effort)
+        );
+    }
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT reasoning_effort FROM agent_sessions \
+         WHERE agent_session_id = ?",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some("ultra"));
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_sessions') WHERE name LIKE 'reasoning_effort%'")
+        .fetch_all(store.test_pool()).await.unwrap();
+    assert_eq!(columns, ["reasoning_effort"]);
+
+    store
+        .update_session_reasoning_effort(&owner(), &session_id, None)
+        .await
+        .unwrap();
+    let inherited = store.get_live_session(&session_id).await.unwrap();
+    assert_eq!(inherited.metadata.reasoning_effort, None);
+    assert_eq!(inherited.metadata.title, frozen_title);
+    assert_eq!(inherited.agent_binding, frozen_binding);
+}
+
+#[tokio::test]
+async fn main_database_pool_is_the_same_canonical_agent_store() {
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let store = AgentSessionStore::from_pool(database.pool().clone())
+        .await
+        .expect("main SQLite must contain the canonical Agent Store generation");
+    let created = store
+        .create_session(create_request(live_session(session_id()), "main-pool"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_turn_receipt(
+                &created.session.agent_session_id,
+                &OperationId("missing-turn".to_owned()),
+            )
+            .await
+            .unwrap()
+            .status,
+        TurnReceiptStatus::NotFound
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_session_creation_waits_for_the_sqlite_writer_and_both_succeed() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database(&directory.path().join("parallel-sessions.db"))
+        .await
+        .unwrap();
+    let store = AgentSessionStore::from_pool(database.pool().clone())
+        .await
+        .unwrap();
+
+    // Hold the SQLite writer lock while both Session opens reach their write
+    // boundary. BEGIN IMMEDIATE must wait here; the previous deferred BEGIN
+    // read the idempotency index first and then failed its lock upgrade.
+    let mut writer = database.pool().begin().await.unwrap();
+    sqlx::query("UPDATE users SET updated_at = updated_at")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+
+    let first_store = store.clone();
+    let first = tokio::spawn(async move {
+        first_store
+            .create_session(create_request(live_session(session_id()), "parallel-first"))
+            .await
+    });
+    let second_store = store.clone();
+    let second = tokio::spawn(async move {
+        second_store
+            .create_session(create_request(live_session(session_id()), "parallel-second"))
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    writer.commit().await.unwrap();
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(6), first)
+        .await
+        .expect("first Session open should honor SQLite busy_timeout")
+        .expect("first Session task should not panic")
+        .expect("first Session should be created");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(6), second)
+        .await
+        .expect("second Session open should honor SQLite busy_timeout")
+        .expect("second Session task should not panic")
+        .expect("second Session should be created");
+    assert_ne!(first.session.agent_session_id, second.session.agent_session_id);
+    assert!(!first.duplicate);
+    assert!(!second.duplicate);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn session_resource_bindings_are_frozen_with_the_session_and_cannot_change_owner() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let mut session = live_session(session_id());
+    session.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId("binding-workspace".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("workspace-1".to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "patch".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("root".to_owned(), "C:/workspace".to_owned())]),
+    }];
+    let created = store
+        .create_session(create_request(session.clone(), "resource-binding"))
+        .await
+        .unwrap();
+    let resources = store
+        .session_resources(&created.session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(resources, session.agent_binding.typed_resource_bindings);
+
+    let mut foreign = live_session(session_id());
+    foreign.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId("binding-foreign".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("workspace-2".to_owned()),
+        owner_id: "another-user".to_owned(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    assert!(matches!(
+        store
+            .create_session(create_request(foreign, "foreign-resource"))
+            .await,
+        Err(SessionStoreError::InvalidSession(message))
+            if message.contains("foreign resource binding")
+    ));
+}
+
+#[tokio::test]
+async fn session_model_binding_replacement_is_exact_and_preserves_resource_authority() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let mut session = live_session(session_id());
+    session.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId("binding-model-workspace".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("workspace-model".to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "patch".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    let created = store
+        .create_session(create_request(session, "model-binding-replacement"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &created.session.agent_session_id,
+            "event-ready-model-binding-replacement",
+            "runtime-supervisor",
+            "ready-model-binding-replacement",
+            "session/ready",
+            "session-model-binding-replacement",
+            Some(created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let expected = created.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref = PresetRevisionRef {
+        preset_id: AgentPresetId("model-variant".to_owned()),
+        revision: 1,
+        revision_digest: digest('c'),
+    };
+    replacement.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId("snapshot-model-variant".to_owned()),
+        snapshot_digest: digest('d'),
+    };
+    replacement.binding_version += 1;
+
+    let updated = store
+        .replace_session_model_binding(
+            &owner(),
+            &created.session.agent_session_id,
+            &expected,
+            replacement.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    assert_eq!(
+        store
+            .session_resources(&created.session.agent_session_id)
+            .await
+            .unwrap(),
+        expected.typed_resource_bindings,
+    );
+
+    let mut stale_successor = replacement.clone();
+    stale_successor.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId("snapshot-stale-successor".to_owned()),
+        snapshot_digest: digest('e'),
+    };
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &created.session.agent_session_id,
+                &expected,
+                stale_successor,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("changed before")
+    ));
+}
+
+#[tokio::test]
+async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_provenance() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (active, _) = create_turn(&store, "active-model-switch", "active-model-switch").await;
+    let expected = active.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref.preset_id = AgentPresetId("active-model-variant".to_owned());
+    replacement.preset_revision_ref.revision_digest = digest('c');
+    replacement.resolved_snapshot_ref.snapshot_id =
+        ResolvedSnapshotId("active-model-snapshot".to_owned());
+    replacement.resolved_snapshot_ref.snapshot_digest = digest('d');
+    replacement.binding_version += 1;
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &active.agent_session_id,
+                &expected,
+                replacement,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+
+    let mut remote = live_session(session_id());
+    remote.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-model-binding"),
+        binding_version: 1,
+    });
+    let remote = store
+        .create_session(create_request(remote, "remote-model-binding"))
+        .await
+        .unwrap();
+    let expected = remote.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref.preset_id = AgentPresetId("remote-model-variant".to_owned());
+    replacement.preset_revision_ref.revision_digest = digest('e');
+    replacement.resolved_snapshot_ref.snapshot_id =
+        ResolvedSnapshotId("remote-model-snapshot".to_owned());
+    replacement.resolved_snapshot_ref.snapshot_digest = digest('f');
+    replacement.binding_version += 1;
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &remote.session.agent_session_id,
+                &expected,
+                replacement,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("Remote")
+    ));
+}
+
+#[tokio::test]
+async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "agent-transition").await;
+    let expected = session.agent_binding.clone();
+    let mut replacement = agent_replacement(&expected, "target");
+    replacement.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId::from("workspace:target"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("target"),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    let request = agent_switch(expected.clone(), replacement.clone(), "atomic");
+
+    let changed = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request.clone())
+        .await
+        .unwrap();
+    assert!(!changed.duplicate);
+    assert_eq!(changed.session.agent_binding, replacement);
+    assert_eq!(changed.transition.previous_binding_ref.binding_version, 1);
+    assert_eq!(changed.transition.next_binding_ref.binding_version, 2);
+    assert!(!changed.transition.completion_gate_inherited);
+    assert_eq!(
+        store
+            .session_resources(&session.agent_session_id)
+            .await
+            .unwrap(),
+        replacement.typed_resource_bindings,
+    );
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    assert_eq!(head.active_set_generation, 1);
+    assert_eq!(
+        store
+            .active_capability_ids(&session.agent_session_id)
+            .await
+            .unwrap(),
+        ["agent.collaboration"]
+    );
+    let events = store.read_events(&session.agent_session_id, None, 100).await.unwrap();
+    assert!(events.events.iter().any(|event| {
+        event.kind.0 == "session/agent-binding-changed"
+            && event.correlation_id.as_ref() == request.transition_id.as_ref()
+    }));
+    let marker = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.presentation_intent == "agent_transition")
+        .expect("canonical transition marker projection");
+    assert_eq!(
+        marker.projection["reference"]["next_agent_label"],
+        "Target Agent"
+    );
+
+    let replay = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request)
+        .await
+        .unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.transition_ack, changed.transition_ack);
+    assert_eq!(replay.active_set_ack, changed.active_set_ack);
+}
+
+#[tokio::test]
+async fn full_agent_transition_persists_only_a_bounded_exact_closed_turn_handoff() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let operation = "handoff-source-turn";
+    let (session, turn_event) = create_turn(&store, "agent-handoff", operation).await;
+    let terminal = store
+        .append_event(&append(
+            &session.agent_session_id,
+            "event-handoff-terminal",
+            "runtime-supervisor",
+            "handoff-terminal",
+            "turn/completed",
+            operation,
+            Some(turn_event),
+            json!({ "result": "closed" }),
+        ))
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    let expected = session.agent_binding.clone();
+    let replacement = agent_replacement(&expected, "handoff-target");
+    let envelope = AgentHandoffEnvelopeV1 {
+        schema_version: nomifun_agent_contracts::AGENT_HANDOFF_ENVELOPE_SCHEMA_V1.to_owned(),
+        source_agent_session_id: session.agent_session_id.clone(),
+        source_turn_operation_id: OperationId::from(operation),
+        source_through_seq: terminal.seq,
+        source_binding_ref: AgentHandoffBindingRefV1::from(&expected),
+        target_binding_ref: AgentHandoffBindingRefV1::from(&replacement),
+        mode: AgentHandoffMode::ContinueTask,
+        completion_gate_inherited: false,
+        requirements: vec![AgentHandoffRequirementV1 {
+            id: "req-1".to_owned(),
+            description: "Preserve exact task scope".to_owned(),
+            source: AgentHandoffInputCitationV1 {
+                input: 0,
+                quote: "task scope".to_owned(),
+            },
+            origin: None,
+        }],
+        last_plan: None,
+        historical_completion_account: None,
+        verified_artifacts: Vec::new(),
+        unresolved_items: vec!["Re-verify the workspace".to_owned()],
+        warnings: vec!["Historical data only".to_owned()],
+    };
+    let mut request = agent_switch(expected.clone(), replacement.clone(), "handoff");
+    request.handoff_mode = AgentHandoffMode::ContinueTask;
+    request.handoff = Some(envelope.clone());
+
+    let mut invalid = request.clone();
+    invalid.handoff.as_mut().unwrap().source_through_seq += 1;
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(&owner(), &session.agent_session_id, invalid)
+            .await,
+        Err(SessionStoreError::InvalidPayload(message)) if message.contains("closed Turn")
+    ));
+    assert_eq!(
+        store
+            .get_live_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_binding,
+        expected
+    );
+    let payload_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_payloads WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(payload_count, 0, "failed handoff leaves no orphan payload");
+
+    let changed = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request)
+        .await
+        .unwrap();
+    assert!(changed.transition.handoff_payload_id.is_some());
+    assert!(changed.transition.handoff_payload_digest.is_some());
+    assert!(!changed.transition.completion_gate_inherited);
+    let stored: (String, i64, String) = sqlx::query_as(
+        "SELECT media_type, byte_len, digest FROM agent_payloads WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "application/vnd.nomifun.agent-handoff+json;version=1");
+    assert!(stored.1 > 0 && stored.1 <= 80 * 1024);
+    assert_eq!(
+        changed.transition.handoff_payload_digest.as_ref().unwrap().as_ref(),
+        stored.2
+    );
+}
+
+async fn settled_resource_effect_session(
+    store: &AgentSessionStore, key: &str,
+) -> AgentSessionLiveRecord {
+    let resource = |kind: &str, operation: &str| TypedResourceBinding {
+        binding_id: ResourceBindingId::from(format!("{kind}:{key}")),
+        resource_kind: ResourceKind::from(kind.to_owned()),
+        resource_id: ResourceId::from(key.to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from([operation.to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let mut session = live_session(session_id());
+    session.agent_binding.typed_resource_bindings = vec![
+        resource("process_session", "exec"), resource("workspace", "write"),
+        resource("project_memory", "read"),
+    ];
+    let session = store.create_session(create_request(session, key)).await.unwrap().session;
+    let ready = store.append_event(&append(&session.agent_session_id,
+        &format!("ready-{key}"), "runtime-supervisor", &format!("ready-{key}"), "session/ready",
+        &format!("session-{key}"), Some(event_id(&format!("event-opening-{key}"))), json!({})))
+        .await.unwrap().ack.unwrap().event_id;
+    let turn_id = format!("resource-turn-{key}");
+    let started = store.append_event(&append(&session.agent_session_id,
+        &format!("turn-{key}"), "session-api", &format!("turn-{key}"), "turn/started", &turn_id,
+        Some(ready), json!({"operation_id":turn_id}))).await.unwrap().ack.unwrap().event_id;
+    for (index, kind, capability, action) in [
+        (0, "workspace", "workspace.files", "workspace.files/write"),
+        (1, "process_session", "workspace.process", "workspace.process/exec"),
+    ] {
+        let operation = format!("resource-operation-{key}-{index}");
+        let tool = store.append_event(&append(&session.agent_session_id,
+            &format!("tool-{key}-{index}"), "runtime-supervisor", &format!("tool-{key}-{index}"),
+            "tool/call-started", &format!("tool-message-{key}-{index}"), Some(started.clone()),
+            json!({"operation_id":operation,"call_id":format!("call-{key}-{index}"),
+                "capability_id":capability,"action_id":action})))
+            .await.unwrap().ack.unwrap().event_id;
+        let request = EffectEventRequest {
+            agent_session_id: session.agent_session_id.clone(), effect_id: format!("effect-{key}-{index}"),
+            turn_id: OperationId::from(turn_id.clone()), operation_id: OperationId::from(operation),
+            owner_domain: "workspace".to_owned(), capability_module: CapabilityId::from(capability),
+            action_id: ActionId::from(action), resource_binding_id: Some(ResourceBindingId::from(format!("{kind}:{key}"))),
+            resource_key: Some(format!("{kind}:{key}")), input_digest: digest('7'), recorded_at: 1000 + index,
+            event_id: event_id(&format!("effect-start-{key}-{index}")), producer_id: EventProducerId::from("capability-host"),
+            idempotency_key: IdempotencyKey::from(format!("effect-{key}-{index}")),
+            correlation_id: CorrelationId::from(format!("effect-{key}-{index}")), strategy: EffectStrategy::ManagedEffect,
+            causation_event_id: Some(tool), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        let effect_started = store.record_effect_started(request.clone()).await.unwrap().ack.unwrap().event_id;
+        store.record_effect_terminal(EffectEventRequest {
+            event_id: event_id(&format!("effect-return-{key}-{index}")), producer_id: EventProducerId::from("owning-plugin"),
+            causation_event_id: Some(effect_started), recorded_at: 1010 + index,
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"returned":true}))), ..request
+        }, EffectTerminalState::Succeeded).await.unwrap();
+    }
+    store.append_event(&append(&session.agent_session_id, &format!("terminal-{key}"),
+        "runtime-supervisor", &format!("terminal-{key}"), "turn/completed", &turn_id,
+        Some(started), json!({}))).await.unwrap();
+    session
+}
+
+#[tokio::test]
+async fn full_agent_transition_preserves_settled_resource_facts_without_reauthorizing_dropped_resources() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let session = settled_resource_effect_session(&store, "settled-switch").await;
+    let expected = session.agent_binding.clone();
+    let effects = store.list_effects(&session.agent_session_id).await.unwrap();
+    assert_eq!(effects.len(), 2);
+    assert!(effects.iter().all(|effect| effect.state == AgentEffectState::Returned && effect.resource_binding_id.is_some()));
+    let source_resources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT binding_id,binding_digest FROM agent_session_resources WHERE session_id=? AND resource_kind IN ('workspace','process_session') ORDER BY binding_id")
+        .bind(session.agent_session_id.as_ref()).fetch_all(store.test_pool()).await.unwrap();
+    let mut replacement = agent_replacement(&expected, "settled-target");
+    replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() == "workspace");
+    let request = agent_switch(expected, replacement.clone(), "settled-switch");
+    let changed = store.replace_session_agent_binding(&owner(), &session.agent_session_id, request.clone()).await
+        .expect("settled effects must not prevent an idle same-Session Agent switch");
+    assert_eq!(changed.session.agent_binding, replacement);
+    assert_eq!(store.session_resources(&session.agent_session_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects,
+        "switching must preserve complete canonical effect identities and observations");
+    let retained: Vec<(String, String)> = sqlx::query_as(
+        "SELECT binding_id,binding_digest FROM agent_session_resources WHERE session_id=? ORDER BY binding_id")
+        .bind(session.agent_session_id.as_ref()).fetch_all(store.test_pool()).await.unwrap();
+    assert_eq!(retained, source_resources, "keep immutable referenced facts; remove unreferenced dropped resources");
+    let foreign_key_errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(foreign_key_errors, 0);
+    let replay = store.replace_session_agent_binding(&owner(), &session.agent_session_id, request).await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.transition_ack, changed.transition_ack);
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects);
+    let through = store.current_cursor(&session.agent_session_id).await.unwrap().seq;
+    let child_id = session_id();
+    let base = crate::ForkContextSnapshot::new(session.agent_session_id.clone(), through,
+        AgentHandoffBindingRefV1::from(&replacement), 1, Vec::new()).unwrap();
+    let forked = store.fork_session(&session.agent_session_id, ForkRequest {
+        child_session_id: child_id.clone(), child_owner_ref: owner(), child_metadata: session.metadata.clone(),
+        child_agent_binding: replacement.clone(), parent_through_seq: through, created_at: 2000,
+        producer_id: "fork-coordinator".into(), operation_id: "settled-switch-fork".into(),
+        idempotency_key: "settled-switch-fork".into(), correlation_id: "settled-switch-fork".into(),
+        event_id: Some("settled-switch-fork-event".into()), base_payload_id: "settled-switch-fork-base".into(),
+        base_body: SessionPayloadBody::Json(StrictJsonValue(serde_json::to_value(base).unwrap())),
+        base_media_type: "application/json".to_owned(), child_initial_active_capability_ids: vec!["workspace.files".to_owned()],
+    }).await.unwrap();
+    assert!(!forked.contract.replays_tool_or_effect && !forked.contract.copies_full_transcript);
+    assert_eq!(store.session_resources(&child_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert!(store.list_effects(&child_id).await.unwrap().is_empty(), "fork never copies the parent's effect ledger or retired binding grants");
+    let delete = DeleteAgentSessionCommand {
+        operation_id: "delete-settled-switch-parent".into(), agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(), requested_at: 3000,
+    };
+    store.fence_delete(&delete).await.unwrap();
+    store.complete_delete(&delete, 3100).await.unwrap();
+    assert_eq!(store.get_live_session(&child_id).await.unwrap().agent_binding, replacement);
+    assert_eq!(store.session_resources(&child_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(store.test_pool()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn single_resource_replacement_preserves_settled_effect_references_and_current_authority() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let session = settled_resource_effect_session(&store, "settled-resource").await;
+    let effects = store.list_effects(&session.agent_session_id).await.unwrap();
+    let expected = session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "process_session");
+    let updated = store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+        &expected, replacement.clone(), "process_session").await.unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    let current = store.session_resources(&session.agent_session_id).await.unwrap();
+    assert!(!current.iter().any(|resource| resource.resource_kind.as_ref() == "process_session"));
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects);
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_session_resources WHERE session_id=? AND resource_kind='process_session'")
+        .bind(session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(retained, 1, "historical process reference remains a fact, never a current grant");
+}
+
+#[tokio::test]
+async fn agent_transition_rejects_redefining_an_existing_resource_identity_atomically() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "resource-identity-initial").await;
+    let expected = session.agent_binding;
+    let mut first = agent_replacement(&expected, "resource-identity");
+    first.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: "workspace:immutable".into(), resource_kind: "workspace".into(), resource_id: "immutable".into(),
+        owner_id: owner().principal_id, operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None, typed_parameters: BTreeMap::new(),
+    }];
+    store.replace_session_agent_binding(&owner(), &session.agent_session_id,
+        agent_switch(expected, first.clone(), "resource-identity-first")).await.unwrap();
+    let before = store.current_cursor(&session.agent_session_id).await.unwrap();
+    let mut changed = agent_replacement(&first, "resource-identity-changed");
+    changed.typed_resource_bindings[0].operations.insert("write".to_owned());
+    let result = store.replace_session_agent_binding(&owner(), &session.agent_session_id,
+        agent_switch(first.clone(), changed, "resource-identity-changed")).await;
+    assert!(matches!(result, Err(SessionStoreError::InvalidSession(message)) if message.contains("immutable resource binding")));
+    assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().agent_binding, first);
+    assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn session_resource_replacement_rejects_unsettled_effects_for_changed_kind() {
+    for unknown in [false, true] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let key = if unknown { "unknown-resource" } else { "pending-resource" };
+        let session = settled_resource_effect_session(&store, key).await;
+        let operation = OperationId::from(format!("unsettled-turn-{key}"));
+        let (_, turn) = store.start_turn(&session.agent_session_id, "session_api".into(),
+            format!("unsettled-turn-{key}").into(), operation.clone(),
+            StrictJsonValue(json!({"content":"Observe an effect with an unsettled outcome"}))).await.unwrap();
+        let turn_started = turn.ack.unwrap().event_id;
+        let owner_operation = format!("unsettled-operation-{key}");
+        let tool = store.append_event(&append(&session.agent_session_id, &format!("unsettled-tool-{key}"),
+            "runtime-supervisor", &format!("unsettled-tool-{key}"), "tool/call-started",
+            &format!("unsettled-message-{key}"), Some(turn_started.clone()),
+            json!({"operation_id":owner_operation,"call_id":format!("unsettled-call-{key}"),
+                "capability_id":"workspace.process","action_id":"workspace.process/exec"})))
+            .await.unwrap().ack.unwrap().event_id;
+        let request = EffectEventRequest {
+            agent_session_id: session.agent_session_id.clone(), effect_id: format!("unsettled-effect-{key}"),
+            turn_id: operation.clone(), operation_id: owner_operation.into(), owner_domain: "workspace".to_owned(),
+            capability_module: "workspace.process".into(), action_id: "workspace.process/exec".into(),
+            resource_binding_id: Some(format!("process_session:{key}").into()), resource_key: Some(key.to_owned()),
+            input_digest: digest('8'), recorded_at: 2000, event_id: format!("unsettled-effect-start-{key}").into(),
+            producer_id: "capability-host".into(), idempotency_key: format!("unsettled-effect-{key}").into(),
+            correlation_id: format!("unsettled-effect-{key}").into(),
+            strategy: if unknown { EffectStrategy::ExternalUncertainEffect } else { EffectStrategy::ManagedEffect },
+            causation_event_id: Some(tool), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        let started = store.record_effect_started(request.clone()).await.unwrap().ack.unwrap().event_id;
+        if unknown {
+            store.record_effect_terminal(EffectEventRequest {
+                event_id: format!("unsettled-effect-unknown-{key}").into(), producer_id: "owning-plugin".into(),
+                causation_event_id: Some(started), recorded_at: 2010, ..request
+            }, EffectTerminalState::Uncertain).await.unwrap();
+        }
+        store.append_event(&append(&session.agent_session_id, &format!("unsettled-turn-terminal-{key}"),
+            "runtime-supervisor", &format!("unsettled-turn-terminal-{key}"), "turn/failed", operation.as_ref(),
+            Some(turn_started), json!({"error":"interrupted before effect outcome was confirmed"}))).await.unwrap();
+        let expected = session.agent_binding;
+        let mut replacement = expected.clone();
+        replacement.binding_version += 1;
+        replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "process_session");
+        assert!(matches!(store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+            &expected, replacement, "process_session").await,
+            Err(SessionStoreError::Conflict(message)) if message.contains("unsettled process_session effects")));
+        assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().agent_binding, expected);
+        let mut unrelated = expected.clone();
+        unrelated.binding_version += 1;
+        unrelated.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "project_memory");
+        store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+            &expected, unrelated, "project_memory").await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_agent_transition_rolls_back_on_resource_failure_and_rejects_stale_active_remote() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "agent-transition-rollback").await;
+    let expected = session.agent_binding.clone();
+    let mut invalid = agent_replacement(&expected, "invalid-resource");
+    invalid.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId::from("foreign-resource"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("foreign"),
+        owner_id: "another-owner".to_owned(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    assert!(store
+        .replace_session_agent_binding(
+            &owner(),
+            &session.agent_session_id,
+            agent_switch(expected.clone(), invalid, "rollback"),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_live_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_binding,
+        expected,
+    );
+    assert!(store
+        .session_resources(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().active_set_generation, 0);
+
+    let (active, _) = create_turn(&store, "agent-transition-active", "active-switch").await;
+    let active_expected = active.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &active.agent_session_id,
+                agent_switch(
+                    active_expected.clone(),
+                    agent_replacement(&active_expected, "active"),
+                    "active",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+
+    let mut remote = live_session(session_id());
+    remote.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-agent-transition"),
+        binding_version: 1,
+    });
+    let remote = store
+        .create_session(create_request(remote, "remote-agent-transition"))
+        .await
+        .unwrap();
+    let remote_expected = remote.session.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &remote.session.agent_session_id,
+                agent_switch(
+                    remote_expected.clone(),
+                    agent_replacement(&remote_expected, "remote"),
+                    "remote",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("Remote")
+    ));
+
+    let (effect_session, _, effect_event) = create_pending_effect(
+        &store,
+        "agent-transition-effect",
+        EffectStrategy::ManagedEffect,
+    )
+    .await;
+    store
+        .append_event(&append(
+            &effect_session.agent_session_id,
+            "event-agent-transition-effect-terminal",
+            "runtime-supervisor",
+            "agent-transition-effect-terminal",
+            "turn/completed",
+            "effect-turn-agent-transition-effect",
+            Some(effect_event),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let effect_expected = effect_session.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &effect_session.agent_session_id,
+                agent_switch(
+                    effect_expected.clone(),
+                    agent_replacement(&effect_expected, "effect"),
+                    "effect",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("unsettled effects")
+    ));
+}
+
+#[tokio::test]
+async fn session_resource_replacement_updates_json_and_resource_projection_atomically() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    for id in ["a", "b"] {
+        sqlx::query("INSERT INTO knowledge_bases (knowledge_base_id,name,root_path,created_at,updated_at) VALUES (?,'Fixture knowledge','fixture-root',1,1)")
+        .bind(format!("0190f5fe-7c00-7a00-8000-00000000000{id}"))
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    }
+    let mut session = live_session(session_id());
+    let workspace = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("workspace:default"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("default"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let knowledge_a = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:a"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000a"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    session.agent_binding.typed_resource_bindings =
+        vec![knowledge_a, workspace.clone()];
+    let created = store
+        .create_session(create_request(session, "resource-binding-replacement"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &created.session.agent_session_id,
+            "event-ready-resource-binding-replacement",
+            "runtime-supervisor",
+            "ready-resource-binding-replacement",
+            "session/ready",
+            "session-resource-binding-replacement",
+            Some(created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let expected = created.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement
+        .typed_resource_bindings
+        .retain(|resource| resource.resource_kind.as_ref() != "knowledge_base");
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:b"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000b"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from([
+            "read".to_owned(),
+            "search".to_owned(),
+            "write".to_owned(),
+        ]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("knowledge_enabled".to_owned(), "true".to_owned())]),
+    });
+    replacement
+        .typed_resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+
+    let updated = store
+        .replace_session_resource_bindings(
+            &owner(),
+            &created.session.agent_session_id,
+            &expected,
+            replacement.clone(),
+            "knowledge_base",
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    let resources = store
+        .session_resources(&created.session.agent_session_id)
+        .await
+        .unwrap();
+    assert!(resources.contains(&workspace));
+    assert!(resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000b"
+            && resource.operations.contains("write")
+    }));
+    assert!(!resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000a"
+    }));
+}
+
+#[tokio::test]
+async fn session_resource_replacement_rejects_an_active_turn() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (active, _) = create_turn(
+        &store,
+        "active-resource-replacement",
+        "active-resource-replacement",
+    )
+    .await;
+    let expected = active.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:new"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("new"),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    });
+
+    assert!(matches!(
+        store
+            .replace_session_resource_bindings(
+                &owner(),
+                &active.agent_session_id,
+                &expected,
+                replacement,
+                "knowledge_base",
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+}
+
+#[tokio::test]
+async fn the_same_product_resource_binding_can_be_frozen_into_distinct_sessions() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let binding = TypedResourceBinding {
+        binding_id: ResourceBindingId("workspace:default-workspace".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("default-workspace".to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let mut first = live_session(session_id());
+    first.agent_binding.typed_resource_bindings = vec![binding.clone()];
+    let mut second = live_session(session_id());
+    second.agent_binding.typed_resource_bindings = vec![binding.clone()];
+
+    let first = store.create_session(create_request(first, "shared-resource-first"))
+        .await.unwrap().session;
+    let second = store.create_session(create_request(second, "shared-resource-second"))
+        .await.unwrap().session;
+
+    assert_ne!(first.agent_session_id, second.agent_session_id);
+    assert_eq!(store.session_resources(&first.agent_session_id).await.unwrap(), vec![binding.clone()]);
+    assert_eq!(store.session_resources(&second.agent_session_id).await.unwrap(), vec![binding]);
+}
+
+#[tokio::test]
+async fn opening_remote_session_listing_is_exact_and_excludes_ready_or_local_sessions() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+
+    let opening_id = session_id();
+    let mut opening = live_session(opening_id.clone());
+    opening.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-opening"),
+        binding_version: 1,
+    });
+    store
+        .create_session(create_request(opening, "remote-opening"))
+        .await
+        .unwrap();
+
+    let ready_id = session_id();
+    let mut ready = live_session(ready_id.clone());
+    ready.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-ready"),
+        binding_version: 1,
+    });
+    let ready_created = store
+        .create_session(create_request(ready, "remote-ready"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &ready_id,
+            "event-ready-remote",
+            "runtime-supervisor",
+            "ready-remote",
+            "session/ready",
+            "session-ready-remote",
+            Some(ready_created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    store
+        .create_session(create_request(live_session(session_id()), "local-opening"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.list_opening_remote_sessions().await.unwrap(),
+        vec![opening_id]
+    );
+}
+
+#[tokio::test]
+async fn observations_keep_session_head_events_and_messages_in_one_committed_snapshot() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "observation-snapshot").await;
+    let turn = append(
+        &session.agent_session_id,
+        "observation-turn", "session-api", "observation-turn", "turn/started",
+        "observation-turn", Some(ready_event), json!({}),
+    );
+    store.append_event(&turn).await.unwrap();
+
+    // One pool connection makes competing acquisitions interleave predictably.
+    // An observation that reacquires between fields can combine old session
+    // metadata with a newer head, event page, or message projection.
+    let writer = async {
+        for index in 0..32 {
+            let id = format!("observation-part-{index}");
+            let event = append(
+                &session.agent_session_id,
+                &id, "runtime-supervisor", &id, "message/content-part",
+                "observation-message", Some(turn.event_id.clone()),
+                json!({"content": "part"}),
+            );
+            store.append_event(&event).await.unwrap();
+        }
+    };
+    let reader = async {
+        let mut observations = Vec::new();
+        for _ in 0..32 {
+            observations.push(store.observe(&session.agent_session_id, None, 500).await.unwrap());
+        }
+        observations
+    };
+    let ((), observations) = tokio::join!(writer, reader);
+    for observation in observations {
+        assert_eq!(observation.session.next_seq, observation.head.last_seq + 1);
+        assert_eq!(observation.next_cursor.seq, observation.head.last_seq);
+        assert_eq!(observation.events.last().unwrap().seq, observation.head.last_seq);
+        assert!(observation.messages.iter().all(|message| message.last_seq <= observation.head.last_seq));
+    }
+
+    let page = store.observe(&session.agent_session_id, None, 1).await.unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.next_cursor.seq, page.events[0].seq);
+    assert!(page.next_cursor.seq < page.head.last_seq);
+    let ahead = nomifun_agent_contracts::SessionEventCursor {
+        agent_session_id: session.agent_session_id.clone(),
+        seq: page.head.last_seq + 1,
+    };
+    assert!(matches!(
+        store.observe(&session.agent_session_id, Some(&ahead), 10).await,
+        Err(SessionStoreError::InvalidEvent(_))
+    ));
+}
+
+#[tokio::test]
+async fn append_projection_cursor_and_rebuild_are_one_deterministic_chain() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "projection").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-turn-started",
+        "session-api",
+        "turn-started",
+        "turn/started",
+        "turn-1",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let part = append(
+        &session.agent_session_id,
+        "event-message-part",
+        "runtime-supervisor",
+        "message-part",
+        "message/content-part",
+        "message-1",
+        Some(turn_ack.event_id.clone()),
+        json!({"content": "hello"}),
+    );
+    let part_result = store.append_event(&part).await.unwrap();
+    let duplicate = store.append_event(&part).await.unwrap();
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.cursor, part_result.cursor);
+    let completed = append(
+        &session.agent_session_id,
+        "event-message-completed",
+        "runtime-supervisor",
+        "message-completed",
+        "message/completed",
+        "message-1",
+        Some(part_result.ack.unwrap().event_id),
+        json!({"content_digest": digest_bytes(b"hello"), "part_count": 1}),
+    );
+    store.append_event(&completed).await.unwrap();
+
+    let before_head = store.head(&session.agent_session_id).await.unwrap();
+    let before_messages = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap();
+    assert_eq!(before_messages.len(), 2);
+    let message = before_messages
+        .iter()
+        .find(|projection| projection.projection_id == "message:message-1")
+        .unwrap();
+    assert_eq!(message.projection["content"], "hello");
+    assert_eq!(message.projection["part_count"], 1);
+    assert!(message.projection.get("events").is_none());
+
+    sqlx::query("DELETE FROM agent_messages WHERE session_id = ?")
+        .bind(session.agent_session_id.as_ref())
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM agent_session_heads WHERE session_id = ?")
+        .bind(session.agent_session_id.as_ref())
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    let rebuilt_head = store
+        .rebuild_projections(&session.agent_session_id)
+        .await
+        .unwrap();
+    let rebuilt_messages = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap();
+    assert_eq!(rebuilt_head, before_head);
+    assert_eq!(rebuilt_messages, before_messages);
+
+    let before_cursor = store
+        .current_cursor(&session.agent_session_id)
+        .await
+        .unwrap();
+    let skipped_generation = append(
+        &session.agent_session_id,
+        "event-active-generation-2",
+        "capability-host",
+        "active-generation-2",
+        "capability/active-set-committed",
+        "session-projection",
+        None,
+        json!({"generation": 2, "active_capability_ids": [], "delta": []}),
+    );
+    assert!(store.append_event(&skipped_generation).await.is_err());
+    assert_eq!(
+        store
+            .current_cursor(&session.agent_session_id)
+            .await
+            .unwrap(),
+        before_cursor
+    );
+}
+
+#[test]
+fn projection_rejects_embedded_legacy_event_history() {
+    let session_id = session_id();
+    let existing = crate::MessageProjection {
+        session_id: session_id.clone(),
+        projection_id: "message:legacy-message".to_owned(),
+        first_seq: 3,
+        last_seq: 3,
+        presentation_intent: "message".to_owned(),
+        message_type: None,
+        message_status: None,
+        projection: json!({
+            "projection_id": "message:legacy-message",
+            "correlation_id": "legacy-message",
+            "presentation_intent": "message",
+            "events": [{
+                "seq": 3,
+                "kind": "message/content-part",
+                "kind_version": 1,
+                "payload": {"content": "hello"}
+            }],
+            "state": "streaming",
+            "content": "hello"
+        }),
+        semantic_digest: "legacy-digest".to_owned(),
+    };
+    let payload = json!({
+        "content_digest": digest_bytes(b"hello"),
+        "part_count": 1
+    });
+    let completed = projection_event(
+        &session_id,
+        4,
+        "event-legacy-message-completed",
+        "message/completed",
+        "legacy-message",
+        payload.clone(),
+    );
+
+    assert!(
+        reduce_agent_messages(Some(existing), &completed, &payload).is_err(),
+        "the clean-cut Agent Store must not normalize an old embedded event transcript"
+    );
+}
+
+#[test]
+fn message_source_metadata_is_optional_and_does_not_rewrite_content() {
+    let wire = json!({
+        "session_id": session_id(), "projection_id": "message:fixture",
+        "first_seq": 1, "last_seq": 1, "presentation_intent": "message",
+        "projection": {"content": "same content"}, "semantic_digest": "fixture-digest"
+    });
+    let plain: crate::MessageProjection = serde_json::from_value(wire.clone()).unwrap();
+    assert!(plain.message_type.is_none() && plain.message_status.is_none());
+    assert_eq!(serde_json::to_value(&plain).unwrap(), wire);
+    let mut typed_wire = wire.clone();
+    typed_wire["message_type"] = json!("text");
+    typed_wire["message_status"] = json!("finish");
+    let typed: crate::MessageProjection = serde_json::from_value(typed_wire.clone()).unwrap();
+    assert_eq!(typed.projection, plain.projection);
+    assert_eq!(typed.semantic_digest, plain.semantic_digest);
+    assert_eq!(serde_json::to_value(typed).unwrap(), typed_wire);
+}
+
+#[test]
+fn projection_keeps_tool_references_and_terminal_effect_summary_without_events() {
+    let session_id = session_id();
+    let started_payload = json!({
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write",
+        "input": {"content": "not copied into the projection"}
+    });
+    let started = projection_event(
+        &session_id,
+        3,
+        "event-tool-started",
+        "tool/call-started",
+        "tool-1",
+        started_payload.clone(),
+    );
+    let tool =
+        reduce_agent_messages(None, &started, &started_payload).unwrap();
+    let result_payload = json!({
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write",
+        "output": {"content": "not copied into the projection"},
+        "output_ref": {
+            "artifact_id": "artifact-1",
+            "normalized_relative_path": "results/artifact-1",
+            "digest": "abc123"
+        }
+    });
+    let result = projection_event(
+        &session_id,
+        4,
+        "event-tool-result",
+        "tool/result-recorded",
+        "tool-1",
+        result_payload.clone(),
+    );
+    let tool =
+        reduce_agent_messages(Some(tool), &result, &result_payload).unwrap();
+
+    assert!(tool.projection.get("events").is_none());
+    assert_eq!(
+        tool.projection["tool_summary"]["action_id"],
+        "workspace.write"
+    );
+    assert!(
+        tool.projection["tool_summary"]["result_digest"].is_string(),
+        "tool output must be summarized by digest"
+    );
+    assert!(tool.projection["tool_summary"].get("input").is_none());
+    assert!(tool.projection["tool_summary"].get("output").is_none());
+    assert_eq!(
+        tool.projection["reference"]["output_ref"]["artifact_id"],
+        "artifact-1"
+    );
+
+    let effect_started_payload = json!({
+        "effect_id": "effect-1",
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write"
+    });
+    let effect_started = projection_event(
+        &session_id,
+        5,
+        "event-effect-started",
+        "effect/started",
+        "effect-1",
+        effect_started_payload.clone(),
+    );
+    let effect =
+        reduce_agent_messages(None, &effect_started, &effect_started_payload).unwrap();
+    let effect_succeeded_payload = json!({
+        "receipt": {"artifact_id": "artifact-1"}
+    });
+    let effect_succeeded = projection_event(
+        &session_id,
+        6,
+        "event-effect-succeeded",
+        "effect/succeeded",
+        "effect-1",
+        effect_succeeded_payload.clone(),
+    );
+    let effect = reduce_agent_messages(
+        Some(effect),
+        &effect_succeeded,
+        &effect_succeeded_payload,
+    )
+    .unwrap();
+
+    assert!(effect.projection.get("events").is_none());
+    assert_eq!(effect.projection["terminal_effect"]["state"], "succeeded");
+    assert!(
+        effect.projection["terminal_effect"]["result_digest"].is_string(),
+        "effect receipt must be summarized by digest"
+    );
+    assert_eq!(
+        effect.projection["reference"]["last_event_id"],
+        "event-effect-succeeded"
+    );
+}
+
+#[tokio::test]
+async fn chat_operation_claim_is_atomic_and_respects_turn_fence() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _ready_event) = create_ready(&store, "chat-claim").await;
+    let turn_operation = OperationId("turn-chat-claim".to_owned());
+    let input = append(
+        &session.agent_session_id,
+        "event-chat-input",
+        "session-api",
+        "chat-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        None,
+        json!({"content": "hello"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "event-chat-turn",
+        "session-api",
+        "chat-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id.clone()),
+        json!({
+            "operation_id": turn_operation,
+            "input_event_id": input_ack.event_id,
+            "route_identity": ChatRouteIdentity::new(
+                "coding.codex@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "chat-route".into(),
+                4,
+            ),
+            "resolved_snapshot_ref": snapshot_ref(),
+        }),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    assert_eq!(turn_ack.seq, 5);
+
+    let claim = ChatOperationClaimRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        operation_id: OperationId("model-chat-claim".to_owned()),
+        turn_operation_id: turn_operation.clone(),
+        causation_event_id: input_ack.event_id,
+        route_identity: ChatRouteIdentity::new(
+            "coding.codex@1",
+            nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+            "chat-route".into(),
+            4,
+        ),
+        resolved_snapshot_ref: snapshot_ref(),
+    };
+    let first = store.claim_chat_operation(claim.clone()).await.unwrap();
+    assert!(!first.duplicate);
+    let replay = store.claim_chat_operation(claim).await.unwrap();
+    assert!(replay.duplicate);
+
+    let cancelled = append(
+        &session.agent_session_id,
+        "event-chat-cancelled",
+        "session-api",
+        "chat-cancelled",
+        "turn/cancelled",
+        turn_operation.as_ref(),
+        Some(turn_ack.event_id),
+        json!({"target_operation_id": "turn-chat-claim"}),
+    );
+    store.append_event(&cancelled).await.unwrap();
+    let fenced = store
+        .claim_chat_operation(ChatOperationClaimRequest {
+            agent_session_id: session.agent_session_id,
+            operation_id: OperationId("model-after-cancel".to_owned()),
+            turn_operation_id: turn_operation,
+            causation_event_id: EventId("event-chat-input".to_owned()),
+            route_identity: ChatRouteIdentity::new(
+                "coding.codex@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "chat-route".into(),
+                4,
+            ),
+            resolved_snapshot_ref: snapshot_ref(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(fenced, SessionStoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn initial_turn_is_atomic_replayable_and_cannot_be_admitted_twice() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "initial-only").await;
+    let session_id = &session.agent_session_id;
+    let producer = EventProducerId("session-api".to_owned());
+    let key = IdempotencyKey("initial-only-key".to_owned());
+    let operation = OperationId("turn-initial-only".to_owned());
+    let input = StrictJsonValue(json!({"content": "hello"}));
+
+    let first = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            key.clone(),
+            operation.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!first.1.duplicate);
+
+    let replay = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            key,
+            operation.clone(),
+            input,
+        )
+        .await
+        .unwrap();
+    assert!(replay.0.duplicate);
+    assert!(replay.1.duplicate);
+
+    store
+        .cancel_active_turn(
+            session_id,
+            IdempotencyKey("cancel-initial-only".to_owned()),
+            producer.clone(),
+        )
+        .await
+        .unwrap();
+    let cursor_before_rejected = store.current_cursor(session_id).await.unwrap();
+    let second = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            IdempotencyKey("different-initial-key".to_owned()),
+            OperationId("turn-second-initial".to_owned()),
+            StrictJsonValue(json!({"content": "must not be admitted"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(second, SessionStoreError::Conflict(_)));
+    assert_eq!(
+        store.current_cursor(session_id).await.unwrap(),
+        cursor_before_rejected,
+        "a rejected second initial delivery must not append any fact"
+    );
+
+    let ordinary = store
+        .start_turn(
+            session_id,
+            producer,
+            IdempotencyKey("ordinary-follow-up".to_owned()),
+            OperationId("turn-ordinary-follow-up".to_owned()),
+            StrictJsonValue(json!({"content": "ordinary follow-up"})),
+        )
+        .await
+        .unwrap();
+    assert!(!ordinary.1.duplicate);
+}
+
+#[tokio::test]
+async fn turn_receipt_is_running_without_a_terminal_fact_and_does_not_infer_from_text() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, turn_event) = create_turn(&store, "turn-receipt-running", "turn-running").await;
+    let content = append(
+        &session.agent_session_id,
+        "turn-receipt-content",
+        "runtime-supervisor",
+        "turn-receipt-content",
+        "message/content-part",
+        "turn-running",
+        Some(turn_event),
+        json!({"content": "ordinary text is not a turn terminal"}),
+    );
+    store.append_event(&content).await.unwrap();
+
+    let receipt = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-running"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.status, TurnReceiptStatus::Running);
+    assert!(receipt.started_event.is_some());
+    assert!(receipt.terminal_event.is_none());
+
+    let missing_operation = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-does-not-exist"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_operation.status, TurnReceiptStatus::NotFound);
+
+    let missing_session = AgentSessionId::from(
+        "0199a8c0-0000-7000-8000-000000000099",
+    );
+    assert!(matches!(
+        store
+            .read_turn_receipt(&missing_session, &OperationId::from("turn-running"))
+            .await,
+        Err(SessionStoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn turn_receipt_reports_each_canonical_terminal_state() {
+    for (key, operation, kind, producer, payload, expected) in [
+        (
+            "turn-receipt-completed",
+            "turn-completed",
+            "turn/completed",
+            "runtime-supervisor",
+            json!({}),
+            TurnReceiptStatus::Completed,
+        ),
+        (
+            "turn-receipt-failed",
+            "turn-failed",
+            "turn/failed",
+            "runtime-supervisor",
+            json!({"error": "model failed"}),
+            TurnReceiptStatus::Failed,
+        ),
+        (
+            "turn-receipt-cancelled",
+            "turn-cancelled",
+            "turn/cancelled",
+            "session-api",
+            json!({"target_operation_id": "turn-cancelled"}),
+            TurnReceiptStatus::Cancelled,
+        ),
+    ] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (session, turn_event) = create_turn(&store, key, operation).await;
+        let terminal = append(
+            &session.agent_session_id,
+            &format!("event-{key}-terminal"),
+            producer,
+            &format!("{key}-terminal"),
+            kind,
+            operation,
+            Some(turn_event),
+            payload,
+        );
+        store.append_event(&terminal).await.unwrap();
+
+        let receipt = store
+            .read_turn_receipt(&session.agent_session_id, &OperationId::from(operation))
+            .await
+            .unwrap();
+        assert_eq!(receipt.status, expected);
+        assert_eq!(
+            receipt.terminal_event.as_ref().map(|event| event.kind.0.as_str()),
+            Some(kind)
+        );
+    }
+}
+
+#[tokio::test]
+async fn turn_history_projects_wall_clock_timing_and_structured_failure() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "turn-history-timing").await;
+    let operation = OperationId::from("turn-history-timing-operation");
+    let (_, started) = store
+        .start_turn(
+            &session.agent_session_id,
+            EventProducerId::from("session-api"),
+            IdempotencyKey::from("turn-history-timing-key"),
+            operation.clone(),
+            StrictJsonValue(json!({"content": "fail quickly"})),
+        )
+        .await
+        .unwrap();
+    let started_event = started.record.unwrap();
+    let finished_at_ms = 2_000_000_000_000_i64;
+    let terminal = SessionEventAppend {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: EventId::from("turn-history-timing-terminal"),
+        producer_id: EventProducerId::from("runtime_supervisor"),
+        idempotency_key: IdempotencyKey::from("turn-history-timing-terminal"),
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("turn/failed".to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from(operation.as_ref().to_owned()),
+            causation_event_id: Some(started_event.event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "message": "provider failed",
+                "finished_at_ms": finished_at_ms,
+                "error": {
+                    "message": "The provider is temporarily unavailable",
+                    "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                    "ownership": "user_llm_provider",
+                    "retryable": true
+                }
+            }))),
+        },
+    };
+    store
+        .append_turn_terminal(&terminal, &operation)
+        .await
+        .unwrap();
+
+    let (history, _, _) = store
+        .message_history_before(&session.agent_session_id, None, 50)
+        .await
+        .unwrap();
+    let summary = history
+        .iter()
+        .find(|projection| projection.presentation_intent == "turn_summary")
+        .expect("turn summary projection");
+    let started_at_ms = summary.projection["started_at_ms"].as_i64().unwrap();
+    assert!(started_at_ms > 1_700_000_000_000);
+    assert!(started_at_ms < finished_at_ms);
+    assert_eq!(summary.projection["finished_at_ms"], finished_at_ms);
+    assert_eq!(
+        summary.projection["error"]["code"],
+        "USER_LLM_PROVIDER_GATEWAY_ERROR"
+    );
+    assert_eq!(summary.projection["error"]["retryable"], true);
+    let source = summary.projection["source_message_id"].as_str().unwrap().to_owned();
+    let selected = store.turn_history_for_sources(&session.agent_session_id, &[source.clone()])
+        .await.unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].projection, summary.projection);
+    let (other, _) = create_ready(&store, "turn-history-other-session").await;
+    assert!(store.turn_history_for_sources(&other.agent_session_id, &[source]).await.unwrap().is_empty());
+    assert!(store.turn_history_for_sources(&session.agent_session_id, &[]).await.unwrap().is_empty());
+    assert!(store.turn_history_for_sources(&session.agent_session_id, &vec!["source".to_owned(); 501])
+        .await.is_err());
+}
+
+#[tokio::test]
+async fn turn_receipt_terminal_fence_is_monotonic_across_replays_and_late_events() {
+    for (key, operation, first_kind, first_producer, first_payload, expected) in [
+        (
+            "turn-receipt-fence-completed",
+            "turn-fence-completed",
+            "turn/completed",
+            "runtime-supervisor",
+            json!({}),
+            TurnReceiptStatus::Completed,
+        ),
+        (
+            "turn-receipt-fence-failed",
+            "turn-fence-failed",
+            "turn/failed",
+            "runtime-supervisor",
+            json!({"error": "first terminal"}),
+            TurnReceiptStatus::Failed,
+        ),
+        (
+            "turn-receipt-fence-cancelled",
+            "turn-fence-cancelled",
+            "turn/cancelled",
+            "session-api",
+            json!({"target_operation_id": "turn-fence-cancelled"}),
+            TurnReceiptStatus::Cancelled,
+        ),
+    ] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (session, turn_event) = create_turn(&store, key, operation).await;
+        let first_terminal = append(
+            &session.agent_session_id,
+            &format!("event-{key}-first-terminal"),
+            first_producer,
+            &format!("{key}-first-terminal"),
+            first_kind,
+            operation,
+            Some(turn_event.clone()),
+            first_payload,
+        );
+        let first_result = store.append_event(&first_terminal).await.unwrap();
+        let first_event_id = first_result.ack.as_ref().unwrap().event_id.clone();
+
+        let replay = store.append_event(&first_terminal).await.unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(
+            replay.ack.as_ref().unwrap().event_id,
+            first_event_id
+        );
+
+        let competing = append(
+            &session.agent_session_id,
+            &format!("event-{key}-competing-terminal"),
+            "runtime-supervisor",
+            &format!("{key}-competing-terminal"),
+            if first_kind == "turn/completed" {
+                "turn/failed"
+            } else {
+                "turn/completed"
+            },
+            operation,
+            Some(turn_event.clone()),
+            json!({"error": "late competing terminal"}),
+        );
+        assert!(matches!(
+            store.append_event(&competing).await,
+            Err(SessionStoreError::Conflict(message))
+                if message.contains("terminal fence")
+        ));
+
+        let late_start = append(
+            &session.agent_session_id,
+            &format!("event-{key}-late-start"),
+            "session-api",
+            &format!("{key}-late-start"),
+            "turn/started",
+            operation,
+            Some(first_terminal.event_id.clone()),
+            json!({"operation_id": operation, "retry": true}),
+        );
+        assert!(matches!(
+            store.append_event(&late_start).await,
+            Err(SessionStoreError::Conflict(_))
+        ));
+
+        let receipt = store
+            .read_turn_receipt(&session.agent_session_id, &OperationId::from(operation))
+            .await
+            .unwrap();
+        assert_eq!(receipt.status, expected);
+        assert_eq!(
+            receipt.terminal_event.as_ref().unwrap().event_id,
+            first_event_id
+        );
+        let head = store.head(&session.agent_session_id).await.unwrap();
+        assert_eq!(head.status, "ready");
+        assert!(head.active_turn_id.is_none());
+        let terminal_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_events \
+             WHERE session_id = ? AND correlation_id = ? \
+               AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled')",
+        )
+        .bind(session.agent_session_id.as_ref())
+        .bind(operation)
+        .fetch_one(store.test_pool())
+        .await
+        .unwrap();
+        assert_eq!(terminal_count, 1);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_turn_terminal_attempts_have_one_durable_winner() {
+    let store = AgentSessionStore::open_in_memory_with_connections(4)
+        .await
+        .unwrap();
+    let (session, turn_event) = create_turn(&store, "turn-receipt-concurrent", "turn-concurrent").await;
+    let completed = append(
+        &session.agent_session_id,
+        "event-turn-receipt-concurrent-completed",
+        "runtime-supervisor",
+        "turn-receipt-concurrent-completed",
+        "turn/completed",
+        "turn-concurrent",
+        Some(turn_event.clone()),
+        json!({}),
+    );
+    let failed = append(
+        &session.agent_session_id,
+        "event-turn-receipt-concurrent-failed",
+        "runtime-supervisor",
+        "turn-receipt-concurrent-failed",
+        "turn/failed",
+        "turn-concurrent",
+        Some(turn_event),
+        json!({"error": "competing terminal"}),
+    );
+
+    let (completed_result, failed_result) =
+        tokio::join!(store.append_event(&completed), store.append_event(&failed));
+    assert_ne!(completed_result.is_ok(), failed_result.is_ok());
+    assert!(
+        matches!(
+            completed_result.as_ref().err(),
+            Some(SessionStoreError::Conflict(_))
+        ) || matches!(
+            failed_result.as_ref().err(),
+            Some(SessionStoreError::Conflict(_))
+        )
+    );
+
+    let receipt = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-concurrent"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt.status,
+        TurnReceiptStatus::Completed | TurnReceiptStatus::Failed
+    ));
+    assert!(receipt.terminal_event.is_some());
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
+    );
+}
+
+#[tokio::test]
+async fn remote_cancel_selects_active_turn_atomically_and_replays() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "remote-cancel").await;
+    let turn_operation = OperationId::from("remote-turn-operation");
+    let input = append(
+        &session.agent_session_id,
+        "remote-cancel-input",
+        "session-api",
+        "remote-cancel-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        Some(ready_event),
+        json!({"content": "cancel me"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "remote-cancel-turn",
+        "session-api",
+        "remote-cancel-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id),
+        json!({"operation_id": turn_operation}),
+    );
+    store.append_event(&turn).await.unwrap();
+
+    let key = IdempotencyKey::from("remote-cancel-key");
+    let (target, first) = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            key.clone(),
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(target, turn_operation);
+    assert!(!first.duplicate);
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
+    );
+
+    let (replayed_target, replay) = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            key,
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed_target, target);
+    assert!(replay.duplicate);
+
+    let no_active = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            IdempotencyKey::from("remote-cancel-no-active"),
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(no_active, SessionStoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn chat_completion_is_atomic_and_cannot_cross_a_cancel_fence() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "chat-terminal").await;
+    let turn_operation = OperationId("turn-chat-terminal".to_owned());
+    let input = append(
+        &session.agent_session_id,
+        "event-chat-terminal-input",
+        "session-api",
+        "chat-terminal-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        Some(ready_event.clone()),
+        json!({"content": "hello"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "event-chat-terminal-turn",
+        "session-api",
+        "chat-terminal-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id),
+        json!({"operation_id": turn_operation}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let cancelled = append(
+        &session.agent_session_id,
+        "event-chat-terminal-cancelled",
+        "session-api",
+        "chat-terminal-cancelled",
+        "turn/cancelled",
+        turn_operation.as_ref(),
+        Some(turn_ack.event_id),
+        json!({"target_operation_id": turn_operation}),
+    );
+    store.append_event(&cancelled).await.unwrap();
+
+    let message = append(
+        &session.agent_session_id,
+        "event-chat-terminal-message",
+        "runtime-supervisor",
+        "chat-terminal-message",
+        "message/completed",
+        "message-chat-terminal",
+        Some(EventId("event-chat-terminal-turn".to_owned())),
+        json!({
+            "content_digest": digest_bytes(b""),
+            "part_count": 0
+        }),
+    );
+    let terminal = append(
+        &session.agent_session_id,
+        "event-chat-terminal-completed",
+        "runtime-supervisor",
+        "chat-terminal-completed",
+        "turn/completed",
+        turn_operation.as_ref(),
+        Some(message.event_id.clone()),
+        json!({"message_event_id": message.event_id}),
+    );
+    let error = store
+        .append_chat_completion(&message, &terminal, &turn_operation)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SessionStoreError::Conflict(_)));
+
+    let events = store
+        .read_events(&session.agent_session_id, None, crate::MAX_EVENT_PAGE_SIZE)
+        .await
+        .unwrap()
+        .events;
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind.0 != "message/completed"),
+        "message terminal must roll back when the turn is already cancelled"
+    );
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
+    );
+}
+
+#[tokio::test]
+async fn stored_payload_and_event_commit_atomically_and_replay_without_budget_growth() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "payload").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-payload-turn",
+        "session-api",
+        "payload-turn",
+        "turn/started",
+        "turn-payload",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let body = SessionPayloadBody::Json(StrictJsonValue(json!({"content": "stored"})));
+    let logical = canonical_json_bytes(&json!({"content": "stored"})).unwrap();
+    let payload = SessionPayloadRecord {
+        payload_id: ArtifactId("payload-message-1".to_owned()),
+        agent_session_id: session.agent_session_id.clone(),
+        media_type: "application/json".to_owned(),
+        byte_len: logical.len() as u64,
+        digest: digest_bytes(&logical),
+        body,
+    };
+    let part = SessionEventAppend {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: event_id("event-stored-part"),
+        producer_id: EventProducerId("runtime-supervisor".to_owned()),
+        idempotency_key: IdempotencyKey("stored-part".to_owned()),
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("message/content-part".to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId("message-stored".to_owned()),
+            causation_event_id: Some(turn_ack.event_id),
+            payload: SessionEventPayloadRef::Stored(payload.payload_id.clone()),
+        },
+    };
+    let committed = store
+        .append_event_with_payload(&part, Some(&payload))
+        .await
+        .unwrap();
+    let replay = store
+        .append_event_with_payload(&part, Some(&payload))
+        .await
+        .unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.cursor, committed.cursor);
+    let payload_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id = ?")
+            .bind(session.agent_session_id.as_ref())
+            .fetch_one(store.test_pool())
+            .await
+            .unwrap();
+    assert_eq!(payload_count, 1);
+
+    let completed = append(
+        &session.agent_session_id,
+        "event-stored-completed",
+        "runtime-supervisor",
+        "stored-completed",
+        "message/completed",
+        "message-stored",
+        Some(committed.ack.unwrap().event_id),
+        json!({"content_digest": digest_bytes(b"stored"), "part_count": 1}),
+    );
+    store.append_event(&completed).await.unwrap();
+    let projection = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|projection| projection.projection_id == "message:message-stored")
+        .unwrap();
+    assert_eq!(projection.projection["content"], "stored");
+}
+
+#[tokio::test]
+async fn completed_compaction_is_the_only_rehydration_base() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "compaction").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-compaction-turn",
+        "session-api",
+        "compaction-turn",
+        "turn/started",
+        "turn-compaction",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let completed = append(
+        &session.agent_session_id,
+        "event-compaction-turn-completed",
+        "runtime-supervisor",
+        "compaction-turn-completed",
+        "turn/completed",
+        "turn-compaction",
+        Some(turn_ack.event_id),
+        json!({}),
+    );
+    let completed_ack = store.append_event(&completed).await.unwrap().ack.unwrap();
+
+    let body = SessionPayloadBody::Json(StrictJsonValue(json!({
+        "summary": "bounded completed context"
+    })));
+    let logical = canonical_json_bytes(&json!({
+        "summary": "bounded completed context"
+    }))
+    .unwrap();
+    let context_payload = SessionPayloadRecord {
+        payload_id: ArtifactId("compaction-context-1".to_owned()),
+        agent_session_id: session.agent_session_id.clone(),
+        media_type: "application/json".to_owned(),
+        byte_len: logical.len() as u64,
+        digest: digest_bytes(&logical),
+        body,
+    };
+    let compaction = CompactionCompletedPayload {
+        agent_session_id: session.agent_session_id.clone(),
+        through_seq: completed_ack.seq,
+        context_payload_id: context_payload.payload_id.clone(),
+        context_digest: context_payload.digest.clone(),
+    };
+    let event = append(
+        &session.agent_session_id,
+        "event-compaction-completed",
+        "compaction-coordinator",
+        "compaction-completed",
+        "compaction/completed",
+        "compaction-1",
+        Some(completed_ack.event_id),
+        serde_json::to_value(&compaction).unwrap(),
+    );
+    store
+        .append_event_with_payload(&event, Some(&context_payload))
+        .await
+        .unwrap();
+
+    let rehydration = store
+        .rehydration_input(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(rehydration.completed_compaction, Some(compaction));
+    assert_eq!(
+        rehydration.subsequent_events[0].kind.0,
+        "compaction/completed"
+    );
+    assert_eq!(
+        rehydration.resolved_snapshot_ref,
+        session.agent_binding.resolved_snapshot_ref
+    );
+}
+
+#[tokio::test]
+async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "effect-strategy").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-effect-strategy-turn",
+        "session-api",
+        "effect-strategy-turn",
+        "turn/started",
+        "turn-effect-strategy",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        "event-effect-strategy-tool",
+        "runtime-supervisor",
+        "effect-strategy-tool",
+        "tool/call-started",
+        "tool-effect-strategy",
+        Some(turn_ack.event_id),
+        json!({
+            "operation_id": "effect-operation-managed",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+
+    let read_only = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: "effect-read-only".to_owned(),
+        turn_id: OperationId("turn-effect-strategy".to_owned()),
+        operation_id: OperationId("effect-operation-read-only".to_owned()),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId("workspace.files".to_owned()),
+        action_id: ActionId("workspace.files/read".to_owned()),
+        resource_binding_id: None,
+        resource_key: None,
+        input_digest: digest('8'),
+        recorded_at: 10,
+        event_id: event_id("event-effect-read-only-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-read-only".to_owned()),
+        correlation_id: CorrelationId("effect-read-only".to_owned()),
+        strategy: EffectStrategy::ReadOnly,
+        causation_event_id: Some(tool_ack.event_id.clone()),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    assert!(matches!(
+        store.record_effect_started(read_only).await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "read-only operations must not emit effect lifecycle events"
+    ));
+
+    let managed = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: "effect-managed".to_owned(),
+        turn_id: OperationId("turn-effect-strategy".to_owned()),
+        operation_id: OperationId("effect-operation-managed".to_owned()),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId("workspace.files".to_owned()),
+        action_id: ActionId("workspace.files/write".to_owned()),
+        resource_binding_id: None,
+        resource_key: Some("workspace:test".to_owned()),
+        input_digest: digest('9'),
+        recorded_at: 11,
+        event_id: event_id("event-effect-managed-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-managed".to_owned()),
+        correlation_id: CorrelationId("effect-managed".to_owned()),
+        strategy: EffectStrategy::ManagedEffect,
+        causation_event_id: Some(tool_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let started_ack = store
+        .record_effect_started(managed.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    let uncertain = EffectEventRequest {
+        event_id: event_id("event-effect-managed-uncertain"),
+        producer_id: EventProducerId("capability-owner".to_owned()),
+        causation_event_id: Some(started_ack.event_id.clone()),
+        ..managed.clone()
+    };
+    assert!(matches!(
+        store
+            .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
+            .await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "managed effects require process-restart proof before becoming uncertain"
+    ));
+
+    let failed = EffectEventRequest {
+        event_id: event_id("event-effect-managed-failed"),
+        producer_id: EventProducerId("capability-owner".to_owned()),
+        causation_event_id: Some(started_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "error": "known local failure"
+        }))),
+        ..managed
+    };
+    store
+        .record_effect_terminal(failed, EffectTerminalState::Failed)
+        .await
+        .unwrap();
+    let effect = store
+        .read_effect(&session.agent_session_id, "effect-managed")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(effect.state, AgentEffectState::Rejected);
+    assert_eq!(effect.action_id.as_ref(), "workspace.files/write");
+}
+
+#[tokio::test]
+async fn effect_store_requires_exact_tool_causation_and_immutable_terminal_identity() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "effect-identity").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-effect-identity-turn",
+        "session-api",
+        "effect-identity-turn",
+        "turn/started",
+        "turn-effect-identity",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        "event-effect-identity-tool",
+        "capability-host",
+        "effect-identity-tool",
+        "tool/call-started",
+        "tool-effect-identity",
+        Some(turn_ack.event_id.clone()),
+        json!({
+            "operation_id": "effect-identity-operation",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+    let unrelated_tool = append(
+        &session.agent_session_id,
+        "event-effect-unrelated-tool",
+        "capability-host",
+        "effect-unrelated-tool",
+        "tool/call-started",
+        "tool-effect-unrelated",
+        Some(turn_ack.event_id.clone()),
+        json!({
+            "operation_id": "other-operation",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/delete"
+        }),
+    );
+    let unrelated_tool_ack = store
+        .append_event(&unrelated_tool)
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+
+    let started = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: "effect-identity-1".to_owned(),
+        turn_id: OperationId("turn-effect-identity".to_owned()),
+        operation_id: OperationId("effect-identity-operation".to_owned()),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId("workspace.files".to_owned()),
+        action_id: ActionId("workspace.files/write".to_owned()),
+        resource_binding_id: None,
+        resource_key: Some("workspace:file.txt".to_owned()),
+        input_digest: digest('6'),
+        recorded_at: 30,
+        event_id: event_id("event-effect-identity-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-identity-idem".to_owned()),
+        correlation_id: CorrelationId("effect-identity-1".to_owned()),
+        strategy: EffectStrategy::ManagedEffect,
+        causation_event_id: Some(tool_ack.event_id.clone()),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+
+    let mut wrong_kind_cause = started.clone();
+    wrong_kind_cause.event_id = event_id("event-effect-wrong-kind-cause");
+    wrong_kind_cause.causation_event_id = Some(turn_ack.event_id);
+    assert!(store.record_effect_started(wrong_kind_cause).await.is_err());
+
+    let mut cross_tool_cause = started.clone();
+    cross_tool_cause.event_id = event_id("event-effect-cross-tool-cause");
+    cross_tool_cause.causation_event_id = Some(unrelated_tool_ack.event_id.clone());
+    assert!(store.record_effect_started(cross_tool_cause).await.is_err());
+
+    let started_ack = store
+        .record_effect_started(started.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    for field in [
+        "effect_id",
+        "turn_id",
+        "operation_id",
+        "owner_domain",
+        "capability_module",
+        "action_id",
+        "input_digest",
+        "strategy",
+        "resource_binding_id",
+        "resource_key",
+        "causation_event_id",
+    ] {
+        let mut terminal = EffectEventRequest {
+            event_id: event_id(&format!("event-effect-identity-mutated-{field}")),
+            producer_id: EventProducerId("owning-plugin".to_owned()),
+            causation_event_id: Some(started_ack.event_id.clone()),
+            recorded_at: 31,
+            ..started.clone()
+        };
+        match field {
+            "effect_id" => terminal.effect_id = "effect-identity-other".to_owned(),
+            "turn_id" => terminal.turn_id = OperationId("turn-other".to_owned()),
+            "operation_id" => terminal.operation_id = OperationId("operation-other".to_owned()),
+            "owner_domain" => terminal.owner_domain = "other".to_owned(),
+            "capability_module" => {
+                terminal.capability_module = CapabilityId("workspace.vcs".to_owned())
+            }
+            "action_id" => terminal.action_id = ActionId("workspace.files/delete".to_owned()),
+            "input_digest" => terminal.input_digest = digest('7'),
+            "strategy" => terminal.strategy = EffectStrategy::ExternalUncertainEffect,
+            "resource_binding_id" => {
+                terminal.resource_binding_id =
+                    Some(ResourceBindingId("binding-effect-identity".to_owned()))
+            }
+            "resource_key" => terminal.resource_key = Some("workspace:other.txt".to_owned()),
+            "causation_event_id" => {
+                terminal.causation_event_id = Some(unrelated_tool_ack.event_id.clone())
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            store
+                .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+                .await
+                .is_err(),
+            "mutating {field} must fail closed"
+        );
+    }
+
+    let terminal = EffectEventRequest {
+        event_id: event_id("event-effect-identity-succeeded"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        causation_event_id: Some(started_ack.event_id),
+        recorded_at: 32,
+        ..started
+    };
+    let committed = store
+        .record_effect_terminal(terminal.clone(), EffectTerminalState::Succeeded)
+        .await
+        .unwrap();
+    let mut retry = terminal;
+    retry.recorded_at = 1_032;
+    let replay = store.record_effect_terminal(retry.clone(), EffectTerminalState::Succeeded)
+        .await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.record, committed.record);
+    assert_eq!(replay.ack, committed.ack);
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    for field in ["payload", "operation_id", "owner_domain", "input_digest", "resource_key",
+        "producer_id", "causation_event_id"] {
+        let mut changed = retry.clone();
+        match field {
+            "payload" => changed.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(
+                json!({"result": "different owner receipt"}))),
+            "operation_id" => changed.operation_id = OperationId::from("other-operation"),
+            "owner_domain" => changed.owner_domain = "other-owner".to_owned(),
+            "input_digest" => changed.input_digest = digest('7'),
+            "resource_key" => changed.resource_key = Some("workspace:other.txt".to_owned()),
+            "producer_id" => changed.producer_id = EventProducerId::from("other-owner"),
+            "causation_event_id" => changed.causation_event_id = Some(event_id("other-cause")),
+            _ => unreachable!(),
+        }
+        assert!(matches!(store.record_effect_terminal(changed, EffectTerminalState::Succeeded).await,
+            Err(SessionStoreError::IdempotencyConflict(_))), "changed {field} must remain a conflict");
+    }
+    assert!(matches!(store.record_effect_terminal(retry, EffectTerminalState::Failed).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().last_seq, head.last_seq);
+}
+
+#[tokio::test]
+async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture_root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
+        .map(|root| std::path::PathBuf::from(root).join("data"))
+        .unwrap_or_else(|| directory.path().to_path_buf());
+    std::fs::create_dir_all(&fixture_root).unwrap();
+    let database_path = fixture_root.join("agent.db");
+    let database = nomifun_db::init_database(&database_path).await.unwrap();
+    let mut store = AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+    let (session, ready_event) = create_ready(&store, "effect").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-effect-turn",
+        "session-api",
+        "effect-turn",
+        "turn/started",
+        "turn-effect",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        "event-tool-started",
+        "runtime-supervisor",
+        "tool-started",
+        "tool/call-started",
+        "tool-1",
+        Some(turn_ack.event_id),
+        json!({
+            "operation_id": "effect-operation-1",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+
+    let started = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: "effect-1".to_owned(),
+        turn_id: OperationId("turn-effect".to_owned()),
+        operation_id: OperationId("effect-operation-1".to_owned()),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId("workspace.files".to_owned()),
+        action_id: ActionId("workspace.files/write".to_owned()),
+        resource_binding_id: None,
+        resource_key: Some("workspace:external".to_owned()),
+        input_digest: digest('a'),
+        recorded_at: 20,
+        event_id: event_id("event-effect-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-idem".to_owned()),
+        correlation_id: CorrelationId("effect-1".to_owned()),
+        strategy: EffectStrategy::ExternalUncertainEffect,
+        causation_event_id: Some(tool_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "strategy": "external_uncertain_effect"
+        }))),
+    };
+    let started_ack = store
+        .record_effect_started(started.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    let uncertain = EffectEventRequest {
+        event_id: event_id("event-effect-uncertain"),
+        producer_id: EventProducerId("runtime-supervisor".to_owned()),
+        causation_event_id: Some(started_ack.event_id),
+        ..started.clone()
+    };
+    let uncertain_ack = store
+        .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "reconciliation"
+    );
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().active_turn_id.as_deref(), Some("turn-effect"));
+    assert_eq!(store.read_turn_receipt(&session.agent_session_id, &"turn-effect".into()).await.unwrap().status, TurnReceiptStatus::Running);
+
+    let retry = EffectEventRequest {
+        event_id: event_id("event-effect-retry"),
+        producer_id: EventProducerId("capability-host-retry".to_owned()),
+        idempotency_key: IdempotencyKey("effect-retry".to_owned()),
+        strategy: EffectStrategy::ExternalUncertainEffect,
+        ..started.clone()
+    };
+    assert!(store.record_effect_started(retry).await.is_err());
+
+    let competing = EffectEventRequest {
+        effect_id: "effect-2".to_owned(),
+        operation_id: OperationId("effect-operation-2".to_owned()),
+        event_id: event_id("event-effect-competing"),
+        producer_id: EventProducerId("capability-host-competing".to_owned()),
+        idempotency_key: IdempotencyKey("effect-competing".to_owned()),
+        correlation_id: CorrelationId("effect-2".to_owned()),
+        ..started.clone()
+    };
+    assert!(
+        store.record_effect_started(competing).await.is_err(),
+        "an unknown external effect must fence a new effect on the same resource"
+    );
+
+    let wrong_reconcile_identity = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-wrong-identity"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        action_id: ActionId("workspace.files/delete".to_owned()),
+        causation_event_id: Some(uncertain_ack.event_id.clone()),
+        ..started.clone()
+    };
+    assert!(
+        store
+            .reconcile_effect(
+                wrong_reconcile_identity,
+                EffectReconcileOutcome::StillUncertain
+            )
+            .await
+            .is_err()
+    );
+    let wrong_reconcile_cause = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-wrong-cause"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        causation_event_id: Some(started.event_id.clone()),
+        ..started.clone()
+    };
+    assert!(
+        store
+            .reconcile_effect(wrong_reconcile_cause, EffectReconcileOutcome::StillUncertain)
+            .await
+            .is_err()
+    );
+
+    let reconcile = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        causation_event_id: Some(uncertain_ack.event_id.clone()),
+        ..started.clone()
+    };
+    let committed_reconcile = store
+        .reconcile_effect(reconcile.clone(), EffectReconcileOutcome::StillUncertain)
+        .await
+        .unwrap();
+    database.close().await;
+    store = AgentSessionStore::connect_existing(&database_path).await.unwrap();
+    let mut retry_reconcile = reconcile;
+    retry_reconcile.recorded_at += 1_000;
+    let replay = store.reconcile_effect(retry_reconcile.clone(), EffectReconcileOutcome::StillUncertain)
+        .await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.record, committed_reconcile.record);
+    assert_eq!(replay.ack, committed_reconcile.ack);
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    assert!(matches!(store.reconcile_effect(retry_reconcile.clone(),
+        EffectReconcileOutcome::ConfirmedSucceeded {receipt: json!({"receipt": "different fact"})}).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    let mut changed_identity = retry_reconcile;
+    changed_identity.resource_key = Some("workspace:other-resource".to_owned());
+    assert!(matches!(store.reconcile_effect(changed_identity, EffectReconcileOutcome::StillUncertain).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().last_seq, head.last_seq);
+    let effect = store
+        .read_effect(&session.agent_session_id, "effect-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(effect.state, AgentEffectState::Unknown);
+    assert!(effect.terminal_event_id.is_some());
+    let repeated_reconcile = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-again"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        idempotency_key: IdempotencyKey("effect-reconcile-again".to_owned()),
+        causation_event_id: Some(uncertain_ack.event_id),
+        ..started
+    };
+    assert!(matches!(
+        store
+            .reconcile_effect(repeated_reconcile, EffectReconcileOutcome::StillUncertain)
+            .await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "effect reconciliation is already committed"
+    ));
+    let projections = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        projections
+            .iter()
+            .find(|projection| projection.projection_id == "effect:effect-1")
+            .unwrap()
+            .projection["state"],
+        "still_uncertain"
+    );
+    store.test_pool().close().await;
+}
+
+#[test]
+fn snapshot_admission_requires_exact_execution_support() {
+    let profile_digest = digest('e');
+    let typed_resource_digest = digest('f');
+    let ceiling = RuntimeExecutionCeiling {
+        protocol_version: VersionString("runtime-v1".to_owned()),
+        protocol_schema_digest: digest('1'),
+        profile_kind: RuntimeProfileKind::ManagedMinimal,
+        profile_digest: profile_digest.clone(),
+        native_features: BTreeSet::new(),
+        native_actions: BTreeSet::new(),
+        enabled_capabilities: BTreeMap::<CapabilityId, RuntimeCapabilityExecutionContract>::new(),
+
+        packages: BTreeMap::new(),
+        skills: BTreeMap::new(),
+        mcp_tools: BTreeMap::new(),
+        model_routes: BTreeMap::new(),
+        typed_resource_bindings: Vec::new(),
+        typed_resource_contract_digest: typed_resource_digest.clone(),
+    };
+    let support = RuntimeExecutorSupport {
+        runtime_release_digest: digest('2'),
+        hello_payload_digest: digest('3'),
+        protocol_versions: BTreeSet::from([VersionString("runtime-v1".to_owned())]),
+        protocol_schema_digests: BTreeSet::from([digest('1')]),
+        profile_digests: BTreeMap::from([(
+            RuntimeProfileKind::ManagedMinimal,
+            BTreeSet::from([profile_digest]),
+        )]),
+        native_features: BTreeSet::new(),
+        native_actions: BTreeSet::<ActionId>::new(),
+        capabilities: BTreeMap::new(),
+        packages: BTreeMap::new(),
+        skills: BTreeMap::new(),
+        mcp_tools: BTreeMap::new(),
+        model_routes: BTreeMap::new(),
+        typed_resource_contract_digests: BTreeSet::from([typed_resource_digest]),
+    };
+    let admission = SnapshotCompatibilityAdmissionInput {
+        resolved_snapshot_ref: snapshot_ref(),
+        required_ceiling: ceiling,
+        available_executor: support,
+    };
+    assert!(matches!(
+        evaluate_snapshot_compatibility(&admission),
+        SnapshotCompatibilityAdmissionResult::CompatibleExact { .. }
+    ));
+
+    let mut unavailable = admission.clone();
+    unavailable.available_executor.protocol_versions.clear();
+    assert!(matches!(
+        evaluate_snapshot_compatibility(&unavailable),
+        SnapshotCompatibilityAdmissionResult::ExecutorUnavailable { .. }
+    ));
+}
+
+#[tokio::test]
+async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (parent, _) = create_ready(&store, "fork-parent").await;
+    let child_id = session_id();
+    let request = ForkRequest {
+        child_session_id: child_id.clone(),
+        child_owner_ref: owner(),
+        child_metadata: AgentSessionMetadata {
+            title: Some("Fork child".to_owned()),
+            archived: false,
+            pinned: false,
+            reasoning_effort: None,
+        },
+        child_agent_binding: binding(),
+        parent_through_seq: 1,
+        created_at: 1_788_000_000_100,
+        producer_id: EventProducerId("fork-coordinator".to_owned()),
+        operation_id: OperationId("fork-operation-1".to_owned()),
+        idempotency_key: IdempotencyKey("fork-idem-1".to_owned()),
+        correlation_id: CorrelationId("fork-1".to_owned()),
+        event_id: Some(event_id("event-forked-1")),
+        base_payload_id: ArtifactId("fork-base-1".to_owned()),
+        base_body: SessionPayloadBody::Json(StrictJsonValue(serde_json::to_value(crate::ForkContextSnapshot::new(
+            parent.agent_session_id.clone(), 1, AgentHandoffBindingRefV1::from(&parent.agent_binding), 1,
+            vec![crate::CanonicalContextMessage { seq: 1, role: crate::CanonicalContextRole::User, content: "Parent context".into() }],
+        ).unwrap()).unwrap())),
+        base_media_type: "application/json".to_owned(),
+        child_initial_active_capability_ids: vec!["coding.workspace".to_owned()],
+    };
+    let forked = store
+        .fork_session(&parent.agent_session_id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(forked.child_session.agent_session_id, child_id);
+    assert_eq!(
+        forked.child_session.parent_session_id,
+        Some(parent.agent_session_id.clone())
+    );
+    assert!(forked.contract.child_base_is_self_contained);
+    assert!(!forked.contract.copies_full_transcript);
+    assert_eq!(forked.contract.fork.parent_through_seq, 1);
+    assert_eq!(forked.child_cursor.seq, 3);
+    assert_eq!(store.head(&child_id).await.unwrap().status, "ready");
+    let replay = store
+        .fork_session(&parent.agent_session_id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay.child_session.agent_session_id, child_id);
+    assert_eq!(replay.fork_ack, forked.fork_ack);
+
+    let mut changed_cursor = request.clone();
+    changed_cursor.parent_through_seq = 2;
+    assert_eq!(
+        store
+            .fork_session(&parent.agent_session_id, changed_cursor)
+            .await
+            .unwrap_err()
+            .code(),
+        Some("IDEMPOTENCY_CONFLICT")
+    );
+
+    let mut beyond_head = request;
+    beyond_head.child_session_id = session_id();
+    beyond_head.idempotency_key = IdempotencyKey("fork-idem-beyond-head".to_owned());
+    beyond_head.operation_id = OperationId("fork-operation-beyond-head".to_owned());
+    beyond_head.parent_through_seq = u64::MAX;
+    assert_eq!(
+        store
+            .fork_session(&parent.agent_session_id, beyond_head)
+            .await
+            .unwrap_err()
+            .code(),
+        Some("INVALID_SESSION")
+    );
+
+    let delete = DeleteAgentSessionCommand {
+        operation_id: OperationId("delete-parent".to_owned()),
+        agent_session_id: parent.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_000_200,
+    };
+    store.fence_delete(&delete).await.unwrap();
+    store
+        .complete_delete(&delete, 1_788_000_000_300)
+        .await
+        .unwrap();
+    assert!(store.get_live_session(&child_id).await.is_ok());
+}
+
+#[tokio::test]
+async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "delete").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId("delete-operation".to_owned()),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_001_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    assert_eq!(
+        store
+            .get_deleting_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_session_id,
+        session.agent_session_id
+    );
+
+    let late = append(
+        &session.agent_session_id,
+        "event-late-turn",
+        "session-api",
+        "late-turn",
+        "turn/started",
+        "late-turn",
+        Some(ready_event),
+        json!({}),
+    );
+    assert!(matches!(
+        store.append_event(&late).await.unwrap_err(),
+        SessionStoreError::Deleted(_)
+    ));
+    assert!(matches!(
+        store
+            .current_cursor(&session.agent_session_id)
+            .await
+            .unwrap_err(),
+        SessionStoreError::Deleted(_)
+    ));
+
+    let deleted = store
+        .complete_delete(
+            &command,
+            1_788_000_001_200,
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.tombstone.agent_session_id, session.agent_session_id);
+    assert_eq!(deleted.tombstone.owner_ref, owner());
+    assert_eq!(deleted.tombstone.deleted_at, 1_788_000_001_200);
+
+    let tombstone = store
+        .inspect_tombstone(&session.agent_session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tombstone, deleted.tombstone);
+    for table in [
+        "agent_events",
+        "agent_payloads",
+        "agent_session_heads",
+        "agent_messages",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE session_id = ?"
+        ))
+        .bind(session.agent_session_id.as_ref())
+        .fetch_one(store.test_pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{table} retained deleted Session content");
+    }
+    assert!(matches!(
+        store.fence_delete(&command).await.unwrap_err(),
+        SessionStoreError::Deleted(_)
+    ));
+}
+
+#[tokio::test]
+async fn interrupted_delete_requires_owner_cleanup_before_explicit_completion() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-recovery").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId("delete-before-restart".to_owned()),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_002_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    let reentered = store.fence_delete(&command).await.unwrap();
+    assert_eq!(reentered.live.agent_session_id, session.agent_session_id);
+    assert!(store.inspect_tombstone(&session.agent_session_id).await.unwrap().is_none());
+    let completed = store
+        .complete_delete(&command, 1_788_000_002_100)
+        .await
+        .unwrap();
+    assert_eq!(completed.operation_id, command.operation_id);
+    assert_eq!(completed.tombstone.agent_session_id, session.agent_session_id);
+}
+
+#[tokio::test]
+async fn delete_fence_allows_existing_effect_to_settle_but_blocks_new_work() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started, started_event_id) =
+        create_pending_effect(&store, "delete-effect", EffectStrategy::ManagedEffect).await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-effect-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_003_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    let blockers = store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(blockers.effects.len(), 1);
+    assert_eq!(blockers.effects[0].state, AgentEffectState::Pending);
+    assert!(matches!(
+        store
+            .complete_delete(&command, 1_788_000_003_100)
+            .await,
+        Err(SessionStoreError::Conflict(_))
+    ));
+
+    let terminal = EffectEventRequest {
+        recorded_at: 1_788_000_003_050,
+        event_id: event_id("event-effect-delete-effect-succeeded"),
+        producer_id: EventProducerId::from("owning-plugin"),
+        causation_event_id: Some(started_event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "receipt": "committed-before-delete-fence"
+        }))),
+        ..started
+    };
+    store
+        .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .complete_delete(&command, 1_788_000_003_100)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unknown_effect_must_be_explicitly_reconciled_while_delete_is_fenced() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started, started_event_id) = create_pending_effect(
+        &store,
+        "delete-unknown-effect",
+        EffectStrategy::ExternalUncertainEffect,
+    )
+    .await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-unknown-effect-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_004_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    let uncertain = EffectEventRequest {
+        recorded_at: 1_788_000_004_010,
+        event_id: event_id("event-delete-effect-uncertain"),
+        producer_id: EventProducerId::from("runtime-supervisor"),
+        causation_event_id: Some(started_event_id),
+        ..started.clone()
+    };
+    let uncertain_event_id = store
+        .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
+        .await
+        .unwrap()
+        .ack
+        .unwrap()
+        .event_id;
+    assert_eq!(
+        store
+            .delete_blockers(&session.agent_session_id)
+            .await
+            .unwrap()
+            .effects[0]
+            .state,
+        AgentEffectState::Unknown
+    );
+    assert!(store
+        .complete_delete(&command, 1_788_000_004_020)
+        .await
+        .is_err());
+
+    let reconcile = EffectEventRequest {
+        recorded_at: 1_788_000_004_015,
+        event_id: event_id("event-delete-effect-reconciled"),
+        producer_id: EventProducerId::from("owning-plugin"),
+        causation_event_id: Some(uncertain_event_id),
+        ..started
+    };
+    store
+        .reconcile_effect(
+            reconcile,
+            EffectReconcileOutcome::ConfirmedFailed {
+                error: nomifun_agent_contracts::CanonicalErrorCode::from(
+                    "EXTERNAL_EFFECT_CONFIRMED_FAILED",
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .complete_delete(&command, 1_788_000_004_020)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn restart_quarantines_managed_pending_effect_without_claiming_failure() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _, _) =
+        create_pending_effect(&store, "managed-restart", EffectStrategy::ManagedEffect).await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-managed-restart"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_004_100,
+    };
+    store.fence_delete(&command).await.unwrap();
+    assert_eq!(
+        store
+            .quarantine_pending_effects_for_delete(
+                &owner(),
+                &session.agent_session_id,
+                1_788_000_004_110,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let blockers = store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(blockers.effects[0].state, AgentEffectState::Unknown);
+    store
+        .override_unknown_effect_for_delete(
+            &owner(),
+            &session.agent_session_id,
+            &blockers.effects[0].effect_id,
+            &digest('d'),
+            1_788_000_004_120,
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    let retained_state: String = sqlx::query_scalar(
+        "SELECT state FROM agent_effects WHERE session_id = ? AND effect_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .bind(&blockers.effects[0].effect_id)
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(retained_state, "unknown", "override must not falsify outcome");
+}
+
+#[tokio::test]
+async fn resource_cleanup_uncertainty_survives_store_restart_and_blocks_purge() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-cleanup-unknown").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-cleanup-unknown-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_005_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    store
+        .record_resource_cleanup_started(&session.agent_session_id, "ssh")
+        .await
+        .unwrap();
+    store
+        .record_resource_cleanup_uncertain(
+            &session.agent_session_id,
+            "ssh",
+            1_788_000_005_010,
+        )
+        .await
+        .unwrap();
+
+    let restarted = AgentSessionStore::from_pool(store.test_pool().clone())
+        .await
+        .unwrap();
+    let blockers = restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        blockers.resource_cleanup_uncertainties,
+        vec![crate::ResourceCleanupUncertainty {
+            owner_domain: "ssh".to_owned(),
+            recorded_at: 1_788_000_005_010,
+        }]
+    );
+    assert!(matches!(
+        restarted
+            .complete_delete(&command, 1_788_000_005_020)
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("resource cleanup uncertainty")
+    ));
+    assert!(restarted
+        .inspect_tombstone(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(restarted
+        .get_deleting_session(&session.agent_session_id)
+        .await
+        .is_ok());
+
+    restarted
+        .override_resource_cleanup_for_delete(
+            &owner(),
+            &session.agent_session_id,
+            "ssh",
+            &digest('c'),
+            1_788_000_005_015,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        restarted
+            .record_resource_cleanup_succeeded(&session.agent_session_id, "ssh")
+            .await,
+        Err(SessionStoreError::Conflict(_))
+    ), "manual risk acceptance must not be rewritten as cleanup success");
+    assert!(restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    restarted
+        .complete_delete(&command, 1_788_000_005_020)
+        .await
+        .unwrap();
+    let reopened = AgentSessionStore::from_pool(restarted.test_pool().clone())
+        .await
+        .unwrap();
+    let audits = reopened
+        .deletion_audits(&owner(), &session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].target_kind, "resource_cleanup");
+    assert_eq!(audits[0].target_id, "ssh");
+    assert_eq!(audits[0].reason_digest, digest('c'));
+    assert_eq!(audits[0].recorded_at, 1_788_000_005_015);
+    let private_event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(reopened.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(private_event_count, 0, "tombstone must purge private events");
+}
+
+#[tokio::test]
+async fn canonical_autowork_config_is_owner_scoped_cas_and_boot_listable() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "autowork-config").await;
+    assert_eq!(
+        store
+            .automation_config(&session.agent_session_id)
+            .await
+            .unwrap(),
+        crate::AgentSessionAutomationConfig::default()
+    );
+    let command = crate::CommitAgentSessionAutomationConfig {
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        expected_revision: 0,
+        enabled: true,
+        tag: Some("release".to_owned()),
+        max_requirements: Some(3),
+        operation_id: Some("autowork-config-enable".to_owned()),
+        recorded_at: 1_788_000_006_000,
+    };
+    let saved = store
+        .commit_automation_config(command.clone())
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(
+        store
+            .commit_automation_config(command.clone())
+            .await
+            .unwrap(),
+        saved
+    );
+    let listed = store
+        .list_enabled_automation_configs(&owner())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session.agent_session_id, session.agent_session_id);
+    assert_eq!(listed[0].config, saved);
+
+    let disabled = store
+        .commit_automation_config(crate::CommitAgentSessionAutomationConfig {
+            agent_session_id: session.agent_session_id.clone(),
+            owner_ref: owner(),
+            expected_revision: 1,
+            enabled: false,
+            tag: Some("release".to_owned()),
+            max_requirements: Some(3),
+            operation_id: Some("autowork-config-disable".to_owned()),
+            recorded_at: 1_788_000_006_010,
+        })
+        .await
+        .unwrap();
+    assert_eq!(disabled.revision, 2);
+    assert!(!disabled.enabled);
+    assert_eq!(
+        store
+            .commit_automation_config(command.clone())
+            .await
+            .unwrap(),
+        saved,
+        "A -> B -> replay(A) must return A's historical receipt"
+    );
+    assert_eq!(
+        store
+            .automation_config(&session.agent_session_id)
+            .await
+            .unwrap(),
+        disabled,
+        "historical replay must not roll the current config back"
+    );
+    let mut changed_replay = command.clone();
+    changed_replay.tag = Some("changed".to_owned());
+    assert!(matches!(
+        store.commit_automation_config(changed_replay).await,
+        Err(SessionStoreError::IdempotencyConflict(_))
+    ));
+
+    let mut stale = command.clone();
+    stale.operation_id = Some("autowork-config-stale".to_owned());
+    stale.tag = Some("other".to_owned());
+    assert!(matches!(
+        store.commit_automation_config(stale).await,
+        Err(SessionStoreError::Conflict(_))
+    ));
+    let mut foreign = command;
+    foreign.owner_ref.principal_id = "foreign".to_owned();
+    foreign.expected_revision = 1;
+    foreign.operation_id = Some("autowork-config-foreign".to_owned());
+    assert!(store.commit_automation_config(foreign).await.is_err());
+}
+
+#[tokio::test]
+async fn restart_quarantines_unfinished_resource_cleanup_before_retry() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-cleanup-started").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-cleanup-started-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_007_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    store
+        .record_resource_cleanup_started(&session.agent_session_id, "ssh")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .delete_blockers(&session.agent_session_id)
+            .await
+            .unwrap()
+            .resource_cleanup_pending,
+        vec!["ssh"]
+    );
+    let restarted = AgentSessionStore::from_pool(store.test_pool().clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted
+            .quarantine_pending_resource_cleanups_for_delete(
+                &owner(),
+                &session.agent_session_id,
+                1_788_000_007_010,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let blockers = restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert!(blockers.resource_cleanup_pending.is_empty());
+    assert_eq!(blockers.resource_cleanup_uncertainties.len(), 1);
+}
+
+#[tokio::test]
+async fn turn_output_facts_resolve_payloads_only_inside_the_exact_terminal_boundary() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started) = create_turn(&store, "bounded-output", "turn-output-one").await;
+    let value = json!({"content":"exact output","turn_id":"root-one"});
+    let bytes = canonical_json_bytes(&value).unwrap();
+    let payload = SessionPayloadRecord {
+        payload_id: ArtifactId::from("bounded-output-payload"),
+        agent_session_id: session.agent_session_id.clone(), media_type: "application/json".into(),
+        byte_len: bytes.len() as u64, digest: digest_bytes(&bytes),
+        body: SessionPayloadBody::Json(StrictJsonValue(value.clone())),
+    };
+    let mut part = append(&session.agent_session_id, "bounded-output-part", "runtime-supervisor", "bounded-output-part",
+        "message/content-part", "assistant-one", Some(started.clone()), value.clone());
+    part.semantic_event.payload = SessionEventPayloadRef::Stored(payload.payload_id.clone());
+    store.append_event_with_payload(&part, Some(&payload)).await.unwrap();
+    let completion = append(&session.agent_session_id, "bounded-output-complete", "runtime-supervisor", "bounded-output-complete",
+        "message/completed", "assistant-one", Some(part.event_id.clone()),
+        json!({"part_count":1,"content_digest":digest_bytes(b"exact output")}));
+    store.append_event(&completion).await.unwrap();
+    let terminal = append(&session.agent_session_id, "bounded-output-terminal", "runtime-supervisor", "bounded-output-terminal",
+        "turn/completed", "turn-output-one", Some(completion.event_id), json!({}));
+    store.append_event(&terminal).await.unwrap();
+    let second = append(&session.agent_session_id, "bounded-output-second", "session-api", "bounded-output-second",
+        "turn/started", "turn-output-two", Some(terminal.event_id.clone()), json!({"source_message_id":"root-two"}));
+    store.append_event(&second).await.unwrap();
+    let later = append(&session.agent_session_id, "bounded-output-later", "runtime-supervisor", "bounded-output-later",
+        "message/content-part", "assistant-two", Some(second.event_id.clone()), json!({"content":"later output","turn_id":"root-two"}));
+    store.append_event(&later).await.unwrap();
+    let exact = store.turn_output_facts(&session.agent_session_id, &OperationId::from("turn-output-one")).await.unwrap();
+    assert_eq!(exact.events.first().unwrap().event_id, started);
+    assert_eq!(exact.events.last().unwrap().event_id, terminal.event_id);
+    assert_eq!(exact.event_payloads[part.event_id.as_ref()], value);
+    assert_eq!(exact.events.len(), 4);
+    assert!(!exact.event_payloads.contains_key(later.event_id.as_ref()));
+    assert!(exact.fork_context.is_none());
+    let running = store.turn_output_facts(&session.agent_session_id, &OperationId::from("turn-output-two")).await.unwrap();
+    assert_eq!(running.events.first().unwrap().event_id, second.event_id);
+    assert_eq!(running.events.last().unwrap().event_id, later.event_id);
+    assert_eq!(running.events.len(), 2);
+    assert!(matches!(store.turn_output_facts(&session.agent_session_id, &OperationId::from("missing-turn")).await,
+        Err(SessionStoreError::NotFound(_))));
+}

@@ -32,7 +32,7 @@ import { MODEL_CACHE_NAME, modelCacheKey } from './modelCacheKey';
 
 /** Sentinel: the model isn't in Cache Storage yet (the main thread owns the
  *  download via `modelCache.ensureMattingModel`). Callers fall back to heuristic. */
-export const MODEL_NOT_READY = 'MODEL_NOT_READY';
+const MODEL_NOT_READY = 'MODEL_NOT_READY';
 
 /** MODNet 参考边（preprocessor: shortest_edge）。 */
 const REF_EDGE = 512;
@@ -49,7 +49,7 @@ const SIZE_DIVISOR = 32;
  * 预先写入）。命中直返；未命中抛 [`MODEL_NOT_READY`]——绝不在 worker 里直连远端
  * 下载（那正是 30s 超时死路的根因）。
  */
-export async function fetchModel(): Promise<ArrayBuffer> {
+async function fetchModel(): Promise<ArrayBuffer> {
   if (typeof caches === 'undefined') throw new Error(MODEL_NOT_READY);
   let cache: Cache;
   try {
@@ -71,7 +71,7 @@ export async function fetchModel(): Promise<ArrayBuffer> {
  * 与 Xenova/modnet processor（shortest_edge=512, size_divisibility=32）一致，
  * 仅多了极端长宽比下的长边钳制。
  */
-export function computeInferenceSize(
+function computeInferenceSize(
   width: number,
   height: number
 ): { width: number; height: number } {
@@ -85,7 +85,7 @@ export function computeInferenceSize(
 }
 
 /** 纯 TS 双线性 RGBA 缩放（OffscreenCanvas 不可用时的兜底；alpha 一并重采样）。 */
-export function resizeRgbaBilinear(img: RawImage, dw: number, dh: number): RawImage {
+function resizeRgbaBilinear(img: RawImage, dw: number, dh: number): RawImage {
   const { data, width: sw, height: sh } = img;
   const out = new Uint8ClampedArray(dw * dh * 4);
   const xRatio = sw / dw;
@@ -116,7 +116,7 @@ export function resizeRgbaBilinear(img: RawImage, dw: number, dh: number): RawIm
 }
 
 /** RGBA → NCHW Float32，(x - 127.5) / 127.5（= rescale 1/255 + mean/std 0.5）。 */
-export function rgbaToNchwNormalized(img: RawImage): Float32Array {
+function rgbaToNchwNormalized(img: RawImage): Float32Array {
   const { data, width, height } = img;
   const n = width * height;
   const out = new Float32Array(3 * n);
@@ -130,7 +130,7 @@ export function rgbaToNchwNormalized(img: RawImage): Float32Array {
 }
 
 /** 0..1 matte 双线性放大回原尺寸 → 0..255 alpha。 */
-export function resizeMatteBilinear(
+function resizeMatteBilinear(
   matte: Float32Array,
   sw: number,
   sh: number,

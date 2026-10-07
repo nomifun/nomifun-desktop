@@ -4,11 +4,12 @@
 // parsing YAML frontmatter and writing memory entries.
 
 use std::fs;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
+use std::io::Result;
 use crate::types::{MemoryEntry, MemoryFrontmatter};
 
 /// Maximum number of lines to read when extracting frontmatter.
@@ -26,7 +27,10 @@ const FRONTMATTER_DELIM: &str = "---";
 /// Gracefully degrades: if the file has no valid frontmatter, returns
 /// a default (empty) frontmatter with the entire file as body content.
 pub fn read_memory(path: &Path) -> Result<MemoryEntry> {
-    let raw = fs::read_to_string(path)?;
+    let mut file = fs::File::open(path)?;
+    file.lock_shared()?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
     let (frontmatter, content) = parse_frontmatter(&raw, Some(path));
     Ok(MemoryEntry::new(frontmatter, content))
 }
@@ -48,7 +52,10 @@ pub fn write_memory(dir: &Path, entry: &MemoryEntry) -> Result<PathBuf> {
     let path = dir.join(&filename);
 
     let content = serialize_entry(entry);
-    fs::write(&path, content)?;
+    let mut file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+    file.lock()?;
+    file.write_all(content.as_bytes())?;
+    file.set_len(content.len() as u64)?;
 
     Ok(path)
 }
@@ -77,28 +84,46 @@ pub fn bump_memory_usage(dir: &Path, filename: &str, now: DateTime<Utc>) -> Resu
         return Ok(());
     }
     let path = dir.join(filename);
-    // Missing / unreadable file = no-op. Citations can name stale filenames.
-    let Ok(mut entry) = read_memory(&path) else {
+    // Reject existing symlinks and non-files before opening a model-named path.
+    if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return Ok(());
+    }
+    let Ok(mut file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
         return Ok(());
     };
-    entry.frontmatter.usage_count = Some(entry.frontmatter.usage_count.unwrap_or(0) + 1);
-    entry.frontmatter.last_used = Some(now);
-    let content = serialize_entry(&entry);
-    fs::write(&path, content)?;
+    file.lock()?;
+    let mut raw = String::new();
+    if file.read_to_string(&mut raw).is_err() {
+        return Ok(());
+    }
+    let Some((yaml, body)) = split_frontmatter(&raw) else {
+        return Ok(());
+    };
+    // Update only the two citation fields. Preserve unknown metadata and the
+    // exact body; invalid/non-memory documents must never be repaired by a citation.
+    let Ok(mut metadata) = serde_yaml::from_str::<serde_yaml::Mapping>(yaml) else {
+        return Ok(());
+    };
+    let count = match metadata.get("usage_count") {
+        None | Some(serde_yaml::Value::Null) => 0,
+        Some(value) => match value.as_u64() {
+            Some(count) => count,
+            None => return Ok(()),
+        },
+    };
+    metadata.insert("usage_count".into(), count.saturating_add(1).into());
+    metadata.insert("last_used".into(), now.to_rfc3339().into());
+    let yaml = serde_yaml::to_string(&metadata).map_err(std::io::Error::other)?;
+    let content = format!("---\n{}---\n{body}", yaml);
+    file.rewind()?;
+    file.write_all(content.as_bytes())?;
+    file.set_len(content.len() as u64)?;
     Ok(())
 }
 
-/// True when `name` is a plain `.md` file name that this store could itself
-/// have written, and so is safe to join onto the memory directory.
-///
-/// Deliberately a whitelist rather than a blocklist: [`generate_filename`]
-/// only ever emits `<type>_<sanitized_name>.md`, where [`sanitize_filename`]
-/// has already reduced the name to ASCII alphanumerics and `_`. Accepting just
-/// that shape rules out every path-escape construct at once — separators, `..`,
-/// a `c:` drive prefix (which `join` would treat as drive-relative, discarding
-/// `dir`, even though `is_absolute()` reads `false` for it), an NTFS
-/// `name:stream` suffix, a trailing dot or space, and reserved device names —
-/// without needing to enumerate them.
+/// Accept a plain ASCII Markdown basename (including legacy names), never
+/// separators, drive prefixes, NTFS streams, or parent traversal. This is a
+/// lexical check; bump_memory_usage separately rejects existing symlinks.
 fn is_safe_memory_filename(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".md") else {
         return false;
@@ -127,70 +152,34 @@ fn is_safe_memory_filename(name: &str) -> bool {
 /// Returns `(frontmatter, body)`. On parse failure, returns default
 /// frontmatter and the entire content as body.
 fn parse_frontmatter(raw: &str, path: Option<&Path>) -> (MemoryFrontmatter, String) {
-    let trimmed = raw.trim_start();
-
-    // Must start with `---`
-    if !trimmed.starts_with(FRONTMATTER_DELIM) {
-        return (MemoryFrontmatter::default(), raw.to_owned());
+    if let Some((yaml, body)) = split_frontmatter(raw) {
+        match serde_yaml::from_str::<MemoryFrontmatter>(yaml) {
+            Ok(frontmatter) => return (frontmatter, body.trim_start_matches(['\r', '\n']).to_owned()),
+            Err(error) => {
+                if let Some(path) = path {
+                    tracing::warn!(target: "nomi_memory", path = %path.display(), %error, "failed to parse memory frontmatter");
+                }
+            }
+        }
     }
+    (MemoryFrontmatter::default(), raw.to_owned())
+}
 
-    // Find the closing `---`
-    let after_open = &trimmed[FRONTMATTER_DELIM.len()..];
-
-    // Skip the rest of the opening delimiter line (e.g. `---\n`)
-    let after_newline = match after_open.find('\n') {
-        Some(pos) => &after_open[pos + 1..],
-        None => return (MemoryFrontmatter::default(), raw.to_owned()),
-    };
-
-    // Find the closing delimiter within the frontmatter max lines
-    let mut search_offset = 0;
-    let mut lines_seen = 0;
-    let close_pos = loop {
-        if lines_seen >= FRONTMATTER_MAX_LINES {
-            // No closing delimiter within limit — treat as no frontmatter
-            return (MemoryFrontmatter::default(), raw.to_owned());
+/// Return the YAML and untouched body, consuming whole delimiter lines.
+fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
+    let trimmed = raw.trim_start();
+    let (opening, rest) = trimmed.split_once('\n')?;
+    if opening.trim_end() != FRONTMATTER_DELIM {
+        return None;
+    }
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n').take(FRONTMATTER_MAX_LINES) {
+        if line.trim() == FRONTMATTER_DELIM {
+            return Some((&rest[..offset], &rest[offset + line.len()..]));
         }
-        match after_newline[search_offset..].find('\n') {
-            Some(nl) => {
-                let line = after_newline[search_offset..search_offset + nl].trim();
-                if line == FRONTMATTER_DELIM {
-                    break search_offset;
-                }
-                search_offset += nl + 1;
-                lines_seen += 1;
-            }
-            None => {
-                // Last line without trailing newline
-                let line = after_newline[search_offset..].trim();
-                if line == FRONTMATTER_DELIM {
-                    break search_offset;
-                }
-                // No closing delimiter found
-                return (MemoryFrontmatter::default(), raw.to_owned());
-            }
-        }
-    };
-
-    let yaml_str = &after_newline[..close_pos];
-    let body_start = search_offset + FRONTMATTER_DELIM.len();
-    let body = after_newline
-        .get(body_start..)
-        .unwrap_or("")
-        .trim_start_matches('\n');
-
-    // Parse YAML
-    let frontmatter = match serde_yaml::from_str::<MemoryFrontmatter>(yaml_str) {
-        Ok(fm) => fm,
-        Err(e) => {
-            if let Some(p) = path {
-                tracing::warn!(target: "nomi_memory", path = %p.display(), error = %e, "failed to parse memory frontmatter");
-            }
-            MemoryFrontmatter::default()
-        }
-    };
-
-    (frontmatter, body.to_owned())
+        offset += line.len();
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +334,7 @@ mod tests {
         let raw = "---\n: :\n  :\n---\nBody after bad yaml";
         let (fm, body) = parse_frontmatter(raw, None);
         assert_eq!(fm, MemoryFrontmatter::default());
-        assert_eq!(body, "Body after bad yaml");
+        assert_eq!(body, raw);
     }
 
     #[test]

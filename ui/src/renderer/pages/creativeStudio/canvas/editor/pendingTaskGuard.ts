@@ -10,12 +10,12 @@ import { canvasReducer } from '../core';
 
 type CanvasMediaAssetNode = Extract<
   CanvasState['document']['nodes'][number],
-  { type: 'image' | 'panorama' }
+  { type: 'image' }
 >;
 
 const isCanvasMediaAssetNode = (
   node: CanvasState['document']['nodes'][number]
-): node is CanvasMediaAssetNode => node.type === 'image' || node.type === 'panorama';
+): node is CanvasMediaAssetNode => node.type === 'image';
 
 const sameOperation = (
   left: CreativeConfigOperation | null,

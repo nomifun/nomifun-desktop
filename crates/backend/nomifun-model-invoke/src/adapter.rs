@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nomifun_api_types::ModelTask;
 
@@ -19,6 +20,14 @@ pub trait ProtocolAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     /// Whether this adapter can serve `task`.
     fn supports(&self, task: ModelTask) -> bool;
+    /// Provider-recommended minimum delay between async status requests.
+    ///
+    /// Callers may impose a longer delay. Keeping this on the protocol
+    /// adapter prevents a provider-specific status-query limit from leaking
+    /// into the generic creation scheduler or persisted job state.
+    fn recommended_poll_interval(&self) -> Option<Duration> {
+        None
+    }
     /// Execute (or start) the call.
     async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError>;
     /// Poll an async job. Default: this protocol has no async jobs.

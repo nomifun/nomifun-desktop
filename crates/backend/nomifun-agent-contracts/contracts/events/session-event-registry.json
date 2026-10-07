@@ -1,0 +1,1148 @@
+{
+  "registry_version": "session-events-v1",
+  "entries": [
+    {
+      "kind": "session/opening",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-opening/v1",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "none",
+        "kinds": []
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head",
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "session/ready",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-ready/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/opening"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "session/open-failed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-open-failed/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/opening"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "session/agent-binding-changed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-agent-binding-changed/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled",
+          "session/agent-binding-changed"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head",
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "turn/started",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-started/v1",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/completed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-completed/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/failed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-failed/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/cancelled",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-cancelled/v1",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/steer-accepted",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-steer-accepted/v1",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/follow-up-accepted",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-follow-up-accepted/v1",
+      "producer": {
+        "allowed": [
+          "session_api",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "idmm/notice-recorded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/idmm-notice-recorded/v1",
+      "producer": {
+        "allowed": ["session_api"]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": ["message/completed", "message/assistant-projected"]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": ["message-projection"]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "message/user-accepted",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/message-user-accepted/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/started"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "message/content-part",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/message-content-part/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "runtime_sidecar"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started",
+          "message/content-part"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "thinking/content-part",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/thinking-content-part/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "message/completed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/message-completed/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "message/content-part",
+          "turn/started"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "message/assistant-projected",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/message-assistant-projected/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled",
+          "message/assistant-projected"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "context/model-visible-applied",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/context-model-visible-applied/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "capability_host",
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started",
+          "capability/active-set-committed"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "capability/active-set-committed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/capability-active-set-committed/v1",
+      "producer": {
+        "allowed": [
+          "capability_host"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/opening",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "context/cleared",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/context-cleared/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled",
+          "context/cleared"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "capability/activation-requested",
+      "version": 1,
+      "persistence": "transient_diagnostic",
+      "payload_schema": "events/capability-activation-requested/v1",
+      "producer": {
+        "allowed": [
+          "capability_host"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_committed",
+        "kinds": []
+      },
+      "correlation": "turn",
+      "idempotency": "diagnostic_best_effort",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "ignore_transient_diagnostic"
+    },
+    {
+      "kind": "capability/activation-failed",
+      "version": 1,
+      "persistence": "transient_diagnostic",
+      "payload_schema": "events/capability-activation-failed/v1",
+      "producer": {
+        "allowed": [
+          "capability_host"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_committed",
+        "kinds": []
+      },
+      "correlation": "turn",
+      "idempotency": "diagnostic_best_effort",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "ignore_transient_diagnostic"
+    },
+    {
+      "kind": "tool/call-started",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/tool-call-started/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "capability_host",
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "tool_call",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "tool/result-recorded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/tool-result-recorded/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "capability_host",
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "tool/call-started"
+        ]
+      },
+      "correlation": "tool_call",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "effect/started",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/effect-started/v1",
+      "producer": {
+        "allowed": [
+          "capability_host",
+          "owning_plugin",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "tool/call-started"
+        ]
+      },
+      "correlation": "effect",
+      "idempotency": "effect_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "effect/succeeded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/effect-succeeded/v1",
+      "producer": {
+        "allowed": [
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "effect/started"
+        ]
+      },
+      "correlation": "effect",
+      "idempotency": "effect_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "effect/failed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/effect-failed/v1",
+      "producer": {
+        "allowed": [
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "effect/started"
+        ]
+      },
+      "correlation": "effect",
+      "idempotency": "effect_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "effect/uncertain",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/effect-uncertain/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor",
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "effect/started"
+        ]
+      },
+      "correlation": "effect",
+      "idempotency": "effect_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "effect/reconciled",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/effect-reconciled/v1",
+      "producer": {
+        "allowed": [
+          "owning_plugin"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "effect/uncertain"
+        ]
+      },
+      "correlation": "effect",
+      "idempotency": "effect_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "automation/config-committed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/automation-config-committed/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_committed",
+        "kinds": []
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "resource/cleanup-started",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/resource-cleanup-started/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_committed",
+        "kinds": []
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "resource/cleanup-uncertain",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/resource-cleanup-uncertain/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "resource/cleanup-started"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "resource/cleanup-succeeded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/resource-cleanup-succeeded/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "resource/cleanup-started"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "resource/cleanup-reconciled",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/resource-cleanup-reconciled/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "resource/cleanup-uncertain"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "resource/cleanup-override",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/resource-cleanup-override/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "resource/cleanup-uncertain"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "deletion/effect-override",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/deletion-effect-override/v1",
+      "producer": {
+        "allowed": [
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "effect/uncertain"
+        ]
+      },
+      "correlation": "session",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "runtime/execution-claimed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-execution-claimed/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "runtime/execution-recovery-blocked",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-execution-recovery-blocked/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "runtime/effect-reconciliation-attested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-effect-reconciliation-attested/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/paused",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "turn/pause-requested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-pause-requested/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/paused",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-paused/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head",
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/resume-authorized",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-resume-authorized/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/paused"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head",
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "runtime/progress-recorded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-progress-recorded/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "compaction/completed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/compaction-completed/v1",
+      "producer": {
+        "allowed": [
+          "compaction_coordinator",
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/completed"
+        ]
+      },
+      "correlation": "compaction",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    },
+    {
+      "kind": "session/forked",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-forked/v1",
+      "producer": {
+        "allowed": [
+          "fork_coordinator",
+          "session_api"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "session/ready",
+          "turn/completed",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "fork",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head"
+        ]
+      },
+      "replay_rule": "rehydrate_runtime_input"
+    }
+  ]
+}

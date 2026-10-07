@@ -136,7 +136,7 @@ export interface WorkspaceTreeSource {
  * just the upload-tracking identity. Its mere presence is what enables the
  * upload toolbar entry, drag overlay, and global paste capture.
  */
-export interface WorkspaceUploadConfig {
+interface WorkspaceUploadConfig {
   /**
    * Stable identity used to scope/track in-flight uploads (the conversation id
    * string for WebUI HTTP uploads + paste-service registration).

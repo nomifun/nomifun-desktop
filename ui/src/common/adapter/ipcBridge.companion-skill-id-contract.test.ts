@@ -20,6 +20,13 @@ const SKILL_PATTERN_ID = parseSkillPatternId('0190f5fe-7c00-7a00-8000-0000000000
 
 const realFetch = globalThis.fetch;
 
+// These tests own the wire path/payload contract; native and WebUI origins
+// are covered separately by httpBridge's environment tests.
+const requestPath = (input: RequestInfo | URL): string => {
+  const url = new URL(String(input), 'http://127.0.0.1:13400');
+  return url.pathname + url.search;
+};
+
 const rawSkill = (overrides: Record<string, unknown> = {}) => ({
   companion_skill_id: COMPANION_SKILL_ID,
   skill_name: 'research',
@@ -68,7 +75,7 @@ describe('companion skill v3 wire contract', () => {
       installFetch(async (input, init) => {
         calls.push({
           method: init?.method ?? 'GET',
-          url: String(input),
+          url: requestPath(input),
           body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
         });
         return jsonResponse({
@@ -95,7 +102,7 @@ describe('companion skill v3 wire contract', () => {
         {
           method: 'GET',
           url:
-            `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills` +
+            `/api/companion/companions/${COMPANION_ID}/skills` +
             '?status=draft&limit=10&offset=20',
         },
       ]);
@@ -110,7 +117,7 @@ describe('companion skill v3 wire contract', () => {
       installFetch(async (input, init) => {
         calls.push({
           method: init?.method ?? 'GET',
-          url: String(input),
+          url: requestPath(input),
           body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
         });
         if (init?.method === 'PUT') return new Response(null, { status: 204 });
@@ -143,17 +150,17 @@ describe('companion skill v3 wire contract', () => {
       expect(calls).toEqual([
         {
           method: 'GET',
-          url: `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills/${COMPANION_SKILL_ID}`,
+          url: `/api/companion/companions/${COMPANION_ID}/skills/${COMPANION_SKILL_ID}`,
         },
         {
           method: 'PUT',
-          url: `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills/${COMPANION_SKILL_ID}`,
+          url: `/api/companion/companions/${COMPANION_ID}/skills/${COMPANION_SKILL_ID}`,
           body: { content: '# updated\n' },
         },
         {
           method: 'POST',
           url:
-            `http://127.0.0.1:13400/api/companion/companions/${COMPANION_ID}/skills/` +
+            `/api/companion/companions/${COMPANION_ID}/skills/` +
             `${COMPANION_SKILL_ID}/decide`,
           body: { accept: true, reason: 'useful' },
         },

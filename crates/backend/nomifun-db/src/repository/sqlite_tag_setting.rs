@@ -2,7 +2,7 @@ use nomifun_common::validate_uuidv7;
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::TagSettingRow;
+use crate::models::{TagSettingPatch, TagSettingRow};
 use crate::repository::tag_setting::ITagSettingRepository;
 
 #[derive(Clone, Debug)]
@@ -29,9 +29,10 @@ impl ITagSettingRepository for SqliteTagSettingRepository {
         Ok(row)
     }
 
-    async fn upsert(&self, row: &TagSettingRow) -> Result<(), DbError> {
+    async fn upsert(&self, tag: &str, patch: &TagSettingPatch) -> Result<TagSettingRow, DbError> {
         let mut tx = self.pool.begin().await?;
-        if let Some(webhook_id) = row.webhook_id.as_deref() {
+        let webhook_id = patch.webhook_id.as_ref().and_then(|id| id.as_deref());
+        if let Some(webhook_id) = webhook_id {
             validate_uuidv7(webhook_id).map_err(|error| {
                 DbError::Conflict(format!("invalid webhook_id '{webhook_id}': {error}"))
             })?;
@@ -47,24 +48,28 @@ impl ITagSettingRepository for SqliteTagSettingRepository {
                 )));
             }
         }
-        sqlx::query(
+        let row = sqlx::query_as::<_, TagSettingRow>(
             "INSERT INTO tag_settings (tag, webhook_id, description, notify_events, updated_at) \
-             VALUES (?, ?, ?, ?, ?) \
+             VALUES (?, ?, COALESCE(?, ''), COALESCE(?, 'done,failed,needs_review'), ?) \
              ON CONFLICT(tag) DO UPDATE SET \
-                webhook_id = excluded.webhook_id, \
-                description = excluded.description, \
-                notify_events = excluded.notify_events, \
-                updated_at = excluded.updated_at",
+                webhook_id = CASE WHEN ? THEN excluded.webhook_id ELSE tag_settings.webhook_id END, \
+                description = COALESCE(?, tag_settings.description), \
+                notify_events = COALESCE(?, tag_settings.notify_events), \
+                updated_at = excluded.updated_at \
+             RETURNING tag, webhook_id, description, notify_events, updated_at",
         )
-        .bind(&row.tag)
-        .bind(row.webhook_id.as_deref())
-        .bind(&row.description)
-        .bind(&row.notify_events)
-        .bind(row.updated_at)
-        .execute(&mut *tx)
+        .bind(tag)
+        .bind(webhook_id)
+        .bind(&patch.description)
+        .bind(&patch.notify_events)
+        .bind(patch.updated_at)
+        .bind(patch.webhook_id.is_some())
+        .bind(&patch.description)
+        .bind(&patch.notify_events)
+        .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(row)
     }
 
     async fn list_all(&self) -> Result<Vec<TagSettingRow>, DbError> {

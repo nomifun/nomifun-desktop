@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// The default data directory shared by all hosts built for the same channel
 /// (desktop shell, `nomifun-web`, the `nomicore` bin): the per-user
@@ -24,9 +24,10 @@ use clap::{Parser, Subcommand};
 /// Concurrent use of one dir is prevented by the exclusive server lock (see
 /// `bootstrap::server_lock`).
 ///
-/// Installs created before this layout used `NomiFun/Nomi<channel-suffix>`
-/// (see [`legacy_default_data_dir`]); `bootstrap::data_root` migrates them
-/// forward on boot.
+/// Historical self-export locations are recognized by
+/// `bootstrap::data_root`, but Fresh-v4 never migrates their entries. The
+/// existing canonical root is isolated only by the one-time whole-root
+/// cutover before a new v4 root is created.
 ///
 /// This is only the *unset* default — it does NOT consult `NOMIFUN_DATA_DIR`
 /// itself (clap's `env` binding and the desktop shell resolve the env).
@@ -42,9 +43,9 @@ pub fn default_data_dir() -> PathBuf {
 
 /// The pre-0.3.4 default data directory for the active channel:
 /// `<app-data>/NomiFun/Nomi<channel-suffix>` (or the historic temp fallback
-/// `<system temp>/nomifun-data/Nomi<channel-suffix>`). Used only as the
-/// migration *source* by `bootstrap::data_root` and by the inherited-env
-/// sanitizer; never used for new datasets.
+/// `<system temp>/nomifun-data/Nomi<channel-suffix>`). Retained only for
+/// inherited self-export normalization; Fresh-v4 does not open or migrate
+/// entries from this path.
 pub fn legacy_default_data_dir() -> PathBuf {
     let leaf = legacy_nomi_leaf(&crate::channel::dir_suffix());
     dirs::data_local_dir()
@@ -68,7 +69,7 @@ fn fallback_leaf(suffix: &str) -> String {
 }
 
 /// The pre-0.3.4 leaf under the `NomiFun` vendor directory (`Nomi`,
-/// `Nomi-dev`, …). Retained only so the migration can find old datasets.
+/// `Nomi-dev`, …). Retained only for inherited-path normalization.
 fn legacy_nomi_leaf(suffix: &str) -> String {
     format!("Nomi{suffix}")
 }
@@ -132,6 +133,22 @@ pub struct Cli {
 // `Mcp` prefix is load-bearing on Mcp* variants — clap derives kebab-case
 // subcommand names (`mcp-requirement-stdio`, etc.) that external callers
 // (ACP agent CLI, injected MCP bridge specs) depend on verbatim.
+/// Connection options shared by the product-facing headless commands.
+///
+/// These commands are clients of an already running local NomiFun HTTP
+/// application. They intentionally do not compose a second AppServices graph
+/// or open the database beside the desktop/server process.
+#[derive(Args, Clone, Debug)]
+pub struct HeadlessConnectionArgs {
+    /// NomiFun base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+    #[arg(long, env = "NOMIFUN_URL", value_name = "URL")]
+    pub url: Option<String>,
+
+    /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+    #[arg(long, env = "NOMIFUN_ACCESS_TOKEN", value_name = "TOKEN")]
+    pub token: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// MCP stdio server for AutoWork requirement declaration tools
@@ -149,11 +166,6 @@ pub enum Command {
     /// folder / application via ShellExecute; spawned by the ACP agent CLI on
     /// Windows so the agent stops launching apps with fragile `cmd /c start`).
     McpOpenStdio,
-    /// MCP stdio server exposing the desktop computer-use capability as discrete
-    /// tools (snapshot / click / type / launch / …; spawned by the ACP agent CLI
-    /// on Windows when the `computer-use` build is present). A thin facade over
-    /// the in-tree ComputerTool, so codex/ACP get the same upgraded automation.
-    McpComputerStdio,
     /// One-shot terminal lifecycle hook relay (invoked by claude/codex native
     /// hooks; reads the event JSON from stdin and POSTs it to the in-process
     /// TerminalLifecycleServer). NOT an MCP server — fire-and-forget.
@@ -168,24 +180,12 @@ pub enum Command {
     /// app launched from confirms whether each backend is detectable
     /// before involving server logs.
     Doctor,
-    /// List the capabilities exposed on the Remote surface (name + description),
-    /// as JSON. Offline — reads the capability registry directly, no running
-    /// instance required.
-    Tools,
-    /// Invoke a capability on a RUNNING NomiFun instance via its REST `/v1` API.
-    /// Endpoint/token from `--url`/`--token` or `NOMIFUN_URL` /
-    /// `NOMIFUN_ACCESS_TOKEN`.
-    Call {
-        /// Capability name, e.g. `nomi_cron_list` (see `nomicore tools`).
-        name: String,
-        /// JSON arguments object (default `{}`).
-        args: Option<String>,
-        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
-        #[arg(long)]
-        url: Option<String>,
-        /// NomiFun Desktop installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
-        #[arg(long)]
-        token: Option<String>,
+    /// Use the canonical installation-owner Remote API. Every operation is
+    /// explicit and session-bound; there is no generic capability/Registry
+    /// dispatch or implicit recent-session state.
+    Remote {
+        #[command(subcommand)]
+        operation: RemoteCommand,
     },
     /// Create a complete offline backup bundle from the current data/work directories.
     ///
@@ -217,13 +217,81 @@ pub enum Command {
     },
 }
 
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    /// Open an AgentSession from an owner-scoped RemoteBinding.
+    Open {
+        /// RemoteBinding identity created by the local Agent settings API.
+        binding_id: String,
+        /// Optional canonical JSON value admitted as the initial turn input.
+        #[arg(long)]
+        initial_input: Option<String>,
+        /// Stable retry identity. When omitted, the CLI prints and uses a new key.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+        #[arg(long)]
+        url: Option<String>,
+        /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Start one turn on an explicitly identified AgentSession.
+    Turn {
+        /// Canonical UUIDv7 AgentSession identity returned by `remote open`.
+        agent_session_id: String,
+        /// Canonical JSON turn input.
+        input: String,
+        /// Stable retry identity. When omitted, the CLI prints and uses a new key.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+        #[arg(long)]
+        url: Option<String>,
+        /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Observe canonical Session events and message projections after a cursor.
+    Observe {
+        /// Canonical UUIDv7 AgentSession identity.
+        agent_session_id: String,
+        /// Exclusive Session event cursor.
+        #[arg(long, default_value_t = 0)]
+        after_seq: u64,
+        /// Maximum number of events to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+        #[arg(long)]
+        url: Option<String>,
+        /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Cancel the active turn on an explicitly identified AgentSession.
+    Cancel {
+        /// Canonical UUIDv7 AgentSession identity.
+        agent_session_id: String,
+        /// Stable retry identity. When omitted, the CLI prints and uses a new key.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+        #[arg(long)]
+        url: Option<String>,
+        /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
     use clap::error::ErrorKind;
     use std::path::PathBuf;
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, RemoteCommand};
 
     #[test]
     fn default_data_dir_matches_active_channel() {
@@ -260,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_default_keeps_the_historic_nomi_leaf_for_migration() {
+    fn legacy_default_keeps_the_historic_nomi_leaf_for_normalization() {
         let legacy = super::legacy_default_data_dir();
         let leaf = super::legacy_nomi_leaf(&crate::channel::dir_suffix());
         assert!(
@@ -271,7 +339,7 @@ mod tests {
         assert_ne!(
             legacy,
             super::default_data_dir(),
-            "legacy and current defaults must differ so migration has a direction"
+            "legacy and current defaults must remain distinguishable"
         );
     }
 
@@ -395,4 +463,59 @@ mod tests {
         assert!(restore.contains("Custom external workspaces"));
         assert!(restore.contains("storage-generation"));
     }
+
+    #[test]
+    fn canonical_remote_subcommands_parse_without_legacy_generic_dispatch() {
+        let open = Cli::try_parse_from([
+            "nomicore",
+            "remote",
+            "open",
+            "binding-1",
+            "--initial-input",
+            r#"{"text":"hello"}"#,
+            "--idempotency-key",
+            "open-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            open.command,
+            Some(Command::Remote {
+                operation: RemoteCommand::Open {
+                    binding_id,
+                    initial_input: Some(initial_input),
+                    idempotency_key: Some(idempotency_key),
+                    ..
+                }
+            }) if binding_id == "binding-1"
+                && initial_input == r#"{"text":"hello"}"#
+                && idempotency_key == "open-1"
+        ));
+
+        let observe = Cli::try_parse_from([
+            "nomicore",
+            "remote",
+            "observe",
+            "0190f5fe-7c00-7a00-8000-000000000001",
+            "--after-seq",
+            "7",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            observe.command,
+            Some(Command::Remote {
+                operation: RemoteCommand::Observe {
+                    after_seq: 7,
+                    limit: 25,
+                    ..
+                }
+            })
+        ));
+
+        let command = Cli::command();
+        assert!(command.find_subcommand("tools").is_none());
+        assert!(command.find_subcommand("call").is_none());
+    }
+
 }

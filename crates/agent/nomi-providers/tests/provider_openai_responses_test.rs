@@ -127,6 +127,52 @@ async fn collect(mut receiver: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<Llm
 }
 
 #[tokio::test]
+async fn dropping_receiver_closes_a_stalled_initial_response() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+        }
+        let mut body = vec![0; content_length.expect("request must have a body length")];
+        socket.read_exact(&mut body).await.unwrap();
+        socket.get_mut().write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\nconnection: close\r\n\r\n",
+        ).await.unwrap();
+        // Keep the HTTP body pending. Closing the downstream must release it
+        // without requiring another SSE event or waiting for a request timeout.
+        timeout(Duration::from_secs(2), socket.read(&mut [0]))
+            .await
+            .expect("stalled response stayed open after receiver drop")
+            .unwrap()
+    });
+    let provider = OpenAIResponsesProvider::new("key", &url, compat(false));
+    let receiver = timeout(Duration::from_secs(2), provider.stream(&request(false)))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(receiver);
+    assert_eq!(server.await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn retention_requires_both_gates_and_uses_responses_wire() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -195,6 +241,31 @@ async fn extra_body_cannot_restore_an_omitted_ceiling_or_protocol_invariants() {
     assert!(body.get("previous_response_id").is_none());
     assert_eq!(body["stream"], true);
     assert_eq!(body["store"], false);
+}
+
+#[tokio::test]
+async fn model_reasoning_default_applies_when_the_request_has_no_override() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            completed_text("resp_default_effort", false, "ok"),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut provider_compat = compat(false);
+    provider_compat.reasoning_effort = Some("medium".to_owned());
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
+    let mut request = request(false);
+    request.reasoning_effort = None;
+    collect(provider.stream(&request).await.unwrap()).await;
+
+    let received = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["reasoning"], json!({"effort": "medium"}));
 }
 
 #[tokio::test]
@@ -479,7 +550,7 @@ async fn incomplete_function_call_is_never_executable_or_chainable() {
 #[tokio::test]
 async fn completed_function_call_commits_atomically_with_cursor_then_done() {
     let server = MockServer::start().await;
-    let arguments = r#"{"path":"miniapp.html"}"#;
+    let arguments = r#"{"path":"plugin.html"}"#;
     let function = json!({
         "id": "fc_complete",
         "type": "function_call",
@@ -540,7 +611,7 @@ async fn completed_function_call_commits_atomically_with_cursor_then_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         LlmEvent::ToolUse { id, name, input, .. }
-            if id == "call_complete" && name == "Write" && input["path"] == "miniapp.html"
+            if id == "call_complete" && name == "Write" && input["path"] == "plugin.html"
     )));
     let cursor = events
         .iter()

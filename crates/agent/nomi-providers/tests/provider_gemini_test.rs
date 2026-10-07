@@ -191,6 +191,55 @@ async fn native_extra_body_preserves_unknown_fields_but_typed_fields_win() {
 }
 
 #[tokio::test]
+async fn native_reasoning_effort_uses_request_then_model_default_then_automatic() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(text_sse(), "text/event-stream"),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let mut configured_compat = ProviderCompat::gemini_defaults();
+    configured_compat.reasoning_effort = Some("medium".to_owned());
+    let provider = GeminiProvider::new(
+        "test-key",
+        &format!("{}/v1beta", server.uri()),
+        configured_compat,
+    );
+    let mut configured = minimal_request();
+    configured.reasoning_effort = Some("high".to_owned());
+    collect_events(provider.stream(&configured).await.unwrap()).await;
+    collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+
+    let automatic_provider = GeminiProvider::new(
+        "test-key",
+        &format!("{}/v1beta", server.uri()),
+        ProviderCompat::gemini_defaults(),
+    );
+    collect_events(automatic_provider.stream(&minimal_request()).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let configured_body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        configured_body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+    let model_default_body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        model_default_body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "medium"
+    );
+    let automatic_body: Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert!(
+        automatic_body["generationConfig"]
+            .get("thinkingConfig")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn native_request_preserves_multimodal_tools_ids_and_signatures() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

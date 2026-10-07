@@ -574,7 +574,7 @@ async fn deleting_group_sessions_cancels_only_their_queued_prompts() {
 
     let now = nomifun_common::now_ms();
     let mut queued = Vec::new();
-    for (plugin_id, chat_id, session_id, text) in [
+    for (plugin_product_id, chat_id, session_id, text) in [
         (
             first_plugin.channel_plugin_id.as_str(),
             "group-a",
@@ -605,7 +605,7 @@ async fn deleting_group_sessions_cancels_only_their_queued_prompts() {
             chat_id,
             text,
         );
-        prompt.channel_plugin_id = plugin_id.to_owned();
+        prompt.channel_plugin_id = plugin_product_id.to_owned();
         prompt.channel_session_id = session_id.to_owned();
         let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
             repo.enqueue_pending_prompt(&prompt, now).await.unwrap()
@@ -720,7 +720,7 @@ async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions()
 
     let now = nomifun_common::now_ms();
     let mut queued = Vec::new();
-    for (plugin_id, session, text) in [
+    for (plugin_product_id, session, text) in [
         (
             target_plugin.channel_plugin_id.as_str(),
             &target_group,
@@ -747,7 +747,7 @@ async fn atomic_group_access_update_rolls_back_then_clears_non_direct_sessions()
             session.chat_id.as_deref().unwrap(),
             text,
         );
-        prompt.channel_plugin_id = plugin_id.to_owned();
+        prompt.channel_plugin_id = plugin_product_id.to_owned();
         prompt.channel_session_id = session.channel_session_id.clone();
         let nomifun_db::PendingPromptEnqueue::Queued { row, .. } =
             repo.enqueue_pending_prompt(&prompt, now).await.unwrap()

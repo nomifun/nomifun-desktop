@@ -6,13 +6,40 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { fromApiTurnCompletedEvent } from './ipcBridge';
+import { fromApiFileMetadata, fromApiTurnCompletedEvent, fromApiTurnPausedEvent } from './ipcBridge';
+import { isAuthoritativeCompletionRuntimeIdle } from '@/renderer/pages/conversation/platforms/authoritativeTurnLifecyclePolicy';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
 const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000001';
 const MESSAGE_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
 describe('ipc bridge wire ID contracts', () => {
+  test('pause notifications retain exact identities and carry no completion authority', () => {
+    expect(fromApiTurnPausedEvent({ conversation_id: CONVERSATION_ID, turn_id: MESSAGE_ID,
+      status: 'paused', runtime: { can_send_message: false } })).toEqual({ conversation_id: CONVERSATION_ID, turn_id: MESSAGE_ID });
+    for (const raw of [{ conversation_id: CONVERSATION_ID }, { conversation_id: 'invalid', turn_id: MESSAGE_ID }]) {
+      expect(() => fromApiTurnPausedEvent(raw)).toThrow();
+    }
+  });
+
+  test('maps filesystem metadata snake-case fields before directory validation', () => {
+    expect(fromApiFileMetadata({
+      name: 'project',
+      path: '/tmp/project',
+      size: 0,
+      type: 'inode/directory',
+      last_modified: 123,
+      is_directory: true,
+    })).toEqual({
+      name: 'project',
+      path: '/tmp/project',
+      size: 0,
+      type: 'inode/directory',
+      lastModified: 123,
+      isDirectory: true,
+    });
+  });
+
   test('revoke user uses channel_user_id and not user_id', () => {
     expect(source.includes('revokeUser: httpPost<void, { channel_user_id:')).toBe(true);
     expect(source.includes("'/api/channel/users/revoke'")).toBe(true);
@@ -72,17 +99,9 @@ describe('ipc bridge wire ID contracts', () => {
     expect(rejected).toBe(true);
   });
 
-  test('manual knowledge writeback retry uses the owning conversation and message IDs', () => {
-    expect(
-      /retryKnowledgeWriteback:\s*httpPost<\s*void,\s*\{\s*conversation_id:\s*ConversationId;\s*message_id:\s*MessageId;\s*attempt_id:\s*string;?\s*\}\s*>/.test(
-        source
-      )
-    ).toBe(true);
-    expect(
-      source.includes(
-        '`/api/conversations/${p.conversation_id}/messages/${p.message_id}/knowledge-writeback/retry`'
-      )
-    ).toBe(true);
+  test('does not expose the legacy mutable knowledge-writeback bridge', () => {
+    expect(source.includes('retryKnowledgeWriteback:')).toBe(false);
+    expect(source.includes('/knowledge-writeback/retry')).toBe(false);
   });
 
   test('maps exact active_turn_id from a turn lifecycle runtime snapshot', () => {
@@ -114,5 +133,26 @@ describe('ipc bridge wire ID contracts', () => {
     });
 
     expect(mapped.runtime.is_processing).toBe(true);
+  });
+
+  test('accepts the canonical relay terminal only with explicit idle runtime authority', () => {
+    const mapped = fromApiTurnCompletedEvent({
+      conversation_id: CONVERSATION_ID,
+      turn_id: MESSAGE_ID,
+      status: 'finished',
+      state: 'ai_waiting_input',
+      can_send_message: true,
+      runtime: {
+        state: 'idle',
+        can_send_message: true,
+        has_runtime: false,
+        runtime_status: 'finished',
+        is_processing: false,
+        active_turn_id: null,
+      },
+    });
+
+    expect(mapped.turn_id).toBe(MESSAGE_ID);
+    expect(isAuthoritativeCompletionRuntimeIdle(mapped.runtime)).toBe(true);
   });
 });

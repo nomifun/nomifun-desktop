@@ -1,0 +1,1907 @@
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use base64::Engine as _;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use fs2::FileExt as _;
+use nomifun_common::AppError;
+use same_file::Handle as SameFileHandle;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+pub const WORKSPACE_OWNER_DIRECTORY: &str = ".nomifun";
+pub const ARTIFACT_DIRECTORY: &str = "artifacts";
+pub const ARTIFACT_RELATIVE_ROOT: &str = ".nomifun/artifacts";
+const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_ARTIFACT_READ_BYTES: usize = 1024 * 1024;
+const ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_STALE_PUBLICATION_CLEANUP: usize = 64;
+const MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES: usize = 32;
+const PUBLICATION_LOCK_FILE: &str = ".publication.lock";
+const PUBLICATION_OUTCOME_UNKNOWN: &str = "artifact publication outcome is unknown";
+static PUBLICATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub fn is_workspace_owner_component(component: &OsStr) -> bool {
+    let Some(component) = component.to_str() else { return false };
+    #[cfg(windows)]
+    { component.eq_ignore_ascii_case(WORKSPACE_OWNER_DIRECTORY) }
+    #[cfg(not(windows))]
+    { component == WORKSPACE_OWNER_DIRECTORY }
+}
+
+pub(crate) fn normalized_workspace_relative(raw: &str, allow_empty: bool) -> Result<PathBuf, AppError> {
+    if raw != raw.trim() || raw.contains(['\0', '\\']) {
+        return Err(AppError::BadRequest("workspace path must use its exact portable relative form".into()));
+    }
+    if raw.is_empty() {
+        return allow_empty.then(PathBuf::new)
+            .ok_or_else(|| AppError::BadRequest("workspace path must not be empty".into()));
+    }
+    let mut normalized = PathBuf::new();
+    let mut portable = Vec::new();
+    for component in Path::new(raw).components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| AppError::BadRequest("workspace path must be UTF-8".into()))?;
+                // Validate raw segments before Win32 can normalize an alias
+                // or open an alternate data stream during canonicalization.
+                if crate::path_safety::is_unsafe_path_segment(value) {
+                    return Err(AppError::BadRequest("workspace path has an invalid component".into()));
+                }
+                if portable.is_empty() && is_workspace_owner_component(component.as_os_str()) {
+                    return Err(AppError::NotFound("workspace path was not found".into()));
+                }
+                portable.push(value);
+                normalized.push(value);
+            }
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(AppError::BadRequest("workspace path must be normalized and traversal-free".into()));
+            }
+        }
+    }
+    if portable.join("/") != raw {
+        return Err(AppError::BadRequest("workspace path contains redundant separators or components".into()));
+    }
+    Ok(normalized)
+}
+
+pub fn artifact_publication_outcome_unknown(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(message) if message.strip_prefix(PUBLICATION_OUTCOME_UNKNOWN)
+        .is_some_and(|suffix| suffix.starts_with(": ")))
+}
+
+/// Content-addressed artifacts owned through pinned, handle-relative paths.
+#[derive(Clone)]
+pub struct WorkspaceArtifactStore {
+    workspace_path: PathBuf,
+    workspace_identity: Arc<SameFileHandle>,
+    workspace: Arc<Dir>,
+    publication_lock: Arc<Mutex<()>>,
+    verified: Arc<Mutex<VerifiedArtifactCache>>,
+    io_counters: Arc<ArtifactIoCounters>,
+}
+
+struct VerifiedArtifact {
+    file: File,
+    identity: SameFileHandle,
+    size_bytes: u64,
+    sha256: String,
+    chunk_hashes: Vec<String>,
+}
+
+#[derive(Default)]
+struct VerifiedArtifactCache {
+    entries: HashMap<String, Arc<Mutex<VerifiedArtifact>>>,
+    lru: VecDeque<String>,
+}
+
+impl VerifiedArtifactCache {
+    fn get(&mut self, id: &str) -> Option<Arc<Mutex<VerifiedArtifact>>> {
+        let value = self.entries.get(id).cloned()?;
+        self.lru.retain(|entry| entry != id);
+        self.lru.push_back(id.to_owned());
+        Some(value)
+    }
+
+    fn insert(&mut self, id: String, value: Arc<Mutex<VerifiedArtifact>>) {
+        self.entries.insert(id.clone(), value);
+        self.lru.retain(|entry| entry != &id);
+        self.lru.push_back(id);
+        while self.entries.len() > MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES {
+            let Some(evicted) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+}
+
+struct ArtifactNamespace { dir: Dir, identity: SameFileHandle }
+
+struct PublicationLease(File);
+
+impl PublicationLease {
+    fn acquire(directory: &Dir) -> Result<Self, AppError> {
+        let mut options = CapOpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .follow(FollowSymlinks::No);
+        let file = directory
+            .open_with(PUBLICATION_LOCK_FILE, &options)
+            .map_err(|error| AppError::Conflict(format!("cannot open artifact publication lease: {error}")))?
+            .into_std();
+        sync_directory(directory)?;
+        file.lock_exclusive().map_err(|error| {
+            AppError::Conflict(format!("cannot acquire artifact publication lease: {error}"))
+        })?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for PublicationLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+#[derive(Default)]
+struct ArtifactIoCounters { full_scan_bytes: AtomicU64, page_read_bytes: AtomicU64 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedWorkspaceArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root_sha256: Option<String>,
+    pub artifact_id: String,
+    pub source_path: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceArtifactRead {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root_sha256: Option<String>,
+    pub artifact_id: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub size_bytes: u64,
+    pub complete: bool,
+    pub sha256: String,
+    pub data_base64: String,
+}
+
+impl WorkspaceArtifactStore {
+    pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, AppError> {
+        let workspace_root = fs::canonicalize(workspace_root.as_ref()).map_err(|error| {
+            AppError::BadRequest(format!("cannot resolve workspace artifact root '{}': {error}", workspace_root.as_ref().display()))
+        })?;
+        if !workspace_root.is_dir() { return Err(AppError::BadRequest("workspace artifact root is not a directory".into())); }
+        let workspace = Dir::open_ambient_dir(&workspace_root, ambient_authority())
+            .map_err(|error| AppError::BadRequest(format!("cannot pin workspace artifact root '{}': {error}", workspace_root.display())))?;
+        let workspace_identity = dir_identity(&workspace)?;
+        let canonical_after = fs::canonicalize(&workspace_root).map_err(|error| {
+            AppError::Conflict(format!("workspace artifact root changed while opening: {error}"))
+        })?;
+        let reopened = Dir::open_ambient_dir(&workspace_root, ambient_authority()).map_err(|error| {
+            AppError::Conflict(format!("workspace artifact root changed while opening: {error}"))
+        })?;
+        if canonical_after != workspace_root || dir_identity(&reopened)? != workspace_identity {
+            return Err(AppError::Conflict("workspace artifact root changed while opening".into()));
+        }
+        let store = Self {
+            workspace_path: workspace_root,
+            workspace_identity: Arc::new(workspace_identity),
+            workspace: Arc::new(workspace),
+            publication_lock: Arc::new(Mutex::new(())),
+            verified: Arc::new(Mutex::new(VerifiedArtifactCache::default())),
+            io_counters: Arc::new(ArtifactIoCounters::default()),
+        };
+        match open_artifact_namespace(&store.workspace, false) {
+            Ok(namespace) => {
+                let _lease = PublicationLease::acquire(&namespace.dir)?;
+                match cleanup_stale_publications(&namespace.dir) {
+                    Ok(_) => {}
+                    Err(error) if artifact_publication_outcome_unknown(&error) => {
+                        // Keep diagnostic reads available. Every publication must
+                        // retry this unresolved cleanup and return its public error.
+                        tracing::warn!(%error, "artifact startup cleanup remains unconfirmed; publication is blocked");
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(store)
+    }
+
+    pub fn publish(&self, source: &str, expected: Option<&str>) -> Result<PublishedWorkspaceArtifact, AppError> {
+        self.publish_with_hooks(source, expected, || {}, || {})
+    }
+
+    fn publish_with_hooks<F: FnOnce(), G: FnOnce()>(&self, source: &str, expected: Option<&str>, after_source: F, after_namespace: G) -> Result<PublishedWorkspaceArtifact, AppError> {
+        let _publication = self
+            .publication_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.verify_workspace()?;
+        let relative = normalized_workspace_relative(source, false)?;
+        let namespace = open_artifact_namespace(&self.workspace, true)?;
+        let _lease = PublicationLease::acquire(&namespace.dir)?;
+        // A different owner may have left unconfirmed cleanup since this store
+        // was opened. Reconcile under the shared lease before every publication.
+        if !cleanup_stale_publications(&namespace.dir)? {
+            return Err(AppError::Conflict("artifact startup cleanup has more owned files to reconcile; retry before publishing".into()));
+        }
+        after_namespace();
+        verify_namespace(&self.workspace, &namespace)?;
+        let mut staged = stage_source(
+            &self.workspace,
+            &relative,
+            &namespace,
+            &self.io_counters,
+            after_source,
+        )?;
+        let publication = (|| {
+            self.verify_workspace()?;
+            let digest = staged.digest.clone();
+            if expected.is_some_and(|value| value != digest.as_str()) {
+                return Err(AppError::Conflict(format!("workspace artifact source digest changed (expected {}, observed {digest})", expected.unwrap())));
+            }
+            let (created, verified) = publish_content_addressed(&namespace, &digest, &staged, &self.io_counters)?;
+            if let Err(error) = verify_namespace(&self.workspace, &namespace) {
+                drop(verified);
+                if created {
+                    rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
+                        AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: namespace changed and rollback failed: {cleanup}"
+                        ))
+                    })?;
+                }
+                return Err(error);
+            }
+            if let Err(error) = self.verify_workspace() {
+                drop(verified);
+                if created {
+                    rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
+                        AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: workspace changed and rollback failed: {cleanup}"
+                        ))
+                    })?;
+                }
+                return Err(error);
+            }
+            self.verified
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(digest.clone(), Arc::new(Mutex::new(verified)));
+            Ok(PublishedWorkspaceArtifact {
+                workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
+                artifact_id: digest.clone(), source_path: source.into(), relative_path: format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
+                mime_type: mime_guess::from_path(source).first_or_octet_stream().essence_str().into(), size_bytes: staged.size_bytes, sha256: digest,
+            })
+        })();
+        match staged.cleanup() {
+            Ok(()) => publication,
+            Err(cleanup) => Err(AppError::Conflict(format!(
+                "{PUBLICATION_OUTCOME_UNKNOWN}: staging cleanup could not be proven ({cleanup}); publication result: {}",
+                publication.as_ref().map_or_else(|error| error.to_string(), |_| "published".to_owned()),
+            ))),
+        }
+    }
+
+    pub fn read(&self, artifact_id: &str, offset: u64, limit: usize) -> Result<WorkspaceArtifactRead, AppError> {
+        self.verify_workspace()?;
+        validate_artifact_id(artifact_id)?;
+        if limit == 0 || limit > MAX_ARTIFACT_READ_BYTES { return Err(AppError::BadRequest(format!("workspace artifact read limit must be between 1 and {MAX_ARTIFACT_READ_BYTES} bytes"))); }
+        let namespace = open_artifact_namespace(&self.workspace, false)?;
+        verify_namespace(&self.workspace, &namespace)?;
+        self.verify_workspace()?;
+        let verified = self.verified_artifact(&namespace, artifact_id)?;
+        let mut verified = verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if offset > verified.size_bytes { return Err(AppError::BadRequest("workspace artifact offset is beyond the end of the file".into())); }
+        let bytes = read_verified_page(&namespace, artifact_id, &mut verified, offset, limit, &self.io_counters)?;
+        verify_namespace(&self.workspace, &namespace)?;
+        let next_offset = offset + bytes.len() as u64;
+        Ok(WorkspaceArtifactRead { workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
+            artifact_id: artifact_id.into(), offset, next_offset, size_bytes: verified.size_bytes, complete: next_offset == verified.size_bytes, sha256: verified.sha256.clone(), data_base64: base64::engine::general_purpose::STANDARD.encode(bytes) })
+    }
+
+    fn verified_artifact(&self, namespace: &ArtifactNamespace, id: &str) -> Result<Arc<Mutex<VerifiedArtifact>>, AppError> {
+        if let Some(value) = self
+            .verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            return Ok(value);
+        }
+        let value = Arc::new(Mutex::new(load_verified_artifact(namespace, id, &self.io_counters)?));
+        let mut cache = self
+            .verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = cache.get(id) {
+            return Ok(existing);
+        }
+        cache.insert(id.into(), Arc::clone(&value));
+        Ok(value)
+    }
+
+    fn verify_workspace(&self) -> Result<(), AppError> {
+        let canonical = fs::canonicalize(&self.workspace_path).map_err(|error| {
+            AppError::Conflict(format!("workspace artifact root changed: {error}"))
+        })?;
+        let reopened = Dir::open_ambient_dir(&self.workspace_path, ambient_authority())
+            .map_err(|error| AppError::Conflict(format!("workspace artifact root changed: {error}")))?;
+        let reopened_identity = dir_identity(&reopened)?;
+        if canonical != self.workspace_path
+            || &reopened_identity != self.workspace_identity.as_ref()
+        {
+            return Err(AppError::Conflict(
+                "workspace artifact root identity changed during the operation".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)] fn io_counts(&self) -> (u64, u64) { (self.io_counters.full_scan_bytes.load(Ordering::Acquire), self.io_counters.page_read_bytes.load(Ordering::Acquire)) }
+    #[cfg(test)] fn verified_cache_len(&self) -> usize { self.verified.lock().unwrap().entries.len() }
+}
+
+fn validate_artifact_id(id: &str) -> Result<(), AppError> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')) { return Err(AppError::BadRequest("workspace artifact ID must be a lowercase SHA-256 digest".into())); }
+    Ok(())
+}
+
+struct StagedArtifact {
+    dir: Dir,
+    name: String,
+    witness: Option<String>,
+    identity: Option<SameFileHandle>,
+    digest: String,
+    size_bytes: u64,
+    chunk_hashes: Vec<String>,
+    cleanup_attempted: bool,
+}
+
+impl StagedArtifact {
+    fn cleanup(&mut self) -> Result<(), AppError> {
+        if self.cleanup_attempted { return Ok(()); }
+        self.cleanup_attempted = true;
+        remove_owned_staging_name(self, || {})?;
+        if let Some(witness) = &self.witness {
+            remove_owned_publication_name(&self.dir, witness, self.identity.as_ref().unwrap(), || {})?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedArtifact {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::warn!(%error, "artifact staging cleanup remains unconfirmed");
+        }
+    }
+}
+
+fn remove_owned_staging_name(staged: &StagedArtifact, after_identity: impl FnOnce()) -> Result<(), AppError> {
+    let expected = staged.identity.as_ref().ok_or_else(|| AppError::Conflict("staging object identity is unavailable".into()))?;
+    remove_owned_publication_name(&staged.dir, &staged.name, expected, after_identity)
+}
+
+fn remove_owned_publication_name(directory: &Dir, name: &str, expected: &SameFileHandle, after_identity: impl FnOnce()) -> Result<(), AppError> {
+    let options = read_options();
+    #[cfg(windows)]
+    let mut options = options;
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.access_mode(DELETE | FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let current = match directory.open_with(name, &options) {
+        Ok(file) => file.into_std(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::Conflict(format!("cannot pin staging cleanup name: {error}"))),
+    };
+    let identity = SameFileHandle::from_file(current.try_clone().map_err(|error| AppError::Conflict(error.to_string()))?)
+        .map_err(|error| AppError::Conflict(error.to_string()))?;
+    if expected != &identity { return Err(AppError::Conflict("staging cleanup name belongs to another object".into())); }
+    after_identity();
+    #[cfg(windows)]
+    crate::windows_cleanup::remove_handle(&current).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging handle: {error}")))?;
+    #[cfg(not(windows))]
+    directory.remove_file(name).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging name: {error}")))?;
+    sync_directory(directory)
+}
+
+fn durable_publication_identity(file: &File) -> Result<String, AppError> {
+    let metadata = file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
+    if !metadata.is_file() { return Err(AppError::Conflict("publication witness is not a regular file".into())); }
+    let birth = metadata.created().and_then(|time| time.duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)).map_err(|error| AppError::Conflict(format!("publication birth identity is unavailable: {error}")))?.as_nanos();
+    #[cfg(windows)]
+    let object = crate::windows_cleanup::durable_identity_token(file)
+        .map_err(|error| AppError::Conflict(format!("publication object identity is unavailable: {error}")))?;
+    #[cfg(unix)]
+    let object = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{:016x}-{:032x}", metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(any(windows, unix)))]
+    return Err(AppError::Conflict("durable publication identity is unavailable on this host".into()));
+    #[cfg(any(windows, unix))]
+    Ok(format!("{object}-{birth:032x}"))
+}
+
+fn publication_witness_name(stage: &str, identity: &str) -> String {
+    format!("{stage}.owner-{identity}")
+}
+
+fn parse_publication_witness(name: &str) -> Option<(&str, &str)> {
+    let (stage, identity) = name.rsplit_once(".owner-")?;
+    let fields = identity.split('-').collect::<Vec<_>>();
+    (is_owner_publication_temp(stage) && fields.len() == 3 && fields[0].len() == 16
+        && fields[1].len() == 32 && fields[2].len() == 32
+        && fields.iter().all(|field| field.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))))
+        .then_some((stage, identity))
+}
+
+fn open_artifact_namespace(workspace: &Dir, create: bool) -> Result<ArtifactNamespace, AppError> {
+    let owner = open_owned_dir(workspace, WORKSPACE_OWNER_DIRECTORY, create, "workspace owner")?;
+    let dir = open_owned_dir(&owner, ARTIFACT_DIRECTORY, create, "workspace artifact")?;
+    let identity = dir_identity(&dir)?;
+    Ok(ArtifactNamespace { dir, identity })
+}
+
+fn open_owned_dir(parent: &Dir, name: &str, create: bool, label: &str) -> Result<Dir, AppError> {
+    match parent.open_dir_nofollow(name) {
+        Ok(dir) => Ok(dir),
+        Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = parent.create_dir(name) && error.kind() != std::io::ErrorKind::AlreadyExists { return Err(AppError::Internal(format!("cannot create {label} directory: {error}"))); }
+            sync_directory(parent)?;
+            parent.open_dir_nofollow(name).map_err(|error| AppError::Forbidden(format!("cannot pin {label} directory: {error}")))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(AppError::NotFound("workspace artifact store is empty".into())),
+        Err(error) => Err(AppError::Forbidden(format!("cannot pin {label} directory without following links: {error}"))),
+    }
+}
+
+fn dir_identity(dir: &Dir) -> Result<SameFileHandle, AppError> {
+    SameFileHandle::from_file(dir.try_clone().map_err(|error| AppError::Internal(error.to_string()))?.into_std_file())
+        .map_err(|error| AppError::Internal(format!("cannot identify owned directory: {error}")))
+}
+
+fn verify_namespace(workspace: &Dir, expected: &ArtifactNamespace) -> Result<(), AppError> {
+    if open_artifact_namespace(workspace, false)?.identity != expected.identity { return Err(AppError::Conflict("workspace artifact namespace changed during the operation".into())); }
+    Ok(())
+}
+
+fn is_owner_publication_temp(name: &str) -> bool {
+    let Some(body) = name
+        .strip_prefix(".publish-")
+        .and_then(|value| value.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((incarnation, sequence)) = body.rsplit_once('-') else {
+        return false;
+    };
+    let valid_incarnation = incarnation.parse::<u32>().is_ok()
+        || uuid::Uuid::parse_str(incarnation).is_ok();
+    valid_incarnation
+        && !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &Dir) -> Result<(), AppError> {
+    // cap-std may retain an O_PATH directory descriptor for capability
+    // traversal. fsync on that descriptor returns EBADF on Linux. Reopen the
+    // already-authorized directory itself with a readable descriptor and
+    // flush that handle; no ambient path resolution is introduced.
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    directory
+        .open_with(".", &options)
+        .map_err(|error| AppError::Internal(format!("cannot reopen artifact directory for sync: {error}")))?
+        .into_std()
+        .sync_all()
+        .map_err(|error| AppError::Internal(format!("cannot sync artifact directory: {error}")))
+}
+
+#[cfg(windows)]
+fn sync_directory(directory: &Dir) -> Result<(), AppError> {
+    let result = directory
+        .try_clone()
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .into_std_file()
+        .sync_all();
+    match result {
+        Ok(()) => Ok(()),
+        // Windows rejects FlushFileBuffers for directory handles opened with
+        // backup semantics. The staged file itself was flushed before the
+        // handle-relative hard-link, and NTFS exposes no directory-fsync
+        // equivalent to strengthen that metadata boundary.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(AppError::Internal(format!(
+            "cannot sync artifact directory: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_directory(_directory: &Dir) -> Result<(), AppError> {
+    Ok(())
+}
+
+fn rollback_confirmed_published(
+    directory: &Dir,
+    target: &str,
+    staged: &StagedArtifact,
+) -> Result<(), AppError> {
+    rollback_confirmed_published_with_hook(directory, target, staged, || {})
+}
+
+fn rollback_confirmed_published_with_hook(
+    directory: &Dir,
+    target: &str,
+    staged: &StagedArtifact,
+    after_identity: impl FnOnce(),
+) -> Result<(), AppError> {
+    let options = read_options();
+    #[cfg(windows)]
+    let mut options = options;
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.access_mode(DELETE | FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let target_file = match directory.open_with(target, &options) {
+        Ok(file) => file.into_std(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sync_directory(directory)?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(AppError::Conflict(format!(
+                "cannot reopen published artifact: {error}"
+            )));
+        }
+    };
+    let target_identity = SameFileHandle::from_file(target_file.try_clone().map_err(|error| AppError::Conflict(error.to_string()))?).map_err(|error| {
+        AppError::Conflict(format!("cannot identify published artifact for rollback: {error}"))
+    })?;
+    if staged
+        .identity
+        .as_ref()
+        .is_none_or(|expected| expected != &target_identity)
+    {
+        return Err(AppError::Conflict(
+            "published artifact identity changed before rollback".into(),
+        ));
+    }
+    after_identity();
+    #[cfg(windows)]
+    crate::windows_cleanup::remove_handle(&target_file).map_err(|error| {
+        AppError::Conflict(format!("cannot remove recorded artifact handle: {error}"))
+    })?;
+    #[cfg(not(windows))]
+    directory.remove_file(target).map_err(|error| {
+        AppError::Conflict(format!("cannot remove unconfirmed artifact link: {error}"))
+    })?;
+    sync_directory(directory)
+}
+
+fn cleanup_stale_publications(directory: &Dir) -> Result<bool, AppError> {
+    let mut stale = BTreeMap::<String, Option<String>>::new();
+    let mut has_more = false;
+    for entry in directory.entries().map_err(|error| {
+        AppError::Internal(format!("cannot inspect artifact staging namespace: {error}"))
+    })? {
+        let entry = entry.map_err(|error| {
+            AppError::Internal(format!("cannot inspect artifact staging entry: {error}"))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let (stage, witness) = if is_owner_publication_temp(name) {
+            (name, None)
+        } else if let Some((stage, _)) = parse_publication_witness(name) {
+            (stage, Some(name))
+        } else { continue };
+        if !stale.contains_key(stage) && stale.len() == MAX_STALE_PUBLICATION_CLEANUP {
+            has_more = true;
+            break;
+        }
+        let candidate = stale.entry(stage.to_owned()).or_default();
+        if let Some(witness) = witness {
+            if candidate.as_ref().is_some_and(|previous| previous != witness) {
+                return Err(AppError::Conflict(format!("{PUBLICATION_OUTCOME_UNKNOWN}: multiple staging ownership witnesses require reconciliation")));
+            }
+            *candidate = Some(witness.to_owned());
+        }
+    }
+    for (stage, observed_witness) in stale {
+        let cleanup = (|| {
+            let witness = match directory.open_with(&stage, &read_options()) {
+                Ok(file) => publication_witness_name(&stage, &durable_publication_identity(&file.into_std())?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => observed_witness
+                    .ok_or_else(|| AppError::Conflict("staging name disappeared without an ownership witness".into()))?,
+                Err(error) => return Err(AppError::Conflict(format!("cannot pin stale staging name: {error}"))),
+            };
+            let (_, recorded_identity) = parse_publication_witness(&witness)
+                .ok_or_else(|| AppError::Conflict("staging ownership witness is invalid".into()))?;
+            let file = directory.open_with(&witness, &read_options())
+                .map_err(|error| AppError::Conflict(format!("cannot pin staging ownership witness: {error}")))?.into_std();
+            if durable_publication_identity(&file)? != recorded_identity {
+                return Err(AppError::Conflict("staging ownership witness belongs to another object".into()));
+            }
+            let identity = SameFileHandle::from_file(file).map_err(|error| AppError::Conflict(error.to_string()))?;
+            remove_owned_publication_name(directory, &stage, &identity, || {})?;
+            remove_owned_publication_name(directory, &witness, &identity, || {})
+        })();
+        cleanup.map_err(|error| AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: startup staging cleanup cannot be proven ({error})"
+        )))?;
+    }
+    Ok(!has_more)
+}
+
+fn read_options() -> CapOpenOptions { let mut value = CapOpenOptions::new(); value.read(true).follow(FollowSymlinks::No); value }
+fn create_options() -> CapOpenOptions { let mut value = CapOpenOptions::new(); value.write(true).create_new(true).follow(FollowSymlinks::No); value }
+
+fn validate_open_source(workspace: &Dir, path: &Path, expected: &SameFileHandle) -> Result<(), AppError> {
+    let canonical = workspace.canonicalize(path).map_err(|error| AppError::Forbidden(format!("workspace artifact source escaped its root: {error}")))?;
+    let mut components = canonical.components();
+    let first = components.next().ok_or_else(|| AppError::BadRequest("workspace artifact source is empty".into()))?;
+    if !matches!(first, Component::Normal(_))
+        || is_workspace_owner_component(first.as_os_str())
+        || components.any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AppError::Forbidden("workspace artifact source escaped its allowed namespace".into()));
+    }
+    let reopened = workspace.open_with(path, &read_options()).map_err(|error| AppError::Conflict(format!("workspace artifact source changed: {error}")))?.into_std();
+    let identity = SameFileHandle::from_file(reopened).map_err(|error| AppError::Conflict(format!("cannot identify workspace artifact source: {error}")))?;
+    if &identity != expected { return Err(AppError::Conflict("workspace artifact source identity changed".into())); }
+    Ok(())
+}
+
+fn stage_source<F: FnOnce()>(workspace: &Dir, source: &Path, namespace: &ArtifactNamespace, counters: &ArtifactIoCounters, after_source_open: F) -> Result<StagedArtifact, AppError> {
+    let mut source_file = workspace.open_with(source, &read_options()).map_err(|error| AppError::BadRequest(format!("cannot open workspace artifact source: {error}")))?.into_std();
+    let source_identity = SameFileHandle::from_file(source_file.try_clone().map_err(|error| AppError::BadRequest(error.to_string()))?).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    validate_open_source(workspace, source, &source_identity)?;
+    let before = source_file.metadata().map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if !before.is_file() || before.len() == 0 || before.len() > MAX_ARTIFACT_BYTES { return Err(AppError::BadRequest(format!("workspace artifact source must contain 1..={MAX_ARTIFACT_BYTES} bytes"))); }
+    let modified = before.modified().ok();
+    let (mut staged, mut staged_file) = create_staging_file(namespace)?;
+    let staged_result = (|| {
+        after_source_open();
+        let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
+        let mut bounded = std::io::Read::by_ref(&mut source_file).take(before.len() + 1);
+        loop {
+            let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
+            if read == 0 { break; }
+            total += read as u64;
+            counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
+            if total > before.len() {
+                return Err(AppError::Conflict("workspace artifact source grew while publishing".into()));
+            }
+            whole.update(&buffer[..read]);
+            chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
+            staged_file.write_all(&buffer[..read]).map_err(|error| AppError::Internal(error.to_string()))?;
+        }
+        staged_file.sync_all().map_err(|error| AppError::Internal(error.to_string()))?; drop(staged_file);
+        validate_open_source(workspace, source, &source_identity)?;
+        let after = source_file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
+        if total != before.len() || after.len() != before.len() || after.modified().ok() != modified { return Err(AppError::Conflict("workspace artifact source changed while publishing".into())); }
+        staged.digest = format!("{:x}", whole.finalize());
+        staged.size_bytes = total;
+        staged.chunk_hashes = chunks;
+        verify_staged_identity(&staged)?;
+        Ok(())
+    })();
+    if let Err(cause) = staged_result {
+        return match staged.cleanup() {
+            Ok(()) => Err(cause),
+            Err(cleanup) => Err(AppError::Conflict(format!(
+                "{PUBLICATION_OUTCOME_UNKNOWN}: staging failed ({cause}) and cleanup could not be proven ({cleanup})"
+            ))),
+        };
+    }
+    Ok(staged)
+}
+
+fn create_staging_file(namespace: &ArtifactNamespace) -> Result<(StagedArtifact, File), AppError> {
+    for _ in 0..16 {
+        let name = format!(
+            ".publish-{}-{}.tmp",
+            uuid::Uuid::now_v7(),
+            PUBLICATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let staged_dir = namespace
+            .dir
+            .try_clone()
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        match namespace.dir.open_with(&name, &create_options()) {
+            Ok(file) => {
+                let file = file.into_std();
+                let mut staged = StagedArtifact {
+                    dir: staged_dir,
+                    name,
+                    witness: None,
+                    identity: None,
+                    digest: String::new(),
+                    size_bytes: 0,
+                    chunk_hashes: Vec::new(),
+                    cleanup_attempted: false,
+                };
+                let identity = SameFileHandle::from_file(
+                    file.try_clone()
+                        .map_err(|error| AppError::Internal(error.to_string()))?,
+                )
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+                staged.identity = Some(identity);
+                let witness_result = (|| {
+                    // The hardlink keeps the recorded object alive across process
+                    // death. Its native ID and birth time reject a reused name.
+                    let token = durable_publication_identity(&file)?;
+                    let witness = publication_witness_name(&staged.name, &token);
+                    staged.dir.hard_link(&staged.name, &staged.dir, &witness)
+                        .map_err(|error| AppError::Conflict(format!("cannot persist staging ownership witness: {error}")))?;
+                    staged.witness = Some(witness.clone());
+                    let witnessed = staged.dir.open_with(&witness, &read_options())
+                        .map_err(|error| AppError::Conflict(error.to_string()))?.into_std();
+                    if durable_publication_identity(&witnessed)? != token {
+                        return Err(AppError::Conflict("staging ownership witness changed while creating".into()));
+                    }
+                    verify_staged_identity(&staged)?;
+                    sync_directory(&staged.dir)
+                })();
+                if let Err(cause) = witness_result {
+                    return match staged.cleanup() {
+                        Ok(()) => Err(cause),
+                        Err(cleanup) => Err(AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: ownership witness failed ({cause}) and cleanup could not be proven ({cleanup})"
+                        ))),
+                    };
+                }
+                return Ok((staged, file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(AppError::Internal(error.to_string())),
+        }
+    }
+    Err(AppError::Conflict("workspace artifact staging namespace is exhausted".into()))
+}
+
+fn read_fixed_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let read = reader.read(&mut buffer[filled..])?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
+}
+
+fn verify_staged_identity(staged: &StagedArtifact) -> Result<(), AppError> {
+    let current = staged.dir.open_with(&staged.name, &read_options()).map_err(|error| AppError::Conflict(error.to_string()))?.into_std();
+    let current = SameFileHandle::from_file(current).map_err(|error| AppError::Conflict(error.to_string()))?;
+    if staged.identity.as_ref().is_none_or(|expected| expected != &current) { return Err(AppError::Conflict("artifact staging identity changed before publication".into())); }
+    Ok(())
+}
+
+fn publish_content_addressed(namespace: &ArtifactNamespace, target: &str, staged: &StagedArtifact, counters: &ArtifactIoCounters) -> Result<(bool, VerifiedArtifact), AppError> {
+    publish_content_addressed_with_hook(namespace, target, staged, counters, || {})
+}
+
+fn publish_content_addressed_with_hook<F: FnOnce()>(
+    namespace: &ArtifactNamespace,
+    target: &str,
+    staged: &StagedArtifact,
+    counters: &ArtifactIoCounters,
+    after_link: F,
+) -> Result<(bool, VerifiedArtifact), AppError> {
+    verify_staged_identity(staged)?;
+    match namespace.dir.symlink_metadata(target) { Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => return Ok((false, load_verified_artifact(namespace, target, counters)?)), Ok(_) => return Err(AppError::Conflict("workspace artifact identity is occupied by a non-file entry".into())), Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}, Err(error) => return Err(AppError::BadRequest(error.to_string())) }
+    if let Err(error) = staged.dir.hard_link(&staged.name, &namespace.dir, target) { if namespace.dir.metadata(target).is_ok() { return Ok((false, load_verified_artifact(namespace, target, counters)?)); } return Err(AppError::Internal(format!("cannot atomically publish artifact: {error}"))); }
+    after_link();
+    let finalized = (|| {
+        sync_directory(&namespace.dir)?;
+        // An unchanged inode and length cannot attest the bytes copied during
+        // staging. Reuse the reader's bounded full verification before
+        // returning a publication receipt or caching its chunk index.
+        let verified = load_verified_artifact(namespace, target, counters)?;
+        if staged
+            .identity
+            .as_ref()
+            .is_none_or(|expected| expected != &verified.identity)
+            || verified.size_bytes != staged.size_bytes
+        {
+            return Err(AppError::Conflict(
+                "published artifact differs from staged bytes".into(),
+            ));
+        }
+        Ok(verified)
+    })();
+    match finalized {
+        Ok(verified) => Ok((true, verified)),
+        Err(cause) => match rollback_confirmed_published(&namespace.dir, target, staged) {
+            Ok(()) => Err(cause),
+            Err(cleanup) => Err(AppError::Conflict(format!(
+                "{PUBLICATION_OUTCOME_UNKNOWN}: post-link verification failed ({cause}) and rollback could not be proven ({cleanup})"
+            ))),
+        },
+    }
+}
+
+fn load_verified_artifact(namespace: &ArtifactNamespace, id: &str, counters: &ArtifactIoCounters) -> Result<VerifiedArtifact, AppError> {
+    load_verified_artifact_with_hook(namespace, id, counters, || {})
+}
+
+fn load_verified_artifact_with_hook(namespace: &ArtifactNamespace, id: &str, counters: &ArtifactIoCounters, after_metadata: impl FnOnce()) -> Result<VerifiedArtifact, AppError> {
+    let mut file = namespace.dir.open_with(id, &read_options()).map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { AppError::NotFound("workspace artifact was not found".into()) } else { AppError::BadRequest(error.to_string()) })?.into_std();
+    let identity = SameFileHandle::from_file(file.try_clone().map_err(|error| AppError::BadRequest(error.to_string()))?).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let metadata = file.metadata().map_err(|error| AppError::BadRequest(error.to_string()))?; if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES { return Err(AppError::Conflict("workspace artifact has an invalid stored size".into())); }
+    after_metadata();
+    let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
+    let mut bounded = std::io::Read::by_ref(&mut file).take(metadata.len() + 1);
+    loop {
+        let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
+        if read == 0 { break; }
+        counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
+        total += read as u64;
+        if total > metadata.len() {
+            return Err(AppError::Conflict("workspace artifact grew beyond its observed size".into()));
+        }
+        whole.update(&buffer[..read]);
+        chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
+    }
+    let digest = format!("{:x}", whole.finalize()); if total != metadata.len() || digest != id { return Err(AppError::Conflict("workspace artifact no longer matches its content identity".into())); }
+    verify_target_identity(namespace, id, &identity, total)?; file.seek(SeekFrom::Start(0)).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(VerifiedArtifact { file, identity, size_bytes: total, sha256: digest, chunk_hashes: chunks })
+}
+
+fn verify_target_identity(namespace: &ArtifactNamespace, id: &str, expected: &SameFileHandle, size: u64) -> Result<(), AppError> {
+    let file = namespace.dir.open_with(id, &read_options()).map_err(|error| AppError::Conflict(error.to_string()))?.into_std();
+    let identity = SameFileHandle::from_file(file.try_clone().map_err(|error| AppError::Conflict(error.to_string()))?).map_err(|error| AppError::Conflict(error.to_string()))?;
+    if &identity != expected || file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?.len() != size { return Err(AppError::Conflict("workspace artifact path identity changed".into())); }
+    Ok(())
+}
+
+fn read_verified_page(namespace: &ArtifactNamespace, id: &str, verified: &mut VerifiedArtifact, offset: u64, limit: usize, counters: &ArtifactIoCounters) -> Result<Vec<u8>, AppError> {
+    verify_target_identity(namespace, id, &verified.identity, verified.size_bytes)?;
+    let end = offset.saturating_add(limit as u64).min(verified.size_bytes); let first = (offset / ARTIFACT_CHUNK_BYTES as u64) as usize; let last = if end == offset { first } else { ((end - 1) / ARTIFACT_CHUNK_BYTES as u64) as usize }; let mut output = Vec::with_capacity((end - offset) as usize);
+    for index in first..=last { let start = index as u64 * ARTIFACT_CHUNK_BYTES as u64; if start >= verified.size_bytes { break; } let len = (verified.size_bytes - start).min(ARTIFACT_CHUNK_BYTES as u64) as usize; let mut chunk = vec![0_u8; len]; verified.file.seek(SeekFrom::Start(start)).map_err(|error| AppError::BadRequest(error.to_string()))?; verified.file.read_exact(&mut chunk).map_err(|error| AppError::Conflict(error.to_string()))?; counters.page_read_bytes.fetch_add(len as u64, Ordering::Relaxed); let digest = format!("{:x}", Sha256::digest(&chunk)); if verified.chunk_hashes.get(index).map(String::as_str) != Some(digest.as_str()) { return Err(AppError::Conflict("workspace artifact chunk no longer matches verified content".into())); } let copy_start = offset.max(start); let copy_end = end.min(start + len as u64); if copy_start < copy_end { output.extend_from_slice(&chunk[(copy_start-start) as usize..(copy_end-start) as usize]); } }
+    verify_target_identity(namespace, id, &verified.identity, verified.size_bytes)?; Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_marker_inside_error_details_is_not_publication_uncertainty() {
+        for error in [
+            AppError::BadRequest(format!("patch target '{PUBLICATION_OUTCOME_UNKNOWN}' is not a regular file")),
+            AppError::Internal(format!("cannot create temporary file under '{PUBLICATION_OUTCOME_UNKNOWN}'")),
+            AppError::Conflict(format!("source '{PUBLICATION_OUTCOME_UNKNOWN}' changed before publication")),
+            AppError::Conflict(format!("{PUBLICATION_OUTCOME_UNKNOWN}ish is a literal source name")),
+        ] {
+            assert!(!artifact_publication_outcome_unknown(&error),"path/detail text must not create an unknown outcome: {error}");
+        }
+        assert!(artifact_publication_outcome_unknown(&AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: post-link verification and rollback failed"
+        ))));
+    }
+
+    struct ShortReader {
+        bytes: std::io::Cursor<Vec<u8>>,
+        max_read: usize,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let limit = output.len().min(self.max_read);
+            self.bytes.read(&mut output[..limit])
+        }
+    }
+
+    #[test]
+    fn fixed_chunk_reader_fills_non_terminal_chunks_after_short_reads() {
+        let payload = (0..(ARTIFACT_CHUNK_BYTES + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut reader = ShortReader {
+            bytes: std::io::Cursor::new(payload.clone()),
+            max_read: 7,
+        };
+        let mut buffer = vec![0; ARTIFACT_CHUNK_BYTES];
+        assert_eq!(read_fixed_chunk(&mut reader, &mut buffer).unwrap(), ARTIFACT_CHUNK_BYTES);
+        assert_eq!(buffer, payload[..ARTIFACT_CHUNK_BYTES]);
+        assert_eq!(read_fixed_chunk(&mut reader, &mut buffer).unwrap(), 17);
+        assert_eq!(&buffer[..17], &payload[ARTIFACT_CHUNK_BYTES..]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_reopens_a_flushable_capability_handle() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = Dir::open_ambient_dir(fixture.path(), ambient_authority()).unwrap();
+        sync_directory(&directory).unwrap();
+    }
+
+    fn publication_temp_count(path: &Path) -> usize {
+        fs::read_dir(path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(is_owner_publication_temp)
+            })
+            .count()
+    }
+
+    #[test]
+    fn failed_staging_and_expected_digest_paths_leave_no_publication_temp() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("source"), "artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        assert!(store.publish("source", Some(&"0".repeat(64))).is_err());
+        assert_eq!(
+            publication_temp_count(&workspace.path().join(ARTIFACT_RELATIVE_ROOT)),
+            0
+        );
+    }
+
+    #[test]
+    fn cache_and_publication_mutex_poison_do_not_turn_committed_bytes_into_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("source"), "artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        let cache = Arc::clone(&store.verified);
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("poison verified cache for recovery test");
+        })
+        .join();
+        let publication = Arc::clone(&store.publication_lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = publication.lock().unwrap();
+            panic!("poison publication mutex for recovery test");
+        })
+        .join();
+        let artifact = store.publish("source", None).unwrap();
+        assert!(store
+            .read(&artifact.artifact_id, 0, MAX_ARTIFACT_READ_BYTES)
+            .is_ok());
+    }
+
+    #[test]
+    fn post_link_missing_target_rolls_back_known_while_identity_swap_is_unknown() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("source"), "artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let counters = ArtifactIoCounters::default();
+
+        let missing = stage_source(
+            &store.workspace,
+            Path::new("source"),
+            &namespace,
+            &counters,
+            || {},
+        )
+        .unwrap();
+        let missing_target = missing.digest.clone();
+        let missing_path = workspace
+            .path()
+            .join(ARTIFACT_RELATIVE_ROOT)
+            .join(&missing_target);
+        let missing_result = publish_content_addressed_with_hook(
+            &namespace,
+            &missing_target,
+            &missing,
+            &counters,
+            || fs::remove_file(&missing_path).unwrap(),
+        );
+        let missing_error = match missing_result {
+            Err(error) => error,
+            Ok(_) => panic!("missing post-link target must fail finalization"),
+        };
+        assert!(!artifact_publication_outcome_unknown(&missing_error));
+        assert!(!missing_path.exists());
+        drop(missing);
+
+        fs::write(workspace.path().join("source"), "different artifact").unwrap();
+        let swapped = stage_source(
+            &store.workspace,
+            Path::new("source"),
+            &namespace,
+            &counters,
+            || {},
+        )
+        .unwrap();
+        let swapped_target = swapped.digest.clone();
+        let swapped_path = workspace
+            .path()
+            .join(ARTIFACT_RELATIVE_ROOT)
+            .join(&swapped_target);
+        let swapped_result = publish_content_addressed_with_hook(
+            &namespace,
+            &swapped_target,
+            &swapped,
+            &counters,
+            || {
+                fs::remove_file(&swapped_path).unwrap();
+                fs::write(&swapped_path, "foreign replacement").unwrap();
+            },
+        );
+        let error = match swapped_result {
+            Err(error) => error,
+            Ok(_) => panic!("post-link identity replacement must fail finalization"),
+        };
+        assert!(artifact_publication_outcome_unknown(&error));
+        assert_eq!(fs::read(&swapped_path).unwrap(), b"foreign replacement");
+        drop(swapped);
+        assert_eq!(
+            publication_temp_count(&workspace.path().join(ARTIFACT_RELATIVE_ROOT)),
+            0
+        );
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_before_link() {
+        publication_bytes_race(false);
+    }
+
+    #[test]
+    fn artifact_size_admission_rejects_source_above_512_mib_without_reading() {
+        artifact_size_admission(false);
+    }
+
+    #[test]
+    #[ignore = "explicit 512 MiB publication and complete pagination acceptance"]
+    fn artifact_exact_512_mib_publication_and_pagination() {
+        const EXPECTED: &str = "9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767";
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("exact-512-mib"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let source = workspace.join("source");
+        let file = File::create(&source).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            let ok = unsafe { DeviceIoControl(file.as_raw_handle(), FSCTL_SET_SPARSE,
+                std::ptr::null(), 0, std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) };
+            assert_ne!(ok, 0, "cannot create sparse boundary source: {}", std::io::Error::last_os_error());
+        }
+        file.set_len(MAX_ARTIFACT_BYTES).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source", Some(EXPECTED)).unwrap();
+        assert_eq!(published.size_bytes, MAX_ARTIFACT_BYTES);
+        assert_eq!(published.artifact_id, EXPECTED);
+        assert_eq!(published.sha256, EXPECTED);
+        let before_pages = store.io_counts();
+        let mut offset = 0;
+        let mut pages = 0;
+        let mut whole = Sha256::new();
+        loop {
+            let page = store.read(&published.artifact_id, offset, MAX_ARTIFACT_READ_BYTES).unwrap();
+            assert_eq!(page.offset, offset);
+            assert_eq!(page.size_bytes, MAX_ARTIFACT_BYTES);
+            assert_eq!(page.sha256, EXPECTED);
+            let bytes = base64::engine::general_purpose::STANDARD.decode(page.data_base64).unwrap();
+            assert!(bytes.iter().all(|byte| *byte == 0));
+            assert_eq!(bytes.len(), MAX_ARTIFACT_READ_BYTES);
+            whole.update(&bytes);
+            assert_eq!(page.next_offset, offset + bytes.len() as u64);
+            offset = page.next_offset;
+            pages += 1;
+            if page.complete { break; }
+        }
+        assert_eq!(offset, MAX_ARTIFACT_BYTES);
+        assert_eq!(pages, 512);
+        assert_eq!(format!("{:x}", whole.finalize()), EXPECTED);
+        let after_pages = store.io_counts();
+        assert_eq!(before_pages.0, after_pages.0, "cached pages must not repeat a full verification");
+        assert_eq!(after_pages.1 - before_pages.1, MAX_ARTIFACT_BYTES);
+        let eof = store.read(&published.artifact_id, offset, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert!(eof.complete && eof.data_base64.is_empty());
+        assert_eq!(eof.next_offset, MAX_ARTIFACT_BYTES);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "published_bytes":published.size_bytes, "relative_path":published.relative_path,
+            "artifact_id":published.artifact_id, "sha256":published.sha256, "pages":pages,
+            "concatenated_bytes":offset, "full_scan_before_pages":before_pages.0,
+            "full_scan_after_pages":after_pages.0, "page_read_bytes":after_pages.1 - before_pages.1,
+            "eof_empty":true, "remaining_temps":0,
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn artifact_size_admission_rejects_blob_above_512_mib_without_reading() {
+        artifact_size_admission(true);
+    }
+
+    fn artifact_size_admission(blob: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if blob {"oversized-blob"} else {"oversized-source"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let id = "0".repeat(64);
+        let path = if blob {workspace.join(ARTIFACT_RELATIVE_ROOT).join(&id)} else {workspace.join("source")};
+        let file = File::create(&path).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            let ok = unsafe { DeviceIoControl(file.as_raw_handle(), FSCTL_SET_SPARSE,
+                std::ptr::null(), 0, std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) };
+            assert_ne!(ok, 0, "sparse fixture setup failed: {}", std::io::Error::last_os_error());
+        }
+        file.set_len(MAX_ARTIFACT_BYTES + 1).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let source_identity = SameFileHandle::from_path(&path).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let error = if blob {
+            load_verified_artifact(&namespace, &id, &counters).err().expect("oversized blob must fail admission")
+        } else {
+            store.publish("source", None).unwrap_err()
+        };
+        let scanned = if blob {counters.full_scan_bytes.load(Ordering::Acquire)} else {store.io_counts().0};
+        assert!(source_identity == SameFileHandle::from_path(&path).unwrap());
+        assert_eq!(scanned, 0, "size admission must reject before a full scan");
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_ARTIFACT_BYTES + 1);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        assert!(!artifact_publication_outcome_unknown(&error));
+        if blob { assert!(matches!(error, AppError::Conflict(_))); }
+        else { assert!(matches!(error, AppError::BadRequest(_))); }
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blob":blob, "maximum_bytes":MAX_ARTIFACT_BYTES, "actual_bytes":fs::metadata(&path).unwrap().len(),
+            "full_scan_bytes":scanned, "known_rejection":true, "path_preserved":true,
+            "relative_path":path.strip_prefix(&workspace).unwrap(), "remaining_temps":0,
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_a_foreign_reused_name() {
+        staging_cleanup_name_race(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_identity_window_preserves_a_preexisting_foreign_target() {
+        rollback_identity_window(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_identity_window_locks_the_recorded_target_until_delete() {
+        rollback_identity_window(true);
+    }
+
+    #[cfg(windows)]
+    fn rollback_identity_window(after_identity: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if after_identity {"after-identity"} else {"before-identity"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let foreign = workspace.join("foreign");
+        fs::write(&foreign, b"foreign!").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let target = staged.digest.clone();
+        let target_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&target);
+        let (created, verified) = publish_content_addressed(&namespace, &target, &staged, &ArtifactIoCounters::default()).unwrap();
+        assert!(created);
+        drop(verified);
+        if !after_identity {
+            crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true).unwrap();
+        }
+        let mut blocked = None;
+        let rollback = rollback_confirmed_published_with_hook(&namespace.dir, &target, &staged, || {
+            if after_identity {
+                blocked = crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true)
+                    .err().and_then(|error| error.raw_os_error());
+            }
+        });
+        let foreign_preserved = if after_identity {fs::read(&foreign).ok()} else {fs::read(&target_path).ok()};
+        let confirmed = rollback.is_ok();
+        drop(staged);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "after_identity":after_identity, "blocked_native_code":blocked,
+            "rollback_confirmed":confirmed, "foreign_preserved_bytes":foreign_preserved,
+            "target_exists":target_path.exists(), "target_digest":target,
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert_eq!(foreign_preserved.as_deref(), Some(b"foreign!".as_slice()), "rollback deleted an unowned target after identity verification");
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+        if after_identity {
+            assert_eq!(blocked, Some(32));
+            assert!(confirmed && !target_path.exists());
+            fs::write(&target_path, b"later file").unwrap();
+            crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true).unwrap();
+            assert_eq!(fs::read(&target_path).unwrap(), b"foreign!");
+        } else {
+            assert!(!confirmed && target_path.exists());
+        }
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_same_bytes_under_a_foreign_inode() {
+        staging_cleanup_name_race(true);
+    }
+
+    #[test]
+    fn cold_cleanup_preserves_foreign_stage_with_different_bytes() {
+        cold_cleanup_foreign_stage(false);
+    }
+
+    #[test]
+    fn cold_cleanup_preserves_foreign_stage_with_same_bytes() {
+        cold_cleanup_foreign_stage(true);
+    }
+
+    fn cold_cleanup_foreign_stage(same_bytes: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if same_bytes {"cold-same-bytes"} else {"cold-different-bytes"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source", None).unwrap();
+        let peer = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, false).unwrap();
+        let lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace,
+            &ArtifactIoCounters::default(), || {}).unwrap();
+        let reused = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let retained = workspace.join("retained-owned-stage");
+        fs::rename(&reused, &retained).unwrap();
+        let foreign_bytes: &[u8] = if same_bytes {b"artifact"} else {b"foreign!"};
+        fs::write(&reused, foreign_bytes).unwrap();
+        let foreign = SameFileHandle::from_path(&reused).unwrap();
+        assert_ne!(staged.identity.as_ref().unwrap(), &foreign);
+        drop(staged);
+        assert_eq!(fs::read(&reused).unwrap(), foreign_bytes);
+        drop(lease);
+        drop(namespace);
+        let live_retry = store.publish("source", None);
+        let peer_retry = peer.publish("source", None);
+        let live_unknown = live_retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let peer_unknown = peer_retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        drop(peer);
+        drop(store);
+        let reopened = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let read = reopened.read(&published.artifact_id, 0, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(read.data_base64).unwrap(), b"artifact");
+        let retry = reopened.publish("source", None);
+        let unknown = retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let actual = fs::read(&reused).ok();
+        let same_identity = SameFileHandle::from_path(&reused).ok().as_ref() == Some(&foreign);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "same_bytes":same_bytes, "foreign_bytes":foreign_bytes, "actual_after_reopen":actual,
+            "foreign_identity_preserved":same_identity, "retry_unknown":unknown,
+            "same_store_retry_unknown":live_unknown, "preexisting_store_retry_unknown":peer_unknown,
+            "reused_relative_path":reused.strip_prefix(&workspace).unwrap(),
+            "published_relative_path":published.relative_path, "diagnostic_read_ok":true,
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(actual.as_deref(), Some(foreign_bytes), "cold cleanup deleted an unowned object retained by live cleanup");
+        assert!(same_identity && unknown, "unconfirmed cleanup must keep its identity and reject new publication");
+        assert!(live_unknown && peer_unknown, "existing owners must observe the same unresolved cleanup as a cold owner");
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+    }
+
+    #[test]
+    fn cold_cleanup_reclaims_owned_stage_after_process_exit() {
+        cold_cleanup_crashed_owner(false, false);
+    }
+
+    #[test]
+    fn cold_cleanup_reclaims_owned_witness_after_stage_unlink() {
+        cold_cleanup_crashed_owner(true, false);
+    }
+
+    #[test]
+    fn cold_cleanup_preserves_a_replaced_ownership_witness() {
+        cold_cleanup_crashed_owner(false, true);
+    }
+
+    fn cold_cleanup_crashed_owner(missing_stage: bool, foreign_witness: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if foreign_witness {"cold-foreign-witness"}
+                else if missing_stage {"cold-orphan-witness"} else {"cold-owned-exit"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let records = crashed_staging_fixture(&workspace, 1);
+        let (stage, witness) = &records[0];
+        let stage_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(stage);
+        let witness_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(witness);
+        assert_eq!(SameFileHandle::from_path(&stage_path).unwrap(), SameFileHandle::from_path(&witness_path).unwrap());
+        let retained = workspace.join("retained-owned-witness");
+        let foreign = if foreign_witness {
+            fs::rename(&witness_path, &retained).unwrap();
+            fs::write(&witness_path, b"artifact").unwrap();
+            let identity = SameFileHandle::from_path(&witness_path).unwrap();
+            assert_ne!(identity, SameFileHandle::from_path(&stage_path).unwrap());
+            Some(identity)
+        } else { None };
+        if missing_stage { fs::remove_file(&stage_path).unwrap(); }
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"artifact"));
+        let page = store.read(&digest, 0, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(page.data_base64).unwrap(), b"artifact");
+        let retry = store.publish("source", None);
+        let unknown = retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let preserved = foreign.as_ref().is_some_and(|expected|
+            SameFileHandle::from_path(&witness_path).ok().as_ref() == Some(expected));
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "missing_stage":missing_stage, "foreign_witness":foreign_witness,
+            "stage_relative_path":stage_path.strip_prefix(&workspace).unwrap(),
+            "witness_relative_path":witness_path.strip_prefix(&workspace).unwrap(),
+            "stage_exists":stage_path.exists(), "witness_exists":witness_path.exists(),
+            "foreign_identity_preserved":preserved, "retry_unknown":unknown,
+            "diagnostic_read_ok":true, "published_relative_path":format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
+        })).unwrap()).unwrap();
+        if foreign_witness {
+            assert!(unknown && preserved);
+            assert_eq!(fs::read(&stage_path).unwrap(), b"artifact");
+            assert_eq!(fs::read(&witness_path).unwrap(), b"artifact");
+            assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        } else {
+            assert_eq!(retry.unwrap().artifact_id, digest);
+            assert!(!stage_path.exists() && !witness_path.exists());
+            assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_cleanup_locks_identity_until_native_delete() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("locked-cleanup"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let foreign = workspace.join("foreign");
+        fs::write(&foreign, b"foreign!").unwrap();
+        let mut blocked = None;
+        remove_owned_staging_name(&staged, || {
+            let failure = crate::windows_test_support::rename_with_posix_semantics(&foreign, &path, true).unwrap_err();
+            blocked = failure.raw_os_error();
+            assert_eq!(blocked, Some(32));
+        }).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read(&foreign).unwrap(), b"foreign!");
+        drop(staged);
+        fs::write(&path, b"later file").unwrap();
+        crate::windows_test_support::rename_with_posix_semantics(&foreign, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"foreign!");
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blocked_native_code":blocked, "owned_name_removed":true,
+            "foreign_preserved":true, "same_remap_possible_after_release":true,
+            "reused_relative_path":path.strip_prefix(&workspace).unwrap(),
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_foreign_name_and_reports_uncertainty() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("public-stage-failure"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let reused = std::cell::RefCell::new(PathBuf::new());
+        let retained = workspace.join("retained-owned-stage");
+        let result = store.publish_with_hooks("source", None, || {
+            let current = fs::read_dir(workspace.join(ARTIFACT_RELATIVE_ROOT)).unwrap()
+                .map(|entry| entry.unwrap().path()).find(|path| path.file_name().unwrap().to_str().is_some_and(is_owner_publication_temp)).unwrap();
+            fs::rename(&current, &retained).unwrap();
+            fs::write(&current, b"foreign!").unwrap();
+            *reused.borrow_mut() = current;
+        }, || {});
+        let error = result.unwrap_err();
+        let unknown = artifact_publication_outcome_unknown(&error);
+        let actual = fs::read(reused.borrow().as_path()).ok();
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "unknown":unknown, "error":error.to_string(), "actual_after_failure":actual,
+            "reused_relative_path":reused.borrow().strip_prefix(&workspace).unwrap(),
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(actual.as_deref(), Some(b"foreign!".as_slice()), "public failure cleanup deleted an unowned stage name");
+        assert!(unknown, "unconfirmed staging cleanup must be explicit in the public receipt");
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+    }
+
+    fn staging_cleanup_name_race(same_bytes: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if same_bytes {"same-bytes"} else {"different-bytes"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let reused = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let retained = workspace.join("retained-owned-stage");
+        fs::rename(&reused, &retained).unwrap();
+        let foreign_bytes: &[u8] = if same_bytes {b"artifact"} else {b"foreign!"};
+        fs::write(&reused, foreign_bytes).unwrap();
+        let foreign = SameFileHandle::from_path(&reused).unwrap();
+        assert_ne!(staged.identity.as_ref().unwrap(), &foreign);
+        drop(staged);
+        let actual = fs::read(&reused).ok();
+        let foreign_identity_preserved = SameFileHandle::from_path(&reused).ok().as_ref() == Some(&foreign);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "same_bytes":same_bytes, "reused_relative_path":reused.strip_prefix(&workspace).unwrap(),
+            "foreign_bytes":foreign_bytes, "actual_after_drop":actual,
+            "foreign_identity_preserved":foreign_identity_preserved,
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        assert_eq!(actual.as_deref(), Some(foreign_bytes), "cleanup deleted an unowned file at the old stage name");
+        assert!(foreign_identity_preserved);
+    }
+
+    #[test]
+    fn artifact_growth_budget_bounds_source_staging() {
+        artifact_growth_budget(false);
+    }
+
+    #[test]
+    fn artifact_growth_budget_bounds_verified_blob_loading() {
+        artifact_growth_budget(true);
+    }
+
+    fn artifact_growth_budget(blob: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if blob {"blob-growth"} else {"source-growth"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let source = workspace.join("source");
+        fs::write(&source, b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let append = |path: &Path| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&vec![b'x'; ARTIFACT_CHUNK_BYTES * 2]).unwrap();
+            file.sync_all().unwrap();
+        };
+        let (rejected, altered_path) = if blob {
+            let published = store.publish("source", None).unwrap();
+            let path = workspace.join(&published.relative_path);
+            let result = load_verified_artifact_with_hook(&namespace, &published.artifact_id, &counters,
+                || append(&path));
+            (result.is_err(), path)
+        } else {
+            let result = stage_source(&store.workspace, Path::new("source"), &namespace, &counters,
+                || append(&source));
+            (result.is_err(), source.clone())
+        };
+        let scanned = counters.full_scan_bytes.load(Ordering::Acquire);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blob":blob, "observed_bytes":8, "growth_bytes":ARTIFACT_CHUNK_BYTES * 2,
+            "scanned_bytes":scanned, "rejected":rejected,
+            "altered_relative_path":altered_path.strip_prefix(&workspace).unwrap(),
+            "actual_size":fs::metadata(&altered_path).unwrap().len(),
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert!(rejected, "a growing source must be rejected rather than published or cached");
+        assert_eq!(fs::metadata(&altered_path).unwrap().len(), 8 + 2 * ARTIFACT_CHUNK_BYTES as u64);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        assert!(scanned <= 9, "growth beyond observed size consumed {scanned} bytes instead of a bounded overflow probe");
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_after_link() {
+        publication_bytes_race(true);
+    }
+
+    fn publication_bytes_race(after_link: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if after_link {"after-link"} else {"before-link"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &counters, || {}).unwrap();
+        let target = staged.digest.clone();
+        let staged_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let target_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&target);
+        if !after_link { fs::write(&staged_path, b"corrupt!").unwrap(); }
+        verify_staged_identity(&staged).unwrap();
+        let result = publish_content_addressed_with_hook(&namespace, &target, &staged, &counters, || {
+            if after_link { fs::write(&target_path, b"corrupt!").unwrap(); }
+        });
+        let same_inode = staged.identity.as_ref().unwrap() == &SameFileHandle::from_path(&staged_path).unwrap();
+        assert!(same_inode, "fault must keep the original staged inode");
+        let rejected = result.is_err();
+        let unknown = result.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let target_before_drop = fs::read(&target_path).ok();
+        drop(result);
+        drop(staged);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "after_link":after_link, "same_inode":same_inode, "same_size":true,
+            "rejected":rejected, "unknown":unknown, "digest":target,
+            "target_bytes_before_drop":target_before_drop, "target_exists":target_path.exists(),
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+        assert!(rejected, "artifact publication accepted bytes inconsistent with its declared digest");
+        assert!(!unknown, "confirmed rollback must remain a known rejection");
+        assert!(!target_path.exists(), "corrupt publication must be rolled back");
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+    }
+
+    #[test] fn publish_and_read_round_trip() {
+        let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"artifact payload").unwrap();
+        let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let published=store.publish("result.txt",None).unwrap();
+        let first=store.read(&published.artifact_id,0,8).unwrap();
+        let second=store.read(&published.artifact_id,first.next_offset,MAX_ARTIFACT_READ_BYTES).unwrap();
+        let source=crate::WorkspacePathObservation::from_canonical(workspace.path(),&fs::canonicalize(workspace.path().join("result.txt")).unwrap()).unwrap();
+        assert_eq!(published.workspace_root_sha256.as_ref(),Some(&source.root_sha256));
+        assert_eq!(first.workspace_root_sha256,published.workspace_root_sha256);
+        assert_eq!(second.workspace_root_sha256,published.workspace_root_sha256);
+        let bytes=[first.data_base64,second.data_base64].into_iter().flat_map(|v|base64::engine::general_purpose::STANDARD.decode(v).unwrap()).collect::<Vec<_>>();
+        assert_eq!(bytes,b"artifact payload");
+    }
+    #[test]
+    fn live_reader_never_follows_a_recreated_workspace_artifact() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        let retained = parent.path().join("retained-workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("source"),b"original artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source",None).unwrap();
+        let first = store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(first.data_base64).unwrap(),
+            b"original artifact",
+        );
+
+        match fs::rename(&workspace,&retained) {
+            Ok(()) => {
+                let replacement_namespace = workspace.join(ARTIFACT_RELATIVE_ROOT);
+                fs::create_dir_all(&replacement_namespace).unwrap();
+                fs::write(replacement_namespace.join(&published.artifact_id),b"forged artifact").unwrap();
+                assert!(store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err(),
+                    "the old reader must reject a recreated workspace root");
+                let replacement = WorkspaceArtifactStore::new(&workspace).unwrap();
+                assert!(replacement.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err(),
+                    "a new reader must reject replacement bytes under an old digest name");
+                assert_eq!(
+                    fs::read(retained.join(&published.relative_path)).unwrap(),
+                    b"original artifact",
+                );
+            }
+            Err(_) => {
+                // Some native filesystems deny workspace cleanup while the
+                // pinned directory/file handles are live. The old identity
+                // then remains authoritative and no replacement can appear.
+                let reread = store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).unwrap();
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD.decode(reread.data_base64).unwrap(),
+                    b"original artifact",
+                );
+                assert!(!retained.exists());
+            }
+        }
+    }
+    #[test] fn rejects_noncanonical_owner_paths() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"x").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); for path in ["../x","./result.txt",".nomifun/artifacts/x","nested//x"] { assert!(store.publish(path,None).is_err(),"{path}"); } #[cfg(windows)] assert!(store.publish(".NOMIFUN/artifacts/x",None).is_err()); }
+    #[test] fn tampered_chunk_is_rejected() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"original").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("result.txt",None).unwrap(); fs::write(workspace.path().join(&artifact.relative_path),"tampered").unwrap(); assert!(store.read(&artifact.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err()); }
+    #[test] fn pages_reuse_verified_index() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("large.bin"),vec![b'x';ARTIFACT_CHUNK_BYTES*8]).unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("large.bin",None).unwrap(); let before=store.io_counts(); for offset in [0,17_000,131_000,260_000] { store.read(&artifact.artifact_id,offset,16_384).unwrap(); } let after=store.io_counts(); assert_eq!(after.0,before.0); assert!(after.1-before.1<=4*2*ARTIFACT_CHUNK_BYTES as u64); }
+    #[test]
+    fn verified_handle_cache_is_bounded_and_eviction_revalidates_content() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        let mut first = None;
+        for index in 0..=MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES {
+            let source = format!("source-{index}");
+            fs::write(workspace.path().join(&source), format!("artifact-{index}")) .unwrap();
+            let published = store.publish(&source, None).unwrap();
+            first.get_or_insert(published);
+        }
+        assert_eq!(store.verified_cache_len(), MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES);
+        let first = first.unwrap();
+        fs::write(workspace.path().join(&first.relative_path), "tampered-after-eviction").unwrap();
+        assert!(store
+            .read(&first.artifact_id, 0, MAX_ARTIFACT_READ_BYTES)
+            .is_err());
+        assert!(store.verified_cache_len() <= MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES);
+    }
+    #[test]
+    fn startup_cleanup_requires_original_object_witnesses() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = workspace.path().join(ARTIFACT_RELATIVE_ROOT);
+        let owned = crashed_staging_fixture(workspace.path(), 2);
+        WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        for (stage, witness) in owned {
+            assert!(!artifacts.join(stage).exists());
+            assert!(!artifacts.join(witness).exists());
+        }
+        let reused_pid = format!(".publish-{}-99.tmp", std::process::id());
+        fs::write(artifacts.join(".publish-4294967295-34.tmp"), "stale").unwrap();
+        fs::write(artifacts.join(&reused_pid), "stale reused pid").unwrap();
+        fs::write(artifacts.join(".publish-owner.tmp"), "keep").unwrap();
+        fs::write(artifacts.join(".publish-12-34-extra.tmp"), "keep").unwrap();
+        fs::write(artifacts.join("ordinary.tmp"), "keep").unwrap();
+
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+
+        assert_eq!(fs::read(artifacts.join(".publish-4294967295-34.tmp")).unwrap(), b"stale");
+        assert_eq!(fs::read(artifacts.join(reused_pid)).unwrap(), b"stale reused pid");
+        assert!(artifacts.join(".publish-owner.tmp").exists());
+        assert!(artifacts.join(".publish-12-34-extra.tmp").exists());
+        assert!(artifacts.join("ordinary.tmp").exists());
+        assert!(artifact_publication_outcome_unknown(&store.publish("source", None).unwrap_err()));
+    }
+
+    #[test]
+    fn concurrent_publications_share_one_temp_and_link_owner_gate() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("first"), "first").unwrap();
+        fs::write(workspace.path().join("second"), "second").unwrap();
+        let first_store = Arc::new(WorkspaceArtifactStore::new(workspace.path()).unwrap());
+        let second_store = Arc::new(WorkspaceArtifactStore::new(workspace.path()).unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_owner = Arc::clone(&first_store);
+        let first = std::thread::spawn(move || {
+            first_owner.publish_with_hooks(
+                "first",
+                None,
+                move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || {},
+            )
+        });
+        entered_rx.recv().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let second_owner = Arc::clone(&second_store);
+        let second = std::thread::spawn(move || {
+            let result = second_owner.publish("second", None);
+            done_tx.send(result.is_ok()).unwrap();
+            result
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        let first = first.join().unwrap().unwrap();
+        let second = second.join().unwrap().unwrap();
+        assert_ne!(first.artifact_id, second.artifact_id);
+        assert!(
+            first_store
+                .read(&first.artifact_id, 0, MAX_ARTIFACT_READ_BYTES)
+                .is_ok()
+        );
+        assert!(
+            second_store
+                .read(&second.artifact_id, 0, MAX_ARTIFACT_READ_BYTES)
+                .is_ok()
+        );
+    }
+    #[test]
+    fn pid_reuse_temps_do_not_exhaust_publication_names() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = workspace.path().join(ARTIFACT_RELATIVE_ROOT);
+        for (sequence, (stage, witness)) in crashed_staging_fixture(workspace.path(), 16).into_iter().enumerate() {
+            let (_, token) = parse_publication_witness(&witness).unwrap();
+            let reused = format!(".publish-{}-{sequence}.tmp", std::process::id());
+            fs::rename(artifacts.join(stage), artifacts.join(&reused)).unwrap();
+            fs::rename(artifacts.join(&witness), artifacts.join(publication_witness_name(&reused, token))).unwrap();
+        }
+        fs::write(workspace.path().join("source"), "fresh").unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        assert!(store.publish("source", None).is_ok());
+    }
+    #[test]
+    fn stale_cleanup_makes_bounded_progress_past_sixty_four_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("cold-owned-65"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let artifacts = workspace.join(ARTIFACT_RELATIVE_ROOT);
+        crashed_staging_fixture(&workspace, MAX_STALE_PUBLICATION_CLEANUP + 1);
+        fs::write(workspace.join("source"), "fresh").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        assert_eq!(publication_temp_count(&artifacts), 1);
+        let published = store.publish("source", None).unwrap();
+        assert_eq!(
+            fs::read_dir(&artifacts)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".publish-"))
+                .count(),
+            0
+        );
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "initial_pairs":65, "after_open_stages":1, "after_publish_stages":0,
+            "remaining_publication_names":0, "published_relative_path":published.relative_path,
+            "source_bytes":b"fresh", "child_exit_code":73,
+        })).unwrap()).unwrap();
+    }
+
+    fn crashed_staging_fixture(workspace: &Path, count: usize) -> Vec<(String, String)> {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["artifact_store::tests::cold_cleanup_process_exit_fixture", "--exact", "--ignored", "--nocapture"])
+            .env("NOMIFUN_COLD_CLEANUP_FIXTURE", workspace)
+            .env("NOMIFUN_COLD_CLEANUP_COUNT", count.to_string())
+            .output().unwrap();
+        fs::write(workspace.join("child-output.log"), [&output.stdout[..], &output.stderr[..]].concat()).unwrap();
+        assert_eq!(output.status.code(), Some(73), "fixture must exit without running destructors");
+        serde_json::from_slice(&fs::read(workspace.join("crashed-stages.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[ignore = "fixture subprocess exits without running Rust destructors"]
+    fn cold_cleanup_process_exit_fixture() {
+        let workspace = PathBuf::from(std::env::var_os("NOMIFUN_COLD_CLEANUP_FIXTURE").unwrap());
+        let count: usize = std::env::var("NOMIFUN_COLD_CLEANUP_COUNT").unwrap().parse().unwrap();
+        assert!((1..=MAX_STALE_PUBLICATION_CLEANUP + 1).contains(&count));
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        store.publish("source", None).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, false).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let mut held = Vec::new();
+        let mut names = Vec::new();
+        for _ in 0..count {
+            let staged = stage_source(&store.workspace, Path::new("source"), &namespace,
+                &ArtifactIoCounters::default(), || {}).unwrap();
+            names.push((staged.name.clone(), staged.witness.clone().unwrap()));
+            held.push(staged);
+        }
+        let mut manifest = File::create(workspace.join("crashed-stages.json")).unwrap();
+        manifest.write_all(&serde_json::to_vec(&names).unwrap()).unwrap();
+        manifest.sync_all().unwrap();
+        std::process::exit(73);
+    }
+    #[cfg(unix)] #[test] fn final_component_swap_is_rejected() { let workspace=tempfile::tempdir().unwrap(); let outside=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"inside").unwrap(); fs::write(outside.path().join("secret"),"outside").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let result=store.publish_with_hooks("result.txt",None,||{fs::remove_file(workspace.path().join("result.txt")).unwrap();std::os::unix::fs::symlink(outside.path().join("secret"),workspace.path().join("result.txt")).unwrap();},||{}); assert!(result.is_err()); }
+    #[cfg(unix)] #[test] fn ancestor_swap_is_rejected() { let workspace=tempfile::tempdir().unwrap(); let outside=tempfile::tempdir().unwrap(); fs::create_dir(workspace.path().join("nested")).unwrap(); fs::write(workspace.path().join("nested/result"),"inside").unwrap(); fs::write(outside.path().join("result"),"outside").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let result=store.publish_with_hooks("nested/result",None,||{fs::rename(workspace.path().join("nested"),workspace.path().join("owned")).unwrap();std::os::unix::fs::symlink(outside.path(),workspace.path().join("nested")).unwrap();},||{}); assert!(result.is_err()); }
+    #[cfg(unix)] #[test] fn owner_namespace_swap_writes_nothing_outside() { let workspace=tempfile::tempdir().unwrap(); let outside=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result"),"inside").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let result=store.publish_with_hooks("result",None,||{},||{fs::rename(workspace.path().join(".nomifun"),workspace.path().join("owned")).unwrap();std::os::unix::fs::symlink(outside.path(),workspace.path().join(".nomifun")).unwrap();}); assert!(result.is_err()); assert!(fs::read_dir(outside.path()).unwrap().next().is_none()); }
+    #[cfg(windows)]
+    #[test]
+    fn ancestor_and_owner_junction_swaps_are_rejected() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("result"), "outside").unwrap();
+
+        let ancestor_workspace = tempfile::tempdir().unwrap();
+        fs::create_dir(ancestor_workspace.path().join("nested")).unwrap();
+        fs::write(
+            ancestor_workspace.path().join("nested/result"),
+            "inside",
+        )
+        .unwrap();
+        let ancestor_store =
+            WorkspaceArtifactStore::new(ancestor_workspace.path()).unwrap();
+        let ancestor_swapped = std::sync::atomic::AtomicBool::new(false);
+        let ancestor = ancestor_store.publish_with_hooks(
+            "nested/result",
+            None,
+            || {
+                if fs::rename(
+                    ancestor_workspace.path().join("nested"),
+                    ancestor_workspace.path().join("owned"),
+                )
+                .is_ok()
+                {
+                    junction::create(
+                        outside.path(),
+                        ancestor_workspace.path().join("nested"),
+                    )
+                    .unwrap();
+                    ancestor_swapped.store(true, Ordering::Release);
+                }
+            },
+            || {},
+        );
+        if ancestor_swapped.load(Ordering::Acquire) {
+            assert!(ancestor.is_err());
+            junction::delete(ancestor_workspace.path().join("nested")).unwrap();
+        } else {
+            // Windows sharing rules denied the raced directory replacement
+            // while the pinned source handle was live.
+            assert!(ancestor.is_ok());
+        }
+
+        let owner_workspace = tempfile::tempdir().unwrap();
+        fs::write(owner_workspace.path().join("result"), "inside").unwrap();
+        let owner_store = WorkspaceArtifactStore::new(owner_workspace.path()).unwrap();
+        let owner_swapped = std::sync::atomic::AtomicBool::new(false);
+        let owner = owner_store.publish_with_hooks(
+            "result",
+            None,
+            || {},
+            || {
+                if fs::rename(
+                    owner_workspace.path().join(".nomifun"),
+                    owner_workspace.path().join(".nomifun-owned"),
+                )
+                .is_ok()
+                {
+                    junction::create(
+                        outside.path(),
+                        owner_workspace.path().join(".nomifun"),
+                    )
+                    .unwrap();
+                    owner_swapped.store(true, Ordering::Release);
+                }
+            },
+        );
+        if owner_swapped.load(Ordering::Acquire) {
+            assert!(owner.is_err());
+            junction::delete(owner_workspace.path().join(".nomifun")).unwrap();
+        } else {
+            assert!(owner.is_ok());
+        }
+        assert!(
+            fs::read_dir(outside.path())
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() == "result")
+        );
+    }
+}

@@ -16,6 +16,19 @@ import {
 } from './hooks';
 import { assignTurnIdsFromUserRequests, buildTurnDisclosureItems } from './turnDisclosureModel';
 
+test('cold history preserves typed continuation identity and exact segment bodies', () => {
+  const source=parseMessageId('0190f5fe-7c00-7a00-8000-000000000021');
+  const tail=parseMessageId('0190f5fe-7c00-7a00-8000-000000000022');
+  const turn=parseMessageId('0190f5fe-7c00-7a00-8000-000000000001');
+  const message: TMessage={id:'tail-render',message_id:tail,msg_id:tail,turn_id:turn,
+    conversation_id:parseConversationId('0190f5fe-7c00-7a00-8000-000000000099'),type:'text',position:'left',
+    content:{content:'五（续）\n原始尾段\n',continuation_of_message_id:source}};
+  const normalized=normalizeDbMessage(message);
+  expect(normalized.message_id).toBe(tail);expect(normalized.msg_id).toBe(tail);
+  expect(normalized.type==='text' ? normalized.content.continuation_of_message_id : undefined).toBe(source);
+  expect(normalized.type==='text' ? normalized.content.content : undefined).toBe('五（续）\n原始尾段\n');
+});
+
 const messageId = (label: string): MessageId => {
   let hash = 0xcbf29ce484222325n;
   for (const char of label) {
@@ -60,7 +73,156 @@ const baseMessage = (overrides: MessageOverrides): TMessage =>
     ...(overrides.msg_id == null ? {} : { msg_id: messageId(overrides.msg_id) }),
   }) as TMessage;
 
+const textContent = (message: TMessage): string => {
+  const value = (message.content as { content?: unknown }).content;
+  return typeof value === 'string' ? value : '';
+};
+
 describe('mergeFetchedMessagesForConversation', () => {
+  test('history refresh during step two preserves its newer live text without rewriting step one', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('live-step-turn');
+    const first = fetchedMessage(baseMessage({
+      id: 'first', msg_id: 'live-step-one', message_id: messageId('live-step-one'),
+      conversation_id: conversationId, turn_id: turnId, created_at: 1000,
+      content: { content: 'I found the cause.' },
+    }));
+    const second = fetchedMessage(baseMessage({
+      id: 'second', msg_id: 'live-step-two', message_id: messageId('live-step-two'),
+      conversation_id: conversationId, turn_id: turnId, created_at: 2000,
+      content: { content: 'Checking' },
+    }));
+    const live = baseMessage({
+      id: 'live', msg_id: 'live-step-two', conversation_id: conversationId,
+      turn_id: turnId, created_at: 2000, content: { content: 'Checking the completed fix now.' },
+    });
+    const merged = mergeFetchedMessagesForConversation([first, live], [second, first], conversationId);
+    expect(merged.map(textContent)).toEqual(['I found the cause.', 'Checking the completed fix now.']);
+  });
+
+  test('rehydrates public progress on both sides of a tool receipt without concatenating steps', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('journal-turn');
+    const firstStreamId = messageId('journal-first-step');
+    const secondStreamId = messageId('journal-second-step');
+    const user = fetchedMessage(baseMessage({
+      id: 'journal-user', msg_id: 'journal-user', conversation_id: conversationId,
+      turn_id: turnId, position: 'right', created_at: 1000,
+      content: { content: 'Investigate the failure' },
+    }));
+    const first = fetchedMessage(baseMessage({
+      id: 'journal-first', msg_id: 'journal-first-step', message_id: firstStreamId,
+      conversation_id: conversationId, turn_id: turnId, created_at: 1500,
+      content: { content: 'I found the cause.' },
+    }));
+    const tool = fetchedMessage(baseMessage({
+      id: 'journal-tool', msg_id: 'journal-tool', conversation_id: conversationId,
+      turn_id: turnId, type: 'tool_call', created_at: 2500,
+      content: { call_id: 'read-one', name: 'read_file', status: 'completed', artifacts: [] },
+    } as any));
+    const second = fetchedMessage(baseMessage({
+      id: 'journal-second', msg_id: 'journal-second-step', message_id: secondStreamId,
+      conversation_id: conversationId, turn_id: turnId, created_at: 3500,
+      content: { content: 'The check passed and the fix is ready.' },
+    }));
+    const terminal = fetchedMessage(baseMessage({
+      id: 'journal-terminal', msg_id: 'journal-terminal', conversation_id: conversationId,
+      turn_id: turnId, type: 'agent_status', position: 'center', created_at: 4000,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 4000 },
+    } as any));
+    const liveSecond = baseMessage({
+      id: 'live-journal-second', msg_id: 'journal-first-step', conversation_id: conversationId,
+      turn_id: turnId, created_at: 3500,
+      content: { content: 'The check passed and the fix is ready.' },
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [user, first, tool, liveSecond],
+      [terminal, second, tool, first, user],
+      conversationId
+    );
+    expect(merged.filter((message) => message.type === 'text').map(textContent)).toEqual([
+      'Investigate the failure',
+      'I found the cause.',
+      'The check passed and the fix is ready.',
+    ]);
+    expect(merged.slice(1, 4).map((message) => message.type)).toEqual([
+      'text', 'tool_call', 'text',
+    ]);
+  });
+
+  test('orders a newest-first initial history page chronologically before rendering', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const oldest = baseMessage({
+      id: 'oldest',
+      msg_id: 'oldest',
+      conversation_id: conversationId,
+      position: 'right',
+      created_at: 1000,
+      content: { content: 'first' },
+    });
+    const middle = baseMessage({
+      id: 'middle',
+      msg_id: 'middle',
+      conversation_id: conversationId,
+      created_at: 2000,
+      content: { content: 'second' },
+    });
+    const newest = baseMessage({
+      id: 'newest',
+      msg_id: 'newest',
+      conversation_id: conversationId,
+      created_at: 3000,
+      content: { content: 'third' },
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [],
+      fetchedMessages([newest, middle, oldest]),
+      conversationId
+    );
+
+    expect(merged.map((message) => message.id)).toEqual(['oldest', 'middle', 'newest']);
+  });
+
+  test('hydrates one durable turn summary over its matching live Agent status', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('turn-summary-root');
+    const streamId = messageId('turn-summary-stream');
+    const liveStatus = baseMessage({
+      id: 'live-turn-summary',
+      msg_id: streamId,
+      turn_id: turnId,
+      conversation_id: conversationId,
+      type: 'agent_status',
+      position: 'center',
+      status: 'work',
+      created_at: 1500,
+      content: { backend: 'nomi', status: 'preparing', agent_name: 'Nomi' },
+    });
+    const durableStatus = fetchedMessage(baseMessage({
+      id: 'durable-turn-summary',
+      msg_id: streamId,
+      turn_id: turnId,
+      conversation_id: conversationId,
+      type: 'agent_status',
+      position: 'center',
+      status: 'finish',
+      created_at: 1000,
+      content: { backend: 'nomi', status: 'prepared', agent_name: 'Nomi', turn_summary: true },
+    }));
+
+    const merged = mergeFetchedMessagesForConversation(
+      [liveStatus],
+      [durableStatus],
+      conversationId
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.message_id).toBe(durableStatus.message_id);
+    expect(merged[0]?.content).toEqual(durableStatus.content);
+  });
+
   test('hydrates distinct thinking and agent-status rows into one owning turn disclosure', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
     const turnId = messageId('persisted-process-root');
@@ -304,6 +466,41 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged).toEqual([fetchedPersistedError]);
   });
 
+  test('replaces a live turn-status projection when the durable terminal becomes an error tip', () => {
+    const durableId = durableMessageId('failed-turn-summary');
+    const liveStatus = baseMessage({
+      id: 'live-failed-status',
+      message_id: durableId,
+      msg_id: 'failed-turn-stream',
+      type: 'agent_status',
+      position: 'center',
+      status: 'work',
+      content: { backend: 'nomi', status: 'preparing', turn_summary: true },
+    });
+    const durableError = fetchedMessage(baseMessage({
+      id: 'durable-failed-tip',
+      message_id: durableId,
+      msg_id: 'failed-turn-stream',
+      type: 'tips',
+      position: 'center',
+      status: 'error',
+      content: {
+        content: 'provider failed',
+        type: 'error',
+        started_at_ms: 4_000_000,
+        finished_at_ms: 4_002_000,
+      },
+    }));
+
+    const merged = mergeFetchedMessagesForConversation(
+      [liveStatus],
+      [durableError],
+      liveStatus.conversation_id
+    );
+
+    expect(merged).toEqual([durableError]);
+  });
+
   test('retains older persisted keyset pages in chronological position during a terminal refresh', () => {
     const olderUser = baseMessage({
       id: 'older-db-user',
@@ -419,6 +616,121 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged[0]).toEqual(fetchedPersistedThinking);
   });
 
+  test('replaces settled live thinking with durable per-step thinking after navigation', () => {
+    const turnId = messageId('thinking-turn-root');
+    const live = baseMessage({
+      id: 'live-thinking', msg_id: 'live-stream', turn_id: turnId,
+      type: 'thinking', created_at: 2000,
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const persisted = baseMessage({
+      id: 'durable-thinking-step-1', msg_id: 'durable-thinking-step-1', turn_id: turnId,
+      type: 'thinking', created_at: 2000,
+      content: { content: 'Inspect the workspace', status: 'done' },
+    });
+    const terminal = baseMessage({
+      id: 'turn-summary', msg_id: 'turn-summary', turn_id: turnId,
+      type: 'agent_status', position: 'center', created_at: 3000,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 3000 },
+    });
+    const merged = mergeFetchedMessagesForConversation(
+      [live], fetchedMessages([persisted, terminal]), live.conversation_id
+    );
+    expect(merged.map((message) => message.id)).toEqual(['durable-thinking-step-1', 'turn-summary']);
+  });
+
+  test('history refresh reconciles the canonical thinking phase independently of the Turn terminal', () => {
+    const turnId = messageId('active-thinking-turn');
+    const live = baseMessage({
+      id: 'live-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const persisted = baseMessage({
+      id: 'saved-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const active = mergeFetchedMessagesForConversation([live], fetchedMessages([persisted]), live.conversation_id);
+    expect(active).toHaveLength(1);
+    expect(active[0].id).toBe('saved-thinking');
+    expect(active[0].content).toMatchObject({ status: 'thinking' });
+
+    const combined = {
+      ...persisted,
+      content: { content: 'Inspect the workspace. Continue checking', status: 'thinking' },
+    } as TMessage;
+    const reopened = mergeFetchedMessagesForConversation([live], fetchedMessages([combined]), live.conversation_id);
+    expect(reopened[0].content).toMatchObject({
+      content: 'Inspect the workspace. Continue checking', status: 'thinking',
+    });
+
+    const terminal = baseMessage({
+      id: 'turn-summary', msg_id: 'turn-summary', turn_id: turnId, type: 'agent_status',
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 3000 },
+    });
+    const settled = mergeFetchedMessagesForConversation(
+      active, fetchedMessages([persisted, terminal]), live.conversation_id
+    );
+    expect(settled.find(message => message.type === 'thinking')?.content).toMatchObject({ status: 'done' });
+  });
+
+  test('a phase handoff from history completes equal live text while the Turn remains active', () => {
+    const turnId = messageId('handoff-thinking-turn');
+    const live = baseMessage({ id: 'live', msg_id: 'thinking-step', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect.', status: 'thinking' } });
+    const saved = { ...live, id: 'saved', content: { content: 'Inspect.', status: 'done' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id);
+    expect(merged[0].content).toMatchObject({ status: 'done' });
+  });
+
+  test('a live handoff cannot be reopened by an older equal reasoning snapshot', () => {
+    const turnId = messageId('handoff-thinking-turn');
+    const live = baseMessage({ id: 'live', msg_id: 'thinking-step', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect.', status: 'done' } });
+    const saved = { ...live, id: 'saved', content: { content: 'Inspect.', status: 'thinking' } } as TMessage;
+    const queryStart = { ...live, content: { content: 'Inspect.', status: 'thinking' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id, [queryStart]);
+    expect(merged[0].content).toMatchObject({ status: 'done' });
+    const reopened = { ...saved, content: { content: 'Inspect. Verify.', status: 'thinking' } } as TMessage;
+    const next = mergeFetchedMessagesForConversation(merged, fetchedMessages([reopened]), live.conversation_id);
+    expect(next[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+  });
+
+  test('a bounded canonical body can settle an unchanged longer live phase after a dropped completion frame', () => {
+    const liveContent = 'x'.repeat(512 * 1024) + 'new live suffix';
+    const live = baseMessage({ id: 'live', msg_id: 'bounded-thinking-step', type: 'thinking',
+      content: { content: liveContent, status: 'thinking' } });
+    const saved = { ...live, id: 'saved', content: { content: 'x'.repeat(512 * 1024), status: 'done' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id, [live]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toMatchObject({ content: liveContent, status: 'done' });
+  });
+
+  test('an older history completion cannot close a phase reopened during the fetch', () => {
+    const previous = baseMessage({ id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect.', status: 'done' } });
+    const resumed = { ...previous, content: { content: 'Inspect.Verify.', status: 'thinking' } } as TMessage;
+    const saved = fetchedMessage({ ...previous, id: 'saved' });
+    const merged = mergeFetchedMessagesForConversation([resumed], [saved], previous.conversation_id, [previous]);
+    expect(merged[0].content).toMatchObject({ content: 'Inspect.Verify.', status: 'thinking' });
+    const unchanged = mergeFetchedMessagesForConversation(merged, [saved], previous.conversation_id, merged);
+    expect(unchanged[0].content).toMatchObject({ content: 'Inspect.Verify.', status: 'done' });
+  });
+
+  test('streamed reasoning resumes its canonical row after interleaved narration', () => {
+    const thought = baseMessage({ id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect. ', status: 'done' } });
+    const narration = baseMessage({ id: 'narration', msg_id: 'public-step', content: { content: 'Reading the source.' } });
+    const delta = baseMessage({ id: 'delta', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Verify.', status: 'thinking' } });
+    const merged = composeMessageForTest(delta, [thought, narration]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].id).toBe('thought');
+    expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+    expect(merged[1]).toBe(narration);
+    const done = { ...delta, content: { content: '', status: 'done' } } as TMessage;
+    expect(composeMessageForTest(done, merged)[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'done' });
+  });
+
   test('keeps a longer streaming thinking snapshot if the fetched row is stale', () => {
     const streamingThinking = baseMessage({
       id: 'client-streaming-thinking-id',
@@ -527,9 +839,73 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged).toHaveLength(2);
     expect(merged.map((message) => (message as any).content.call_id)).toEqual(['call-1', 'call-2']);
   });
+
+  test('replaces the canonical live assistant row with its durable projection', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const user = baseMessage({
+      id: 'user-root', msg_id: 'user-root', message_id: messageId('user-root'),
+      conversation_id: conversationId, position: 'right', content: { content: 'hello' },
+    });
+    const liveAssistant = baseMessage({
+      id: 'live-assistant', msg_id: 'assistant-segment', turn_id: messageId('user-root'),
+      conversation_id: conversationId, position: 'left', status: 'work',
+      content: { content: 'world' }, created_at: 1001,
+    });
+    const durableAssistant = baseMessage({
+      id: 'durable-assistant', msg_id: 'assistant-segment',
+      message_id: messageId('assistant-segment'), conversation_id: conversationId,
+      position: 'left', status: 'finish', content: { content: 'world' }, created_at: 1002,
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [user, liveAssistant],
+      fetchedMessages([user, durableAssistant]),
+      conversationId,
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((message) => message.id)).toEqual(['user-root', 'durable-assistant']);
+    expect(merged.map((message) => [message.position, textContent(message)])).toEqual([
+      ['right', 'hello'], ['left', 'world'],
+    ]);
+  });
 });
 
 describe('composeMessageForTest', () => {
+  test('keeps a canonical assistant stream separate from its user turn root', () => {
+    const rootTurnId = messageId('canonical-user-root');
+    const assistantMessageId = messageId('canonical-assistant-stream');
+    const user = baseMessage({
+      id: 'optimistic-user',
+      msg_id: 'canonical-user-root',
+      type: 'text',
+      position: 'right',
+      created_at: 1000,
+      content: { content: 'hello' },
+    });
+    const assistant = baseMessage({
+      id: 'live-assistant',
+      msg_id: 'canonical-assistant-stream',
+      turn_id: rootTurnId,
+      type: 'text',
+      position: 'left',
+      created_at: 1001,
+      content: { content: 'world' },
+    });
+
+    const merged = composeMessageForTest(assistant, [user]);
+
+    expect(user.msg_id).toBe(rootTurnId);
+    expect(assistant.msg_id).toBe(assistantMessageId);
+    expect(assistant.msg_id).not.toBe(rootTurnId);
+    expect(merged).toHaveLength(2);
+    expect(merged.map((message) => [message.position, textContent(message)])).toEqual([
+      ['right', 'hello'],
+      ['left', 'world'],
+    ]);
+    expect(merged[1].turn_id).toBe(rootTurnId);
+  });
+
   test('keeps the first tool envelope stable when a terminal frame arrives late', () => {
     const turnId = messageId('stable-turn');
     const running = baseMessage({
@@ -583,6 +959,42 @@ describe('composeMessageForTest', () => {
     expect(merged[0].created_at).toBe(1000);
     expect(merged[0].turn_id).toBe(rootTurnId);
     expect(merged[0].content).toMatchObject({ status: 'done', duration: 4000 });
+  });
+
+  test('thinking completion updates its own step while later thinking remains active', () => {
+    const first = baseMessage({
+      id: 'first-thought', msg_id: 'thinking-step-1', type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const second = baseMessage({
+      id: 'second-thought', msg_id: 'thinking-step-2', type: 'thinking',
+      content: { content: 'Plan the next edit', status: 'thinking' },
+    });
+    const completion = baseMessage({
+      id: 'first-done', msg_id: 'thinking-step-1', type: 'thinking',
+      content: { content: '', status: 'done' },
+    });
+    const merged = composeMessageForTest(completion, [first, second]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].content).toMatchObject({ content: 'Inspect the workspace', status: 'done' });
+    expect(merged[1].content).toMatchObject({ content: 'Plan the next edit', status: 'thinking' });
+  });
+
+  test('a new reasoning delta reopens a completed contiguous step', () => {
+    const completed = baseMessage({
+      id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect the workspace. ', status: 'done' },
+    });
+    const resumed = baseMessage({
+      id: 'resumed-thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Consider the result.', status: 'thinking' },
+    });
+    const merged = composeMessageForTest(resumed, [completed]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe('thought');
+    expect(merged[0].content).toMatchObject({
+      content: 'Inspect the workspace. Consider the result.', status: 'thinking',
+    });
   });
 
   test('keeps terminal tips separate from successful text sharing the same stream msg_id', () => {
@@ -727,47 +1139,6 @@ describe('composeMessageForTest', () => {
 
     expect(merged).toHaveLength(2);
     expect(merged.map((message) => message.msg_id)).toEqual([messageId('turn-1'), messageId('turn-2')]);
-  });
-
-  test('replaces the current plan by session_id even when the incoming msg_id changes', () => {
-    const oldPlan = baseMessage({
-      id: 'turn-1:plan:update_plan',
-      msg_id: 'turn-1:plan:update_plan',
-      type: 'plan',
-      content: {
-        session_id: 'update_plan',
-        entries: [
-          { content: 'Inspect', status: 'completed' },
-          { content: 'Implement', status: 'in_progress' },
-          { content: 'Verify', status: 'pending' },
-        ],
-      },
-    });
-    const text = baseMessage({
-      id: 'assistant-text',
-      msg_id: 'assistant-text',
-      type: 'text',
-      content: { content: 'Working...' },
-    });
-    const updatedPlan = baseMessage({
-      id: 'turn-2:plan:update_plan',
-      msg_id: 'turn-2:plan:update_plan',
-      type: 'plan',
-      content: {
-        session_id: 'update_plan',
-        entries: [
-          { content: 'Inspect', status: 'completed' },
-          { content: 'Implement', status: 'completed' },
-          { content: 'Verify', status: 'completed' },
-        ],
-      },
-    });
-
-    const merged = composeMessageForTest(updatedPlan, [oldPlan, text]);
-
-    expect(merged).toHaveLength(2);
-    expect(merged[0]).toEqual(text);
-    expect(merged[1]).toEqual(updatedPlan);
   });
 
   test('keeps live agent status separate from text sharing the same turn msg_id', () => {
@@ -916,6 +1287,33 @@ describe('normalizeDbMessage', () => {
     sha256: 'c'.repeat(64),
   };
 
+  test('rehydrates the canonical Agent transition instead of leaving an empty success tip', () => {
+    const normalized = normalizeDbMessage(baseMessage({
+      id: 'agent-transition',
+      type: 'tips',
+      position: 'center',
+      content: {
+        type: 'success', content: '',
+        agent_transition: {
+          transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+          previous_agent_label: 'General', next_agent_label: 'chat.minimal',
+          previous_preset_id: 'source', next_preset_id: 'target',
+          next_template_key: 'chat.minimal',
+          effective_from: 'next_turn', handoff_mode: 'context_only',
+          completion_gate_inherited: false,
+        },
+      } as any,
+    }));
+
+    expect(normalized.type).toBe('tips');
+    if (normalized.type !== 'tips') return;
+    expect(normalized.content.agent_transition).toMatchObject({
+      next_agent_label: 'chat.minimal', next_preset_id: 'target',
+      next_template_key: 'chat.minimal',
+      effective_from: 'next_turn',
+    });
+  });
+
   test('keeps the owning turn identity supplied by the transport boundary', () => {
     const turnId = messageId('failed-turn');
     const normalized = normalizeDbMessage(
@@ -928,13 +1326,30 @@ describe('normalizeDbMessage', () => {
         content: {
           content: 'provider failed',
           type: 'error',
-          error: { message: 'provider failed', code: 'USER_LLM_PROVIDER_RATE_LIMITED' },
+          error: {
+            message: 'provider failed', code: 'USER_LLM_PROVIDER_RATE_LIMITED',
+            agentLabel: 'Original Agent', modelName: 'original-model', workspacePath: '/original-workspace',
+            providerDiagnostic: { reason: 'rate_limited', httpStatus: 429, providerCode: 'rate_limit_error',
+              requestId: 'req-original', retryAfterMs: 5000, endpoint: 'https://api.example.com/v1/chat', modelName: 'actual-model' },
+          },
+          started_at_ms: 4_000_000,
+          finished_at_ms: 4_002_000,
         } as any,
       })
     );
 
     expect(normalized.type).toBe('tips');
     expect(normalized.turn_id).toBe(turnId);
+    if (normalized.type !== 'tips') throw new Error('expected tips message');
+    expect(normalized.content.started_at_ms).toBe(4_000_000);
+    expect(normalized.content.finished_at_ms).toBe(4_002_000);
+    expect(normalized.content.error?.code).toBe('USER_LLM_PROVIDER_RATE_LIMITED');
+    expect(normalized.content.error?.agentLabel).toBe('Original Agent');
+    expect(normalized.content.error?.modelName).toBe('original-model');
+    expect(normalized.content.error?.workspacePath).toBe('/original-workspace');
+    expect(normalized.content.error?.providerDiagnostic).toEqual({ reason: 'rate_limited', httpStatus: 429,
+      providerCode: 'rate_limit_error', requestId: 'req-original', retryAfterMs: 5000,
+      endpoint: 'https://api.example.com/v1/chat', modelName: 'actual-model' });
   });
 
   test('keeps persisted turn identity for tools and text', () => {
@@ -1214,35 +1629,6 @@ describe('normalizeDbMessage', () => {
     expect(committed.content.artifacts).toEqual([persistedArtifact]);
   });
 
-  test('history downgrades receipt-less tool-group image success before process rendering', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'receiptless-image-group-row',
-        msg_id: 'assistant-receiptless-image-group',
-        type: 'tool_group',
-        status: 'finish',
-        content: [
-          {
-            call_id: 'receiptless-image-group',
-            name: 'ImageGeneration',
-            description: 'generated',
-            status: 'Success',
-            result_display: {
-              img_url: '/workspace/old.png',
-              relative_path: 'old.png',
-            },
-          },
-        ] as any,
-      })
-    );
-
-    expect(normalized.type).toBe('tool_group');
-    if (normalized.type !== 'tool_group') throw new Error('expected tool group');
-    expect(normalized.status).toBe('error');
-    expect(normalized.content[0].status).toBe('Error');
-    expect(normalized.content[0].result_display).toBeUndefined();
-  });
-
   test('preserves persisted knowledge writeback state from decoded text content', () => {
     const normalized = normalizeDbMessage(
       baseMessage({
@@ -1270,38 +1656,6 @@ describe('normalizeDbMessage', () => {
     expect(normalized.content.content).toBe('Final answer.');
     expect(normalized.content.knowledge_writeback?.status).toBe('written');
     expect(normalized.content.knowledge_writeback?.written?.[0]?.rel_path).toBe('patterns/final.md');
-  });
-
-  test('drops the retired staged flag from a row persisted before write-back landed in the base body', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'assistant-turn-1',
-        msg_id: 'assistant-turn-1',
-        type: 'text',
-        content: {
-          content: 'Final answer.',
-          knowledge_writeback: {
-            status: 'written',
-            updated_at: 20,
-            written: [
-              {
-                kb_id: '0190f5fe-7c00-7a00-8000-000000000001',
-                rel_path: '_inbox/1/patterns/final.md',
-                staged: true,
-              },
-            ],
-          },
-        } as any,
-      })
-    );
-
-    expect(normalized.type).toBe('text');
-    if (normalized.type !== 'text') throw new Error('expected text message');
-    const written = normalized.content.knowledge_writeback?.written?.[0];
-    // The legacy path is kept verbatim — it simply keys differently on retry —
-    // but the placement flag is gone from the projection entirely.
-    expect(written?.rel_path).toBe('_inbox/1/patterns/final.md');
-    expect(Object.prototype.hasOwnProperty.call(written ?? {}, 'staged')).toBe(false);
   });
 
   test('keeps newer persisted writeback state while preserving longer streaming text', () => {
@@ -1347,31 +1701,17 @@ describe('mergeThinkingStreamContent', () => {
     expect(mergeThinkingStreamContent('用户要求', '写一个贪吃蛇游戏')).toBe('用户要求写一个贪吃蛇游戏');
   });
 
-  test('replaces with cumulative chunks instead of duplicating the same paragraph', () => {
-    expect(mergeThinkingStreamContent('用户要求写一个贪吃蛇游戏', '用户要求写一个贪吃蛇游戏')).toBe(
-      '用户要求写一个贪吃蛇游戏'
-    );
-    expect(mergeThinkingStreamContent('用户要求写一个贪吃蛇游戏', '用户要求写一个贪吃蛇游戏。开始创建文件')).toBe(
-      '用户要求写一个贪吃蛇游戏。开始创建文件'
-    );
+  test('preserves repeated words from distinct typed reasoning deltas', () => {
+    expect(mergeThinkingStreamContent('Verify.', 'Verify.')).toBe('Verify.Verify.');
   });
 
-  test('treats whitespace-only formatting changes as the same cumulative snapshot', () => {
-    expect(
-      mergeThinkingStreamContent(
-        '用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动',
-        '用户要求我写一个贪吃蛇游戏，包括： 1. 游戏窗口 2. 蛇的移动'
-      )
-    ).toBe('用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动');
+  test('preserves whitespace and shared prefixes without guessing snapshot replacement', () => {
+    expect(mergeThinkingStreamContent('Inspect.\n', 'Inspect.\nCheck.')).toBe('Inspect.\nInspect.\nCheck.');
+    expect(mergeThinkingStreamContent('Inspect.', '\n\n')).toBe('Inspect.\n\n');
   });
 
-  test('ignores shorter replayed thinking snapshots after whitespace normalization', () => {
-    expect(
-      mergeThinkingStreamContent(
-        '用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动\n3. 食物生成',
-        '用户要求我写一个贪吃蛇游戏，包括： 1. 游戏窗口'
-      )
-    ).toBe('用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动\n3. 食物生成');
+  test('an empty completion frame leaves the complete body intact', () => {
+    expect(mergeThinkingStreamContent('Inspect.\nVerify.', '')).toBe('Inspect.\nVerify.');
   });
 
   test('stringifies malformed thinking stream chunks instead of throwing', () => {

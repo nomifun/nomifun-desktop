@@ -43,6 +43,10 @@ pub struct CapturedScreen {
 }
 
 const MAX_SCREENSHOT_PNG_BYTES: usize = 5 * 1024 * 1024;
+/// The canonical Capability Kernel port carries Computer output through a
+/// bounded JSON envelope before the application restores a typed image part.
+/// Keep that screenshot below the 2 MiB base64 transport ceiling.
+pub(crate) const CANONICAL_SCREENSHOT_PNG_BYTES: usize = 3 * 1024 * 1024 / 2;
 const MIN_SCREENSHOT_LONG_EDGE: u32 = 320;
 const MAX_ENCODE_ATTEMPTS: usize = 12;
 
@@ -66,14 +70,24 @@ fn png_bytes(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
 /// High-entropy or unusually large frames are downscaled deterministically so
 /// native Computer screenshots can never exceed the shared 5 MiB image limit.
 pub fn encode_png(img: &image::RgbaImage) -> Result<EncodedPng, String> {
+    encode_png_with_limit(img, MAX_SCREENSHOT_PNG_BYTES)
+}
+
+pub(crate) fn encode_png_with_limit(
+    img: &image::RgbaImage,
+    max_png_bytes: usize,
+) -> Result<EncodedPng, String> {
     if img.width() == 0 || img.height() == 0 {
         return Err("Cannot encode an empty screenshot".to_owned());
+    }
+    if max_png_bytes == 0 {
+        return Err("Screenshot image transport limit is zero".to_owned());
     }
 
     let mut working = img.clone();
     for _ in 0..MAX_ENCODE_ATTEMPTS {
         let png = png_bytes(&working)?;
-        if png.len() <= MAX_SCREENSHOT_PNG_BYTES {
+        if png.len() <= max_png_bytes {
             return Ok(EncodedPng {
                 width: working.width(),
                 height: working.height(),
@@ -89,7 +103,7 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<EncodedPng, String> {
         if old_w.max(old_h) <= MIN_SCREENSHOT_LONG_EDGE {
             break;
         }
-        let ratio = ((MAX_SCREENSHOT_PNG_BYTES as f64 / png.len() as f64).sqrt() * 0.92)
+        let ratio = ((max_png_bytes as f64 / png.len() as f64).sqrt() * 0.92)
             .clamp(0.1, 0.9);
         let min_ratio = MIN_SCREENSHOT_LONG_EDGE as f64 / old_w.max(old_h) as f64;
         let ratio = ratio.max(min_ratio.min(0.9));
@@ -107,8 +121,7 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<EncodedPng, String> {
     }
 
     Err(format!(
-        "Screenshot could not be reduced below the {} MiB provider image limit",
-        MAX_SCREENSHOT_PNG_BYTES / (1024 * 1024)
+        "Screenshot could not be reduced below the {max_png_bytes} byte image transport limit"
     ))
 }
 
@@ -258,6 +271,15 @@ mod tests {
         assert!(encoded.image.data.len() <= MAX_BASE64_BYTES);
         assert!(encoded.width > 0 && encoded.height > 0);
         assert!(encoded.width < img.width() || encoded.height < img.height());
+
+        let canonical = encode_png_with_limit(&img, CANONICAL_SCREENSHOT_PNG_BYTES)
+            .expect("canonical encode should succeed");
+        let canonical_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&canonical.image.data)
+            .expect("canonical screenshot should be base64");
+        assert!(canonical_bytes.len() <= CANONICAL_SCREENSHOT_PNG_BYTES);
+        assert!(canonical.width > 0 && canonical.height > 0);
+        assert!(canonical.width <= encoded.width && canonical.height <= encoded.height);
     }
 
     #[cfg(target_os = "macos")]

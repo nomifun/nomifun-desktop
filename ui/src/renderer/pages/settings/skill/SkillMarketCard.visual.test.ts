@@ -25,7 +25,7 @@ describe('SkillMarketCard visual hierarchy', () => {
 
   test('shows at most three tags and summarizes the remainder', () => {
     expect(source.includes('const MAX_VISIBLE_TAGS = 3')).toBe(true);
-    expect(source.includes('totalTagCount - MAX_VISIBLE_TAGS')).toBe(true);
+    expect(source.includes('rawTags.length - MAX_VISIBLE_TAGS')).toBe(true);
     expect(source.includes('+{overflowCount}')).toBe(true);
   });
 
@@ -48,13 +48,14 @@ describe('SkillMarketCard visual hierarchy', () => {
 
   test('locks each add action while its asynchronous request is pending', () => {
     expect(panelSource.includes('const pendingAddIdsRef = useRef<Set<string>>(new Set())')).toBe(true);
-    expect(panelSource.includes('addedStateLoading || isAdded?.(item) || pendingAddIdsRef.current.has(item.id)')).toBe(true);
+    expect(panelSource.includes('(added && !canRunAddedAction?.(item))')).toBe(true);
+    expect(panelSource.includes('pendingAddIdsRef.current.has(item.id)')).toBe(true);
     expect(panelSource.includes('await onAdd(item)')).toBe(true);
     expect(panelSource.includes('finished.delete(item.id)')).toBe(true);
     expect(panelSource.includes("console.error('Market add callback failed:'")).toBe(true);
     expect(source.includes('loading={adding}')).toBe(true);
-    expect(source.includes('disabled={adding || added || addedStateLoading}')).toBe(true);
+    expect(source.includes('disabled={adding || !actionEnabled || addedStateLoading}')).toBe(true);
     expect(source.includes("t('common.added'" )).toBe(true);
-    expect(panelSource.includes('addedStateLoading || isAdded?.(item)')).toBe(true);
+    expect(panelSource.includes('addedStateLoading ||')).toBe(true);
   });
 });

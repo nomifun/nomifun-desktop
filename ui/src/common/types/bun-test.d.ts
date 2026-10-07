@@ -1,41 +1,17 @@
 /**
- * @license
- * Copyright 2025-2026 NomiFun (nomifun.com)
- * SPDX-License-Identifier: Apache-2.0
+ * Load only Bun's test API: renderer code must retain browser globals, not
+ * Bun's process-wide fetch/Request extensions. Keep this version aligned with
+ * the test runner in ui/package.json.
  */
+import 'bun-types/test';
 
 declare module 'bun:test' {
-  type TestFn = () => void | Promise<void>;
-
-  interface Matchers {
-    not: Matchers;
+  interface MatchersBuiltin<T> {
+    // Runtime equality intentionally compares branded IDs and wire snapshots
+    // against plain literals (also for negative assertions). Preserve the
+    // previous test contract without casting fixtures to production types.
     toBe(expected: unknown): void;
     toEqual(expected: unknown): void;
-    toHaveLength(expected: number): void;
-    toBeCloseTo(expected: number, precision?: number): void;
-    toBeDefined(): void;
-    toBeUndefined(): void;
-    toBeTruthy(): void;
-    toBeFalsy(): void;
-    toBeNull(): void;
-    toMatchObject(expected: unknown): void;
-    toBeGreaterThan(expected: number): void;
-    toBeGreaterThanOrEqual(expected: number): void;
-    toBeLessThan(expected: number): void;
-    toBeLessThanOrEqual(expected: number): void;
+    toStrictEqual(expected: unknown): void;
   }
-
-  interface Test {
-    (name: string, fn: TestFn, timeout?: number): void;
-    each<T>(cases: readonly T[]): (name: string, fn: (caseValue: T) => void | Promise<void>) => void;
-    each<T extends readonly unknown[]>(
-      cases: readonly T[]
-    ): (name: string, fn: (...caseValues: T) => void | Promise<void>) => void;
-  }
-
-  export function describe(name: string, fn: TestFn): void;
-  export function beforeEach(fn: TestFn): void;
-  export function afterEach(fn: TestFn): void;
-  export const test: Test;
-  export function expect(actual: unknown): Matchers;
 }

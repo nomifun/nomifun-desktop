@@ -16,6 +16,8 @@ pub struct RobotDto {
     pub last_seen: Option<String>,
     /// RFC 3339.
     pub created_at: String,
+    pub permissions: crate::registry::RobotPermissions,
+    pub supported_permissions: Vec<String>,
 }
 
 fn ms_to_rfc3339(ms: i64) -> String {
@@ -34,6 +36,8 @@ impl From<&RobotRecord> for RobotDto {
             firmware_version: record.firmware_version.clone(),
             last_seen: record.last_seen.map(ms_to_rfc3339),
             created_at: ms_to_rfc3339(record.created_at),
+            permissions: record.permissions.clone(),
+            supported_permissions: vec!["proactive_speech".to_owned()],
         }
     }
 }

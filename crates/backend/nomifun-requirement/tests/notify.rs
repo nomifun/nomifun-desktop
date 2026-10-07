@@ -46,10 +46,7 @@ async fn svc(notifier: Arc<RecordingNotifier>) -> RequirementService {
         Arc::new(NoopBroadcaster),
         Arc::from(installation_owner.as_str()),
     );
-    let service = RequirementService::new(repo, emitter)
-        .with_completion_notifier(notifier);
-    Box::leak(Box::new(db));
-    service
+    RequirementService::new(repo, emitter).with_completion_notifier(notifier)
 }
 
 fn new_req(tag: &str) -> CreateRequirementRequest {

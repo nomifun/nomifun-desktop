@@ -30,11 +30,12 @@ async fn previous_turn_terminal_cannot_finish_the_next_turn() {
         "a stale terminal must be rejected by turn identity"
     );
     assert_eq!(runtime.status(), Some(ConversationStatus::Running));
+    assert!(!runtime.emit_finish_for_turn(previous_turn,None,Some(TurnStopReason::Paused)),
+        "a late pause from the previous generation must not pause its successor");
     assert!(
         !runtime.emit_for_turn(
             previous_turn,
-            AgentStreamEvent::Text(TextEventData {
-                content: "late first-turn content".into(),
+            AgentStreamEvent::Text(TextEventData { step: None, content: "late first-turn content".into(),
             }),
         ),
         "stale content/artifact projections must also be rejected"

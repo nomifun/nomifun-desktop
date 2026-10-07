@@ -43,7 +43,7 @@ export function getPathSeparator(targetPath: string): string {
  * 在树中查找节点（通过 relativePath）
  * Find node in tree by relativePath
  */
-export function findNodeByKey(list: IDirOrFile[], key: string): IDirOrFile | null {
+function findNodeByKey(list: IDirOrFile[], key: string): IDirOrFile | null {
   for (const item of list) {
     if (item.relativePath === key) return item;
     if (item.children && item.children.length > 0) {
@@ -55,42 +55,48 @@ export function findNodeByKey(list: IDirOrFile[], key: string): IDirOrFile | nul
 }
 
 /**
- * Merge children that were lazy-loaded in the old tree back into a freshly
- * fetched tree. The backend's getWorkspace only returns one level at a time;
- * a full refresh of the root therefore arrives with deep dirs collapsed to
- * empty children, even when the user had expanded them via loadMore.
- *
- * For every directory node in the new tree that has no children loaded, we
- * substitute the old node's children (matched by relativePath). Files are
- * left untouched. Dirs that were deleted on disk simply don't appear in the
- * new tree, so they drop out naturally.
+ * Refresh directories that the user has already loaded. An absent children
+ * field means unread; an empty array is an authoritative empty directory.
+ * The old tree only identifies which branches need reading. Its file names
+ * must never be copied into a fresh response as evidence of current contents.
  */
-export function mergeLoadedChildren(newRes: IDirOrFile[], oldFiles: IDirOrFile[]): IDirOrFile[] {
-  if (oldFiles.length === 0) return newRes;
-
-  const oldByPath = new Map<string, IDirOrFile>();
+export async function reconcileLoadedChildren(
+  newRes: IDirOrFile[],
+  oldFiles: IDirOrFile[],
+  readChildren: (node: IDirOrFile) => Promise<IDirOrFile[]>,
+  isCurrent: () => boolean,
+  retryPaths: Iterable<string> = []
+): Promise<IDirOrFile[]> {
+  const loadedPaths = new Set<string>(retryPaths);
   const indexNode = (n: IDirOrFile) => {
-    if (n.relativePath != null) oldByPath.set(n.relativePath, n);
+    if (!n.isFile && n.children !== undefined) loadedPaths.add(n.relativePath);
     n.children?.forEach(indexNode);
   };
   oldFiles.forEach(indexNode);
 
-  const visit = (node: IDirOrFile): IDirOrFile => {
-    if (node.isFile) return node;
-    const oldNode = node.relativePath != null ? oldByPath.get(node.relativePath) : undefined;
-    const newHasChildren = (node.children?.length ?? 0) > 0;
-    const oldHasChildren = (oldNode?.children?.length ?? 0) > 0;
-
-    if (newHasChildren) {
-      return { ...node, children: node.children!.map(visit) };
+  const visit = async (nodes: IDirOrFile[]): Promise<IDirOrFile[]> => {
+    const result: IDirOrFile[] = [];
+    for (const node of nodes) {
+      if (!isCurrent()) return nodes;
+      if (node.isFile) {
+        result.push(node);
+        continue;
+      }
+      let children = node.children;
+      if (children === undefined && loadedPaths.has(node.relativePath)) {
+        const response = await readChildren(node);
+        const directory = response.find((item) => !item.isFile && item.relativePath === node.relativePath);
+        if (!directory || directory.children === undefined) {
+          throw new Error('Workspace directory response is incomplete');
+        }
+        children = directory.children;
+      }
+      result.push(children === undefined ? node : { ...node, children: await visit(children) });
     }
-    if (oldHasChildren) {
-      return { ...node, children: oldNode!.children };
-    }
-    return node;
+    return result;
   };
 
-  return newRes.map(visit);
+  return visit(newRes);
 }
 
 /**
@@ -124,7 +130,7 @@ export function replacePathInList(keys: string[], oldPath: string, newPath: stri
  * 递归更新子节点路径（用于重命名后更新整棵树）
  * Recursively update children paths (for tree update after rename)
  */
-export function updateChildrenPaths(
+function updateChildrenPaths(
   children: IDirOrFile[] | undefined,
   oldFullPrefix: string,
   newFullPrefix: string,

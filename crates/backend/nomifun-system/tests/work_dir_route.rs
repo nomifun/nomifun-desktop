@@ -86,7 +86,6 @@ async fn setup_with_work_and_cli_override(
         TEST_KEY,
         http_client.clone(),
         VersionCheckService::new(http_client, "1.0.0".to_owned()),
-        None,
         data_dir,
         work_dir,
         work_dir_is_cli_override,

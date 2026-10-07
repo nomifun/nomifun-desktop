@@ -1,4 +1,6 @@
 pub mod api_response;
+pub mod provider_capability;
+pub mod provider_gateway_error;
 pub mod egress;
 pub mod proxy;
 pub mod secret_redaction;
@@ -17,8 +19,37 @@ use std::time::Duration;
 /// idle read gap is normal. Per-request timeouts remain each caller's choice.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Build the proxy-aware shared client with a bounded connection setup.
+///
+/// Panics if TLS/resolver initialization fails, as reqwest::Client::new does.
+/// Never retry with a default client that discards the selected proxy and
+/// connection timeout. Fallible provider setup uses http_client_no_redirect.
 pub fn http_client() -> reqwest::Client {
     proxy::apply_detected_proxy(reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("failed to build the configured outbound HTTP client")
+}
+
+/// Build the shared outbound client with redirects disabled.
+///
+/// Provider attempts must have exactly one network request boundary. Following
+/// an HTTP redirect would silently create a second POST outside the Broker's
+/// retry/failover accounting and could forward credentials to a new origin.
+pub fn http_client_no_redirect() -> Result<reqwest::Client, reqwest::Error> {
+    proxy::apply_detected_proxy(
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+    .build()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shared_client_factories_initialize_without_sending_requests() {
+        let _guard = crate::proxy::test_system_proxy_lock();
+        let _ = super::http_client();
+        super::http_client_no_redirect().expect("fallible shared client");
+    }
 }

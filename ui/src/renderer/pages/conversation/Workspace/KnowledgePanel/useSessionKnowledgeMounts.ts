@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey, browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 import type { KnowledgeBaseId } from '@/common/types/ids';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -18,10 +18,10 @@ import {
 /**
  * Which knowledge bases a session actually has mounted.
  *
- * Neither the conversation nor the terminal payload carries any knowledge field
- * (see `TChatConversation.extra`, `ITerminalSession`), and there is no batch
- * "resolve these kb_ids" endpoint, so this needs `getBinding` for the ids and
- * `listBases` for their names.
+ * Canonical conversations resolve their live resource subset through the
+ * dedicated AgentSession Knowledge command. Terminals remain workpath-scoped.
+ * Both paths use `listBases` only for current presentation metadata; it is
+ * never a second authority source for a Session.
  *
  * Three properties matter and each cost a bug during review:
  *
@@ -63,6 +63,15 @@ const ensureSubscribed = () => {
     bindingCache.set(key, binding);
     notifyTarget(key);
   });
+  ipcBridge.agentPlatform.sessions.onKnowledgeChanged.on((payload) => {
+    const key = knowledgeBindingTargetKey({
+      kind: 'conversation',
+      target_id: payload.agent_session_id,
+    });
+    bindingCache.set(key, { ...payload.binding, channel_write_enabled: false });
+    writeSeed(key, mountedIdsOf(bindingCache.get(key)));
+    notifyTarget(key);
+  });
   const refreshBases = () => {
     // Replace-on-success rather than clear-then-fetch: clearing would make
     // `mounted` momentarily false and unmount the open panel.
@@ -86,7 +95,8 @@ const ensureSubscribed = () => {
  * session already reports the right `mounted` value. Only ids are stored — names
  * and file counts always come from the live `listBases`.
  */
-const seedStorageKey = (targetKey: string) => browserStorageGenerationKey(`knowledge-mounted:${targetKey}`);
+const seedStorageKey = (targetKey: string) =>
+  (targetKey.startsWith('conversation:') ? agentBrowserStorageGenerationKey : browserStorageGenerationKey)(`knowledge-mounted:${targetKey}`);
 
 function readSeed(targetKey: string): KnowledgeBaseId[] {
   if (typeof window === 'undefined') return [];
@@ -115,8 +125,8 @@ const mountedIdsOf = (binding: IKnowledgeBinding | undefined): KnowledgeBaseId[]
 
 export interface SessionKnowledgeMounts {
   /**
-   * True when the session's binding is enabled with at least one base — the same
-   * rule as the session-list capability dot (`useWorkpathKnowledgeLit`).
+   * True when a canonical conversation or terminal workpath currently has an
+   * enabled binding with at least one base.
    *
    * Optimistic on the first render of a known session (seeded from
    * localStorage), then authoritative.
@@ -132,19 +142,20 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
 
   const target = useMemo(() => (source ? resolveKnowledgeBindingTarget(source) : null), [source]);
   const targetKey = target ? knowledgeBindingTargetKey(target) : null;
+  const subscriptionKey = targetKey;
 
   useEffect(() => {
-    if (!targetKey) return undefined;
+    if (!subscriptionKey) return undefined;
     ensureSubscribed();
     const listener = () => setTick((tick) => tick + 1);
-    const set = listeners.get(targetKey) ?? new Set();
+    const set = listeners.get(subscriptionKey) ?? new Set();
     set.add(listener);
-    listeners.set(targetKey, set);
+    listeners.set(subscriptionKey, set);
     return () => {
       set.delete(listener);
-      if (set.size === 0) listeners.delete(targetKey);
+      if (set.size === 0) listeners.delete(subscriptionKey);
     };
-  }, [targetKey]);
+  }, [subscriptionKey]);
 
   const binding = targetKey ? bindingCache.get(targetKey) : undefined;
 
@@ -157,13 +168,19 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
     let cancelled = false;
     void (async () => {
       try {
-        const next = await ipcBridge.knowledge.getBinding.invoke({
-          kind: target.kind,
-          target_id: target.target_id,
-        });
+        const next = target.kind === 'conversation'
+          ? await ipcBridge.agentPlatform.sessions.getKnowledge.invoke({
+              agent_session_id: target.target_id,
+            })
+          : await ipcBridge.knowledge.getBinding.invoke({
+              kind: target.kind,
+              target_id: target.target_id,
+            });
         // A `binding-changed` event that landed mid-flight is newer than this
         // response — do not clobber it.
-        if (!bindingCache.has(targetKey)) bindingCache.set(targetKey, next);
+        if (!bindingCache.has(targetKey)) {
+          bindingCache.set(targetKey, { ...next, channel_write_enabled: false });
+        }
         if (!cancelled) writeSeed(targetKey, mountedIdsOf(bindingCache.get(targetKey)));
       } catch {
         // Re-arm so the next attempt tick retries instead of wedging.

@@ -1,5 +1,5 @@
 //! Companion chat threads: real `type='nomi'` conversations driven by the
-//! full agent engine (plan mode / skills / slash commands / MCP), flavored
+//! canonical Agent Runtime with globally available Skills and MCP, flavored
 //! with the owning companion's persona system prompt and the companion memory
 //! tools.
 //!
@@ -10,24 +10,19 @@
 //! registers the memory tools, and (b) the main sidebar filters them out;
 //! `extra.companion_id` records the owning companion for persona/knowledge selection.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::CompanionMemorySink;
 use nomifun_api_types::CreateConversationRequest;
-use nomifun_common::{AppError, ProviderWithModel};
-use nomifun_conversation::ConversationService;
+use nomifun_common::AppError;
 
 use crate::collector::{self, SharedConfig, SharedEventStoreLock};
 use crate::events::CompanionEventEmitter;
-use crate::managed_skills::{
-    load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
-    save_manifest,
-};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
+use crate::session_port::CompanionSessionPort;
 use crate::store::{CompanionThread, MEMORY_KINDS, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
@@ -141,10 +136,6 @@ pub async fn build_companion_system_prompt(
             "\n\n主人此刻正通过 {platform} 远程和你说话。此刻你是一个通过 IM 陪主人聊天、答疑、出主意的对话助手：\
              你可以用 nomi_list_conversations / nomi_conversation_status 等只读工具帮主人了解桌面上正在跑的会话状态并转述，\
              也可以用 nomi_memory_* 维护你的长期记忆。\
-             当主人主动告诉你某个会话卡在决策上、或你查看到它在等人选择（runtime_state 为 WaitingConfirmation，或 pending_confirmations > 0）时，\
-             你可以替主人转达：先用 nomi_list_confirmations(conversation_id) 读出待决项和选项，\
-             把问题和选项以编号列表发给主人（如「1. 允许  2. 拒绝」），主人回复编号后，\
-             用 nomi_resolve_confirmation(conversation_id, call_id, option) 提交对应选项的 value，别擅自替主人做选择。\
              远程消息排版要适合 IM 阅读：短段落，少用大型 markdown 结构。\n\
              【硬性规则】除非主人在本轮消息中明确要求，否则禁止创建会话、向其他会话派发任务、创建定时任务或需求；\
              禁止依据历史记忆主动执行任何操作。你的默认动作是回答与建议，不是替主人去办事。"
@@ -154,25 +145,9 @@ pub async fn build_companion_system_prompt(
             "\n\n你还是整台 Nomi 桌面的总管家：用 nomi_* 工具可以查看/操作所有会话、定时任务、长期记忆和需求平台。\
              删除类操作先向主人复述目标确认后再执行。",
         );
-        system.push_str(
-            "\n\n重型任务分流（召唤伙伴）：识别到重型 coding/工程类任务（改仓库代码、跑构建/测试、多文件重构、\
-             长时间自动化）时不要在本聊天里直接开干——先向主人提议「我开一个工作会话来做这件事」，征得同意后用 \
-             nomi_create_conversation 创建：主人给了项目路径就带 workpath；同时带 summon（companion_id 填你自己的 id，\
-             memory_ids 先用 recall_memories 按任务挑几条最相关的记忆 id，宁少勿滥），让工作会话装载你的技能与所选记忆\
-             （对它只读）。建好后用 nomi_send_to_conversation 把任务派过去，并告诉主人新会话入口。",
-        );
     }
     if !profile.persona.custom.trim().is_empty() {
         system.push_str(&format!("\n主人对你的额外设定：{}", profile.persona.custom.trim()));
-    }
-    if let Some(snapshot) = profile.applied_preset.as_ref()
-        && !snapshot.instructions.trim().is_empty()
-    {
-        system.push_str(&format!(
-            "\n\n## 当前设定：{}\n{}",
-            snapshot.preset_name,
-            snapshot.instructions.trim()
-        ));
     }
     system.push_str(
         "\n\n## 知识沉淀技巧\n\
@@ -248,22 +223,6 @@ pub async fn build_companion_system_prompt(
     system
 }
 
-/// reconcile 的纯决策结果。
-#[derive(Debug, PartialEq, Eq)]
-enum WorkspaceAction {
-    /// current 已是 desired，无需动。
-    Noop,
-    /// current 为空：在 desired 处新建。
-    Create(std::path::PathBuf),
-    /// 把 current 目录移动到 desired（伙伴改名后的目录跟随）。
-    Move {
-        from: std::path::PathBuf,
-        to: std::path::PathBuf,
-    },
-    /// current 是外来路径（如 temp cwd）：留置不动，勿孤立已写文件。
-    Leave,
-}
-
 /// 纯：按 profile 算出目标工作区目录：
 /// `{workspaces_dir}/{seq}_{净化名}`（净化名为空则仅 `{seq}`）。
 fn compute_desired_workspace_dir(
@@ -277,65 +236,6 @@ fn compute_desired_workspace_dir(
         format!("{}_{}", profile.seq, seg)
     };
     workspaces_dir.join(leaf)
-}
-
-/// 纯：根据 current(extra.workspace，已 trim) 与工作区树，决策动作。
-fn plan_workspace_reconcile(
-    current: &str,
-    desired: &std::path::Path,
-    workspaces_dir: &std::path::Path,
-) -> WorkspaceAction {
-    let current = current.trim();
-    if current.is_empty() {
-        return WorkspaceAction::Create(desired.to_path_buf());
-    }
-    let cur = std::path::Path::new(current);
-    if cur == desired {
-        return WorkspaceAction::Noop;
-    }
-    if cur.starts_with(workspaces_dir) {
-        WorkspaceAction::Move { from: cur.to_path_buf(), to: desired.to_path_buf() }
-    } else {
-        WorkspaceAction::Leave
-    }
-}
-
-/// 执行一个 reconcile 动作的落盘部分；返回应写入 `extra.workspace` 的新路径
-/// （None = 保留 current 不变）。尽力而为：移动失败（占用/目标非空）返回 None。
-fn apply_workspace_action(action: WorkspaceAction) -> Option<std::path::PathBuf> {
-    match action {
-        WorkspaceAction::Noop | WorkspaceAction::Leave => None,
-        WorkspaceAction::Create(dir) => {
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                tracing::warn!(error = %e, dir = %dir.display(), "create companion workspace dir failed");
-            }
-            Some(dir)
-        }
-        WorkspaceAction::Move { from, to } => {
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // 目标已存在：仅当其为空目录时安全推进（删空再 rename）；非空则保留 current。
-            if to.exists() {
-                let empty = std::fs::read_dir(&to)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(false);
-                if empty {
-                    let _ = std::fs::remove_dir(&to);
-                } else {
-                    tracing::warn!(to = %to.display(), "companion workspace target exists and is non-empty; keeping current");
-                    return None;
-                }
-            }
-            match std::fs::rename(&from, &to) {
-                Ok(()) => Some(to),
-                Err(e) => {
-                    tracing::warn!(error = %e, from = %from.display(), to = %to.display(), "move companion workspace failed; keeping current");
-                    None
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -367,120 +267,13 @@ mod workspace_path_tests {
         );
     }
 
-    #[test]
-    fn plan_empty_current_creates() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("", desired, ws),
-            WorkspaceAction::Create(desired.to_path_buf())
-        );
-    }
-
-    #[test]
-    fn plan_current_equals_desired_noop() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/ws/1_x", desired, ws),
-            WorkspaceAction::Noop
-        );
-    }
-
-    #[test]
-    fn plan_outside_tree_is_left_untouched() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/cs/id/workspace", desired, ws),
-            WorkspaceAction::Leave
-        );
-    }
-
-    #[test]
-    fn plan_renamed_within_tree_moves() {
-        let desired = Path::new("/ws/1_new");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/ws/1_old", desired, ws),
-            WorkspaceAction::Move { from: PathBuf::from("/ws/1_old"), to: desired.to_path_buf() }
-        );
-    }
-
-    #[test]
-    fn plan_foreign_temp_cwd_left_untouched() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/data/conversations/nomi-temp-9", desired, ws),
-            WorkspaceAction::Leave
-        );
-    }
-}
-
-#[cfg(test)]
-mod workspace_apply_tests {
-    use super::*;
-
-    #[test]
-    fn create_makes_dir_and_returns_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("ws/1_x");
-        let out = apply_workspace_action(WorkspaceAction::Create(dir.clone()));
-        assert_eq!(out, Some(dir.clone()));
-        assert!(dir.is_dir());
-    }
-
-    #[test]
-    fn move_preserves_files_and_returns_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("cs/id/workspace");
-        std::fs::create_dir_all(&from).unwrap();
-        std::fs::write(from.join("a.txt"), "hi").unwrap();
-        let to = tmp.path().join("ws/1_毛球");
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, Some(to.clone()));
-        assert!(!from.exists());
-        assert_eq!(std::fs::read_to_string(to.join("a.txt")).unwrap(), "hi");
-    }
-
-    #[test]
-    fn move_into_existing_empty_target_succeeds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("ws/1_old");
-        std::fs::create_dir_all(&from).unwrap();
-        std::fs::write(from.join("a.txt"), "x").unwrap();
-        let to = tmp.path().join("ws/1_new");
-        std::fs::create_dir_all(&to).unwrap(); // 预先存在且为空
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, Some(to.clone()));
-        assert_eq!(std::fs::read_to_string(to.join("a.txt")).unwrap(), "x");
-    }
-
-    #[test]
-    fn move_into_existing_nonempty_target_keeps_current() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("ws/1_old");
-        std::fs::create_dir_all(&from).unwrap();
-        let to = tmp.path().join("ws/1_new");
-        std::fs::create_dir_all(&to).unwrap();
-        std::fs::write(to.join("occupied.txt"), "keep").unwrap(); // 目标非空
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, None); // 不覆盖，保留 current
-        assert!(from.exists());
-        assert_eq!(std::fs::read_to_string(to.join("occupied.txt")).unwrap(), "keep");
-    }
-
-    #[test]
-    fn noop_and_leave_return_none() {
-        assert_eq!(apply_workspace_action(WorkspaceAction::Noop), None);
-        assert_eq!(apply_workspace_action(WorkspaceAction::Leave), None);
-    }
 }
 
 /// Thread management over the real conversation domain. Every method is
 /// scoped to one companion — threads are owned, listed and activated per companion.
 pub struct CompanionThreads {
+    /// Serialize ensure across all entry points, including simultaneous first opens.
+    pub ensure_lock: tokio::sync::Mutex<()>,
     /// Canonical instance owner resolved from the user repository at startup.
     /// Companion conversations are host-control-plane resources and must never
     /// infer their owner from a username or a hard-coded database identifier.
@@ -488,24 +281,23 @@ pub struct CompanionThreads {
     pub store: CompanionStore,
     pub config: SharedConfig,
     pub registry: Arc<CompanionRegistry>,
-    pub conversations: Arc<ConversationService>,
-    pub runtime_registry: Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry>,
-    pub skill_paths: Arc<nomifun_extension::SkillPaths>,
+    pub sessions: Arc<dyn CompanionSessionPort>,
+    pub skill_paths: Arc<nomifun_skill_library::SkillPaths>,
 }
 
 /// Resolve the authoritative effective skill set for one companion profile.
 ///
 /// Fails closed: reconciliation callers must never treat a resolver failure
-/// as "no skills" — that empty set would strip every managed workspace link,
-/// wipe the frozen `extra.skills` snapshot and kill the live runtime. Three
+/// as "no skills" — a failed library read must not erase the profile
+/// selection used to create the canonical Session. Three
 /// failure signals are distinguished from a genuinely empty configuration:
 /// - the builtin corpus dir is missing/unreadable (startup materialization
 ///   failed, e.g. macOS packaging), so the resolver cannot see real skills;
-/// - `materialize_skills_for_agent` itself errors;
+/// - `resolve_skill_sources` itself errors;
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
 pub(crate) async fn effective_skill_names(
-    skill_paths: &nomifun_extension::SkillPaths,
+    skill_paths: &nomifun_skill_library::SkillPaths,
     profile: &CompanionProfileConfig,
 ) -> Result<Vec<String>, AppError> {
     if !skill_paths.builtin_skills_dir.is_dir() {
@@ -514,13 +306,16 @@ pub(crate) async fn effective_skill_names(
             skill_paths.builtin_skills_dir.display()
         )));
     }
-    let auto_names: Vec<String> = nomifun_extension::list_builtin_auto_skills(skill_paths)
+    let inventory = nomifun_skill_library::frozen::capture_inventory(skill_paths).await?;
+    let available = inventory.skills.iter().map(|skill| skill.name.as_str()).collect::<std::collections::BTreeSet<_>>();
+    let auto_names: Vec<String> = nomifun_skill_library::list_builtin_auto_skills(skill_paths)
         .await?
         .into_iter()
         .map(|skill| skill.name)
+        .filter(|name| available.contains(name.as_str()))
         .collect();
     let configured = normalized_effective_skill_names(auto_names, &profile.skills);
-    let resolved = nomifun_extension::materialize_skills_for_agent(
+    let resolved = nomifun_skill_library::resolve_skill_sources(
         skill_paths,
         &profile.companion_id,
         &configured,
@@ -539,159 +334,7 @@ pub(crate) async fn effective_skill_names(
     Ok(names)
 }
 
-/// Materialize + link `skill_names` into `workspace/.nomi/skills` under
-/// manifest ownership (`managed-companion-skills.json`): entries the manifest
-/// owns but that are no longer desired are removed (only when ownership is
-/// proven — user-created skills are never touched), missing desired skills are
-/// linked and recorded. Best-effort: failures log and degrade. Shared by
-/// companion threads and the in-session summon track (`skill_names = []`
-/// unloads every manifest-owned entry, e.g. after 解除召唤). Returns the
-/// resolved desired skill names.
-pub(crate) async fn sync_managed_workspace_skills(
-    skill_paths: &nomifun_extension::SkillPaths,
-    conversation_id: &str,
-    workspace: &Path,
-    skill_names: &[String],
-) -> Vec<String> {
-    let nomi_dir = workspace.join(".nomi");
-    let skills_dir = nomi_dir.join("skills");
-    // Cleanup fast-path: nothing desired and nothing managed → leave the
-    // workspace untouched (never create `.nomi`/manifest files in ordinary
-    // work workspaces that were never summoned).
-    if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
-        return Vec::new();
-    }
-    let resolved = match nomifun_extension::materialize_skills_for_agent(
-        skill_paths,
-        conversation_id,
-        skill_names,
-    )
-    .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
-            return Vec::new();
-        }
-    };
-
-    let old_manifest = load_manifest(&nomi_dir);
-    let desired: std::collections::HashSet<&str> = resolved
-        .iter()
-        .filter(|skill| {
-            old_manifest
-                .managed
-                .get(&skill.name)
-                .is_none_or(|record| record_source_matches(record, &skill.source_path))
-        })
-        .map(|skill| skill.name.as_str())
-        .collect();
-    let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
-    let to_link: Vec<_> = resolved
-        .iter()
-        .filter(|skill| !skills_dir.join(&skill.name).exists())
-        .cloned()
-        .collect();
-    if let Err(error) = nomifun_extension::link_workspace_skills(
-        workspace,
-        &[".nomi/skills"],
-        &to_link,
-    )
-    .await
-    {
-        tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
-    }
-    for skill in &to_link {
-        let target = skills_dir.join(&skill.name);
-        match record_managed_entry(&target, &skill.source_path) {
-            Ok(Some(record)) => {
-                manifest.managed.insert(skill.name.clone(), record);
-            }
-            Ok(None) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                error = %error,
-                target = %target.display(),
-                "record managed companion skill failed"
-            ),
-        }
-    }
-    if let Err(error) = save_manifest(&nomi_dir, &manifest) {
-        tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
-    }
-    resolved.into_iter().map(|skill| skill.name).collect()
-}
-
 impl CompanionThreads {
-    async fn builtin_auto_skill_names(&self) -> Vec<String> {
-        match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
-            Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
-            Err(error) => {
-                tracing::warn!(error = %error, "list builtin auto skills for companion failed");
-                Vec::new()
-            }
-        }
-    }
-
-    async fn sync_workspace_skills(
-        &self,
-        conversation_id: &str,
-        workspace: &Path,
-        skill_names: &[String],
-    ) {
-        sync_managed_workspace_skills(&self.skill_paths, conversation_id, workspace, skill_names)
-            .await;
-    }
-
-    /// Reconcile the workspace links and immutable conversation skill snapshot
-    /// for one existing companion thread. All failures are best-effort at this
-    /// boundary; a profile patch must not become unusable because a stale
-    /// workspace or runtime is temporarily unavailable. Resolver failures abort
-    /// the whole reconciliation before anything destructive: an error-empty
-    /// skill set must never masquerade as an authoritative configuration.
-    pub(crate) async fn reconcile_profile_skills(
-        &self,
-        profile: &CompanionProfileConfig,
-        conversation_id: &str,
-    ) {
-        let Ok(response) = self
-            .conversations
-            .get(self.authoritative_user_id.as_ref(), conversation_id)
-            .await
-        else {
-            return;
-        };
-        let effective = match effective_skill_names(&self.skill_paths, profile).await {
-            Ok(effective) => effective,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    companion_id = %profile.companion_id,
-                    conversation_id,
-                    "resolve companion skills failed; skipping skill reconciliation"
-                );
-                return;
-            }
-        };
-        if let Some(workspace) = response
-            .extra
-            .get("workspace")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|workspace| !workspace.is_empty())
-        {
-            self.sync_workspace_skills(conversation_id, Path::new(workspace), &effective)
-                .await;
-        }
-        if let Err(error) = self
-            .conversations
-            .replace_skill_snapshot(conversation_id, &effective)
-            .await
-        {
-            tracing::warn!(error = %error, conversation_id, "reconcile companion skill snapshot failed");
-        }
-    }
-
     /// `NotFound` unless `conversation_id` is a registered thread owned by
     /// `companion_id`.
     async fn assert_owned(&self, companion_id: &str, conversation_id: &str) -> Result<(), AppError> {
@@ -703,49 +346,12 @@ impl CompanionThreads {
         Ok(())
     }
 
-    /// 把某线程落盘工作区收敛到伙伴目标（seq+name）目录：统管首次创建和改名跟随。
-    /// 幂等 + 尽力而为，绝不让调用方失败；被占用则保留当前路径下次再试。
-    pub(crate) async fn reconcile_thread_workspace(&self, profile: &CompanionProfileConfig, conversation_id: &str) {
-        let resp = match self
-            .conversations
-            .get(self.authoritative_user_id.as_ref(), conversation_id)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, conversation_id, "fetch companion thread for workspace reconcile failed");
-                return;
-            }
-        };
-        let current = resp
-            .extra
-            .get("workspace")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let workspaces_dir = self.registry.workspaces_dir();
-        let desired = compute_desired_workspace_dir(&workspaces_dir, profile);
-        let action = plan_workspace_reconcile(&current, &desired, &workspaces_dir);
-        if let Some(new_path) = apply_workspace_action(action) {
-            let new_str = new_path.to_string_lossy().into_owned();
-            if new_str != current
-                && let Err(e) = self
-                    .conversations
-                    .update_extra(conversation_id, serde_json::json!({ "workspace": new_str }))
-                    .await
-            {
-                tracing::warn!(error = %e, conversation_id, "update companion workspace extra failed");
-            }
-        }
-    }
-
     /// 该线程落盘工作区——仅当它位于 pretty 工作区树（解耦树）之下时返回。外来/temp/
     /// 空路径返回 None。
     /// 必须在删除会话「之前」读（删除会丢 extra）。
     async fn thread_workspace_under_tree(&self, conversation_id: &str) -> Option<std::path::PathBuf> {
         let resp = self
-            .conversations
+            .sessions
             .get(self.authoritative_user_id.as_ref(), conversation_id)
             .await
             .ok()?;
@@ -767,6 +373,7 @@ impl CompanionThreads {
     /// requires the companion's `profile.model` to be configured (else BadRequest).
     /// `title` only applies when a brand-new thread is created.
     pub async fn create(&self, companion_id: &str, title: Option<String>) -> Result<CompanionThread, AppError> {
+        let _guard = self.ensure_lock.lock().await;
         let profile = self
             .registry
             .get(companion_id)
@@ -775,11 +382,6 @@ impl CompanionThreads {
         // Single-session ensure: list (which prunes threads whose backing
         // conversation was deleted out-of-band) and reuse the survivor.
         if let Some(existing) = self.list(companion_id).await?.into_iter().next() {
-            // 收敛工作区：首次补建 / 改名跟随（best-effort）。
-            // 外来 temp cwd 仍留置不动（见 plan_workspace_reconcile 的 Leave 分支：
-            // 移动 live cwd 会孤立已写文件）。新伙伴走下面的 create 分支直接落 pretty 名。
-            self.reconcile_thread_workspace(&profile, &existing.conversation_id).await;
-            self.reconcile_profile_skills(&profile, &existing.conversation_id).await;
             let _ = set_active_thread_ptr(&self.store, companion_id, Some(&existing.conversation_id)).await;
             return Ok(existing);
         }
@@ -803,22 +405,9 @@ impl CompanionThreads {
             tracing::warn!(error = %e, dir = %workspace_dir.display(), "create companion workspace dir failed");
         }
         let workspace = workspace_dir.to_string_lossy().into_owned();
-        let auto_skill_names = self.builtin_auto_skill_names().await;
-        // Minting must not hard-fail on a transient resolver error: a brand-new
-        // conversation has nothing to destroy, and the follow-up reconcile (and
-        // every later get_or_create) repairs the frozen snapshot once the
-        // resolver recovers.
-        let effective_skill_names = match effective_skill_names(&self.skill_paths, &profile).await {
-            Ok(names) => names,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    companion_id = %profile.companion_id,
-                    "resolve companion skills failed; creating thread without preset skills"
-                );
-                Vec::new()
-            }
-        };
+        // A profile selection must be resolved before the host can freeze its
+        // canonical Session. Resolver failure is not an empty selection.
+        let effective_skill_names = effective_skill_names(&self.skill_paths, &profile).await?;
 
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
@@ -827,7 +416,6 @@ impl CompanionThreads {
             source: None,
             channel_chat_id: None,
             preset_id: None,
-            preset_overrides: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -837,37 +425,20 @@ impl CompanionThreads {
                 "companion_session": true,
                 "companion_id": companion_id,
                 "system_prompt": system_prompt,
-                // `build_companion_system_prompt` already includes the frozen
-                // preset instructions. Prevent the generic conversation path
-                // from appending the same block a second time.
-                "preset_instructions_embedded": true,
-                // The conversation service freezes this into `extra.skills`.
-                // Supplying the resolved set also filters configured names that
-                // are not installed; the follow-up reconciliation repairs the
-                // snapshot against the authoritative resolver.
-                "preset_enabled_skills": effective_skill_names,
-                "exclude_auto_inject_skills": auto_skill_names,
-                // Fixed private work folder (locked, browsable in the chat tab's file
-                // sidebar). Marks the conversation as a custom (non-temp) workspace, so
-                // no skill symlinks are wired — the companion uses gateway tools, not skills.
+                // Fixed private work folder, browsable in the companion chat.
                 "workspace": workspace,
-                // No explicit session_mode here: the Nomi factory defaults every
-                // companion-owned session to "yolo" auto-approval (see
-                // factory/nomi.rs) — the companion chat has no interactive
-                // approval UI, so a tool call under Default mode would park forever
-                // (聊天永久「思考中」). The companion's prompt is what guards destructive
-                // ops (复述确认), not an approval gate.
                 });
                 extra
             },
         };
-        let created = if let Some(snapshot) = profile.applied_preset.clone() {
-            self.conversations
-                .create_from_preset_snapshot(self.authoritative_user_id.as_ref(), req, snapshot)
-                .await?
-        } else {
-            self.conversations.create(self.authoritative_user_id.as_ref(), req).await?
-        };
+        let created = self
+            .sessions
+            .create(
+                self.authoritative_user_id.as_ref(),
+                req,
+                effective_skill_names,
+            )
+            .await?;
         let created_id = created.conversation_id;
         // Register; if the registry write fails, reap the just-created
         // conversation — an unregistered companion row is invisible to every
@@ -876,13 +447,12 @@ impl CompanionThreads {
             Ok(thread) => thread,
             Err(e) => {
                 let _ = self
-                    .conversations
+                    .sessions
                     .delete(self.authoritative_user_id.as_ref(), &created_id)
                     .await;
                 return Err(e);
             }
         };
-        self.reconcile_profile_skills(&profile, &created_id).await;
         let _ = set_active_thread_ptr(&self.store, companion_id, Some(&created_id)).await;
         Ok(thread)
     }
@@ -896,7 +466,7 @@ impl CompanionThreads {
         let mut removed_ids: Vec<String> = Vec::new();
         for t in threads.drain(..) {
             match self
-                .conversations
+                .sessions
                 .get(self.authoritative_user_id.as_ref(), &t.conversation_id)
                 .await
             {
@@ -936,7 +506,7 @@ impl CompanionThreads {
         // Conversation first (kills the running agent via delete hooks);
         // tolerate already-deleted rows.
         match self
-            .conversations
+            .sessions
             .delete(self.authoritative_user_id.as_ref(), conversation_id)
             .await
         {
@@ -957,81 +527,6 @@ impl CompanionThreads {
         Ok(())
     }
 
-    /// Propagate the companion's model (唯一事实源 = profile.model) onto its single
-    /// companion conversation ROW so the next turn uses the new model. The
-    /// conversation row `model` was only a create-time snapshot; this keeps it
-    /// in sync after a `PATCH /api/companion/companions/{id}` model change. Idempotent and
-    /// best-effort at the call site. `companion_id` must own the thread.
-    pub async fn set_model(
-        &self,
-        companion_id: &str,
-        conversation_id: &str,
-        model: &ProviderWithModel,
-    ) -> Result<(), AppError> {
-        self.assert_owned(companion_id, conversation_id).await?;
-        self.conversations
-            .update(
-                self.authoritative_user_id.as_ref(),
-                conversation_id,
-                nomifun_api_types::UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: Some(ProviderWithModel {
-                        provider_id: model.provider_id.clone(),
-                        model: model.model.clone(),
-                        use_model: model.use_model.clone(),
-                    }),
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: None,
-                },
-                &self.runtime_registry,
-            )
-            .await
-            .map(|_| ())
-    }
-
-    /// Replace only the reusable preset-derived portion of an existing
-    /// companion thread. The companion id, memory, history, workspace and
-    /// process-issued platform capability stays untouched.
-    pub async fn set_preset(
-        &self,
-        companion_id: &str,
-        conversation_id: &str,
-        system_prompt: String,
-        snapshot: &nomifun_api_types::ResolvedPresetSnapshot,
-    ) -> Result<(), AppError> {
-        self.assert_owned(companion_id, conversation_id).await?;
-        self.conversations
-            .update(
-                self.authoritative_user_id.as_ref(),
-                conversation_id,
-                nomifun_api_types::UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: None,
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: Some(serde_json::json!({
-                        "system_prompt": system_prompt,
-                        "preset_instructions_embedded": true,
-                        "preset_id": snapshot.preset_id.clone(),
-                        "preset_revision": snapshot.preset_revision,
-                        "preset_snapshot": snapshot,
-                        "skills": snapshot.included_skills.clone(),
-                        "exclude_auto_inject_skills": snapshot.excluded_auto_skills.clone(),
-                        "preset_knowledge_binding": true,
-                    })),
-                },
-                &self.runtime_registry,
-            )
-            .await
-            .map(|_| ())
-    }
 }
 
 /// `CompanionMemorySink` implementation over the shared companion store — the
@@ -1202,20 +697,19 @@ impl CompanionMemorySink for CompanionStoreSink {
 mod skill_resolution_tests {
     use super::*;
     use crate::profile::CompanionSkillConfig;
+    use std::path::Path;
 
-    fn skill_paths(root: &Path) -> nomifun_extension::SkillPaths {
+    fn skill_paths(root: &Path) -> nomifun_skill_library::SkillPaths {
         // A present builtin corpus dir is the baseline healthy state: its
         // absence is the exact macOS "startup materialization failed" signal
         // that resolution must treat as an error, so tests opt out explicitly.
         std::fs::create_dir_all(root.join("builtin-skills")).unwrap();
-        nomifun_extension::SkillPaths {
+        nomifun_skill_library::SkillPaths {
             data_dir: root.to_path_buf(),
             user_skills_dir: root.join("skills"),
             cron_skills_dir: root.join("cron/skills"),
             builtin_skills_dir: root.join("builtin-skills"),
             builtin_rules_dir: root.join("builtin-rules"),
-            preset_rules_dir: root.join("preset-rules"),
-            preset_skills_dir: root.join("preset-skills"),
         }
     }
 
@@ -1243,7 +737,7 @@ mod skill_resolution_tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut profile = profile_with_enabled(&["alpha"]);
         // Non-canonical id (only reachable through a hand-built profile)
-        // drives materialize_skills_for_agent's validate_filename Err arm.
+        // drives resolve_skill_sources's validate_filename Err arm.
         profile.companion_id = "../escape".into();
         let result = effective_skill_names(&skill_paths(tmp.path()), &profile).await;
         assert!(result.is_err(), "materialize error must propagate, got {result:?}");
@@ -1624,28 +1118,6 @@ mod tests {
         let local = build_companion_system_prompt(&store, &profile, None, false).await;
         assert!(local.contains("总管家"), "local desktop companion stays the 总管家");
         assert!(local.contains("上周让你做导出功能"), "local snapshot still includes task memories");
-    }
-
-    #[tokio::test]
-    async fn local_prompt_routes_heavy_coding_to_summoned_work_sessions() {
-        // Spec §B6 反向分流: the LOCAL 总管家 proposes a summoned work session
-        // for heavy coding instead of doing it inline; the rule rides
-        // nomi_create_conversation's workpath + summon params and requires the
-        // owner's consent first. The paragraph must NOT leak into remote (IM)
-        // mode, whose hard no-proactive-dispatch rule stays authoritative.
-        let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
-
-        let local = build_companion_system_prompt(&store, &profile, None, false).await;
-        assert!(local.contains("重型任务分流"), "local prompt carries the routing rule");
-        assert!(local.contains("nomi_create_conversation"));
-        assert!(local.contains("workpath"));
-        assert!(local.contains("summon"));
-        assert!(local.contains("征得同意"), "consent-first is part of the rule");
-
-        let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
-        assert!(!remote.contains("重型任务分流"), "routing rule must not leak into remote mode");
-        assert!(!remote.contains("workpath"));
     }
 
     #[tokio::test]

@@ -225,9 +225,13 @@ pub fn build_polish_prompt(name: &str, draft: &str) -> String {
 /// [`SAMPLE_MAX_PER_FILE`] bytes, total capped at [`SAMPLE_MAX_TOTAL`].
 pub async fn sample_base_files(root: &Path) -> Vec<(String, String)> {
     let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || sample_base_files_blocking(&root))
-        .await
-        .unwrap_or_default()
+    match tokio::task::spawn_blocking(move || sample_base_files_blocking(&root)).await {
+        Ok(samples) => samples,
+        Err(error) => {
+            crate::service::background::record_join_failure(&error);
+            Vec::new()
+        }
+    }
 }
 
 fn sample_base_files_blocking(root: &Path) -> Vec<(String, String)> {

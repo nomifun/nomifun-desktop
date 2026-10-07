@@ -77,73 +77,50 @@ fn config_file_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("opencode.json"))
 }
 
-/// Strip single-line (`//`) and multi-line (`/* ... */`) JSON comments.
-///
-/// Preserves string contents (comments inside strings are left alone).
-fn strip_json_comments(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let len = bytes.len();
+/// Parse JSONC while preserving string bytes and comment token boundaries.
+fn parse_jsonc(input: &str) -> Result<serde_json::Value, McpError> {
+    let mut bytes = input.as_bytes().to_vec();
     let mut i = 0;
-
-    while i < len {
-        // Check for string literal
-        if bytes[i] == b'"' {
-            result.push('"');
-            i += 1;
-            // Consume until closing quote, respecting escapes
-            while i < len {
-                if bytes[i] == b'\\' && i + 1 < len {
-                    result.push(bytes[i] as char);
-                    result.push(bytes[i + 1] as char);
-                    i += 2;
-                } else if bytes[i] == b'"' {
-                    result.push('"');
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    let byte = bytes[i];
                     i += 1;
-                    break;
-                } else {
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-        } else if bytes[i] == b'/' && i + 1 < len {
-            if bytes[i + 1] == b'/' {
-                // Single-line comment: skip until newline
-                i += 2;
-                while i < len && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            } else if bytes[i + 1] == b'*' {
-                // Multi-line comment: skip until */
-                i += 2;
-                while i + 1 < len {
-                    if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                        i += 2;
+                    if byte == b'\\' {
+                        i += 1;
+                    } else if byte == b'"' {
                         break;
                     }
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
+                    bytes[i] = b' ';
                     i += 1;
                 }
-                // Handle unterminated block comment
-                if i >= len {
-                    break;
-                }
-            } else {
-                result.push(bytes[i] as char);
-                i += 1;
             }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let start = i;
+                i += 2;
+                while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" {
+                    i += 1;
+                }
+                if i + 1 >= bytes.len() {
+                    return Err(McpError::AgentOperationFailed("unterminated JSONC comment".into()));
+                }
+                i += 2;
+                for byte in &mut bytes[start..i] {
+                    if !matches!(*byte, b'\n' | b'\r') {
+                        *byte = b' ';
+                    }
+                }
+            }
+            _ => i += 1,
         }
     }
-
-    result
-}
-
-/// Parse JSONC (JSON with comments) into a `serde_json::Value`.
-fn parse_jsonc(input: &str) -> Result<serde_json::Value, McpError> {
-    let stripped = strip_json_comments(input);
-    serde_json::from_str(&stripped).map_err(McpError::from)
+    serde_json::from_slice(&bytes).map_err(McpError::from)
 }
 
 /// Extract MCP servers from the parsed config root.
@@ -233,12 +210,8 @@ fn parse_headers(config: &serde_json::Value) -> HashMap<String, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn source_is_opencode() {
-        assert_eq!(OpencodeAdapter.source(), McpSource::OpenCode);
-    }
 
-    // -- strip_json_comments --------------------------------------------------
+    // -- JSONC comments -------------------------------------------------------
 
     #[test]
     fn strip_single_line_comments() {
@@ -246,8 +219,7 @@ mod tests {
   // This is a comment
   "key": "value" // inline comment
 }"#;
-        let stripped = strip_json_comments(input);
-        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        let parsed = parse_jsonc(input).unwrap();
         assert_eq!(parsed["key"], "value");
     }
 
@@ -258,8 +230,7 @@ mod tests {
      comment */
   "key": "value"
 }"#;
-        let stripped = strip_json_comments(input);
-        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        let parsed = parse_jsonc(input).unwrap();
         assert_eq!(parsed["key"], "value");
     }
 
@@ -269,8 +240,7 @@ mod tests {
   "key": "value with // comment inside",
   "key2": "value with /* block */ inside"
 }"#;
-        let stripped = strip_json_comments(input);
-        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        let parsed = parse_jsonc(input).unwrap();
         assert_eq!(parsed["key"], "value with // comment inside");
         assert_eq!(parsed["key2"], "value with /* block */ inside");
     }
@@ -278,15 +248,21 @@ mod tests {
     #[test]
     fn strip_comments_preserves_escaped_quotes() {
         let input = r#"{"key": "val\"ue // not a comment"}"#;
-        let stripped = strip_json_comments(input);
-        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        let parsed = parse_jsonc(input).unwrap();
         assert_eq!(parsed["key"], "val\"ue // not a comment");
     }
 
     #[test]
-    fn strip_no_comments() {
-        let input = r#"{"key": "value"}"#;
-        assert_eq!(strip_json_comments(input), input);
+    fn jsonc_preserves_strings_and_comment_line_endings() {
+        let expected = serde_json::json!({ "key": "中文🙂\\\"// /*" });
+        let input = expected.to_string();
+        for suffix in ["", "// 尾注释", "// 注释\r", "/* 中\r\n文 */"] {
+            assert_eq!(parse_jsonc(&(input.clone() + suffix)).unwrap(), expected);
+        }
+        for separator in ["\r", "\n", "\r\n"] {
+            let input = format!("{{// 注释{separator}\"key\": 1}}");
+            assert_eq!(parse_jsonc(&input).unwrap(), serde_json::json!({ "key": 1 }));
+        }
     }
 
     // -- parse_mcp_field ------------------------------------------------------
@@ -441,27 +417,31 @@ mod tests {
   // comment
   "mcp": {
     /* block comment */
-    "srv": {
+    "中文🙂": {
       "type": "stdio",
-      "command": "npx"
+      "command": "工具",
+      "args": ["你好", "// 原样保留", "/* 注释文本 */"]
     }
   }
 }"#;
         let root = parse_jsonc(input).unwrap();
         let servers = parse_mcp_field(&root).unwrap();
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "srv");
+        assert_eq!(servers[0].name, "中文🙂");
+        match &servers[0].transport {
+            McpServerTransport::Stdio { command, args, .. } => {
+                assert_eq!(command, "工具");
+                assert_eq!(args, &["你好", "// 原样保留", "/* 注释文本 */"]);
+            }
+            _ => panic!("expected Stdio"),
+        }
     }
 
     #[test]
     fn parse_jsonc_invalid_json_fails() {
-        let result = parse_jsonc("not json at all");
-        assert!(result.is_err());
+        for input in ["not json at all", "1/**/2", "tr/**/ue", "{}/*", "{}/* ", "{}/*x", "{}/*x*"] {
+            assert!(parse_jsonc(input).is_err(), "must reject {input:?}");
+        }
     }
 
-    #[test]
-    fn trait_is_object_safe() {
-        let adapter: Box<dyn McpAgentAdapter> = Box::new(OpencodeAdapter);
-        assert_eq!(adapter.source(), McpSource::OpenCode);
-    }
 }

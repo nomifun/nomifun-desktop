@@ -13,7 +13,8 @@
 //! relay — only this inline form leaks.
 //!
 //! The desktop UI never shows this reasoning because it filters twice:
-//! - backend, on the finished message: `nomifun_conversation::response_middleware::strip_think_tags`
+//! - backend, on the finished message: the host response middleware strips
+//!   provider-specific think tags before the final Channel delivery
 //! - frontend, while streaming / for history: `ui/src/renderer/utils/chat/thinkTagFilter.ts`
 //!
 //! The IM relay has no frontend, and its raw token stream never went through the

@@ -1,27 +1,33 @@
 import React, { Suspense } from 'react';
+import { useTranslation } from 'react-i18next';
 import { HashRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
+import { PLUGIN_FEATURE_VISIBLE } from '@renderer/utils/plugins/pluginFeatureAvailability';
+import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import {
-  CREATIVE_STUDIO_CANVASES_PATH,
-  CREATIVE_STUDIO_ROOT_PATH,
-  creativeStudioSectionForPath,
-  type CreativeStudioSection,
-} from '@renderer/pages/creativeStudio/app/routes';
+  loadCreativeStudioAssetsRoute,
+  loadCreativeStudioCanvasRoute,
+  loadCreativeStudioCanvasesRoute,
+  loadCreativeStudioPromptsRoute,
+  loadCreativeStudioTemplateRoute,
+  loadKnowledgeDetailRoute,
+  loadResourcePageBoundary,
+} from './routePreload';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
-const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
+const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
+const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));
 const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
+const PluginLibraryPage = React.lazy(() => import('@renderer/pages/plugins'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
-const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
-const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
+const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/ExecutionEngines'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
-const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
 const ComponentsShowcase = React.lazy(() => import('@renderer/pages/TestShowcase'));
 const ScheduledTasksPage = React.lazy(() => import('@renderer/pages/cron/ScheduledTasksPage'));
@@ -36,98 +42,42 @@ const NomiConfigPage = React.lazy(() => import('@renderer/pages/nomi'));
 const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/customerService'));
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
-const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
-const loadCreativeStudioFocusShell = () =>
-  import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell');
-const loadCreativeStudioCanvasesRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute');
-const loadCreativeStudioPromptsRoute = () =>
-  import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute');
-const loadCreativeStudioAssetsRoute = () =>
-  import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage');
-const loadCreativeStudioCanvasRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasProductRoute');
-const loadCreativeStudioWorkbenches = () =>
-  import('@renderer/pages/creativeStudio/workbenches/product');
-const loadCreativeStudioImageWorkbenchRoute = () =>
-  loadCreativeStudioWorkbenches().then((module) => ({
-    default: module.ImageWorkbenchProductRoute,
-  }));
-const loadCreativeStudioVideoWorkbenchRoute = () =>
-  loadCreativeStudioWorkbenches().then((module) => ({
-    default: module.VideoWorkbenchProductRoute,
-  }));
-const loadCreativeStudioDirectorRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute');
-const loadCreativeStudioTemplateRoute = () =>
-  import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute');
+const KnowledgeDetailPage = React.lazy(loadKnowledgeDetailRoute);
 
-const creativeStudioRouteLoaders: Record<CreativeStudioSection, () => Promise<unknown>> = {
-  canvases: loadCreativeStudioCanvasesRoute,
-  canvas: loadCreativeStudioCanvasRoute,
-  director: loadCreativeStudioDirectorRoute,
-  image: loadCreativeStudioImageWorkbenchRoute,
-  video: loadCreativeStudioVideoWorkbenchRoute,
-  prompts: loadCreativeStudioPromptsRoute,
-  assets: loadCreativeStudioAssetsRoute,
-  templates: loadCreativeStudioTemplateRoute,
-};
-
-const ignoreCreativeStudioPreloadFailure = (preload: Promise<unknown>): Promise<void> =>
-  preload.then(
-    () => undefined,
-    () => undefined
-  );
-
-/**
- * Warms the focused product shell and the exact lazy route needed for a
- * Creative Studio destination. Preloading remains best-effort: route errors
- * still render through the normal route error boundary when the user navigates.
- */
-export const preloadCreativeStudioRoute = (path: string): Promise<void> => {
-  const section = creativeStudioSectionForPath(path);
-  const loader = section ? creativeStudioRouteLoaders[section] : null;
-  if (!loader) return Promise.resolve();
-
-  return ignoreCreativeStudioPreloadFailure(
-    Promise.all([loadCreativeStudioFocusShell(), loader()])
-  );
-};
-
-/** Preload the sections exposed by the Creative Studio product sidebar at idle. */
-export const preloadCreativeStudioNavigationRoutes = (): Promise<void> =>
-  ignoreCreativeStudioPreloadFailure(
-    Promise.all([
-      loadCreativeStudioFocusShell(),
-      loadCreativeStudioCanvasesRoute(),
-      loadCreativeStudioWorkbenches(),
-      loadCreativeStudioPromptsRoute(),
-      loadCreativeStudioAssetsRoute(),
-      loadCreativeStudioTemplateRoute(),
-    ])
-  );
-
-const CreativeStudioFocusShell = React.lazy(loadCreativeStudioFocusShell);
+const ResourcePageBoundary = React.lazy(loadResourcePageBoundary);
 const CreativeStudioCanvasesRoute = React.lazy(loadCreativeStudioCanvasesRoute);
 const CreativeStudioPromptsRoute = React.lazy(loadCreativeStudioPromptsRoute);
 const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
-const CreativeStudioImageWorkbenchRoute = React.lazy(loadCreativeStudioImageWorkbenchRoute);
-const CreativeStudioVideoWorkbenchRoute = React.lazy(loadCreativeStudioVideoWorkbenchRoute);
-const CreativeStudioDirectorRoute = React.lazy(loadCreativeStudioDirectorRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
-const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
-const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
+const PluginRunPage = React.lazy(() => import('@renderer/pages/plugins/PluginRunPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
 const RouteFallback: React.FC<{ Component: React.LazyExoticComponent<React.ComponentType> }> = ({ Component }) => {
   const location = useLocation();
+  const { t } = useTranslation();
   const resetKey = `${location.pathname}${location.search}${location.hash}`;
+  const stateLabel =
+    location.state &&
+    typeof location.state === 'object' &&
+    'routeLoadingLabel' in location.state &&
+    typeof location.state.routeLoadingLabel === 'string'
+      ? location.state.routeLoadingLabel.slice(0, 160)
+      : undefined;
+  const routeLoadingLabel =
+    stateLabel ||
+    (location.pathname.startsWith('/knowledge/')
+      ? t('knowledge.opening', { defaultValue: '正在打开知识库…' })
+      : resourceSectionForPath(location.pathname) === 'canvas'
+        ? t('creativeStudio.canvas.editor.loading', {
+            defaultValue: '正在载入画布…',
+          })
+        : undefined);
 
   return (
     <RouteErrorBoundary resetKey={resetKey}>
-      <Suspense fallback={<AppLoader />}>
+      <Suspense fallback={<AppLoader label={routeLoadingLabel} />}>
         <Component />
       </Suspense>
     </RouteErrorBoundary>
@@ -148,40 +98,6 @@ const SessionShellRoute: React.FC = () => {
         <ConversationShell />
       </Suspense>
     </RouteErrorBoundary>
-  );
-};
-
-const withSearch = (path: string, searchParams: URLSearchParams) => {
-  const search = searchParams.toString();
-  return search ? `${path}?${search}` : path;
-};
-
-/** Preserve local/remote tab deep links from the former settings route. */
-const LegacyExecutionEngineRedirect: React.FC = () => {
-  const { search } = useLocation();
-  return <Navigate to={`/settings/execution-engines${search}`} replace />;
-};
-
-const LegacyExtensionsRedirect: React.FC = () => {
-  const { search } = useLocation();
-  const searchParams = new URLSearchParams(search);
-  const tab = searchParams.get('tab');
-  searchParams.delete('tab');
-
-  if (tab === 'tools') {
-    return <Navigate to={withSearch('/mcp', searchParams)} replace />;
-  }
-
-  return <Navigate to={withSearch('/skills', searchParams)} replace />;
-};
-
-const CreativeStudioCanvasesRedirect: React.FC = () => {
-  const { search, hash } = useLocation();
-  return (
-    <Navigate
-      to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}
-      replace
-    />
   );
 };
 
@@ -226,25 +142,21 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route element={layout}>
             <Route index element={<Navigate to='/guid' replace />} />
             {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
-            <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
-              <Route index element={<CreativeStudioCanvasesRedirect />} />
-              <Route path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)} />
-              <Route path='projects' element={<CreativeStudioCanvasesRedirect />} />
-              <Route path='canvas/:canvasId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
-              <Route path='director/:canvasId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
-              <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
-              <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
-              <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
-              <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
-              <Route path='templates' element={withRouteFallback(CreativeStudioTemplateRoute)} />
+            <Route element={withRouteFallback(ResourcePageBoundary)}>
+              <Route path={CANVASES_PATH} element={withRouteFallback(CreativeStudioCanvasesRoute)} />
+              <Route path={CANVAS_PATTERN} element={withRouteFallback(CreativeStudioCanvasRoute)} />
+              <Route path={ASSET_LIBRARY_PATH} element={<Navigate to={MATERIALS_PATH} replace />} />
+              <Route path={MATERIALS_PATH} element={withRouteFallback(CreativeStudioAssetsRoute)} />
+              <Route path={PROMPTS_PATH} element={withRouteFallback(CreativeStudioPromptsRoute)} />
+              <Route path={TEMPLATES_PATH} element={withRouteFallback(CreativeStudioTemplateRoute)} />
             </Route>
-            {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
+            {/* Agent authoring is public; platform capabilities remain separate destinations. */}
+            <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />
+            <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
-            <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
+            <Route path='/plugins' element={PLUGIN_FEATURE_VISIBLE ? withRouteFallback(PluginLibraryPage) : <Navigate to='/guid' replace />} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
-            <Route path='/browser' element={withRouteFallback(BrowserPage)} />
-            <Route path='/presets' element={withRouteFallback(PresetSettings)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
             <Route element={<SessionShellRoute />}>
@@ -255,7 +167,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             </Route>
             {/* Relocated to the capability rail. */}
             <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
-            <Route path='/settings/agent' element={<LegacyExecutionEngineRedirect />} />
             <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
             <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
             <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />
@@ -264,11 +175,10 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
-            <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
-            <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
-            <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/permissions' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/computer-use' element={<Navigate to='/settings/permissions?tab=computer-use' replace />} />
+            <Route path='/settings/voice-input' element={<Navigate to='/settings/permissions?tab=voice-input' replace />} />
             <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
-            <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
             <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
             <Route path='/settings' element={<Navigate to='/settings/system' replace />} />
             <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />
@@ -294,9 +204,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
-            {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
-            <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
-            <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
+            {/* One Plugin library, creator, and App/detail surface. */}
+            <Route path='/plugins/run/:id' element={PLUGIN_FEATURE_VISIBLE ? withRouteFallback(PluginRunPage) : <Navigate to='/guid' replace />} />
           </Route>
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />

@@ -20,7 +20,7 @@ import { useTranslation } from "react-i18next";
 
 import styles from "./CreativeImageTools.module.css";
 
-export interface CreativeCanvasImageToolbarProps {
+interface CreativeCanvasImageToolbarProps {
   nodeId: string;
   children: React.ReactNode;
   visible: boolean;

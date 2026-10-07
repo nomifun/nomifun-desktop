@@ -226,7 +226,8 @@ const shouldDeferPersistence = (command: CanvasCommand): boolean =>
 
 const defaultLoading = (label: string) => (
   <div className={styles.centerState} data-creative-canvas-state='loading' role='status'>
-    {label}
+    <span className={styles.loadingSpinner} aria-hidden='true' />
+    <span>{label}</span>
   </div>
 );
 
@@ -910,7 +911,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           corner,
           stateRef.current.viewport,
           {
-            keepAspectRatio: event.shiftKey,
+            keepAspectRatio: event.shiftKey ||
+              ((node.type === 'image' || node.type === 'video') && Boolean(node.data.assetId)),
           }
         );
         if (!started.ok) return;
@@ -1449,7 +1451,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                   onPointerDown={(event) => beginConnectionDrag(node, 'target', event)}
                 />
               ) : null}
-              {node.type !== 'group' && node.type !== 'director' ? (
+              {node.type !== 'group' ? (
                 <button
                   type='button'
                   className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}

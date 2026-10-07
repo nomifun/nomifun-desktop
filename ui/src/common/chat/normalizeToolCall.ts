@@ -4,9 +4,10 @@ import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
-export type NormalizedToolNotExecutedReason = 'invalid_arguments';
+export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight' | 'process_reference';
+export type NormalizedToolBoundedResult = 'search_context_withheld';
 
-export interface NormalizedToolRetry {
+interface NormalizedToolRetry {
   retryGroupId: string;
   attemptNo: number;
   retryOfCallId?: string;
@@ -15,11 +16,21 @@ export interface NormalizedToolRetry {
 export interface NormalizedToolCall {
   key: string;
   name: string;
+  capabilityId?: string;
+  actionId?: string;
   status: NormalizedToolStatus;
   /** Explicit protocol/tool semantic kind when the source provides one. */
   kind?: string;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
+  /** Exit status of a native command whose completion and cleanup are proven. */
+  commandExitCode?: number;
+  /** The local process owner proved that the requested executable did not start. */
+  commandNotStarted?: boolean;
+  /** A native deadline result with proven cleanup; the source error status remains intact. */
+  commandTimedOut?: boolean;
+  /** Exact local Runtime result whose data was intentionally withheld at a documented bound. */
+  boundedResult?: NormalizedToolBoundedResult;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
   skipped?: boolean;
   /** The runtime rejected the call before dispatching it to the tool. */
@@ -35,7 +46,7 @@ export interface NormalizedToolCall {
 
 const formatValue = (value: unknown): string => toDisplayText(value);
 
-const canonicalMcpOriginHash = /^[a-z2-7]{16}$/;
+const canonicalMcpOriginHash = /^(?:[a-z2-7]{16}|[a-f0-9]{20})$/;
 
 /**
  * Turn provider-facing MCP routing aliases back into a stable receipt label.
@@ -44,6 +55,8 @@ const canonicalMcpOriginHash = /^[a-z2-7]{16}$/;
  */
 export const formatToolDisplayName = (value: unknown): string => {
   const fullName = toDisplayText(value).trim();
+  const platformAlias = fullName.match(/^platform__([a-z0-9_]+)__[a-f0-9]{20}$/);
+  if (platformAlias) return `platform/${platformAlias[1]}`;
   if (!fullName.startsWith('mcp__')) return fullName;
 
   const segments = fullName.split('__');
@@ -70,66 +83,23 @@ function toNormalizedToolGroupStatus(status: unknown): NormalizedToolStatus {
     case 'Pending':
       return 'pending';
     case 'Executing':
-    case 'Confirming':
     default:
       return 'running';
   }
 }
 
-const getResultDisplayText = (
-  result_display: IMessageToolGroup['content'][0]['result_display']
-): string | undefined => {
-  if (!result_display) return undefined;
-  if (typeof result_display === 'string') return result_display;
-  if ('file_diff' in result_display) return result_display.file_diff;
-  if ('img_url' in result_display) return result_display.relative_path || result_display.img_url;
-  return undefined;
-};
-
 export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCall[] {
   if (!Array.isArray(message.content)) return [];
-  return message.content.map(({ name, call_id, description, confirmationDetails, status, result_display }) => {
+  return message.content.map(({ name, call_id, description, status }) => {
     const displayStatus = normalizeToolGroupStatus(status);
-    let desc = typeof description === 'string' ? description.slice(0, 100) : '';
-    // Guard on `confirmationDetails` so the discriminant `type` narrows the
-    // union directly off the object; previously `type` was aliased through
-    // optional chaining, which left `confirmationDetails` possibly-undefined.
-    // The branches only ran when it was present before, so behavior is unchanged.
-    if (confirmationDetails) {
-      const type = confirmationDetails.type;
-      if (type === 'edit') desc = toDisplayText(confirmationDetails.file_name);
-      if (type === 'exec') desc = toDisplayText(confirmationDetails.command);
-      if (type === 'info') {
-        desc =
-          confirmationDetails.urls?.map((url) => toDisplayText(url)).join(';') ||
-          toDisplayText(confirmationDetails.title);
-      }
-      if (type === 'mcp') {
-        desc = `${toDisplayText(confirmationDetails.server_name)}:${toDisplayText(confirmationDetails.tool_name)}`;
-      }
-    }
-
-    let input: string | undefined;
-    if (confirmationDetails) {
-      const { title: _title, type: _type, ...rest } = confirmationDetails;
-      if (Object.keys(rest).length) input = formatValue(rest);
-    } else if (description) {
-      input = description;
-    }
+    const desc = typeof description === 'string' ? description.slice(0, 100) : '';
 
     return {
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
       status: toNormalizedToolGroupStatus(displayStatus),
-      ...(confirmationDetails?.type === 'exec'
-        ? { kind: 'execute' }
-        : confirmationDetails?.type === 'edit'
-          ? { kind: 'edit' }
-          : {}),
-      ...(displayStatus === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
       description: desc,
-      input,
-      output: getResultDisplayText(result_display),
+      ...(description ? { input: description } : {}),
     };
   });
 }
@@ -144,6 +114,8 @@ function normalizeToolCallStatus(status?: unknown): NormalizedToolStatus {
       return 'completed';
     case 'error':
       return 'error';
+    case 'canceled':
+      return 'canceled';
     case 'running':
       return 'running';
     default:
@@ -167,6 +139,64 @@ const isOrdinaryShellExit = (name: unknown, status: unknown, output: unknown): b
     !/(?:^|\r?\n)Signal:/m.test(text) &&
     !/(?:^|\r?\n)Cleanup diagnostics:/m.test(text)
   );
+};
+
+const nativeProcessToolNames = new Set(['exec_command', 'start_process', 'poll_process']);
+
+const isNativeCommandNotStarted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !['exec_command', 'start_process'].includes(toDisplayText(name).trim())) return false;
+  const text = toDisplayText(output).trim();
+  if (!text || text.length > 4096) return false;
+  try {
+    const receipt = JSON.parse(text);
+    return receipt?.schema === 'nomifun.process-start-observation.v1'
+      && receipt.state === 'not_started' && receipt.code === 'PROCESS_NOT_STARTED'
+      && receipt.user_code_started === false && receipt.success === false
+      && !Object.hasOwn(receipt, 'process_id') && !Object.hasOwn(receipt, 'exit_code')
+      && !Object.hasOwn(receipt, 'signal')
+      && typeof receipt.message === 'string' && receipt.message.trim().length > 0
+      && receipt.message.length <= 2048;
+  } catch {
+    return false;
+  }
+};
+
+const getNativeCommandExitCode = (name: unknown, status: unknown, output: unknown): number | undefined => {
+  if (!nativeProcessToolNames.has(toDisplayText(name).trim())) return undefined;
+  if (status !== 'completed' && status !== 'error') return undefined;
+  try {
+    const receipt = JSON.parse(toDisplayText(output).trim());
+    if (!receipt || receipt.state !== 'exited' || receipt.signal !== null
+      || !Number.isInteger(receipt.exit_code) || receipt.exit_code < 0
+      || typeof receipt.process_id !== 'string' || !receipt.process_id
+      || typeof receipt.output?.text !== 'string'
+      || receipt.success !== (receipt.exit_code === 0)
+      || receipt.cleanup?.reaped !== true
+      || receipt.cleanup.interrupt_attempted !== false
+      || receipt.cleanup.terminate_attempted !== false
+      || receipt.cleanup.force_kill_attempted !== false
+      || !Array.isArray(receipt.cleanup.errors) || receipt.cleanup.errors.length !== 0) return undefined;
+    return receipt.exit_code;
+  } catch {
+    return undefined;
+  }
+};
+
+const isCleanNativeTimeout = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !nativeProcessToolNames.has(toDisplayText(name).trim())) return false;
+  try {
+    const receipt = JSON.parse(toDisplayText(output).trim());
+    return receipt?.state === 'timed_out' && receipt.success === false
+      && receipt.exit_code == null && receipt.signal == null
+      && typeof receipt.process_id === 'string' && receipt.process_id.length > 0 && receipt.process_id.length <= 128
+      && typeof receipt.output?.text === 'string'
+      && receipt.cleanup?.reaped === true
+      && Array.isArray(receipt.cleanup.errors) && receipt.cleanup.errors.length === 0
+      && ['interrupt_attempted', 'terminate_attempted', 'force_kill_attempted']
+        .every((field) => typeof receipt.cleanup[field] === 'boolean');
+  } catch {
+    return false;
+  }
 };
 
 const directProbeToolTitles = new Set(['read', 'glob', 'grep', 'search', 'find']);
@@ -194,6 +224,25 @@ const isOrdinaryDirectProbeFailure = (name: unknown, status: unknown, output: un
   return isExplicitProbeMiss(name, output);
 };
 
+const isSearchContextWithheld = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (name !== 'search_files' || status !== 'error') return false;
+  const text = toDisplayText(output).trim();
+  if (!text || text.length > 4096) return false;
+  try {
+    const value = JSON.parse(text) as Record<string, unknown>;
+    if (!value || Array.isArray(value) || typeof value !== 'object') return false;
+    if (Object.keys(value).sort().join(',') !== 'kind,notice,search_executed,snippets_withheld') return false;
+    return value.kind === 'search_context_withheld'
+      && value.search_executed === true
+      && value.snippets_withheld === true
+      && typeof value.notice === 'string'
+      && value.notice.length > 0
+      && value.notice.length <= 2048;
+  } catch {
+    return false;
+  }
+};
+
 const skippedAfterPriorErrorPrefix = 'Skipped because a previous tool call in this assistant turn failed.';
 
 const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
@@ -201,6 +250,42 @@ const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
 
 const invalidArgumentsNotExecutedSuffix =
   'Correct the arguments and retry; the tool was not executed.';
+
+const localRuntimeToolNames = new Set([
+  'read_file', 'search_files', 'write_file', 'apply_patch', 'delete_path',
+  'exec_command', 'start_process', 'poll_process', 'write_process_stdin',
+  'close_process_stdin', 'resize_process', 'cancel_process',
+  'git_status', 'git_diff', 'git_stage', 'git_commit', 'git_push',
+  'update_plan', 'report_completion',
+  'search_tool_history', 'read_tool_history', 'load_tool_history',
+]);
+
+const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !localRuntimeToolNames.has(toDisplayText(name).trim())) return false;
+  const text = toDisplayText(output).trimStart();
+  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |Call update_plan alone first; report_completion cannot close a missing or stale plan|The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
+};
+
+const processControlOperations: Record<string, string> = {
+  poll_process: 'poll', write_process_stdin: 'stdin', close_process_stdin: 'close_stdin',
+  resize_process: 'resize', cancel_process: 'cancel',
+};
+
+const isProcessReferenceNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error') return false;
+  const operation = processControlOperations[toDisplayText(name).trim()];
+  if (!operation) return false;
+  try {
+    const receipt = JSON.parse(toDisplayText(output));
+    return receipt?.schema === 'nomifun.process-control-observation.v1'
+      && receipt.state === 'not_executed' && receipt.code === 'PROCESS_REFERENCE_INVALID'
+      && receipt.operation === operation && receipt.control_applied === false && receipt.success === false
+      && !Object.hasOwn(receipt, 'process_id')
+      && typeof receipt.message === 'string' && receipt.message.length > 0 && receipt.message.length <= 2048;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Match only the local runtime's standardized pre-dispatch rejection. A null
@@ -212,6 +297,16 @@ const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: u
 
   const toolName = toDisplayText(name).trim();
   const text = toDisplayText(output).trim();
+  if (localRuntimeToolNames.has(toolName)) {
+    try {
+      const rejection = JSON.parse(text);
+      if (rejection?.status === 'not_executed' && rejection.code === 'INVALID_TOOL_ARGUMENTS'
+        && rejection.tool === toolName && Array.isArray(rejection.issues) && rejection.issues.length > 0
+        && typeof rejection.message === 'string' && rejection.message.length > 0) return true;
+    } catch {
+      // Legacy rejections use plain text.
+    }
+  }
   if (!toolName || !text.startsWith(`Invalid arguments for tool '${toolName}':`)) return false;
   if (!text.endsWith(invalidArgumentsNotExecutedSuffix)) return false;
 
@@ -219,7 +314,7 @@ const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: u
 };
 
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
-  const { call_id, name, status, input, output, args, description, artifacts, retry } = message.content;
+  const { call_id, name, capability_id, action_id, status, input, output, args, description, artifacts, retry } = message.content;
   if (!call_id) return undefined;
   const normalizedRetry =
     retry &&
@@ -243,16 +338,33 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
       : undefined;
   const skipped = isSkippedAfterPriorError(status, output);
   const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
+  const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
+  const searchContextWithheld = isSearchContextWithheld(name, status, output);
+  const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
+  const commandExitCode = getNativeCommandExitCode(name, status, output);
+  const commandNotStarted = isNativeCommandNotStarted(name, status, output);
+  const commandTimedOut = isCleanNativeTimeout(name, status, output);
+  const nonFatalFailure = searchContextWithheld
+    || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
+    || isOrdinaryShellExit(name, status, output)
+    || isOrdinaryDirectProbeFailure(name, status, output);
 
   return {
     key: toDisplayText(call_id),
     name: toDisplayText(name, 'Tool'),
-    status: skipped || invalidArgumentsNotExecuted ? 'canceled' : normalizeToolCallStatus(status),
+    status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted || processReferenceNotExecuted
+      ? 'canceled' : normalizeToolCallStatus(status),
+    ...(typeof capability_id === 'string' && capability_id ? { capabilityId: capability_id } : {}),
+    ...(typeof action_id === 'string' && action_id ? { actionId: action_id } : {}),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
-    ...(isOrdinaryShellExit(name, status, output) || isOrdinaryDirectProbeFailure(name, status, output)
-      ? { nonFatalFailure: true }
-      : {}),
+    ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
+    ...(processReferenceNotExecuted ? { notExecutedReason: 'process_reference' as const } : {}),
+    ...(searchContextWithheld ? { boundedResult: 'search_context_withheld' as const } : {}),
+    ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
+    ...(commandExitCode !== undefined ? { commandExitCode } : {}),
+    ...(commandNotStarted ? { commandNotStarted: true } : {}),
+    ...(commandTimedOut ? { commandTimedOut: true } : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output:
@@ -280,16 +392,4 @@ export function normalizeToolMessages(messages: ToolMessage[]): NormalizedToolCa
       return undefined;
     })
     .filter((item): item is NormalizedToolCall => item !== undefined);
-}
-
-export function hasRunningToolMessages(messages: ToolMessage[]): boolean {
-  return messages.some((m) => {
-    if (m.type === 'tool_group') {
-      return Array.isArray(m.content) && m.content.some((t) => toNormalizedToolGroupStatus(t.status) === 'running');
-    }
-    if (m.type === 'tool_call') {
-      return normalizeToolCallStatus(m.content?.status) === 'running';
-    }
-    return false;
-  });
 }

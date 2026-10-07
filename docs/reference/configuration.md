@@ -50,11 +50,12 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `mcp-knowledge-stdio` | MCP stdio server for per-session knowledge search. |
 | `mcp-gateway-stdio` | Internal stdio transport for platform Gateway tools; accepts only a host-issued scoped, expiring signed claim. |
 | `mcp-open-stdio` | MCP stdio server exposing a reliable OS `open` tool. |
-| `mcp-computer-stdio` | MCP stdio server exposing desktop computer-use tools. |
 | `terminal-hook --event <kind>` | One-shot terminal lifecycle hook relay. |
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
-| `tools` | List public Remote capability names and descriptions as JSON. |
-| `call <name> [json-args]` | Invoke a public Remote capability on a running instance via `/v1`. |
+| `remote open <binding_id>` | Open a canonical Remote AgentSession. |
+| `remote turn <agent_session_id> <json-input>` | Start a turn on an explicit Remote AgentSession. |
+| `remote observe <agent_session_id>` | Read Remote Session events/messages after `--after-seq`. |
+| `remote cancel <agent_session_id>` | Cancel the explicit Session's active turn. |
 
 ## Shared environment variables
 
@@ -68,8 +69,8 @@ These are read by the backend regardless of which host embeds it.
 | `JWT_SECRET` | `nomifun-app` | Secret used to sign session JWTs. See [Auth secret resolution](#auth-secret-resolution) for the resolution order. |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
-| `NOMIFUN_URL` | `nomicore call` | Base URL for a running instance when invoking Remote capabilities. |
-| `NOMIFUN_ACCESS_TOKEN` | `nomifun-app`, `nomicore call` | Installation-scoped access token for `/mcp`, `/mcp-agent`, and `/v1`; never companion-bound. |
+| `NOMIFUN_URL` | `nomicore remote` | Base URL for a running instance when using canonical Remote operations. |
+| `NOMIFUN_ACCESS_TOKEN` | Fresh-v4 host, `nomicore remote` | Installation-scoped token for `/mcp` and `/api/remote/*`; startup values seed/rotate the stored verifier and never bind a companion. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
 
@@ -94,7 +95,7 @@ Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/
 ## Data directory and work directory semantics
 
 - `data-dir` holds the SQLite database (`nomifun-backend.db*`), per-agent state, the Bun cache, log files, and any embedded extension data. Treat it like any other database — back it up and restrict permissions. Sharing it between two running backends is prevented mechanically (see the server lock below).
-- All three hosts (`nomifun-desktop`, `nomifun-web`, the standalone `nomicore` binary) resolve a default through `nomifun_app::cli::default_data_dir()`. Hosts built for the same channel share it: stable uses the per-user `NomiFun` directory (`%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` on Linux); non-stable channels use a **sibling** such as `NomiFun-dev` or `NomiFun-beta` — channel dirs are never nested inside the stable root. The root `dev`, `dev:web`, and `build:fast` commands select dev, while the installed app, `serve:web`, and release builds remain stable. `bun run seed:dev` copies a stable snapshot into dev when needed. For an explicit location, point `NOMIFUN_DATA_DIR` or `--data-dir` somewhere else.
+- All three hosts (`nomifun-desktop`, `nomifun-web`, the standalone `nomicore` binary) resolve a default through `nomifun_app::cli::default_data_dir()`. Hosts built for the same channel share it: stable uses the per-user `NomiFun` directory (`%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` on Linux); non-stable channels use a **sibling** such as `NomiFun-dev` or `NomiFun-beta` — channel dirs are never nested inside the stable root. The root `dev`, `dev:web`, and `build:fast` commands select dev, while the installed app, `serve:web`, and release builds remain stable. For an explicit location, point `NOMIFUN_DATA_DIR` or `--data-dir` somewhere else; development startup does not import historical Agent state from the stable dataset.
 - At startup (before the database is opened) the backend takes an OS-level **exclusive lock** on `{data_dir}/server.lock`. A second backend process on the same data dir fails fast with an error naming the holder (pid + executable) and the two ways out: close the other instance, or give this one its own directory via `NOMIFUN_DATA_DIR` / `--data-dir`. The lock is advisory (`flock` / `LockFileEx` via `fs2`) and is released by the OS when the process exits or crashes — a leftover `server.lock` file is harmless. `nomicore doctor` and the `mcp-*` stdio subcommands do not take the lock (doctor is designed to run alongside a live server).
 - `work-dir` holds per-conversation workspaces. When unset, it resolves in this order: `--work-dir` → the UI-selected workspace persisted in `dir-config.json` → non-empty `NOMIFUN_WORK_DIR` env → the data dir itself. An inherited `NOMIFUN_WORK_DIR` that names a default data-root location or a directory that no longer exists is ignored — this guards against stale self-exports across auto-update restarts. Conversations create subdirectories under `<work-dir>/conversations/`; deleting a conversation deletes its workspace.
 - Every host — the desktop shell included — treats `NOMIFUN_DATA_DIR` as the **final data root**, taken literally with no `/Nomi` suffix, so Docker (`/data`) and systemd (`/var/lib/nomifun`) deployments are unaffected. With neither the env nor `--data-dir` set, all hosts fall back to the shared per-user default above; the old relative `data` default is gone. Older builds used `NomiFun/Nomi<suffix>` (and, before that, `<system temp>/nomifun-data/Nomi`); on the first boot after upgrading, an existing legacy dataset is migrated into `NomiFun<suffix>` automatically (one-shot, crash-safe, resumed on the next boot if interrupted; deferred to the next launch if the old app instance is still running). Absolute paths persisted in the database — knowledge-base roots, terminal cwds, custom workspaces — are rewritten once after the move.

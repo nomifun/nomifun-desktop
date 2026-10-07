@@ -7,9 +7,8 @@ use nomifun_db::{
     SqliteProviderRepository, SqliteSettingsRepository,
 };
 use nomifun_system::{
-    ClientPrefService, ManagedModelService, ModelFetchService, ProviderConnectionService,
-    ProviderModelService, ProviderService, SettingsService, SystemRouterState,
-    VersionCheckService,
+    ClientPrefService, ModelFetchService, ProviderConnectionService, ProviderModelService,
+    ProviderService, SettingsService, SystemRouterState, VersionCheckService,
 };
 
 struct TestProviderDeletionCoordinator;
@@ -40,7 +39,6 @@ pub fn build_system_state(
     encryption_key: [u8; 32],
     http_client: reqwest::Client,
     version_check_service: VersionCheckService,
-    managed_model_service: Option<Arc<ManagedModelService>>,
     data_dir: PathBuf,
     work_dir: PathBuf,
     work_dir_is_cli_override: bool,
@@ -84,7 +82,6 @@ pub fn build_system_state(
             connection_repo,
             Arc::new(TestProviderDeletionCoordinator),
         ),
-        managed_model_service,
         version_check_service,
         data_dir,
         work_dir,

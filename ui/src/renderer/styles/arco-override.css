@@ -276,17 +276,22 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   border-color: var(--color-border-2) !important;
 }
 
-/* Conversation capability popovers (smart-decision / knowledge): Arco adds its
-   own inner padding, while IdmmControl / KnowledgeControl already own the panel
+/* Conversation capability popovers: Arco adds its own inner padding, while
+   KnowledgeControl already owns the panel
    padding. Zero the shell padding so the content has one consistent left/right
    gutter instead of a doubled left side. */
-.idmm-control-popover .arco-popover-content,
-.idmm-control-popover .arco-popover-inner,
-.idmm-control-popover .arco-popover-inner-content,
 .knowledge-control-popover .arco-popover-content,
 .knowledge-control-popover .arco-popover-inner,
-.knowledge-control-popover .arco-popover-inner-content {
+.knowledge-control-popover .arco-popover-inner-content,
+.idmm-control-popover .arco-popover-content,
+.idmm-control-popover .arco-popover-inner,
+.idmm-control-popover .arco-popover-inner-content {
   padding: 0 !important;
+}
+
+.idmm-control-popover,
+.idmm-control-popover .arco-popover-content {
+  max-width: calc(100vw - 24px);
 }
 
 .knowledge-control-popover .knowledge-control-search,
@@ -349,17 +354,13 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
 }
 
 /* Mount & Usage: one workspace-like frame, with a bounded consumer list and
-   a quiet rules rail. The split changes direction on compact screens. */
+   a quiet rules rail. */
 .knowledge-use-shell {
   box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.015);
 }
 
 .knowledge-use-rules-desktop {
   border-left: 1px solid var(--color-border-2);
-}
-
-.knowledge-use-rules-mobile {
-  border-top: 1px solid var(--color-border-2);
 }
 
 .knowledge-use-step {
@@ -891,35 +892,6 @@ body[arco-theme='dark'] .arco-message.arco-message-error {
   color: color-mix(in srgb, var(--danger, #f53f3f) 70%, var(--text-primary, #1d2129)) !important;
 }
 
-/* Settings modal mobile tabs styles */
-/* 设置弹窗移动端 Tabs 样式 */
-.settings-mobile-tabs {
-  .arco-tabs-nav {
-    border-bottom: 1px solid var(--color-border-2);
-  }
-
-  .arco-tabs-nav-tab {
-    font-size: 14px;
-    padding: 8px 0;
-    margin: 0 12px;
-    color: var(--color-text-2);
-  }
-
-  .arco-tabs-nav-tab:first-child {
-    margin-left: 0;
-  }
-
-  .arco-tabs-nav-tab-active {
-    color: var(--color-text-1);
-    font-weight: 500;
-  }
-
-  .arco-tabs-nav-ink {
-    height: 2px;
-    background: var(--color-primary);
-  }
-}
-
 /* WebUI / Channels tabs in Remote settings */
 .settings-remote-tabs {
   .arco-tabs-nav {
@@ -946,89 +918,97 @@ body[arco-theme='dark'] .arco-message.arco-message-error {
   }
 }
 
-/* Guid (homepage) mobile: cap model / permission pills so long values
- * truncate instead of pushing the `+` and send buttons off-screen.
- * Driven by LayoutContext.isMobile (data-mobile attribute) so it fires
- * even when CSS media queries don't — Electron windows can report widths
- * wider than 768px while still being shaped like mobile. Lives here in
- * the global stylesheet because the homepage doesn't import sendbox.css. */
-[data-mobile='true'] .agent-mode-compact-pill,
-[data-mobile='true'] [data-testid='guid-model-selector'],
-[data-mobile='true'] [data-testid='mode-selector'] {
-  max-width: 130px !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
+/* Product pagination — shared by list pages, table pagination and bespoke
+ * paging controls. Keep the selected page calm and legible in every color
+ * scheme instead of inheriting Arco's saturated primary block. */
+.nomi-pagination {
+  color: var(--color-text-1);
 }
 
-[data-mobile='true'] .agent-mode-compact-pill .arco-btn-content {
-  min-width: 0 !important;
-  overflow: hidden !important;
+.nomi-pagination .arco-pagination-total-text {
+  color: var(--color-text-1);
 }
 
-/* Inside the guid model selector, only the label text shrinks/truncates;
- * the leading brain icon and trailing down chevron stay at their natural
- * size so the dropdown affordance never disappears. The button's direct
- * child is a flex span containing [icon, label, chevron]. */
-[data-mobile='true'] [data-testid='guid-model-selector'] > span {
-  min-width: 0 !important;
-  overflow: hidden !important;
-}
-
-[data-mobile='true'] [data-testid='guid-model-selector'] > span > span:nth-child(2) {
-  min-width: 0 !important;
-  overflow: hidden !important;
-  text-overflow: clip !important;
-  white-space: nowrap !important;
-}
-
-/* Tighten the gap between model and mode pills on mobile by trimming
- * each pill's horizontal padding — Arco's round buttons default to
- * ~12px each side, leaving a visible ~24px chasm even with gap:0. */
-[data-mobile='true'] [data-testid='guid-model-selector'].arco-btn-shape-round,
-[data-mobile='true'] [data-testid='mode-selector'] .arco-btn-shape-round {
-  padding-left: 4px !important;
-  padding-right: 4px !important;
-}
-
-/* List pagination — Arco's default active page chip and the
- * prev/next arrows use the saturated brand primary, which reads as a harsh
- * colored block. Soften to calm neutral fills/text via theme tokens so it
- * looks restrained in both light and dark themes. Scoped to the list pages
- * that use this shared pagination treatment. */
-.requirements-pagination .arco-pagination-item-active,
-.scheduled-tasks-pagination .arco-pagination-item-active,
-.memory-pagination .arco-pagination-item-active,
-.requirements-pagination .arco-pagination-item-active:hover,
-.scheduled-tasks-pagination .arco-pagination-item-active:hover,
-.memory-pagination .arco-pagination-item-active:hover {
+.nomi-pagination .arco-pagination-item-active,
+.nomi-pagination .arco-pagination-item-active:hover,
+.nomi-pagination [data-nomi-pagination-page] {
   background-color: var(--color-fill-2) !important;
   border-color: transparent !important;
   color: var(--color-text-1) !important;
   font-weight: 500;
 }
 
-.requirements-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
-.scheduled-tasks-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
-.memory-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover {
+.nomi-pagination .arco-pagination-item:not(.arco-pagination-item-disabled):not(.arco-pagination-item-active):hover,
+.nomi-pagination [data-nomi-pagination-control]:hover:not(:disabled) {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
 }
 
-.requirements-pagination .arco-pagination-item-prev,
-.scheduled-tasks-pagination .arco-pagination-item-prev,
-.memory-pagination .arco-pagination-item-prev,
-.requirements-pagination .arco-pagination-item-next,
-.scheduled-tasks-pagination .arco-pagination-item-next,
-.memory-pagination .arco-pagination-item-next {
+.nomi-pagination .arco-pagination-item-prev,
+.nomi-pagination .arco-pagination-item-next,
+.nomi-pagination [data-nomi-pagination-control] {
   color: var(--color-text-2) !important;
 }
 
-.requirements-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.scheduled-tasks-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.memory-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.requirements-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
-.scheduled-tasks-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
-.memory-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
+.nomi-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
+.nomi-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
+}
+
+.nomi-pagination .arco-select-view,
+.nomi-pagination .arco-pagination-jumper-input,
+.nomi-pagination [data-nomi-pagination-option] {
+  border-color: transparent !important;
+  background-color: var(--color-bg-2) !important;
+  color: var(--color-text-1) !important;
+}
+
+.nomi-pagination [data-nomi-pagination-control],
+.nomi-pagination [data-nomi-pagination-page] {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0;
+  place-items: center;
+  border: 0 solid transparent;
+  border-radius: var(--border-radius-small);
+  font: inherit;
+  font-size: 14px;
+}
+
+.nomi-pagination [data-nomi-pagination-control] {
+  cursor: pointer;
+  background-color: transparent;
+}
+
+.nomi-pagination [data-nomi-pagination-control]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-primary-light-3);
+}
+
+.nomi-pagination [data-nomi-pagination-control]:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-4) !important;
+  background-color: transparent !important;
+}
+
+.nomi-pagination [data-nomi-pagination-option] {
+  display: inline-flex;
+  min-width: 94px;
+  min-height: 32px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--border-radius-small);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.nomi-pagination[data-empty='true'] [data-nomi-pagination-page] {
+  background-color: transparent !important;
+  color: var(--color-text-4) !important;
 }

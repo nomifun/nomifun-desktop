@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -45,8 +45,12 @@ fn event_kind_to_str(kind: &EventKind) -> Option<&'static str> {
 
 /// Returns `true` if enough time has elapsed since the last event for `key`.
 /// Updates the timestamp when returning `true`.
+#[cfg(test)]
 fn should_emit(debounce: &DashMap<String, Instant>, key: &str) -> bool {
-    let now = Instant::now();
+    should_emit_at(debounce, key, Instant::now())
+}
+
+fn should_emit_at(debounce: &DashMap<String, Instant>, key: &str, now: Instant) -> bool {
     if let Some(last) = debounce.get(key)
         && now.duration_since(*last) < DEBOUNCE_DURATION
     {
@@ -71,74 +75,289 @@ fn should_emit(debounce: &DashMap<String, Instant>, key: &str) -> bool {
 ///   creation events.
 pub struct FileWatchService {
     user_events: Arc<dyn UserEventSink>,
-    /// Shared watcher for all single-file watches.
-    file_watcher: Mutex<RecommendedWatcher>,
-    /// Set of canonical paths being watched (shared with the event handler).
-    watched_files: Arc<DashMap<String, HashSet<String>>>,
+    /// Cache owner shared with the file routes; callbacks must not keep it alive.
+    inventory: Weak<crate::FileService>,
+    /// Per-path watcher registrations. A callback captures one registration's
+    /// owner fence, so native tail events cannot cross into a later restart.
+    file_watcher: Mutex<FileWatchState>,
     /// Per-workspace Office watchers, keyed by canonical workspace path.
-    office_watchers: Mutex<HashMap<String, OfficeWatchRegistration>>,
-    /// Debounce timestamps shared with watcher callbacks.
-    debounce: Arc<DashMap<String, Instant>>,
+    office_watchers: Mutex<OfficeWatchState>,
+}
+
+fn native_inventory_changed(result: &Result<notify::Event, notify::Error>) -> bool {
+    result.as_ref().map_or(true, |event| {
+        event.need_rescan() || event_kind_to_str(&event.kind).is_some()
+    })
+}
+
+fn invalidate_file_inventory(
+    inventory: &Weak<crate::FileService>, registered: &Path,
+    result: &Result<notify::Event, notify::Error>,
+) {
+    if !native_inventory_changed(result) { return; }
+    let Some(files) = inventory.upgrade() else { return; };
+    if let Ok(event) = result && !event.need_rescan() {
+        for path in &event.paths { files.invalidate_caches_for_path(path); }
+    } else {
+        // Native loss does not identify the affected file. This callback owns
+        // exactly one registration, so revoke its intersecting inventories.
+        files.invalidate_caches_for_path(registered);
+    }
+}
+
+fn emit_file_event(
+    result: Result<notify::Event, notify::Error>,
+    registered: &str,
+    owners: &Arc<OwnerFence>,
+    debounce: &DashMap<String, Instant>,
+    events: &dyn UserEventSink,
+    now: Instant,
+) {
+    let event = match result {
+        Ok(event) => event,
+        Err(error) => {
+            warn!(error = %error, "file watcher error");
+            return;
+        }
+    };
+    let Some(event_type) = event_kind_to_str(&event.kind) else {
+        return;
+    };
+    for path in &event.paths {
+        let path_str = path.to_string_lossy().into_owned();
+        if path_str != registered {
+            continue;
+        }
+        let debounce_key = format!("{event_type}\0{path_str}");
+        if !should_emit_at(debounce, &debounce_key, now) {
+            continue;
+        }
+        let payload = FileWatchEvent {
+            file_path: path_str,
+            event_type: event_type.to_owned(),
+        };
+        let json = serde_json::to_value(&payload).unwrap_or_default();
+        let Some(delivery) = owners.begin_delivery("file watcher") else {
+            return;
+        };
+        for owner_id in &delivery.owners {
+            events.send_to_user(
+                owner_id,
+                WebSocketMessage::new("fileWatch.fileChanged", json.clone()),
+            );
+        }
+    }
+}
+
+fn invalidate_office_inventory(
+    inventory: &Weak<crate::FileService>, workspace: &Path,
+    result: &Result<notify::Event, notify::Error>,
+) {
+    if native_inventory_changed(result) && let Some(files) = inventory.upgrade() {
+        // Every change matters to the inventory, including non-Office files,
+        // ignore rules, renames and stream errors. Filter UI events afterwards.
+        files.invalidate_caches_for_path(workspace);
+    }
+}
+
+#[derive(Default)]
+struct OwnerFence {
+    state: Mutex<OwnerFenceState>,
+    settled: Condvar,
+}
+
+#[derive(Default)]
+struct OwnerFenceState {
+    owners: HashSet<String>,
+    deliveries: usize,
+}
+
+struct OwnerDelivery {
+    fence: Arc<OwnerFence>,
+    owners: Vec<String>,
+}
+
+impl Drop for OwnerDelivery {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.fence.state.lock() {
+            state.deliveries = state.deliveries.saturating_sub(1);
+            if state.deliveries == 0 {
+                self.fence.settled.notify_all();
+            }
+        }
+    }
+}
+
+impl OwnerFence {
+    fn with_owner(owner: &str) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(OwnerFenceState {
+                owners: HashSet::from([owner.to_owned()]),
+                deliveries: 0,
+            }),
+            settled: Condvar::new(),
+        })
+    }
+
+    fn insert(&self, owner: &str, label: &str) -> Result<(), AppError> {
+        self.state
+            .lock()
+            .map_err(|error| AppError::Internal(format!("{label} owner fence poisoned: {error}")))?
+            .owners
+            .insert(owner.to_owned());
+        Ok(())
+    }
+
+    fn contains(&self, owner: &str) -> bool {
+        self.state.lock().is_ok_and(|state| state.owners.contains(owner))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.state.lock().is_ok_and(|state| state.owners.is_empty())
+    }
+
+    /// Remove one owner and wait until every delivery that could have copied
+    /// that owner finishes. New callbacks observe the removal before stop
+    /// returns, while event sinks remain outside the mutex and may re-enter.
+    fn retire(&self, owner: &str, label: &str) -> Result<Option<bool>, AppError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| AppError::Internal(format!("{label} owner fence poisoned: {error}")))?;
+        if !state.owners.remove(owner) {
+            return Ok(None);
+        }
+        while state.deliveries > 0 {
+            state = self
+                .settled
+                .wait(state)
+                .map_err(|error| AppError::Internal(format!("{label} owner fence poisoned: {error}")))?;
+        }
+        Ok(Some(state.owners.is_empty()))
+    }
+
+    fn begin_delivery(self: &Arc<Self>, label: &str) -> Option<OwnerDelivery> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(error = %error, fence = label, "watch owner fence poisoned");
+                return None;
+            }
+        };
+        if state.owners.is_empty() {
+            return None;
+        }
+        let owners = state.owners.iter().cloned().collect();
+        state.deliveries = state.deliveries.saturating_add(1);
+        Some(OwnerDelivery {
+            fence: self.clone(),
+            owners,
+        })
+    }
 }
 
 struct OfficeWatchRegistration {
-    _watcher: RecommendedWatcher,
-    owners: Arc<DashMap<String, ()>>,
+    watcher: RecommendedWatcher,
+    owners: Arc<OwnerFence>,
+    debounce: Arc<DashMap<String, Instant>>,
+}
+
+fn emit_office_event(event: &notify::Event, workspace: &str, owners: &Arc<OwnerFence>,
+    debounce: &DashMap<String, Instant>, events: &dyn UserEventSink, now: Instant) {
+    if !matches!(event.kind, EventKind::Create(_)) { return; }
+    for path in &event.paths {
+        if !is_office_file(path) { continue; }
+        let path_str = path.to_string_lossy().into_owned();
+        if !should_emit_at(debounce, &format!("office:{path_str}"), now) { continue; }
+        let payload = OfficeFileAddedEvent { file_path: path_str, workspace: workspace.to_owned() };
+        let json = serde_json::to_value(&payload).unwrap_or_default();
+        let Some(delivery) = owners.begin_delivery("office watcher") else {
+            return;
+        };
+        for owner_id in &delivery.owners {
+            events.send_to_user(owner_id, WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json.clone()));
+        }
+    }
+}
+
+type WatchAliases = HashMap<(String, PathBuf), String>;
+
+struct FileWatchRegistration {
+    watcher: RecommendedWatcher,
+    owners: Arc<OwnerFence>,
+    debounce: Arc<DashMap<String, Instant>>,
+}
+
+#[derive(Default)]
+struct FileWatchState {
+    registrations: HashMap<String, FileWatchRegistration>,
+    aliases: WatchAliases,
+}
+
+#[derive(Default)]
+struct OfficeWatchState { registrations: HashMap<String, OfficeWatchRegistration>, aliases: WatchAliases }
+
+fn watch_alias(path: &str) -> Result<PathBuf, AppError> {
+    std::path::absolute(path).map_err(|error| AppError::BadRequest(format!("invalid watch path: {error}")))
+}
+
+fn watch_key(aliases: &WatchAliases, owner: &str, path: &str, registered: impl Fn(&str) -> bool) -> Result<String, AppError> {
+    // A recorded request wins over a new filesystem resolution. The entry may
+    // have disappeared, or a link may now point at a different registered file.
+    if let Some(key) = aliases.get(&(owner.to_owned(), watch_alias(path)?)) { return Ok(key.clone()); }
+    if registered(path) { return Ok(path.to_owned()); }
+    Ok(std::fs::canonicalize(path).unwrap_or_else(|_| path.into()).to_string_lossy().into_owned())
+}
+
+fn validate_watch_alias(aliases: &WatchAliases, owner: &str, alias: &Path, canonical: &str) -> Result<(), AppError> {
+    if aliases.get(&(owner.to_owned(), alias.to_path_buf())).is_some_and(|prior| prior != canonical) {
+        return Err(AppError::Conflict("watch path changed target; stop the original subscription before restarting".into()));
+    }
+    Ok(())
+}
+
+fn forget_watch_aliases(aliases: &mut WatchAliases, owner: &str, canonical: &str) {
+    aliases.retain(|(registered_owner, _), target| registered_owner != owner || target != canonical);
+}
+
+fn confirm_unwatch(watcher: &mut RecommendedWatcher, path: &Path) -> Result<(), AppError> {
+    match watcher.unwatch(path) {
+        Ok(()) => Ok(()),
+        Err(error) if unwatch_error_is_confirmed_removal(&error) => Ok(()),
+        Err(error) => Err(AppError::Internal(format!("file watch cleanup is unconfirmed: {error}"))),
+    }
+}
+
+fn unwatch_error_is_confirmed_removal(error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::WatchNotFound) || unwatch_errno_is_confirmed_removal(error)
+}
+
+// A deleted directory's inotify watch is kernel-removed before a late unwatch
+// arrives; EINVAL then proves removal rather than unconfirmed cleanup.
+#[cfg(target_os = "linux")]
+fn unwatch_errno_is_confirmed_removal(error: &notify::Error) -> bool {
+    matches!(&error.kind, notify::ErrorKind::Io(inner) if inner.raw_os_error() == Some(libc::EINVAL))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unwatch_errno_is_confirmed_removal(_error: &notify::Error) -> bool {
+    false
 }
 
 impl FileWatchService {
+    fn invalidate_registered_inventory(&self, path: &Path) {
+        if let Some(files) = self.inventory.upgrade() {
+            files.invalidate_caches_for_path(path);
+        }
+    }
+
     /// Create a new watch service backed by the platform's recommended watcher.
-    pub fn new(user_events: Arc<dyn UserEventSink>) -> Result<Self, AppError> {
-        let watched_files: Arc<DashMap<String, HashSet<String>>> = Arc::new(DashMap::new());
-        let debounce: Arc<DashMap<String, Instant>> = Arc::new(DashMap::new());
-
-        let events = user_events.clone();
-        let wf = watched_files.clone();
-        let db = debounce.clone();
-
-        let file_watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let event = match res {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(error = %e, "file watcher error");
-                    return;
-                }
-            };
-
-            let event_type = match event_kind_to_str(&event.kind) {
-                Some(t) => t,
-                None => return,
-            };
-
-            for path in &event.paths {
-                let path_str = path.to_string_lossy().into_owned();
-                let Some(owners) = wf.get(&path_str) else { continue };
-                let owner_ids: Vec<String> = owners.iter().cloned().collect();
-                drop(owners);
-                if !should_emit(&db, &path_str) {
-                    continue;
-                }
-                let payload = FileWatchEvent {
-                    file_path: path_str,
-                    event_type: event_type.to_owned(),
-                };
-                let json = serde_json::to_value(&payload).unwrap_or_default();
-                for owner_id in owner_ids {
-                    events.send_to_user(
-                        &owner_id,
-                        WebSocketMessage::new("fileWatch.fileChanged", json.clone()),
-                    );
-                }
-            }
-        })
-        .map_err(|e| AppError::Internal(format!("failed to create file watcher: {e}")))?;
-
+    pub fn new(user_events: Arc<dyn UserEventSink>, inventory: Weak<crate::FileService>) -> Result<Self, AppError> {
         Ok(Self {
             user_events,
-            file_watcher: Mutex::new(file_watcher),
-            watched_files,
-            office_watchers: Mutex::new(HashMap::new()),
-            debounce,
+            inventory,
+            file_watcher: Mutex::new(FileWatchState::default()),
+            office_watchers: Mutex::new(OfficeWatchState::default()),
         })
     }
 }
@@ -150,60 +369,114 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let canonical = std::fs::canonicalize(file_path)
             .map_err(|e| AppError::NotFound(format!("cannot resolve path {file_path}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
+        let alias = watch_alias(file_path)?;
 
         let mut watcher = self
             .file_watcher
             .lock()
             .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
-        // The watcher lock serializes check/register/insert, so concurrent
-        // owners cannot install duplicate OS watches for the same path.
-        if let Some(mut owners) = self.watched_files.get_mut(&key) {
-            owners.insert(owner_id.to_owned());
+        validate_watch_alias(&watcher.aliases, owner_id, &alias, &key)?;
+        if let Some(registration) = watcher.registrations.get(&key) {
+            registration.owners.insert(owner_id, "file watcher")?;
+            watcher.aliases.insert((owner_id.to_owned(), alias), key);
+            self.invalidate_registered_inventory(&canonical);
             return Ok(());
         }
-        self.watched_files
-            .insert(key.clone(), HashSet::from([owner_id.to_owned()]));
-        if let Err(error) = watcher.watch(&canonical, RecursiveMode::NonRecursive) {
-            self.watched_files.remove(&key);
-            return Err(AppError::Internal(format!("failed to watch {file_path}: {error}")));
-        }
+
+        let events = self.user_events.clone();
+        let callback_inventory = self.inventory.clone();
+        let callback_key = key.clone();
+        let owners = OwnerFence::with_owner(owner_id);
+        let callback_owners = owners.clone();
+        let debounce = Arc::new(DashMap::new());
+        let callback_debounce = debounce.clone();
+        let mut native = notify::recommended_watcher(
+            move |result: Result<notify::Event, notify::Error>| {
+                invalidate_file_inventory(
+                    &callback_inventory,
+                    Path::new(&callback_key),
+                    &result,
+                );
+                emit_file_event(
+                    result,
+                    &callback_key,
+                    &callback_owners,
+                    &callback_debounce,
+                    events.as_ref(),
+                    Instant::now(),
+                );
+            },
+        )
+        .map_err(|e| AppError::Internal(format!("failed to create file watcher: {e}")))?;
+        native
+            .watch(&canonical, RecursiveMode::NonRecursive)
+            .map_err(|error| AppError::Internal(format!("failed to watch {file_path}: {error}")))?;
+        watcher.registrations.insert(
+            key.clone(),
+            FileWatchRegistration {
+                watcher: native,
+                owners,
+                debounce,
+            },
+        );
+        watcher.aliases.insert((owner_id.to_owned(), alias), key);
+        // The watcher cannot report changes made before this subscription.
+        self.invalidate_registered_inventory(&canonical);
         Ok(())
     }
 
     async fn stop_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError> {
         require_owner(owner_id)?;
-        let canonical = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.into());
-        let key = canonical.to_string_lossy().into_owned();
-
-        let remove_os_watch = match self.watched_files.get_mut(&key) {
-            Some(mut owners) => {
-                owners.remove(owner_id);
-                owners.is_empty()
-            }
-            None => false,
+        // Resolve the exact registration, then release the registry lock while
+        // waiting for already-started deliveries. Event sinks may synchronously
+        // enter another watch route without deadlocking the callback.
+        let (key, owners) = {
+            let watcher = self
+                .file_watcher
+                .lock()
+                .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
+            let key = watch_key(&watcher.aliases, owner_id, file_path,
+                |key| watcher.registrations.get(key).is_some_and(|registration|
+                    registration.owners.contains(owner_id)))?;
+            let Some(registration) = watcher.registrations.get(&key) else {
+                return Ok(());
+            };
+            (key, registration.owners.clone())
         };
-        if !remove_os_watch {
+        if owners.retire(owner_id, "file watcher")?.is_none() {
             return Ok(());
         }
-        self.watched_files.remove(&key);
 
         let mut watcher = self
             .file_watcher
             .lock()
             .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
-        // Ignore unwatch errors — the file may have been deleted.
-        let _ = watcher.unwatch(&canonical);
-        self.debounce.remove(&key);
+        let remove_registration = if let Some(registration) = watcher.registrations.get_mut(&key)
+            && Arc::ptr_eq(&owners, &registration.owners)
+            && owners.is_empty()
+        {
+            if let Err(error) = confirm_unwatch(&mut registration.watcher, Path::new(&key)) {
+                owners.insert(owner_id, "file watcher")?;
+                return Err(error);
+            }
+            registration.debounce.clear();
+            true
+        } else {
+            false
+        };
+        if remove_registration {
+            watcher.registrations.remove(&key);
+        }
+        forget_watch_aliases(&mut watcher.aliases, owner_id, &key);
         Ok(())
     }
 
     async fn stop_all_watches(&self, owner_id: &str) -> Result<(), AppError> {
         require_owner(owner_id)?;
-        let paths: Vec<String> = self
-            .watched_files
-            .iter()
-            .filter(|entry| entry.value().contains(owner_id))
-            .map(|entry| entry.key().clone())
+        let paths: Vec<String> = self.file_watcher.lock()
+            .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?
+            .registrations.iter()
+            .filter_map(|(path, registration)| registration.owners.contains(owner_id).then(|| path.clone()))
             .collect();
         for path in paths {
             self.stop_watch(owner_id, &path).await?;
@@ -216,6 +489,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let canonical = std::fs::canonicalize(workspace)
             .map_err(|e| AppError::NotFound(format!("cannot resolve workspace {workspace}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
+        let alias = watch_alias(workspace)?;
 
         // Keep the registration lock through watcher construction and insert.
         // Otherwise two concurrent callers can replace each other's watcher
@@ -224,19 +498,26 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .office_watchers
             .lock()
             .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        if let Some(registration) = watchers.get(&key) {
-            registration.owners.insert(owner_id.to_owned(), ());
+        validate_watch_alias(&watchers.aliases, owner_id, &alias, &key)?;
+        if let Some(registration) = watchers.registrations.get(&key) {
+            registration.owners.insert(owner_id, "office watcher")?;
+            watchers.aliases.insert((owner_id.to_owned(), alias), key);
+            self.invalidate_registered_inventory(&canonical);
             return Ok(());
         }
 
         let events = self.user_events.clone();
-        let db = self.debounce.clone();
+        // Different workspace registrations may overlap, and a restarted
+        // registration must never inherit suppression from its predecessor.
+        let db = Arc::new(DashMap::new());
+        let registration_debounce = db.clone();
         let ws = key.clone();
-        let owners = Arc::new(DashMap::new());
-        owners.insert(owner_id.to_owned(), ());
+        let owners = OwnerFence::with_owner(owner_id);
         let callback_owners = owners.clone();
+        let inventory = self.inventory.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            invalidate_office_inventory(&inventory, Path::new(&ws), &res);
             let event = match res {
                 Ok(e) => e,
                 Err(e) => {
@@ -245,32 +526,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
                 }
             };
 
-            if !matches!(event.kind, EventKind::Create(_)) {
-                return;
-            }
-
-            for path in &event.paths {
-                if !is_office_file(path) {
-                    continue;
-                }
-                let path_str = path.to_string_lossy().into_owned();
-                let debounce_key = format!("office:{path_str}");
-                if !should_emit(&db, &debounce_key) {
-                    continue;
-                }
-                let payload = OfficeFileAddedEvent {
-                    file_path: path_str,
-                    workspace: ws.clone(),
-                };
-                let json = serde_json::to_value(&payload).unwrap_or_default();
-                let owner_ids: Vec<String> = callback_owners.iter().map(|entry| entry.key().clone()).collect();
-                for owner_id in owner_ids {
-                    events.send_to_user(
-                        &owner_id,
-                        WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json.clone()),
-                    );
-                }
-            }
+            emit_office_event(&event, &ws, &callback_owners, &db, events.as_ref(), Instant::now());
         })
         .map_err(|e| AppError::Internal(format!("failed to create office watcher: {e}")))?;
 
@@ -278,36 +534,59 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .watch(&canonical, RecursiveMode::Recursive)
             .map_err(|e| AppError::Internal(format!("failed to watch workspace {workspace}: {e}")))?;
 
-        watchers.insert(
-            key,
+        watchers.registrations.insert(
+            key.clone(),
             OfficeWatchRegistration {
-                _watcher: watcher,
+                watcher,
                 owners,
+                debounce: registration_debounce,
             },
         );
+        watchers.aliases.insert((owner_id.to_owned(), alias), key);
+        self.invalidate_registered_inventory(&canonical);
         Ok(())
     }
 
     async fn stop_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError> {
         require_owner(owner_id)?;
-        let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.into());
-        let key = canonical.to_string_lossy().into_owned();
+        let (key, owners) = {
+            let watchers = self
+                .office_watchers
+                .lock()
+                .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
+            let key = watch_key(&watchers.aliases, owner_id, workspace,
+                |key| watchers.registrations.get(key).is_some_and(|registration|
+                    registration.owners.contains(owner_id)))?;
+            let Some(registration) = watchers.registrations.get(&key) else {
+                return Ok(());
+            };
+            (key, registration.owners.clone())
+        };
+        if owners.retire(owner_id, "office watcher")?.is_none() {
+            return Ok(());
+        }
 
         let mut watchers = self
             .office_watchers
             .lock()
             .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        let remove_registration = watchers
-            .get(&key)
-            .map(|registration| {
-                registration.owners.remove(owner_id);
-                registration.owners.is_empty()
-            })
-            .unwrap_or(false);
+        let remove_registration = if let Some(registration) = watchers.registrations.get_mut(&key)
+            && Arc::ptr_eq(&owners, &registration.owners)
+            && owners.is_empty()
+        {
+            if let Err(error) = confirm_unwatch(&mut registration.watcher, Path::new(&key)) {
+                owners.insert(owner_id, "office watcher")?;
+                return Err(error);
+            }
+            registration.debounce.clear();
+            true
+        } else {
+            false
+        };
         if remove_registration {
-            // Dropping the last owner's registration stops the OS watcher.
-            watchers.remove(&key);
+            watchers.registrations.remove(&key);
         }
+        forget_watch_aliases(&mut watchers.aliases, owner_id, &key);
         Ok(())
     }
 }
@@ -327,6 +606,710 @@ mod tests {
     use super::*;
     use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
     use std::path::PathBuf;
+
+    struct NoEvents;
+    impl UserEventSink for NoEvents {
+        fn send_to_user(&self, _: &str, _: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    fn lifecycle_fixture() -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("watch-lifecycle-");
+        match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => builder.tempdir_in(parent).unwrap(),
+            None => builder.tempdir().unwrap(),
+        }
+    }
+
+    #[test]
+    fn unwatch_watch_not_found_counts_as_confirmed_removal() {
+        assert!(unwatch_error_is_confirmed_removal(&notify::Error::watch_not_found()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unwatch_inotify_einval_counts_as_confirmed_removal() {
+        let gone = notify::Error::io(std::io::Error::from_raw_os_error(libc::EINVAL));
+        assert!(unwatch_error_is_confirmed_removal(&gone));
+        let live = notify::Error::io(std::io::Error::from_raw_os_error(libc::EIO));
+        assert!(!unwatch_error_is_confirmed_removal(&live));
+        assert!(!unwatch_error_is_confirmed_removal(&notify::Error::generic("boom")));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unwatch_io_errors_stay_unconfirmed_off_linux() {
+        let err = notify::Error::io(std::io::Error::from_raw_os_error(22));
+        assert!(!unwatch_error_is_confirmed_removal(&err));
+    }
+
+    struct InventoryDeliveryEvents {
+        files: Mutex<std::sync::Weak<crate::FileService>>,
+        root: PathBuf,
+        runtime: tokio::runtime::Handle,
+        office: bool,
+        observations: tokio::sync::mpsc::UnboundedSender<(String, Result<Vec<String>, String>)>,
+    }
+
+    impl UserEventSink for InventoryDeliveryEvents {
+        fn send_to_user(&self, owner: &str, event: WebSocketMessage<serde_json::Value>) {
+            let expected = if self.office {
+                event.name == "workspaceOfficeWatch.fileAdded"
+            } else {
+                event.name == "fileWatch.fileChanged" && event.data["event_type"] == "remove"
+            };
+            if !expected { return; }
+            let files = self.files.lock().unwrap().upgrade().unwrap();
+            let root = self.root.clone();
+            let runtime = self.runtime.clone();
+            // Observe the public API during delivery, before the callback can
+            // perform any later invalidation. The native callback has no runtime.
+            let observed = std::thread::spawn(move || runtime.block_on(async move {
+                use crate::IFileService;
+                files.list_workspace_files(root.to_str().unwrap()).await
+                    .map(|files| {
+                        let mut names = files.into_iter().map(|file| file.name).collect::<Vec<_>>();
+                        names.sort();
+                        names
+                    }).map_err(|error| error.to_string())
+            })).join().unwrap();
+            let _ = self.observations.send((owner.to_owned(), observed));
+        }
+    }
+
+    async fn inventory_after_native_delivery(office: bool) {
+        use crate::{IFileService, IFileWatchService};
+        let fixture = lifecycle_fixture();
+        let root = fixture.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let old = root.join("old.txt");
+        std::fs::write(&old, b"old").unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(InventoryDeliveryEvents {
+            files: Mutex::new(std::sync::Weak::new()), root: root.clone(),
+            runtime: tokio::runtime::Handle::current(), office, observations: sender,
+        });
+        let files = Arc::new(crate::FileService::new(events.clone(), vec![root.clone()]));
+        *events.files.lock().unwrap() = Arc::downgrade(&files);
+        assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+        let watches = FileWatchService::new(events, Arc::downgrade(&files)).unwrap();
+        let owner = nomifun_common::generate_id();
+        if office {
+            watches.start_office_watch(&owner, root.to_str().unwrap()).await.unwrap();
+            assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+            std::fs::write(root.join("new.docx"), b"new").unwrap();
+        } else {
+            watches.start_watch(&owner, old.to_str().unwrap()).await.unwrap();
+            assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+            std::fs::remove_file(old).unwrap();
+        }
+        let observed = tokio::time::timeout(Duration::from_secs(3), receiver.recv()).await;
+        let mut actual = std::fs::read_dir(&root).unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect::<Vec<_>>();
+        actual.sort();
+        drop(watches);
+        if !matches!(&observed, Ok(Some((recipient, Ok(names)))) if recipient == &owner && names == &actual) {
+            let observation = serde_json::json!({ "office": office, "observed": format!("{observed:?}"), "disk": actual });
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+            panic!("native delivery exposed a stale inventory; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_refreshes_before_native_office_delivery() {
+        inventory_after_native_delivery(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_refreshes_before_native_remove_delivery() {
+        inventory_after_native_delivery(false).await;
+    }
+
+    #[tokio::test]
+    async fn inventory_activation_reconciles_changes_before_subscription() {
+        use crate::{IFileService, IFileWatchService};
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![root.clone()]));
+        let watches = FileWatchService::new(Arc::new(NoEvents), Arc::downgrade(&files)).unwrap();
+        let owner = nomifun_common::generate_id();
+        let mut observations = Vec::new();
+        for office in [false, true] {
+            let workspace = root.join(if office { "office" } else { "single" });
+            std::fs::create_dir(&workspace).unwrap();
+            let watched = workspace.join("watched.txt");
+            std::fs::write(&watched, b"old").unwrap();
+            for round in 1..=2 {
+                files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                // No subscription is active while the cached inventory becomes stale.
+                std::fs::write(workspace.join(format!("gap-{round}.docx")), b"gap").unwrap();
+                if office {
+                    watches.start_office_watch(&owner, workspace.to_str().unwrap()).await.unwrap();
+                } else {
+                    watches.start_watch(&owner, watched.to_str().unwrap()).await.unwrap();
+                }
+                let observed = files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                let actual = std::fs::read_dir(&workspace).unwrap().count();
+                observations.push((office, round, observed.len(), actual));
+                if office {
+                    watches.stop_office_watch(&owner, workspace.to_str().unwrap()).await.unwrap();
+                } else {
+                    watches.stop_watch(&owner, watched.to_str().unwrap()).await.unwrap();
+                }
+            }
+        }
+        drop(watches);
+        if observations.iter().any(|(_, _, observed, actual)| observed != actual) {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+            panic!("activation kept a pre-subscription snapshot; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_gaps_and_filtered_office_changes_revoke_cached_snapshots() {
+        use crate::IFileService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![root.clone()]));
+        let first = root.join("first");
+        let second = root.join("second");
+        let watched = DashMap::new();
+        for workspace in [&first, &second] {
+            std::fs::create_dir(workspace).unwrap();
+            let file = workspace.join("watched.txt");
+            std::fs::write(&file, b"old").unwrap();
+            watched.insert(file.to_string_lossy().into_owned(), HashSet::from(["owner".to_owned()]));
+        }
+        let events = [
+            (false, Err(notify::Error::generic("injected native gap"))),
+            (false, Ok(notify::Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan))),
+            (true, Err(notify::Error::generic("injected native gap"))),
+            (true, Ok(notify::Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan))),
+            (true, Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(first.join("plain.txt")))),
+        ];
+        let mut observations = Vec::new();
+        for (index, (office, event)) in events.iter().enumerate() {
+            for workspace in [&first, &second] {
+                files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                std::fs::write(workspace.join(format!("{index}.txt")), b"new").unwrap();
+            }
+            if *office {
+                // A recursive registration covers all names, even when Office
+                // delivery would filter out this event's kind or extension.
+                invalidate_office_inventory(&Arc::downgrade(&files), &root, event);
+            } else {
+                for path in watched.iter().map(|entry| entry.key().clone()).collect::<Vec<_>>() {
+                    invalidate_file_inventory(&Arc::downgrade(&files), Path::new(&path), event);
+                }
+            }
+            for workspace in [&first, &second] {
+                let observed = files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap().len();
+                let actual = std::fs::read_dir(workspace).unwrap().count();
+                observations.push((index, observed, actual));
+            }
+        }
+        if observations.iter().any(|(_, observed, actual)| observed != actual) {
+            std::fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+            panic!("native gap or filtered change kept stale caches; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[test]
+    fn inventory_callbacks_do_not_retain_the_file_service() {
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![]));
+        let weak = Arc::downgrade(&files);
+        let _watches = FileWatchService::new(Arc::new(NoEvents), weak.clone()).unwrap();
+        drop(files);
+        assert!(weak.upgrade().is_none());
+        invalidate_file_inventory(&weak, Path::new("closed"), &Err(notify::Error::generic("closed")));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleted_file_watch_can_be_stopped_through_its_original_alias() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let file = fixture.path().join("watched.txt");
+        let alias = fixture.path().join("parent/../watched.txt");
+        std::fs::write(&file, b"initial").unwrap();
+        let owner = nomifun_common::generate_id();
+        let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_file(&file).unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        if !service.file_watcher.lock().unwrap().registrations.is_empty() {
+            let registrations = service.file_watcher.lock().unwrap().registrations.keys().cloned().collect::<Vec<_>>();
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&registrations).unwrap()).unwrap();
+            panic!("deleted file subscription survived stop; retained fixture: {}", fixture.keep().display());
+        }
+        std::fs::write(&file, b"new file").unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.file_watcher.lock().unwrap().registrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleted_office_workspace_can_be_stopped_through_its_original_alias() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let workspace = fixture.path().join("workspace");
+        let alias = fixture.path().join("parent/../workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let owner = nomifun_common::generate_id();
+        let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        if !service.office_watchers.lock().unwrap().registrations.is_empty() {
+            let registrations = service.office_watchers.lock().unwrap().registrations.keys().cloned().collect::<Vec<_>>();
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&registrations).unwrap()).unwrap();
+            panic!("deleted workspace subscription survived stop; retained fixture: {}", fixture.keep().display());
+        }
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.office_watchers.lock().unwrap().registrations.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn retargeted_alias_stops_its_original_subscription_without_affecting_another() {
+        use crate::IFileWatchService;
+        for office in [false, true] {
+            let fixture = lifecycle_fixture();
+            let first = fixture.path().join("first");
+            let second = fixture.path().join("second");
+            let alias = fixture.path().join("alias");
+            std::fs::create_dir(&first).unwrap();
+            std::fs::create_dir(&second).unwrap();
+            std::fs::write(first.join("watched.txt"), b"first").unwrap();
+            std::fs::write(second.join("watched.txt"), b"second").unwrap();
+            junction::create(&first, &alias).unwrap();
+            let original = if office { alias.clone() } else { alias.join("watched.txt") };
+            let other = if office { second.clone() } else { second.join("watched.txt") };
+            let other_key = std::fs::canonicalize(&other).unwrap().to_string_lossy().into_owned();
+            let owner = nomifun_common::generate_id();
+            let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
+            if office {
+                service.start_office_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                service.start_office_watch(&owner, other.to_str().unwrap()).await.unwrap();
+            } else {
+                service.start_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                service.start_watch(&owner, other.to_str().unwrap()).await.unwrap();
+            }
+            junction::delete(&alias).unwrap();
+            std::fs::remove_dir(&alias).unwrap();
+            junction::create(&second, &alias).unwrap();
+            if office {
+                assert!(matches!(service.start_office_watch(&owner, original.to_str().unwrap()).await, Err(AppError::Conflict(_))));
+                service.stop_office_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                assert_eq!(service.office_watchers.lock().unwrap().registrations.len(), 1);
+                assert!(service.office_watchers.lock().unwrap().registrations.contains_key(&other_key));
+                service.stop_office_watch(&owner, other.to_str().unwrap()).await.unwrap();
+                let state = service.office_watchers.lock().unwrap();
+                assert!(state.registrations.is_empty() && state.aliases.is_empty());
+            } else {
+                assert!(matches!(service.start_watch(&owner, original.to_str().unwrap()).await, Err(AppError::Conflict(_))));
+                service.stop_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                assert_eq!(service.file_watcher.lock().unwrap().registrations.len(), 1);
+                assert!(service.file_watcher.lock().unwrap().registrations.contains_key(&other_key));
+                service.stop_all_watches(&owner).await.unwrap();
+                assert!(service.file_watcher.lock().unwrap().registrations.is_empty());
+                assert!(service.file_watcher.lock().unwrap().aliases.is_empty());
+            }
+            junction::delete(&alias).unwrap();
+        }
+    }
+
+    struct ChannelEvents(tokio::sync::mpsc::UnboundedSender<(String, nomifun_api_types::WebSocketMessage<serde_json::Value>)>);
+    impl UserEventSink for ChannelEvents {
+        fn send_to_user(&self, owner: &str, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+            let _ = self.0.send((owner.to_owned(), event));
+        }
+    }
+
+    #[derive(Default)]
+    struct RoutedEvents(Mutex<Vec<String>>);
+
+    impl UserEventSink for RoutedEvents {
+        fn send_to_user(
+            &self,
+            owner: &str,
+            _: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+            self.0.lock().unwrap().push(owner.to_owned());
+        }
+    }
+
+    #[test]
+    fn metadata_change_does_not_debounce_a_following_remove_event() {
+        let path = std::env::temp_dir().join("watch-debounce-kind.txt");
+        let key = path.to_string_lossy().into_owned();
+        let owners = OwnerFence::with_owner("owner");
+        let debounce = DashMap::new();
+        let events = RoutedEvents::default();
+        let now = Instant::now();
+        for kind in [
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            emit_file_event(
+                Ok(notify::Event::new(kind).add_path(path.clone())),
+                &key,
+                &owners,
+                &debounce,
+                &events,
+                now,
+            );
+        }
+        assert_eq!(
+            events.0.lock().unwrap().len(),
+            2,
+            "different event kinds for one path carry different facts"
+        );
+    }
+
+    struct BlockingEvents {
+        started: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        delivered: Mutex<Vec<String>>,
+    }
+
+    impl UserEventSink for BlockingEvents {
+        fn send_to_user(
+            &self,
+            owner: &str,
+            _: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            self.delivered.lock().unwrap().push(owner.to_owned());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_waits_for_started_delivery_and_fences_later_callbacks() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let file = fixture.path().join("file.txt");
+        std::fs::write(&file, b"source").unwrap();
+        let key = std::fs::canonicalize(&file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let owner = nomifun_common::generate_id();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let events = Arc::new(BlockingEvents {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+            delivered: Mutex::new(Vec::new()),
+        });
+        let service = Arc::new(FileWatchService::new(events.clone(), Weak::new()).unwrap());
+        service.start_watch(&owner, file.to_str().unwrap()).await.unwrap();
+        let (owners, debounce) = {
+            let state = service.file_watcher.lock().unwrap();
+            let registration = state.registrations.get(&key).unwrap();
+            (registration.owners.clone(), registration.debounce.clone())
+        };
+        let delayed = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from(&key));
+        let callback = {
+            let (events, owners, debounce, key, delayed) = (
+                events.clone(),
+                owners.clone(),
+                debounce.clone(),
+                key.clone(),
+                delayed.clone(),
+            );
+            std::thread::spawn(move || {
+                emit_file_event(
+                    Ok(delayed),
+                    &key,
+                    &owners,
+                    &debounce,
+                    events.as_ref(),
+                    Instant::now(),
+                );
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+        let stop = {
+            let (service, owner, path) = (
+                service.clone(),
+                owner.clone(),
+                file.to_string_lossy().into_owned(),
+            );
+            tokio::spawn(async move {
+                let _ = attempted_tx.send(());
+                service.stop_watch(&owner, &path).await
+            })
+        };
+        attempted_rx.await.unwrap();
+        assert!(!stop.is_finished(), "stop returned while a delivery still owned the registration fence");
+        release_tx.send(()).unwrap();
+        callback.join().unwrap();
+        stop.await.unwrap().unwrap();
+        assert_eq!(events.delivered.lock().unwrap().as_slice(), [owner.as_str()]);
+
+        emit_file_event(
+            Ok(delayed),
+            &key,
+            &owners,
+            &debounce,
+            events.as_ref(),
+            Instant::now() + DEBOUNCE_DURATION,
+        );
+        assert_eq!(events.delivered.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delayed_file_callback_never_targets_a_recreated_registration() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let file = fixture.path().join("file.txt");
+        std::fs::write(&file, b"source").unwrap();
+        let key = std::fs::canonicalize(&file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let old_owner = nomifun_common::generate_id();
+        let new_owner = nomifun_common::generate_id();
+        let events = Arc::new(RoutedEvents::default());
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
+        service.start_watch(&old_owner, file.to_str().unwrap()).await.unwrap();
+        let (old_owners, old_debounce) = {
+            let state = service.file_watcher.lock().unwrap();
+            let registration = state.registrations.get(&key).unwrap();
+            (registration.owners.clone(), registration.debounce.clone())
+        };
+        let delayed = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from(&key));
+
+        service.stop_watch(&old_owner, file.to_str().unwrap()).await.unwrap();
+        service.start_watch(&new_owner, file.to_str().unwrap()).await.unwrap();
+        {
+            let state = service.file_watcher.lock().unwrap();
+            let registration = state.registrations.get(&key).unwrap();
+            assert!(!Arc::ptr_eq(&old_owners, &registration.owners));
+            assert!(registration.owners.contains(&new_owner));
+        }
+        emit_file_event(
+            Ok(delayed),
+            &key,
+            &old_owners,
+            &old_debounce,
+            events.as_ref(),
+            Instant::now(),
+        );
+
+        assert!(
+            events.0.lock().unwrap().is_empty(),
+            "an event queued by the retired native registration must not cross into its replacement"
+        );
+        service.stop_watch(&new_owner, file.to_str().unwrap()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_office_callback_never_targets_a_recreated_registration() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let file = root.join("late.docx");
+        let key = root.to_string_lossy().into_owned();
+        let old_owner = nomifun_common::generate_id();
+        let new_owner = nomifun_common::generate_id();
+        let events = Arc::new(RoutedEvents::default());
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
+        service.start_office_watch(&old_owner, &key).await.unwrap();
+        let (old_owners, old_debounce) = {
+            let state = service.office_watchers.lock().unwrap();
+            let registration = state.registrations.get(&key).unwrap();
+            (registration.owners.clone(), registration.debounce.clone())
+        };
+        let delayed = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file);
+
+        service.stop_office_watch(&old_owner, &key).await.unwrap();
+        service.start_office_watch(&new_owner, &key).await.unwrap();
+        {
+            let state = service.office_watchers.lock().unwrap();
+            let registration = state.registrations.get(&key).unwrap();
+            assert!(!Arc::ptr_eq(&old_owners, &registration.owners));
+            assert!(registration.owners.contains(&new_owner));
+        }
+        emit_office_event(
+            &delayed,
+            &key,
+            &old_owners,
+            &old_debounce,
+            events.as_ref(),
+            Instant::now(),
+        );
+        assert!(
+            events.0.lock().unwrap().is_empty(),
+            "an office event queued by the retired native registration must not cross into its replacement"
+        );
+        service.stop_office_watch(&new_owner, &key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recreated_watches_deliver_real_events_to_the_new_owner() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let owner = nomifun_common::generate_id();
+        let next_owner = nomifun_common::generate_id();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender)), Weak::new()).unwrap();
+        let file = fixture.path().join("file.txt");
+        let alias = fixture.path().join("parent/../file.txt");
+        std::fs::write(&file, b"old").unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_file(&file).unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(&file, b"new").unwrap();
+        service.start_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(&file, b"modified").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (recipient, event) = receiver.recv().await.unwrap();
+                if recipient == next_owner && event.name == "fileWatch.fileChanged" { break; }
+            }
+        }).await.expect("recreated file watch did not receive a native event");
+        service.stop_all_watches(&next_owner).await.unwrap();
+        let workspace = fixture.path().join("workspace");
+        let alias = fixture.path().join("parent/../workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(workspace.join("new.docx"), b"new office fixture").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (recipient, event) = receiver.recv().await.unwrap();
+                if recipient == next_owner && event.name == "workspaceOfficeWatch.fileAdded" { break; }
+            }
+        }).await.expect("recreated workspace watch did not receive a native event");
+        service.stop_office_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.file_watcher.lock().unwrap().registrations.is_empty());
+        assert!(service.file_watcher.lock().unwrap().aliases.is_empty());
+        let office = service.office_watchers.lock().unwrap();
+        assert!(office.registrations.is_empty() && office.aliases.is_empty());
+    }
+
+    #[derive(Default)]
+    struct OfficeDeliveryEvents(Mutex<Vec<(String, String)>>);
+    impl UserEventSink for OfficeDeliveryEvents {
+        fn send_to_user(&self, owner: &str, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+            if event.name == "workspaceOfficeWatch.fileAdded" {
+                self.0.lock().unwrap().push((owner.to_owned(), event.data["workspace"].as_str().unwrap().to_owned()));
+            }
+        }
+    }
+
+    fn inject_office_event(service: &FileWatchService, root: &str, file: &Path, now: Instant, events: &OfficeDeliveryEvents) {
+        let registrations = service.office_watchers.lock().unwrap();
+        let registration = registrations.registrations.get(root).unwrap();
+        let event = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file.to_path_buf());
+        emit_office_event(&event, root, &registration.owners, &registration.debounce, events, now);
+    }
+
+    #[tokio::test]
+    async fn overlapping_office_roots_each_deliver_the_same_native_event() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let file = nested.join("shared.docx");
+        std::fs::write(&file, b"fixture").unwrap();
+        let parent_owner = nomifun_common::generate_id();
+        let child_owner = nomifun_common::generate_id();
+        let events = Arc::new(OfficeDeliveryEvents::default());
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
+        service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        let now = Instant::now();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        inject_office_event(&service, nested.to_str().unwrap(), &file, now, &events);
+        let observed = events.0.lock().unwrap().clone();
+        if observed != [(parent_owner.clone(), root.to_string_lossy().into_owned()), (child_owner.clone(), nested.to_string_lossy().into_owned())] {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+            panic!("one workspace suppressed another's event; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn office_restarts_do_not_inherit_the_prior_subscription_debounce() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let file = root.join("recreated.docx");
+        std::fs::write(&file, b"fixture").unwrap();
+        let old_owner = nomifun_common::generate_id();
+        let new_owner = nomifun_common::generate_id();
+        let events = Arc::new(OfficeDeliveryEvents::default());
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
+        service.start_office_watch(&old_owner, root.to_str().unwrap()).await.unwrap();
+        let now = Instant::now();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        service.stop_office_watch(&old_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&new_owner, root.to_str().unwrap()).await.unwrap();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        let observed = events.0.lock().unwrap().clone();
+        if observed.iter().map(|item| &item.0).collect::<Vec<_>>() != [&old_owner, &new_owner] {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+            panic!("new subscription inherited old suppression; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_office_subscriptions_receive_real_events_independently() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let parent_owner = nomifun_common::generate_id();
+        let child_owner = nomifun_common::generate_id();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender)), Weak::new()).unwrap();
+        service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        std::fs::write(nested.join("shared.docx"), b"first fixture").unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut observed = HashSet::new();
+            while observed.len() < 2 {
+                let (owner, event) = receiver.recv().await.unwrap();
+                if event.name == "workspaceOfficeWatch.fileAdded" && event.data["file_path"].as_str().is_some_and(|path| path.ends_with("shared.docx")) {
+                    observed.insert((owner, event.data["workspace"].as_str().unwrap().to_owned()));
+                }
+            }
+            observed
+        }).await.expect("both native workspace subscriptions must receive the event");
+        assert_eq!(observed, HashSet::from([(parent_owner.clone(), root.to_string_lossy().into_owned()),
+            (child_owner.clone(), nested.to_string_lossy().into_owned())]));
+        service.stop_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        std::fs::write(nested.join("second.docx"), b"second fixture").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (owner, event) = receiver.recv().await.unwrap();
+                if event.name == "workspaceOfficeWatch.fileAdded" && event.data["file_path"].as_str().is_some_and(|path| path.ends_with("second.docx")) {
+                    assert_eq!(owner, child_owner);
+                    assert_eq!(event.data["workspace"], nested.to_string_lossy().as_ref());
+                    break;
+                }
+            }
+        }).await.expect("remaining native subscriber must keep receiving events");
+        service.stop_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        assert!(service.office_watchers.lock().unwrap().registrations.is_empty());
+    }
 
     // -- is_office_file --
 

@@ -387,6 +387,7 @@ describe('Creative Studio v1 document contract', () => {
     const group: CreativeCanvasNode = {
       id: 'group-1',
       type: 'group',
+      name: '第一幕节点',
       position: { x: 10, y: 20 },
       size: { width: 640, height: 480 },
       groupId: null,
@@ -447,8 +448,17 @@ describe('Creative Studio v1 document contract', () => {
       ],
     };
 
+    expect(parseCreativeProjectDocument(document).nodes[0]).toEqual(group);
     expect(parseCreativeProjectDocument(document).nodes[1]).toEqual(text);
     expect(parseCreativeProjectDocument(document).nodes[2]).toEqual(image);
+
+    const untrimmedName = structuredClone(document);
+    untrimmedName.nodes[0].name = ' 第一幕节点 ';
+    expectContractError(
+      () => parseCreativeProjectDocument(untrimmedName),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].name'
+    );
 
     const missingTarget = structuredClone(document);
     missingTarget.connections[0].targetNodeId = 'missing';
@@ -626,6 +636,28 @@ describe('Creative Studio v1 document contract', () => {
       nodes: [oldV1],
     });
     expect(oldParsed.nodes[0].type === 'video' && oldParsed.nodes[0].data.composer).toBeNull();
+
+    const mentioned = structuredClone(video);
+    if (mentioned.type !== 'video' || !mentioned.data.composer) throw new Error('expected video');
+    mentioned.data.composer.prompt = '🎬 @图片1 动起来';
+    mentioned.data.composer.mentions = [{
+      id: 'mention-video', sourceNodeId: 'source-image', fallbackLabel: '图片1', start: 3, end: 7,
+    }];
+    const documentWithMention = {
+      ...createEmptyCreativeProjectDocument(PROJECT_ID), nodes: [mentioned],
+    };
+    // A disconnected binding survives persistence so the UI can show its error.
+    expect(parseCreativeProjectDocument(documentWithMention).nodes[0]).toEqual(mentioned);
+    for (const mentions of [
+      [{ ...mentioned.data.composer.mentions[0], start: 2 }],
+      [mentioned.data.composer.mentions[0], { ...mentioned.data.composer.mentions[0], id: 'overlap' }],
+      [mentioned.data.composer.mentions[0], mentioned.data.composer.mentions[0]],
+    ]) {
+      expect(() => parseCreativeProjectDocument({
+        ...documentWithMention,
+        nodes: [{ ...mentioned, data: { ...mentioned.data, composer: { ...mentioned.data.composer, mentions } } }],
+      })).toThrow();
+    }
 
     const invalid = structuredClone(video);
     if (invalid.type !== 'video' || !invalid.data.composer) {
@@ -814,24 +846,24 @@ describe('Creative Studio v1 document contract', () => {
       locked: false,
       data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null, composer: null },
     };
-    const director: CreativeCanvasNode = {
-      id: 'director-1',
-      type: 'director',
+    const text: CreativeCanvasNode = {
+      id: 'text-1',
+      type: 'text',
       position: { x: 400, y: 0 },
       size: { width: 360, height: 300 },
       groupId: null,
       zIndex: 1,
       locked: false,
-      data: { sceneId: null, cameraId: null, timelineMs: 0, durationMs: 0 },
+      data: { text: 'caption', format: 'plain', fontSize: 16, textAlign: 'left' },
     };
     const valid = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
-      nodes: [image, director],
+      nodes: [image, text],
       connections: [
         {
           id: 'edge-1',
           sourceNodeId: image.id,
-          targetNodeId: director.id,
+          targetNodeId: text.id,
           sourceHandle: null,
           targetHandle: null,
         },
@@ -846,15 +878,6 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(selfConnected),
       'INVALID_DOCUMENT',
       '$.connections[0].targetNodeId'
-    );
-
-    const directorOutput = structuredClone(valid);
-    directorOutput.connections[0].sourceNodeId = director.id;
-    directorOutput.connections[0].targetNodeId = image.id;
-    expectContractError(
-      () => parseCreativeProjectDocument(directorOutput),
-      'INVALID_DOCUMENT',
-      '$.connections[0].sourceNodeId'
     );
 
     const duplicate = structuredClone(valid);
@@ -889,6 +912,44 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(document),
       'INVALID_DOCUMENT',
       '$.nodes[0].data.legacyHtml'
+    );
+  });
+
+  test('round-trips timeline clips and rejects invalid trim bounds', () => {
+    const document = createEmptyCreativeProjectDocument(PROJECT_ID);
+    document.nodes.push({
+      id: 'timeline-1',
+      type: 'timeline',
+      position: { x: 0, y: 0 },
+      size: { width: 680, height: 180 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: {
+        title: '时间线1',
+        muted: false,
+        clips: [{
+          id: 'clip-1',
+          assetId: 'asset-video',
+          kind: 'video',
+          startMs: 0,
+          durationMs: 5_000,
+          sourceStartMs: 1_000,
+          sourceDurationMs: 8_000,
+        }],
+      },
+    });
+
+    expect(parseCreativeProjectDocument(document).nodes[0]).toEqual(document.nodes[0]);
+
+    const invalid = structuredClone(document);
+    const timeline = invalid.nodes[0];
+    if (timeline?.type !== 'timeline') throw new Error('timeline fixture missing');
+    timeline.data.clips[0]!.sourceDurationMs = 5_500;
+    expectContractError(
+      () => parseCreativeProjectDocument(invalid),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.clips[0].sourceDurationMs'
     );
   });
 });

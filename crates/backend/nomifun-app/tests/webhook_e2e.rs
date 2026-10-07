@@ -7,9 +7,92 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use common::{
-    nomi_extra_with_workspace, body_json, build_app, delete_with_token, get_request,
-    get_with_token, json_with_token, setup_and_login,
+    body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token,
+    setup_and_login,
 };
+
+const AUTOWORK_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679991";
+const AUTOWORK_MODEL: &str = "webhook-autowork-model";
+
+async fn seed_autowork_provider(services: &nomifun_app::compatibility::AppServices) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', 'webhook-autowork-fixture', \
+            'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+    )
+    .bind(AUTOWORK_PROVIDER_ID)
+    .bind(common::encrypted_bearer_credentials())
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    common::seed_openai_chat_model(
+        services.database.pool(),
+        AUTOWORK_PROVIDER_ID,
+        AUTOWORK_MODEL,
+    )
+    .await;
+}
+
+/// Create the fixture through the same Agent configuration and Session APIs
+/// used by the product. AutoWork validates the exact saved revision and
+/// Snapshot, so a hand-written Store row is intentionally not sufficient.
+async fn create_autowork_agent_session(
+    app: &axum::Router,
+    services: &nomifun_app::compatibility::AppServices,
+    token: &str,
+    csrf: &str,
+    title: &str,
+) -> String {
+    seed_autowork_provider(services).await;
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-presets/from-template/chat.minimal",
+            json!({
+                "display_name": format!("{title} configuration"),
+                "reuse_existing": false,
+                "model": {
+                    "provider_id": AUTOWORK_PROVIDER_ID,
+                    "model": AUTOWORK_MODEL
+                }
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let preset = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .expect("configured Agent preset id");
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-sessions",
+            json!({
+                "preset_id": preset_id,
+                "title": title
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let session = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    session["data"]["agent_session_id"]
+        .as_str()
+        .expect("created AgentSession id")
+        .to_owned()
+}
 
 #[tokio::test]
 async fn unauthenticated_webhook_list_is_rejected() {
@@ -346,7 +429,7 @@ async fn tag_settings_get_default_and_upsert() {
 }
 
 #[tokio::test]
-async fn tag_bindings_lists_enabled_autowork_conversations() {
+async fn tag_bindings_lists_enabled_autowork_agent_sessions() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -359,35 +442,21 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
 
-    // create a conversation, then enable AutoWork on it for tag "x"
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/conversations",
-            json!({
-                "type": "nomi",
-                "name": "Conv X",
-                "extra": nomi_extra_with_workspace("/project")
-            }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let conv_id = body_json(resp).await["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-        .to_string();
+    let session_id = create_autowork_agent_session(
+        &app,
+        &services,
+        &token,
+        &csrf,
+        "AgentSession X",
+    )
+    .await;
 
     let resp = app
         .clone()
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/autowork",
-            json!({ "kind": "conversation", "target_id": conv_id, "enabled": true, "tag": "x" }),
+            json!({ "kind": "conversation", "target_id": &session_id, "enabled": true, "tag": "x" }),
             &token,
             &csrf,
         ))
@@ -395,7 +464,7 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // tag-bindings now groups the conversation under "x"
+    // tag-bindings now groups the canonical Session under "x".
     let resp = app
         .clone()
         .oneshot(get_with_token("/api/requirements/tag-bindings", &token))
@@ -406,7 +475,7 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
     let groups = json["data"].as_array().unwrap();
     let x = groups.iter().find(|g| g["tag"] == "x").expect("tag x present");
     assert_eq!(x["bindings"].as_array().unwrap().len(), 1);
-    assert_eq!(x["bindings"][0]["target_id"], conv_id);
+    assert_eq!(x["bindings"][0]["target_id"], session_id);
 }
 
 #[tokio::test]
@@ -417,26 +486,14 @@ async fn admin_disable_of_idle_target_is_allowed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/conversations",
-            json!({
-                "type": "nomi",
-                "name": "Conv Y",
-                "extra": nomi_extra_with_workspace("/project")
-            }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    let conv_id = body_json(resp).await["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-        .to_string();
+    let session_id = create_autowork_agent_session(
+        &app,
+        &services,
+        &token,
+        &csrf,
+        "AgentSession Y",
+    )
+    .await;
 
     // enable then admin-disable (idle) → both OK
     for enabled in [true, false] {
@@ -445,7 +502,7 @@ async fn admin_disable_of_idle_target_is_allowed() {
             .oneshot(json_with_token(
                 "POST",
                 "/api/requirements/autowork",
-                json!({ "kind": "conversation", "target_id": conv_id, "enabled": enabled, "tag": "x", "from_admin": true }),
+                json!({ "kind": "conversation", "target_id": &session_id, "enabled": enabled, "tag": "x", "from_admin": true }),
                 &token,
                 &csrf,
             ))

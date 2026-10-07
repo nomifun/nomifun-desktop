@@ -5,8 +5,8 @@ import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conve
 import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { reconcileConversationAuthoritativeRuntime } from './reconcileConversationTurnAfterStreamTerminal';
 
-export const CONVERSATION_STOP_TIMEOUT_MS = 8_000;
-export const CONVERSATION_STOP_CONFIRM_TIMEOUT_MS = 8_000;
+const CONVERSATION_STOP_TIMEOUT_MS = 8_000;
+const CONVERSATION_STOP_CONFIRM_TIMEOUT_MS = 8_000;
 
 export class ConversationStopTimeoutError extends Error {
   constructor(timeoutMs: number) {

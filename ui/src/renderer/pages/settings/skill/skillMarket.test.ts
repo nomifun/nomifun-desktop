@@ -25,16 +25,13 @@ const item = {
 };
 
 describe('skill market helpers', () => {
-  test('filters by source, search, and shared tags', () => {
-    const result = filterSkillMarketItems([item], 'clawhub', 'github', {
-      audience: ['developer'],
-      scenario: ['coding'],
-    });
+  test('filters by source and search', () => {
+    const result = filterSkillMarketItems([item], 'clawhub', 'github');
 
     expect(result).toEqual([item]);
-    expect(filterSkillMarketItems([item], 'skillhub', '', { audience: [], scenario: [] })).toHaveLength(0);
-    expect(filterSkillMarketItems([item], 'clawhub', 'missing', { audience: [], scenario: [] })).toHaveLength(0);
-    expect(filterSkillMarketItems([item], 'clawhub', '开发', { audience: [], scenario: [] })).toEqual([item]);
+    expect(filterSkillMarketItems([item], 'skillhub', '')).toHaveLength(0);
+    expect(filterSkillMarketItems([item], 'clawhub', 'missing')).toHaveLength(0);
+    expect(filterSkillMarketItems([item], 'clawhub', '开发')).toEqual([item]);
   });
 
   test('rejects unsafe cached commands and URLs', () => {

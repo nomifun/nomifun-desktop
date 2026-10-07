@@ -28,9 +28,10 @@ pub struct AgentExecutionTemplateParticipantRow {
     pub template_participant_id: String,
     pub template_id: String,
     pub source_agent_id: String,
+    /// Immutable Agent launch snapshot carried by the authoring candidate.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,

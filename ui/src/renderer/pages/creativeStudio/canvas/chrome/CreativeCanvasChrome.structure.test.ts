@@ -10,6 +10,14 @@ import { readFileSync } from 'node:fs';
 const component = readFileSync(new URL('./CreativeCanvasChrome.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('./types.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./CreativeCanvasChrome.module.css', import.meta.url), 'utf8');
+const resourceDialog = readFileSync(
+  new URL('../../components/CreativeResourceDialog.tsx', import.meta.url),
+  'utf8'
+);
+const resourceDialogCss = readFileSync(
+  new URL('../../components/CreativeResourceDialog.module.css', import.meta.url),
+  'utf8'
+);
 
 describe('CreativeCanvasChrome architecture boundaries', () => {
   test('uses canonical product types, IconPark, Arco, and injected slots', () => {
@@ -21,7 +29,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(component.includes('props.slots?.canvas')).toBe(true);
     expect(component.includes('props.slots?.left')).toBe(true);
     expect(component.includes('props.slots?.right')).toBe(true);
-    expect(component.includes('props.slots?.bottom')).toBe(true);
+    expect(component.includes('props.slots?.bottom')).toBe(false);
   });
 
   test('emits actions without persistence, API, model, or fake-asset logic', () => {
@@ -34,7 +42,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       'onRedo',
       'onLeftViewChange',
       'onRightViewChange',
-      'onBottomViewChange',
     ]) {
       expect(types.includes(callback)).toBe(true);
     }
@@ -53,6 +60,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('onFitView')).toBe(false);
     expect(types.includes('onToggleMiniMap')).toBe(false);
     expect(types.includes('isMiniMapOpen')).toBe(false);
+    expect(types.includes('onBottomViewChange')).toBe(false);
   });
 
   test('keeps the canonical background vocabulary without a legacy fourth mode', () => {
@@ -62,16 +70,15 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes("'grid'" )).toBe(false);
   });
 
-  test('keeps source-order node creation directly on the toolbar', () => {
+  test('keeps source-order node creation directly on the side rail', () => {
     expect(
       types.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS')
     ).toBe(true);
     expect(
       component.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map')
     ).toBe(true);
-    expect(
-      component.includes('onClick={() => props.onAddNode(kind)}')
-    ).toBe(true);
+    expect(component.includes('onClick={() => handleNodeAdd(kind)}')).toBe(true);
+    expect(component.includes('if (canvasPanelOpen) props.onLeftPanelOpenChange(false)')).toBe(true);
     expect(component.includes('nodeMenuOpen')).toBe(false);
     expect(types.includes('nodeMenuOpen')).toBe(false);
   });
@@ -83,45 +90,56 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       '.rightPanel > .panelBody > *',
       'width: 100%',
       'grid-column: 2',
-      'overflow-x: auto',
+      'overflow-y: auto',
       'position: absolute',
       'data-left-open',
       "data-compact='true'",
       '@media (max-width: 1180px)',
       '@media (max-width: 880px)',
-      '@media (max-width: 640px)',
       '@media (prefers-reduced-motion: reduce)',
     ]) {
       expect(css.includes(token)).toBe(true);
     }
     expect(
-      /\.leftPanel\s*\{[\s\S]*?width:\s*min\(320px,\s*calc\(100% - 28px\)\);/.test(
+      /\.leftPanel\s*\{[\s\S]*?width:\s*48px;/.test(
         css
       )
     ).toBe(true);
-    expect(/\.leftTabs\s*\{[\s\S]*?width:\s*50px;/.test(css)).toBe(true);
+    expect(/\.leftTabs\s*\{[\s\S]*?width:\s*46px;/.test(css)).toBe(true);
     expect(
-      /\.leftTabs button\s*\{[\s\S]*?width:\s*38px;/.test(css)
+      /\.leftTabs button\s*\{[\s\S]*?width:\s*36px;/.test(css)
     ).toBe(true);
     expect(css.includes('box-shadow: inset 3px 0 0 rgb(var(--primary-6));')).toBe(
       false
     );
     expect(
-      /\.leftPanel\[data-left-open='false'\]\s*\{[\s\S]*?width:\s*50px;/.test(
+      /\.leftPanel\[data-left-open='true'\]\s*\{[\s\S]*?width:\s*min\(320px,\s*calc\(100% - 28px\)\);/.test(
         css
       )
     ).toBe(true);
     expect(
-      /\.leftPanel\[data-left-open='false'\] \.leftTabs button\s*\{[\s\S]*?width:\s*40px;/.test(
+      /\.leftPanel\[data-left-open='false'\] \.leftTabs button\s*\{[\s\S]*?width:\s*36px;/.test(
         css
       )
     ).toBe(true);
+    expect(component.includes("aria-haspopup='dialog'")).toBe(true);
+    expect(component.includes('<CreativeCanvasResourceDialog')).toBe(true);
+    expect(component.includes('<CreativeResourceDialog')).toBe(true);
+    expect(css.includes('.canvasResourceContent')).toBe(true);
+    expect(resourceDialogCss.includes('height: min(680px, calc(100vh - 120px));')).toBe(true);
+    expect(css.includes('padding: 18px 14px 10px;')).toBe(true);
+    expect(resourceDialogCss.includes('text-align: left;')).toBe(true);
+    expect(resourceDialog.includes('width: 1120')).toBe(true);
+    expect(component.includes("scope='canvas'")).toBe(true);
   });
 
-  test('keeps the left resource bubble above the top tool dock', () => {
+  test('layers the compact top actions and side rail above the canvas', () => {
     expect(/\.leftPanel\s*\{[\s\S]*?z-index:\s*60;/.test(css)).toBe(true);
-    expect(/\.toolbarPositioner\s*\{[\s\S]*?z-index:\s*50;/.test(css)).toBe(
+    expect(/\.topBar\s*\{[\s\S]*?z-index:\s*70;/.test(css)).toBe(
       true
     );
+    expect(/\.topPrimaryActions,[\s\S]*?\.topActions\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
+    expect(/\.leftPanel\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
+    expect(css.includes('.bottomPanel')).toBe(false);
   });
 });

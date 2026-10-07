@@ -11,7 +11,7 @@ import { DeleteOne, EditOne, More, PlayOne, Power, Pushpin, Refresh, Terminal } 
 import { Checkbox, Dropdown, Input, Menu, Modal, Popover } from '@arco-design/web-react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
-import type { AutoWorkRunState, IdmmRunState, ITerminalSession } from '@/common/adapter/ipcBridge';
+import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import { CapabilityIconCluster } from '@/renderer/components/capability/CapabilityIcon';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import TerminalHoverCard from '@/renderer/pages/conversation/components/TerminalHoverCard';
@@ -30,10 +30,6 @@ interface TerminalRowProps {
   indent?: boolean;
   /** Aggregated status of cron jobs targeting this terminal session ('none' = no jobs). */
   cronStatus?: 'none' | 'active' | 'paused' | 'error';
-  /** AutoWork run state when enabled for this terminal (undefined = not enabled / unknown). */
-  autoworkState?: AutoWorkRunState;
-  /** IDMM run state when enabled for this terminal (undefined = not enabled / unknown). */
-  idmmState?: IdmmRunState;
   /** Sidebar display preference: show/hide the compact age marker on the right. */
   showSessionAge?: boolean;
 }
@@ -58,8 +54,6 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   onToggleSelect,
   indent,
   cronStatus = 'none',
-  autoworkState,
-  idmmState,
   showSessionAge = true,
 }) => {
   const { t } = useTranslation();
@@ -68,9 +62,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   const [renameVisible, setRenameVisible] = useState(false);
   const [renameName, setRenameName] = useState('');
 
-  // Session-level capability markers (trailing group), shared builder with
-  // ConversationRow: 定时任务 → 自动工作 → 智能决策.
-  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState, idmmState });
+  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus });
   const ageLabel = formatSessionAgeLabel(t, session.created_at);
 
   // 进入批量选择模式时菜单容器被卸载，但 menuVisible 残留会在退出选择模式时把菜单弹回来

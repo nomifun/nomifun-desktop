@@ -19,11 +19,12 @@
  * the view→edit switch stays local.
  */
 
-import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Descriptions, Drawer, Spin } from '@arco-design/web-react';
 import { Edit } from '@icon-park/react';
 import { ipcBridge } from '@/common';
+import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IRequirement } from '@/common/adapter/ipcBridge';
 import type { RequirementId } from '@/common/types/ids';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
@@ -60,63 +61,53 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formResetSignal, setFormResetSignal] = useState(0);
+  const context = useMemo(() => ({}), [open, mode, requirementId]);
+  const activeContext = useRef<object | null>(null);
+  const saving = useRef(false);
+  const isCurrent = useCallback(() => activeContext.current === context, [context]);
 
   // Re-seed the inner mode and clear stale data whenever the drawer (re)opens or
   // its target changes — so reopening a different requirement never flashes the
   // previous one, and a host that keeps the drawer mounted gets a clean slate.
   useLayoutEffect(() => {
-    if (!open) return;
-    setInnerMode(mode);
-    setData(null);
-    setFormResetSignal((signal) => signal + 1);
-  }, [open, mode, requirementId]);
-
-  // Fetch the requirement for view/edit. Create needs no fetch.
-  const fetchRequirement = useCallback(async () => {
-    if (requirementId === undefined) return;
-    setLoading(true);
-    try {
-      const full = await ipcBridge.requirements.get.invoke({ requirement_id: requirementId });
-      setData(full);
-    } catch (e) {
-      message.error(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [requirementId, message]);
-
-  // Fetch the requirement once per open/target — NOT per inner mode. View↔edit
-  // flips locally and the data is already in hand, so this effect deliberately
-  // does not depend on `innerMode`; re-fetching on a mode flip would flicker and,
-  // after a save, double-fetch (the explicit fetchRequirement + an effect re-fire).
-  // Create mode needs no fetch.
-  useEffect(() => {
-    if (!open) return;
-    if (mode === 'create') {
+    activeContext.current = open ? context : null;
+    saving.current = false;
+    setSubmitting(false);
+    setLoading(false);
+    if (open) {
+      setInnerMode(mode);
       setData(null);
-      return;
+      setFormResetSignal((signal) => signal + 1);
     }
-    if (requirementId === undefined) return;
+    return () => {
+      activeContext.current = null;
+    };
+  }, [context, open, mode]);
+
+  // Local view/edit flips reuse the loaded data. Update already returns a full
+  // requirement including attachments, so a successful save needs no second GET.
+  useEffect(() => {
+    if (!open || mode === 'create' || requirementId === undefined) return;
     let cancelled = false;
     setLoading(true);
     void ipcBridge.requirements.get
       .invoke({ requirement_id: requirementId })
       .then((full) => {
-        if (!cancelled) setData(full);
+        if (!cancelled && isCurrent()) setData(full);
       })
       .catch((e) => {
-        if (!cancelled) message.error(String(e));
+        if (!cancelled && isCurrent() && !isHandledAuthExpiredHttpError(e)) message.error(String(e));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && isCurrent()) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, mode, requirementId, message]);
+    return () => { cancelled = true; };
+  }, [open, mode, requirementId, message, isCurrent]);
 
   const handleCreate = useCallback(
     async (payload: RequirementFormPayload) => {
+      if (!isCurrent() || saving.current) return;
+      saving.current = true;
       setSubmitting(true);
       try {
         await ipcBridge.requirements.create.invoke({
@@ -126,24 +117,29 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
           order_key: payload.order_key,
           attachments: payload.newAttachments,
         });
+        if (!isCurrent()) return;
         message.success(t('requirements.form.createdOk'));
         onSaved();
         onClose();
       } catch (e) {
-        message.error(String(e));
+        if (isCurrent() && !isHandledAuthExpiredHttpError(e)) message.error(String(e));
       } finally {
-        setSubmitting(false);
+        if (isCurrent()) {
+          saving.current = false;
+          setSubmitting(false);
+        }
       }
     },
-    [message, t, onSaved, onClose]
+    [message, t, onSaved, onClose, isCurrent]
   );
 
   const handleUpdate = useCallback(
     async (payload: RequirementFormPayload) => {
-      if (requirementId === undefined) return;
+      if (requirementId === undefined || !isCurrent() || saving.current) return;
+      saving.current = true;
       setSubmitting(true);
       try {
-        await ipcBridge.requirements.update.invoke({
+        const full = await ipcBridge.requirements.update.invoke({
           requirement_id: requirementId,
           updates: {
             title: payload.title,
@@ -155,17 +151,21 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
             remove_attachment_ids: payload.removeAttachmentIds,
           },
         });
+        if (!isCurrent()) return;
         message.success(t('requirements.form.updatedOk'));
+        setData(full);
         setInnerMode('view');
-        await fetchRequirement();
         onSaved();
       } catch (e) {
-        message.error(String(e));
+        if (isCurrent() && !isHandledAuthExpiredHttpError(e)) message.error(String(e));
       } finally {
-        setSubmitting(false);
+        if (isCurrent()) {
+          saving.current = false;
+          setSubmitting(false);
+        }
       }
     },
-    [requirementId, message, t, fetchRequirement, onSaved]
+    [requirementId, message, t, onSaved, isCurrent]
   );
 
   const drawerTitle = (() => {

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use nomifun_common::AgentExecutionEventKind;
 use ts_rs::{Config, TS};
 
-const BASELINE: &str = include_str!("../migrations/001_v3_baseline.sql");
+const BASELINE: &str = include_str!("../migrations/001_canonical_baseline.sql");
 const TYPESCRIPT_BINDING: &str = include_str!(
     "../../../../ui/src/common/protocolBindings/AgentExecutionEventKind.ts"
 );

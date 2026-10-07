@@ -8,34 +8,23 @@ import { conversationTarget, type ConversationId, type MessageId } from '@/commo
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
-import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
-import MobileActionSheet, {
-  type MobileActionSheetEntry,
-  type MobileActionSheetOption,
-  useAttachEntry,
-} from '@/renderer/components/chat/MobileActionSheet';
+import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
-import FilePreview from '@/renderer/components/media/FilePreview';
-import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
-import SummonControl from '@/renderer/pages/conversation/components/SummonPanel';
-import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
+import SessionCapabilityPicker, { useSessionCapabilityCatalog } from '@/renderer/components/chat/SessionCapabilityPicker';
+import { useSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilitySelection';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
-import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
 import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
 import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
 import {
-  snapshotEditSuffixLocalIds,
   useAddOrUpdateMessage,
   useMessageList,
   useRemoveMessageByMsgId,
-  useRemoveMessagesByLocalIds,
 } from '@/renderer/pages/conversation/Messages/hooks';
-import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import {
   shouldEnqueueConversationCommand,
   useConversationCommandQueue,
@@ -59,29 +48,34 @@ import {
   useConversationStopAttemptGuard,
 } from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
-import { getConversationRuntimeWorkspaceErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
-import {
-  warmupConversation,
-  warmupConversationForPassiveMount,
-} from '@/renderer/pages/conversation/utils/warmupConversation';
+import { conversationRequestError, hasCanonicalRequestError, type ConversationRequestFailure } from '@/renderer/pages/conversation/utils/conversationRequestError';
+import ConversationErrorNote from '../../Messages/components/ConversationErrorNote';
+import { warmupConversationForPassiveMount } from '@/renderer/pages/conversation/utils/warmupConversation';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { allSupportedExts } from '@/renderer/services/FileService';
-import { iconColors } from '@/renderer/styles/colors';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import type { AgentModeOption } from '@/renderer/utils/model/agentModes';
-import { Message, Tag } from '@arco-design/web-react';
-import { Brain, MagicHat, Shield } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Message, Tooltip } from '@arco-design/web-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
-import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
+import { steerOrQueue } from './steerOrQueue';
+import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
+import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
+import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
+import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
+import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
+import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
+import { mutate as mutateSWR } from 'swr';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
+import { useConversationTaskPlan } from './useConversationTaskPlan';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -129,47 +123,46 @@ const useSendBoxDraft = (conversation_id: ConversationId) => {
 const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
-  session_mode?: string;
+  agentSelectorNode?: React.ReactNode;
   agent_name?: string;
-  dynamicModes: AgentModeOption[];
   turnActivity: NomiMessageRuntime;
+  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
   /**
-   * Hide the permission/agent-mode selector (and the mobile action-sheet
-   * model + permission entries). Used by locked surfaces like the desktop
-   * companion chat, which runs in a fixed yolo mode with a locked model.
-   */
-  hideModeSelector?: boolean;
-  /** Conversation collaborator-model control, rendered after the main model. */
-  collaboratorSelectorNode?: React.ReactNode;
-  /**
-   * Extra node(s) rendered in the right-tools group, after the collaborator
-   * selector and before the permission selector. A projected task uses this to
-   * surface its task-requirement control inside the participant conversation.
+   * Extra node(s) rendered in the bottom right-tools group. A projected task
+   * uses this to surface its task-requirement control inside the participant conversation.
    */
   extraRightTools?: React.ReactNode;
+  /** False for product surfaces that currently support chat only. */
+  creationEnabled?: boolean;
+  /** Hide work-session configuration chrome on a dedicated product surface. */
+  compactProductComposer?: boolean;
 }> = ({
   conversation_id,
   modelSelection,
-  session_mode,
+  agentSelectorNode,
   agent_name,
-  dynamicModes,
   turnActivity,
-  hideModeSelector,
-  collaboratorSelectorNode,
+  modelSelectionHint,
+  modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating = false,
+  onReasoningEffortChange,
   extraRightTools,
+  creationEnabled = true,
+  compactProductComposer = false,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
-  const [currentMode, setCurrentMode] = useState<string | undefined>(session_mode);
-  const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
-  const layout = useLayoutContext();
-  const isMobile = Boolean(layout?.isMobile);
-  const conversationContext = useConversationContextSafe();
-  const loadedSkills = conversationContext?.loadedSkills ?? [];
-  const loadedMcpStatuses = conversationContext?.loadedMcpStatuses ?? [];
+  const capabilityCatalog = useSessionCapabilityCatalog();
+  const sessionCapabilities = useSessionCapabilitySelection(conversation_id);
+  const taskPlan = useConversationTaskPlan(conversation_id, turnActivity.running);
   const { t } = useTranslation();
-  const providerLabel = useModelSelectorProviderLabel();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
+  const [defaultVisionModel] = useConfig('models.default.vision');
 
   const {
     data: providerGraph,
@@ -185,6 +178,7 @@ const NomiSendBox: React.FC<{
           !isProviderGraphLoading && !providerGraphError && Array.isArray(providerGraph),
         providerId: current_model?.id,
         model: current_model?.use_model,
+        visionModel: defaultVisionModel,
       });
       if (decision.allowed) return true;
       Message.warning(
@@ -199,6 +193,7 @@ const NomiSendBox: React.FC<{
     [
       current_model?.id,
       current_model?.use_model,
+      defaultVisionModel,
       isProviderGraphLoading,
       providerGraph,
       providerGraphError,
@@ -209,6 +204,7 @@ const NomiSendBox: React.FC<{
   const {
     running,
     hasHydratedRunningState,
+    pauseNotice,
     tokenUsage,
     setActiveMsgId,
     markTurnAccepted,
@@ -220,12 +216,33 @@ const NomiSendBox: React.FC<{
     getTurnStartGeneration,
     getTurnCompletionGeneration,
   } = turnActivity;
+  const modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice);
+  const modelPickerHint = pauseNotice ? t('messages.planPaused') : running
+    ? t('conversation.chat.modelSwitchAfterTurn')
+    : modelSelectionHint;
   const hasContextUsage =
     typeof tokenUsage?.context_window === 'number' &&
     tokenUsage.context_window > 0 &&
     typeof tokenUsage?.context_tokens === 'number';
 
   const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent } = useSendBoxDraft(conversation_id);
+  const creationContext = useCreationComposer();
+  const creation = creationEnabled ? creationContext : null;
+  const generation = useGenerationModel(creation, collectSelectedFiles(uploadFile, atPath));
+  const [creationSubmitting, setCreationSubmitting] = useState(false);
+  const creationSubmittingRef = useRef(false);
+  const isCreating = Boolean(creation?.draft.mode);
+  useEffect(() => {
+    if (creation?.draft.pendingPrompt === undefined) return;
+    setContent(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation?.draft.pendingPrompt, creation?.update, setContent]);
+
+  useEffect(() => {
+    if (!creation?.draft.pendingFiles) return;
+    setUploadFile(previous => Array.from(new Set([...previous, ...creation.draft.pendingFiles!])));
+    creation.update(draft => ({ ...draft, pendingFiles: undefined }));
+  }, [creation?.draft.pendingFiles, creation?.update, setUploadFile]);
 
   const handleContentChange = useCallback(
     (val: string) => {
@@ -234,14 +251,7 @@ const NomiSendBox: React.FC<{
     [setContent]
   );
 
-  const [agentWarmed, setAgentWarmed] = useState(false);
-  const prepareRuntimeSync = useCallback(async () => {
-    await warmupConversation(conversation_id);
-  }, [conversation_id]);
-  const prepareRuntimeForRead = useCallback(async () => {
-    await warmupConversationForPassiveMount(conversation_id);
-  }, [conversation_id]);
-
+  const [initialDeliveryReady, setInitialDeliveryReady] = useState(false);
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {
       if (!res?.extra?.workspace) return;
@@ -249,31 +259,46 @@ const NomiSendBox: React.FC<{
     });
   }, [conversation_id]);
 
+  const [requestFailure, setRequestFailure] = useState<(ConversationRequestFailure & { conversationId: ConversationId }) | null>(null);
+  const requestConversationIdRef = useLatestRef(conversation_id);
+  const reportRequestFailure = useCallback((error: unknown, fallbackCode: string, previousMessageIds?: ReadonlySet<string>, input?: string) => {
+    if (requestConversationIdRef.current !== conversation_id) return;
+    setRequestFailure({ conversationId: conversation_id, error: conversationRequestError(error, fallbackCode), timestamp: Date.now(), previousMessageIds, input });
+  }, [conversation_id, requestConversationIdRef]);
+  useEffect(() => { setRequestFailure(null); }, [conversation_id]);
+
   useEffect(() => {
-    if (!conversation_id) return;
-    setAgentWarmed(false);
+    if (!conversation_id || isCreating) return;
+    let cancelled = false;
+    setInitialDeliveryReady(false);
     void warmupConversationForPassiveMount(conversation_id)
       .then(() => {
-        setAgentWarmed(true);
+        // Hydration completes before the guarded initial message handoff.
+        if (!cancelled) {
+          // `false` means an already-Ready canonical Session needed no passive
+          // warmup, not that its guarded initial handoff must stay blocked.
+          setInitialDeliveryReady(true);
+        }
       })
       .catch((error) => {
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        if (!cancelled) reportRequestFailure(error, 'CONVERSATION_PREPARATION_FAILED');
       });
-  }, [conversation_id, t]);
-
-  const slash_commands = useSlashCommands(conversation_id, {
-    conversation_type: 'nomi',
-    agentStatus: agentWarmed ? 'active' : null,
-  });
+    return () => { cancelled = true; };
+  }, [conversation_id, isCreating, reportRequestFailure]);
 
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const removeMessageByMsgId = useRemoveMessageByMsgId();
   const messageList = useMessageList();
   const messageListRef = useLatestRef(messageList);
-  const removeMessagesByLocalIds = useRemoveMessagesByLocalIds();
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
   const isBusy = running || isStopping;
+  const capabilitiesWereBlocked = useRef(Boolean(isBusy || pauseNotice));
+  useEffect(() => {
+    const blocked = Boolean(isBusy || pauseNotice);
+    if (capabilitiesWereBlocked.current && !blocked) sessionCapabilities.retry();
+    capabilitiesWereBlocked.current = blocked;
+  }, [isBusy, pauseNotice, sessionCapabilities.retry]);
   const { beginStopAttempt, getStopAttemptStatus } = useConversationStopAttemptGuard(
     conversation_id,
     getTurnStartGeneration,
@@ -322,28 +347,31 @@ const NomiSendBox: React.FC<{
         input,
         files,
         initialOnly = false,
+        pluginDelivery,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
         Partial<Pick<ConversationCommandQueueItem, 'id'>> & {
           initialOnly?: boolean;
+          pluginDelivery?: import('@/common/types/pluginDevelopment').PluginDeliveryRequirement;
         },
       execution?: ConversationCommandQueueExecution,
       deferLocalTurnUntilFresh = execution !== undefined
     ) => {
       if (!current_model?.use_model) {
-        Message.warning(t('conversation.chat.noModelSelected'));
+        reportRequestFailure(new Error('No model selected'), 'PROVIDER_UNAVAILABLE');
         throw new Error('No model selected');
       }
       if (!canSendFiles(files)) {
         throw new Error('Image send blocked by the selected chat capability');
       }
 
-      // Persisted queue/recovery deliveries start behind an idle fence. Only
-      // the atomic first-delivery winner may open a new local turn.
-      if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
-
+      // Persisted deliveries open local turn UI only after a fresh receipt.
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
+      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
+      setRequestFailure(null);
       let msg_id: MessageId | null = null;
       try {
+        const selection = await sessionCapabilities.applyBeforeSend();
+        if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
         if (!deferLocalTurnUntilFresh) {
           void checkAndUpdateTitle(conversation_id, input);
         }
@@ -357,6 +385,8 @@ const NomiSendBox: React.FC<{
           files,
           idempotency_key: id,
           initial_only: initialOnly,
+          plugin_delivery: pluginDelivery,
+          inject_skills: selection.skill_names,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -396,12 +426,14 @@ const NomiSendBox: React.FC<{
         if (msg_id) removeMessageByMsgId(msg_id);
         setActiveMsgId(null);
         setWaitingResponse(false);
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
         throw error;
       }
     },
     [
       addOrUpdateMessage,
+      reportRequestFailure,
+      messageListRef,
       checkAndUpdateTitle,
       canSendFiles,
       conversation_id,
@@ -413,6 +445,7 @@ const NomiSendBox: React.FC<{
       setWaitingResponse,
       t,
       workspacePath,
+      sessionCapabilities.applyBeforeSend,
     ]
   );
 
@@ -433,14 +466,15 @@ const NomiSendBox: React.FC<{
   } = useConversationCommandQueue({
     conversation_id: conversation_id,
     enabled: true,
-    isBusy,
+    isBusy: isBusy || pauseNotice !== null,
     isHydrated: hasHydratedRunningState,
     onExecute: executeCommand,
   });
 
-  // Handle initial message from Guid page — wait until model is ready
+  // Handle the Guid handoff only after passive warmup has settled.
+  // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model) return;
+    if (!conversation_id || !current_model?.use_model || !initialDeliveryReady || sessionCapabilities.loading || !sessionCapabilities.state) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -459,7 +493,6 @@ const NomiSendBox: React.FC<{
           console.error('[NomiSendBox] Failed to fill draft message:', error);
           sessionStorage.removeItem(draftProcessedKey);
         }
-        return;
       }
     }
 
@@ -481,10 +514,10 @@ const NomiSendBox: React.FC<{
           releaseInitialMessageDelivery(storageKey);
           return;
         }
-        const { input, files, idempotency_key } = initialMessage;
+        const { input, files, idempotency_key, plugin_delivery } = initialMessage;
         attemptedIdempotencyKey = idempotency_key;
         await executeCommand(
-          { id: idempotency_key, input, files, initialOnly: true },
+          { id: idempotency_key, input, files, initialOnly: true, pluginDelivery: plugin_delivery },
           undefined,
           true
         );
@@ -502,14 +535,40 @@ const NomiSendBox: React.FC<{
     };
 
     void processInitialMessage();
-  }, [conversation_id, current_model?.use_model, executeCommand, setContent]);
+  }, [conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, sessionCapabilities.loading, sessionCapabilities.state, setContent]);
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
+    if (creation?.draft.mode) {
+      if (creationSubmittingRef.current) throw new Error('任务正在提交');
+      if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
+      creationSubmittingRef.current = true;
+      setCreationSubmitting(true);
+      setRequestFailure(null);
+      const submittedReferences = creation.draft.references;
+      try {
+        const presetId = await creation.resolvePreset?.() ?? creation.presetId;
+        if (!presetId) throw new Error('请选择可用的创意 Agent');
+        const request = buildCreationRequest(creation.draft, message, presetId, filesToSend, generation.selected);
+        const key = creationAttempt(conversation_id, request);
+        const receipt = await submitCreation(conversation_id, request, key);
+        addOrUpdateMessage({ id: uuid(), msg_id: receipt.message_id, type: 'text', position: 'right', conversation_id, content: { content: message }, created_at: Date.now() });
+        acknowledgeCreationAttempt(conversation_id, key);
+        // A failed status refresh cannot turn a successful admission into a retry.
+        void mutateSWR(creationTasksKey(conversation_id), (previous: typeof receipt.tasks | undefined) => [...(previous || []).filter(task => !receipt.tasks.some(next => next.creation_task_id === task.creation_task_id)), ...receipt.tasks], { revalidate: true }).catch(() => {});
+        if (request.files?.length && contentRef.current === message) {
+          setUploadFile(previous => previous.filter(file => !request.files!.includes(file)));
+          setAtPath(atPathRef.current.filter(item => !request.files!.includes(typeof item === 'string' ? item : item.path)));
+        }
+        creation.update(draft => request.inputs.length && draft.references === submittedReferences ? { ...draft, references: draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)) } : draft);
+        emitter.emit('chat.history.refresh');
+      } catch (error) {
+        reportRequestFailure(error, 'CONVERSATION_CREATION_FAILED');
+        throw error;
+      } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
+      return;
+    }
     if (!canSendFiles(filesToSend)) return;
-    clearFiles();
-    emitter.emit('nomi.selected.file.clear');
-
     if (
       shouldEnqueueConversationCommand({
         enabled: true,
@@ -518,34 +577,38 @@ const NomiSendBox: React.FC<{
       })
     ) {
       enqueue({ input: message, files: filesToSend });
+      clearFiles();
+      emitter.emit('nomi.selected.file.clear');
       return;
     }
 
-    await executeCommand({ input: message, files: filesToSend });
+    await executeCommand({
+      input: message,
+      files: filesToSend,
+    });
+    setUploadFile(previous => previous.filter(file => !filesToSend.includes(file)));
+    setAtPath(atPathRef.current.filter(item => !filesToSend.includes(typeof item === 'string' ? item : item.path)));
+    emitter.emit('nomi.selected.file.clear');
   };
 
-  // 编辑最近一条用户消息并截断重跑。请求成功前保留旧消息和附件；成功后只移除
-  // 请求发出时捕获的旧本地行，避免误删 HTTP 返回前已到达的 replacement stream。
+  // Canonical history is immutable. Editing a previous prompt explicitly
+  // submits the revised text as a new Turn; it never truncates or rewrites the
+  // accepted Session event chain.
   const handleEditResubmit = useCallback(
-    async (msgId: MessageId, createdAt: number, message: string) => {
+    async (_msgId: MessageId, _createdAt: number, message: string) => {
       const filesToSend = collectSelectedFiles(uploadFile, atPath);
       if (!canSendFiles(filesToSend)) return;
-      const oldSuffixLocalIds = snapshotEditSuffixLocalIds(
-        messageListRef.current,
-        msgId,
-        createdAt
-      );
       setWaitingResponse(true);
       const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
+      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
+      setRequestFailure(null);
       try {
-        const res = await ipcBridge.conversation.editResubmit.invoke({
+        const res = await ipcBridge.conversation.sendMessage.invoke({
           conversation_id,
-          msg_id: msgId,
           input: displayMessage,
           files: filesToSend,
           idempotency_key: uuidv7(),
         });
-        removeMessagesByLocalIds(oldSuffixLocalIds);
         clearFiles();
         emitter.emit('nomi.selected.file.clear');
         const disposition = classifyPublicMessageDelivery(res);
@@ -572,7 +635,7 @@ const NomiSendBox: React.FC<{
         if (filesToSend.length > 0) emitter.emit('nomi.workspace.refresh');
       } catch (error) {
         setWaitingResponse(false);
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
         throw error;
       }
     },
@@ -586,8 +649,8 @@ const NomiSendBox: React.FC<{
       canSendFiles,
       reconcilePublicDeliveryReplay,
       messageListRef,
-      removeMessagesByLocalIds,
       addOrUpdateMessage,
+      reportRequestFailure,
       setActiveMsgId,
       setWaitingResponse,
       t,
@@ -601,6 +664,7 @@ const NomiSendBox: React.FC<{
   const executeSteer = useCallback(
     async ({ input, files }: Pick<ConversationCommandQueueItem, 'input' | 'files'>) => {
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
+      setRequestFailure(null);
       let msg_id: MessageId | null = null;
       try {
         const res = await ipcBridge.conversation.steer.invoke({
@@ -643,15 +707,15 @@ const NomiSendBox: React.FC<{
         }
       } catch (error) {
         if (msg_id) removeMessageByMsgId(msg_id);
-        // Rethrow so the caller can divert the interjection into the persisted
-        // command queue. Swallowing here (as this used to) stranded the draft:
-        // the box had already been cleared, so the text was unrecoverable.
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        // Retain a held draft for explicit review. This error may follow
+        // successful delivery, so it must never automatically start a turn.
+        reportRequestFailure(error, 'CONVERSATION_STEER_FAILED');
         throw error;
       }
     },
     [
       addOrUpdateMessage,
+      reportRequestFailure,
       conversation_id,
       reconcileAfterStreamTerminal,
       reconcilePublicDeliveryReplay,
@@ -667,17 +731,17 @@ const NomiSendBox: React.FC<{
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
-    try {
-      await executeSteer({ input: message, files: filesToSend });
-    } catch {
-      // Steering has no durable channel of its own: a failed delivery is simply
-      // gone. Divert into the same persisted command queue the normal send path
-      // uses when busy, so an offline click keeps both the text and the
-      // attachments instead of losing them to an error toast. This is the
-      // fallback the catch in executeSteer has always claimed to perform, and
-      // conversation.steer.fallbackQueued is the message written for it.
-      enqueue({ input: message, files: filesToSend });
-      Message.info(t('conversation.steer.fallbackQueued'));
+    if (
+      !(await steerOrQueue(
+        {
+          input: message,
+          files: filesToSend,
+        },
+        executeSteer,
+        enqueue
+      ))
+    ) {
+        Message.warning(t('conversation.steer.fallbackQueued'));
     }
   };
 
@@ -701,189 +765,6 @@ const NomiSendBox: React.FC<{
   const { openFileSelector, onSlashBuiltinCommand } = useOpenFileSelector({
     onFilesSelected: appendSelectedFiles,
   });
-
-  const { entries: attachEntries, hiddenFileInput: attachHiddenInput } = useAttachEntry({
-    openFileSelector,
-    onLocalFilesAdded: handleFilesAdded,
-    dividerBefore: true,
-  });
-
-  // Mode switching for the mobile action sheet — mirrors AgentModeSelector's
-  // setMode call so the bottom-sheet path stays in lockstep with the desktop dropdown.
-  const handleSheetModeChange = useCallback(
-    async (mode: string) => {
-      if (mode === currentMode) return;
-      try {
-        await prepareRuntimeSync();
-        await ipcBridge.agentConversation.setMode.invoke({ conversation_id, mode });
-        setCurrentMode(mode);
-        void savePreferredMode('nomi', mode);
-        Message.success(t('agentMode.switchSuccess'));
-      } catch (error) {
-        console.error('[NomiSendBox] Failed to switch mode via sheet:', error);
-        Message.error(t('agentMode.switchFailed'));
-      }
-    },
-    [conversation_id, currentMode, prepareRuntimeSync, t]
-  );
-
-  // Sync currentMode from backend when the sheet first opens / conversation switches
-  useEffect(() => {
-    if (!isMobile || !isMobileSheetOpen) return;
-    if (!conversation_id) return;
-    let cancelled = false;
-    void prepareRuntimeSync()
-      .then(() => ipcBridge.agentConversation.getMode.invoke({ conversation_id }))
-      .then((result) => {
-        if (cancelled || !result) return;
-        if (result.initialized !== false) {
-          setCurrentMode(result.mode);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [conversation_id, isMobile, isMobileSheetOpen, prepareRuntimeSync]);
-
-  const handleSheetModelSelect = useCallback(
-    (value: string) => {
-      // value format: `${providerId}::${modelName}`
-      const [providerId, modelName] = value.split('::');
-      const provider = modelSelection.providers.find((p) => p.id === providerId);
-      if (!provider || !modelName) return;
-      void modelSelection.handleSelectModel(provider, modelName);
-    },
-    [modelSelection]
-  );
-
-  const sheetEntries = useMemo<MobileActionSheetEntry[]>(() => {
-    if (!isMobile) return [];
-
-    const availableModes: AgentModeOption[] =
-      dynamicModes.length > 0
-        ? dynamicModes
-        : [
-            { value: 'default', label: 'Default' },
-            { value: 'auto_edit', label: 'Auto-Accept Edits' },
-            { value: 'yolo', label: 'YOLO' },
-          ];
-    const modeOptions: MobileActionSheetOption[] = availableModes.map((mode) => ({
-      key: mode.value,
-      label: t(`agentMode.${mode.value}`, { defaultValue: mode.label }),
-      description: mode.description,
-      active: currentMode === mode.value,
-    }));
-
-    const modelOptions: MobileActionSheetOption[] = modelSelection.providers.flatMap((provider) =>
-      modelSelection.getAvailableModels(provider).map((modelName) => ({
-        key: `${provider.id}::${modelName}`,
-        label: modelName,
-        description: providerLabel(provider),
-        active:
-          modelSelection.current_model?.id === provider.id && modelSelection.current_model?.use_model === modelName,
-      }))
-    );
-
-    const currentModeLabel =
-      modeOptions.find((opt) => opt.active)?.label ?? t('agentMode.default', { defaultValue: 'Default' });
-    const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
-
-    const entries: MobileActionSheetEntry[] = [
-      // Locked surfaces (companion) hide the model + permission entries: model is
-      // pinned to the companion profile and permission is fixed to yolo.
-      ...(hideModeSelector
-        ? []
-        : [
-            {
-              key: 'model',
-              icon: <Brain theme='outline' size='16' />,
-              label: t('common.model', { defaultValue: 'Model' }),
-              meta: currentModelLabel,
-              submenu: {
-                title: t('common.model', { defaultValue: 'Model' }),
-                options: modelOptions,
-                onSelect: handleSheetModelSelect,
-                emptyText: t('conversation.welcome.selectModel'),
-              },
-            },
-            {
-              key: 'permission',
-              icon: <Shield theme='outline' size='16' />,
-              label: t('agentMode.permission', { defaultValue: 'Permission' }),
-              meta: currentModeLabel,
-              submenu: {
-                title: t('agentMode.permission', { defaultValue: 'Permission' }),
-                options: modeOptions,
-                onSelect: (key: string) => void handleSheetModeChange(key),
-              },
-            },
-          ]),
-      ...attachEntries,
-    ];
-
-    if (loadedSkills.length > 0) {
-      const skillOptions: MobileActionSheetOption[] = loadedSkills.map((name) => ({
-        key: name,
-        label: `/${name}`,
-      }));
-      entries.push({
-        key: 'skills',
-        icon: <MagicHat theme='outline' size='16' />,
-        label: t('common.skills', { defaultValue: 'Skills' }),
-        variant: 'muted',
-        submenu: {
-          title: t('common.skills', { defaultValue: 'Skills' }),
-          selectable: false,
-          options: skillOptions,
-          onSelect: (name) => {
-            setContent(`/${name} `);
-          },
-        },
-      });
-    }
-
-    if (loadedMcpStatuses.length > 0) {
-      const mcpOptions: MobileActionSheetOption[] = loadedMcpStatuses.map((item) => ({
-        key: item.name,
-        label: item.name,
-        description:
-          item.status === 'loaded'
-            ? undefined
-            : item.reason
-              ? `${t(`conversation.mcp.status.${item.status}` as const)} · ${item.reason}`
-              : t(`conversation.mcp.status.${item.status}` as const),
-      }));
-      entries.push({
-        key: 'mcp',
-        icon: <Shield theme='outline' size='16' />,
-        label: t('conversation.mcp.loaded', { defaultValue: 'Loaded MCP' }),
-        variant: 'muted',
-        submenu: {
-          title: t('conversation.mcp.loaded', { defaultValue: 'Loaded MCP' }),
-          selectable: false,
-          options: mcpOptions,
-          onSelect: () => undefined,
-        },
-      });
-    }
-
-    return entries;
-  }, [
-    attachEntries,
-    currentMode,
-    dynamicModes,
-    handleSheetModeChange,
-    handleSheetModelSelect,
-    hideModeSelector,
-    isMobile,
-    loadedMcpStatuses,
-    loadedSkills,
-    modelSelection,
-    providerLabel,
-    setContent,
-    t,
-  ]);
 
   useAddEventListener('nomi.selected.file', setAtPath);
   useAddEventListener('nomi.selected.file.append', (selectedItems: Array<string | FileOrFolderItem>) => {
@@ -912,6 +793,7 @@ const NomiSendBox: React.FC<{
       confirmStopped();
       setIsStopping(false);
       resetActiveExecution('external-reset');
+      if (result.status === 'released') emitter.emit('chat.history.refresh');
       return;
     }
 
@@ -936,6 +818,7 @@ const NomiSendBox: React.FC<{
       confirmStopped();
       setIsStopping(false);
       resetActiveExecution('external-reset');
+      if (settled === 'released') emitter.emit('chat.history.refresh');
       return;
     }
 
@@ -944,6 +827,7 @@ const NomiSendBox: React.FC<{
 
   // Clear conversation context (release model context); keeps message records.
   const handleClearContext = async (): Promise<void> => {
+    setRequestFailure(null);
     try {
       await ipcBridge.conversation.clearContext.invoke({ conversation_id });
       Message.success({
@@ -953,15 +837,23 @@ const NomiSendBox: React.FC<{
       });
     } catch (error) {
       console.warn('[NomiSendBox] clear context failed', error);
-      Message.error({
-        content: t('conversation.clearContext.failed', { defaultValue: 'Failed to clear context' }),
-        closable: true,
-      });
+      reportRequestFailure(error, 'CONVERSATION_CONTEXT_CLEAR_FAILED');
     }
   };
 
+  const visibleRequestFailure = requestFailure?.conversationId === conversation_id
+    && !hasCanonicalRequestError(requestFailure, messageList) ? requestFailure : null;
+
   return (
-    <div className='max-w-800px w-full mx-auto flex flex-col mt-auto mb-16px'>
+    <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto ${compactProductComposer ? 'mb-12px' : 'mb-16px'}`}>
+      {visibleRequestFailure && <ConversationErrorNote
+        error={visibleRequestFailure.error} timestamp={visibleRequestFailure.timestamp} sessionId={visibleRequestFailure.conversationId}
+      />}
+      {!visibleRequestFailure && sessionCapabilities.error && <ConversationErrorNote
+        error={conversationRequestError(sessionCapabilities.error, 'SESSION_CAPABILITIES_FAILED')}
+        sessionId={conversation_id}
+        recoveryAction={<button type='button' className='message-error-note__retry' onClick={sessionCapabilities.retry}>{t('common.retry')}</button>}
+      />}
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -977,9 +869,20 @@ const NomiSendBox: React.FC<{
       />
       <SendBox
         key={conversation_id}
+        sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker
+          catalog={capabilityCatalog.catalog}
+          draft={sessionCapabilities.draft}
+          onChange={sessionCapabilities.setDraft}
+          loading={capabilityCatalog.loading || sessionCapabilities.loading}
+          loadFailed={Boolean(capabilityCatalog.error || sessionCapabilities.error)}
+          errorMessage={(sessionCapabilities.error || capabilityCatalog.error)?.message}
+          onRetry={() => { capabilityCatalog.retry(); sessionCapabilities.retry(); }}
+          disabled={isBusy || Boolean(pauseNotice) || modelSelectionDisabled || sessionCapabilities.saving || sessionCapabilities.state?.editable !== true}
+          applyMode='next-send'
+        />}
+        prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
-        showPinnedPlan
-        onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
+        taskPlan={taskPlan}
         value={content}
         onChange={handleContentChange}
         selectedWorkspaceItems={atPath}
@@ -987,10 +890,17 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isBusy}
-        disabled={!current_model?.use_model}
+        loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
+        disabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || sessionCapabilities.loading || !sessionCapabilities.state || sessionCapabilities.saving)}
+        preserveDraftUntilAccepted
+        skipChatWarmup={isCreating}
         placeholder={
-          current_model?.use_model
+          compactProductComposer
+            ? t('nomi.cohabit.composerPlaceholder', {
+                name: agent_name || 'Nomi',
+                defaultValue: '和{{name}}说点什么…',
+              })
+            : isCreating ? '描述你想创作的内容，可添加参考素材…' : current_model?.use_model
             ? t('agent.sendbox.placeholder', {
                 backend: agent_name || 'Nomi',
                 defaultValue: `Send message to {{backend}}...`,
@@ -1003,22 +913,25 @@ const NomiSendBox: React.FC<{
         onFilesAdded={handleFilesAdded}
         hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
         supportedExts={allSupportedExts}
-        defaultMultiLine={!isMobile}
-        lockMultiLine={!isMobile}
+        defaultMultiLine
+        lockMultiLine
+        compactActions={compactProductComposer}
+        compactStacked={compactProductComposer}
         tools={
           <FileAttachButton
             openFileSelector={openFileSelector}
             onLocalFilesAdded={handleFilesAdded}
-            loadedMcpStatuses={loadedMcpStatuses}
           />
         }
+        creationTools={creation ? <CreationControls prompt={content} onPromptChange={setContent} files={collectSelectedFiles(uploadFile, atPath)} /> : undefined}
         rightTools={
-          hideModeSelector ? undefined : (
+          (
             <div
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-composer-group
               data-testid='nomi-sendbox-config-group'
             >
-              {hasContextUsage && (
+              {!compactProductComposer && hasContextUsage && (
                 <ContextUsageRing
                   used={tokenUsage?.context_tokens}
                   max={tokenUsage?.context_window}
@@ -1027,90 +940,38 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
-              {/* 召唤伙伴（设计 B5）：仅普通工作会话可见 —— 伙伴/客服等锁定面
-                  通过 hideModeSelector 隐藏整个配置组，天然不渲染。 */}
-              <SummonControl conversationId={conversation_id} />
-              {collaboratorSelectorNode}
-              {extraRightTools}
-              <AgentModeSelector
-                backend='nomi'
-                conversation_id={conversation_id}
-                compact
-                initialMode={session_mode}
-                dynamicModes={dynamicModes}
-                compactLeadingIcon={<Shield theme='outline' size='14' fill={iconColors.secondary} />}
-                modeLabelFormatter={(mode) => t(`agentMode.${mode.value}`, { defaultValue: mode.label })}
-                compactLabelPrefix={t('agentMode.permission')}
-                hideCompactLabelPrefixOnMobile
-                beforeRuntimeSync={prepareRuntimeForRead}
-                beforeRuntimeMutation={prepareRuntimeSync}
-              />
+              {!compactProductComposer && isCreating && <CreationModelSelector files={collectSelectedFiles(uploadFile, atPath)} />}
+              {!compactProductComposer && !isCreating && (
+                <Tooltip content={modelPickerHint} disabled={!modelPickerHint}>
+                  <span className='inline-flex min-w-0'>
+                    <NomiModelSelector
+                      selection={modelSelection}
+                      disabled={modelPickerDisabled}
+                      reasoningEffort={reasoningEffort}
+                      reasoningEffortDisabled={modelPickerDisabled || reasoningEffortUpdating}
+                      onReasoningEffortChange={onReasoningEffortChange}
+                      className='nomi-sendbox-model-btn'
+                    />
+                  </span>
+                </Tooltip>
+              )}
+              {!compactProductComposer && extraRightTools}
             </div>
           )
         }
-        prefix={
-          <>
-            {uploadFile.length > 0 && (
-              <HorizontalFileList>
-                {uploadFile.map((path) => (
-                  <FilePreview
-                    key={path}
-                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                    path={path}
-                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                  />
-                ))}
-              </HorizontalFileList>
-            )}
-            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-              <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                {atPath.map((item) => {
-                  if (typeof item === 'string') return null;
-                  if (!item.isFile) {
-                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                    return (
-                      <Tag
-                        key={item.path}
-                        data-testid={`nomi-folder-tag-${folderIndex}`}
-                        bordered={false}
-                        className='!bg-primary-1 !text-primary-6'
-                        closable
-                        onClose={() => {
-                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                          emitter.emit('nomi.selected.file', newAtPath);
-                          setAtPath(newAtPath);
-                        }}
-                      >
-                        {item.name}
-                      </Tag>
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
-          </>
-        }
+        renderAttachments={(workspaceItems, onRemoveWorkspaceItem) => <ComposerAttachments
+          files={uploadFile}
+          onRemoveFile={(path) => setUploadFile(previous => previous.filter(file => file !== path))}
+          workspaceItems={workspaceItems}
+          onRemoveWorkspaceItem={onRemoveWorkspaceItem}
+        />}
         onSend={onSendHandler}
         onSteer={onSteerHandler}
-        steerAvailable
-        onEditResubmit={handleEditResubmit}
-        slash_commands={slash_commands}
+        steerAvailable={!isCreating}
+        onEditResubmit={isCreating ? undefined : handleEditResubmit}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
-        allowSendWhileLoading
+        allowSendWhileLoading={!isCreating}
       />
-      {isMobile && (
-        <>
-          <MobileActionSheet
-            open={isMobileSheetOpen}
-            onClose={() => setIsMobileSheetOpen(false)}
-            title={t('common.more', { defaultValue: 'More' })}
-            entries={sheetEntries}
-          />
-          {attachHiddenInput}
-        </>
-      )}
     </div>
   );
 };

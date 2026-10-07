@@ -399,7 +399,7 @@ export type HttpRequestOptions = {
 };
 
 const SENSITIVE_LOG_KEY_PATTERN =
-  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|secret|password|credential|capability|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
+  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|surface[_-]?session|secret|password|credential|capability|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
 
 function isSensitiveLogKey(key: string): boolean {
   if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return true;
@@ -456,7 +456,7 @@ export function redactSensitiveText(input: string): string {
     .replace(/((?:^|[;{,]\s*|")(?:set-)?cookie["']?\s*[:=])\s*[^\r\n]+/gim, '$1[REDACTED]')
     .replace(/[A-Za-z]:\\[^\r\n"'<>]*(?:User Data|Profiles?)[^\r\n"'<>]*/gi, '[REDACTED_PROFILE_PATH]')
     // POSIX equivalent of the drive-letter rule: managed platform profile
-    // roots and system-browser profile directories on macOS/Linux.
+    // roots and Browser Provider profile directories on macOS/Linux.
     .replace(
       /\/(?:Users|home|root|private|var|tmp|opt)\/[^\r\n"'<>]*?(?:platform-profiles|browser-data|User Data|(?:Application Support|\.config)\/(?:Google\/Chrome|google-chrome|Chromium|chromium|Microsoft Edge|microsoft-edge|BraveSoftware|vivaldi|Vivaldi))[^\s"'<>]*/g,
       '[REDACTED_PROFILE_PATH]'
@@ -1104,29 +1104,6 @@ function scheduleWsReconnect(): void {
   }, delay);
 }
 
-/**
- * Whether the shared realtime WebSocket is currently OPEN. This is nominal
- * socket state only: a half-open socket the OS has not surfaced yet still
- * reports OPEN here. Consumers gating fallback polling on realtime health
- * must combine this with `wsLastActivityAt` — readyState alone would disable
- * the poll in exactly the wedged case it exists for.
- */
-export function isWsConnected(): boolean {
-  return ws != null && ws.readyState === WebSocket.OPEN;
-}
-
-/**
- * Timestamp of the most recent inbound frame (server heartbeat pings
- * included) or successful open on the shared realtime WebSocket; `null`
- * before the first connection. The backend heartbeats every active
- * connection at least every 30s, so unlike `readyState` this only keeps
- * advancing while the peer is actually delivering data — a wedged half-open
- * socket goes silent here long before the OS reports the close.
- */
-export function wsLastActivityAt(): number | null {
-  return wsLastActivityAtMs;
-}
-
 // ---------------------------------------------------------------------------
 // Emitter factory (same shape as bridge.buildEmitter)
 // ---------------------------------------------------------------------------
@@ -1191,16 +1168,6 @@ export function wsMappedEmitter<Params = undefined, Raw = Params>(
         callback(mapped);
       });
     },
-    emit: (() => {}) as EmitterLike<Params>['emit'],
-  };
-}
-
-/**
- * Stub emitter for events not yet implemented in the backend.
- */
-export function stubEmitter<Params = undefined>(_name: string): EmitterLike<Params> {
-  return {
-    on: () => () => {},
     emit: (() => {}) as EmitterLike<Params>['emit'],
   };
 }

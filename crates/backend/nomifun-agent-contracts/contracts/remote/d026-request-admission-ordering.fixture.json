@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0.0",
+  "operation_exact_set": ["open", "turn", "observe", "cancel"],
+  "auth_mutation_exact_set": ["rotate", "revoke"],
+  "cases": [
+    {
+      "case_id": "D026_REQUEST_ADMISSION_COMMITTED_FIRST",
+      "applies_to_operations": ["open", "turn", "observe", "cancel"],
+      "applies_to_auth_mutations": ["rotate", "revoke"],
+      "ordering": "request_admission_committed_first",
+      "expected_outcome": {
+        "outcome": "accepted_to_ordinary_finite_boundary"
+      },
+      "expected_agent_session_mutations": 0,
+      "expected_remote_binding_mutations": 0,
+      "expected_effect_replays": 0
+    },
+    {
+      "case_id": "D026_AUTH_MUTATION_COMMITTED_FIRST",
+      "applies_to_operations": ["open", "turn", "observe", "cancel"],
+      "applies_to_auth_mutations": ["rotate", "revoke"],
+      "ordering": "auth_mutation_committed_first",
+      "expected_outcome": {
+        "outcome": "rejected",
+        "code": "REMOTE_AUTH_REQUIRED"
+      },
+      "lookup_binding_or_session": false,
+      "expected_agent_session_mutations": 0,
+      "expected_remote_binding_mutations": 0,
+      "expected_effect_replays": 0
+    },
+    {
+      "case_id": "D026_REPLACEMENT_CREDENTIAL_CONTINUATION",
+      "applies_to_operations": ["turn", "observe", "cancel"],
+      "applies_to_auth_mutations": ["rotate", "revoke"],
+      "ordering": "after_auth_mutation_fence",
+      "replacement_credential_requires_same_owner": true,
+      "replacement_credential_requires_explicit_agent_session_id": true,
+      "implicit_lookup_by_token_connection_or_recent_session": false,
+      "expected_agent_session_mutations": 0,
+      "expected_remote_binding_mutations": 0,
+      "expected_effect_replays": 0
+    }
+  ],
+  "forbidden_auth_state": [
+    "credential_collection",
+    "credential_id",
+    "grace_window",
+    "kill_switch",
+    "per_session_token_lease",
+    "per_token_session_provenance",
+    "scope",
+    "ttl"
+  ]
+}

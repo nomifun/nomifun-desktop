@@ -155,12 +155,12 @@ fn signal(_pid: i32, _signal: i32) -> bool {
 ///
 /// Every descendant is re-verified immediately before it is signalled. We hold a
 /// `Child` for `root`, so its pid cannot be recycled while we work, but the
-/// descendants are pids we merely observed in `/proc`: one of them can exit in
+/// descendants are pids we merely observed in the system snapshot: one of them can exit in
 /// the window between the snapshot and the signal, and on a busy machine the
 /// kernel hands that number straight to somebody else's process. Signalling
 /// blind there means SIGKILL to an innocent bystander — a developer's shell, or
 /// a compiler job. Checking that the pid still names an sshd with the same
-/// parent costs one `/proc` read and removes that whole class of accident.
+/// parent costs one fresh process snapshot and removes that whole class of accident.
 ///
 /// For the same reason there is no process-*group* signal here. It would be
 /// redundant on Linux (the descendants have already left the group via `setsid`)
@@ -210,36 +210,44 @@ fn descendants_deepest_first(root: i32, table: &[(i32, i32)]) -> Vec<(i32, i32)>
     generations.into_iter().skip(1).rev().flatten().collect()
 }
 
-/// `(pid, ppid)` for every process we can see.
+/// `(pid, ppid)` for every process we can see. `sysinfo` is intentional here:
+/// `/proc` is Linux-only, and returning an empty table on macOS used to kill
+/// only the listener while established `sshd-session` descendants kept every
+/// test transport connected.
 fn process_table() -> Vec<(i32, i32)> {
-    let mut table = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return table;
-    };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if let Some((_, ppid)) = read_comm_and_ppid(pid) {
-            table.push((pid, ppid));
-        }
-    }
-    table
+    let system = process_snapshot();
+    system
+        .processes()
+        .values()
+        .filter_map(|process| {
+            Some((
+                i32::try_from(process.pid().as_u32()).ok()?,
+                i32::try_from(process.parent()?.as_u32()).ok()?,
+            ))
+        })
+        .collect()
 }
 
-/// `(comm, ppid)` straight from `/proc/<pid>/stat`, or `None` if the process is
-/// gone. `comm` may contain spaces and parentheses, so the fields after it are
-/// only unambiguous from the LAST ')': then state, then ppid.
+fn process_snapshot() -> sysinfo::System {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+}
+
+/// `(comm, ppid)` from a fresh native process snapshot, or `None` if the
+/// process is gone or its identity cannot be represented safely.
 fn read_comm_and_ppid(pid: i32) -> Option<(String, i32)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (before_close, after_comm) = stat.rsplit_once(')')?;
-    let comm = before_close.split_once('(').map(|(_, c)| c)?.to_string();
-    let ppid = after_comm.split_whitespace().nth(1)?.parse::<i32>().ok()?;
-    Some((comm, ppid))
+    let pid = u32::try_from(pid).ok()?;
+    let system = process_snapshot();
+    let process = system.process(sysinfo::Pid::from_u32(pid))?;
+    let parent = i32::try_from(process.parent()?.as_u32()).ok()?;
+    Some((process.name().to_string_lossy().into_owned(), parent))
 }
 
 /// Start sshd as the leader of its own process group so [`TestSshd::stop`] can

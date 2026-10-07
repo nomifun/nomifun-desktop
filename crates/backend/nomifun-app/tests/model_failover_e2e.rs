@@ -14,7 +14,7 @@ use common::{body_json, build_app, get_with_token, json_with_token, setup_and_lo
 /// `agent.model_failover` against the providers table inside one writer
 /// transaction (dangling references are a 409 Conflict). Queue fixtures must
 /// therefore reference real rows.
-async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+async fn seed_provider(services: &nomifun_app::compatibility::AppServices, provider_id: &str, model: &str) {
     let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \

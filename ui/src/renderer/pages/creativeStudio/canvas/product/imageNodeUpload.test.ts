@@ -152,6 +152,8 @@ describe('canvas image node upload projection', () => {
       },
     };
     const filled = fillEmptyCanvasImageNodeFromAsset(node, imageAsset());
+    expect(filled.size.width).toBeCloseTo(240 * 16 / 9);
+    expect(filled.size.height).toBe(240);
 
     expect(filled).toMatchObject({
       id: node.id,
@@ -159,7 +161,6 @@ describe('canvas image node upload projection', () => {
       groupId: node.groupId,
       zIndex: node.zIndex,
       locked: true,
-      size: { width: 640, height: 360 },
       data: {
         assetId: testUuid(701),
         caption: '上传的图片.png',

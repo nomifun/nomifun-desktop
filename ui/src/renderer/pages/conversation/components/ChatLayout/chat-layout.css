@@ -1,12 +1,16 @@
 /* Chat layout header styles */
+.chat-focus-stop-host { display:flex; align-items:center; flex-shrink:0; }
+.chat-focus-stop-host:empty { display:none; }
 
-.chat-layout-header--mobile-unified {
-  height: 46px !important;
-  min-height: 46px;
-  padding: 0 12px !important;
-  background: linear-gradient(180deg, var(--bg-2) 0%, transparent 100%) !important;
-  border-bottom: none;
-  box-shadow: none;
+.chat-layout-header-host { container: conversation-header / inline-size; }
+.chat-layout-header-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+
+/* A narrow desktop pane keeps the remaining header controls reachable. */
+@container conversation-header (max-width: 600px) {
+  .chat-layout-header { flex-wrap:wrap; column-gap:8px; row-gap:6px; }
+  .chat-layout-header-title { height:30px; }
+  .chat-layout-header-actions { order:2; flex:1 1 100%; min-width:0; flex-wrap:wrap; gap:6px; }
+  .chat-layout-header-actions > * { flex-shrink:0; }
 }
 
 .chat-layout-header--glass {
@@ -34,7 +38,7 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce), (max-width: 768px) {
+@media (prefers-reduced-motion: reduce) {
   .chat-layout-header--glass {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -202,43 +206,6 @@
   box-shadow: -8px 0 26px rgba(0, 0, 0, 0.16);
 }
 
-.workspace-tool-rail-mobile-trigger {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  z-index: 80;
-  width: 24px;
-  height: 70px;
-  padding: 0;
-  transform: translateY(-50%);
-  border: 1px solid var(--bg-3);
-  border-radius: 12px 0 0 12px;
-  border-right: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  color: rgb(var(--primary-6));
-  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
-  box-shadow: -6px 6px 18px color-mix(in srgb, #000 10%, transparent);
-}
-
-.workspace-tool-rail-mobile-trigger__dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* Header model pill — only cap width on mobile, where the titlebar slot has
-   limited horizontal room. Desktop lets the pill grow to fit the full name. */
-@media (max-width: 767px) {
-  .header-model-btn {
-    max-width: 140px;
-  }
-}
-
 /* Desktop session capability pills. Active state must read clearly across all
    preset/custom themes, so it derives the surface and border from the current
    capability accent instead of hard-coded light-theme colors. */
@@ -313,36 +280,6 @@
     background: var(--color-primary-light-1) !important;
     border-color: rgb(var(--primary-6)) !important;
     color: rgb(var(--primary-6)) !important;
-  }
-}
-
-/* Mobile: conversation header pills */
-@media (max-width: 767px) {
-  .agent-mode-compact-pill {
-    min-height: 32px !important;
-    height: 32px !important;
-    padding: 0 10px !important;
-    border-radius: 999px !important;
-  }
-
-  .agent-mode-compact-pill .arco-btn-content {
-    line-height: 1;
-  }
-
-  .agent-mode-compact-pill--readonly,
-  .agent-mode-compact-pill--readonly:hover,
-  .agent-mode-compact-pill--readonly:active,
-  .agent-mode-compact-pill--readonly:focus,
-  .agent-mode-compact-pill--readonly:focus-visible {
-    cursor: default !important;
-    pointer-events: none !important;
-    background: var(--color-fill-2) !important;
-    border: none !important;
-    box-shadow: none !important;
-  }
-
-  .chat-header-cron-pill {
-    margin-right: 4px;
   }
 }
 

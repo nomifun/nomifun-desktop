@@ -12,10 +12,9 @@ use nomifun_mcp::McpOAuthService;
 
 async fn make_service() -> (McpOAuthService, Arc<dyn IOAuthTokenRepository>) {
     let db = nomifun_db::init_database_memory().await.unwrap();
+    // The repository's cloned pool keeps the in-memory DB alive after this helper returns.
     let repo: Arc<dyn IOAuthTokenRepository> = Arc::new(SqliteOAuthTokenRepository::new(db.pool().clone()));
     let svc = McpOAuthService::new(repo.clone(), reqwest::Client::new());
-    // Keep db alive by leaking it (integration test only).
-    std::mem::forget(db);
     (svc, repo)
 }
 
@@ -219,6 +218,7 @@ async fn get_token_returns_access_token_when_valid() {
     .await
     .unwrap();
 
+    drop(repo); // The service alone must keep the repository and its pool alive.
     let token = svc.get_token("https://valid.example.com").await.unwrap();
     assert_eq!(token.as_deref(), Some("my_access_token"));
 }

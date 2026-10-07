@@ -2,8 +2,8 @@
 //! `/api/creation/tasks` surface is deliberately not mounted.
 
 use axum::Router;
-use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Extension, Json, Path, Query, State};
+use axum::extract::rejection::{JsonRejection};
+use axum::extract::{Extension, Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -14,28 +14,22 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
-use crate::dto::{
-    CreativeCreationTask, CreativeCreationTaskPage, CreativeCreationTaskRetireResult,
-};
+use crate::dto::CreativeCreationTask;
 #[cfg(test)]
 use crate::dto::CreationTask;
 use crate::service::{CreativeTaskOwner, NewCreationTask};
 use crate::state::CreationRouterState;
-use crate::types::{CreationInput, CreationInputKind, StandaloneWorkbenchKind};
+use crate::types::{CreationInput, CreationInputKind};
 
 pub fn creation_routes(state: CreationRouterState) -> Router {
     Router::new()
         .route(
             "/api/creative-studio/tasks",
-            get(list_standalone_workbench_tasks).post(create_creative_task),
+            post(create_creative_task),
         )
         .route(
             "/api/creative-studio/tasks/{creation_task_id}",
             get(get_creative_task),
-        )
-        .route(
-            "/api/creative-studio/tasks/retire",
-            post(retire_standalone_workbench_tasks),
         )
         .route(
             "/api/creative-studio/tasks/{creation_task_id}/cancel",
@@ -64,9 +58,6 @@ enum CreativeTaskOwnerRequest {
         canvas_id: String,
         node_id: String,
     },
-    StandaloneWorkbench {
-        workbench_kind: StandaloneWorkbenchKind,
-    },
     TemplateStep {
         template_id: String,
         template_run_id: String,
@@ -83,11 +74,6 @@ impl From<CreativeTaskOwnerRequest> for CreativeTaskOwner {
             } => Self::CanvasNode {
                 canvas_id,
                 node_id,
-            },
-            CreativeTaskOwnerRequest::StandaloneWorkbench {
-                workbench_kind,
-            } => Self::StandaloneWorkbench {
-                workbench_kind,
             },
             CreativeTaskOwnerRequest::TemplateStep {
                 template_id,
@@ -115,21 +101,7 @@ struct CreateCreativeTaskRequest {
     inputs: Vec<InputRef>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListStandaloneWorkbenchTasksQuery {
-    workbench_kind: StandaloneWorkbenchKind,
-    limit: Option<usize>,
-    cursor: Option<String>,
-    active_only: Option<bool>,
-}
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RetireStandaloneWorkbenchTasksRequest {
-    workbench_kind: StandaloneWorkbenchKind,
-    task_ids: Vec<String>,
-}
 
 fn required_idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
     let mut values = headers.get_all("idempotency-key").iter();
@@ -183,44 +155,7 @@ async fn create_creative_task(
     ))
 }
 
-async fn list_standalone_workbench_tasks(
-    State(state): State<CreationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    query: Result<Query<ListStandaloneWorkbenchTasksQuery>, QueryRejection>,
-) -> Result<Json<ApiResponse<CreativeCreationTaskPage>>, AppError> {
-    let Query(query) = query.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let page = state
-        .service
-        .list_standalone_workbench_tasks(
-            query.workbench_kind,
-            query.active_only.unwrap_or(false),
-            query.limit,
-            query.cursor.as_deref(),
-        )
-        .await?;
-    Ok(Json(ApiResponse::ok(CreativeCreationTaskPage::try_new(
-        page.items,
-        page.next_cursor,
-    )?)))
-}
 
-async fn retire_standalone_workbench_tasks(
-    State(state): State<CreationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<RetireStandaloneWorkbenchTasksRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CreativeCreationTaskRetireResult>>, AppError> {
-    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let retired_task_ids = state
-        .service
-        .retire_standalone_workbench_tasks(
-            request.workbench_kind,
-            &request.task_ids,
-        )
-        .await?;
-    Ok(Json(ApiResponse::ok(CreativeCreationTaskRetireResult {
-        retired_task_ids,
-    })))
-}
 
 async fn get_creative_task(
     State(state): State<CreationRouterState>,
@@ -228,6 +163,10 @@ async fn get_creative_task(
     Path(creation_task_id): Path<String>,
 ) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
     let task = state.service.get_task(&creation_task_id).await?;
+    // Conversation tasks are exposed only by the conversation-authorized API.
+    if task.conversation_id.is_some() {
+        return Err(AppError::NotFound("creation task not found".into()));
+    }
     Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
 }
 
@@ -236,6 +175,10 @@ async fn cancel_creative_task(
     Extension(_user): Extension<CurrentUser>,
     Path(creation_task_id): Path<String>,
 ) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
+    let current = state.service.get_task(&creation_task_id).await?;
+    if current.conversation_id.is_some() {
+        return Err(AppError::NotFound("creation task not found".into()));
+    }
     let task = state.service.cancel_task(&creation_task_id).await?;
     Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
 }
@@ -298,29 +241,10 @@ mod tests {
             "0190f5fe-7c00-7a00-8000-000000000003"
         );
 
-        let standalone = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
-            "owner": {
-                "kind": "standalone_workbench",
-                "workbench_kind": "video"
-            },
-            "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
-            "model": "video-model-v1",
-            "capability": "i2v",
-            "params": {"prompt": "Aurora"},
-            "inputs": [{
-                "asset_id": "0190f5fe-7c00-7a00-8000-000000000006",
-                "kind": "image",
-                "role": "first_frame"
-            }]
-        }))
-        .unwrap();
-        assert!(matches!(
-            standalone.owner,
-            CreativeTaskOwnerRequest::StandaloneWorkbench {
-                workbench_kind: StandaloneWorkbenchKind::Video,
-                ..
-            }
-        ));
+        assert!(serde_json::from_value::<CreateCreativeTaskRequest>(json!({
+            "owner": {"kind":"standalone_workbench","workbench_kind":"video"},
+            "provider_id":"0190f5fe-7c00-7a00-8000-000000000004", "model":"video-model-v1", "capability":"t2v"
+        })).is_err());
 
         for invalid in [
             json!({
@@ -381,62 +305,16 @@ mod tests {
         assert!(required_idempotency_key(&headers).is_err());
     }
 
-    #[test]
-    fn standalone_list_query_is_exact_and_rejects_unknown_or_duplicate_fields() {
-        let uri = "/api/creative-studio/tasks?workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002&active_only=true"
-            .parse()
-            .unwrap();
-        let Query(query) = Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).unwrap();
-        assert_eq!(query.workbench_kind, StandaloneWorkbenchKind::Video);
-        assert_eq!(query.limit, Some(30));
-        assert_eq!(query.active_only, Some(true));
-        assert!(query.cursor.as_deref().unwrap().starts_with("1:"));
 
-        for invalid in [
-            "/api/creative-studio/tasks?workbench_kind=video&unknown=1",
-            "/api/creative-studio/tasks?workbench_kind=video&workbench_kind=image",
-            "/api/creative-studio/tasks?workbench_kind=canvas",
-            "/api/creative-studio/tasks?workbench_kind=video&active_only=yes",
-            "/api/creative-studio/tasks?workbench_kind=video&active_only=true&active_only=false",
-        ] {
-            let uri = invalid.parse().unwrap();
-            assert!(
-                Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).is_err(),
-                "query must fail closed: {invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn standalone_retire_body_is_flat_exact_and_typed() {
-        let request = serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(json!({
-            "workbench_kind": "image",
-            "task_ids": ["0190f5fe-7c00-7a00-8000-000000000002"]
-        }))
-        .unwrap();
-        assert_eq!(request.workbench_kind, StandaloneWorkbenchKind::Image);
-        assert_eq!(request.task_ids.len(), 1);
-        for invalid in [
-            json!({
-                "workbench_kind": "image",
-                "task_ids": [],
-                "owner": {"kind": "standalone_workbench"}
-            }),
-            json!({
-                "workbench_kind": "canvas",
-                "task_ids": []
-            }),
-        ] {
-            assert!(serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(invalid).is_err());
-        }
-    }
 
     #[test]
     fn creative_task_surface_rejects_invalid_owner_rows() {
         let invalid = CreationTask {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
             canvas_id: None,
-            workbench_kind: None,
+
             template_id: None,
             template_run_id: None,
             template_step_id: None,

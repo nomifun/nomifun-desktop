@@ -16,7 +16,7 @@ pub mod pty;
 pub mod read;
 pub mod registry;
 pub mod tool_search;
-pub mod update_plan;
+pub mod vcs;
 pub mod worktree;
 pub mod write;
 pub mod write_stdin;
@@ -64,9 +64,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;
 
-use nomi_config::hooks::HooksConfig;
 use nomi_protocol::events::ToolCategory;
-use nomi_types::skill_types::ContextModifier;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 /// Safety-net wall-clock budget for a tool invocation.
@@ -89,30 +87,21 @@ pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Write `content` to `file_path` atomically: write to a uniquely-named temp
-/// file in the same directory, then rename it over the target. Rename is atomic
-/// on the same filesystem, so a crash or a concurrent reader never observes a
-/// half-written file. Falls back to a direct write only if the rename fails
-/// (e.g. cross-device). Shared by the Edit and Write tools so both get the same
-/// crash-safety guarantee.
+/// Publish a complete file from an exclusively created sibling temporary file.
+/// A failed rename is an error, never permission to truncate the target directly.
+/// This provides atomic replacement, not fsync/crash-durability guarantees.
 pub(crate) fn atomic_write(file_path: &str, content: &str) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    use std::io::Write;
 
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = format!("{}.tmp.{}.{}", file_path, std::process::id(), seq);
-
-    if let Err(e) = std::fs::write(&tmp_path, content) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    if std::fs::rename(&tmp_path, file_path).is_err() {
-        // Cross-device rename (temp and target on different filesystems) cannot
-        // be atomic; clean up the temp and fall back to a direct write.
-        let _ = std::fs::remove_file(&tmp_path);
-        std::fs::write(file_path, content)?;
-    }
-    Ok(())
+    let target = std::path::Path::new(file_path);
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temp = tempfile::Builder::new().prefix(".nomi-write-").make_in(parent, |path| {
+        // Preserve normal file creation permissions (subject to umask on Unix).
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    })?;
+    temp.write_all(content.as_bytes())?;
+    temp.persist(target).map(|_| ()).map_err(|error| error.error)
 }
 
 /// Trusted identity of one provider-emitted tool invocation.
@@ -124,6 +113,7 @@ pub(crate) fn atomic_write(file_path: &str, content: &str) -> std::io::Result<()
 /// boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolExecutionContext {
+    turn_id: String,
     operation_id: String,
 }
 
@@ -133,19 +123,27 @@ impl ToolExecutionContext {
     /// Derive an invocation identity from both the durable turn/message scope
     /// and the provider's call id. Some providers reuse short ids such as
     /// `call_0` in later turns, so the scope is part of the hash.
-    pub fn from_scoped_tool_call(execution_scope: &str, tool_call_id: &str) -> Self {
+    pub fn from_scoped_tool_call(turn_id: &str, tool_call_id: &str) -> Self {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
         hasher.update(Self::DOMAIN);
-        hasher.update((execution_scope.len() as u64).to_be_bytes());
-        hasher.update(execution_scope.as_bytes());
+        hasher.update((turn_id.len() as u64).to_be_bytes());
+        hasher.update(turn_id.as_bytes());
         hasher.update((tool_call_id.len() as u64).to_be_bytes());
         hasher.update(tool_call_id.as_bytes());
         let digest = hasher.finalize();
         Self {
+            turn_id: turn_id.to_owned(),
             operation_id: format!("tool-call-v1-{digest:x}"),
         }
+    }
+
+    /// Canonical host-owned Agent Turn identity. This remains independent from
+    /// the derived tool-operation identity and is never sourced from model
+    /// arguments or reconstructed from the operation hash.
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
     }
 
     /// Stable, bounded visible-ASCII identity for this exact tool invocation.
@@ -203,6 +201,19 @@ pub trait Tool: Send + Sync {
     /// Execute the tool
     async fn execute(&self, input: Value) -> ToolResult;
 
+    /// Read-only admission before exposing canonical arguments to a selected
+    /// Product hook. Boundary adapters must reuse their actual owner's live
+    /// authorization checks without acquiring resources or dispatching work.
+    /// The real invocation still rechecks authority after the hook returns.
+    /// Unsupported tools fail explicitly; an absent hook never calls this.
+    async fn preflight_hook(
+        &self,
+        _input: &Value,
+        _context: &ToolExecutionContext,
+    ) -> Result<(), String> {
+        Err(format!("Tool '{}' does not support execution hook admission", self.name()))
+    }
+
     /// Maximum wall-clock time for one invocation, including host-side hooks.
     ///
     /// This is an engine safety net, not a replacement for a tool's own
@@ -224,34 +235,6 @@ pub trait Tool: Send + Sync {
         _context: &ToolExecutionContext,
     ) -> ToolResult {
         self.execute(input).await
-    }
-
-    /// Consume machine-observed state-changing effects completed by a nested
-    /// Agent during this exact invocation.
-    ///
-    /// This channel is deliberately orthogonal to [`Self::category_for`]: tool
-    /// categories drive approval policy, while completion evidence must never
-    /// widen or bypass that policy. Native tools return zero and are accounted
-    /// for directly by the engine. Boundary tools such as fork-mode `Skill`
-    /// may override this after correlating evidence with the trusted operation
-    /// id supplied to [`Self::execute_with_context`].
-    fn take_delegated_effects(&self, _context: &ToolExecutionContext) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Return an optional context modifier based on the tool input.
-    /// Called after execute() to collect any engine-level overrides.
-    /// Only SkillTool overrides this; all other tools return None.
-    fn context_modifier_for(&self, _input: &Value) -> Option<ContextModifier> {
-        None
-    }
-
-    /// Return any hooks declared in the skill's frontmatter for dynamic registration.
-    /// Called after a successful execute() so the tool-execution layer can merge
-    /// the returned hooks into the active HookEngine.
-    /// Only SkillTool overrides this; all other tools return None.
-    fn skill_hooks_for(&self, _input: &Value) -> Option<HooksConfig> {
-        None
     }
 
     /// Max result size in chars before truncation
@@ -278,13 +261,6 @@ pub trait Tool: Send + Sync {
             self.category_for(input),
             ToolCategory::Edit | ToolCategory::Exec | ToolCategory::Irreversible
         )
-    }
-
-    /// Whether this specific invocation can skip interactive approval even when
-    /// the session is not globally auto-approved. Defaults to false so existing
-    /// tools keep their current approval behavior.
-    fn auto_approve_invocation(&self, _input: &Value, _category: ToolCategory) -> bool {
-        false
     }
 
     /// Whether an unchanged successful result can be a normal part of waiting
@@ -323,6 +299,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn atomic_write_keeps_existing_siblings_and_cleans_failed_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let sibling = dir.path().join(format!("target.txt.tmp.{}.0", std::process::id()));
+        std::fs::write(&sibling, "unrelated").unwrap();
+        atomic_write(target.to_str().unwrap(), "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "unrelated");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
+
+        let blocked = dir.path().join("directory");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("keep"), "untouched").unwrap();
+        assert!(atomic_write(blocked.to_str().unwrap(), "not a file").is_err());
+        assert_eq!(std::fs::read_to_string(blocked.join("keep")).unwrap(), "untouched");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_rejects_failed_rename_without_direct_overwrite() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        // Permit reads/writes but deny DELETE sharing, so rename fails while a
+        // direct truncate/write would succeed. Keep the handle alive throughout.
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&target)
+            .unwrap();
+        assert!(atomic_write(target.to_str().unwrap(), "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn tool_execution_context_is_stable_bounded_and_turn_scoped() {
         let first = ToolExecutionContext::from_scoped_tool_call("turn-a", "call_0");
         let retry = ToolExecutionContext::from_scoped_tool_call("turn-a", "call_0");
@@ -332,6 +346,9 @@ mod tests {
         assert_eq!(first, retry);
         assert_ne!(first, next_turn);
         assert_ne!(first, next_call);
+        assert_eq!(first.turn_id(), "turn-a");
+        assert_eq!(next_turn.turn_id(), "turn-b");
+        assert_ne!(first.turn_id(), first.operation_id());
         assert!(first.operation_id().len() <= 128);
         assert!(
             first

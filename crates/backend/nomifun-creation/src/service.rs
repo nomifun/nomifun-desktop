@@ -23,14 +23,13 @@ use nomifun_common::{
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreativeTaskParams, CreationTaskPageCursorRef, CreationTaskRow, CreativeTaskOwnerRef,
-    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams,
-    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
+    CreateCreativeTaskParams, CreationTaskRow, CreativeTaskOwnerRef,
+    ICreationTaskRepository, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
     MAX_ARTIFACT_BYTES, ModelInvokeService, ModelRef, ProducedAsset, ProducedData, TaskOutcome,
-    TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
+    TaskRequest, TaskResult, TtsRequest, VideoGenRequest, MusicGenRequest,
 };
 use nomifun_net::egress::{SafeHttpClient, SafeHttpError, SafeHttpErrorKind, redacted_url};
 use serde::Serialize;
@@ -43,8 +42,7 @@ use tokio_util::sync::CancellationToken;
 use crate::artifact::{reconcile_mime, validate_for_capability};
 use crate::dto::CreationTask;
 use crate::types::{
-    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
-    TaskStatus,
+    CreationError, CreationInput, CreationInputKind, MediaCapability, TaskStatus,
 };
 
 /// Default per-provider in-flight cap (信号量).
@@ -53,6 +51,9 @@ const DEFAULT_PER_PROVIDER_LIMIT: usize = 3;
 const DEFAULT_GLOBAL_LIMIT: usize = 10;
 /// Default poll interval for async submit→poll protocols.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(2500);
+/// Bound exponential status-query backoff while still allowing an adapter to
+/// declare a longer provider-mandated base interval.
+const MAX_POLL_BACKOFF: Duration = Duration::from_secs(120);
 /// Default total budget for an async task before it is failed as `timeout`.
 const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Timeout for fetching a URL-form artifact the adapter returned.
@@ -80,10 +81,27 @@ fn checked_creation_input_bytes(current: usize, next: usize) -> Result<usize, Cr
     Ok(total)
 }
 
+fn rate_limit_poll_backoff(
+    base: Duration,
+    consecutive_rate_limits: u32,
+    retry_after_ms: Option<u64>,
+) -> Duration {
+    // The first 429 doubles the already-safe base cadence. Subsequent 429s
+    // continue exponentially, bounded so a transient throttle cannot make a
+    // healthy job appear hung for the rest of its ten-minute task budget.
+    let multiplier = 1_u32
+        .checked_shl(consecutive_rate_limits.min(30))
+        .unwrap_or(u32::MAX);
+    let fallback = base.saturating_mul(multiplier);
+    let provider_hint = retry_after_ms.map(Duration::from_millis).unwrap_or_default();
+    fallback
+        .max(provider_hint)
+        .min(MAX_POLL_BACKOFF.max(base))
+}
+
 /// The MIME stamped on produced text artifacts (the bridge keys its text-asset
 /// special case off a `text/plain` prefix).
 const TEXT_MIME: &str = "text/plain; charset=utf-8";
-const DEFAULT_TEXT_MAX_TOKENS: u32 = 4096;
 
 /// Complete one-shot text request handed from the creation state machine to
 /// the application's Agent Chat execution bridge.
@@ -91,9 +109,10 @@ const DEFAULT_TEXT_MAX_TOKENS: u32 = 4096;
 pub struct CreationTextRequest {
     pub provider_id: String,
     pub model: String,
+    pub expected_config_revision: Option<i64>,
     pub system: String,
     pub prompt: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
 }
 
 /// Chat execution seam for Workshop text nodes.
@@ -184,7 +203,7 @@ fn param_str(params: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `params.seconds` for video generation: absent → `None`; a JSON number or a
+/// `params.seconds` for media generation: absent → `None`; a JSON number or a
 /// numeric string (both accepted by the retired openai_video adapter) →
 /// `Some(u32)`; anything else present-but-unparseable is a typed local
 /// `invalid_params` (the old code forwarded garbage to the provider; failing
@@ -203,14 +222,34 @@ fn param_seconds(params: &Value) -> Result<Option<u32>, CreationError> {
         })
 }
 
-fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
+/// MiniMax does not expose a strict duration field for music generation. Keep
+/// the user's explicit selection useful by expressing it as an approximate
+/// composition target while preserving the original value in the task params.
+fn music_prompt(params: &Value) -> Result<String, CreationError> {
+    let prompt = param_prompt(params);
+    let Some(seconds) = param_seconds(params)? else {
+        return Ok(prompt);
+    };
+    if !matches!(seconds, 60 | 120 | 180 | 240 | 300 | 360) {
+        return Err(CreationError::new(
+            "invalid_params",
+            "music params.seconds must be one of 60, 120, 180, 240, 300, or 360",
+        ));
+    }
+    Ok(format!(
+        "{prompt}\n\n[Target duration: approximately {seconds} seconds.]"
+    ))
+}
+
+fn param_text_max_tokens(params: &Value) -> Result<Option<u32>, CreationError> {
     let Some(value) = params.get("max_tokens") else {
-        return Ok(DEFAULT_TEXT_MAX_TOKENS);
+        return Ok(None);
     };
     value
         .as_u64()
         .filter(|value| *value > 0)
         .and_then(|value| u32::try_from(value).ok())
+        .map(Some)
         .ok_or_else(|| {
             CreationError::new(
                 "invalid_params",
@@ -245,6 +284,7 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         return params.clone();
     };
     let mut extra = object.clone();
+    extra.retain(|key, _| !key.starts_with("_nomifun") && !key.starts_with("nomifun"));
     for key in consumed {
         extra.remove(*key);
     }
@@ -256,7 +296,9 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         "userPrompt",
         "referenceWidth",
         "referenceHeight",
-        "nomifunStandaloneWorkbench",
+        PINNED_CONNECTION_REF_PARAM,
+        PINNED_PROVIDER_REVISION_PARAM,
+        "_nomifun_creation_agent",
     ] {
         extra.remove(key);
     }
@@ -280,27 +322,49 @@ fn cap_to_task_request(
             quality: param_str(params, "quality"),
             extra: request_extra(
                 params,
-                &["prompt", "count", "n", "width", "height", "size", "quality", "interface_mode"],
+                &[
+                    "prompt",
+                    "count",
+                    "n",
+                    "width",
+                    "height",
+                    "size",
+                    "quality",
+                    "interface_mode",
+                    "aspect",
+                ],
             ),
         }),
         MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
             prompt: param_prompt(params),
+            quality: param_str(params, "quality"),
             count: param_count(params)?,
             size: param_size(params),
             inputs,
             extra: request_extra(
                 params,
-                &["prompt", "count", "n", "width", "height", "size", "interface_mode"],
+                &[
+                    "prompt",
+                    "count",
+                    "n",
+                    "quality",
+                    "width",
+                    "height",
+                    "size",
+                    "interface_mode",
+                    "aspect",
+                ],
             ),
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: param_prompt(params),
+            resolution: param_str(params, "resolution"),
             seconds: param_seconds(params)?,
-            size: param_size(params),
+            size: param_size(params).or_else(|| param_str(params, "aspect").filter(|aspect| !aspect.eq_ignore_ascii_case("auto"))),
             inputs,
             extra: request_extra(
                 params,
-                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
+                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect", "count", "n"],
             ),
         }),
         MediaCapability::V2v => {
@@ -309,6 +373,13 @@ fn cap_to_task_request(
                 "video-to-video (v2v) is not supported by any protocol adapter",
             ));
         }
+        MediaCapability::Music => TaskRequest::MusicGeneration(MusicGenRequest {
+            prompt: music_prompt(params)?,
+            lyrics: param_str(params, "lyrics"),
+            instrumental: params.get("instrumental").and_then(Value::as_bool).unwrap_or(true),
+            format: param_str(params, "format"),
+            extra: request_extra(params, &["prompt", "lyrics", "instrumental", "format", "seconds"]),
+        }),
         MediaCapability::Tts => TaskRequest::SpeechSynthesis(TtsRequest {
             text: param_prompt(params),
             voice: param_str(params, "voice"),
@@ -350,6 +421,16 @@ fn required_artifact_count(
     ) {
         Ok(param_count(params)? as usize)
     } else {
+        if matches!(capability, MediaCapability::T2v | MediaCapability::I2v | MediaCapability::V2v) {
+            for field in ["count", "n"] {
+                if params.get(field).is_some_and(|value| value.as_u64() != Some(1)) {
+                    return Err(CreationError::new(
+                        "invalid_params",
+                        format!("params.{field} must be 1: each video task produces one clip; submit separate tasks for multiple clips"),
+                    ));
+                }
+            }
+        }
         Ok(1)
     }
 }
@@ -365,64 +446,15 @@ pub struct NewCreationTask {
     pub inputs: Vec<CreationInput>,
 }
 
-pub const DEFAULT_STANDALONE_TASK_PAGE_LIMIT: usize = 30;
-pub const MAX_STANDALONE_TASK_PAGE_LIMIT: usize = 100;
-
-#[derive(Debug, Clone)]
-pub struct StandaloneWorkbenchTaskPage {
-    pub items: Vec<CreationTask>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StandaloneTaskPageCursor {
-    submitted_at: i64,
-    creation_task_id: String,
-}
-
-fn parse_standalone_task_cursor(raw: &str) -> Result<StandaloneTaskPageCursor, AppError> {
-    let (timestamp, task_id) = raw.split_once(':').ok_or_else(|| {
-        AppError::BadRequest(
-            "cursor must be '<submitted_at>:<creation_task_uuidv7>'".into(),
-        )
-    })?;
-    if timestamp.is_empty() || task_id.is_empty() || task_id.contains(':') {
-        return Err(AppError::BadRequest(
-            "cursor must contain exactly one timestamp/task separator".into(),
-        ));
-    }
-    let submitted_at = timestamp.parse::<i64>().map_err(|_| {
-        AppError::BadRequest("cursor submitted_at must be a canonical non-negative integer".into())
-    })?;
-    if submitted_at < 0 || submitted_at.to_string() != timestamp {
-        return Err(AppError::BadRequest(
-            "cursor submitted_at must be a canonical non-negative integer".into(),
-        ));
-    }
-    let creation_task_id = CreationTaskId::parse(task_id)
-        .map_err(|error| AppError::BadRequest(format!("invalid cursor task id: {error}")))?
-        .into_string();
-    Ok(StandaloneTaskPageCursor {
-        submitted_at,
-        creation_task_id,
-    })
-}
-
-fn encode_standalone_task_cursor(task: &CreationTaskRow) -> String {
-    format!("{}:{}", task.submitted_at, task.creation_task_id)
-}
-
 /// Canonical Creative Studio task owner. The API accepts this tagged union and
 /// persists exactly one branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreativeTaskOwner {
+    ConversationTurn { conversation_id: String, message_id: String },
     CanvasNode {
         canvas_id: String,
         node_id: String,
-    },
-    StandaloneWorkbench {
-        workbench_kind: StandaloneWorkbenchKind,
     },
     TemplateStep {
         template_id: String,
@@ -434,6 +466,10 @@ pub enum CreativeTaskOwner {
 impl CreativeTaskOwner {
     fn normalize(self) -> Result<Self, AppError> {
         match self {
+            Self::ConversationTurn { conversation_id, message_id } => Ok(Self::ConversationTurn {
+                conversation_id: nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?.into_string(),
+                message_id: nomifun_common::MessageId::parse(message_id).map_err(|e| AppError::BadRequest(e.to_string()))?.into_string(),
+            }),
             Self::CanvasNode {
                 canvas_id,
                 node_id,
@@ -445,9 +481,6 @@ impl CreativeTaskOwner {
                     .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
                     .into_string(),
             }),
-            Self::StandaloneWorkbench { workbench_kind } => {
-                Ok(Self::StandaloneWorkbench { workbench_kind })
-            }
             Self::TemplateStep {
                 template_id,
                 template_run_id,
@@ -472,6 +505,7 @@ impl CreativeTaskOwner {
 
     fn as_repository_owner(&self) -> CreativeTaskOwnerRef<'_> {
         match self {
+            Self::ConversationTurn { conversation_id, message_id } => CreativeTaskOwnerRef::ConversationTurn { conversation_id, message_id },
             Self::CanvasNode {
                 canvas_id,
                 node_id,
@@ -480,11 +514,6 @@ impl CreativeTaskOwner {
                 project_id: canvas_id,
                 node_id,
             },
-            Self::StandaloneWorkbench { workbench_kind } => {
-                CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: workbench_kind.as_str(),
-                }
-            }
             Self::TemplateStep {
                 template_id,
                 template_run_id,
@@ -508,6 +537,34 @@ struct PreparedCreationTask {
     inputs: Vec<CreationInput>,
 }
 
+const PINNED_CONNECTION_REF_PARAM: &str = "_nomifun_connection_config_ref";
+const PINNED_PROVIDER_REVISION_PARAM: &str = "_nomifun_provider_config_revision";
+
+fn pinned_provider_revision(
+    provider_id: &str,
+    params: &Value,
+) -> Result<Option<i64>, CreationError> {
+    let connection_ref = params.get(PINNED_CONNECTION_REF_PARAM);
+    let revision = params.get(PINNED_PROVIDER_REVISION_PARAM);
+    match (connection_ref, revision) {
+        (None, None) => Ok(None),
+        (Some(Value::String(connection_ref)), Some(Value::Number(revision))) => {
+            let revision = revision.as_i64().filter(|revision| *revision >= 0).ok_or_else(|| {
+                CreationError::config("pinned provider revision must be a non-negative integer")
+            })?;
+            if connection_ref != &format!("provider:{provider_id}@{revision}") {
+                return Err(CreationError::config(
+                    "pinned connection_config_ref does not match provider and revision",
+                ));
+            }
+            Ok(Some(revision))
+        }
+        _ => Err(CreationError::config(
+            "pinned provider revision and connection_config_ref must be supplied together",
+        )),
+    }
+}
+
 #[derive(Serialize)]
 struct CanonicalCreativeTaskRequest<'a> {
     owner: &'a CreativeTaskOwner,
@@ -525,43 +582,20 @@ impl PreparedCreationTask {
         owner: CreativeTaskOwner,
         submitted_at: i64,
     ) -> WorkerJob {
-        let (
-            canvas_id,
-            workbench_kind,
-            template_id,
-            template_run_id,
-            template_step_id,
-            node_id,
-        ) = match owner {
-            CreativeTaskOwner::CanvasNode {
-                canvas_id,
-                node_id,
-            } => (Some(canvas_id), None, None, None, None, Some(node_id)),
-            CreativeTaskOwner::StandaloneWorkbench { workbench_kind } => (
-                None,
-                Some(workbench_kind),
-                None,
-                None,
-                None,
-                None,
-            ),
-            CreativeTaskOwner::TemplateStep {
-                template_id,
-                template_run_id,
-                template_step_id,
-            } => (
-                None,
-                None,
-                Some(template_id),
-                Some(template_run_id),
-                Some(template_step_id),
-                None,
-            ),
+        let (conversation_id, message_id) = match &owner {
+            CreativeTaskOwner::ConversationTurn { conversation_id, message_id } => (Some(conversation_id.clone()), Some(message_id.clone())),
+            _ => (None, None),
+        };
+        let (canvas_id, template_id, template_run_id, template_step_id, node_id) = match owner {
+            CreativeTaskOwner::ConversationTurn { .. } => (None, None, None, None, None),
+            CreativeTaskOwner::CanvasNode { canvas_id, node_id } => (Some(canvas_id), None, None, None, Some(node_id)),
+            CreativeTaskOwner::TemplateStep { template_id, template_run_id, template_step_id } => (None, Some(template_id), Some(template_run_id), Some(template_step_id), None),
         };
         WorkerJob {
+            conversation_id,
+            message_id,
             creation_task_id,
             canvas_id,
-            workbench_kind,
             template_id,
             template_run_id,
             template_step_id,
@@ -678,9 +712,11 @@ pub trait AssetSource: Send + Sync {
 
 /// The persisted fields a worker needs to run (or resume) one task.
 struct WorkerJob {
+    conversation_id: Option<String>,
+    message_id: Option<String>,
     creation_task_id: String,
     canvas_id: Option<String>,
-    workbench_kind: Option<StandaloneWorkbenchKind>,
+
     template_id: Option<String>,
     template_run_id: Option<String>,
     template_step_id: Option<String>,
@@ -886,6 +922,8 @@ impl CreationService {
             )));
         }
         let params = canonical_json(req.params);
+        pinned_provider_revision(&provider_id, &params)
+            .map_err(|error| AppError::BadRequest(format!("{}: {}", error.kind, error.message)))?;
         let params_json = serde_json::to_string(&params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
 
@@ -923,15 +961,6 @@ impl CreationService {
         // state only for a brand-new key. Skipping the eager provider lookup
         // here keeps an exact historical replay readable after retirement.
         let prepared = self.prepare_task(req).await?;
-        if let CreativeTaskOwner::StandaloneWorkbench { workbench_kind, .. } = &owner
-            && !workbench_kind.accepts_capability(prepared.capability)
-        {
-            return Err(AppError::BadRequest(format!(
-                "standalone {} workbench cannot own capability {}",
-                workbench_kind.as_str(),
-                prepared.capability.as_str()
-            )));
-        }
         if prepared.model.trim() != prepared.model {
             return Err(AppError::BadRequest(
                 "Creative Studio model must be already normalized".into(),
@@ -998,6 +1027,62 @@ impl CreationService {
             .try_into()
     }
 
+    /// Freeze the selected connection revision before accepting a new user
+    /// submission. Replays use their persisted snapshot and do not call this.
+    pub async fn capture_model_config(&self, request: &mut NewCreationTask) -> Result<(), AppError> {
+        let Some(invoke) = &self.invoke else { return Ok(()); };
+        let capability = MediaCapability::parse(&request.capability).ok_or_else(|| AppError::BadRequest("Unsupported generation capability".into()))?;
+        let task = cap_to_task_request(capability, &request.params, Vec::new())
+            .map_err(|error| AppError::BadRequest(error.message))?.task();
+        let selected = invoke.resolve_task_config(&ModelRef { provider_id: request.provider_id.clone(), model: request.model.clone() }, task).await
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let params = request.params.as_object_mut().ok_or_else(|| AppError::BadRequest("Generation parameters must be an object".into()))?;
+        params.insert(PINNED_CONNECTION_REF_PARAM.into(), Value::String(format!("provider:{}@{}", selected.provider_id, selected.config_revision)));
+        params.insert(PINNED_PROVIDER_REVISION_PARAM.into(), Value::from(selected.config_revision));
+        Ok(())
+    }
+
+    /// Persist an explicitly attached reference in the existing asset library.
+    /// The caller owns file access; generation only receives validated bytes.
+    pub async fn import_reference(&self, bytes: Vec<u8>, mime: String, origin: Value, in_library: bool) -> Result<CreationInput, AppError> {
+        let mime = crate::validate_artifact_payload(&bytes, &mime)
+            .map_err(|error| AppError::BadRequest(error.message))?;
+        let kind = if mime.starts_with("image/") { CreationInputKind::Image }
+            else if mime.starts_with("video/") { CreationInputKind::Video }
+            else if mime.starts_with("audio/") { CreationInputKind::Audio }
+            else { return Err(AppError::BadRequest("Choose an image, video or audio reference".into())); };
+        let sink = self.asset_sink.as_ref().ok_or_else(|| AppError::Internal("Asset storage is unavailable".into()))?;
+        let asset_id = sink.persist(PersistAsset { bytes, mime, origin, in_library }).await
+            .map_err(|error| AppError::Internal(error.message))?;
+        Ok(CreationInput { asset_id, kind, role: "reference".into() })
+    }
+
+    pub async fn list_conversation_tasks(&self, conversation_id: &str) -> Result<Vec<CreationTask>, AppError> {
+        nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        self.repo.list_conversation_tasks(conversation_id).await?.into_iter().map(CreationTask::try_from).collect()
+    }
+
+    pub async fn conversation_message_creation_references(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Value>, AppError> {
+        nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        nomifun_common::MessageId::parse(message_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        Ok(self.repo.conversation_message_creation_references(conversation_id, message_id).await?)
+    }
+
+    /// Called under the conversation's existing deletion/reset admission fence.
+    /// Keep terminal task provenance so saved materials survive transcript deletion.
+    pub async fn cancel_conversation_tasks(&self, conversation_id: &str) -> Result<(), AppError> {
+        for task in self.repo.list_conversation_tasks(conversation_id).await? {
+            if matches!(task.status.as_str(), "queued" | "running") {
+                self.cancel_task(&task.creation_task_id).await?;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     async fn create_test_task(
         self: &Arc<Self>,
@@ -1030,149 +1115,7 @@ impl CreationService {
         rows.pop().expect("one task row remains after artifact audit").try_into()
     }
 
-    pub async fn list_standalone_workbench_tasks(
-        &self,
-        workbench_kind: StandaloneWorkbenchKind,
-        active_only: bool,
-        limit: Option<usize>,
-        cursor: Option<&str>,
-    ) -> Result<StandaloneWorkbenchTaskPage, AppError> {
-        let limit = limit.unwrap_or(DEFAULT_STANDALONE_TASK_PAGE_LIMIT);
-        if !(1..=MAX_STANDALONE_TASK_PAGE_LIMIT).contains(&limit) {
-            return Err(AppError::BadRequest(format!(
-                "limit must be between 1 and {MAX_STANDALONE_TASK_PAGE_LIMIT}"
-            )));
-        }
-        let cursor = cursor.map(parse_standalone_task_cursor).transpose()?;
-        let mut rows = self
-            .repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: workbench_kind.as_str(),
-                active_only,
-                before: cursor.as_ref().map(|cursor| CreationTaskPageCursorRef {
-                    submitted_at: cursor.submitted_at,
-                    creation_task_id: &cursor.creation_task_id,
-                }),
-                limit,
-            })
-            .await?;
-        let has_more = rows.len() > limit;
-        rows.truncate(limit);
-        for row in &rows {
-            let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
-                && row.node_id.is_none()
-                && row.template_id.is_none()
-                && row.template_run_id.is_none()
-                && row.template_step_id.is_none();
-            let capability_matches = MediaCapability::parse(&row.capability)
-                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
-            if !exact_owner || !capability_matches {
-                return Err(AppError::Internal(format!(
-                    "standalone task {} escaped its exact owner/capability scope",
-                    row.creation_task_id
-                )));
-            }
-        }
-        let next_cursor = has_more && !rows.is_empty();
-        let encoded_cursor = next_cursor
-            .then(|| rows.last().map(encode_standalone_task_cursor))
-            .flatten();
-        let rows = self.audit_rows_for_output(rows).await?;
-        let items = rows
-            .into_iter()
-            .map(CreationTask::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(StandaloneWorkbenchTaskPage {
-            items,
-            next_cursor: encoded_cursor,
-        })
-    }
 
-    pub async fn retire_standalone_workbench_tasks(
-        &self,
-        workbench_kind: StandaloneWorkbenchKind,
-        task_ids: &[String],
-    ) -> Result<Vec<String>, AppError> {
-        if task_ids.is_empty() || task_ids.len() > 100 {
-            return Err(AppError::BadRequest(
-                "retire requires between 1 and 100 task_ids".into(),
-            ));
-        }
-        let mut seen = HashSet::with_capacity(task_ids.len());
-        for task_id in task_ids {
-            CreationTaskId::parse(task_id).map_err(|error| {
-                AppError::BadRequest(format!("invalid retire task id {task_id:?}: {error}"))
-            })?;
-            if !seen.insert(task_id.as_str()) {
-                return Err(AppError::BadRequest(format!(
-                    "retire task_ids contains duplicate {task_id}"
-                )));
-            }
-        }
-
-        let mut rows = Vec::with_capacity(task_ids.len());
-        for task_id in task_ids {
-            let row = self
-                .repo
-                .get_task(task_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("creation task {task_id} not found")))?;
-            let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
-                && row.node_id.is_none()
-                && row.template_id.is_none()
-                && row.template_run_id.is_none()
-                && row.template_step_id.is_none();
-            let capability_matches = MediaCapability::parse(&row.capability)
-                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
-            if !exact_owner || !capability_matches {
-                return Err(AppError::Conflict(format!(
-                    "creation task {task_id} does not belong to the requested standalone workbench owner"
-                )));
-            }
-            if matches!(row.status.as_str(), "queued" | "running") {
-                return Err(AppError::Conflict(format!(
-                    "live creation task {task_id} cannot be retired"
-                )));
-            }
-            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
-                return Err(AppError::Conflict(format!(
-                    "creation task {task_id} is not in a supported terminal state"
-                )));
-            }
-            rows.push(row);
-        }
-        let deleted_at = rows
-            .iter()
-            .map(|row| row.submitted_at)
-            .max()
-            .unwrap_or_default()
-            .max(now_ms());
-        let rows = self.audit_rows_for_output(rows).await?;
-        for row in rows {
-            CreationTask::try_from(row)?;
-        }
-        let retired = self
-            .repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: workbench_kind.as_str(),
-                task_ids,
-                deleted_at,
-            })
-            .await?;
-        if retired.len() != task_ids.len() {
-            return Err(AppError::Internal(
-                "retirement returned an incomplete task batch".into(),
-            ));
-        }
-        for (expected, row) in task_ids.iter().zip(&retired) {
-            if row.creation_task_id != *expected || row.deleted_at.is_none() {
-                return Err(AppError::Internal(
-                    "retirement returned a reordered or untombstoned task".into(),
-                ));
-            }
-        }
-        Ok(task_ids.to_vec())
-    }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
     /// task moves to `canceled` and its worker is signalled to abort in-flight.
@@ -1190,9 +1133,9 @@ impl CreationService {
         }
         // Write the terminal status FIRST, then cancel the token so the worker's
         // finalize sees `Canceled` and won't overwrite it.
-        let updated = self
+        let canceled = self
             .repo
-            .update_task(
+            .update_task_if_live(
                 creation_task_id,
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Canceled.as_str()),
@@ -1201,10 +1144,12 @@ impl CreationService {
                 },
             )
             .await?;
-        if let Some(token) = self.inflight.lock().unwrap().get(creation_task_id) {
-            token.cancel();
+        if canceled {
+            if let Some(token) = self.inflight.lock().unwrap().get(creation_task_id) {
+                token.cancel();
+            }
         }
-        updated.try_into()
+        self.get_task(creation_task_id).await
     }
 
     fn artifact_manifest(row: &CreationTaskRow) -> (TaskArtifactManifest, Option<TaskArtifactIssue>) {
@@ -1338,10 +1283,13 @@ impl CreationService {
         Ok(())
     }
 
-    /// Boot reconciliation ("running ⟺ active executor" invariant). Async tasks that
-    /// have a remote job id are RESUMED (their poll loop restarts); every other
-    /// live task (queued, or running with no remote handle) is converged to
-    /// `failed(interrupted)`. Returns the count settled as failed.
+    /// Boot reconciliation ("running ⟺ active executor" invariant). Queued
+    /// tasks are safe to restart because the worker persists `running` before
+    /// invoking a provider. Running async tasks that have a durable remote job
+    /// id resume their poll loop. A running task without a remote handle is
+    /// ambiguous (the provider invocation may already have happened), so only
+    /// that state is converged to `failed(interrupted)`. Returns the count
+    /// settled as failed.
     pub async fn reconcile_on_boot(self: &Arc<Self>) -> Result<usize, AppError> {
         let all_rows = self.repo.list_all_tasks().await?;
         let manifests = self.verify_artifact_manifests(&all_rows).await?;
@@ -1402,8 +1350,11 @@ impl CreationService {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            if row.status == TaskStatus::Running.as_str() && remote.is_some() {
-                let prepared = (|| -> Result<(MediaCapability, Value, usize), CreationError> {
+            let restart_queued = row.status == TaskStatus::Queued.as_str();
+            let resume_remote = row.status == TaskStatus::Running.as_str() && remote.is_some();
+            if restart_queued || resume_remote {
+                let prepared =
+                    (|| -> Result<(MediaCapability, Value, usize, Vec<CreationInput>), CreationError> {
                     let capability = MediaCapability::parse(&row.capability).ok_or_else(|| {
                         CreationError::new(
                             "unsupported_capability",
@@ -1417,17 +1368,33 @@ impl CreationService {
                         )
                     })?;
                     let required_count = required_artifact_count(capability, &params)?;
-                    Ok((capability, params, required_count))
+                    let inputs = if restart_queued {
+                        let raw = row.input_bindings.as_deref().ok_or_else(|| {
+                            CreationError::new(
+                                "invalid_inputs",
+                                "queued task has no durable input bindings and cannot be restarted safely",
+                            )
+                        })?;
+                        serde_json::from_str::<Vec<CreationInput>>(raw).map_err(|error| {
+                            CreationError::new(
+                                "invalid_inputs",
+                                format!("persisted task input bindings are invalid JSON: {error}"),
+                            )
+                        })?
+                    } else {
+                        // A submitted remote job already consumed its inputs;
+                        // the resumed worker only polls the durable handle.
+                        Vec::new()
+                    };
+                    Ok((capability, params, required_count, inputs))
                 })();
                 match prepared {
-                    Ok((capability, params, required_artifact_count)) => {
+                    Ok((capability, params, required_artifact_count, inputs)) => {
                         self.spawn(WorkerJob {
+                            conversation_id: row.conversation_id,
+                            message_id: row.message_id,
                             creation_task_id: row.creation_task_id.clone(),
                             canvas_id: row.project_id,
-                            workbench_kind: row
-                                .workbench_kind
-                                .as_deref()
-                                .and_then(StandaloneWorkbenchKind::parse),
                             template_id: row.template_id,
                             template_run_id: row.template_run_id,
                             template_step_id: row.template_step_id,
@@ -1437,7 +1404,7 @@ impl CreationService {
                             capability,
                             params,
                             required_artifact_count,
-                            inputs: Vec::new(), // inputs already consumed at submit; poll needs none
+                            inputs,
                             submitted_at: row.submitted_at,
                             remote_task_id: remote,
                         });
@@ -1457,7 +1424,7 @@ impl CreationService {
 
             let err = CreationError::new(
                 "interrupted",
-                "task did not survive a restart (no active executor); settled at boot",
+                "provider execution was interrupted before a durable remote handle was recorded; retry is required to avoid duplicate output",
             );
             match self.write_failed(&row.creation_task_id, &err).await {
                 Ok(()) => settled += 1,
@@ -1534,6 +1501,13 @@ impl CreationService {
             let request = CreationTextRequest {
                 provider_id: job.provider_id.clone(),
                 model: job.model.clone(),
+                expected_config_revision: match pinned_provider_revision(
+                    &job.provider_id,
+                    &job.params,
+                ) {
+                    Ok(revision) => revision,
+                    Err(error) => return ExecOutcome::Failed(error),
+                },
                 system: param_str(&job.params, "system").unwrap_or_default(),
                 prompt: param_prompt(&job.params),
                 max_tokens,
@@ -1585,9 +1559,19 @@ impl CreationService {
             return self.poll_loop(job, &invoke, &mref, &req, handle, token).await;
         }
 
+        let expected_config_revision = match pinned_provider_revision(&job.provider_id, &job.params)
+        {
+            Ok(revision) => revision,
+            Err(error) => return ExecOutcome::Failed(error),
+        };
         let outcome = tokio::select! {
             _ = token.cancelled() => return ExecOutcome::Canceled,
-            r = invoke.invoke(&mref, req) => r,
+            r = async {
+                match expected_config_revision {
+                    Some(revision) => invoke.invoke_at_config_revision(&mref, revision, req).await,
+                    None => invoke.invoke(&mref, req).await,
+                }
+            } => r,
         };
         match outcome {
             Err(e) => ExecOutcome::Failed(e.into()),
@@ -1641,6 +1625,13 @@ impl CreationService {
         } else {
             job.submitted_at + self.task_timeout.as_millis() as i64
         };
+        let base_poll_interval = invoke
+            .recommended_poll_interval(&handle, req.task())
+            .map_or(self.poll_interval, |provider_interval| {
+                self.poll_interval.max(provider_interval)
+            });
+        let mut next_poll_delay = base_poll_interval;
+        let mut consecutive_rate_limits = 0_u32;
         loop {
             if token.is_cancelled() {
                 return ExecOutcome::Canceled;
@@ -1650,9 +1641,14 @@ impl CreationService {
                     "async task exceeded its poll deadline",
                 ));
             }
+            let remaining_ms = u64::try_from(deadline.saturating_sub(now_ms())).unwrap_or(0);
+            let sleep_delay = next_poll_delay.min(Duration::from_millis(remaining_ms));
             tokio::select! {
                 _ = token.cancelled() => return ExecOutcome::Canceled,
-                _ = tokio::time::sleep(self.poll_interval) => {}
+                _ = tokio::time::sleep(sleep_delay) => {}
+            }
+            if now_ms() >= deadline {
+                continue;
             }
             let poll = tokio::select! {
                 _ = token.cancelled() => return ExecOutcome::Canceled,
@@ -1661,11 +1657,34 @@ impl CreationService {
             match poll {
                 Ok(TaskOutcome::Pending(next)) => {
                     handle = next;
+                    next_poll_delay = base_poll_interval;
+                    consecutive_rate_limits = 0;
                     continue;
                 }
                 Ok(TaskOutcome::Done(result)) => return self.persist_or_fail(job, result).await,
                 Err(e) => {
-                    // Terminal: an upstream 4xx (bad job id / auth), a
+                    // A status-query 429 is transient by definition: retain
+                    // the accepted remote job and retry with Retry-After-aware
+                    // exponential backoff. Treating it as a terminal 4xx loses
+                    // a billable generation that may still complete normally.
+                    if e.kind == InvokeErrorKind::RateLimited || e.http_status == Some(429) {
+                        consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
+                        next_poll_delay = rate_limit_poll_backoff(
+                            base_poll_interval,
+                            consecutive_rate_limits,
+                            e.retry_after_ms,
+                        );
+                        tracing::warn!(
+                            id = %job.creation_task_id,
+                            error = %e.message,
+                            retry_after_ms = next_poll_delay.as_millis(),
+                            "creation poll rate limited; backing off"
+                        );
+                        continue;
+                    }
+                    next_poll_delay = base_poll_interval;
+                    consecutive_rate_limits = 0;
+                    // Terminal: an upstream non-429 4xx (bad job id / auth), a
                     // JobFailed (the remote job reached a terminal failure
                     // state — the old PollResult::Failed leg), or a catalog
                     // kind (provider/model deleted or retagged mid-poll must
@@ -2095,14 +2114,14 @@ fn build_origin(job: &WorkerJob) -> Value {
             Value::String(job.creation_task_id.as_str().to_owned()),
         ),
     ]);
+    if let Some(conversation_id) = &job.conversation_id {
+        origin.insert("conversation_id".into(), Value::String(conversation_id.clone()));
+    }
+    if let Some(message_id) = &job.message_id {
+        origin.insert("message_id".into(), Value::String(message_id.clone()));
+    }
     if let Some(canvas_id) = &job.canvas_id {
         origin.insert("canvas_id".into(), Value::String(canvas_id.clone()));
-    }
-    if let Some(workbench_kind) = job.workbench_kind {
-        origin.insert(
-            "workbench_kind".into(),
-            Value::String(workbench_kind.as_str().to_owned()),
-        );
     }
     if let Some(template_id) = &job.template_id {
         origin.insert("template_id".into(), Value::String(template_id.clone()));
@@ -2227,6 +2246,8 @@ mod tests {
         SubmitError(String),
         /// Pending on submit; return Pending for `pending_polls` polls, then Done.
         AsyncDone { pending_polls: usize },
+        /// First status query is throttled; the next one completes normally.
+        AsyncRateLimitedThenDone,
         /// Pending on submit; never completes (each poll returns Pending).
         AsyncNever,
     }
@@ -2302,7 +2323,9 @@ mod tests {
                 MockBehavior::SubmitError(m) => {
                     Err(InvokeError::new(nomifun_model_invoke::InvokeErrorKind::ProviderError, m.clone()))
                 }
-                MockBehavior::AsyncDone { .. } | MockBehavior::AsyncNever => {
+                MockBehavior::AsyncDone { .. }
+                | MockBehavior::AsyncRateLimitedThenDone
+                | MockBehavior::AsyncNever => {
                     Ok(TaskOutcome::Pending(self.pending_handle()))
                 }
             }
@@ -2324,6 +2347,19 @@ mod tests {
                             mime: Some("video/mp4".into()),
                         }])))
                     }
+                }
+                MockBehavior::AsyncRateLimitedThenDone if n == 0 => Err(
+                    InvokeError::new(
+                        InvokeErrorKind::RateLimited,
+                        "provider returned 429 Too Many Requests: too many video status queries",
+                    )
+                    .with_http_status(429),
+                ),
+                MockBehavior::AsyncRateLimitedThenDone => {
+                    Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
+                        data: ProducedData::Bytes(valid_mp4()),
+                        mime: Some("video/mp4".into()),
+                    }])))
                 }
                 _ => Ok(TaskOutcome::Pending(job.clone())),
             }
@@ -3053,243 +3089,7 @@ mod tests {
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn standalone_task_page_is_owner_scoped_cursor_strict_and_audited() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let provider_id = seed_provider(db.pool(), "openai", "openai.videos").await;
-        let _canvas_id = seed_service_test_canvas(db.pool()).await;
-        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        let mut task_ids = Vec::new();
-        for submitted_at in [200, 100] {
-            let task_id = CreationTaskId::new().into_string();
-            let fingerprint = json!({"task": task_id}).to_string();
-            repo.get_or_create_creative_task(CreateCreativeTaskParams {
-                creation_task_id: &task_id,
-                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: "video",
-                },
-                provider_id: &provider_id,
-                model: "test-model",
-                capability: "t2v",
-                params: r#"{"prompt":"Aurora","seconds":5}"#,
-                input_bindings: "[]",
-                request_fingerprint: &fingerprint,
-                status: "queued",
-                submitted_at,
-            })
-            .await
-            .unwrap();
-            repo.update_task(
-                &task_id,
-                UpdateCreationTaskParams {
-                    status: Some("failed"),
-                    error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
-                    finished_at: Some(Some(submitted_at + 1)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            task_ids.push(task_id);
-        }
-        let service = CreationService::new(Arc::new(repo.clone()));
 
-        let first = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                false,
-                Some(1),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.items.len(), 1);
-        assert_eq!(first.items[0].creation_task_id, task_ids[0]);
-        let cursor = first.next_cursor.expect("one more row requires a cursor");
-
-        let second = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                false,
-                Some(1),
-                Some(&cursor),
-            )
-            .await
-            .unwrap();
-        assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].creation_task_id, task_ids[1]);
-        assert!(second.next_cursor.is_none());
-        assert!(
-            service
-                .list_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Image,
-                    false,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-                .items
-                .is_empty()
-        );
-        for invalid in ["", "01:bad", "-1:0190f5fe-7c00-7a00-8000-000000000001"] {
-            assert!(matches!(
-                service
-                    .list_standalone_workbench_tasks(
-                        StandaloneWorkbenchKind::Video,
-                        false,
-                        None,
-                        Some(invalid),
-                    )
-                    .await,
-                Err(AppError::BadRequest(_))
-            ));
-        }
-
-        let retired = service
-            .retire_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                &[task_ids[0].clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(retired, vec![task_ids[0].clone()]);
-        let direct = service.get_task(&task_ids[0]).await.unwrap();
-        let first_deleted_at = direct.deleted_at.expect("direct GET exposes tombstone");
-        assert!(
-            service
-                .list_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Video,
-                    false,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-                .items
-                .iter()
-                .all(|task| task.creation_task_id != task_ids[0])
-        );
-        service
-            .retire_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                &[task_ids[0].clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            service.get_task(&task_ids[0]).await.unwrap().deleted_at,
-            Some(first_deleted_at),
-            "idempotent retire preserves the first tombstone timestamp"
-        );
-
-        let corrupt_id = CreationTaskId::new().into_string();
-        let fingerprint = json!({"task": corrupt_id}).to_string();
-        repo.get_or_create_creative_task(CreateCreativeTaskParams {
-            creation_task_id: &corrupt_id,
-            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                workbench_kind: "video",
-            },
-            provider_id: &provider_id,
-            model: "test-model",
-            capability: "t2v",
-            params: r#"{"prompt":"missing output","seconds":5}"#,
-            input_bindings: "[]",
-            request_fingerprint: &fingerprint,
-            status: "queued",
-            submitted_at: 300,
-        })
-        .await
-        .unwrap();
-        let missing_asset = WorkshopAssetId::new().into_string();
-        let result_ids = serde_json::to_string(&[missing_asset]).unwrap();
-        repo.update_task(
-            &corrupt_id,
-            UpdateCreationTaskParams {
-                status: Some("succeeded"),
-                result_asset_ids: Some(&result_ids),
-                finished_at: Some(Some(301)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert!(
-            service
-                .retire_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Video,
-                    &[corrupt_id.clone()],
-                )
-                .await
-                .is_err(),
-            "retirement must not hide a succeeded task before artifact audit"
-        );
-        assert!(repo.get_task(&corrupt_id).await.unwrap().unwrap().deleted_at.is_none());
-    }
-
-    #[tokio::test]
-    async fn standalone_active_page_excludes_every_terminal_status() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
-        let _canvas_id = seed_service_test_canvas(db.pool()).await;
-        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        let queued_id = CreationTaskId::new().into_string();
-        let failed_id = CreationTaskId::new().into_string();
-        for (task_id, submitted_at) in [(&queued_id, 20), (&failed_id, 10)] {
-            let fingerprint = json!({"task": task_id}).to_string();
-            repo.get_or_create_creative_task(CreateCreativeTaskParams {
-                creation_task_id: task_id,
-                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: "image",
-                },
-                provider_id: &provider_id,
-                model: "test-model",
-                capability: "t2i",
-                params: r#"{"prompt":"Aurora"}"#,
-                input_bindings: "[]",
-                request_fingerprint: &fingerprint,
-                status: "queued",
-                submitted_at,
-            })
-            .await
-            .unwrap();
-        }
-        repo.update_task(
-            &failed_id,
-            UpdateCreationTaskParams {
-                status: Some("failed"),
-                error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
-                finished_at: Some(Some(11)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let service = CreationService::new(Arc::new(repo));
-
-        let active = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Image,
-                true,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(active.items.len(), 1);
-        assert_eq!(active.items[0].creation_task_id, queued_id);
-
-        let all = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Image,
-                false,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(all.items.len(), 2);
-    }
 
     #[tokio::test]
     async fn creative_template_task_runs_with_exact_owner_and_provenance() {
@@ -3380,7 +3180,25 @@ mod tests {
         assert_eq!(requests[0].model, "test-model");
         assert_eq!(requests[0].system, "be concise");
         assert_eq!(requests[0].prompt, "draft a launch note");
-        assert_eq!(requests[0].max_tokens, 777);
+        assert_eq!(requests[0].max_tokens, Some(777));
+    }
+
+    #[tokio::test]
+    async fn text_task_without_token_limit_leaves_provider_default_available() {
+        let adapter = MockAdapter::with(
+            "must-not-run", vec![ModelTask::Chat],
+            MockBehavior::SubmitError("media adapter must not execute Chat".into()),
+        );
+        let h = harness(adapter.clone(), "openai").await;
+        let mut task = new_task(&h.provider_id, "text");
+        task.params = json!({"prompt": "draft a long report"});
+        let created = h.svc.create_test_task(task).await.unwrap();
+        let done = wait_terminal(&h.svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 0);
+        let requests = h.text_executor.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].max_tokens, None);
     }
 
     #[tokio::test]
@@ -3542,6 +3360,22 @@ mod tests {
         // remote task id was persisted on the way through
         let row = h.svc.get_task(&created.creation_task_id).await.unwrap();
         assert_eq!(row.status, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn async_task_recovers_from_status_query_rate_limit() {
+        let adapter = MockAdapter::with(
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
+            MockBehavior::AsyncRateLimitedThenDone,
+        );
+        let h = harness(adapter.clone(), "openai").await;
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2v")).await.unwrap();
+        let done = wait_terminal(&h.svc, &created.creation_task_id).await;
+
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(done.result_asset_ids.len(), 1);
+        assert_eq!(adapter.poll_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -3737,6 +3571,20 @@ mod tests {
         assert_eq!(overflow.kind, "input_batch_too_large");
     }
 
+    #[test]
+    fn poll_rate_limit_backoff_is_exponential_honors_retry_after_and_is_bounded() {
+        let base = Duration::from_secs(10);
+        assert_eq!(rate_limit_poll_backoff(base, 1, None), Duration::from_secs(20));
+        assert_eq!(
+            rate_limit_poll_backoff(base, 2, Some(75_000)),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            rate_limit_poll_backoff(base, 30, None),
+            MAX_POLL_BACKOFF
+        );
+    }
+
     #[tokio::test]
     async fn create_task_enforces_image_count_and_n_without_defaulting_or_clamping() {
         let adapter = MockAdapter::with(
@@ -3774,6 +3622,31 @@ mod tests {
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(done.result_asset_ids.len(), 10);
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn create_task_rejects_video_batch_count_before_persistence_or_provider_execution() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        for capability in ["t2v", "i2v", "v2v"] {
+            for params in [
+                json!({"count": 2}), json!({"n": 2}), json!({"count": 0}),
+                json!({"count": -1}), json!({"count": "1"}), json!({"count": 1.5}),
+                json!({"count": 1, "n": 2}), json!({"count": null}),
+            ] {
+                let mut task = new_task(&h.provider_id, capability);
+                task.params = params;
+                let error = h.svc.create_test_task(task).await.unwrap_err();
+                assert!(matches!(error, AppError::BadRequest(ref message) if message.contains("each video task produces one clip")));
+            }
+        }
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 0);
+        assert!(h.svc.repo.list_all_tasks().await.unwrap().is_empty());
+        for capability in [MediaCapability::T2v, MediaCapability::I2v, MediaCapability::V2v] {
+            for params in [json!({}), json!({"count": 1}), json!({"n": 1}), json!({"count": 1, "n": 1})] {
+                assert_eq!(required_artifact_count(capability, &params).unwrap(), 1);
+            }
+        }
     }
 
     #[tokio::test]
@@ -3836,8 +3709,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 2);
-        assert_eq!(svc.get_task(&queued_id).await.unwrap().status, "failed");
+        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 1);
+        let restarted = wait_terminal(&svc, &queued_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert_eq!(svc.get_task(&running_id).await.unwrap().status, "failed");
         assert!(!sink.contains(&queued_asset));
         assert!(!sink.contains(&running_asset));
@@ -3845,7 +3719,7 @@ mod tests {
 
         // Re-running complete-inventory recovery is idempotent.
         assert_eq!(svc.reconcile_on_boot().await.unwrap(), 0);
-        assert_eq!(sink.live_count(), 0);
+        assert_eq!(sink.live_count(), 1, "the restarted task's committed output remains");
     }
 
     #[tokio::test]
@@ -3883,16 +3757,9 @@ mod tests {
         );
         assert!(tracked.contains(&asset_id));
 
-        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 1);
-        assert_eq!(
-            svc.repo
-                .get_task(&creation_task_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "failed"
-        );
+        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 0);
+        let restarted = wait_terminal(&svc, &creation_task_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert!(!tracked.contains(&asset_id));
     }
 
@@ -4099,9 +3966,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_settles_queued_and_resumes_running_with_remote() {
-        // Build a service whose adapter completes on the first poll, so a resumed
-        // running-with-remote task reaches succeeded.
+    async fn reconcile_restarts_queued_and_remote_jobs_but_settles_uncertain_running() {
+        // Build a service whose adapter completes on the first poll. Both a
+        // never-started queued task and a running task with a durable remote
+        // handle can safely continue after boot.
         let adapter = MockAdapter::with(
             "openai.videos",
             vec![ModelTask::VideoGeneration],
@@ -4109,11 +3977,11 @@ mod tests {
         );
         let h = harness(adapter, "openai").await;
         let repo = &h.svc.repo;
-        let queued_id = create_test_task(&h.svc, &h.provider_id, "t2i", "{}").await;
+        let queued_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
         let running_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
         let resume_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
 
-        // (a) a queued leftover → should become failed(interrupted)
+        // (a) a queued leftover → restarted from its durable request
 
         // (b) a running task WITHOUT remote → failed(interrupted)
         repo.update_task(&running_id, UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
@@ -4140,13 +4008,10 @@ mod tests {
         .unwrap();
 
         let settled = h.svc.reconcile_on_boot().await.unwrap();
-        assert_eq!(settled, 2, "queued + running-without-remote settle as failed");
+        assert_eq!(settled, 1, "only running-without-remote is ambiguous");
 
-        assert_eq!(h.svc.get_task(&queued_id).await.unwrap().status, "failed");
-        assert_eq!(
-            h.svc.get_task(&queued_id).await.unwrap().error.unwrap()["kind"],
-            "interrupted"
-        );
+        let restarted = wait_terminal(&h.svc, &queued_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert_eq!(h.svc.get_task(&running_id).await.unwrap().status, "failed");
 
         // resumed one completes via its poll loop
@@ -4241,9 +4106,11 @@ mod tests {
         let node_id = CreativeStudioNodeId::new().into_string();
         let provider_id = ProviderId::new().into_string();
         let job = WorkerJob {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: creation_task_id.clone(),
             canvas_id: Some(canvas_id.clone()),
-            workbench_kind: None,
+
             template_id: None,
             template_run_id: None,
             template_step_id: None,
@@ -4276,9 +4143,11 @@ mod tests {
     #[test]
     fn build_origin_omits_absent_owner_branch_ids_instead_of_writing_null() {
         let job = WorkerJob {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: CreationTaskId::new().into_string(),
             canvas_id: None,
-            workbench_kind: None,
+
             template_id: Some(CreativeStudioTemplateId::new().into_string()),
             template_run_id: Some(CreativeStudioTemplateRunId::new().into_string()),
             template_step_id: Some(CreativeStudioTemplateStepId::new().into_string()),
@@ -4298,32 +4167,6 @@ mod tests {
         assert!(!origin.as_object().unwrap().contains_key("node_id"));
     }
 
-    #[test]
-    fn build_origin_carries_exact_standalone_workbench_branch() {
-        let job = WorkerJob {
-            creation_task_id: CreationTaskId::new().into_string(),
-            canvas_id: None,
-            workbench_kind: Some(StandaloneWorkbenchKind::Video),
-            template_id: None,
-            template_run_id: None,
-            template_step_id: None,
-            node_id: None,
-            provider_id: ProviderId::new().into_string(),
-            model: "video-model".into(),
-            capability: MediaCapability::I2v,
-            params: json!({"prompt": "Aurora", "seconds": 5}),
-            required_artifact_count: 1,
-            inputs: vec![],
-            submitted_at: 1,
-            remote_task_id: None,
-        };
-
-        let origin = build_origin(&job);
-        assert!(origin.get("canvas_id").is_none());
-        assert_eq!(origin["workbench_kind"], "video");
-        assert!(origin.get("node_id").is_none());
-        assert!(origin.get("template_id").is_none());
-    }
 
     // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----
 
@@ -4366,7 +4209,9 @@ mod tests {
     fn cap_to_task_request_maps_every_media_capability() {
         let params = json!({
             "prompt": "a cat", "count": 2, "width": 512, "height": 512,
-            "quality": "high", "seconds": 4, "voice": "alloy", "system": "be brief"
+            "quality": "high", "aspect": "1:1", "seconds": 4, "voice": "alloy", "system": "be brief",
+            "_nomifun_connection_config_ref": "provider:0190f5fe-7c00-7000-8000-000000000001@4",
+            "_nomifun_provider_config_revision": 4
         });
         let input = InputAsset { id: None, role: "mask".into(), bytes: vec![1], mime: "image/png".into() };
 
@@ -4387,8 +4232,10 @@ mod tests {
             match cap_to_task_request(cap, &params, vec![input.clone()]).unwrap() {
                 TaskRequest::ImageEdit(r) => {
                     assert_eq!(r.count, 2);
+                    assert_eq!(r.quality.as_deref(), Some("high"));
                     assert_eq!(r.inputs.len(), 1);
                     assert_eq!(r.inputs[0].role, "mask");
+                    assert!(r.extra.get("aspect").is_none());
                 }
                 _ => panic!("{cap:?} must map to ImageEdit"),
             }
@@ -4400,7 +4247,7 @@ mod tests {
                     assert_eq!(r.size.as_deref(), Some("512x512"));
                     assert_eq!(
                         r.extra,
-                        json!({"count": 2, "quality": "high", "voice": "alloy", "system": "be brief"})
+                        json!({"quality": "high", "voice": "alloy", "system": "be brief"})
                     );
                 }
                 _ => panic!("{cap:?} must map to VideoGeneration"),
@@ -4427,6 +4274,23 @@ mod tests {
             }
             _ => panic!("tts must map to SpeechSynthesis"),
         }
+        let music = json!({"prompt":"Warm piano", "instrumental":false, "lyrics":"A new day", "format":"mp3", "seconds":120, "_nomifun_creation_request":{"private":"receipt"}});
+        match cap_to_task_request(MediaCapability::Music, &music, vec![]).unwrap() {
+            TaskRequest::MusicGeneration(r) => {
+                assert_eq!(r.prompt, "Warm piano\n\n[Target duration: approximately 120 seconds.]");
+                assert_eq!(r.lyrics.as_deref(), Some("A new day"));
+                assert!(!r.instrumental);
+                assert_eq!(r.format.as_deref(), Some("mp3"));
+                assert_eq!(r.extra, json!({}));
+            }
+            _ => panic!("music must map to MusicGeneration rather than speech"),
+        }
+        let invalid_music = json!({"prompt":"Warm piano", "seconds":90});
+        let Err(error) = cap_to_task_request(MediaCapability::Music, &invalid_music, vec![]) else {
+            panic!("music duration must use a supported composer choice");
+        };
+        assert_eq!(error.kind, "invalid_params");
+        assert!(error.message.contains("music params.seconds"));
         let Err(text_error) = cap_to_task_request(MediaCapability::Text, &params, vec![]) else {
             panic!("text must never map to a media invocation request");
         };
@@ -4462,10 +4326,47 @@ mod tests {
         };
         assert_eq!(request.size.as_deref(), Some("1920x1080"));
         assert_eq!(request.seconds, Some(5));
+        assert_eq!(request.resolution.as_deref(), Some("1080p"));
         assert_eq!(
             request.extra,
             json!({})
         );
+
+        let automatic = json!({
+            "prompt": "model-selected framing",
+            "seconds": 5,
+            "resolution": "1080p",
+            "aspect": "auto"
+        });
+        let TaskRequest::VideoGeneration(request) =
+            cap_to_task_request(MediaCapability::T2v, &automatic, vec![]).unwrap()
+        else {
+            panic!("t2v must map to VideoGeneration");
+        };
+        assert!(request.size.is_none());
+        assert_eq!(request.resolution.as_deref(), Some("1080p"));
+        assert_eq!(request.extra, json!({}));
+    }
+
+    #[test]
+    fn automatic_image_size_stays_absent_from_the_provider_request() {
+        let params = json!({
+            "prompt": "model-selected framing",
+            "count": 1,
+            "aspect": "auto",
+            "nomifunRetrySlot": {
+                "taskId": "01900000-0000-7000-8000-000000000001",
+                "submittedAt": 1,
+                "predecessorTaskIds": ["01900000-0000-7000-8000-000000000001"]
+            }
+        });
+        let TaskRequest::ImageGeneration(request) =
+            cap_to_task_request(MediaCapability::T2i, &params, vec![]).unwrap()
+        else {
+            panic!("t2i must map to ImageGeneration");
+        };
+        assert!(request.size.is_none());
+        assert_eq!(request.extra, json!({}));
     }
 
     #[test]
@@ -4500,8 +4401,8 @@ mod tests {
 
     #[test]
     fn text_max_tokens_is_strict_and_bounded() {
-        assert_eq!(param_text_max_tokens(&json!({})).unwrap(), DEFAULT_TEXT_MAX_TOKENS);
-        assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), 8192);
+        assert_eq!(param_text_max_tokens(&json!({})).unwrap(), None);
+        assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), Some(8192));
         for invalid in [
             json!({"max_tokens": 0}),
             json!({"max_tokens": -1}),
@@ -4586,7 +4487,7 @@ mod http_e2e_tests {
     };
     use nomifun_model_invoke::AdapterRegistry;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x37; 32];
@@ -4662,6 +4563,15 @@ mod http_e2e_tests {
     }
 
     async fn build(base_url: &str) -> (Arc<CreationService>, String, Arc<CountingSink>, nomifun_db::Database) {
+        build_with_image_provider(base_url, "openai", "gpt-image-1", "openai.images").await
+    }
+
+    async fn build_with_image_provider(
+        base_url: &str,
+        platform: &str,
+        model: &str,
+        protocol: &str,
+    ) -> (Arc<CreationService>, String, Arc<CountingSink>, nomifun_db::Database) {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         // seed a provider row pointed at the mock server
@@ -4673,7 +4583,7 @@ mod http_e2e_tests {
             NewProviderModelCapability {
                 task: "image_generation",
                 traits: "[]",
-                protocol: "openai.images",
+                protocol,
                 connection_role: "default",
                 provider_params: "{}",
                 ..Default::default()
@@ -4681,14 +4591,14 @@ mod http_e2e_tests {
             NewProviderModelCapability {
                 task: "image_edit",
                 traits: "[]",
-                protocol: "openai.images",
+                protocol,
                 connection_role: "default",
                 provider_params: "{}",
                 ..Default::default()
             },
         ];
         let initial_model = NewProviderModel {
-            model: "gpt-image-1",
+            model,
             enabled: true,
             sort_order: 0,
             description: None,
@@ -4698,7 +4608,7 @@ mod http_e2e_tests {
             .create(
                 nomifun_db::CreateProviderParams {
                 provider_id: None,
-                platform: "openai",
+                platform,
                 name: "Mock",
                 base_url,
                 auth_scheme: "bearer",
@@ -4720,7 +4630,7 @@ mod http_e2e_tests {
         for (model, task, protocol) in [
             ("sora-2", "video_generation", "openai.videos"),
             ("tts-1", "speech_synthesis", "openai.audio_speech"),
-        ] {
+        ].into_iter().filter(|_| platform == "openai") {
             let capabilities = [NewProviderModelCapability {
                 task,
                 traits: "[]",
@@ -4814,6 +4724,124 @@ mod http_e2e_tests {
         assert_eq!(done.result_asset_ids.len(), 1);
         WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
         assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stepfun_images_downloads_url_artifact_and_persists_task() {
+        for (platform, prefix) in [("stepfun", "/v1"), ("stepfun-plan", "/step_plan/v1")] {
+            let provider = MockServer::start().await;
+            let cdn = MockServer::start().await;
+            let image = valid_png();
+            let artifact_url = format!("{}/generated.png?signature=mock-signature", cdn.uri());
+            Mock::given(method("POST"))
+                .and(path(format!("{prefix}/images/generations")))
+                .and(header("authorization", "Bearer sk-e2e"))
+                .and(body_partial_json(json!({
+                    "model": "step-image-edit-2",
+                    "prompt": "a campus",
+                    "size": "1024x1024"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [{"url": artifact_url, "finish_reason": "success"}]
+                })))
+                .expect(1)
+                .mount(&provider)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/generated.png"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "image/png")
+                        .set_body_bytes(image.clone()),
+                )
+                .expect(1)
+                .mount(&cdn)
+                .await;
+
+            let (svc, provider_id, sink, db) = build_with_image_provider(
+                &format!("{}{prefix}", provider.uri()),
+                platform,
+                "step-image-edit-2",
+                "stepfun.images",
+            ).await;
+            let created = svc.create_test_task(NewCreationTask {
+                provider_id,
+                model: "step-image-edit-2".into(),
+                capability: "t2i".into(),
+                params: json!({"prompt": "a campus", "width": 1024, "height": 1024, "count": 1}),
+                inputs: vec![],
+            }).await.unwrap();
+            let done = wait_terminal(&svc, &created.creation_task_id).await;
+            assert_eq!(done.status, "succeeded", "platform={platform}; error={:?}", done.error);
+            assert!(done.error.is_none());
+            assert_eq!(done.result_asset_ids.len(), 1);
+            WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
+            assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+            assert_eq!(*sink.persisted.lock().unwrap(), vec![("image/png".to_owned(), image)]);
+
+            let stored = SqliteCreationTaskRepository::new(db.pool().clone())
+                .get_task(&created.creation_task_id).await.unwrap().unwrap();
+            assert_eq!(stored.model, "step-image-edit-2");
+            assert_eq!(stored.status, "succeeded");
+            assert!(stored.error.is_none());
+            assert!(stored.finished_at.is_some());
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&stored.result_asset_ids).unwrap(),
+                done.result_asset_ids,
+            );
+            let downloads = cdn.received_requests().await.unwrap();
+            assert_eq!(downloads.len(), 1);
+            assert_eq!(downloads[0].url.query(), Some("signature=mock-signature"));
+            assert!(!downloads[0].headers.contains_key("authorization"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stepfun_plan_rejects_url_image_content_type_mismatch() {
+        let server = MockServer::start().await;
+        let artifact_url = format!("{}/generated.png", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/step_plan/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"url": artifact_url, "finish_reason": "success"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/generated.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(valid_png()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, db) = build_with_image_provider(
+            &format!("{}/step_plan/v1", server.uri()),
+            "stepfun-plan",
+            "step-image-edit-2",
+            "stepfun.images",
+        ).await;
+        let mut request = t2i(&provider_id);
+        request.model = "step-image-edit-2".into();
+        request.params["width"] = json!(1024);
+        request.params["height"] = json!(1024);
+        let created = svc.create_test_task(request).await.unwrap();
+        let done = wait_terminal(&svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "failed");
+        assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
+        assert!(done.error.as_ref().unwrap()["message"].as_str()
+            .is_some_and(|message| message.contains("MIME mismatch")));
+        assert!(done.result_asset_ids.is_empty());
+        assert_eq!(sink.count.load(Ordering::SeqCst), 0);
+        assert!(sink.persisted.lock().unwrap().is_empty());
+        let stored = SqliteCreationTaskRepository::new(db.pool().clone())
+            .get_task(&created.creation_task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "failed");
+        assert_eq!(stored.result_asset_ids, "[]");
     }
 
     #[tokio::test]

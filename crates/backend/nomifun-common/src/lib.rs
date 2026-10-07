@@ -3,6 +3,7 @@ pub mod ansi;
 pub mod constants;
 pub mod agent_execution;
 
+mod atomic_file;
 mod case_convert;
 mod crypto;
 pub mod dir_config;
@@ -15,7 +16,6 @@ mod fsname;
 mod hooks;
 mod id;
 mod idempotency;
-pub mod miniapp_workspace;
 mod scoped_auth;
 mod pagination;
 pub mod paths;
@@ -35,7 +35,7 @@ pub use agent_execution::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionActorType, AgentExecutionEventKind,
     AgentExecutionReceipt, AgentExecutionStatus, AgentStepMode, AgentToolPolicy, ConversationExecutionRelation, DecisionPolicy,
     DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
-    ParticipantAssignmentSource, PlanGate, StepFailurePolicy, UnknownAgentExecutionValue,
+    ParticipantAssignmentSource, StepFailurePolicy, UnknownAgentExecutionValue,
     MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
     MAX_AGENT_EXECUTION_STEPS,
@@ -52,23 +52,22 @@ pub use enums::{
 pub use error::{AppError, ErrorChain, workspace_path_has_edge_whitespace_segment};
 pub use execution_authority::ExecutionAuthority;
 pub use fsname::sanitize_dir_segment;
-pub use hooks::{OnConversationDelete, OnTerminalDelete, RequirementCreator};
+pub use hooks::{OnTerminalDelete, RequirementCreator};
 pub use id::{
     AgentExecutionAttemptId, AgentExecutionId, AgentExecutionParticipantId,
     AgentExecutionStepId, AgentExecutionTemplateId, AgentExecutionTemplateParticipantId,
     AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
-    ConversationArtifactId, ConversationId, CreationTaskId, CreativeStudioConnectionId,
+    ConversationId, CreationTaskId, CreativeStudioConnectionId,
     CreativeStudioCanvasId, CreativeStudioNodeId, CreativeStudioProjectId,
     CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     CronJobId, CronJobRunId,
-    CsAgentId, CsNoteId,
+    CsAgentCapabilityReceiptId, CsAgentId, CsHandoffId, CsNoteId,
     EntityId, FigureId,
-    IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
+    KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
     KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, McpServerId,
     MessageId,
-    MiniAppId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
     RemoteAgentId, TerminalId, UUID_STRING_LEN,
     RequirementId, SshHostId, UserId, UuidV7Error, WebhookId,
@@ -87,5 +86,13 @@ pub use pagination::PaginatedResult;
 pub use provider_lifecycle::{ProviderLifecycleBarrier, SharedProviderLifecycleBarrier};
 pub use provider_usage::{ProviderInUseDetails, ProviderUsage, ProviderUsageFeature};
 pub use timestamp::{TimestampMs, now_ms};
-pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel};
+pub use types::{CommandSpec, EnvVar, ProviderWithModel};
 pub use vision_registry::VisionUnsupportedRegistry;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn publish_new_file_noreplace(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    atomic_file::publish_new_file(source, target)
+}

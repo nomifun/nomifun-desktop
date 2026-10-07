@@ -14,7 +14,6 @@ import {
   HeadsetOne,
   LinkCloud,
   SettingTwo,
-  Lightning,
   Pic,
   PreviewOpen,
   SafeRetrieval,
@@ -22,14 +21,11 @@ import {
   Voice,
 } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
-import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import ModelModalContent from '@/renderer/components/settings/SettingsModal/contents/ModelModalContent';
 import ModelFailoverContent from './ModelFailoverContent';
-import FreeModelsContent from './FreeModelsContent';
 import SpeechToTextContent from './SpeechToTextContent';
 import TextToSpeechContent from './TextToSpeechContent';
 import ChatModelsContent from './ChatModelsContent';
@@ -38,8 +34,11 @@ import VisionModelsContent from './VisionModelsContent';
 import ImageModelsContent from './ImageModelsContent';
 import ImageEditModelsContent from './ImageEditModelsContent';
 import VideoModelsContent from './VideoModelsContent';
+import MusicModelsContent from './MusicModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 import RerankModelsContent from './RerankModelsContent';
+import ModelImportChat from './ModelImportChat';
+import { withoutModelAdditionTask } from './modelAdditionIntent';
 
 type Section =
   | 'models'
@@ -51,9 +50,9 @@ type Section =
   | 'image'
   | 'image-edit'
   | 'video'
+  | 'music'
   | 'embedding'
   | 'rerank'
-  | 'free'
   | 'failover';
 
 /**
@@ -65,8 +64,8 @@ type Section =
 const LEGACY_SECTIONS: Record<string, Section> = {
   speech: 'asr',
   creation: 'image',
-  // 「全局模型设置」曾是 IDMM 全局默认 + 故障转移队列 + 决策活动的三 tab 宿主。
-  // 全局 IDMM 那套已整体删除,剩下的只有故障转移队列,所以这一栏就叫它自己。
+  free: 'chat',
+  // 旧全局模型设置已收敛，只保留故障转移队列。
   global: 'failover',
 };
 
@@ -80,9 +79,9 @@ const SECTION_KEYS: readonly Section[] = [
   'image',
   'image-edit',
   'video',
+  'music',
   'embedding',
   'rerank',
-  'free',
   'failover',
 ];
 
@@ -108,11 +107,8 @@ interface SectionGroup {
 }
 
 /**
- * The sidebar's three groups, in the order a model actually travels: a provider
- * is the source of every model, so 供应商与密钥 leads; then one section per model
- * capability; then the things you reach for rarely. 免费模型 sits in the last
- * group on purpose — it is NomiFun-managed, not something the user configured,
- * and the same rule orders the provider groups inside every capability section.
+ * The sidebar groups follow a model from provider access, through capabilities,
+ * to advanced routing controls.
  */
 const SECTION_GROUPS: SectionGroup[] = [
   {
@@ -171,6 +167,11 @@ const SECTION_GROUPS: SectionGroup[] = [
         icon: <VideoTwo theme='outline' size='16' strokeWidth={3} />,
       },
       {
+        key: 'music',
+        labelKey: 'settings.modelHub.sectionMusic',
+        icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
         key: 'embedding',
         labelKey: 'settings.modelHub.sectionEmbedding',
         icon: <SafeRetrieval theme='outline' size='16' strokeWidth={3} />,
@@ -186,11 +187,6 @@ const SECTION_GROUPS: SectionGroup[] = [
     key: 'advanced',
     titleKey: 'settings.modelHub.groupAdvanced',
     sections: [
-      {
-        key: 'free',
-        labelKey: 'settings.modelHub.sectionFree',
-        icon: <Lightning theme='outline' size='16' strokeWidth={3} />,
-      },
       {
         key: 'failover',
         labelKey: 'settings.modelHub.sectionFailover',
@@ -211,16 +207,13 @@ const FLAT_SECTIONS: SectionDef[] = SECTION_GROUPS.flatMap((group) => group.sect
  *
  * One sidebar entry = one model capability, so nothing hides behind a page-level
  * filter or a second row of tabs. The sidebar width is drag-resizable and
- * persisted. On mobile the sidebar collapses to a horizontal segmented bar above
- * the content (flat — the groups are a desktop affordance).
+ * persisted.
  *
  * The level syncs to `?section=`; the retired keys (`speech`, `creation`,
  * `global`) still resolve so old bookmarks work.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [section, setSection] = useState<Section>(
@@ -238,7 +231,7 @@ const ModelHubPage: React.FC = () => {
     (key: string) => {
       if (!isSection(key)) return;
       setSection(key);
-      const next = new URLSearchParams(searchParams);
+      const next = withoutModelAdditionTask(searchParams);
       next.set('section', key);
       setSearchParams(next, { replace: true });
     },
@@ -266,6 +259,7 @@ const ModelHubPage: React.FC = () => {
 
   const content = (
     <>
+      {section !== 'failover' && <ModelImportChat />}
       {section === 'models' && <ModelModalContent />}
       {section === 'chat' && <ChatModelsContent />}
       {section === 'realtime' && <RealtimeModelsContent />}
@@ -275,9 +269,9 @@ const ModelHubPage: React.FC = () => {
       {section === 'image' && <ImageModelsContent />}
       {section === 'image-edit' && <ImageEditModelsContent />}
       {section === 'video' && <VideoModelsContent />}
+      {section === 'music' && <MusicModelsContent />}
       {section === 'embedding' && <EmbeddingModelsContent />}
       {section === 'rerank' && <RerankModelsContent />}
-      {section === 'free' && <FreeModelsContent />}
       {section === 'failover' && <ModelFailoverContent />}
     </>
   );
@@ -287,25 +281,6 @@ const ModelHubPage: React.FC = () => {
   // now, so every legacy sub-tab resolves to it.
   if (searchParams.get('section') === 'agents') {
     return <Navigate to='/settings/execution-engines' replace />;
-  }
-
-  // Mobile: horizontal segmented nav above the content (no left sidebar).
-  if (isMobile) {
-    const segmentedItems: SegmentedTabItem[] = FLAT_SECTIONS.map((s) => ({
-      key: s.key,
-      label: t(s.labelKey),
-      icon: s.icon,
-    }));
-    return (
-      <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
-        <div className='text-20px font-600 text-t-primary leading-tight'>{t('settings.modelHub.title')}</div>
-        <div className='mt-4px mb-14px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.subtitle')}</div>
-        <div className='mb-16px'>
-          <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
-        </div>
-        {content}
-      </div>
-    );
   }
 
   const siderHeader = (

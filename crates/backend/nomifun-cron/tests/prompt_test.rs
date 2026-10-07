@@ -1,15 +1,6 @@
 use nomifun_cron::prompt::{
-    SKILL_SUGGEST_FILENAME, build_existing_conversation_prompt,
-    build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
+    build_existing_conversation_prompt, build_new_conversation_with_skill_prompt,
 };
-
-#[test]
-fn build_new_conversation_prompt_with_skill_suggest_includes_follow_up_block() {
-    let prompt = build_new_conversation_prompt_with_skill_suggest("Daily Report", "Every day at 9am", "Summarize it.");
-    assert!(prompt.contains(&format!("create a file named \"{SKILL_SUGGEST_FILENAME}\"")));
-    assert!(prompt.contains("short kebab-case name"));
-    assert!(prompt.contains("If you think the task is too simple or one-off to benefit from a skill file"));
-}
 
 #[test]
 fn build_new_conversation_with_skill_prompt_matches_frontend_copy() {

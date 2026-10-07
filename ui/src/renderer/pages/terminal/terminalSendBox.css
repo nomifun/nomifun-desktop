@@ -4,8 +4,7 @@
  * Scoped under `.terminal-sendbox-compact` (passed as the SendBox `className`)
  * so the chat composer is completely unaffected. The descendant selector
  * (specificity 0,2,0) beats the panel's atomic `p-16px` / `rd-20px` utilities
- * (0,1,0). The mobile `!important` override in sendbox.css still wins on mobile,
- * where the panel is already compact — no conflict.
+ * (0,1,0), so the terminal composer keeps its compact height.
  */
 .terminal-sendbox-compact .sendbox-panel {
   padding: 8px 12px;

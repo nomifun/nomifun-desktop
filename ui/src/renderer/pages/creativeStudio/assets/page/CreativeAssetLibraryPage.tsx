@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Checkbox, Input, InputTag, Message, Modal } from '@arco-design/web-react';
-import type { TFunction } from 'i18next';
+import { Button, Input, InputTag, Message, Modal } from '@arco-design/web-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
-import CreativeVideoPlayer from '../components/CreativeVideoPlayer';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
+import { saveCreativeAssetAs } from '../saveCreativeAsset';
+import { creativeAssetDisplayTitle } from '../presentation';
 import {
   CreateCreativeTextAssetModal,
   CreativeAssetLibrary,
@@ -24,12 +24,12 @@ import type {
 } from '../components';
 import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetLibraryPort } from '../types';
 import { useCreativeAssets } from '../useCreativeAssets';
+import CreativeAssetPreviewModal from './CreativeAssetPreviewModal';
 import styles from './CreativeAssetLibraryPage.module.css';
 import {
   CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT,
   EMPTY_CREATIVE_TEXT_ASSET_FORM,
   buildGlobalCreativeAssetQuery,
-  creativeAssetDownloadName,
   creativeAssetEditDraft,
   creativeAssetPageCount,
   creativeAssetPageIsLoaded,
@@ -39,39 +39,22 @@ import {
   normalizeCreativeAssetEditDraft,
   normalizeCreativeTextAssetForm,
   validateCreativeAssetManualUpload,
-  validateCreativeCollectionRename,
 } from './model';
-import type { CreativeAssetEditDraft, CreativeCollectionRenameDraft } from './model';
+import type { CreativeAssetEditDraft } from './model';
 import { useCreativeAssetUploadQueue } from './useCreativeAssetUploadQueue';
 
-const EMPTY_SELECTION = new Set<string>();
 const SOURCE_ASSET_PAGE_SIZE = 10;
 const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
   title: '',
   collection: '',
   tags: [],
-  inLibrary: true,
 };
-const DEFAULT_RENAME_DRAFT: CreativeCollectionRenameDraft = { from: '', to: '' };
 
 const popupContainer = (): HTMLElement =>
-  document.getElementById('creative-studio-portal-root') ?? document.body;
+  document.getElementById('resource-page-portal-root') ?? document.body;
 
 const errorText = (reason: unknown): string =>
   reason instanceof Error ? reason.message : String(reason);
-
-const assetKindLabel = (t: TFunction, kind: CreativeAsset['kind']): string => {
-  switch (kind) {
-    case 'image':
-      return t('creativeStudio.assets.kind.image', { defaultValue: '图片' });
-    case 'video':
-      return t('creativeStudio.assets.kind.video', { defaultValue: '视频' });
-    case 'audio':
-      return t('creativeStudio.assets.kind.audio', { defaultValue: '音频' });
-    case 'text':
-      return t('creativeStudio.assets.kind.text', { defaultValue: '文本' });
-  }
-};
 
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -82,102 +65,13 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
-const downloadAsset = (asset: CreativeAsset): void => {
+const saveAssetAs = async (asset: CreativeAsset): Promise<void> => {
   if (isCreativeAssetDeleted(asset)) return;
-  const anchor = document.createElement('a');
-  anchor.href = asset.originalUrl;
-  anchor.download = creativeAssetDownloadName(asset);
-  anchor.rel = 'noopener noreferrer';
-  anchor.click();
-};
-
-interface AssetPreviewModalProps {
-  asset: CreativeAsset | null;
-  onClose: () => void;
-}
-
-const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose }) => {
-  const { t } = useTranslation();
-  return (
-    <Modal
-      visible={Boolean(asset)}
-      title={
-        asset?.title ??
-        t('creativeStudio.assets.preview.title', { defaultValue: '素材详情' })
-      }
-      footer={null}
-      autoFocus={false}
-      focusLock
-      unmountOnExit
-      className={styles.modalBody}
-      getPopupContainer={popupContainer}
-      onCancel={onClose}
-    >
-      {asset ? (
-        <div className={styles.previewBody} data-creative-asset-preview={asset.kind}>
-          <div className={styles.previewMedia}>
-            {isCreativeAssetDeleted(asset) ? (
-              <p role='status'>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</p>
-            ) : asset.kind === 'image' ? (
-              <img src={asset.originalUrl} alt={asset.title} />
-            ) : asset.kind === 'video' ? (
-              <div className={styles.previewVideo}>
-                <CreativeVideoPlayer src={asset.originalUrl} poster={asset.thumbnailUrl ?? undefined} label={asset.title} />
-              </div>
-            ) : asset.kind === 'audio' ? (
-              <audio src={asset.originalUrl} controls preload='metadata' aria-label={asset.title} />
-            ) : (
-              <pre className={styles.previewText}>{asset.textContent ?? ''}</pre>
-            )}
-          </div>
-          <div className={styles.previewMeta}>
-            <p>
-              {t('creativeStudio.assets.preview.kind', {
-                defaultValue: '类型：{{kind}}',
-                kind: assetKindLabel(t, asset.kind),
-              })}
-            </p>
-            <p>
-              {t('creativeStudio.assets.preview.collection', {
-                defaultValue: '合集：{{collection}}',
-                collection:
-                  asset.collection ||
-                  t('creativeStudio.assets.library.noCollection', { defaultValue: '未分组' }),
-              })}
-            </p>
-            {asset.mimeType ? (
-              <p>
-                {t('creativeStudio.assets.preview.mime', {
-                  defaultValue: 'MIME：{{mime}}',
-                  mime: asset.mimeType,
-                })}
-              </p>
-            ) : null}
-          </div>
-          {asset.tags.length ? (
-            <div
-              className={styles.previewTags}
-              aria-label={t('creativeStudio.assets.preview.tags', { defaultValue: '素材标签' })}
-            >
-              {asset.tags.map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-          ) : null}
-          <footer className={styles.previewFooter}>
-            {asset.kind !== 'text' ? (
-              <Button type='primary' disabled={isCreativeAssetDeleted(asset)} onClick={() => downloadAsset(asset)}>
-                {t('creativeStudio.assets.preview.downloadOriginal', {
-                  defaultValue: '下载原始文件',
-                })}
-              </Button>
-            ) : null}
-            <Button onClick={onClose}>
-              {t('creativeStudio.assets.preview.close', { defaultValue: '关闭' })}
-            </Button>
-          </footer>
-        </div>
-      ) : null}
-    </Modal>
-  );
+  try {
+    await saveCreativeAssetAs(asset);
+  } catch (reason) {
+    Message.error(errorText(reason));
+  }
 };
 
 interface EditAssetModalProps {
@@ -228,7 +122,7 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
         <p className={styles.modalDescription}>
           {t('creativeStudio.assets.edit.description', {
             defaultValue:
-              '可修改后端支持的标题、合集、标签和素材库状态；素材类型与原始文件不可替换。',
+              '修改素材的标题、合集和标签。',
           })}
         </p>
         <label className={styles.field}>
@@ -259,9 +153,6 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
             onChange={(tags) => patch({ tags: tags.map(String) })}
           />
         </label>
-        <Checkbox checked={draft.inLibrary} disabled={submitting} onChange={(inLibrary) => patch({ inLibrary })}>
-          {t('creativeStudio.assets.edit.keepInLibrary', { defaultValue: '保留在素材库' })}
-        </Checkbox>
         {!valid ? (
           <p className={styles.modalError}>
             {t('creativeStudio.assets.edit.titleRequired', { defaultValue: '标题不能为空。' })}
@@ -297,6 +188,11 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [kind, setKind] = useState<CreativeAssetKindFilter>('all');
   const [view, setView] = useState<CreativeAssetViewMode>('grid');
   const [page, setPage] = useState(1);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [deletingAssets, setDeletingAssets] = useState<readonly CreativeAsset[]>([]);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteSubmittingRef = useRef(false);
   const querySearch = creativeAssetQuerySearch(debouncedSearch, submittedSearch);
 
   const query = useMemo(
@@ -328,6 +224,10 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   }, [totalPages]);
 
   useEffect(() => {
+    setSelectedIds(new Set());
+  }, [client, kind, querySearch, visiblePage]);
+
+  useEffect(() => {
     if (pageLoaded) {
       pageLoadAttemptRef.current = null;
       return;
@@ -336,7 +236,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       pageLoadAttemptRef.current = null;
       return;
     }
-    if (library.loading || library.loadingMore || !library.hasMore) return;
+    if (deleteSubmitting || library.loading || library.loadingMore || !library.hasMore) return;
     const previousAttempt = pageLoadAttemptRef.current;
     if (
       previousAttempt?.page === visiblePage &&
@@ -347,6 +247,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     pageLoadAttemptRef.current = { page: visiblePage, loaded: library.assets.length };
     void library.loadMore();
   }, [
+    deleteSubmitting,
     library.assets.length,
     library.error,
     library.hasMore,
@@ -383,6 +284,12 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       ? { ...current, deletedAt: Date.now(), textContent: null, originalUrl: '', thumbnailUrl: null, inLibrary: false }
       : current);
     setEditingAsset((current) => current?.id === assetId ? null : current);
+    setSelectedIds((current) => {
+      if (!current.has(assetId)) return current;
+      const next = new Set(current);
+      next.delete(assetId);
+      return next;
+    });
   }), [client]);
 
   useEffect(() => {
@@ -402,16 +309,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [editDraft, setEditDraft] = useState<CreativeAssetEditDraft>(DEFAULT_EDIT_DRAFT);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
-
-  const [deletingAsset, setDeletingAsset] = useState<CreativeAsset | null>(null);
-  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const deleteSubmittingRef = useRef(false);
-
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [renameDraft, setRenameDraft] = useState<CreativeCollectionRenameDraft>(DEFAULT_RENAME_DRAFT);
-  const [renameSubmitting, setRenameSubmitting] = useState(false);
-  const [renameError, setRenameError] = useState<string | null>(null);
 
   const handleUploadFiles = (files: readonly File[]): void => {
     const accepted: File[] = [];
@@ -438,7 +335,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         textContent: input.textContent,
         collection: input.collection || undefined,
         tags: input.tags,
-        inLibrary: input.inLibrary,
+        inLibrary: true,
       });
       setTextModalOpen(false);
       setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
@@ -469,7 +366,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         title: draft.title,
         collection: draft.collection || null,
         tags: draft.tags,
-        inLibrary: draft.inLibrary,
       });
       void library.reload();
       setEditingAsset(null);
@@ -483,70 +379,61 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     }
   };
 
+  const openDelete = (assets: readonly CreativeAsset[]): void => {
+    if (!assets.length || deleteSubmittingRef.current) return;
+    setDeleteError(null);
+    setDeletingAssets(assets);
+  };
+
   const handleDelete = async (): Promise<void> => {
-    if (!deletingAsset || deleteSubmittingRef.current) return;
+    if (!deletingAssets.length || deleteSubmittingRef.current) return;
     deleteSubmittingRef.current = true;
     setDeleteSubmitting(true);
     setDeleteError(null);
+    const deletedIds = new Set<string>();
+    const failures: Array<{ asset: CreativeAsset; message: string }> = [];
     try {
-      await library.remove(deletingAsset.id);
-      void library.reload();
-      setDeletingAsset(null);
-      Message.success(
-        t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
-      );
-    } catch (reason) {
-      setDeleteError(
-        isBackendHttpError(reason) && reason.status === 409
-          ? t('creativeStudio.assets.delete.activeTask', {
-              defaultValue: '素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。',
-            })
-          : isBackendHttpError(reason) && reason.status >= 500
-            ? t('creativeStudio.assets.delete.retryCleanup', { defaultValue: '删除或文件清理尚未完成，请重试删除。' })
-            : isBackendHttpError(reason) ? reason.backendMessage : errorText(reason)
-      );
+      for (const asset of deletingAssets) {
+        try {
+          await library.remove(asset.id);
+          deletedIds.add(asset.id);
+        } catch (reason) {
+          failures.push({
+            asset,
+            message: isBackendHttpError(reason) && reason.status === 409
+              ? t('creativeStudio.assets.delete.activeTask', {
+                  defaultValue: '素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。',
+                })
+              : isBackendHttpError(reason) && reason.status >= 500
+                ? t('creativeStudio.assets.delete.retryCleanup', { defaultValue: '删除或文件清理尚未完成，请重试删除。' })
+                : isBackendHttpError(reason) ? reason.backendMessage : errorText(reason),
+          });
+        }
+      }
+      setSelectedIds((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
+      setDeletingAssets(failures.map(({ asset }) => asset));
+      if (failures.length) {
+        setDeleteError(deletingAssets.length === 1 ? failures[0].message : [
+          t('creativeStudio.assets.delete.partialFailure', {
+            defaultValue: '已删除 {{deletedCount}} 项，{{failedCount}} 项未能删除。请重试剩余素材。',
+            deletedCount: deletedIds.size,
+            failedCount: failures.length,
+          }),
+          ...failures.map(({ asset, message }) => `${creativeAssetDisplayTitle(asset)}：${message}`),
+        ].join('\n'));
+      } else {
+        Message.success(deletedIds.size === 1
+          ? t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
+          : t('creativeStudio.assets.messages.assetsDeleted', {
+              defaultValue: '已删除 {{assetCount}} 项素材。',
+              assetCount: deletedIds.size,
+            }));
+      }
+      if (deletedIds.size) await library.reload();
     } finally {
       deleteSubmittingRef.current = false;
       setDeleteSubmitting(false);
     }
-  };
-
-  const handleRenameCollection = async (): Promise<void> => {
-    const validation = validateCreativeCollectionRename(renameDraft, t);
-    if (validation) {
-      setRenameError(validation);
-      return;
-    }
-    setRenameSubmitting(true);
-    setRenameError(null);
-    try {
-      const updated = await library.renameCollection(renameDraft.from.trim(), renameDraft.to.trim());
-      setRenameOpen(false);
-      setRenameDraft(DEFAULT_RENAME_DRAFT);
-      if (updated > 0) {
-        Message.success(
-          t('creativeStudio.assets.messages.collectionUpdated', {
-            defaultValue: '已更新 {{assetCount}} 个素材。',
-            assetCount: updated,
-          })
-        );
-      } else {
-        Message.info(
-          t('creativeStudio.assets.messages.collectionUnused', {
-            defaultValue: '没有找到使用该合集的素材。',
-          })
-        );
-      }
-    } catch (reason) {
-      setRenameError(errorText(reason));
-    } finally {
-      setRenameSubmitting(false);
-    }
-  };
-
-  const openRenameCollection = (): void => {
-    setRenameError(null);
-    setRenameOpen(true);
   };
 
   const handlePageChange = (nextPage: number): void => {
@@ -559,14 +446,14 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       <CreativeAssetLibrary
         className={styles.library}
         appearance='source-page'
-        selectable={false}
+        disabled={deleteSubmitting}
         state={pageState}
         search={search}
         kind={kind}
         scope='library'
         view={view}
         locale={locale ?? i18n.resolvedLanguage ?? i18n.language}
-        selectedIds={EMPTY_SELECTION}
+        selectedIds={selectedIds}
         uploads={uploads.items}
         uploadAccept={CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT}
         uploadHint={t('creativeStudio.assets.upload.hint', {
@@ -576,18 +463,19 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           page: visiblePage,
           pageSize: SOURCE_ASSET_PAGE_SIZE,
           total: library.total,
-          loading: library.loading || library.loadingMore || (!pageLoaded && !library.error),
+          loading: deleteSubmitting || library.loading || library.loadingMore || (!pageLoaded && !library.error),
           onPageChange: handlePageChange,
         }}
         labels={{
-          title: t('creativeStudio.assets.page.title', { defaultValue: '我的素材' }),
+          title: t('creativeStudio.assets.page.title', { defaultValue: '资产库' }),
           description: t('creativeStudio.assets.page.description', {
-            defaultValue: '收藏常用素材，按类型和标题快速查找。',
+            defaultValue: '集中管理素材，按类型和标题快速查找。',
           }),
           searchPlaceholder: t('creativeStudio.assets.page.searchPlaceholder', {
             defaultValue: '搜索素材标题',
           }),
           kindFilter: t('creativeStudio.assets.page.kindFilter', { defaultValue: '类型' }),
+          selectAll: t('assetLibrary.selection.selectAll', { defaultValue: '全选本页' }),
           emptyTitle: t('creativeStudio.assets.page.emptyTitle', {
             defaultValue: '没有找到素材',
           }),
@@ -609,22 +497,18 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onKindChange={setKind}
         onScopeChange={() => undefined}
         onViewChange={setView}
-        onSelectionChange={() => undefined}
+        onSelectionChange={setSelectedIds}
         onUploadFiles={handleUploadFiles}
         onCreateText={() => {
           setTextError(null);
           setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
           setTextModalOpen(true);
         }}
-        onRenameCollection={openRenameCollection}
         onOpenAsset={setPreviewAsset}
         onEditAsset={openEdit}
-        onDownloadAsset={downloadAsset}
-        onRemoveAsset={(asset) => {
-          if (deleteSubmittingRef.current) return;
-          setDeleteError(null);
-          setDeletingAsset(asset);
-        }}
+        onDownloadAsset={saveAssetAs}
+        onRemoveAsset={(asset) => openDelete([asset])}
+        onRemoveSelected={openDelete}
         onCancelUpload={uploads.cancel}
         onRetryUpload={uploads.retry}
         onDismissUpload={uploads.dismiss}
@@ -642,7 +526,12 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onSubmit={() => void handleCreateText()}
       />
 
-      <AssetPreviewModal asset={previewAsset} onClose={() => setPreviewAsset(null)} />
+      <CreativeAssetPreviewModal
+        asset={previewAsset}
+        locale={locale}
+        onSaveAs={saveAssetAs}
+        onClose={() => setPreviewAsset(null)}
+      />
 
       <EditAssetModal
         asset={editingAsset}
@@ -655,7 +544,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       />
 
       <Modal
-        visible={Boolean(deletingAsset)}
+        visible={deletingAssets.length > 0}
         title={t('creativeStudio.assets.delete.title', { defaultValue: '删除素材' })}
         confirmLoading={deleteSubmitting}
         okButtonProps={{ status: 'danger' }}
@@ -666,89 +555,21 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         getPopupContainer={popupContainer}
         onOk={() => void handleDelete()}
         onCancel={() => {
-          if (!deleteSubmittingRef.current) setDeletingAsset(null);
+          if (!deleteSubmittingRef.current) setDeletingAssets([]);
         }}
       >
         <div className={styles.modalBody}>
           <p className={styles.deleteText}>
-            {t('creativeStudio.assets.delete.description', {
+            {deletingAssets.length > 1 ? t('creativeStudio.assets.delete.batchDescription', {
+              defaultValue: '确定永久删除选中的 {{assetCount}} 项素材吗？原始文件及缩略图将被删除，且无法恢复。使用这些素材的画布和生成历史会保留记录，并显示“素材已删除”。',
+              assetCount: deletingAssets.length,
+            }) : t('creativeStudio.assets.delete.description', {
               defaultValue: '确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。',
-              title: deletingAsset?.title ?? '',
+              title: deletingAssets[0]?.title ?? '',
             })}
           </p>
           {deleteError ? <p className={styles.modalError} role='alert'>{deleteError}</p> : null}
         </div>
-      </Modal>
-
-      <Modal
-        visible={renameOpen}
-        title={t('creativeStudio.assets.collection.renameTitle', {
-          defaultValue: '重命名合集',
-        })}
-        footer={null}
-        autoFocus={false}
-        focusLock
-        unmountOnExit
-        maskClosable={!renameSubmitting}
-        closable={!renameSubmitting}
-        getPopupContainer={popupContainer}
-        onCancel={() => {
-          if (!renameSubmitting) setRenameOpen(false);
-        }}
-      >
-        <form
-          className={styles.modalForm}
-          data-rename-creative-asset-collection-form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!renameSubmitting) void handleRenameCollection();
-          }}
-        >
-          <p className={styles.modalDescription}>
-            {t('creativeStudio.assets.collection.renameDescription', {
-              defaultValue:
-                '这会更新所有使用当前合集名称的素材。新名称留空会将这些素材设为未分组。',
-            })}
-          </p>
-          <label className={styles.field}>
-            <span>
-              {t('creativeStudio.assets.collection.currentNameLabel', {
-                defaultValue: '当前合集名称',
-              })}
-            </span>
-            <Input
-              value={renameDraft.from}
-              maxLength={240}
-              disabled={renameSubmitting}
-              onChange={(from) => setRenameDraft((draft) => ({ ...draft, from }))}
-            />
-          </label>
-          <label className={styles.field}>
-            <span>
-              {t('creativeStudio.assets.collection.newNameLabel', {
-                defaultValue: '新合集名称',
-              })}
-            </span>
-            <Input
-              value={renameDraft.to}
-              maxLength={240}
-              placeholder={t('creativeStudio.assets.collection.newNamePlaceholder', {
-                defaultValue: '留空表示取消分组',
-              })}
-              disabled={renameSubmitting}
-              onChange={(to) => setRenameDraft((draft) => ({ ...draft, to }))}
-            />
-          </label>
-          {renameError ? <p className={styles.modalError} role='alert'>{renameError}</p> : null}
-          <footer className={styles.modalFooter}>
-            <Button disabled={renameSubmitting} onClick={() => setRenameOpen(false)}>
-              {t('creativeStudio.assets.collection.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button type='primary' htmlType='submit' loading={renameSubmitting}>
-              {t('creativeStudio.assets.collection.confirm', { defaultValue: '确认更新' })}
-            </Button>
-          </footer>
-        </form>
       </Modal>
     </main>
   );

@@ -701,6 +701,136 @@ async fn shutdown_closes_the_start_gate_and_reports_every_active_session() {
 }
 
 #[tokio::test]
+async fn shutdown_wakes_long_poll_and_reaps_active_process() {
+    use std::{future::Future, task::Poll};
+
+    let temporary = tempfile::tempdir().expect("temporary directory should be created");
+    let evidence_root = std::env::var_os("NOMI_PROCESS_SHUTDOWN_EVIDENCE")
+        .map(std::path::PathBuf::from);
+    let directory = evidence_root.as_deref().unwrap_or(temporary.path());
+    std::fs::create_dir_all(directory).expect("evidence directory should exist");
+    let directory = directory.canonicalize().expect("evidence directory must resolve");
+    let marker = directory.join("long-poll.pid");
+    let supervisor = ProcessSupervisor::new(SupervisorConfig {
+        max_sessions: 2,
+        reaper_interval: Duration::from_secs(30),
+    });
+    let mut request = helper_request(
+        owner(Uuid::now_v7(), Uuid::now_v7()),
+        vec![
+            OsString::from("write-pid-then-sleep"),
+            marker.as_os_str().to_owned(),
+            OsString::from("60000"),
+        ],
+        Duration::from_secs(30),
+    );
+    // The optional evidence root is the helper's workspace, not an ambient
+    // write grant. Bind both cwd and the sole capability root to that directory.
+    request.cwd = directory.clone();
+    request.capability = CapabilityPolicy::local_owner(directory);
+    // Use the product stop contract, rather than the surrounding lease tests'
+    // 75 ms total cleanup allowance, when proving a native shutdown boundary.
+    let default_stop = ProcessPolicy::default();
+    request.policy.interrupt_grace = default_stop.interrupt_grace;
+    request.policy.terminate_grace = default_stop.terminate_grace;
+    request.policy.reap_grace = default_stop.reap_grace;
+    let handle = supervisor
+        .start(request)
+        .await
+        .expect("long-poll helper should start");
+    let process = ProcessProbe::new(handle.pid);
+    let marker_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&marker) {
+                break contents.trim().parse::<u32>().expect("marker should contain PID");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("helper must execute and publish its independent PID marker");
+    assert_eq!(marker_pid, handle.pid);
+    assert!(!process.is_gone(), "helper should still be alive before poll");
+
+    let mut long_poll = Box::pin(supervisor.poll(
+        &handle.owner,
+        &handle.session_id,
+        OutputCursor::START,
+        Instant::now() + Duration::from_secs(60),
+    ));
+    let admitted_pending = std::future::poll_fn(|context| {
+        Poll::Ready(long_poll.as_mut().poll(context).is_pending())
+    })
+    .await;
+    assert!(admitted_pending, "long poll must own an admitted pending action");
+
+    let mut shutdown = Box::pin(supervisor.shutdown());
+    let concurrent = tokio::time::timeout(Duration::from_secs(6), async {
+        tokio::join!(shutdown.as_mut(), long_poll.as_mut())
+    })
+    .await;
+    let (completed_with_poll, report, poll_outcome) = match concurrent {
+        Ok((report, polled)) => (true, report, Some(polled)),
+        Err(_) => {
+            // Preserve the original timeout, then release only the reader so
+            // the formal shutdown can clean this test's process before FAIL.
+            drop(long_poll);
+            let report = tokio::time::timeout(Duration::from_secs(6), shutdown.as_mut())
+                .await
+                .expect("shutdown must clean the helper after pending poll is released");
+            (false, report, None)
+        }
+    };
+    let gone = process.is_gone();
+    let matching = report.sessions.iter().find(|session| {
+        session.session_id == handle.session_id && session.owner == handle.owner
+    });
+    let cleanup_reaped = matching.is_some_and(|session| matches!(
+        &session.outcome,
+        ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped
+    ));
+    let poll_matches_report = match (&poll_outcome, matching) {
+        (Some(Ok(PollResult::Finished(outcome))), Some(session)) => outcome == &session.outcome,
+        _ => false,
+    };
+    let repeated = tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
+        .await
+        .expect("repeated shutdown must immediately return its retained report");
+    let repeated_same = repeated == report;
+    if let Some(root) = evidence_root {
+        let evidence = serde_json::json!({
+            "pid": handle.pid,
+            "marker_pid": marker_pid,
+            "admitted_poll_pending": admitted_pending,
+            "shutdown_completed_with_poll": completed_with_poll,
+            "report_sessions": report.sessions.len(),
+            "cleanup_reaped": cleanup_reaped,
+            "exact_process_gone_after_formal_cleanup": gone,
+            "poll_matches_shutdown_report": poll_matches_report,
+            "repeated_shutdown_same_report": repeated_same,
+            "poll_outcome": format!("{poll_outcome:?}"),
+        });
+        std::fs::write(root.join("assertions.json"), evidence.to_string())
+            .expect("independent assertions should be preserved");
+    }
+
+    assert!(gone, "formal cleanup must finish before the test reports a failure");
+    assert_eq!(report.sessions.len(), 1, "shutdown must report the unique owned session");
+    assert!(cleanup_reaped, "shutdown must retain the exact cancelled cleanup outcome");
+    assert!(repeated_same, "repeated shutdown must preserve the original cleanup report");
+    assert!(
+        completed_with_poll,
+        "admitted long poll prevented shutdown from stopping an active process"
+    );
+    assert!(matches!(
+        poll_outcome,
+        Some(Ok(PollResult::Finished(ProcessOutcome::Cancelled { cleanup, .. })))
+            if cleanup.reaped
+    ), "shutdown must wake the original poll with the same terminal cleanup");
+    assert!(poll_matches_report, "poll and shutdown must retain the same terminal record");
+}
+
+#[tokio::test]
 async fn shutdown_omits_already_finished_sessions_from_its_active_cleanup_report() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let finished = supervisor

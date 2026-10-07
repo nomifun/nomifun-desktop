@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use std::path::{Path as FsPath, PathBuf};
@@ -50,7 +50,6 @@ pub fn office_proxy_routes(state: OfficeRouterState) -> Router {
 #[derive(serde::Deserialize)]
 struct ProxyCapabilityPath {
     capability: String,
-    path: Option<String>,
 }
 
 // -- Preview start/stop handlers ------------------------------------------
@@ -238,26 +237,40 @@ fn proxy_response_into_axum(proxy_resp: crate::proxy::ProxyResponse) -> Response
 async fn ppt_proxy(
     State(state): State<OfficeRouterState>,
     Path(params): Path<ProxyCapabilityPath>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let path = params.path.as_deref().unwrap_or("/");
-    proxy_forward(state, &params.capability, path, DocType::Ppt, &headers).await
+    let path = proxy_path_and_query(&uri);
+    proxy_forward(state, &params.capability, &path, DocType::Ppt, &headers).await
 }
 
 async fn office_watch_proxy(
     State(state): State<OfficeRouterState>,
     Path(params): Path<ProxyCapabilityPath>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let path = params.path.as_deref().unwrap_or("/");
+    let path = proxy_path_and_query(&uri);
     let request_headers = headers_to_pairs(&headers);
 
     let proxy_resp = state
         .proxy_service
-        .forward_watch(&params.capability, path, &request_headers)
+        .forward_watch(&params.capability, &path, &request_headers)
         .await?;
 
     Ok(proxy_response_into_axum(proxy_resp))
+}
+
+fn proxy_path_and_query(uri: &Uri) -> String {
+    // These routes are /api/{proxy-kind}/{capability}[/{path}]. Path extraction
+    // decodes escapes, so only use it for the capability, not the upstream URL.
+    let tail = uri.path().splitn(5, '/').nth(4).unwrap_or("");
+    let mut path = format!("/{tail}");
+    if let Some(query) = uri.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    path
 }
 
 async fn proxy_forward(

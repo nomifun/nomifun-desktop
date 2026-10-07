@@ -10,6 +10,8 @@ pub struct SystemInfoResponse {
     /// include it in their namespace so a reset/restore cannot attach stale
     /// UI state to a different entity graph.
     pub storage_generation: String,
+    /// Canonical Agent data generation, independent from preserved domain data.
+    pub agent_data_generation: u32,
     /// Operating system: `darwin`, `win32`, or `linux`.
     pub platform: String,
     /// CPU architecture: `x64` or `arm64`.
@@ -88,6 +90,7 @@ mod tests {
             work_dir: "/home/user/.local/share/nomifun".into(),
             log_dir: "/home/user/.local/state/nomifun/logs".into(),
             storage_generation: "01900000-0000-7000-8000-000000000000".into(),
+            agent_data_generation: 42,
             platform: "linux".into(),
             arch: "x64".into(),
         };
@@ -100,7 +103,9 @@ mod tests {
             "01900000-0000-7000-8000-000000000000"
         );
         assert_eq!(json["platform"], "linux");
+        assert_eq!(json["agent_data_generation"], 42);
         assert_eq!(json["arch"], "x64");
+        assert!(json.get("experimental_agent_ui_available").is_none());
         // Verify snake_case
         assert!(json.get("cacheDir").is_none());
     }
@@ -112,6 +117,7 @@ mod tests {
             work_dir: "/tmp/work".into(),
             log_dir: "/tmp/logs".into(),
             storage_generation: "01900000-0000-7000-8000-000000000001".into(),
+            agent_data_generation: 42,
             platform: "darwin".into(),
             arch: "arm64".into(),
         };

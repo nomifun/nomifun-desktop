@@ -19,7 +19,6 @@ import type {
  * persistence schema and never accepts the retired WorkshopCanvasDoc shape.
  */
 export type CanvasNodeType = CreativeCanvasNodeKind;
-export type CanvasContentNodeType = Exclude<CanvasNodeType, 'group'>;
 export type CanvasPoint = CreativePoint;
 export type CanvasSize = CreativeSize;
 
@@ -29,7 +28,6 @@ export interface CanvasSelectionRect extends CanvasPoint, CanvasSize {}
 export type CanvasViewport = CreativeViewport;
 export type CanvasNode = CreativeCanvasNode;
 export type CanvasGroup = Extract<CanvasNode, { type: 'group' }>;
-export type CanvasContentNode = Exclude<CanvasNode, { type: 'group' }>;
 export type CanvasGraphNode = CanvasNode;
 export type CanvasEdge = CreativeCanvasConnection;
 
@@ -41,7 +39,7 @@ export interface CanvasDocument {
 
 export type CanvasSelectionMode = 'replace' | 'add' | 'toggle';
 
-export interface CanvasBoxSelection {
+interface CanvasBoxSelection {
   anchor: CanvasPoint;
   current: CanvasPoint;
   mode: CanvasSelectionMode;
@@ -61,12 +59,12 @@ export interface CanvasClipboard {
   connections: CanvasEdge[];
 }
 
-export interface CanvasHistoryMerge {
+interface CanvasHistoryMerge {
   key: string;
   at: number;
 }
 
-export interface CanvasHistory {
+interface CanvasHistory {
   past: CanvasDocument[];
   future: CanvasDocument[];
   merge: CanvasHistoryMerge | null;

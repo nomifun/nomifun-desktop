@@ -75,5 +75,3 @@ export function useContentSiderCollapse(storageKey: string, defaultCollapsed = f
 
   return { collapsed, toggle, setCollapsed };
 }
-
-export default useContentSiderCollapse;

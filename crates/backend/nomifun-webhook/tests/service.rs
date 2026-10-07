@@ -9,7 +9,7 @@ use nomifun_db::{
     ITagSettingRepository, IWebhookRepository, SqliteTagSettingRepository, SqliteWebhookRepository,
     init_database_memory,
 };
-use nomifun_webhook::{WebhookSender, WebhookService};
+use nomifun_webhook::{NotificationBindingState, WebhookSender, WebhookService};
 
 #[derive(Default)]
 struct MockSender {
@@ -39,7 +39,6 @@ async fn svc(sender: Arc<dyn WebhookSender>) -> WebhookService {
     let db = init_database_memory().await.unwrap();
     let webhooks: Arc<dyn IWebhookRepository> = Arc::new(SqliteWebhookRepository::new(db.pool().clone()));
     let tags: Arc<dyn ITagSettingRepository> = Arc::new(SqliteTagSettingRepository::new(db.pool().clone()));
-    Box::leak(Box::new(db));
     WebhookService::new(webhooks, tags, sender)
 }
 
@@ -88,6 +87,49 @@ async fn create_list_update_delete_and_secret_is_hidden() {
 }
 
 #[tokio::test]
+async fn concurrent_partial_updates_preserve_independent_fields() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let wh = s.create(create_req()).await.unwrap();
+    let (rename, disable) = tokio::join!(
+        s.update(&wh.webhook_id, UpdateWebhookRequest {
+            name: Some("Renamed".into()), ..Default::default()
+        }),
+        s.update(&wh.webhook_id, UpdateWebhookRequest {
+            enabled: Some(false), secret: Some(None), ..Default::default()
+        }),
+    );
+    rename.unwrap();
+    disable.unwrap();
+    let saved = s.get(&wh.webhook_id).await.unwrap();
+    assert_eq!(saved.name, "Renamed");
+    assert!(!saved.enabled);
+    assert!(!saved.has_secret);
+}
+
+#[tokio::test]
+async fn concurrent_tag_patches_preserve_fields_on_insert_and_update() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let wh = s.create(create_req()).await.unwrap();
+    for description in ["first", "second"] {
+        let (describe, bind) = tokio::join!(
+            s.upsert_tag_setting("alpha", UpsertTagSettingRequest {
+                description: Some(description.into()), ..Default::default()
+            }),
+            s.upsert_tag_setting("alpha", UpsertTagSettingRequest {
+                webhook_id: Some(Some(wh.webhook_id.clone())),
+                notify_events: Some(vec![]), ..Default::default()
+            }),
+        );
+        describe.unwrap();
+        bind.unwrap();
+        let saved = s.get_tag_setting("alpha").await.unwrap();
+        assert_eq!(saved.description, description);
+        assert_eq!(saved.webhook_id.as_ref(), Some(&wh.webhook_id));
+        assert!(saved.notify_events.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn create_validates_name_and_url() {
     let s = svc(Arc::new(MockSender::default())).await;
     let mut bad = create_req();
@@ -96,6 +138,48 @@ async fn create_validates_name_and_url() {
     let mut bad = create_req();
     bad.url = "".into();
     assert!(s.create(bad).await.is_err());
+}
+
+#[tokio::test]
+async fn tag_events_reject_invalid_entries_without_changing_settings() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let events = vec!["done".to_string(), "needs_review".to_string()];
+    s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            description: Some("keep me".into()),
+            notify_events: Some(events.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    for invalid in ["done,failed", "", "unknown", " done"] {
+        let error = s.upsert_tag_setting(
+            "alpha",
+            UpsertTagSettingRequest {
+                description: Some("must not be saved".into()),
+                notify_events: Some(vec!["done".into(), invalid.into()]),
+                ..Default::default()
+            },
+        ).await.unwrap_err();
+        assert!(matches!(error, nomifun_common::AppError::BadRequest(_)));
+        let saved = s.get_tag_setting("alpha").await.unwrap();
+        assert_eq!(saved.notify_events, events);
+        assert_eq!(saved.description, "keep me");
+    }
+
+    let cleared = s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            notify_events: Some(vec![]),
+            ..Default::default()
+        },
+    ).await.unwrap();
+    assert!(cleared.notify_events.is_empty());
+    let kept = s.upsert_tag_setting("alpha", UpsertTagSettingRequest::default()).await.unwrap();
+    assert!(kept.notify_events.is_empty(), "omitted events must keep an explicit empty set");
 }
 
 #[tokio::test]
@@ -189,4 +273,49 @@ async fn tag_setting_upsert_validates_webhook_exists() {
         .await
         .unwrap();
     assert!(cleared.webhook_id.is_none());
+}
+
+#[tokio::test]
+async fn notification_binding_projection_distinguishes_unbound_bound_and_disabled() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    assert_eq!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Unbound {
+            tag: "alpha".into()
+        }
+    );
+
+    let webhook = s.create(create_req()).await.unwrap();
+    s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            webhook_id: Some(Some(webhook.webhook_id.clone())),
+            notify_events: Some(vec!["done".into()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Bound {
+            enabled: true,
+            notify_events,
+            ..
+        } if notify_events == vec!["done".to_owned()]
+    ));
+
+    s.update(
+        &webhook.webhook_id,
+        UpdateWebhookRequest {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Bound { enabled: false, .. }
+    ));
 }

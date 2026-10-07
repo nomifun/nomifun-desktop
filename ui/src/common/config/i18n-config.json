@@ -4,7 +4,6 @@
   "supportedLanguages": ["zh-CN", "en-US"],
   "modules": [
     "common",
-    "agentMode",
     "update",
     "login",
     "fileSelection",
@@ -17,7 +16,6 @@
     "google",
     "cron",
     "requirements",
-    "idmm",
     "starOffice",
     "guid",
     "agent",
@@ -26,6 +24,7 @@
     "autowork",
     "nomi",
     "knowledge",
-    "customerService"
+    "customerService",
+    "agentSettings"
   ]
 }

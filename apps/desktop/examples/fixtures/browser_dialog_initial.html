@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native initial dialog fixture</title>
+<style>body {font:16px system-ui;margin:40px} button {font:inherit;padding:12px;margin:8px}</style>
+<script>
+window.initialAnswer = prompt('Initial document prompt', '默认');
+window.initialCompleted = true;
+</script>
+<h1>Loaded native document</h1>
+<p>Prompt result: <output id="initial-result"></output></p>
+<script>document.getElementById('initial-result').textContent=String(window.initialAnswer);</script>
+<button id="arm" onclick="window.armTrusted=event.isTrusted;window.onbeforeunload=e=>{e.preventDefault();e.returnValue=''}">Arm leave confirmation</button>
+<button id="popup" onclick="window.popupTrusted=event.isTrusted;window.popupHandle=window.open('/dialog-popup','dialog-popup')">Open dialog popup</button>

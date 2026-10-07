@@ -74,24 +74,25 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Agent executions | `/api/agent-executions/*` | authenticated | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
 | Terminals | `/api/terminals/*` | authenticated | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
 | Knowledge bases | `/api/knowledge/*` | authenticated | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
-| Creative Studio management and generation | `/api/creative-studio/*` management families: projects, assets, prompts, templates/runs/drafts, tasks, agent sessions, and collections | instance owner only | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs), [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs), [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs) |
-| Creative Studio media delivery | `GET /api/creative-studio/files/{asset_id}` | public read-only capability URL; no list or mutation surface | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| Mini-apps | `GET/POST /api/miniapps`, `POST /api/miniapps/validate`, `POST /api/miniapps/import`, `GET/PUT/DELETE /api/miniapps/{miniapp_id}`, `POST /api/miniapps/{miniapp_id}/publish`, `POST /api/miniapps/{miniapp_id}/workspace` (idempotently materialises the working copy and returns its absolute source path; creates no conversation) | instance owner only | [`nomifun-miniapp/src/routes.rs`](../../crates/backend/nomifun-miniapp/src/routes.rs) |
-| Mini-app runtime (serve the published snapshot) | `GET /api/miniapps/{miniapp_id}/serve` | public — auth-exempt on purpose: an iframe subresource load carries no trust header, so the runner and the in-conversation preview could not render at all behind auth; the guard is the unguessable UUIDv7 (the same capability-URL pattern as `GET /api/creative-studio/files/{asset_id}`) | same as above |
+| Creation management and generation | `/api/creative-studio/*` management families: projects, assets, prompts, templates/runs/drafts, tasks, agent sessions, and collections | instance owner only | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs), [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs), [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs) |
+| Creation media delivery | `GET /api/creative-studio/files/{asset_id}` | public read-only capability URL; no list or mutation surface | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
+| Unified Plugin Core | `/api/plugins`, `/api/plugins/{plugin_id}/*`, and `/api/plugin-drafts/*`: library, Chat/Draft authoring, shared directory/ZIP/Backup import, configuration, lifecycle, Package/Backup export, and Preview | instance owner; mutations additionally require local product trust | [`router/plugin.rs`](../../crates/backend/nomifun-app/src/router/plugin.rs) |
+| Plugin Surface assets and bridge | descriptor-fenced asset and bridge routes containing the exact session generation and Artifact digest | instance owner with the matching live Surface descriptor | same as above |
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | NomiFun Desktop access token | `/api/webui/access-token` | local-trust installation-owner flow | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
-| Browser platform management (Agent-only managed browser) | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; installation-owner-only routes are separately gated | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
+| Conversation Browser Workspace | `/api/conversations/{conversation_id}/browser*` | installation owner with local product trust; conversation ownership is checked and delegated execution steps are rejected | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
+| System-browser connection | `/api/conversations/{conversation_id}/system-browser*` | installation owner with local product trust; conversation ownership is checked; currently Windows-only | [`router/system_browser.rs`](../../crates/backend/nomifun-app/src/router/system_browser.rs) |
 | Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/preview-history/*` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
 | Office iframe proxies | `/api/ppt-proxy/*`, `/api/office-watch-proxy/*` | public (serve iframe content; no auth) | same as above |
 | Settings + providers + system info | `/api/settings`, `/api/providers/*`, `/api/system/*` | authenticated | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
+| Host system permissions | `GET /api/system/permissions` reads live Microphone, Accessibility, and Screen Recording state; `POST /api/system/permissions/{request,open-settings}` requests access or opens the matching pane | installation owner for reads; mutations that display host UI additionally require local product trust | [`router/computer_permissions.rs`](../../crates/backend/nomifun-app/src/router/computer_permissions.rs) |
 | Global model failover queue | `/api/agent/model-failover` | authenticated | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |
 | Connection probes (Bedrock, …) | `/api/bedrock/test-connection` | authenticated | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
 | Shell helpers + STT | `/api/shell/*`, `/api/stt` | authenticated | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | Public assets (logos) | `/api/assets/logos/*` | public | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Public MCP front door | `/mcp/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Public MCP agent front door | `/mcp-agent/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Remote capability REST API | `/v1/*` | installation token | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
+| Canonical Remote MCP front door | `/mcp` | installation token | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
+| Canonical Remote REST API | `/api/remote/open`, `/api/remote/turn`, `/api/remote/observe`, `/api/remote/cancel` | installation token | [`nomifun-app/src/router/remote_rest.rs`](../../crates/backend/nomifun-app/src/router/remote_rest.rs) |
 | Realtime WebSocket | `/ws` | authenticated (token in `Sec-WebSocket-Protocol` or query) | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 For the exact set of methods on each route, read the corresponding `routes.rs` file — every router declares its routes inline.
@@ -115,75 +116,36 @@ These are the auth endpoints clients are most likely to interact with directly:
 
 ### Browser platform endpoints
 
-The current Browser product is **Agent-only**. Browser execution is owned by the
-process-wide `BrowserSessionHub` and organized into Browser Lanes; the Browser
-page and `/api/browser/*` are an observability and management surface for
-status, capacity/queue pressure, identity, and lifecycle only. They do not
-provide page navigation, page input, or direct browser control, and they never
-expose raw CDP endpoints, debugging ports, profile paths, or profile contents.
-
-The Hub remains authoritative for Host/Lane ownership, capacity, identity,
-concurrency, and shutdown. Operations within one Lane are serialized, while
-different Lanes can run concurrently within the active resource policy.
-Ordinary `primary` Agent work runs with Chromium `--headless=new` and an
-application-isolated stable profile. Only an explicit Browser-management
-foreground request or sign-in flow replaces that Host with a headful managed
-Host. Crawl (`anonymous`), `authenticated_replica`, and `isolated` work remain
-headless under Hub policy. NomiFun never opens a user's personal Chrome or Edge
-profile.
+The interactive Browser is a native surface owned by one conversation. Its HTTP
+API supports the conversation UI; Agent observation and input use the frozen
+`Browser` tool binding for the active turn rather than an HTTP management API.
+Both paths address the same tabs and profile. While an Agent run is active,
+human commands fail closed; after the turn ends, the user can operate the same
+page. There is no user-control transfer state.
 
 | Method + path | Purpose |
 |---|---|
-| `GET /api/browser/overview` | Return user-visible capacity, pressure, queue, identity, lifecycle, Lane, and safe Host diagnostics. |
-| `GET /api/browser/lanes` | List the authenticated user's visible Browser Lanes and their management-safe state. |
-| `POST /api/browser/lanes/{lane_id}/foreground` | For the authenticated user's own running `primary` Lane only, safely replace its headless Host with a headful managed Host using the same application profile. The browser epoch changes, old target/frame/refs become stale, and the active URL is restored only on a best-effort basis; clients must refresh inventory and perform a fresh observe. This is lifecycle/visibility management only and grants no page input, user takeover, or Agent execution capability. |
-| `POST /api/browser/lanes/{lane_id}/close` | Idempotently close one Lane without closing its conversation or Agent execution. |
-| `POST /api/browser/conversations/{conversation_id}/close` | Close the authenticated user's Lanes for one conversation. |
-| `POST /api/browser/close-all` | Installation owner only: close every Browser Lane managed by this application instance. |
-| `GET /api/browser/resource-policy` | Installation owner only: read the active Browser resource-policy preset and advanced limits. |
-| `PUT /api/browser/resource-policy` | Installation owner only: validate, persist, and apply a Browser resource policy. |
+| `GET /api/conversations/{conversation_id}/browser` | Read the Browser Workspace snapshot without creating a runtime. |
+| `POST /api/conversations/{conversation_id}/browser` | Ensure the conversation's native Browser Workspace and return its snapshot. |
+| `DELETE /api/conversations/{conversation_id}/browser` | Close an idle Browser Workspace using its exact `runtime_generation`; stale or active requests are rejected. |
+| `POST /api/conversations/{conversation_id}/browser/commands` | Run one typed user command against the native tabs while input is user-owned: create/activate/close/navigate/history/reload, close all pages, open Downloads or the current URL externally, cancel an owned download, answer a website permission/dialog, or clear this conversation's site data. |
+| `GET /api/conversations/{conversation_id}/system-browser` | Read the separate system-browser connection and authorized-tab state. |
+| `POST /api/conversations/{conversation_id}/system-browser` | Connect to an already-running Chrome instance after the user enabled Chrome remote debugging. NomiFun does not launch Chrome or import its profile. |
+| `DELETE /api/conversations/{conversation_id}/system-browser` | Disconnect the exact connection without closing Chrome or its tabs. |
+| `POST /api/conversations/{conversation_id}/system-browser/choices` | List the current connection's candidate tabs for explicit authorization. |
+| `POST /api/conversations/{conversation_id}/system-browser/tabs` | Authorize one exact tab choice for this conversation. |
 
-The foreground endpoint requires normal application authentication and, for
-cookie-authenticated requests, the standard `x-csrf-token` header. It returns
-`404` both when the Lane does not exist and when it belongs to another user, so
-the endpoint cannot be used to probe another user's inventory. A `409` reports
-a state conflict such as a non-Primary identity or a Lane becoming stale or
-closed during the request; a Lane that is not ready or running can return
-`503`. Clients should refresh inventory and select a running Primary Lane. The
-endpoint intentionally replaces the normal headless Host with a headful Host.
-This increments the browser epoch and invalidates old target/frame/ref state;
-URL restoration is best effort and callers must perform a fresh observe.
+These routes are mounted only for the locally trusted desktop product and are
+also protected by installation-owner authentication. They never return raw
+protocol endpoints, debugging ports, profile paths, cookies, or credentials.
+Mutable system-browser operations are unavailable while the Agent owns the
+conversation run.
 
-The installation-owner-only compatibility endpoints
-`POST /api/browser/login/open`, `POST /api/browser/login/close`, and
-`GET /api/browser/login/status` manage a normal Hub-owned Primary sign-in Lane
-and explicitly request its headful managed Host. They do not create an embedded
-or second browser surface or add page-input controls to the Browser management
-page/API.
-
-Outside the intentionally insecure no-auth local mode, all routes require
-normal application authentication. Inventory and Lane/conversation lifecycle
-operations are user-scoped; installation-wide close and resource-policy routes
-also enforce installation-owner authority. Cookie-authenticated `POST` and
-`PUT` requests must include the normal `x-csrf-token` header. Safe `GET`
-requests bypass CSRF.
-
-> **Superseded (historical only):** the embedded JPEG/screencast viewer, its
-> dedicated Browser WebSocket, user takeover/return-control flow, and viewer
-> tokens have been removed from the product surface. The former
-> `POST /api/browser/lanes/{lane_id}/return-control`,
-> `POST /api/browser/lanes/{lane_id}/viewer-token`, and
-> `GET /api/browser/lanes/{lane_id}/view` routes are not current API endpoints
-> and must not be used by clients.
-
-Page execution remains Agent-only. Agent actions continue through the existing
-application approval and safety policy, including fail-closed handling for
-high-risk or irreversible actions. Browser management endpoints do not grant
-an execution capability and cannot bypass those gates.
-
-Browser inventory and lifecycle changes are delivered as authenticated JSON
-events on the shared `/ws` realtime channel. There is no Browser image-frame or
-viewer-input transport.
+`nomi_local_websearch` has no Browser-management endpoint. It is an independently
+selectable Agent tool backed by an isolated background browser and does not use
+the conversation profile. Likewise, `nomi_system_browser` is an independent
+Agent capability; enabling it does not enable the embedded Browser or local
+search.
 
 ## WebSocket event model
 
@@ -219,6 +181,6 @@ The list above is meant to get you to the right module. From there, read the sou
 ## See also
 
 - [Configuration Reference](./configuration.md) — flags, env vars, the auth secret resolution order.
-- [Browser Platform Architecture](../architecture/browser-platform.md) — BrowserSessionHub, Browser Hosts/Lanes, identity domains, Agent-only external managed Chromium, and lifecycle guarantees.
+- [Browser Platform Architecture](../architecture/browser-platform.md) — the native conversation Browser Workspace, independent system-browser connection, isolated background runtimes, and lifecycle guarantees.
 - [Troubleshooting](./troubleshooting.md) — common API and WebSocket failure modes.
 - [Web Server Deployment](../guides/web-server-deployment.md) — exposing the API over the network behind TLS.

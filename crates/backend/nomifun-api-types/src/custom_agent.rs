@@ -37,8 +37,6 @@ pub struct CustomAgentUpsertRequest {
 #[serde(deny_unknown_fields)]
 pub struct CustomAgentAdvancedOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_skills_dirs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_policy: Option<BehaviorPolicy>,

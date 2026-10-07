@@ -30,7 +30,7 @@ export interface CreativeCanvasDetail {
   document: CreativeCanvasDocument;
 }
 
-export interface CreativeCanvasAgentKickoff {
+interface CreativeCanvasAgentKickoff {
   prompt: string;
   model: CreativeChatModelReference;
 }
@@ -56,10 +56,6 @@ export interface CreativeCanvasListResponse {
 export interface CreativeCanvasResponse {
   canvas: CreativeCanvasSummary;
 }
-
-export interface CreativeCanvasDetailResponse extends CreativeCanvasDetail {}
-
-export type SaveCreativeCanvasResponse = CreativeCanvasResponse;
 
 /** Build the canonical empty-document shape for a newly created canvas. */
 export function createEmptyCreativeCanvasDocument(
@@ -114,15 +110,5 @@ export function creativeCanvasDetailToLegacyProject(
   return {
     project: creativeCanvasSummaryToLegacyProject(detail.canvas),
     document: creativeCanvasDocumentToLegacyProject(detail.document),
-  };
-}
-
-/** @deprecated Compatibility adapter for canvas/editor modules not migrated yet. */
-export function legacyProjectDetailToCreativeCanvas(
-  detail: CreativeProjectDetail
-): CreativeCanvasDetail {
-  return {
-    canvas: legacyProjectSummaryToCreativeCanvas(detail.project),
-    document: legacyProjectDocumentToCreativeCanvas(detail.document),
   };
 }

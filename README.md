@@ -51,7 +51,7 @@
 
 ---
 
-**NomiFun** is everything you imagine an AI workstation to be — and it runs on your terms. One React frontend and one Rust backend give you an evolving desktop companion, an unattended automation platform, a unified knowledge base, native computer- and browser-use, and an open capability bus that any agent can drive. No cloud account. No telemetry. No subscription. Your data never leaves your machine except for the LLM calls **you** configure.
+**NomiFun** is everything you imagine an AI workstation to be — and it runs on your terms. One React frontend and one Rust backend give you an evolving desktop companion, an unattended automation platform, a unified knowledge base, native computer- and browser-use, and an open capability bus that any agent can drive. No NomiFun cloud account. No telemetry. No subscription. Your workspace data stays local; requests go to the model services **you** configure, including model invocation, model catalogs, and quota queries.
 
 > The product name is **NomiFun**. Lowercase `nomifun` is used only for code identifiers, crate names, environment variables, and repository paths.
 
@@ -63,13 +63,13 @@ NomiFun has four runtime projects plus **NomiFun Portal**, the canonical
 documentation home. **Desktop is the local AI, data, model, Agent, task, and
 tool hub**; Mobile and the Xiaozhi robot connect to capabilities that you
 explicitly enable, while Net Infra provides an optional, self-hosted
-cross-network relay. Desktop also hosts Agent Mini Apps, so an app created by
-an Agent can keep using the same local runtime and governed capabilities
-instead of becoming an isolated demo.
+cross-network relay. Desktop also hosts Unified Plugins, so a locally authored
+Plugin can keep using the same governed runtime and capabilities instead of
+becoming an isolated demo.
 
 | Project | Role | Start here |
 |---|---|---|
-| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Mini Apps, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
+| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Unified Plugins, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
 | NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile guide](https://www.nomifun.com/docs/guides/mobile-bridge/) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
 | NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi guide](https://www.nomifun.com/docs/guides/xiaozhi-robot/) · Firmware source: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -98,8 +98,8 @@ document authentication, LAN exposure, and deployment boundaries.
 This is not a collection of unrelated clients that happen to share a logo. Desktop owns
 the durable state and executes models, Agents, requirements, tools, knowledge,
 companion memory, and Skills. Mobile is a direct LAN control surface; Xiaozhi is
-a voice-and-motion hardware surface; Mini Apps are interactive software surfaces
-created and hosted by the same Desktop installation; Net Infra is an optional
+a voice-and-motion hardware surface; Unified Plugins are interactive software
+surfaces created and hosted by the same Desktop installation; Net Infra is an optional
 transport layer rather than another application backend. The result is one governed
 capability graph with multiple ways to reach it, rather than separate clouds,
 accounts, credentials, and copies of user data.
@@ -129,10 +129,10 @@ innovation timeline. Simplified Chinese:
 
 Data security is not a setting in NomiFun — it is the architecture.
 
-- **All data is local.** NomiFun never proactively sends your data anywhere. The **only** outbound network calls are the LLM requests you explicitly configure to your chosen model provider. There is no other third-party service integration phoning home.
+- **All data is local.** NomiFun never proactively sends your data anywhere. Model-service requests go to the services you explicitly configure, including model invocation, model catalogs, and quota queries. See the [FAQ](docs/reference/faq.md#is-nomifun-really-local-only) for other network features you can choose to use.
 - **Safe for anyone who cares about data.** Individuals and enterprises with strict data-handling requirements can use it with confidence. The code is **fully open and open to audit**.
 - **We cut features to keep this promise.** To guarantee your data stays yours, we deliberately dropped several advanced, genuinely fun feature designs. Everything here is in service of letting users — and developers — relax.
-- **No ads. No commercialization. No membership tiers.** We promise to *never* charge for any feature of this project. The only thing that costs money is your LLM provider's tokens, which is outside our control. (If finding/serving models is painful, [reach out](#-contact--community) — we're happy to help build a unified model gateway.)
+- **No ads. No membership tiers. The official project conducts no commercial operations.** We will never charge for any feature of this project, and the official project does not operate any paid services. The only expense is model tokens, which you pay directly to the model service you choose.
 
 See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible-disclosure policy.
 
@@ -157,18 +157,18 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio Canvas editor" width="100%">
-  <br/><sub><b>Creative Studio · a persistent Canvas, focused media workbenches, reusable prompts and assets, templates, and a bounded Director</b></sub>
+  <img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="NomiFun Creative Studio Canvas library" width="100%">
+  <br/><sub><b>Creative Studio · persistent Canvases, focused media workbenches, reusable prompts and assets, and templates</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · task-aware routing and Free Models</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
     <td width="50%"><img src="docs/images/readme/en/companions.png" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, workbenches, libraries, templates, Assistant, skills, Director, and companion workflow.</sub></td>
+    <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, workbenches, libraries, templates, Assistant, skills, and companion workflow.</sub></td>
   </tr>
 </table>
 
@@ -184,13 +184,12 @@ Creative Studio is a new, focused creation surface inside NomiFun Desktop—not 
 single marketing screen. The numbered gallery follows the product surfaces a
 creator can actually open: persistent Canvases, independent Image and Video
 Workbenches, Prompt Center, My Assets, private templates and AI Create,
-multi-image series, Director, Canvas Assistant, explicit Creative Studio skills,
+multi-image series, Canvas Assistant, explicit Creative Studio skills,
 and an optional native desktop companion.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/02-canvas-editor-rich.png" alt="Creative Studio rich Canvas editor"><br/><sub><b>Canvas Editor</b> · an infinite document with media nodes, Asset library, Director panel, and Assistant</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/creative-studio/en-US/03-image-workbench.png" alt="Creative Studio Image Workbench"><br/><sub><b>Image Workbench</b> · standalone T2I/I2I with the configured image task and real asset references</sub></td>
@@ -205,19 +204,14 @@ and an optional native desktop companion.
     <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio AI Create template editor"><br/><sub><b>AI Create + Template Editor</b> · review one bounded draft, edit it, and explicitly Save before reuse</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/09-director-timeline.png" alt="Creative Studio Director timeline"><br/><sub><b>Director</b> · a Canvas-bound, bounded 3D scene and timeline with cameras, keyframes, capture, and Canvas references</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/10-director-stage.png" alt="Creative Studio Director 3D stage"><br/><sub><b>Director stage</b> · the bounded 3D scene and camera view attached to a Canvas</sub></td>
-  </tr>
-  <tr>
     <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.png" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
     <td width="50%"><img src="docs/images/creative-studio/en-US/12-companion-workspace.png" alt="NomiFun desktop companion beside Creative Studio"><br/><sub><b>Desktop companion collaboration</b> · the native companion can stay visible while you create</sub></td>
   </tr>
 </table>
 
-The numbered paths are the stable README contract for the Creative Studio
-gallery: `01`–`12`. The Canvas Editor capture also shows the
-Canvas Assistant and its explicit Creative Studio skill choices; the Skills
-Hub capture above shows those packages as reusable capabilities. All captures
+The retained numbered paths are the stable README contract for the Creative Studio
+gallery: `01`, `03`–`08`, and `11`–`12`. The Skills Hub capture above shows the
+Creative Studio skill packages as reusable capabilities. All captures
 should represent the running product, not a mockup or an invented capability. See
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture
 manifest.
@@ -237,10 +231,9 @@ memory, tools, permissions, and execution runtime:
 | Product surface | What it adds |
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
-| **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, a bounded Director, and optional companion-in-the-workspace collaboration. |
+| **Unified Plugins** | Creates or imports one package, validates and installs one Artifact, runs optional App/Service entrypoints, exposes Action/Binding capabilities, and provides generation-safe storage, backup, restore, and deletion. |
+| **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
-| **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
 
 ### 🐾 Desktop Companion — it grows with you
@@ -251,7 +244,7 @@ The companion you talk to every day quietly becomes the partner who *gets* you.
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
 - **A family, not a hive mind.** Run multiple companions side by side, each a complete individual with **its own** chat model, persona, memory, and domain knowledge bases. Memory belongs to exactly one companion — nothing you tell the work companion leaks into the one you chat with at home.
-- **Chat with them where you already work.** Companion chats now live in the main **Sessions** UI under a dedicated desktop-companion group, while `/nomi` stays focused on companion management.
+- **A place of their own.** Companion chat, identity and management now live together in **Desktop Companion**. Work Sessions stay focused on projects and tasks, while the native quick window lets you switch companions and reply without opening the full workspace.
 - **It learns you (opt-in, on by default after a one-time consent).** A background learner distills your usage into durable memories; a deterministic evolution engine mines your recurring multi-step tool sequences into **draft skills** it proposes for your review. Memory is fully **visible and editable**.
 - **Skills it writes itself.** Companions distill their own skills out of real work and discuss them with you before anything is kept.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
@@ -267,15 +260,21 @@ sessions, and tool coordination. Setup is built into each companion's **Remote
 control → Robot connection** page: copy its OTA address, enter the six-digit
 activation code shown by the robot, and bind the device to that companion.
 
-### 🧩 Agent Mini Apps — turn a conversation into a reusable tool
+### 🧩 Unified Plugins — create and run governed local software
 
-Create a Mini App in a normal Agent conversation, preview it in the same
-workspace, and explicitly publish a durable snapshot to the local Mini Apps
-library. Desktop keeps that published version separate from the editable working
-copy, so you can continue iterating without silently changing what users launch.
-Every revision remains attached to a normal, auditable conversation rather than
-a hidden second chat system, and the resulting app can reuse the same local
-Agents, data, models, and governed tools.
+Create a Plugin through Chat or import a package directory/ZIP. Both sources
+enter the same validation and `install_artifact` path. A local Plugin points to
+one active immutable Artifact and one generation DataRoot; optional UI and
+Service entrypoints cover UI-only, headless, and mixed Plugins without separate
+product models. Actions bind directly to Agent, Desktop, and Automation points
+through stable `plugin:<plugin_id>/<action_id>` identities.
+
+The unified SDK exposes SQLite, KV, Files, memory-only Cache, Config,
+Credential references, Host capabilities, and cross-Plugin Actions. Preview
+uses the same Bridge and storage adapters against a temporary DataRoot. Package
+export excludes user data; Backup includes current data and non-secret config
+but never Credential plaintext. See the
+[Unified Plugin Core contract](docs/specs/2026-09-22-unified-plugin-core/README.zh.md).
 
 ### 🎨 Creative Studio — focused creation on an infinite canvas
 
@@ -284,8 +283,8 @@ Agents, data, models, and governed tools.
 > Technical contract: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
 Creative Studio is a persistent creative document system, not a disposable
-whiteboard. An infinite Canvas stores text, image, video, audio, panorama,
-config, director, and group nodes. Media nodes own the visible creation
+whiteboard. An infinite Canvas stores text, image, video, audio, timeline,
+config, and group nodes. Media nodes own the visible creation
 surface; config nodes keep the exact provider/model/task, typed parameters,
 ordered inputs, task state, and results auditable. The **Canvas Assistant**
 proposes typed graph operations, validates them fail-closed, and waits for
@@ -310,17 +309,14 @@ applying a proposal still requires the user’s explicit confirmation.
 plans into private reusable templates. **AI Create** produces one strict draft
 for review; Apply opens an in-memory editor draft and only explicit **Save**
 persists it. Multi-image series can require review before generation.
-**Director** is a bounded 3D scene and timeline surface attached to Canvas: it
-manages cameras, keyframes, captures, and Canvas references without pretending
-to be a full DCC or video editor.
 
 Every operation carries an exact enabled `{ providerId, model, task }` identity:
 `chat` for Assistant and template drafting, `image_generation`/`image_edit`
 for T2I/I2I, `video_generation` for T2V/I2V, and `speech_synthesis` for TTS.
 Canvas writes use revision-based CAS; conflicts stop automatic saving instead
 of overwriting newer work, and task history reconciles the exact owner after
-reload. Canvas ZIP v2 exports the validated document, referenced asset closure,
-and Director sidecar while the v1 reader remains supported. Standalone history
+reload. Canvas ZIP v2 exports the validated document and referenced asset closure
+while the v1 reader remains supported. Standalone history
 is scoped by `workbenchKind`, not by a hidden Canvas binding.
 
 ### 🧠 Multi-Agent execution cluster — plan, schedule, supervise
@@ -365,13 +361,13 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **Browser use** — a main-process `BrowserSessionHub` owns managed Chromium Hosts and addressable Browser Lanes. The built-in agent, the Gateway, and parallel AgentExecution attempts all enter the same platform instead of launching private browsers.
-- **Status and lifecycle browser management** — the **Browser** page reports conversations, runtimes, Lanes, tabs, URLs, identity mode, capacity, queue position, pressure, resource estimates, and failures. Within that management boundary, a user can explicitly foreground an already-running Primary Lane; the page still does not embed a preview or expose page input or takeover controls.
-- **Shared live login identity** — ordinary interactive Lanes use an application-managed Primary profile and see live shared login state. Public crawls use an anonymous identity with no Primary cookies or site storage, while explicitly isolated work gets a separate identity. NomiFun never opens the user's real Chrome or Edge profile.
-- **Bounded, observable concurrency** — different Lanes can run concurrently while each Lane remains strictly serialized. When safe capacity is exhausted, callers and the UI receive queue position, pressure reason, and recommended concurrency rather than an apparently ready handle blocked by a hidden global lock.
-- **Quiet by default, foreground on request** — ordinary Primary Agent work uses a real headful managed Chromium window that starts minimized in the background and does not pop up or steal focus. **Open browser in foreground** restores that same window and active target for a running Primary Lane; explicit sign-in flows foreground it automatically. NomiFun retains lifecycle authority, including user closes, owner revocation, and managed process-tree cleanup.
-- **Agent-only interaction** — page navigation and input remain owned by the executing agent. Browser approvals still enforce the existing danger × surface policy, without a separate viewer takeover path.
-- **Guarded by design** — every action carries a danger × surface approval matrix; irreversible actions wait for explicit confirmation.
+- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
+- **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
+- **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
+- **Optional local web search** — `nomi_local_websearch` gives models without provider-native search a separate, selectable public-web search tool. It runs in an isolated background browser and never reads conversation tabs or sign-in state.
+- **Optional system-browser connection** — `nomi_system_browser` is a separate selectable capability for an already-running, signed-in Chrome on Windows. The user explicitly authorizes tabs for the conversation; NomiFun does not import profiles or move credentials into the embedded browser.
+- **No hidden interactive fallback** — isolated headless Chromium is reserved for local search and content rendering. Interactive Browser work always targets the native conversation surface, and failure to create that surface is reported instead of silently switching engines.
 
 > ℹ️ Computer/browser control ship with the **desktop app**. The headless web/server host omits them by design.
 
@@ -396,27 +392,23 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 - **Graceful multimodal fallback** — if a selected provider/model rejects image input, NomiFun strips the images, retries in the same conversation, and leaves an inline notice instead of killing the session.
 - **Per-model context tuning** — override context-window limits per model when an upstream platform reports bad defaults or hides them, improving routing and long-context budgeting.
 
-### 🔌 Multi-model control plane — providers, capabilities, and Free Models
+### 🔌 Multi-model control plane — providers, capabilities, and routing
 
 NomiFun separates provider credentials from model records and capabilities. Extend the
 catalog with native providers, compatible protocols, custom base URLs, or local and
-self-hosted endpoints, then assign models to chat, realtime, ASR, TTS, vision,
-image generation/editing, video generation, embedding, and reranking. Routing is
+self-hosted endpoints. Enter a model id directly, then configure independent
+routes when realtime, ASR, TTS, image generation/editing, video generation,
+embedding, or reranking needs a separate interface. Chat input and technical
+features require no capability checkboxes. Routing is
 task-aware, supports per-model context and output limits, and can fail over without
 pretending that every provider uses the same URL, protocol, or auth.
 
-The important boundary is explicit capability, not a fixed vendor list: a model is
-usable for a task only when its configured provider and protocol declare that task.
+Model suggestions do not restrict manual entry. Independent tasks use their
+saved provider and protocol routes; Chat features depend on protocol support and
+actual provider responses rather than omitted capability tags.
 Creative Studio carries the exact `{ provider, model, task }` identity into every
 media operation, so a same-named model from another provider is never substituted
 silently.
-
-**NomiFun Free Models** are available through a built-in managed provider. You
-can enable it, refresh its catalog, run a health check, and activate an available
-model without first creating a separate provider entry or supplying your own API
-key. These are online third-party inference services: availability, limits, and
-data-handling terms can change, so review the in-product notice before sending
-sensitive content.
 
 For your own providers, pick by region, price, quota, capability, and data policy,
 then add the credentials on **Models & Agents**. The following services are
@@ -442,7 +434,7 @@ remain under each provider's control.
 
 > Product guide: [In-app terminals on NomiFun Portal](https://www.nomifun.com/docs/guides/terminal/)
 
-Run agent CLIs inside in-app PTY sessions (or the standalone `nomi` CLI). This is how **Claude Code, Codex, and Gemini CLI** are used with NomiFun: a real pseudo-terminal, the CLI's own auth and OAuth, its own approval prompts, nothing re-implemented. NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity. AutoWork can drive such a terminal turn by turn.
+Run agent CLIs inside in-app PTY sessions. This is how **Claude Code, Codex, and Gemini CLI** are used with NomiFun: a real pseudo-terminal, the CLI's own auth and OAuth, its own approval prompts, nothing re-implemented. NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity. AutoWork can drive such a terminal turn by turn.
 
 ### 📱 NomiFun Mobile — direct to your Desktop
 
@@ -498,11 +490,11 @@ apps/
   desktop/      Tauri 2 shell and desktop-only commands
   web/          standalone web host for API + SPA
 crates/
-  agent/        15 nomi-* crates: engine, providers, tools, MCP, skills, memory,
-                browser/computer use, and the standalone nomi CLI
-  backend/      29 nomifun-* crates: app composition, auth, database, sessions,
-                MCP, knowledge, requirements, terminal, companion, gateway, etc.
-  shared/       2 cross-layer crates: nomifun-net and nomi-redact
+  agent/        nomi-* agent engine crates: providers, tools, MCP, skills,
+                memory, browser/computer use
+  backend/      nomifun-* service crates: app composition, auth, database,
+                sessions, MCP, knowledge, requirements, terminal, etc.
+  shared/       cross-layer crates shared by agent and backend
 ui/             React 19 + Vite SPA shared by desktop and web
 docs/           technical docs, user/operator guides, architecture notes
 packaging/      Linux deployment support for the web host
@@ -637,25 +629,51 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 
 - **arch** — zero or more architectures. Omit to use the per-OS default below.
 - **`--signed`** — sign (and, on macOS, notarize). Requires local signing config; see each OS.
-- **`-- …`** — everything after `--` is forwarded verbatim to `tauri build`
-  (e.g. `-- --bundles nsis`). `build:mac` and `build:win` also forward unknown `--xxx`
-  options directly. For updater builds, layer on the committed overlay as a **file path**:
+- **`-- …`** — forwards supported arguments to `tauri build`
+  (e.g. Windows `-- --bundles nsis`). macOS product packaging fixes the release
+  profile, arm64 target and complete App/DMG output; flags that bypass this contract
+  are rejected. For updater builds, layer on the committed overlay as a **file path**:
   `bun run build:<os> --config apps/desktop/tauri.updater.conf.json` — pass the file, not
   inline JSON, because Windows PowerShell 5.1 strips the quotes from `--config '{...}'`.
 
-**macOS — `build:mac`** (produces `.dmg`; default arch: `universal`)
+**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64)
 
 | Goal | Command |
 | --- | --- |
-| Universal (Intel + Apple Silicon, one fat package) | `bun run build:mac` |
-| Universal, signed + notarized | `bun run build:mac --signed` |
-| Apple Silicon only | `bun run build:mac arm` |
-| Intel only | `bun run build:mac intel` |
-| Intel only, signed + notarized | `bun run build:mac --signed intel` |
-| All three separately (ARM + Intel + Universal) | `bun run build:mac arm intel universal` |
+| Apple Silicon local test package | `bun run build:mac` or `bun run build` |
+| Developer ID signature + configured notarization | `bun run build:mac --signed` or `bun run build:signed` |
+| Complete signed updater archive | `bun run build:updater` |
+| Developer ID package and updater archive | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| Complete development `.app` with embedded Browser | `bun run build:fast` |
 
-Arch aliases: `arm`/`aarch64`/`silicon`, `intel`/`x64`/`x86_64`, `universal`/`all-arch`.
-Signing reads `apps/desktop/signing/.env.signing` (gitignored); missing → it errors with setup hints.
+The pinned CEF runtime supports arm64; Intel and Universal builds are rejected.
+Arch aliases are `arm`/`aarch64`/`silicon`. All macOS product commands use the same
+CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
+are generated from the final App after its CEF components have been installed and
+signed; updater signing also requires the configured Tauri updater private key.
+
+`bun run dev` launches a complete development `.app` and waits for native browser
+cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
+and prints its path. A bare Cargo binary lacks the embedded browser bundle.
+
+For a stable installed development signing identity, explicitly set
+`NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` for
+`bun run dev` or `bun run build:fast`. The same identity signs the main App, CEF
+framework and all Helpers, including incremental rebuilds; bundle caches are
+separate for each configured identity. The scripts do not select or create a
+certificate. With no setting, builds use ad-hoc signing and print one startup
+notice that rebuilding may require macOS Keychain authorization again.
+
+The pinned CEF currently uses the default **Chromium Safe Storage** Keychain
+item. macOS controls explicit access to it, separately from Agent Browser grants.
+A stable signing identity and bundle identifier let Keychain recognize updates;
+they do not replace the user's initial authorization. See the
+[macOS signing notes](apps/desktop/signing/README.md) for this SDK limitation.
+
+Developer ID signing reads `apps/desktop/signing/.env.signing` (gitignored) and
+requires an installed `APPLE_SIGNING_IDENTITY`. Configured notarization applies
+to the final App and DMG. `release:mac` publishes arm64 artifacts and reads only
+that build target when generating its updater entry.
 
 **Windows — `build:win`** (produces a single NSIS `.exe`; default arch: the host's, usually `x64`)
 
@@ -683,8 +701,8 @@ Arch aliases: `x64`/`x86_64`, `arm64`/`aarch64`/`arm`. Linux has no signing/nota
 ⚠️ Cross-arch (e.g. building arm64 on an x64 host) needs the target's sysroot/toolchain and often
 fails on the webkit2gtk link — build on the target architecture's machine/container instead.
 
-> `bun run build` stays as the simple "just build for whatever OS I'm on" shortcut; the
-> `build:<os>` commands above add explicit arch selection, signing, and `dist/desktop/` collection.
+> `bun run build` builds for the current OS. On macOS it uses the complete arm64
+> CEF packaging pipeline; Windows and Linux retain their existing Tauri build path.
 
 <details>
 <summary><b>Full script catalog</b></summary>
@@ -699,15 +717,16 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
+| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
+| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 打桌面包并签名+公证（仅 macOS） |
-| `bun run build:updater` | 打桌面包并产出自更新 .sig 制品 |
+| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
+| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 Unified Plugin 边界检查 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:cloud` | 管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
@@ -720,23 +739,41 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
-| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
+| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
+| `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
+| `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
+| `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
+| `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
+| `bun run test:voice-smoke-runner` | 测试有界Mobile语音无头观测脚本，不作为真机体验证据 |
+| `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
+| `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
+| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
+| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
-| `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
+| `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
+| `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |
+| `bun run check:uarc-boundary` | 校验单一Runtime、canonical Agent Store、Module/Resource边界；退役生产引用预算为零 |
+| `bun run check:nomi-core-live-provider` | Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态检查：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check:agent-reliability` | 读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过 |
+| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/Plugin边界及脚本登记检查 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
-| `bun run check:dead-css` | 死 CSS 工具类棘轮：拦住新增的 {text,bg,border}-[rgb(var(--ramp-N))] / border-border-N / border-b-base / border-b-light（存量记在脚本 BASELINE，只许变少） |
+| `bun run check:dead-css` | 死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败） |
+| `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
+| `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
+| `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
+| `bun run check:voice-boundary` | 校验可选Mobile语音的独立合同、核心port和供应商wire隔离 |
+| `bun run check:voice-contracts` | 校验独立Voice JSON schema与同级Mobile生成合同，不改主Agent合同 |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
+| `bun run gen:voice-contracts` | 生成独立Voice JSON schema与同级Mobile TypeScript合同 |
 | **维护 / 工具** | |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
-| `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
 | `bun run help` | 打印脚本目录（--check 校验登记 / --readme 生成 README 表） |
 
@@ -826,7 +863,7 @@ preferred channel.
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/nomifun-wecom-group.png" alt="NomiFun WeCom group QR" width="220"><br/><sub><b>NomiFun WeCom group / NomiFun 企业微信群</b></sub></td>
+    <td align="center"><img src="docs/images/contact/wechat-group-qr.png" alt="NomiFun WeChat group 0 QR code" width="220"><br/><sub><b>NomiFun WeChat group 0 / NomiFun 微信交流群 0</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ group QR" width="220"><br/><sub><b>QQ group / QQ 群</b></sub></td>
   </tr>
 </table>

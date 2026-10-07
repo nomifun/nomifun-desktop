@@ -50,7 +50,7 @@
 
 ---
 
-**NomiFun** 满足你对 AI 工作站的全部想象 —— 而且一切由你做主。一套 React 前端 + 一套 Rust 后端，为你带来会成长的桌面伙伴、无人值守的自动化平台、统一知识库、原生的 computer / browser use，以及任何智能体都能驱动的开放能力总线。无需云账号、无遥测、无订阅。除了**你自己配置**的大模型调用，你的数据绝不离开本机。
+**NomiFun** 满足你对 AI 工作站的全部想象 —— 而且一切由你做主。一套 React 前端 + 一套 Rust 后端，为你带来会成长的桌面伙伴、无人值守的自动化平台、统一知识库、原生的 computer / browser use，以及任何智能体都能驱动的开放能力总线。无需 NomiFun 云账号、无遥测、无订阅。工作空间数据保存在本机；发往你自己配置的模型服务的请求（包括模型调用、模型目录和额度查询）由你选择的服务处理。
 
 > 产品名是 **NomiFun**；小写 `nomifun` 仅用于代码标识符、crate 名、环境变量与仓库路径。
 
@@ -116,10 +116,10 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 在 NomiFun 里，数据安全不是一个开关，而是架构本身。
 
-- **数据全在本地。** NomiFun 绝不主动向外发送任何数据。**唯一**的出站网络请求，是你自己明确配置、调用所选模型厂商的大模型请求；除此之外，没有任何第三方服务的网络对接。
+- **数据全在本地。** NomiFun 绝不主动向外发送任何数据。发往你自己配置的模型服务的请求（包括模型调用、模型目录和额度查询）由你选择的服务处理。其他可主动使用的联网功能见 [FAQ](docs/reference/faq.md#is-nomifun-really-local-only)。
 - **关注数据安全的个体与企业都可放心使用。** 代码**完全开源、接受审计**。
 - **为了这个承诺，我们砍掉了不少功能。** 为了保障你的数据安全，我们刻意舍弃了很多先进、有趣的功能设计 —— 一切都是为了让用户、也让开发者更放心。
-- **无广告、无商业化、无会员制。** 我们承诺：永远不对本项目的任何功能收费。唯一花钱的地方是模型供应商的 token，这是我们无法替你解决的客观成本。（如果你在寻找 / 搭建模型上遇到困难，欢迎[联系我们](#-联系我们--社区)，我们很乐意帮忙搭建统一的模型网关。）
+- 无广告、无会员制，官方不做任何商业化运营；永远不对本项目的任何功能收费，官方也不运营任何付费服务；唯一的花费是模型 token，由你直接支付给自己选择的模型服务方。
 
 部署威胁模型与漏洞披露策略见 [`SECURITY.md`](SECURITY.md)。
 
@@ -144,18 +144,18 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 </p>
 
 <p>
-  <img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊画布编辑器" width="100%">
-  <br/><sub><b>创意工坊 · 持久化 Canvas、独立媒体工作台、可复用提示词与素材、模板和受限 Director</b></sub>
+  <img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="NomiFun 创意工坊 Canvas 库" width="100%">
+  <br/><sub><b>创意工坊 · 持久化 Canvas、独立媒体工作台、可复用提示词与素材和模板</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 按任务路由与免费模型</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 供应商、能力与按任务路由</b></sub></td>
     <td width="50%"><img src="docs/images/readme/zh/companions.png" alt="NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴 · 人格、记忆、模型与远程控制</b></sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
-    <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、工作台、素材库、模板、Assistant、技能、Director 与伙伴协同流程。</sub></td>
+    <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、工作台、素材库、模板、Assistant、技能与伙伴协同流程。</sub></td>
   </tr>
 </table>
 
@@ -169,13 +169,12 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 创意工坊是 NomiFun Desktop 中新加入的专注创作面，不是一张宣传图。
 下面的编号画廊按真实产品入口展开：持久化 Canvas、独立图像与视频工作台、
-Prompt Center、My Assets、私有模板与 AI Create、多图系列、Director、
+Prompt Center、My Assets、私有模板与 AI Create、多图系列、
 Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原生桌面伙伴。
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/02-canvas-editor-rich.png" alt="创意工坊丰富画布编辑器"><br/><sub><b>Canvas 编辑器</b> · 无限文档、媒体节点、素材库、Director 面板与 Assistant</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/creative-studio/zh-CN/03-image-workbench.png" alt="创意工坊图像工作台"><br/><sub><b>图像工作台</b> · 独立 T2I/I2I、精确图像任务与真实素材参考</sub></td>
@@ -190,18 +189,13 @@ Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原�
     <td width="50%"><img src="docs/images/creative-studio/zh-CN/08-template-editor.png" alt="创意工坊 AI Create 模板编辑器"><br/><sub><b>AI Create + 模板编辑器</b> · 审阅一份受限草稿，编辑后显式保存再复用</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/09-director-timeline.png" alt="创意工坊 Director 时间线"><br/><sub><b>Director 时间线</b> · 绑定 Canvas 的受限 3D 场景、镜头、关键帧、捕获与引用</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/10-director-stage.png" alt="创意工坊 Director 3D 舞台"><br/><sub><b>Director 舞台</b> · 绑定到 Canvas 的 3D 场景与机位视图</sub></td>
-  </tr>
-  <tr>
     <td width="50%"><img src="docs/images/creative-studio/zh-CN/11-companion-settings.png" alt="NomiFun 桌面伙伴工作区"><br/><sub><b>伙伴工作区</b> · 伙伴形象、人格、模型、记忆、Skills 与“显示在桌面”控制</sub></td>
     <td width="50%"><img src="docs/images/creative-studio/zh-CN/12-companion-workspace.png" alt="创作时显示的 NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴协同</b> · 原生伙伴窗口可以在创作时保持可用</sub></td>
   </tr>
 </table>
 
-编号路径是 Creative Studio 画廊的稳定 README 约定：`01`–`12`。Canvas 编辑器截图
-同时展示 Canvas Assistant 与明确选择的 Creative Studio 技能；上方 Skills Hub
-截图展示这些技能作为可复用能力包。所有截图都应来自正在运行的产品，不应是
+保留的编号路径是 Creative Studio 画廊的稳定 README 约定：`01`、`03`–`08` 与 `11`–`12`。上方
+Skills Hub 截图展示 Creative Studio 技能作为可复用能力包。所有截图都应来自正在运行的产品，不应是
 mockup 或凭空扩展的能力。完整来源与采集说明见
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md)。
 
@@ -220,9 +214,8 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 提供持久化 Canvas、独立 Image/Video Workbench、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能、受限 Director，以及可选的桌面伙伴协同。 |
+| **创意工坊** | 提供持久化 Canvas、独立 Image/Video Workbench、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能，以及可选的桌面伙伴协同。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
-| **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
 
 ### 🐾 桌面伙伴 —— 越用越懂你
@@ -233,7 +226,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 
 - **专属形象。** 上传自定义伙伴形象（DIY），或从与具体伙伴解耦的独立**形象库**中挑选。
 - **一家人，而非一个脑。** 运行多个伙伴并同时使用，每一个都是完整的独立个体：**各自**的聊天模型、人格、记忆和领域知识库。每条记忆都只属于一个伙伴——你对工作伙伴说的话，不会漏进你在家里聊天的那一个。
-- **聊天入口回到主会话。** 伙伴聊天现在直接进入主 **会话** 体系，并在侧边栏拥有独立的「桌面伙伴」分组；`/nomi` 则专注于伙伴管理。
+- **伙伴有自己的空间。** 聊天、身份与管理统一归入一级 **桌面伙伴**；工作「会话」只保留项目与任务。原生桌面快捷窗可以随时切换伙伴并快速回复，无需先打开完整工作区。
 - **它在学你（默认开启，首启动一次性确认）。** 后台 Learner 把你的使用蒸馏为长期记忆；确定性的进化引擎从你反复出现的多步工具序列中挖掘出 **skill 草稿**，提交给你审阅。记忆**完全可见、可编辑**。
 - **自己写 skill。** 伙伴从真实工作里自动总结、生成 skill 并与你商议，确认后才留下。
 - **不只是伙伴，更是超级网关。** 每个伙伴都是完整、独立的个体，可连接多个 IM 渠道。只要有网络和社交平台，随时随地一条消息，就能指挥伙伴帮你操作电脑。每个伙伴都能完整驱动桌面的系统能力。
@@ -261,7 +254,7 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 > 技术契约：[`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md)
 
 创意工坊不是一次性的白板，而是一套持久化的创意文档系统。无限 Canvas 支持文字、
-图片、视频、音频、全景、配置、Director 与分组节点。媒体节点负责可见的创作表面；
+图片、视频、音频、时间线、配置与分组节点。媒体节点负责可见的创作表面；
 配置节点保存精确的 provider/model/task、类型化参数、有序输入、任务状态和结果，确保
 每次生成都可审计。**Canvas Assistant** 只提出经过严格校验的图结构操作，失败时拒绝
 执行，并等待用户点击**应用到画布**；它不会在后台静默修改文档或偷偷启动生成。
@@ -274,14 +267,13 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 
 **Template Studio** 把提示词、变量、精确模型绑定和输出计划整理成私有模板。**AI Create**
 只生成一份严格草稿供审阅；点击应用只打开内存中的编辑草稿，只有显式**保存**才会持久化。
-多图系列可在生成前要求人工复核。**Director** 是绑定到 Canvas 的受边界约束的 3D 场景与
-时间线界面，支持镜头、关键帧、捕获和 Canvas 引用，但不冒充完整 DCC 或视频编辑器。
+多图系列可在生成前要求人工复核。
 
 每项操作都携带精确启用的 `{ providerId, model, task }`：Canvas Assistant 与模板草稿使用
 `chat`，T2I/I2I 使用 `image_generation`/`image_edit`，T2V/I2V 使用 `video_generation`，
 TTS 使用 `speech_synthesis`。Canvas 写入使用基于 revision 的 CAS；冲突会停止自动保存而
-不会覆盖新版本，任务历史在重载后只对账同一个 owner。Canvas ZIP v2 导出经过校验的文档、
-引用素材闭包和 Director sidecar，同时继续兼容 v1 reader。独立工作台历史只按
+不会覆盖新版本，任务历史在重载后只对账同一个 owner。Canvas ZIP v2 导出经过校验的文档
+与引用素材闭包，同时继续兼容 v1 reader。独立工作台历史只按
 `workbenchKind` 归属，不会暗中绑定 Canvas。
 
 ### 🧠 多 Agent 执行集群 —— 规划、调度与监督
@@ -325,13 +317,13 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **Browser use** —— 由应用主进程中的 `BrowserSessionHub` 统一管理 Chromium Host 与可寻址 Browser Lane；内置 Agent、Gateway 和并行 AgentExecution attempt 都进入同一平台，不再各自启动私有浏览器。
-- **只做浏览器状态与生命周期管理。** 右侧 **Browser** 页面展示会话、runtime、Lane、Tab、URL、身份模式、容量、队列位置、压力、资源估算和错误；用户可对 running Primary Lane 显式“前台打开”，但页面不嵌入预览，也不提供页面输入或接管控件。
-- **共享实时登录身份。** 普通交互式 Lane 使用 NomiFun 管理的稳定 Primary profile，并实时共享登录状态；公开抓取使用不携带 Primary cookies/站点存储的匿名身份，显式隔离任务使用独立身份。NomiFun 不读取用户真实 Chrome / Edge profile。
-- **并发有界且可观察。** 不同 Lane 可真正并行，同一 Lane 严格串行；容量不足时显示队列位置、压力原因和建议并发，而不是用不可见的全局锁假装浏览器已就绪。
-- **默认静默后台，按需前台打开。** 普通 Primary Agent 任务使用真实、headful 的受管 Chromium，但默认以最小化窗口在后台启动，不自动弹窗或抢焦点。对 running Primary Lane 执行“前台打开”会恢复同一个窗口和活动 target；显式登录流程则会自动前台打开。NomiFun 继续权威管理用户关闭、owner 撤销和受管进程树清理。
-- **仅 Agent 操作页面。** 页面导航与输入只属于执行中的 Agent；浏览器高风险操作仍遵循既有 danger × surface 审批策略，但不再存在独立的查看器接管路径。
-- **生而受控** —— 每个动作都带 danger × surface 审批矩阵，不可逆操作须显式确认。
+- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 Apple Silicon macOS 嵌入原生 CEF，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
+- **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
+- **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
+- **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
+- **可选的本地网页搜索** —— `nomi_local_websearch` 为不支持厂商原生搜索的模型提供独立、可选择的公开网页检索工具。它使用隔离的后台浏览器，不读取会话标签页或登录状态。
+- **可选的系统浏览器连接** —— `nomi_system_browser` 是另一项独立能力，用于连接 Windows 上已经运行并登录的 Chrome。用户按会话明确授权标签页；NomiFun 不导入 Profile，也不把凭据搬进内嵌浏览器。
+- **不做隐藏的交互降级** —— 隔离 headless Chromium 只用于本地搜索与内容渲染。交互式 Browser 始终使用会话内原生 Surface；创建失败时直接报告，不会悄悄切换执行引擎。
 
 > ℹ️ computer/browser 控制随**桌面应用**提供；无头的 web/server 宿主按设计不含。
 
@@ -356,21 +348,19 @@ NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开
 - **多模态失败会优雅降级。** 如果当前模型/供应商不接受图片输入，NomiFun 会自动剔除图片、在同一会话里重试，并给出一条可见提示，而不是直接把整段会话打断。
 - **每模型上下文窗口可单独校准。** 当上游平台默认值不准、没报全，或你想精细控制路由与长上下文预算时，可以按模型单独覆写上下文窗口上限。
 
-### 🔌 多模型控制面 —— 供应商、能力与免费模型
+### 🔌 多模型控制面 —— 供应商、能力与路由
 
 NomiFun 把供应商凭据、模型记录与能力分开管理。你可以通过原生 provider、兼容协议、
-自定义 base URL，以及本地或自托管 endpoint 持续扩展目录，再把模型分别用于聊天、
-实时交互、ASR、TTS、视觉、图片生成/编辑、视频生成、Embedding 与 Rerank。路由会
+自定义 base URL，以及本地或自托管 endpoint 持续扩展目录。直接填写模型 ID，再为
+实时交互、ASR、TTS、图片生成/编辑、视频生成、Embedding 与 Rerank 按需配置独立
+调用接口；Chat 输入与技术能力无需用户勾选启用。路由会
 感知任务类型，支持逐模型上下文/输出限制与故障切换，也不会假设不同供应商共用同一套
 URL、协议或鉴权方式。
 
-重要边界是显式能力，而不是固定厂商清单：只有所配置的 provider 与协议声明支持某项
-任务时，模型才会被用于该任务。创意工坊会把精确的 `{ provider, model, task }` 身份
+模型建议清单不限制手工录入。独立任务使用已保存的 provider 与协议接口；Chat 能力
+由协议实现和实际 provider 响应决定，不会因缺少能力标签而关闭。创意工坊会把精确的
+`{ provider, model, task }` 身份
 带入每次媒体操作，不会静默用另一个 provider 的同名模型替换。
-
-**NomiFun 免费模型**通过内置托管供应商提供。无需先新建供应商或填写自己的 API Key，
-即可启用服务、刷新模型目录、执行健康检查并激活可用模型，真正做到开箱即用。它们属于
-在线第三方推理服务，可用性、限额和数据处理方式可能变化；发送敏感内容前请阅读产品内提示。
 
 对于自有供应商，可以按地区、价格、额度、能力和数据政策选择，并在 **模型 & Agent**
 页面填写凭据。下列均为第三方服务，费用、可用地区、速率限制与数据处理规则由各家控制。
@@ -394,7 +384,7 @@ URL、协议或鉴权方式。
 
 > 产品使用文档：[NomiFun Portal 应用内终端指南](https://www.nomifun.com/zh/docs/guides/terminal/)
 
-在应用内 PTY 会话里运行各种 agent CLI（或独立的 `nomi` CLI）。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
+在应用内 PTY 会话里运行各种 agent CLI。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
 
 ### 📱 NomiFun Mobile —— 直连你的 Desktop
 
@@ -446,11 +436,11 @@ apps/
   desktop/      Tauri 2 外壳与桌面专属命令
   web/          API + SPA 的独立 web 宿主
 crates/
-  agent/        15 个 nomi-* crate：引擎、供应商、工具、MCP、skills、记忆、
-                browser/computer use，以及独立 nomi CLI
-  backend/      29 个 nomifun-* crate：应用组装、鉴权、数据库、会话、
-                MCP、知识库、需求、终端、伙伴、网关等
-  shared/       2 个跨层 crate：nomifun-net 与 nomi-redact
+  agent/        nomi-* agent 引擎 crate：供应商、工具、MCP、skills、记忆、
+                browser/computer use
+  backend/      nomifun-* 服务 crate：应用组装、鉴权、数据库、会话、
+                MCP、知识库、需求、终端等
+  shared/       agent 与 backend 共用的跨层 crate
 ui/             桌面与 web 共用的 React 19 + Vite SPA
 docs/           技术文档、用户/运维指南、架构说明
 packaging/      web 宿主的 Linux 部署支持
@@ -568,6 +558,36 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 
 优先使用脚本入口而非裸 `cargo`/`vite` —— 它们附带了构建目录清理与一致性检查。第一次接触代码库？请读 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 与 [`docs/contributing/development.zh.md`](docs/contributing/development.zh.md)。
 
+### macOS 构建与发行
+
+内置浏览器使用固定的 Apple Silicon arm64 CEF 运行库，当前明确拒绝 Intel 与 Universal 包。
+`build`、`build:mac`、`build:signed` 和 `build:updater` 在 macOS 上使用同一套完整装配流程：
+先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
+更新包还需要独立的 Tauri updater 签名密钥。
+
+| 目标 | 命令 |
+| --- | --- |
+| 本地 arm64 测试安装包 | `bun run build` 或 `bun run build:mac` |
+| Developer ID 签名与已配置的公证 | `bun run build:signed` 或 `bun run build:mac --signed` |
+| 完整 updater 包与 `.sig` | `bun run build:updater` |
+| Developer ID 安装包与 updater 包 | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| 可直接运行、包含内置浏览器的开发 App | `bun run build:fast` |
+
+`bun run dev` 从完整开发 `.app` 启动，并在 Rust 热重载前等待原生浏览器完成退出清理；
+`build:fast` 也会生成完整开发 `.app` 并输出路径。裸 Cargo 二进制没有配套浏览器 App Bundle。
+开发时可显式设置 `NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"`，
+再运行 `bun run dev` 或 `bun run build:fast`。主 App、CEF Framework、全部 Helper 和增量重建
+都使用这个已安装的身份，缓存按签名身份隔离。脚本不会自动选择或创建证书；未配置时保留 ad-hoc
+签名，并在启动时提示一次“重建后可能需 macOS 钥匙串授权”。
+
+当前固定 CEF 使用默认 **Chromium Safe Storage** 钥匙串项目。macOS 的明确访问授权与 Agent Browser
+能力授权分别管理；固定签名身份和 Bundle ID 可让系统识别后续更新，但不能替代用户首次授权。
+SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md)。
+
+生产入口固定 release profile、arm64 target 和完整 App/DMG，不接受绕过装配的 `--debug`、`--no-bundle` 等参数。
+签名读取 gitignored 的 `apps/desktop/signing/.env.signing`，要求已安装的 `APPLE_SIGNING_IDENTITY`；
+最终 App 和 DMG 才进行已配置的公证。`release:mac` 发布 arm64 产物，并仅扫描本次 arm64 target 生成更新条目。
+
 <details>
 <summary><b>完整脚本目录</b></summary>
 
@@ -581,15 +601,16 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
+| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
+| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 打桌面包并签名+公证（仅 macOS） |
-| `bun run build:updater` | 打桌面包并产出自更新 .sig 制品 |
+| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
+| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 Unified Plugin 边界检查 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:cloud` | 管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
@@ -602,23 +623,41 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
-| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
+| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
+| `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
+| `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
+| `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
+| `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
+| `bun run test:voice-smoke-runner` | 测试有界Mobile语音无头观测脚本，不作为真机体验证据 |
+| `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
+| `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
+| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
+| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
-| `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
+| `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
+| `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |
+| `bun run check:uarc-boundary` | 校验单一Runtime、canonical Agent Store、Module/Resource边界；退役生产引用预算为零 |
+| `bun run check:nomi-core-live-provider` | Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态检查：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check:agent-reliability` | 读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过 |
+| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/Plugin边界及脚本登记检查 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
-| `bun run check:dead-css` | 死 CSS 工具类棘轮：拦住新增的 {text,bg,border}-[rgb(var(--ramp-N))] / border-border-N / border-b-base / border-b-light（存量记在脚本 BASELINE，只许变少） |
+| `bun run check:dead-css` | 死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败） |
+| `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
+| `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
+| `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
+| `bun run check:voice-boundary` | 校验可选Mobile语音的独立合同、核心port和供应商wire隔离 |
+| `bun run check:voice-contracts` | 校验独立Voice JSON schema与同级Mobile生成合同，不改主Agent合同 |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
+| `bun run gen:voice-contracts` | 生成独立Voice JSON schema与同级Mobile TypeScript合同 |
 | **维护 / 工具** | |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
-| `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
 | `bun run help` | 打印脚本目录（--check 校验登记 / --readme 生成 README 表） |
 
@@ -708,7 +747,7 @@ GitHub Issues。
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/nomifun-wecom-group.png" alt="NomiFun 企业微信群二维码" width="220"><br/><sub><b>NomiFun 企业微信群</b></sub></td>
+    <td align="center"><img src="docs/images/contact/wechat-group-qr.png" alt="NomiFun 微信交流群 0 二维码" width="220"><br/><sub><b>NomiFun 微信交流群 0</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ 群二维码" width="220"><br/><sub><b>QQ 群</b></sub></td>
   </tr>
 </table>

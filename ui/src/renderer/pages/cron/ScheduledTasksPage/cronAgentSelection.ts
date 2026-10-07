@@ -5,7 +5,7 @@
  */
 
 import type { ICronJob } from '@/common/adapter/ipcBridge';
-import type { PresetReference } from '@/common/types/agent/presetTypes';
+import type { AgentPresetId } from '@/common/types/agentPlatform';
 import type { AgentId } from '@/common/types/ids';
 import { resolveLocaleKey } from '@/common/utils';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
@@ -17,7 +17,7 @@ const LEGACY_PREFIX = 'legacy:';
 /** Select values are UI-only identities. Persisted cron configuration uses the parsed IDs. */
 export const getCronAgentOptionValue = (agentId: AgentId): string => `${AGENT_PREFIX}${agentId}`;
 
-export const getCronPresetOptionValue = (presetId: PresetReference): string => `${PRESET_PREFIX}${presetId}`;
+export const getCronPresetOptionValue = (presetId: AgentPresetId): string => `${PRESET_PREFIX}${presetId}`;
 
 const getCronLegacyOptionValue = (identity: string): string => `${LEGACY_PREFIX}${identity}`;
 

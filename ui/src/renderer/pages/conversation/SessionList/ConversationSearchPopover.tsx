@@ -8,9 +8,9 @@ import { ipcBridge } from '@/common';
 import type { IMessageSearchItem } from '@/common/types/conversationSearch';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
-import { blockMobileInputFocus, blurActiveElement } from '@/renderer/utils/ui/focus';
+import { blurActiveElement } from '@/renderer/utils/ui/focus';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { Empty, Spin, Typography } from '@arco-design/web-react';
 import { Close, CloseSmall, MessageOne, Search } from '@icon-park/react';
@@ -101,7 +101,7 @@ interface ConversationSearchPopoverProps {
 }
 
 const ConversationAgentMark: React.FC<{ conversation: IMessageSearchItem['conversation'] }> = ({ conversation }) => {
-  const { info: presetInfo } = usePresetInfo(conversation);
+  const { info: presetInfo } = useAgentInfo(conversation);
 
   if (presetInfo) {
     if (presetInfo.isEmoji) {
@@ -271,7 +271,6 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
   // targetMessageId 仅在全文检索命中时存在；按编号命中只跳会话本身，无消息可定位。
   const handleConversationNavigate = useCallback(
     async (conversationId: ConversationId, targetMessageId?: MessageId) => {
-      blockMobileInputFocus();
       blurActiveElement();
 
       flushSync(() => {

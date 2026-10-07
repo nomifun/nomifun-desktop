@@ -26,6 +26,8 @@ use helpers::{
 /// Git-based workspace snapshot service.
 pub struct SnapshotService {
     workspaces: DashMap<String, WorkspaceState>,
+    lifecycle: tokio::sync::Mutex<()>,
+    owner_namespace: Option<String>,
 }
 
 impl Default for SnapshotService {
@@ -38,7 +40,34 @@ impl SnapshotService {
     pub fn new() -> Self {
         Self {
             workspaces: DashMap::new(),
+            lifecycle: tokio::sync::Mutex::new(()),
+            owner_namespace: None,
         }
+    }
+
+    /// Independent owner namespace for temporary baseline storage. The value
+    /// is hashed, never joined as a native path. Callers should use a unique
+    /// lifetime identity when independent Sessions share one workspace.
+    pub fn for_owner(owner_namespace: impl Into<String>) -> Self {
+        Self { owner_namespace: Some(owner_namespace.into()), ..Self::new() }
+    }
+
+    /// Inspect the current snapshot information for an initialized workspace.
+    ///
+    /// This is deliberately read-only: it only clones the existing tracked
+    /// state and opens its backing repository to derive the current branch.
+    /// Unlike [`crate::traits::ISnapshotService::init`], it never initializes
+    /// a workspace or changes its reference count. Uninitialized workspaces
+    /// fail closed with `AppError::BadRequest`.
+    pub async fn info(&self, workspace: &str) -> Result<SnapshotInfo, AppError> {
+        let state = get_state(&self.workspaces, workspace)?;
+
+        tokio::task::spawn_blocking(move || {
+            let repo = open_repo(&state)?;
+            Ok(build_info(state.mode, &repo))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
     }
 
     /// Number of currently-tracked workspaces. Test/observability helper.
@@ -99,6 +128,68 @@ impl SnapshotService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature};
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use crate::traits::ISnapshotService;
+
+    fn init_empty_repo(path: &Path) {
+        let repo = Repository::init(path).expect("init repo");
+        let mut index = repo.index().expect("index");
+        let tree_oid = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_oid).expect("find tree");
+        let signature = Signature::now("test", "test@example.com").expect("signature");
+        repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .expect("initial commit");
+    }
+
+    #[tokio::test]
+    async fn info_returns_tracked_workspace_without_changing_refcount() {
+        let tmp = tempdir().expect("tempdir");
+        init_empty_repo(tmp.path());
+
+        let service = SnapshotService::new();
+        let workspace = tmp.path().to_str().expect("workspace path");
+        service.init(workspace).await.expect("init workspace");
+        assert_eq!(service.workspace_count(), 1);
+
+        let alternate_workspace = format!("{}{}", workspace, std::path::MAIN_SEPARATOR);
+        let info = service.info(&alternate_workspace).await.expect("inspect workspace");
+
+        assert_eq!(info.mode, SnapshotMode::GitRepo);
+        assert!(info.branch.is_some());
+        assert_eq!(
+            service.workspace_count(),
+            1,
+            "read-only inspection must not add a tracked entry"
+        );
+
+        service.dispose(workspace).await.expect("dispose workspace");
+        assert_eq!(
+            service.workspace_count(),
+            0,
+            "inspection must not increment the init reference count"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_rejects_untracked_workspace_without_initializing_it() {
+        let tmp = tempdir().expect("tempdir");
+        let service = SnapshotService::new();
+        let workspace = tmp.path().to_str().expect("workspace path");
+
+        let error = service.info(workspace).await.expect_err("workspace is untracked");
+
+        assert!(matches!(error, AppError::BadRequest(message) if message.contains("Workspace not initialized")));
+        assert_eq!(service.workspace_count(), 0);
+        assert!(!service.is_tracked(workspace));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: get workspace state or return error
 // ---------------------------------------------------------------------------
@@ -128,6 +219,7 @@ fn get_state(workspaces: &DashMap<String, WorkspaceState>, workspace: &str) -> R
 #[async_trait::async_trait]
 impl crate::traits::ISnapshotService for SnapshotService {
     async fn init(&self, workspace: &str) -> Result<SnapshotInfo, AppError> {
+        let _lifecycle = self.lifecycle.lock().await;
         // Canonicalize up front so the DashMap key is the canonical path
         // string. Two raw forms that resolve to the same directory (trailing
         // separator, case differences on Windows, `.`/`..` segments) collapse
@@ -153,6 +245,7 @@ impl crate::traits::ISnapshotService for SnapshotService {
             .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?;
         }
 
+        let owner_namespace = self.owner_namespace.clone();
         let result = tokio::task::spawn_blocking(move || {
             let canonical_str = canonical.to_string_lossy().to_string();
 
@@ -183,7 +276,10 @@ impl crate::traits::ISnapshotService for SnapshotService {
                 return Ok((None, info));
             }
 
-            let temp = temp_repo_path(&canonical_str);
+            let temp = temp_repo_path(&match owner_namespace {
+                Some(owner) => format!("{owner}\0{canonical_str}"),
+                None => canonical_str,
+            });
             init_snapshot_repo(&canonical, &temp)?;
             let mode = SnapshotMode::Snapshot;
             let state = WorkspaceState {
@@ -325,21 +421,14 @@ impl crate::traits::ISnapshotService for SnapshotService {
     }
 
     async fn dispose(&self, workspace: &str) -> Result<(), AppError> {
+        let _lifecycle = self.lifecycle.lock().await;
         let key = workspace_key(workspace);
-
-        // Decrement the refcount under the shard lock. Only the call that
-        // drops it to 0 proceeds to actually remove the entry and clean up.
-        // `remove_if` holds the lock across the predicate, so the decrement and
-        // the remove decision are atomic w.r.t. a concurrent `init` bump.
-        let removed = self.workspaces.remove_if_mut(&key, |_, state| {
-            state.refcount = state.refcount.saturating_sub(1);
-            state.refcount == 0
-        });
-
-        let state = match removed {
-            // refcount hit 0 -> entry removed, proceed to clean up.
-            Some((_, s)) => s,
-            // Either not tracked (idempotent) or refcount still > 0 -> keep it.
+        let state = match self.workspaces.get_mut(&key) {
+            Some(mut state) if state.refcount > 1 => {
+                state.refcount -= 1;
+                return Ok(());
+            }
+            Some(state) => state.clone(),
             None => return Ok(()),
         };
 
@@ -351,13 +440,14 @@ impl crate::traits::ISnapshotService for SnapshotService {
                         AppError::Internal(format!("Failed to remove snapshot dir {}: {}", repo_path.display(), e))
                     })?;
                 }
-                Ok(())
+                Ok::<(), AppError>(())
             })
             .await
-            .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
-        } else {
-            // git-repo mode: nothing to clean up
-            Ok(())
+            .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))??;
         }
+        // Keep the owned path/refcount available if cleanup fails or a caller
+        // is cancelled; a subsequent cleanup must retry the same resource.
+        self.workspaces.remove(&key);
+        Ok(())
     }
 }

@@ -14,7 +14,7 @@ import type { SshHostId } from '@/common/types/ids';
  * known yet (no link has been opened, or the snapshot has not answered).
  *
  * Same three-part shape every durable realtime projection in this renderer uses
- * (see `useTerminalSessions` / `useBrowserInventory`):
+ * (see `useTerminalSessions` and other realtime projections):
  *
  * 1. a snapshot on mount — the socket has no replay buffer, so a link that was
  *    already connected before this component mounted is only learnable by

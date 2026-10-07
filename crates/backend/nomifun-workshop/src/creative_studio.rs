@@ -87,6 +87,9 @@ impl CreativeProjectDocument {
             if !node_ids.insert(node.id.as_str()) {
                 return Err(format!("duplicate node id {:?}", node.id));
             }
+            if let Some(name) = node.name.as_deref() {
+                require_trimmed_string(&format!("nodes[{index}].name"), name, 80)?;
+            }
             require_finite(&format!("nodes[{index}].position.x"), node.position.x)?;
             require_finite(&format!("nodes[{index}].position.y"), node.position.y)?;
             node.size.validate(&format!("nodes[{index}].size"))?;
@@ -170,21 +173,6 @@ impl CreativeProjectDocument {
             {
                 return Err(format!(
                     "connections[{index}] must not connect config to config"
-                ));
-            }
-            if *source_kind == CreativeNodeType::Director {
-                return Err(format!(
-                    "connections[{index}] must not use director as a source"
-                ));
-            }
-            if *target_kind == CreativeNodeType::Director
-                && !matches!(
-                    source_kind,
-                    CreativeNodeType::Image | CreativeNodeType::Panorama
-                )
-            {
-                return Err(format!(
-                    "connections[{index}] director targets require an image or panorama source"
                 ));
             }
             if let Some(handle) = connection.source_handle.as_deref() {
@@ -318,6 +306,8 @@ pub struct CreativeNode {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: CreativeNodeType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub position: CreativePoint,
     pub size: CreativeSize,
     pub group_id: Option<String>,
@@ -331,7 +321,9 @@ pub struct CreativeNode {
 struct CreativeNodeWire {
     id: String,
     #[serde(rename = "type")]
-    node_type: CreativeNodeType,
+    node_type: CreativeNodeWireType,
+    #[serde(default)]
+    name: Option<String>,
     position: CreativePoint,
     size: CreativeSize,
     group_id: Option<String>,
@@ -340,42 +332,90 @@ struct CreativeNodeWire {
     data: Value,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CreativeNodeWireType {
+    Image,
+    Panorama,
+    Text,
+    Config,
+    Video,
+    Audio,
+    Timeline,
+    Group,
+}
+
 impl<'de> Deserialize<'de> for CreativeNode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let wire = CreativeNodeWire::deserialize(deserializer)?;
-        let data = match wire.node_type {
-            CreativeNodeType::Image => CreativeNodeData::Image(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+        let (node_type, data) = match wire.node_type {
+            CreativeNodeWireType::Image => (
+                CreativeNodeType::Image,
+                CreativeNodeData::Image(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Panorama => CreativeNodeData::Panorama(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Panorama => {
+                let retired: RetiredPanoramaNodeData =
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?;
+                retired.validate("data").map_err(D::Error::custom)?;
+                (
+                    CreativeNodeType::Image,
+                    CreativeNodeData::Image(CreativeImageNodeData {
+                        asset_id: retired.asset_id,
+                        caption: String::new(),
+                        alt: String::new(),
+                        fit: CreativeImageFit::Contain,
+                        natural_size: None,
+                        composer: None,
+                    }),
+                )
+            }
+            CreativeNodeWireType::Text => (
+                CreativeNodeType::Text,
+                CreativeNodeData::Text(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Text => CreativeNodeData::Text(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Config => (
+                CreativeNodeType::Config,
+                CreativeNodeData::Config(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Config => CreativeNodeData::Config(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Video => (
+                CreativeNodeType::Video,
+                CreativeNodeData::Video(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Video => CreativeNodeData::Video(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Audio => (
+                CreativeNodeType::Audio,
+                CreativeNodeData::Audio(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Audio => CreativeNodeData::Audio(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Timeline => (
+                CreativeNodeType::Timeline,
+                CreativeNodeData::Timeline(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Director => CreativeNodeData::Director(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
-            ),
-            CreativeNodeType::Group => CreativeNodeData::Group(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Group => (
+                CreativeNodeType::Group,
+                CreativeNodeData::Group(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
         };
 
         Ok(Self {
             id: wire.id,
-            node_type: wire.node_type,
+            node_type,
+            name: wire.name,
             position: wire.position,
             size: wire.size,
             group_id: wire.group_id,
@@ -390,16 +430,15 @@ impl<'de> Deserialize<'de> for CreativeNode {
 #[serde(rename_all = "lowercase")]
 pub enum CreativeNodeType {
     Image,
-    Panorama,
     Text,
     Config,
     Video,
     Audio,
-    Director,
+    Timeline,
     Group,
 }
 
-/// Closed payload union for the eight canonical v1 node kinds. Untagged wire
+/// Closed payload union for the seven canonical v1 node kinds. Untagged wire
 /// encoding keeps the product JSON shape as `type + data`; [`CreativeNode`]'s
 /// custom deserializer selects exactly one strict payload from the sibling
 /// `type`, so kind/data drift is rejected before service validation.
@@ -407,12 +446,11 @@ pub enum CreativeNodeType {
 #[serde(untagged)]
 pub enum CreativeNodeData {
     Image(CreativeImageNodeData),
-    Panorama(CreativePanoramaNodeData),
     Text(CreativeTextNodeData),
     Config(CreativeConfigNodeData),
     Video(CreativeVideoNodeData),
     Audio(CreativeAudioNodeData),
-    Director(CreativeDirectorNodeData),
+    Timeline(CreativeTimelineNodeData),
     Group(CreativeGroupNodeData),
 }
 
@@ -420,12 +458,11 @@ impl CreativeNodeData {
     fn node_type(&self) -> CreativeNodeType {
         match self {
             Self::Image(_) => CreativeNodeType::Image,
-            Self::Panorama(_) => CreativeNodeType::Panorama,
             Self::Text(_) => CreativeNodeType::Text,
             Self::Config(_) => CreativeNodeType::Config,
             Self::Video(_) => CreativeNodeType::Video,
             Self::Audio(_) => CreativeNodeType::Audio,
-            Self::Director(_) => CreativeNodeType::Director,
+            Self::Timeline(_) => CreativeNodeType::Timeline,
             Self::Group(_) => CreativeNodeType::Group,
         }
     }
@@ -433,12 +470,11 @@ impl CreativeNodeData {
     fn validate(&self, path: &str) -> Result<(), String> {
         match self {
             Self::Image(data) => data.validate(path),
-            Self::Panorama(data) => data.validate(path),
             Self::Text(data) => data.validate(path),
             Self::Config(data) => data.validate(path),
             Self::Video(data) => data.validate(path),
             Self::Audio(data) => data.validate(path),
-            Self::Director(data) => data.validate(path),
+            Self::Timeline(data) => data.validate(path),
             Self::Group(data) => data.validate(path),
         }
     }
@@ -486,26 +522,35 @@ pub struct CreativeImageComposerDraft {
     pub count: u8,
 }
 
+fn validate_composer_mentions(
+    mentions: &[CreativeImagePromptMention],
+    prompt: &str,
+    path: &str,
+) -> Result<(), String> {
+    let mut mention_ids = BTreeSet::new();
+    let mut previous_end = 0usize;
+    let mut mentions = mentions.iter().enumerate().collect::<Vec<_>>();
+    mentions.sort_by_key(|(_, mention)| (mention.start, mention.end));
+    for (sorted_index, (index, mention)) in mentions.into_iter().enumerate() {
+        mention.validate(&format!("{path}.mentions[{index}]"), prompt)?;
+        if !mention_ids.insert(mention.id.as_str()) {
+            return Err(format!(
+                "{path}.mentions contains duplicate id {:?}",
+                mention.id
+            ));
+        }
+        if sorted_index > 0 && mention.start < previous_end {
+            return Err(format!("{path}.mentions[{index}] overlaps another mention"));
+        }
+        previous_end = mention.end;
+    }
+    Ok(())
+}
+
 impl CreativeImageComposerDraft {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
-        let mut mention_ids = BTreeSet::new();
-        let mut previous_end = 0usize;
-        let mut mentions = self.mentions.iter().enumerate().collect::<Vec<_>>();
-        mentions.sort_by_key(|(_, mention)| (mention.start, mention.end));
-        for (sorted_index, (index, mention)) in mentions.into_iter().enumerate() {
-            mention.validate(&format!("{path}.mentions[{index}]"), &self.prompt)?;
-            if !mention_ids.insert(mention.id.as_str()) {
-                return Err(format!(
-                    "{path}.mentions contains duplicate id {:?}",
-                    mention.id
-                ));
-            }
-            if sorted_index > 0 && mention.start < previous_end {
-                return Err(format!("{path}.mentions[{index}] overlaps another mention"));
-            }
-            previous_end = mention.end;
-        }
+        validate_composer_mentions(&self.mentions, &self.prompt, path)?;
         if let Some(model) = &self.model {
             model.validate(&format!("{path}.model"))?;
         }
@@ -634,18 +679,23 @@ pub enum CreativeImageFit {
     Cover,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Read-only compatibility payload for v1 documents saved before panorama
+/// nodes were retired. Deserialization immediately normalizes it to an image.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreativePanoramaNodeData {
-    pub asset_id: Option<String>,
-    pub projection: CreativePanoramaProjection,
-    pub yaw: f64,
-    pub pitch: f64,
-    pub field_of_view: f64,
+struct RetiredPanoramaNodeData {
+    asset_id: Option<String>,
+    projection: RetiredPanoramaProjection,
+    yaw: f64,
+    pitch: f64,
+    field_of_view: f64,
 }
 
-impl CreativePanoramaNodeData {
+impl RetiredPanoramaNodeData {
     fn validate(&self, path: &str) -> Result<(), String> {
+        match self.projection {
+            RetiredPanoramaProjection::Equirectangular => {}
+        }
         require_optional_id(&format!("{path}.assetId"), self.asset_id.as_deref())?;
         require_range(&format!("{path}.yaw"), self.yaw, -360.0, 360.0)?;
         require_range(&format!("{path}.pitch"), self.pitch, -90.0, 90.0)?;
@@ -658,9 +708,9 @@ impl CreativePanoramaNodeData {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum CreativePanoramaProjection {
+enum RetiredPanoramaProjection {
     Equirectangular,
 }
 
@@ -1008,6 +1058,8 @@ impl CreativeVideoNodeData {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeVideoComposerDraft {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<CreativeImagePromptMention>,
     pub model: Option<CreativeComposerModel>,
     pub resolution: String,
     pub aspect_ratio: String,
@@ -1017,6 +1069,7 @@ pub struct CreativeVideoComposerDraft {
 impl CreativeVideoComposerDraft {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        validate_composer_mentions(&self.mentions, &self.prompt, path)?;
         if let Some(model) = &self.model {
             model.validate(&format!("{path}.model"))?;
         }
@@ -1088,27 +1141,81 @@ impl CreativeAudioComposerDraft {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreativeDirectorNodeData {
-    /// Asset ID of the hidden canonical DirectorState v1 text sidecar.
-    pub scene_id: Option<String>,
-    pub camera_id: Option<String>,
-    pub timeline_ms: f64,
-    pub duration_ms: f64,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CreativeTimelineClipKind {
+    Image,
+    Video,
 }
 
-impl CreativeDirectorNodeData {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeTimelineClip {
+    pub id: String,
+    pub asset_id: String,
+    pub kind: CreativeTimelineClipKind,
+    pub start_ms: f64,
+    pub duration_ms: f64,
+    pub source_start_ms: f64,
+    pub source_duration_ms: Option<f64>,
+}
+
+impl CreativeTimelineClip {
     fn validate(&self, path: &str) -> Result<(), String> {
-        require_optional_id(&format!("{path}.sceneId"), self.scene_id.as_deref())?;
-        require_optional_id(&format!("{path}.cameraId"), self.camera_id.as_deref())?;
-        require_min(&format!("{path}.durationMs"), self.duration_ms, 0.0)?;
+        require_id(&format!("{path}.id"), &self.id)?;
+        require_id(&format!("{path}.assetId"), &self.asset_id)?;
+        require_range(&format!("{path}.startMs"), self.start_ms, 0.0, 86_400_000.0)?;
         require_range(
-            &format!("{path}.timelineMs"),
-            self.timeline_ms,
-            0.0,
+            &format!("{path}.durationMs"),
             self.duration_ms,
-        )
+            100.0,
+            86_400_000.0,
+        )?;
+        require_range(
+            &format!("{path}.sourceStartMs"),
+            self.source_start_ms,
+            0.0,
+            86_400_000.0,
+        )?;
+        if self.start_ms + self.duration_ms > 86_400_000.0 {
+            return Err(format!(
+                "{path} startMs + durationMs must not exceed 86400000"
+            ));
+        }
+        if let Some(source_duration_ms) = self.source_duration_ms {
+            require_range(
+                &format!("{path}.sourceDurationMs"),
+                source_duration_ms,
+                self.source_start_ms + self.duration_ms,
+                86_400_000.0,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeTimelineNodeData {
+    pub title: String,
+    pub muted: bool,
+    pub clips: Vec<CreativeTimelineClip>,
+}
+
+impl CreativeTimelineNodeData {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_string(&format!("{path}.title"), &self.title, false, 1_000)?;
+        if self.clips.len() > 2_000 {
+            return Err(format!("{path}.clips must contain at most 2000 clips"));
+        }
+        let mut clip_ids = BTreeSet::new();
+        for (index, clip) in self.clips.iter().enumerate() {
+            clip.validate(&format!("{path}.clips[{index}]"))?;
+            if !clip_ids.insert(clip.id.as_str()) {
+                return Err(format!("{path}.clips contains duplicate clip id {:?}", clip.id));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1197,6 +1304,7 @@ pub struct CreativeChatPendingTurn {
 pub struct CreativePanels {
     pub left: CreativeLeftPanel,
     pub right: CreativeRightPanel,
+    /// Deprecated v1 compatibility field. Current Canvas renderers ignore it.
     pub bottom: CreativeBottomPanel,
 }
 
@@ -1273,7 +1381,6 @@ pub struct CreativeBottomPanel {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CreativeBottomView {
-    Timeline,
     History,
 }
 
@@ -1646,11 +1753,18 @@ mod tests {
                     "format": "mp3"
                 }
             }),
-            "director" => serde_json::json!({
-                "sceneId": "scene-a",
-                "cameraId": null,
-                "timelineMs": 1200,
-                "durationMs": 5000
+            "timeline" => serde_json::json!({
+                "title": "Timeline 1",
+                "muted": false,
+                "clips": [{
+                    "id": "clip-1",
+                    "assetId": "asset-video",
+                    "kind": "video",
+                    "startMs": 0,
+                    "durationMs": 5000,
+                    "sourceStartMs": 0,
+                    "sourceDurationMs": 10000
+                }]
             }),
             "group" => serde_json::json!({
                 "title": "scene group",
@@ -1692,11 +1806,9 @@ mod tests {
         let mut doc = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
         doc.nodes = vec![
             node("image", "image"),
-            node("panorama", "panorama"),
             node("text", "text"),
             node("config-a", "config"),
             node("config-b", "config"),
-            node("director", "director"),
             node("group", "group"),
         ];
         doc
@@ -1825,18 +1937,18 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_node_payloads_round_trip_and_validate() {
+    fn all_seven_node_payloads_round_trip_and_validate() {
         for kind in [
             "image",
-            "panorama",
             "text",
             "config",
             "video",
             "audio",
-            "director",
+            "timeline",
             "group",
         ] {
-            let parsed = node(&format!("node-{kind}"), kind);
+            let mut parsed = node(&format!("node-{kind}"), kind);
+            parsed.name = Some(format!("{kind} label"));
             let round_trip: CreativeNode =
                 serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
             assert_eq!(round_trip, parsed, "{kind} payload must round-trip");
@@ -1846,6 +1958,73 @@ mod tests {
             doc.validate_for_project(PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{kind} payload must validate: {error}"));
         }
+
+        let mut invalid_name = node("bad-name", "text");
+        invalid_name.name = Some(" untrimmed ".into());
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_name);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("nodes[0].name"));
+    }
+
+    #[test]
+    fn retired_panorama_payloads_normalize_to_images_on_read() {
+        let parsed: CreativeNode =
+            serde_json::from_value(node_value("retired-panorama", "panorama")).unwrap();
+        assert_eq!(parsed.id, "retired-panorama");
+        assert_eq!(parsed.position, CreativePoint { x: 10.0, y: 20.0 });
+        assert_eq!(parsed.size, CreativeSize { width: 320.0, height: 180.0 });
+        assert_eq!(parsed.node_type, CreativeNodeType::Image);
+        let CreativeNodeData::Image(data) = &parsed.data else {
+            unreachable!()
+        };
+        assert_eq!(data.asset_id.as_deref(), Some("asset-panorama"));
+        assert_eq!(data.fit, CreativeImageFit::Contain);
+        assert_eq!(data.natural_size, None);
+
+        let normalized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(normalized["type"], "image");
+        assert!(normalized["data"].get("projection").is_none());
+        assert!(normalized["data"].get("fieldOfView").is_none());
+
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes = vec![parsed, node("text", "text")];
+        document.connections = vec![connection("retired-edge", "retired-panorama", "text")];
+        document.validate_for_project(PROJECT_ID).unwrap();
+
+        let mut invalid = node_value("retired-invalid", "panorama");
+        invalid["data"]["pitch"] = serde_json::json!(91);
+        assert!(serde_json::from_value::<CreativeNode>(invalid).is_err());
+    }
+
+    #[test]
+    fn timeline_rejects_duplicate_clips_and_invalid_source_trim_bounds() {
+        let mut duplicate = node("timeline-duplicate", "timeline");
+        let CreativeNodeData::Timeline(data) = &mut duplicate.data else {
+            unreachable!()
+        };
+        let duplicate_clip = data.clips[0].clone();
+        data.clips.push(duplicate_clip);
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(duplicate);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("duplicate clip id"));
+
+        let mut invalid_trim = node("timeline-trim", "timeline");
+        let CreativeNodeData::Timeline(data) = &mut invalid_trim.data else {
+            unreachable!()
+        };
+        data.clips[0].source_start_ms = 7_000.0;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_trim);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("sourceDurationMs"));
     }
 
     #[test]
@@ -1973,6 +2152,48 @@ mod tests {
         let mut unknown_nested = node_value("unknown-video-composer", "video");
         unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
         assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
+    }
+
+    #[test]
+    fn video_prompt_mentions_round_trip_and_validate_utf16_ranges() {
+        let mut value = node_value("video-mentions", "video");
+        value["data"]["composer"]["prompt"] = serde_json::json!("🎬 @图片1 动起来");
+        value["data"]["composer"]["mentions"] = serde_json::json!([{
+            "id": "mention-video",
+            "sourceNodeId": "source-image",
+            "fallbackLabel": "图片1",
+            "start": 3,
+            "end": 7
+        }]);
+        let video: CreativeNode = serde_json::from_value(value.clone()).unwrap();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(video);
+        document.validate_for_project(PROJECT_ID).unwrap();
+        assert_eq!(
+            serde_json::to_value(&document.nodes[0]).unwrap()["data"]["composer"],
+            value["data"]["composer"]
+        );
+        for invalid in [
+            serde_json::json!([{
+                "id": "mention-video", "sourceNodeId": "source-image",
+                "fallbackLabel": "图片1", "start": 2, "end": 7
+            }]),
+            serde_json::json!([
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7},
+                {"id": "b", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7}
+            ]),
+            serde_json::json!([
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7},
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7}
+            ]),
+        ] {
+            value["data"]["composer"]["mentions"] = invalid;
+            document.nodes[0] = serde_json::from_value(value.clone()).unwrap();
+            assert!(document
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("mentions"));
+        }
     }
 
     #[test]
@@ -2140,18 +2361,6 @@ mod tests {
         invalid_parameters["data"]["parameters"] = serde_json::json!([]);
         assert!(serde_json::from_value::<CreativeNode>(invalid_parameters).is_err());
 
-        let mut invalid_range = node("panorama", "panorama");
-        let CreativeNodeData::Panorama(data) = &mut invalid_range.data else {
-            unreachable!()
-        };
-        data.pitch = 91.0;
-        let mut doc = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
-        doc.nodes.push(invalid_range);
-        assert!(
-            doc.validate_for_project(PROJECT_ID)
-                .unwrap_err()
-                .contains("pitch")
-        );
     }
 
     #[test]
@@ -2175,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_rejects_self_duplicate_group_config_and_invalid_director_edges() {
+    fn graph_rejects_self_duplicate_group_and_config_edges() {
         let cases = [
             ("self", vec![connection("edge-a", "text", "text")], "itself"),
             (
@@ -2201,16 +2410,6 @@ mod tests {
                 vec![connection("edge-a", "config-a", "config-b")],
                 "config to config",
             ),
-            (
-                "director source",
-                vec![connection("edge-a", "director", "image")],
-                "director as a source",
-            ),
-            (
-                "invalid director input",
-                vec![connection("edge-a", "text", "director")],
-                "image or panorama",
-            ),
         ];
 
         for (label, connections, expected) in cases {
@@ -2222,16 +2421,6 @@ mod tests {
                 "{label} produced unexpected error: {error}"
             );
         }
-    }
-
-    #[test]
-    fn graph_accepts_image_and_panorama_as_director_inputs() {
-        let mut doc = graph_document();
-        doc.connections = vec![
-            connection("edge-image", "image", "director"),
-            connection("edge-panorama", "panorama", "director"),
-        ];
-        doc.validate_for_project(PROJECT_ID).unwrap();
     }
 
     #[test]

@@ -344,7 +344,7 @@ describe('canvas video composer runtime integration', () => {
           connection.sourceNodeId === config.id && connection.targetNodeId === derived[0]?.id
       )
     ).toBe(true);
-    expect(state.selection.nodeIds).toEqual([source.id, derived[0]?.id]);
+    expect(state.selection.nodeIds).toEqual([]);
     expect(seenAssets).toEqual([RESULT_ASSET_ID, SECOND_RESULT_ASSET_ID]);
     expect(harness.pending()).toEqual([]);
     expect(harness.events.at(-1)).toBe(`pending:remove:${TASK_ID}`);
@@ -459,21 +459,6 @@ describe('canvas video composer runtime integration', () => {
     expect(futureHarness.pending()).toEqual([TASK_ID]);
 
     const config = configNode();
-    const occupied = sourceNode();
-    occupied.data.assetId = testUuid(509);
-    const occupiedHarness = editorHarness(config, occupied);
-    await expectRejected(
-      settleCanvasVideoComposeTask({
-        editor: occupiedHarness.editor,
-        projectId: PROJECT_ID,
-        task: task('succeeded', config),
-        assets: assetPort(),
-        viewportSize: { width: 1440, height: 900 },
-      }),
-      '已关联其他素材'
-    );
-    expect(occupiedHarness.pending()).toEqual([TASK_ID]);
-
     const queuedHarness = editorHarness(config);
     await expectRejected(
       settleCanvasVideoComposeTask({

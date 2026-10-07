@@ -1191,7 +1191,7 @@ pub(crate) fn validate_for_capability(
         MediaCapability::T2v | MediaCapability::I2v | MediaCapability::V2v => {
             validate_video(bytes, declared.as_deref())
         }
-        MediaCapability::Tts => validate_audio(bytes, declared.as_deref()),
+        MediaCapability::Tts | MediaCapability::Music => validate_audio(bytes, declared.as_deref()),
         MediaCapability::Text => validate_text(bytes, declared.as_deref()),
     }
 }

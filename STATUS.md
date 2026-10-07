@@ -42,8 +42,8 @@ The current frontend route map lives in
 - `/customer-service` and `/customer-service/:cs_agent_id`
 - `/knowledge` and `/knowledge/:id`
 - Creative Studio focused shell: `/workshop`, the canonical Canvas library at
-  `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId` and
-  `/workshop/director/:canvasId`, independent workbenches at `/workshop/image`
+  `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId`,
+  independent workbenches at `/workshop/image`
   and `/workshop/video`, plus `/workshop/prompts`, `/workshop/assets`, and
   `/workshop/templates`.
   `/workshop/projects` is a deprecated compatibility redirect to
@@ -101,4 +101,3 @@ The active docs are `README.md`, `STATUS.md`, and the non-archive sections under
 `docs/`. Dated design specs and audits are
 historical records. They can explain why code exists, but they must not be used
 as current product or operator instructions without re-checking the source.
-

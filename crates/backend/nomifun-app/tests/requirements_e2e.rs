@@ -3,6 +3,13 @@
 mod common;
 
 use axum::http::StatusCode;
+use nomifun_agent_contracts::{
+    AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
+    AgentSessionMetadata, CorrelationId, DigestHex, EventProducerId, IdempotencyKey,
+    OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+    SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
+    StrictJsonValue,
+};
 use nomifun_common::ConversationId;
 use serde_json::json;
 use tower::ServiceExt;
@@ -169,18 +176,73 @@ async fn get_unknown_is_404() {
     assert_eq!(body_json(resp).await["code"], "NOT_FOUND");
 }
 
-/// Seed a conversation row so the logical conversation reference set by claim
-/// resolves to an existing conversation.
-async fn seed_conversation(services: &nomifun_app::AppServices, conv_id: &str) {
-    sqlx::query(
-        "INSERT INTO conversations (conversation_id, user_id, name, type, extra, created_at, updated_at) \
-         VALUES (?, ?, 'Dispatch Conv', 'nomi', '{}', 0, 0)",
+async fn seed_canonical_agent_session(
+    services: &nomifun_app::compatibility::AppServices,
+    session_id: &str,
+) {
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
     )
-    .bind(conv_id)
-    .bind(services.authoritative_user_id.as_ref())
-    .execute(services.database.pool())
     .await
     .unwrap();
+    let session = AgentSessionLiveRecord {
+        agent_session_id: AgentSessionId::from(session_id.to_owned()),
+        owner_ref: PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: services.authoritative_user_id.to_string(),
+        },
+        metadata: AgentSessionMetadata {
+            title: Some("AutoWork AgentSession".to_owned()),
+            archived: false,
+            pinned: false,
+            reasoning_effort: None,
+        },
+        agent_binding: AgentBindingValue {
+            preset_revision_ref: PresetRevisionRef {
+                preset_id: AgentPresetId::from("autowork-test-preset"),
+                revision: 1,
+                revision_digest: DigestHex::from("a".repeat(64)),
+            },
+            resolved_snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: ResolvedSnapshotId::from("autowork-test-snapshot"),
+                snapshot_digest: DigestHex::from("b".repeat(64)),
+            },
+            typed_resource_bindings: Vec::new(),
+            binding_version: 1,
+        },
+        remote_binding_provenance: None,
+        parent_session_id: None,
+        fork_base_payload_id: None,
+        next_seq: 1,
+    };
+    let key = format!("requirements-e2e:{session_id}");
+    let created = store
+        .create_session(nomifun_agent_session::CreateSessionRequest::new(
+            session,
+            1,
+            OperationId::from(format!("{key}:open")),
+            EventProducerId::from("session_api"),
+            IdempotencyKey::from(format!("{key}:open")),
+            CorrelationId::from(format!("{key}:open")),
+        ))
+        .await
+        .unwrap();
+    store
+        .append_event(&SessionEventAppend {
+            agent_session_id: AgentSessionId::from(session_id.to_owned()),
+            event_id: nomifun_agent_contracts::EventId::from(format!("{key}:ready")),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(format!("{key}:ready")),
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("session/ready".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(format!("{key}:ready")),
+                causation_event_id: Some(created.opening_ack.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+            },
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -188,7 +250,7 @@ async fn external_claim_route_is_removed_and_public_updates_cannot_mint_authorit
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = ConversationId::new().into_string();
-    seed_conversation(&services, &conv).await;
+    seed_canonical_agent_session(&services, &conv).await;
 
     let create_response = app
         .clone()
@@ -282,11 +344,11 @@ async fn external_claim_route_is_removed_and_public_updates_cannot_mint_authorit
 }
 
 #[tokio::test]
-async fn set_autowork_requires_tag_when_enabled() {
+async fn set_autowork_requires_a_valid_frozen_session_before_persisting_enable() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = ConversationId::new().into_string();
-    seed_conversation(&services, &conv).await;
+    seed_canonical_agent_session(&services, &conv).await;
 
     // enabled without tag → 400.
     let resp = app
@@ -302,26 +364,30 @@ async fn set_autowork_requires_tag_when_enabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // disabled → 200, not running, run_state off.
+    // A canonical Store row whose frozen control-plane artifacts do not exist
+    // must fail before `enabled=true` is committed. Previously the route
+    // returned running=true during the spawn race and the loop exited moments
+    // later, leaving a durable enabled binding with no executor.
     let resp = app
         .clone()
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/autowork",
-            json!({ "target_id": conv, "enabled": false }),
+            json!({ "target_id": conv, "enabled": true, "tag": "e2e" }),
             &token,
             &csrf,
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["enabled"], false);
-    assert_eq!(json["data"]["running"], false);
-    assert_eq!(json["data"]["run_state"], "off");
-    assert_eq!(json["data"]["kind"], "conversation");
+    assert!(!resp.status().is_success());
+    let legacy_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(legacy_rows, 0);
 
-    // GET reflects disabled (kind/target_id path form).
+    // GET proves the failed enable never changed the durable config.
     let resp = app
         .oneshot(get_with_token(
             &format!("/api/requirements/autowork/conversation/{conv}"),
@@ -330,15 +396,99 @@ async fn set_autowork_requires_tag_when_enabled() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["data"]["enabled"], false);
+    let state = body_json(resp).await;
+    assert_eq!(state["data"]["enabled"], false);
+    assert_eq!(state["data"]["running"], false);
+    assert_eq!(state["data"]["run_state"], "off");
+    assert_eq!(state["data"]["paused"], false);
 }
 
 #[tokio::test]
-async fn terminal_autowork_unknown_terminal_is_not_found() {
+async fn autowork_get_and_resume_project_durable_paused_state() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let session_id = ConversationId::new().into_string();
+    seed_canonical_agent_session(&services, &session_id).await;
+
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    store
+        .commit_automation_config(nomifun_agent_session::CommitAgentSessionAutomationConfig {
+            agent_session_id: AgentSessionId::from(session_id.clone()),
+            owner_ref: PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: services.authoritative_user_id.to_string(),
+            },
+            expected_revision: 0,
+            enabled: true,
+            tag: Some("paused-e2e".to_owned()),
+            max_requirements: None,
+            operation_id: Some("requirements-e2e-paused-enable".to_owned()),
+            recorded_at: 1,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO requirement_tags \
+         (tag, paused, paused_reason, paused_requirement_id, paused_at) \
+         VALUES ('paused-e2e', 1, 'execution_failed', NULL, 2)",
+    )
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(get_with_token(
+            &format!("/api/requirements/autowork/conversation/{session_id}"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let paused = body_json(response).await;
+    assert_eq!(paused["data"]["enabled"], true);
+    assert_eq!(paused["data"]["running"], false);
+    assert_eq!(paused["data"]["paused"], true);
+    assert_eq!(paused["data"]["paused_reason"], "execution_failed");
+    assert_eq!(paused["data"]["run_state"], "paused");
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/requirements/tags/paused-e2e/resume",
+            json!({}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(get_with_token(
+            &format!("/api/requirements/autowork/conversation/{session_id}"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resumed = body_json(response).await;
+    assert_eq!(resumed["data"]["paused"], false);
+    assert!(resumed["data"].get("paused_reason").is_none());
+    assert_eq!(resumed["data"]["run_state"], "idle");
+}
+
+#[tokio::test]
+async fn terminal_autowork_target_is_retired() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    // Enabling AutoWork on a non-existent terminal → ownership check 404.
+    // AutoWork is AgentSession-owned; terminal targets no longer enter the queue.
     let resp = app
         .oneshot(json_with_token(
             "POST",
@@ -349,7 +499,7 @@ async fn terminal_autowork_unknown_terminal_is_not_found() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

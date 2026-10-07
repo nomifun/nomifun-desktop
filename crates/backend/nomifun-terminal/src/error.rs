@@ -17,6 +17,9 @@ pub enum TerminalError {
     #[error("Terminal service is shutting down")]
     ShuttingDown,
 
+    #[error(transparent)]
+    App(#[from] AppError),
+
     #[error("Terminal I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -36,6 +39,7 @@ impl From<TerminalError> for AppError {
             TerminalError::ShuttingDown => {
                 AppError::Conflict("terminal service is shutting down".to_owned())
             }
+            TerminalError::App(error) => error,
             TerminalError::Spawn(msg) => AppError::Internal(msg),
             TerminalError::Io(e) => AppError::Internal(format!("terminal io: {e}")),
             TerminalError::Database(db_err) => AppError::from(db_err),
@@ -79,5 +83,14 @@ mod tests {
     fn stale_generation_maps_to_conflict() {
         let app: AppError = TerminalError::StaleGeneration("old PTY".into()).into();
         assert!(matches!(app, AppError::Conflict(_)));
+    }
+
+    #[test]
+    fn workspace_validation_error_keeps_its_machine_code() {
+        let app: AppError = TerminalError::App(AppError::WorkspaceDirectoryUnavailable(
+            "/removed/project".into(),
+        ))
+        .into();
+        assert_eq!(app.error_code(), "WORKSPACE_DIRECTORY_UNAVAILABLE");
     }
 }

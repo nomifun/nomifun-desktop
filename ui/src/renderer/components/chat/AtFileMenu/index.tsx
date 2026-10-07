@@ -4,6 +4,7 @@ import React from 'react';
 type AtFileMenuProps = {
   activeIndex: number;
   emptyText: string;
+  failure?: { message: string; retryLabel: string; onRetry: () => void };
   items: FileOrFolderItem[];
   label: string;
   loading: boolean;
@@ -15,6 +16,7 @@ type AtFileMenuProps = {
 const AtFileMenu: React.FC<AtFileMenuProps> = ({
   activeIndex,
   emptyText,
+  failure,
   items,
   label,
   loading,
@@ -31,11 +33,25 @@ const AtFileMenu: React.FC<AtFileMenuProps> = ({
         backdropFilter: 'blur(14px) saturate(1.05)',
         WebkitBackdropFilter: 'blur(14px) saturate(1.05)',
       }}
-      role='listbox'
+      role={loading || failure ? 'group' : 'listbox'}
       aria-label={label}
     >
-      {items.length === 0 ? (
-        <div className='px-12px py-10px text-12px text-t-secondary'>{loading ? loadingText : emptyText}</div>
+      {loading ? (
+        <div role='status' className='px-12px py-10px text-12px text-t-secondary'>{loadingText}</div>
+      ) : failure ? (
+        <div role='alert' className='px-12px py-10px text-12px text-t-primary flex items-center justify-between gap-12px'>
+          <span>{failure.message}</span>
+          <button
+            type='button'
+            className='px-10px py-4px rounded-6px shrink-0 cursor-pointer border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-2)]'
+            onMouseDown={(event) => { event.preventDefault(); }}
+            onClick={failure.onRetry}
+          >
+            {failure.retryLabel}
+          </button>
+        </div>
+      ) : items.length === 0 ? (
+        <div className='px-12px py-10px text-12px text-t-secondary'>{emptyText}</div>
       ) : (
         items.map((item, index) => {
           const isActive = index === activeIndex;

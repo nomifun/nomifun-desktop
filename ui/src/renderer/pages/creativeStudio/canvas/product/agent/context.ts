@@ -10,24 +10,24 @@ import type {
   CreativeProjectDocument,
 } from '../../../domain';
 
-export const CREATIVE_CANVAS_AGENT_CONTEXT_KIND =
+const CREATIVE_CANVAS_AGENT_CONTEXT_KIND =
   'nomifun.creative-studio.canvas-context' as const;
-export const CREATIVE_CANVAS_AGENT_CONTEXT_VERSION = 1 as const;
-export const CREATIVE_CANVAS_AGENT_TURN_KIND =
+const CREATIVE_CANVAS_AGENT_CONTEXT_VERSION = 1 as const;
+const CREATIVE_CANVAS_AGENT_TURN_KIND =
   'nomifun.creative-studio.planning-turn' as const;
 export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES = 32;
-export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_CONNECTIONS = 64;
+const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_CONNECTIONS = 64;
 export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_TEXT_CHARS = 2_000;
-export const MAX_CREATIVE_CANVAS_AGENT_MODEL_INPUT_CHARS = 262_144;
+const MAX_CREATIVE_CANVAS_AGENT_MODEL_INPUT_CHARS = 262_144;
 
-export type CreativeCanvasAgentContextValue =
+type CreativeCanvasAgentContextValue =
   | string
   | number
   | boolean
   | null
   | string[];
 
-export interface CreativeCanvasAgentContextNode {
+interface CreativeCanvasAgentContextNode {
   id: string;
   type: CreativeCanvasNode['type'];
   selected: boolean;
@@ -39,7 +39,7 @@ export interface CreativeCanvasAgentContextNode {
   details: Record<string, CreativeCanvasAgentContextValue>;
 }
 
-export interface CreativeCanvasAgentContextConnection {
+interface CreativeCanvasAgentContextConnection {
   id: string;
   sourceNodeId: string;
   targetNodeId: string;
@@ -52,6 +52,7 @@ export interface CreativeCanvasAgentContextSnapshot {
   version: typeof CREATIVE_CANVAS_AGENT_CONTEXT_VERSION;
   canvasId: string;
   canvasRevision: string;
+  canvasTitle: string | null;
   selectedNodeIds: string[];
   nodes: CreativeCanvasAgentContextNode[];
   connections: CreativeCanvasAgentContextConnection[];
@@ -111,7 +112,7 @@ const nodeLabel = (
   node: CreativeCanvasNode,
   details: Record<string, CreativeCanvasAgentContextValue>
 ): string => {
-  const candidate = ['title', 'caption', 'text', 'prompt']
+  const candidate = ['name', 'title', 'caption', 'text', 'prompt']
     .map((key) => details[key])
     .find((value): value is string => typeof value === 'string' && Boolean(value));
   if (!candidate) return `${node.type} · ${node.id.slice(0, 8)}`;
@@ -121,7 +122,7 @@ const nodeLabel = (
 
 const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedNode => {
   const details: Record<string, CreativeCanvasAgentContextValue> = {};
-  let truncated = false;
+  let truncated = addText(details, 'name', node.name);
   switch (node.type) {
     case 'text':
       truncated = addText(details, 'text', node.data.text) || truncated;
@@ -139,10 +140,6 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
           node.data.composer.model?.model
         );
       }
-      break;
-    case 'panorama':
-      details.assetId = node.data.assetId;
-      details.projection = node.data.projection;
       break;
     case 'video':
       details.assetId = node.data.assetId;
@@ -173,6 +170,13 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
         );
       }
       break;
+    case 'timeline':
+      truncated = addText(details, 'title', node.data.title) || truncated;
+      details.muted = node.data.muted;
+      details.clipCount = node.data.clips.length;
+      details.assetIds = node.data.clips.slice(0, 32).map((clip) => clip.assetId);
+      truncated = node.data.clips.length > 32 || truncated;
+      break;
     case 'config':
       details.task = node.data.task;
       details.capability = node.data.capability;
@@ -188,12 +192,6 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
         node.data.resultAssetIds.length > 32 ||
         truncated;
       truncated = addText(details, 'errorMessage', node.data.errorMessage) || truncated;
-      break;
-    case 'director':
-      details.sceneId = node.data.sceneId;
-      details.cameraId = node.data.cameraId;
-      details.timelineMs = node.data.timelineMs;
-      details.durationMs = node.data.durationMs;
       break;
     case 'group':
       truncated = addText(details, 'title', node.data.title) || truncated;
@@ -263,8 +261,10 @@ const contextConnection = (
 export function buildCreativeCanvasAgentContext(input: {
   document: CreativeCanvasAgentContextDocument;
   canvasRevision: string;
+  canvasTitle?: string | null;
   selectedNodeIds: readonly string[];
 }): CreativeCanvasAgentContextSnapshot {
+  const title = input.canvasTitle == null ? null : boundedText(input.canvasTitle);
   const nodeIndex = new Map(input.document.nodes.map((node, index) => [node.id, index]));
   const selected = orderedKnownIds(input.selectedNodeIds, nodeIndex);
   const neighbors = orderedKnownIds(referencedNodeIds(input.document, selected), nodeIndex);
@@ -272,7 +272,7 @@ export function buildCreativeCanvasAgentContext(input: {
   const includedIds = candidates.slice(0, MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES);
   const included = new Set(includedIds);
   const selectedSet = new Set(selected);
-  let truncated = candidates.length > includedIds.length;
+  let truncated = candidates.length > includedIds.length || Boolean(title?.truncated);
   const nodes = includedIds.map((id) => {
     const summarized = summarizeNode(input.document.nodes[nodeIndex.get(id)!]!, selectedSet.has(id));
     truncated = summarized.truncated || truncated;
@@ -289,6 +289,7 @@ export function buildCreativeCanvasAgentContext(input: {
     version: CREATIVE_CANVAS_AGENT_CONTEXT_VERSION,
     canvasId: input.document.projectId,
     canvasRevision: input.canvasRevision,
+    canvasTitle: title?.value || null,
     selectedNodeIds: selected.filter((id) => included.has(id)),
     nodes,
     connections: relevantConnections

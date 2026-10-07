@@ -39,6 +39,7 @@ pub struct ProviderModelCapabilityRow {
     pub provider_params: String,
     pub context_limit: Option<i64>,
     pub output_limit: Option<i64>,
+    pub compaction_threshold_pct: Option<i64>,
     pub health: Option<String>,
     pub health_checked_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
@@ -63,6 +64,7 @@ pub struct NewProviderModelCapability<'a> {
     pub provider_params: &'a str,
     pub context_limit: Option<i64>,
     pub output_limit: Option<i64>,
+    pub compaction_threshold_pct: Option<i64>,
 }
 
 /// Create a model and its complete non-empty capability set atomically.

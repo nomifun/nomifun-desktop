@@ -1,16 +1,42 @@
 {
-  "agentFallbackNotice": "{{original}} is unavailable, using {{fallback}} instead.",
+  "agentEntries": {
+    "needsSetup": "Needs setup",
+    "choose": "Choose an Agent",
+    "search": "Search Agents",
+    "fromTemplate": "Official Agents",
+    "showMorePersonal": "Show more ({{count}})",
+    "showFewerPersonal": "Show fewer custom Agents",
+    "manage": "Manage Agents",
+    "empty": "No matching Agents or templates",
+    "loading": "Loading Agents…",
+    "loadFailed": "Couldn't load the Agent list",
+    "modelNeeded": "No default chat model is currently available. Configure or enable one in Model Management, then retry. Your message and Agent selection have been kept.",
+    "modelCompatibility": {
+      "title": "The selected model is confirmed not to support capabilities this Agent needs",
+      "summary": "The provider explicitly reported that “{{model}}” does not support the technical capabilities below. The app recorded this automatically; there is no checkbox to maintain.",
+      "currentModel": "Current model",
+      "missingCapabilities": "Missing",
+      "preserved": "Your message, attachments, project, and Agent selection are kept. You can continue after making a change.",
+      "chooseCompatible": "Choose compatible model ({{count}})",
+      "configureCurrent": "Check model and protocol setup",
+      "viewChatModels": "View chat models",
+      "noCompatibleOption": "No configured compatible model",
+      "noCompatibleModel": "No other compatible model is available. Check its model and protocol setup or add another model.",
+      "targetNotFound": "The model to configure was not found. The provider and model list is open instead."
+    },
+    "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
+    "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
+  },
   "noAgentAvailable": "No Main Agent is available. Please login to Google or install Claude/Codex CLI. Go to settings?",
   "noAgentAvailableShort": "No Main Agent available. Click to configure.",
   "agentTabAutoSwitch": "Model not compatible with Gemini, auto-switched to {{fallback}}",
   "autoSwitchToAgent": "Gemini is not configured, auto-switching to {{agent}}",
   "autoSwitchedAgent": "{{from}} is not available, switched to {{to}}",
-  "promptExamplesHint": "Try example prompts:",
-  "selectPresetHint": "Select an preset to start a task",
-  "agentSwitcherLabel": "Agent",
-  "switchedToAgent": "Switched to {{agent}}",
   "modelRequired": "Select a model first",
+  "agentPresetRequired": "Select a saved Agent from Agent Workbench to start.",
   "collaboration": {
+    "attachmentsUnsupported": "Agent collaboration cannot start with attachments yet. Remove the files and retry; the message and collaboration setup will be kept.",
+    "autoworkExclusive": "AutoWork and an immediate collaboration launch are separate modes. Turn off AutoWork or clear the collaboration setup first.",
     "models": {
       "title": "Collaborator models",
       "label": "Collaborators",
@@ -27,7 +53,8 @@
     "clearWorkspace": "Clear",
     "specifyWorkspace": "Select project folder",
     "searchPlaceholder": "Search projects…",
-    "defaultWorkspace": "Default workspace (managed by Nomi)"
+    "defaultWorkspace": "Default workspace (managed by Nomi)",
+    "unavailable": "The selected project directory “{{workspacePath}}” does not exist or cannot be accessed. Restore it or choose an existing directory, then try again."
   },
   "scanning": {
     "initialMessage": "Current Agent is unavailable, detecting other available agents...",
@@ -46,40 +73,38 @@
     "draftOff": "Not preset",
     "willMount": "{{count}} base(s) will be mounted"
   },
-  "entry": {
-    "free": "Free-form",
-    "usePreset": "Use preset",
-    "skills": "Use Skills",
-    "skillsActive": "Use Skills · Enabled",
-    "skillsAdjustAria": "Adjust the {{count}} Skills enabled for this chat",
-    "skillsActiveAria": "View {{count}} Skills enabled for this chat",
-    "backToFree": "Free-form"
+  "showcase": {
+    "title": "My companions",
+    "all": "All companions · {{count}}",
+    "manage": "Manage companions",
+    "create": "Create companion",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "search": "Search companions",
+    "noMatches": "No matching companions",
+    "openChat": "Open chat",
+    "opening": "Opening…",
+    "chatFailed": "Could not open this companion’s chat. Please try again.",
+    "floating": "Float on desktop",
+    "floatingFor": "Float {{name}} on desktop",
+    "floatingFailed": "Could not change desktop visibility. Please try again",
+    "emptyTitle": "Invite your first companion",
+    "emptyDescription": "Choose a built-in character or create a companion with your own artwork.",
+    "loading": "Loading companions…",
+    "loadFailed": "Could not load companions",
+    "retry": "Retry",
+    "closeList": "Close companion list",
+    "moreFor": "More actions for {{name}}"
   },
-  "skillsPopover": {
-    "title": "Skills used in this chat",
-    "description": "These Skills are injected into this chat. Use “Use Skills” to adjust them before sending.",
-    "enabledCount": "{{count}} enabled",
-    "overflowCount": "{{count}} more Skills",
-    "adjustHint": "Click “Use Skills” to adjust this chat."
-  },
-  "drawer": {
-    "presetTab": "Presets",
-    "skillsTab": "Skills",
-    "searchPreset": "Search presets…",
-    "searchSkill": "Search skills…",
-    "usePreset": "Use",
-    "keepFree": "Stay free-form",
-    "applySkills": "Apply to this chat",
-    "selectedCount": "{{count}} skill(s) selected",
-    "sourceCustom": "Custom",
-    "sourceBuiltin": "Built-in",
-    "sourceExtension": "Extension",
-    "autoInject": "Auto-inject",
-    "presetCount": "preset(s)",
-    "skillCount": "skill(s)",
-    "presetHint": "Choose one preset; the backend resolves and snapshots it for this conversation.",
-    "presetEmpty": "No presets yet. Create one in Presets, or stay free-form.",
-    "presetNoMatch": "No presets match the current search and filters.",
-    "skillNoMatch": "No Skills match the current search and filters."
+  "utilities": {
+    "title": "Help and tools",
+    "help": "Help & feedback",
+    "docs": "Documentation",
+    "video": "Watch video",
+    "community": "Community",
+    "running": "Running",
+    "checking": "Checking",
+    "unavailable": "Unavailable",
+    "stopped": "Off"
   }
 }

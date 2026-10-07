@@ -209,6 +209,11 @@ for (const key of expectedCsv.split(',').filter(Boolean)) {
     console.error(`${key} url 未指向 v${version}: ${entry.url}`);
     process.exit(1);
   }
+  const installer = key.match(/-(deb|rpm|appimage)$/)?.[1] || 'appimage';
+  if (!new URL(entry.url).pathname.toLowerCase().endsWith(`.${installer}`)) {
+    console.error(`${key} url 与 Linux ${installer} 安装器格式不匹配。`);
+    process.exit(1);
+  }
 }
 NODE
 }
@@ -223,7 +228,13 @@ linux_key_for_triple() {
 
 clean_old_linux_artifacts() {
   mkdir -p "$DistDir"
-  find "$DistDir" -maxdepth 1 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' -o -name 'latest.json' \) -delete 2>/dev/null || true
+  # dist is shared by native lanes. Never remove another platform's signatures
+  # or release locks merely because they use the same evidence suffix.
+  find "$DistDir" -maxdepth 1 -type f \( \
+    -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
+    -o -name '*.deb.sig' -o -name '*.AppImage.sig' -o -name '*.rpm.sig' \
+    -o -name '*.deb.release-lock.json' -o -name '*.AppImage.release-lock.json' -o -name '*.rpm.release-lock.json' \
+    -o -name 'latest.json' \) -delete 2>/dev/null || true
 
   local dir
   for dir in "$ROOT/target/release/bundle" "$ROOT"/target/*linux*/release/bundle; do
@@ -236,11 +247,22 @@ collect_assets() {
   Assets=()
   while IFS= read -r -d '' asset; do
     Assets+=("$asset")
-  done < <(find "$DistDir" -maxdepth 1 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \) -print0 | sort -z)
+  done < <(find "$DistDir" -maxdepth 1 -type f \( \
+    -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
+    -o -name '*.deb.sig' -o -name '*.AppImage.sig' -o -name '*.rpm.sig' \
+    -o -name '*.deb.release-lock.json' -o -name '*.AppImage.release-lock.json' -o -name '*.rpm.release-lock.json' \
+    \) -print0 | sort -z)
 
   if [[ "${#Assets[@]}" -eq 0 ]]; then
     fail "未在 $DistDir 找到 Linux 发布产物。"
   fi
+
+  local package lock
+  while IFS= read -r -d '' package; do
+    lock="$package.release-lock.json"
+    [[ -f "$lock" ]] || fail "Linux package 缺少 release lock: $lock"
+    bun scripts/release/release-lock.mjs verify --root "$ROOT" --lock "$lock" >/dev/null || fail "release lock 校验失败: $lock"
+  done < <(find "$DistDir" -maxdepth 1 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0 | sort -z)
 }
 
 load_release_env
@@ -275,7 +297,8 @@ fi
 
 ExpectedKeys=()
 for t in "${BuildTriples[@]}"; do
-  ExpectedKeys+=("$(linux_key_for_triple "$t")")
+  key="$(linux_key_for_triple "$t")"
+  ExpectedKeys+=("$key" "$key-appimage" "$key-deb" "$key-rpm")
 done
 ExpectedKeysCsv="$(IFS=,; echo "${ExpectedKeys[*]}")"
 
@@ -324,7 +347,7 @@ fi
 echo "  仓库      : ${Repo}"
 echo "  架构      : ${BuildTriples[*]}"
 echo "  updater   : ${ExpectedKeys[*]}"
-echo "  目标产物  : .deb + .AppImage + .rpm + updater .sig + latest.json"
+echo "  目标产物  : .deb + .AppImage + .rpm + release lock + updater .sig + latest.json"
 if [[ "$Mode" == "CREATE" ]]; then
   if [[ -n "$NotesFile" ]]; then
     echo "  release note: 文件 ${NotesFile}（首发建 Release 用）"

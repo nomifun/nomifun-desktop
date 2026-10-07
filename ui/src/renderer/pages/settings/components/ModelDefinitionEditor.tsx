@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
+import { MODEL_TASK_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
+import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
+import type { ModelCatalogSource } from '@/common/protocolBindings/ModelCatalogSource';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
-import { AutoComplete, Button, Checkbox, Input, Modal, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
+import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield, TagOne } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -31,29 +33,36 @@ import {
 import {
   CAPABILITY_ENDPOINT_FIELDS,
   addCapabilityTask,
-  applyCatalogSuggestionForTask,
-  capabilityHasConfiguration,
+  acknowledgeCatalogTaskConflict,
+  applyCatalogSuggestion,
   capabilityValidationMessageKey,
-  catalogSuggestionsForTask,
   changeCapabilityProtocol,
+  changeModelDefinitionId,
   effectiveBaseUrl,
   endpointDescriptorValue,
   isCapabilityEndpointField,
   isDuplicateModelId,
+  getCatalogTaskConflict,
   isProtocolAuthSchemeAllowed,
   parseProviderParams,
   patchCapabilityDraft,
   providerParamChainRounds,
+  providerParamReasoningEffort,
   protocolDescriptorForDraft,
+  reasoningEffortsForProtocol,
+  protocolSupportsReasoningEffort,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
   resolvedCapabilityUrl,
+  isValidModelTokenLimit,
   rootMatchesShape,
   withProviderParamVoice,
   withProviderParamChainRounds,
+  withProviderParamReasoningEffort,
+  withCatalogTaskEvidence,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
   type CapabilityValidationError,
@@ -61,6 +70,7 @@ import {
   type ModelCapabilityDraft,
   type ModelCapabilityDraftPatch,
   type ModelDefinitionDraft,
+  type ModelReasoningEffort,
   type ModelProtocolManifestMap,
   type ProviderConnectionDescriptor,
   type ProviderConnectionInput,
@@ -72,8 +82,11 @@ export interface ModelCatalogSuggestion {
   displayName?: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  tasksSource?: ModelTaskSource;
   /** Window the provider's own catalog declares, when it declares one. */
   contextLimit?: number;
+  outputLimit?: number;
+  contextLimitKind?: 'input_only' | 'combined';
 }
 
 export interface ModelDefinitionEditorProps {
@@ -89,10 +102,14 @@ export interface ModelDefinitionEditorProps {
   validationPending?: boolean;
   existingModelIds?: readonly string[];
   modelReadOnly?: boolean;
+  /** Scenario editors keep the requested task fixed while retaining the full draft. */
+  capabilityTask?: ModelTask;
   catalogSuggestions?: readonly ModelCatalogSuggestion[];
   catalogLoading?: boolean;
   catalogError?: string;
-  onRefreshCatalog?: () => void;
+  catalogSource?: ModelCatalogSource;
+  catalogFetchReady?: boolean;
+  onRefreshCatalog?: () => Promise<unknown> | void;
   connections?: readonly ProviderConnectionDescriptor[];
   onCreateConnection?: (connection: ProviderConnectionInput) => Promise<void>;
   onCallConfigFocusChange?: (task?: ModelTask) => void;
@@ -112,9 +129,11 @@ const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIn
     case 'connection_missing':
       return 'connection';
     case 'output_ceiling_required':
+    case 'invalid_token_limit':
       return 'limits';
     case 'protocol_required':
     case 'protocol_not_registered':
+    case 'protocol_task_mismatch':
     case 'auth_scheme_incompatible':
     case 'base_url_required':
     case 'cross_origin_consent_required':
@@ -354,10 +373,15 @@ const sameCapabilities = (
     );
   });
 
+const EMPTY_TASKS: readonly ModelTask[] = [];
+const EMPTY_IDS: readonly string[] = [];
+const EMPTY_CATALOG: readonly ModelCatalogSuggestion[] = [];
+const EMPTY_CONNECTIONS: readonly ProviderConnectionDescriptor[] = [];
+
 /**
  * Shared provider-model editor used by create-provider, add-model, and edit-model.
- * Catalog data is advisory. New models choose one primary type before selecting
- * or typing a model ID; existing multi-task models keep their full capability set.
+ * Catalog data is advisory. Model IDs are always editable; optional invocation
+ * routes do not filter the catalog or gate the model's native Chat abilities.
  */
 const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, ModelDefinitionEditorProps>(({
   value,
@@ -366,17 +390,20 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   providerAuthScheme,
   providerLabel,
   manifests,
-  manifestLoadingTasks = [],
-  manifestErrorTasks = [],
+  manifestLoadingTasks = EMPTY_TASKS,
+  manifestErrorTasks = EMPTY_TASKS,
   validationErrors,
   validationPending = false,
-  existingModelIds = [],
+  existingModelIds = EMPTY_IDS,
   modelReadOnly = false,
-  catalogSuggestions = [],
+  capabilityTask,
+  catalogSuggestions = EMPTY_CATALOG,
   catalogLoading = false,
   catalogError,
+  catalogSource,
+  catalogFetchReady = true,
   onRefreshCatalog,
-  connections = [],
+  connections = EMPTY_CONNECTIONS,
   onCreateConnection,
   onCallConfigFocusChange,
   callConfigFooterPlacement = 'internal',
@@ -385,27 +412,35 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   const modelInputId = useId();
   const modelAliasInputId = `${modelInputId}-alias`;
   const modelAliasPanelId = `${modelInputId}-alias-panel`;
-  const taskSectionId = useId();
+  const [catalogPopupVisible, setCatalogPopupVisible] = useState(false);
+  const [browseAllCatalog, setBrowseAllCatalog] = useState(false);
+  const [catalogRefreshPending, setCatalogRefreshPending] = useState(false);
+  const [catalogWasRefreshed, setCatalogWasRefreshed] = useState(false);
+  const [localCatalogError, setLocalCatalogError] = useState('');
+  const catalogBusy = catalogLoading || catalogRefreshPending;
+  const effectiveCatalogError = catalogError || localCatalogError;
+  const catalogQuery = browseAllCatalog ? '' : value.model.trim().toLowerCase();
+  const matchingCatalogCount = catalogSuggestions.filter((suggestion) =>
+    suggestion.value.toLowerCase().includes(catalogQuery) || suggestion.label.toLowerCase().includes(catalogQuery)
+  ).length;
+  const [addingCallRoute, setAddingCallRoute] = useState(false);
   const capabilityDetailsId = useId();
   const modelAlias = value.displayName?.trim() ?? '';
+  const taskConflict = getCatalogTaskConflict(value);
+  const selectedCatalogEntry = catalogSuggestions.find((entry) => entry.value.trim() === value.model.trim());
+  useEffect(() => {
+    if (selectedCatalogEntry) {
+      onChange((current) => withCatalogTaskEvidence(current, { ...selectedCatalogEntry, model: selectedCatalogEntry.value }));
+    }
+  }, [onChange, selectedCatalogEntry]);
   const [modelAliasExpanded, setModelAliasExpanded] = useState(false);
   const modelAliasActionLabel = modelAlias
     ? `${t('settings.editModelDisplayName', { defaultValue: '编辑模型别名' })}：${modelAlias}`
     : t('settings.addModelDisplayName', { defaultValue: '添加模型别名' });
   const [customConnectionTask, setCustomConnectionTask] = useState<ModelTask>();
   const selectedTasks = useMemo(
-    () => value.capabilities.map((capability) => capability.task),
-    [value.capabilities]
-  );
-  // The catalog needs exactly ONE task to filter its suggestions by. This is a
-  // search scope, not a model property: it is never rendered as a value and
-  // never persisted. The backend re-sorts a model's capabilities by task on
-  // read (`provider_model.rs` `row_to_model_response`), so a user-picked
-  // "primary task" could not survive a reload even if we stored one.
-  const catalogFilterTask = selectedTasks[0];
-  const filteredCatalogSuggestions = useMemo(
-    () => catalogSuggestionsForTask(catalogSuggestions, catalogFilterTask),
-    [catalogSuggestions, catalogFilterTask]
+    () => value.capabilities.filter((capability) => capabilityTask === undefined || capability.task === capabilityTask).map((capability) => capability.task),
+    [value.capabilities, capabilityTask]
   );
   const recommendationManifests = useMemo(() => {
     const ready: ModelProtocolManifestMap = {};
@@ -440,8 +475,17 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
       ),
     [recommendationPendingTasks, validationErrors, validationPending]
   );
+  // Chat token settings are editable on the model homepage. Their errors
+  // still block saving, but should not open a separate invocation page.
+  const disclosureValidationErrors = useMemo(
+    () => settledValidationErrors.filter((error) =>
+      (capabilityTask === undefined || !error.task || error.task === capabilityTask) &&
+      (error.task !== 'chat' || !['output_ceiling_required', 'invalid_token_limit'].includes(error.code))
+    ),
+    [settledValidationErrors, capabilityTask]
+  );
   const [disclosureState, setDisclosureState] = useState(() =>
-    createCapabilityDisclosureState(selectedTasks, settledValidationErrors)
+    createCapabilityDisclosureState(selectedTasks, disclosureValidationErrors)
   );
   const [callConfigIntentByTask, setCallConfigIntentByTask] = useState<
     Partial<Record<ModelTask, CallConfigIntent>>
@@ -450,9 +494,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     Partial<Record<ModelTask, ModelCapabilityDraft>>
   >({});
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
-  const [customContextByTask, setCustomContextByTask] = useState<
-    Partial<Record<ModelTask, boolean>>
-  >({});
   const [editingOutputLimitByTask, setEditingOutputLimitByTask] = useState<
     Partial<Record<ModelTask, boolean>>
   >({});
@@ -482,13 +523,13 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
 
   useEffect(() => {
     setDisclosureState((current) =>
-      syncCapabilityDisclosureState(current, selectedTasks, settledValidationErrors)
+      syncCapabilityDisclosureState(current, selectedTasks, disclosureValidationErrors)
     );
-  }, [selectedTasks, settledValidationErrors]);
+  }, [selectedTasks, disclosureValidationErrors]);
 
   useEffect(() => {
     const nextIntents: Partial<Record<ModelTask, CallConfigIntent>> = {};
-    for (const error of settledValidationErrors) {
+    for (const error of disclosureValidationErrors) {
       if (error.task && nextIntents[error.task] === undefined) {
         nextIntents[error.task] = callConfigIntentForError(error.code);
       }
@@ -496,11 +537,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     if (Object.keys(nextIntents).length > 0) {
       setCallConfigIntentByTask((current) => ({ ...current, ...nextIntents }));
     }
-  }, [settledValidationErrors]);
+  }, [disclosureValidationErrors]);
 
   const duplicateModel = isDuplicateModelId(value.model, existingModelIds);
-  // Only a fault once a task exists: before that the field is disabled on
-  // purpose and an empty value is simply the next step, not an error.
+  // Show the missing-ID error after a purpose is configured. The initial
+  // empty form keeps the ID input available without an error.
   const missingModel = value.capabilities.length > 0 && !value.model.trim();
 
   const updateCapability = (task: ModelTask, patch: ModelCapabilityDraftPatch) => {
@@ -571,24 +612,17 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   );
 
   const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
-    onChange((current) => {
-      const task = current.capabilities[0]?.task;
-      return task
-        ? applyCatalogSuggestionForTask(
-            current,
-            {
-              model: profile.value,
-              ...(profile.displayName ? { displayName: profile.displayName } : {}),
-              tasks: profile.tasks,
-              traits: profile.traits,
-              ...(profile.contextLimit === undefined ? {} : { contextLimit: profile.contextLimit }),
-            },
-            task
-          )
-        : current;
-    });
+    onChange((current) => applyCatalogSuggestion(current, {
+      model: profile.value,
+      ...(profile.displayName ? { displayName: profile.displayName } : {}),
+      tasks: profile.tasks,
+      traits: profile.traits,
+      tasksSource: profile.tasksSource,
+      ...(profile.contextLimit === undefined ? {} : { contextLimit: profile.contextLimit }),
+      ...(profile.outputLimit === undefined ? {} : { outputLimit: profile.outputLimit }),
+      ...(profile.contextLimitKind === undefined ? {} : { contextLimitKind: profile.contextLimitKind }),
+    }));
   };
-
   const removeTask = (task: ModelTask) => {
     onChange((current) => ({
       ...current,
@@ -596,159 +630,92 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     }));
   };
 
-  /**
-   * Apply a multi-select edit as add/remove against the declared set.
-   *
-   * Additions are free. A removal deletes that task's whole capability — its
-   * protocol, endpoints, traits and limits go with it — so a tag's "×" must not
-   * be a one-click way to lose configured work when the card's delete button
-   * asks for confirmation. Untouched drafts are removed without friction;
-   * configured ones ask first.
-   */
-  const changeTaskSelection = (next: readonly ModelTask[]) => {
-    const chosen = MODEL_TASK_ORDER.filter((task) => next.includes(task));
-    const added = chosen.filter((task) => !selectedTasks.includes(task));
-    const removed = selectedTasks.filter((task) => !chosen.includes(task));
-
-    const applyAdditions = () => {
-      if (added.length === 0) return;
-      onChange((current) => ({
-        ...current,
-        capabilities: added.reduce(
-          (capabilities, task) => addCapabilityTask(capabilities, task),
-          current.capabilities
-        ),
-      }));
-    };
-
-    const configured = removed.filter((task) => {
-      const capability = value.capabilities.find((candidate) => candidate.task === task);
-      return capability !== undefined && capabilityHasConfiguration(capability);
+  const addCallRoute = (task: ModelTask) => {
+    onChange((current) => {
+      const next = { ...current, capabilities: addCapabilityTask(current.capabilities, task) };
+      const entry = catalogSuggestions.find((profile) => profile.value.trim() === current.model.trim());
+      return entry ? applyCatalogSuggestion(next, {
+        model: current.model,
+        displayName: current.displayName,
+        tasks: entry.tasks,
+        traits: entry.traits,
+        tasksSource: entry.tasksSource,
+        contextLimit: entry.contextLimit,
+        outputLimit: entry.outputLimit,
+        contextLimitKind: entry.contextLimitKind,
+      }) : next;
     });
-
-    if (configured.length === 0) {
-      applyAdditions();
-      removed.forEach(removeTask);
-      return;
-    }
-
-    const names = configured
-      .map((task) => t(`settings.modelTask.${task}`, { defaultValue: task }))
-      .join('、');
-    Modal.confirm({
-      title: t('settings.removeModelTask', { defaultValue: '移除任务' }),
-      content: t('settings.removeConfiguredModelTaskConfirm', {
-        defaultValue: `移除“${names}”会同时丢弃它已配置的协议与地址，确定继续？`,
-        tasks: names,
-      }),
-      okButtonProps: { status: 'danger' },
-      onOk: () => {
-        applyAdditions();
-        removed.forEach(removeTask);
-      },
-    });
+    setAddingCallRoute(false);
   };
+
+  const refreshCatalog = async () => {
+    if (!onRefreshCatalog || !catalogFetchReady || catalogBusy) return;
+    setBrowseAllCatalog(true);
+    setCatalogPopupVisible(true);
+    setCatalogWasRefreshed(true);
+    setCatalogRefreshPending(true);
+    setLocalCatalogError('');
+    try {
+      await onRefreshCatalog();
+    } catch {
+      // SWR reports provider errors through catalogError. Other callers can
+      // reject without an error prop; keep that failure visible as well.
+      setLocalCatalogError(t('settings.modelCatalogFetchFailed'));
+    } finally {
+      setCatalogRefreshPending(false);
+    }
+  };
+
+  const catalogStatus = catalogBusy
+    ? t('settings.modelCatalogLoading', { defaultValue: '正在获取供应商模型列表…' })
+    : !catalogFetchReady
+      ? t('settings.modelCatalogNeedsConfiguration', { defaultValue: '填写 API 地址和凭据后可获取模型列表，也可直接输入模型 ID。' })
+      : effectiveCatalogError
+        ? effectiveCatalogError
+        : catalogSuggestions.length === 0
+          ? t('settings.modelCatalogEmpty', { defaultValue: '暂无模型列表，请直接输入模型 ID，或刷新重试。' })
+          : catalogSource === 'official_documentation'
+            ? t('settings.modelCatalogReference', { count: catalogSuggestions.length, defaultValue: '官方文档建议（{{count}} 个模型），并非账号实时列表；也可直接输入其他模型 ID。' })
+            : t('settings.modelCatalogLoaded', { count: catalogSuggestions.length, defaultValue: '已获取 {{count}} 个模型，可从列表选择或继续手填。' });
 
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
-      <section
-        hidden={focusedCallConfigTask !== undefined}
-        className='space-y-10px'
-        aria-labelledby={taskSectionId}
-        data-model-task-section
-      >
-        <div className='space-y-4px'>
-          <div id={taskSectionId} className='text-13px font-500 text-t-secondary'>
-            {t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
-          </div>
-          <div className='text-11px leading-4 text-t-secondary'>
-            {t('settings.modelSupportedTasksHint', {
-              defaultValue:
-                '先选该模型支持的任务，候选模型会按其中第一个任务筛选。同一个模型 ID 支持多个任务时逐项添加，每个任务单独配置协议与地址。',
-            })}
-          </div>
-        </div>
-
-        {modelReadOnly && value.capabilities.length === 0 && (
-          <div className='text-12px text-t-secondary' role='note' data-empty-model-tasks>
-            {t('settings.modelTasksEmpty', {
-              defaultValue: '该模型尚未配置任何任务。',
-            })}
-          </div>
-        )}
-
-        {/*
-          A multi-select whose value IS the declared task set, so the chosen
-          tasks are visible inside the control itself. It replaced a
-          fire-and-reset single-select that showed nothing after a pick.
-
-          Every task stays listed rather than being filtered out once chosen —
-          that is what lets the selected ones render as tags in the field. This
-          reverses a prohibition the spec used to carry; see
-          `docs/specs/2026-08-11-provider-modality-official-matrix.zh.md` §2.2.
-          The concern behind it — declaring tasks nobody configured — is
-          unchanged: each tag still produces its own capability card that must be
-          configured before the model saves.
-        */}
-        <Select
-          mode='multiple'
-          value={selectedTasks}
-          options={MODEL_TASK_ORDER.map((task) => ({
-            value: task,
-            label: t(`settings.modelTask.${task}`, { defaultValue: task }),
-          }))}
-          placeholder={t('settings.selectModelTask', {
-            defaultValue: '选择该模型支持的任务',
-          })}
-          onChange={(next) => changeTaskSelection(Array.isArray(next) ? (next as ModelTask[]) : [])}
-          triggerProps={{ getPopupContainer: () => document.body }}
-          aria-label={t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
-          data-model-task-picker
-        />
-
-        {/*
-          The declared set, restated next to the control that declares it.
-          Without this the picker resets to its placeholder after each pick and
-          the only evidence a task was accepted is a card further down, below the
-          model field — which reads as "the selector cleared and lost my choice".
-
-          Deliberately loud: a bare grey tag under a Select was still missed.
-          Filled row + primary-coloured tags + an explicit "已添加" lead-in, so
-          the confirmation is the first thing the eye lands on after picking.
-
-          Informational on purpose: removing a task discards its transport
-          config, so the single delete path stays on the card, behind a
-          Popconfirm.
-        */}
-        {value.capabilities.length > 0 && (
-          <div className='text-11px leading-4 text-t-tertiary' data-declared-tasks>
-            {t('settings.modelDeclaredTasksHint', {
-              defaultValue: '可在下方逐项配置或移除',
-            })}
-          </div>
-        )}
-      </section>
-
       {!modelReadOnly ? (
         <div
           hidden={focusedCallConfigTask !== undefined}
           className='space-y-8px'
-          data-filtered-catalog-count={filteredCatalogSuggestions.length}
+          data-model-catalog-count={catalogSuggestions.length}
         >
           <div className='flex items-center justify-between gap-8px'>
-            <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
-              {t('settings.modelSelection', { defaultValue: '模型 ID' })}
-            </label>
+            <div className='flex min-w-0 items-center gap-8px'>
+              <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
+                {t('settings.modelSelection', { defaultValue: '模型 ID' })}
+              </label>
+              {catalogSource === 'official_documentation' && catalogSuggestions.length > 0 && (
+                <Tooltip content={t('settings.modelCatalogReference', { count: catalogSuggestions.length })}>
+                  <span
+                    className='rounded-4px bg-fill-2 px-6px py-2px text-11px text-t-secondary'
+                    tabIndex={0}
+                    aria-label={t('settings.modelCatalogReference', { count: catalogSuggestions.length })}
+                    data-model-catalog-reference
+                  >
+                    {t('settings.modelCatalogReferenceCompact', { count: catalogSuggestions.length, defaultValue: '官方建议 · {{count}}' })}
+                  </span>
+                </Tooltip>
+              )}
+            </div>
             {onRefreshCatalog && (
-              <Tooltip content={t('common.refresh', { defaultValue: '刷新' })}>
+              <Tooltip content={catalogFetchReady ? t('settings.refreshModelCatalog', { defaultValue: '获取模型列表' }) : catalogStatus}>
                 <Button
                   size='mini'
                   type='text'
                   className='!h-28px !w-28px !min-w-28px'
                   icon={<Refresh theme='outline' size='14' />}
-                  loading={catalogLoading}
-                  onClick={onRefreshCatalog}
-                  aria-label={t('common.refresh', { defaultValue: '刷新' })}
+                  loading={catalogBusy}
+                  disabled={!catalogFetchReady}
+                  onClick={() => void refreshCatalog()}
+                  aria-label={t('settings.refreshModelCatalog', { defaultValue: '获取模型列表' })}
+                  data-refresh-model-catalog
                 />
               </Tooltip>
             )}
@@ -757,27 +724,44 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             <AutoComplete
               className='min-w-0 flex-1'
               value={value.model}
-              data={filteredCatalogSuggestions.map((suggestion) => ({
+              data={catalogSuggestions.map((suggestion) => ({
                 value: suggestion.value,
                 name: suggestion.label,
               }))}
-              disabled={value.capabilities.length === 0}
-              loading={catalogLoading}
+              loading={catalogBusy}
+              filterOption={browseAllCatalog ? false : (input, option) => {
+                const query = input.toLowerCase();
+                const optionValue = String((option.props as { value?: unknown }).value ?? '');
+                const label = catalogSuggestions.find((suggestion) => suggestion.value === optionValue)?.label ?? optionValue;
+                return optionValue.toLowerCase().includes(query) || label.toLowerCase().includes(query);
+              }}
+              onFocus={() => setCatalogPopupVisible(true)}
+              onSearch={() => {
+                setBrowseAllCatalog(false);
+                setCatalogPopupVisible(true);
+              }}
+              dropdownRender={(menu) => (
+                <div data-model-catalog-dropdown>
+                  <div className={`px-12px py-8px text-12px ${effectiveCatalogError ? 'text-warning-6' : 'text-t-secondary'}`} role={effectiveCatalogError ? 'alert' : 'status'}>
+                    {catalogStatus}
+                  </div>
+                  {menu}
+                  {!catalogBusy && !effectiveCatalogError && catalogSuggestions.length > 0 && matchingCatalogCount === 0 && (
+                    <div className='px-12px py-8px text-12px text-t-secondary'>
+                      {t('settings.modelCatalogNoMatch', { defaultValue: '列表中没有匹配项，可以直接使用您输入的模型 ID。' })}
+                    </div>
+                  )}
+                </div>
+              )}
               allowClear
               status={
                 value.capabilities.length > 0 && (!value.model.trim() || duplicateModel)
                   ? 'error'
                   : undefined
               }
-              placeholder={
-                value.capabilities.length > 0
-                  ? t('settings.modelSelectionPlaceholder', {
-                      defaultValue: '搜索目录模型，或直接输入官网模型 ID',
-                    })
-                  : t('settings.modelSelectionRequiresTask', {
-                      defaultValue: '请先在上方选择任务',
-                    })
-              }
+              placeholder={t('settings.modelSelectionPlaceholder', {
+                defaultValue: '搜索供应商模型，或直接输入模型 ID',
+              })}
               defaultActiveFirstOption={false}
               onChange={(model, option) => {
                 const manualModel = resolveModelInputChange(model, option);
@@ -785,18 +769,48 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   onChange((current) =>
                     current.model === manualModel
                       ? current
-                      : { ...current, model: manualModel, displayName: undefined }
+                      : withCatalogTaskEvidence(
+                          changeModelDefinitionId(current, manualModel),
+                          (() => {
+                            const entry = catalogSuggestions.find((candidate) => candidate.value.trim() === manualModel.trim());
+                            return entry ? { ...entry, model: entry.value } : undefined;
+                          })()
+                        )
                   );
                 }
               }}
               onSelect={(model) => {
-                const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
+                const suggestion = catalogSuggestions.find((item) => item.value === model);
                 if (suggestion) selectCatalogSuggestion(suggestion);
+                setCatalogPopupVisible(false);
               }}
-              triggerProps={{ getPopupContainer: () => document.body }}
+              triggerProps={{
+                getPopupContainer: () => document.body,
+                popupVisible: catalogPopupVisible,
+                onVisibleChange: setCatalogPopupVisible,
+              }}
               inputProps={{
                 id: modelInputId,
                 'aria-describedby': `${modelInputId}-hint`,
+                onKeyDown: (event) => {
+                  if (event.key === 'Escape') setCatalogPopupVisible(false);
+                },
+                suffix: (
+                  <Button
+                    type='text'
+                    size='mini'
+                    icon={<Down theme='outline' size='14' />}
+                    aria-label={t('settings.browseModelCatalog', { defaultValue: '查看模型列表' })}
+                    aria-expanded={catalogPopupVisible}
+                    data-browse-model-catalog
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      setBrowseAllCatalog(true);
+                      setCatalogPopupVisible((visible) => !visible);
+                      if (catalogSuggestions.length === 0 && !catalogBusy) void refreshCatalog();
+                    }}
+                  />
+                ),
               }}
               data-unified-model-input
             />
@@ -898,22 +912,12 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     defaultValue: '请填写模型 ID，否则无法保存。',
                   })
                 : t('settings.modelSelectionHint', {
-                    defaultValue: '目录仅提供第一个任务的建议；没有匹配项时可直接输入模型 ID。',
+                    defaultValue: '可从列表选择，也可直接输入模型 ID。',
                   })}
           </div>
-          {catalogFilterTask && !catalogLoading && filteredCatalogSuggestions.length === 0 && !catalogError && (
-            <div className='text-11px text-t-tertiary' role='note' data-empty-filtered-model-catalog>
-              {t('settings.modelCatalogFilteredEmpty', {
-                defaultValue: '目录中暂无该类型的模型，请直接输入模型 ID。',
-              })}
-            </div>
-          )}
-          {catalogError && (
-            <div className='text-11px text-warning-6' role='note'>
-              {t('settings.modelCatalogUnavailable', {
-                defaultValue: '目录暂不可用，不影响手填模型 ID。',
-              })}{' '}
-              {catalogError}
+          {(catalogBusy || effectiveCatalogError || (catalogWasRefreshed && catalogSource !== 'official_documentation') || !catalogFetchReady || catalogSuggestions.length === 0) && (
+            <div className={`text-11px leading-4 ${effectiveCatalogError ? 'text-warning-6' : 'text-t-tertiary'}`} role={effectiveCatalogError ? 'alert' : 'status'} data-model-catalog-status>
+              {catalogStatus}
             </div>
           )}
         </div>
@@ -926,11 +930,73 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         </div>
       )}
 
+      {modelReadOnly && (
+        <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px'>
+          <label htmlFor={modelAliasInputId} className='text-13px font-500 text-t-secondary'>
+            {t('settings.modelDisplayNameTitle', { defaultValue: '模型别名（选填）' })}
+          </label>
+          <Input
+            id={modelAliasInputId}
+            value={value.displayName ?? ''}
+            placeholder={t('settings.modelDisplayNamePlaceholder', { defaultValue: '例如：Seedance 1.5 Pro' })}
+            maxLength={128}
+            allowClear
+            onChange={(displayName) => onChange((current) => ({ ...current, displayName }))}
+            aria-describedby={`${modelAliasInputId}-hint`}
+            data-model-alias-input
+          />
+          <div id={`${modelAliasInputId}-hint`} className='text-11px leading-4 text-t-tertiary'>
+            {t('settings.modelDisplayNameHint', { defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。' })}
+          </div>
+        </div>
+      )}
+
+      {capabilityTask === undefined && value.capabilities.length === 0 && (
+        <section hidden={focusedCallConfigTask !== undefined} className='space-y-8px' data-model-purpose-required>
+          <div className='text-13px font-500 text-t-secondary'>
+            {t('settings.modelPurpose', { defaultValue: '调用用途' })}
+          </div>
+          <Select
+            value={undefined}
+            options={MODEL_TASK_ORDER.map((task) => ({ value: task, label: t(`settings.modelTask.${task}`, { defaultValue: task }) }))}
+            placeholder={t('settings.selectModelPurpose', { defaultValue: '确认模型的调用用途' })}
+            aria-label={t('settings.modelPurpose', { defaultValue: '调用用途' })}
+            status={value.model.trim() ? 'error' : undefined}
+            onChange={addCallRoute}
+            triggerProps={{ getPopupContainer: () => document.body }}
+            data-model-purpose-picker
+          />
+          <div className='text-11px leading-4 text-t-secondary' role='note'>
+            {selectedCatalogEntry?.tasksSource === 'inferred' && selectedCatalogEntry.tasks.length > 0
+              ? t('settings.modelPurposeUnverifiedHint', { defaultValue: '目录中的用途只是推测，请确认实际用途；此选择不会筛选模型列表。' })
+              : t('settings.modelPurposeRequiredHint', { defaultValue: '用途决定调用接口与请求格式。未知模型不会自动按对话处理，模型 ID 仍可自由输入。' })}
+          </div>
+        </section>
+      )}
+
+      {taskConflict && (
+        <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px rounded-8px border border-solid border-warning-4 bg-warning-1 p-12px' role={taskConflict.acknowledged ? 'note' : 'alert'} data-model-purpose-conflict>
+          <div className='text-12px leading-4 text-warning-7'>
+            {t('settings.modelPurposeConflict', {
+              configured: taskConflict.configuredTasks.map((task) => t(`settings.modelTask.${task}`, { defaultValue: task })).join('、'),
+              declared: taskConflict.declaredTasks.map((task) => t(`settings.modelTask.${task}`, { defaultValue: task })).join('、'),
+              defaultValue: '当前配置用于 {{configured}}，目录明确列出的用途为 {{declared}}。请确认所选模型支持当前接口。',
+            })}
+          </div>
+          {taskConflict.acknowledged
+            ? <div className='text-11px text-t-secondary'>{t('settings.modelPurposeConflictAcknowledged', { defaultValue: '已确认保留当前用途，调用仍使用对应接口。' })}</div>
+            : <Button size='small' onClick={() => onChange(acknowledgeCatalogTaskConflict)} data-confirm-model-purpose>
+                {t('settings.confirmModelPurpose', { defaultValue: '确认保留当前调用用途' })}
+              </Button>}
+        </div>
+      )}
+
       <div className='space-y-10px' data-capability-card-list>
         {value.capabilities
           .filter(
             (capability) =>
-              focusedCallConfigTask === undefined || capability.task === focusedCallConfigTask
+              (capabilityTask === undefined || capability.task === capabilityTask) &&
+              (focusedCallConfigTask === undefined || capability.task === focusedCallConfigTask)
           )
           .map((capability) => {
         const loading = manifestLoadingTasks.includes(capability.task);
@@ -951,7 +1017,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         // this is the only way it learns the convention.
         const rootShape = sdkTransport ? undefined : descriptor?.root_shape ?? undefined;
         const crossOrigin = requiresCrossOriginConsent(capability, manifest, providerBaseUrl, connections);
-        const providerParamsValid = parseProviderParams(capability.providerParamsJson).ok;
+        const parsedProviderParams = parseProviderParams(capability.providerParamsJson);
+        const providerParamsValid = parsedProviderParams.ok;
         const endpointDescriptors =
           descriptor?.endpoints
             .filter(
@@ -979,7 +1046,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         const outputLimitRequired = descriptor?.requires_output_ceiling ?? false;
         const outputLimitMissing =
           outputLimitRequired &&
-          !(typeof capability.outputLimit === 'number' && capability.outputLimit > 0);
+          !isValidModelTokenLimit(capability.outputLimit);
         const recommendedConnection = descriptor?.default_connections.find(
           (connection) => (connection.connection_role ?? 'default') === selectedRole
         );
@@ -1031,7 +1098,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           callConfigBaseline !== undefined && !sameCapabilityDraft(callConfigBaseline, capability);
         const contextLimitSummary = compactTokenCount(
           capability.contextLimit,
-          t('settings.modelAdvanced.contextDefaultCompact', { defaultValue: '200k' })
+          t('settings.modelAdvanced.contextDefaultCompact', { defaultValue: '自动' })
         );
         const outputLimitSummary = compactTokenCount(
           capability.outputLimit,
@@ -1039,13 +1106,18 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             defaultValue: '由供应商决定',
           })
         );
-        const customContextOpen =
-          Boolean(customContextByTask[capability.task]) ||
-          (capability.contextLimit !== undefined &&
-            capability.contextLimit !== 128_000 &&
-            capability.contextLimit !== 200_000);
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
+        const reasoningEffort = providerParamReasoningEffort(capability.providerParamsJson);
+        const reasoningEffortOptions = reasoningEffortsForProtocol(capability.protocol);
+        const hasReasoningEffort =
+          parsedProviderParams.ok &&
+          Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort');
+        const reasoningEffortProtocolSupported = protocolSupportsReasoningEffort(capability.protocol);
+        const reasoningEffortAvailable =
+          capability.task === 'chat' &&
+          reasoningEffortProtocolSupported &&
+          providerParamsValid;
         const protocolTransportOpen =
           protocolTransportOpenByTask[capability.task] ??
           taskValidationErrors.some((error) =>
@@ -1111,12 +1183,12 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           },
           {
             key: 'limits',
-            title: t('settings.modelAdvanced.intentLimits', {
-              defaultValue: '调整模型限制',
-            }),
-            description: t('settings.modelAdvanced.intentLimitsHint', {
-              defaultValue: '设置上下文窗口或最大输出',
-            }),
+            title: capability.task === 'chat'
+              ? t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })
+              : t('settings.modelAdvanced.intentLimits', { defaultValue: '生成与限制' }),
+            description: capability.task === 'chat'
+              ? t('settings.modelAdvanced.reasoningEffortDescription', { defaultValue: '调整模型默认的思考深度。' })
+              : t('settings.modelAdvanced.intentLimitsHint', { defaultValue: '设置上下文与最大输出限制' }),
             icon: <Shield theme='outline' size='17' />,
           },
           {
@@ -1162,70 +1234,61 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               }
               data-capability-card-header={capability.task}
             >
-              <button
-                type='button'
-                className='min-w-0 flex-1 border-0 bg-transparent px-14px py-12px text-left hover:bg-fill-1 focus-visible:outline-none focus-visible:shadow-[inset_0_0_0_2px_rgba(var(--primary-6),0.48)]'
-                aria-expanded={expanded}
-                aria-controls={detailsId}
-                data-capability-disclosure={capability.task}
-                onClick={() => toggleCallConfig(capability.task)}
-              >
-                <div className='flex min-w-0 flex-wrap items-start justify-between gap-10px'>
-                  <div className='min-w-0 flex-1'>
-                    <div className='flex flex-wrap items-center gap-8px'>
-                      <span className='font-600 text-t-primary'>
-                        {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
-                      </span>
-                      <Tag size='small' color={statusColor}>
-                        {statusText}
-                      </Tag>
-                    </div>
-                    <div
-                      className='mt-6px flex min-w-0 flex-wrap items-center gap-x-6px gap-y-2px text-11px text-t-secondary'
-                      data-capability-summary={capability.task}
-                    >
-                      <span className='max-w-260px truncate' title={protocolSummary}>
-                        {protocolSummary}
-                      </span>
-                      <span aria-hidden='true'>·</span>
-                      <span>{selectedRole}</span>
-                      <span aria-hidden='true'>·</span>
-                      <span className='max-w-300px truncate' title={baseUrlSummary}>
-                        {baseUrlSummary}
-                      </span>
-                    </div>
-                  </div>
-                  <span className='ml-auto flex shrink-0 items-center gap-6px whitespace-nowrap text-12px text-primary-6'>
-                    {expanded
-                      ? t('settings.modelAdvanced.collapseConfiguration', { defaultValue: '收起配置' })
-                      : t('settings.modelAdvanced.viewCallConfiguration', {
-                          defaultValue: '查看调用配置',
-                        })}
-                    {expanded ? <Down theme='outline' size='14' /> : <Right theme='outline' size='14' />}
+              <div className='w-full space-y-6px px-14px py-12px'>
+                <div className='flex min-w-0 items-center gap-8px'>
+                  <span className='font-600 text-t-primary'>
+                    {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
                   </span>
+                  <Tag size='small' color={statusColor}>{statusText}</Tag>
+                  <div className='ml-auto flex shrink-0 items-center gap-6px'>
+                    <Button
+                      size='mini'
+                      type='secondary'
+                      aria-expanded={expanded}
+                      aria-controls={detailsId}
+                      aria-label={t('settings.modelAdvanced.advancedForTask', {
+                        task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
+                        defaultValue: '{{task}}高级配置',
+                      })}
+                      data-capability-disclosure={capability.task}
+                      onClick={() => toggleCallConfig(capability.task)}
+                    >
+                      {expanded
+                        ? t('settings.modelAdvanced.collapseConfiguration', { defaultValue: '收起高级配置' })
+                        : t('settings.modelAdvanced.advancedConfiguration', { defaultValue: '高级配置' })}
+                      {expanded ? <Down theme='outline' size='12' /> : <Right theme='outline' size='12' />}
+                    </Button>
+                    {capabilityTask === undefined && <Popconfirm
+                      title={t('settings.removeModelTaskConfirm', {
+                        defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”接口及其调用配置？`,
+                        task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
+                      })}
+                      onOk={() => removeTask(capability.task)}
+                    >
+                      <Button
+                        size='mini'
+                        type='text'
+                        status='danger'
+                        className='!h-28px !w-28px !min-w-28px'
+                        icon={<DeleteFour theme='outline' size='14' />}
+                        aria-label={t('settings.removeModelTask', { defaultValue: '移除调用接口' })}
+                        data-remove-model-task={capability.task}
+                      />
+                    </Popconfirm>}
+                  </div>
                 </div>
-              </button>
-              <div className='flex shrink-0 items-center pr-10px'>
-                <Popconfirm
-                  title={t('settings.removeModelTaskConfirm', {
-                    defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”及其高级配置？`,
-                    task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
-                  })}
-                  onOk={() => removeTask(capability.task)}
+                <div
+                  className='flex min-w-0 flex-wrap items-center gap-x-6px gap-y-2px text-11px text-t-secondary'
+                  data-capability-summary={capability.task}
                 >
-                  <Button
-                    size='mini'
-                    type='text'
-                    status='danger'
-                    className='!h-28px !w-28px !min-w-28px'
-                    icon={<DeleteFour theme='outline' size='14' />}
-                    aria-label={t('settings.removeModelTask', { defaultValue: '移除任务' })}
-                    data-remove-model-task={capability.task}
-                  />
-                </Popconfirm>
+                  <span className='max-w-260px truncate' title={protocolSummary}>{protocolSummary}</span>
+                  <span aria-hidden='true'>·</span>
+                  <span>{selectedRole}</span>
+                  <span aria-hidden='true'>·</span>
+                  <span className='max-w-300px truncate' title={baseUrlSummary}>{baseUrlSummary}</span>
+                </div>
               </div>
             </div>
-
             {/*
               What is actually missing, in words, outside the disclosure.
               The card used to state only a count ("待处理 1 项") while the
@@ -1253,36 +1316,77 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             )}
 
-            {/*
-              Traits stay visible without expanding the card: they describe what
-              the model can do, which is the same kind of question as the task
-              itself, and they are cheap to answer. Everything below — protocol,
-              URLs, connection role, token ceilings — is transport detail that
-              already has a working default.
-            */}
-            <div
-              hidden={focusedCallConfigTask !== undefined}
-              className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
-              data-capability-traits={capability.task}
-            >
-              <div className='text-12px text-t-secondary'>
-                {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
+            {capability.task === 'chat' && (
+              <div
+                hidden={focusedCallConfigTask !== undefined}
+                className='space-y-10px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
+                data-model-context-settings={capability.task}
+              >
+                <div className='text-12px font-600 text-t-primary'>
+                  {t('settings.modelAdvanced.contextSettingsTitle', { defaultValue: '上下文与输出' })}
+                </div>
+                <div className='grid grid-cols-2 gap-10px'>
+                  <div className='space-y-6px'>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
+                    </div>
+                    <ContextLimitSelect
+                      value={capability.contextLimit}
+                      onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
+                    />
+                    <div className='text-11px leading-4 text-t-tertiary'>
+                      {t('settings.modelAdvanced.contextLimitCompactHint', {
+                        defaultValue: '未填写不覆盖模型上下文。仅采用供应商明确提供的窗口；未知时请按模型文档填写，安全预算独立。',
+                      })}
+                    </div>
+                  </div>
+                  <div className='space-y-6px' data-model-output-settings={capability.task}>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.outputLimit', { defaultValue: '最大输出（tokens）' })}
+                    </div>
+                    <OutputLimitInput
+                      value={capability.outputLimit}
+                      onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
+                      compact
+                    />
+                    {outputLimitMissing && (
+                      <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
+                        {t('settings.outputLimitRequired')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                  <div className='space-y-6px'>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.modelAdvanced.compactionThresholdLabel', {
+                        defaultValue: '自动压缩阈值',
+                      })}
+                    </div>
+                    <Select
+                      value={capability.compactionThresholdPct ?? 75}
+                      options={[50, 60, 70, 75, 80, 85, 90, 95].map((pct) => ({
+                        value: pct,
+                        label: `${pct}%${pct === 75 ? ` · ${t('settings.modelAdvanced.recommended', { defaultValue: '推荐' })}` : ''}`,
+                      }))}
+                      onChange={(compactionThresholdPct: number) =>
+                        updateCapability(capability.task, {
+                          compactionThresholdPct: compactionThresholdPct === 75 ? undefined : compactionThresholdPct,
+                        })
+                      }
+                      getPopupContainer={() => document.body}
+                      aria-label={t('settings.modelAdvanced.compactionThresholdLabel', {
+                        defaultValue: '自动压缩阈值',
+                      })}
+                      data-model-compaction-threshold
+                    />
+                    <div className='text-11px leading-4 text-t-tertiary'>
+                      {t('settings.modelAdvanced.compactionThresholdHint', {
+                        defaultValue: '达到可用输入空间的这个比例时自动压缩；调低会更早压缩。',
+                      })}
+                    </div>
+                  </div>
               </div>
-              <Select
-                mode='multiple'
-                value={capability.traits}
-                options={MODEL_TRAIT_ORDER.map((trait) => ({
-                  value: trait,
-                  label: t(`settings.modelTrait.${trait}`, { defaultValue: trait }),
-                }))}
-                onChange={(traits: ModelTrait[]) =>
-                  updateCapability(capability.task, {
-                    traits: MODEL_TRAIT_ORDER.filter((trait) => (traits ?? []).includes(trait)),
-                  })
-                }
-                triggerProps={{ getPopupContainer: () => document.body }}
-              />
-            </div>
+            )}
 
             <div
               id={detailsId}
@@ -1913,14 +2017,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             )}
             </div>
 
-            {/*
-              One heading for both ceilings, because they are NOT two spellings
-              of the same thing and the old flat layout implied they were. The
-              context window feeds the compaction budget (its "default" is the
-              app's 200k assumption); the output ceiling feeds the request's
-              max_tokens (its "default" is whatever the provider picks) and is
-              mandatory for the Anthropic-family protocols.
-            */}
+            {/* Chat context and output are on the model homepage. Advanced
+                Chat settings tune reasoning; other tasks keep their limits here. */}
             <div
               hidden={callConfigIntent !== 'limits'}
               className='space-y-10px rounded-10px border border-solid border-[var(--color-border-2)] p-12px'
@@ -1928,88 +2026,102 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               data-call-config-branch='limits'
             >
               <div className='text-12px font-500 text-t-secondary'>
-                {t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '模型限制' })}
+                {capability.task === 'chat'
+                  ? t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })
+                  : t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '生成与限制' })}
               </div>
 
-              <div className='space-y-8px'>
-                <div className='flex flex-wrap items-center justify-between gap-10px'>
+              {capability.task === 'chat' && (
+                <div className='space-y-8px' data-reasoning-effort-control>
+                  <div className='flex flex-wrap items-center justify-between gap-10px'>
+                    <div>
+                      <div className='text-12px text-t-secondary'>
+                        {t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })}
+                      </div>
+                      <div className='mt-2px text-11px leading-4 text-t-tertiary'>
+                        {t('settings.modelAdvanced.reasoningEffortDescription', {
+                          defaultValue: '作为该模型 Chat 能力的默认值，影响速度、质量和 token 消耗。',
+                        })}
+                      </div>
+                    </div>
+                    <div
+                      className='inline-flex overflow-hidden rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1'
+                      role='group'
+                      aria-label={t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })}
+                    >
+                      {([
+                        { value: undefined, key: 'auto' },
+                        ...reasoningEffortOptions.map((value) => ({ value, key: value })),
+                      ] satisfies Array<{ value: ModelReasoningEffort | undefined; key: string }>).map((option) => {
+                        const selected = option.value === undefined
+                          ? !hasReasoningEffort
+                          : reasoningEffort === option.value;
+                        const disabled = !providerParamsValid || (option.value !== undefined && !reasoningEffortAvailable);
+                        return (
+                          <button
+                            key={option.key}
+                            type='button'
+                            aria-pressed={selected}
+                            disabled={disabled}
+                            data-reasoning-effort={option.key}
+                            className={`min-w-58px border-0 border-r border-solid border-[var(--color-border-2)] px-11px py-6px text-12px last:border-r-0 disabled:cursor-not-allowed disabled:opacity-45 ${
+                              selected
+                                ? 'bg-primary-1 text-primary-6'
+                                : 'bg-transparent text-t-secondary hover:bg-fill-2'
+                            }`}
+                            onClick={() =>
+                              updateCapability(capability.task, {
+                                providerParamsJson: withProviderParamReasoningEffort(
+                                  capability.providerParamsJson,
+                                  option.value
+                                ),
+                              })
+                            }
+                          >
+                            {t(`settings.modelAdvanced.reasoningEffortOptions.${option.key}`, {
+                              defaultValue: option.key,
+                            })}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div
+                    className={`text-11px leading-4 ${
+                      providerParamsValid && reasoningEffortProtocolSupported
+                        ? 'text-t-tertiary'
+                        : 'text-warning-7'
+                    }`}
+                    data-reasoning-effort-hint
+                  >
+                    {!providerParamsValid
+                      ? t('settings.modelAdvanced.reasoningEffortJsonInvalid', {
+                          defaultValue: '先修正供应商参数 JSON，才能调整思考深度。',
+                        })
+                      : !reasoningEffortProtocolSupported
+                          ? t('settings.modelAdvanced.reasoningEffortProtocolUnsupported', {
+                              defaultValue: '当前协议不提供统一的低/中/高映射；请使用自动。',
+                            })
+                          : t('settings.modelAdvanced.reasoningEffortHint', {
+                              defaultValue: '自动使用系统与供应商默认值；固定档位会应用到使用该模型的新调用。',
+                            })}
+                  </div>
+                </div>
+              )}
+
+              {capability.task !== 'chat' && (
+                <div className='space-y-8px'>
                   <div className='text-12px text-t-secondary'>
                     {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
                   </div>
-                  <div
-                    className='inline-flex overflow-hidden rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1'
-                    role='group'
-                    aria-label={t('settings.contextLimit', {
-                      defaultValue: '上下文窗口（tokens）',
-                    })}
-                  >
-                    {[
-                      { label: '128k', value: 128_000 },
-                      { label: '200k', value: undefined },
-                    ].map((option) => {
-                      const selected =
-                        option.value === undefined
-                          ? capability.contextLimit === undefined || capability.contextLimit === 200_000
-                          : capability.contextLimit === option.value;
-                      return (
-                        <button
-                          key={option.label}
-                          type='button'
-                          aria-pressed={selected && !customContextOpen}
-                          className={`min-w-72px border-0 border-r border-solid border-[var(--color-border-2)] px-14px py-6px text-12px last:border-r-0 ${
-                            selected && !customContextOpen
-                              ? 'bg-primary-1 text-primary-6'
-                              : 'bg-transparent text-t-secondary hover:bg-fill-2'
-                          }`}
-                          onClick={() => {
-                            setCustomContextByTask((current) => ({
-                              ...current,
-                              [capability.task]: false,
-                            }));
-                            updateCapability(capability.task, {
-                              contextLimit: option.value,
-                            });
-                          }}
-                        >
-                          {option.label}
-                        </button>
-                      );
-                    })}
-                    <button
-                      type='button'
-                      aria-pressed={customContextOpen}
-                      className={`min-w-76px border-0 px-14px py-6px text-12px ${
-                        customContextOpen
-                          ? 'bg-primary-1 text-primary-6'
-                          : 'bg-transparent text-t-secondary hover:bg-fill-2'
-                      }`}
-                      onClick={() =>
-                        setCustomContextByTask((current) => ({
-                          ...current,
-                          [capability.task]: true,
-                        }))
-                      }
-                    >
-                      {t('settings.outputLimitCustomOption', { defaultValue: '自定义' })}
-                    </button>
-                  </div>
-                </div>
-                <div hidden={!customContextOpen}>
                   <ContextLimitSelect
                     value={capability.contextLimit}
-                    onChange={(contextLimit) =>
-                      updateCapability(capability.task, { contextLimit })
-                    }
+                    onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
                   />
                 </div>
-                <div className='text-11px leading-4 text-t-tertiary'>
-                  {t('settings.modelAdvanced.contextLimitCompactHint', {
-                    defaultValue: '留空按推荐 200k 估算；模型真实窗口更小时再调整。',
-                  })}
-                </div>
-              </div>
+              )}
 
-              <div className='space-y-8px'>
+              {capability.task !== 'chat' && <div className='space-y-8px'>
                 <div className='flex items-center justify-between gap-10px rounded-8px bg-fill-1 px-10px py-8px'>
                   <span className='text-12px text-t-secondary'>
                     {t('settings.outputLimit', { defaultValue: '最大输出（tokens）' })}
@@ -2044,11 +2156,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 {outputLimitMissing && (
                   <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
                     {t('settings.outputLimitRequired', {
-                      defaultValue: 'This protocol requires an explicit max output token value.',
+                      defaultValue: 'This protocol requires a numeric max output value. No provider/model recommendation is available; enter the documented value instead of guessing.',
                     })}
                   </div>
                 )}
-              </div>
+              </div>}
               <div className='flex items-center justify-between gap-10px border-0 border-t border-solid border-[var(--color-border-2)] pt-10px'>
                 <span className='text-11px leading-16px text-t-secondary'>
                   {t('settings.modelAdvanced.taskOnlyHint', {
@@ -2064,8 +2176,11 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   type='text'
                   onClick={() =>
                     updateCapability(capability.task, {
-                      contextLimit: undefined,
-                      outputLimit: undefined,
+                      ...(capability.task === 'chat' ? {} : { contextLimit: undefined, outputLimit: undefined }),
+                      providerParamsJson: withProviderParamReasoningEffort(
+                        capability.providerParamsJson,
+                        undefined
+                      ),
                     })
                   }
                 >
@@ -2213,7 +2328,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
                 {providerParamsValid
                   ? t('settings.modelAdvanced.providerParamsOnly', {
-                      defaultValue: '只填写供应商原始参数；协议、URL 和 endpoint 由上方结构化字段管理。',
+                      defaultValue: '只填写供应商原始参数；切换协议会保留自定义值，不兼容的参数需要明确修正。URL 和凭据边界独立管理。',
                     })
                   : t('settings.modelAdvanced.invalidParamsJson', {
                       defaultValue: '必须是合法的 JSON 对象。',
@@ -2260,6 +2375,29 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         );
       })}
       </div>
+      {capabilityTask === undefined && <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px' data-model-call-routes>
+        {selectedTasks.length > 0 && selectedTasks.length < MODEL_TASK_ORDER.length && (
+          <>
+            <Button type='text' size='small' onClick={() => setAddingCallRoute((open) => !open)} aria-expanded={addingCallRoute} data-add-call-route>
+              {t('settings.addModelCallRoute', { defaultValue: '添加图像、语音等调用接口' })}
+            </Button>
+            {addingCallRoute && (
+              <Select
+                value={undefined}
+                options={MODEL_TASK_ORDER.filter((task) => !selectedTasks.includes(task)).map((task) => ({
+                  value: task,
+                  label: t(`settings.modelTask.${task}`, { defaultValue: task }),
+                }))}
+                placeholder={t('settings.selectModelCallRoute', { defaultValue: '选择需要调用的接口' })}
+                aria-label={t('settings.selectModelCallRoute', { defaultValue: '选择需要调用的接口' })}
+                onChange={addCallRoute}
+                triggerProps={{ getPopupContainer: () => document.body }}
+                data-model-call-route-picker
+              />
+            )}
+          </>
+        )}
+      </div>}
     </div>
   );
 });

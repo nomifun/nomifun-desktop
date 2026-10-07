@@ -9,49 +9,22 @@ pub fn strip_ansi(text: &str) -> String {
 }
 
 pub fn collapse_cr_lines(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    for line in text.split('\n') {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        if let Some(last) = line.rsplit('\r').next() {
-            result.push_str(last);
-        }
-    }
-    result
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).rsplit('\r').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn merge_blank_lines(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
     let mut prev_blank = false;
-    for line in text.split('\n') {
-        let is_blank = line.trim().is_empty();
-        if is_blank {
-            if !prev_blank {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push('\n');
-            }
-            prev_blank = true;
-        } else {
-            if !result.is_empty() && !prev_blank {
-                result.push('\n');
-            } else if prev_blank && result.ends_with('\n') {
-                // blank section already has trailing newline
-            } else if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(line.trim_end());
-            prev_blank = false;
-        }
-    }
-    result
-}
-
-pub fn trim_trailing_whitespace(text: &str) -> String {
     text.lines()
-        .map(|line| line.trim_end())
+        .map(str::trim_end)
+        .filter(|line| {
+            let blank = line.is_empty();
+            let keep = !blank || !prev_blank;
+            prev_blank = blank;
+            keep
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -59,7 +32,6 @@ pub fn trim_trailing_whitespace(text: &str) -> String {
 pub fn sanitize(text: &str) -> String {
     let text = strip_ansi(text);
     let text = collapse_cr_lines(&text);
-    let text = trim_trailing_whitespace(&text);
     merge_blank_lines(&text)
 }
 
@@ -130,18 +102,18 @@ mod tests {
         assert_eq!(merge_blank_lines(input), "a\n\nb");
     }
 
-    // --- trim_trailing_whitespace ---
+    // Whitespace trimming shares the blank-line pass.
 
     #[test]
     fn trim_trailing_spaces() {
         let input = "hello   \nworld\t\t\nfoo";
-        assert_eq!(trim_trailing_whitespace(input), "hello\nworld\nfoo");
+        assert_eq!(merge_blank_lines(input), "hello\nworld\nfoo");
     }
 
     #[test]
     fn trim_trailing_no_trailing() {
         let input = "clean\nlines";
-        assert_eq!(trim_trailing_whitespace(input), input);
+        assert_eq!(merge_blank_lines(input), input);
     }
 
     // --- sanitize (combined safe layer) ---

@@ -16,7 +16,7 @@ const MAX_PROMPT_CHARACTERS = 20_000;
 const MAX_MODEL_CHARACTERS = 512;
 const MAX_RESPONSE_UTF8_BYTES = MAX_CREATIVE_TEMPLATE_DRAFT_JSON_BYTES + 12;
 
-export interface TemplateDraftPortInput {
+interface TemplateDraftPortInput {
   providerId: ProviderId;
   model: string;
   prompt: string;
@@ -36,7 +36,7 @@ export type TemplateDraftHttpRequest = (
   body: unknown
 ) => Promise<unknown>;
 
-export class TemplateDraftPortError extends Error {
+class TemplateDraftPortError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'TemplateDraftPortError';

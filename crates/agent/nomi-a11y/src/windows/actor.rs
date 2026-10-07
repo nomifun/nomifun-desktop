@@ -236,8 +236,8 @@ fn rect_of(r: &uiautomation::types::Rect) -> Rect {
     Rect {
         x: left as f64,
         y: top as f64,
-        w: (r.get_right() - left) as f64,
-        h: (r.get_bottom() - top) as f64,
+        w: r.get_right() as f64 - left as f64,
+        h: r.get_bottom() as f64 - top as f64,
     }
 }
 
@@ -1285,5 +1285,21 @@ impl ActorHandle {
         self.send(Cmd::Focus(pid, tx))?;
         rx.recv()
             .map_err(|_| A11yError::Backend("UIA actor dropped the reply".to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rectangle_dimensions_do_not_overflow_or_add_a_pixel() {
+        let wide = rect_of(&uiautomation::types::Rect::new(
+            i32::MIN, i32::MIN, i32::MAX, i32::MAX,
+        ));
+        assert_eq!(wide.w, u32::MAX as f64);
+        assert_eq!(wide.h, u32::MAX as f64);
+        assert!(rect_of(&uiautomation::types::Rect::new(3, 4, 3, 4)).is_empty());
+        assert!(rect_of(&uiautomation::types::Rect::new(3, 4, -3, -4)).is_empty());
     }
 }

@@ -1680,12 +1680,39 @@ mod tests {
 
         let payload = r#"{
             "operator": { "open_id": "ou_actor" },
-            "action": { "tag": "button", "value": {"action": "system:system.confirm:callId=call_123,value=approve"} },
+            "action": { "tag": "button", "value": {"action": "system:session.new"} },
             "open_message_id": "om_1",
             "open_chat_id": "oc_1"
         }"#;
 
         handle_ws_text(payload, "card", None, &message_tx, &dedup_cache, "ou_bot", &chat_kind_cache).await;
+
+        assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ws_text_unsupported_card_action_is_dropped() {
+        let (message_tx, mut message_rx) = mpsc::channel(16);
+        let dedup_cache = Arc::new(Mutex::new(HashMap::new()));
+        let chat_kind_cache = Arc::new(Mutex::new(HashMap::new()));
+
+        let payload = r#"{
+            "operator": { "open_id": "ou_actor" },
+            "action": { "tag": "button", "value": {"action": "system:unknown.switch:value=yes"} },
+            "open_message_id": "om_retired",
+            "open_chat_id": "oc_retired"
+        }"#;
+
+        handle_ws_text(
+            payload,
+            "card",
+            Some("card_frame_retired"),
+            &message_tx,
+            &dedup_cache,
+            "ou_bot",
+            &chat_kind_cache,
+        )
+        .await;
 
         assert!(message_rx.try_recv().is_err());
     }

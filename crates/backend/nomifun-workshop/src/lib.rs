@@ -33,7 +33,7 @@ pub use prompt_catalog::{CreativePromptCatalogItem, CreativePromptCatalogPage};
 pub use template::{CreativeTemplateDefinitionV1, MAX_TEMPLATE_DEFINITION_BYTES};
 pub use template_draft::{
     TemplateDraftRunRequest, TemplateDraftRunner, MAX_TEMPLATE_DRAFT_JSON_BYTES,
-    MAX_TEMPLATE_DRAFT_RESPONSE_BYTES, TEMPLATE_DRAFT_MAX_TOKENS,
+    MAX_TEMPLATE_DRAFT_RESPONSE_BYTES,
     TEMPLATE_DRAFT_TIMEOUT_SECS,
 };
 pub use template_run::{

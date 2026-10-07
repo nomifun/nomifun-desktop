@@ -14,9 +14,9 @@ export const CREATIVE_TEMPLATE_DRAFT_ARTIFACT_KIND =
   'nomifun.creative-studio.template-draft/v1' as const;
 export const MAX_CREATIVE_TEMPLATE_DRAFT_JSON_BYTES = 262_144;
 
-export type CreativeTemplateDraftMode = 'single-image' | 'multi-image-series';
+type CreativeTemplateDraftMode = 'single-image' | 'multi-image-series';
 
-export interface CreativeTemplateDraft {
+interface CreativeTemplateDraft {
   mode: CreativeTemplateDraftMode;
   name: string;
   description: string;

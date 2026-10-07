@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Form, Input, InputNumber, Message, Modal, Select } from '@arco-design/web-react';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
@@ -28,11 +28,20 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
+  const draftVersion = useRef(0);
+  const saving = useRef(false);
+
+  useLayoutEffect(() => {
+    draftVersion.current++;
+    saving.current = false;
+    setSubmitting(false);
+    return () => { draftVersion.current++; };
+  }, [visible]);
   // Task-filtered catalog (chat): providers with at least one chat-capable model.
   const { groups: chatGroups } = useModelsForTask('chat');
   const providers = useMemo(() => chatGroups.map((g) => g.provider), [chatGroups]);
   const { options: kbOptions } = useKnowledgeBaseOptions();
-  const [providerId, setProviderId] = useState<ProviderId | undefined>(undefined);
+  const providerId = Form.useWatch('provider_id', form) as ProviderId | undefined;
 
   const modelOptions = useMemo(() => {
     const group = chatGroups.find((g) => g.provider.id === providerId);
@@ -40,9 +49,15 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
   }, [chatGroups, providerId]);
 
   const handleSubmit = async () => {
-    const values = await form.validate();
+    if (!visible || saving.current) return;
+    saving.current = true;
+    const version = draftVersion.current;
+    const isCurrent = () => version === draftVersion.current;
     setSubmitting(true);
     try {
+      // Arco renders field errors; validation failure is not a request failure.
+      const values = await form.validate().catch(() => undefined);
+      if (!values || !isCurrent()) return;
       const created = await create({
         name: (values.name as string).trim(),
         greeting: (values.greeting as string) ?? '',
@@ -53,14 +68,18 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
         knowledge_base_ids: ((values.knowledge_base_ids as KnowledgeBaseId[] | undefined) ?? []),
         max_concurrent: (values.max_concurrent as number | undefined) ?? 8,
       });
+      if (!isCurrent()) return;
       Message.success(t('customerService.create.done', { defaultValue: '客服已创建' }));
       form.resetFields();
       onClose();
       onCreated(created);
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) Message.error(error instanceof Error ? error.message : String(error));
     } finally {
-      setSubmitting(false);
+      if (isCurrent()) {
+        saving.current = false;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -85,7 +104,7 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
           <Form.Item
             className={styles.fieldItem}
             field='name'
-            rules={[{ required: true, message: t('customerService.fields.nameRequired', { defaultValue: '请输入客服名称' }) }]}
+            rules={[{ required: true, match: /\S/, message: t('customerService.fields.nameRequired', { defaultValue: '请输入客服名称' }) }]}
           >
             <Input placeholder={t('customerService.fields.namePlaceholder', { defaultValue: '例如：售后小助' })} />
           </Form.Item>
@@ -100,10 +119,7 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
               <Select
                 placeholder={t('customerService.fields.providerPlaceholder', { defaultValue: '选择服务商' })}
                 allowClear
-                onChange={(value) => {
-                  setProviderId(value as ProviderId | undefined);
-                  form.setFieldValue('model', undefined);
-                }}
+                onChange={() => form.setFieldValue('model', undefined)}
               >
                 {providers.map((p) => (
                   <Select.Option key={p.id} value={p.id}>
@@ -187,7 +203,7 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
             {t('customerService.fields.maxConcurrent', { defaultValue: '并发上限' })}
           </div>
           <Form.Item className={`${styles.fieldItem} ${styles.concurrencyControl}`} field='max_concurrent' initialValue={8}>
-            <InputNumber min={1} max={64} />
+            <InputNumber min={1} max={64} precision={0} />
           </Form.Item>
         </div>
       </Form>

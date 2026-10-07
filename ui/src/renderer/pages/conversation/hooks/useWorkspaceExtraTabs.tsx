@@ -8,9 +8,8 @@ import type { TChatConversation } from '@/common/config/storage';
 import ConversationTerminalPanel from '@/renderer/pages/conversation/components/ConversationTerminalPanel';
 import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
 import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
-import MiniAppPanel from '@/renderer/pages/conversation/Workspace/MiniAppPanel';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
-import { ApplicationOne, Terminal } from '@icon-park/react';
+import { Terminal } from '@icon-park/react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -33,10 +32,11 @@ export function useWorkspaceExtraTabs(conversation?: TChatConversation): Workspa
   const conversationId = conversation?.id;
   const extra = conversation?.extra as Record<string, unknown> | undefined;
   const hasWorkspace = Boolean(extra?.workspace);
-
   const knowledgeSource = useMemo<SessionKnowledgeSource | undefined>(
-    () => (conversationId && hasWorkspace ? { kind: 'conversation', conversationId, extra } : undefined),
-    [conversationId, hasWorkspace, extra]
+    () => (conversationId && hasWorkspace
+      ? { kind: 'conversation', sessionId: conversationId }
+      : undefined),
+    [conversationId, hasWorkspace]
   );
   const knowledgeTabs = useSessionKnowledgeTab(knowledgeSource);
 
@@ -49,17 +49,6 @@ export function useWorkspaceExtraTabs(conversation?: TChatConversation): Workspa
         title: t('terminal.conversationPanel.tab'),
         icon: <Terminal size={18} />,
         content: <ConversationTerminalPanel conversationId={conversationId} />,
-      },
-      // Directly below the terminal: a permanent, read-only way to USE a
-      // solidified mini-app without leaving the conversation. Unconditional on
-      // purpose — a tab that appears asynchronously would make WorkspaceRailBody
-      // persist its `files` fallback over the user's stored selection. Loading,
-      // empty and error states are handled inside the panel.
-      {
-        key: 'conversation-miniapps',
-        title: t('miniApps.nav.entry'),
-        icon: <ApplicationOne size={18} />,
-        content: <MiniAppPanel />,
       },
       ...knowledgeTabs,
     ];

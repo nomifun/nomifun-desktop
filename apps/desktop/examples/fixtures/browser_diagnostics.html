@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Native diagnostic scopes</title>
+<button id="errors">Produce frame errors</button><button id="replace">Replace frames</button>
+<iframe id="foreign" src="http://localhost:__PORT__/diagnostic-child"></iframe>
+<iframe id="same" src="/diagnostic-child?leaf"></iframe>
+<script>
+window.generation=0; window.diagnosticClickTrusted=false;
+document.getElementById('errors').onclick=e=>{
+  diagnosticClickTrusted=e.isTrusted;
+  console.error('diag-root-'+generation);
+  for(const frame of document.querySelectorAll('iframe')) frame.contentWindow.postMessage({diagnostic:generation},'*');
+};
+document.getElementById('replace').onclick=()=>{
+  generation++;
+  for(const frame of document.querySelectorAll('iframe')) frame.src=frame.src+(frame.src.includes('?')?'&':'?')+'generation='+generation;
+};
+</script>

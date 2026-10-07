@@ -1,26 +1,24 @@
-import type { PresetTag } from '@/common/types/agent/presetTypes';
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { normalizeTestId } from './skillPresentation';
 import { marketSourceLabel, translateMarketDescription } from './skillMarket';
 import { Button, Tag } from '@arco-design/web-react';
-import { Plus } from '@icon-park/react';
+import { Plus, Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 type SkillMarketCardProps = {
   item: ISkillMarketItem;
-  tagByKey: Map<string, PresetTag>;
   localeKey: string;
   adding: boolean;
   added: boolean;
   addedStateLoading: boolean;
+  addedActionEnabled?: boolean;
+  addedActionLabel?: string;
   onAdd: (item: ISkillMarketItem) => void;
 };
 
 const MAX_VISIBLE_TAGS = 3;
-
-const resolveTagLabel = (tag: PresetTag, localeKey: string): string => tag.label_i18n?.[localeKey] || tag.label;
 
 const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ source }) => {
   const label = marketSourceLabel(source);
@@ -46,26 +44,23 @@ const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ s
 
 const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   item,
-  tagByKey,
   localeKey,
   adding,
   added,
   addedStateLoading,
+  addedActionEnabled = false,
+  addedActionLabel,
   onAdd,
 }) => {
   const { t } = useTranslation();
   const testId = normalizeTestId(item.id);
   const requiresApiKey = item.tags?.includes('requires_api_key') ?? false;
   const noApiKey = item.tags?.includes('no_api_key') ?? false;
-  const resolvedTags = [...(item.audience_tags ?? []), ...(item.scenario_tags ?? [])]
-    .map((key) => tagByKey.get(key))
-    .filter((tag): tag is PresetTag => Boolean(tag));
-  const rawTags = (item.tags ?? []).filter((tag) => !tagByKey.has(tag) && tag !== 'requires_api_key' && tag !== 'no_api_key');
-  const visibleResolvedTags = resolvedTags.slice(0, MAX_VISIBLE_TAGS);
-  const visibleRawTags = resolvedTags.length === 0 ? rawTags.slice(0, MAX_VISIBLE_TAGS) : [];
-  const totalTagCount = resolvedTags.length > 0 ? resolvedTags.length : rawTags.length;
-  const overflowCount = Math.max(0, totalTagCount - MAX_VISIBLE_TAGS);
+  const rawTags = (item.tags ?? []).filter((tag) => tag !== 'requires_api_key' && tag !== 'no_api_key');
+  const visibleRawTags = rawTags.slice(0, MAX_VISIBLE_TAGS);
+  const overflowCount = Math.max(0, rawTags.length - MAX_VISIBLE_TAGS);
   const description = translateMarketDescription(item.description, item, localeKey);
+  const actionEnabled = !added || addedActionEnabled;
 
   return (
     <div
@@ -88,13 +83,15 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
           type='secondary'
           data-testid={`btn-add-market-skill-${testId}`}
           className='!shrink-0 !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
-          icon={added ? undefined : <Plus theme='outline' size={12} strokeWidth={3} />}
+          icon={added ? (addedActionEnabled ? <Refresh size={12} /> : undefined) : <Plus theme='outline' size={12} strokeWidth={3} />}
           loading={adding}
-          disabled={adding || added || addedStateLoading}
+          disabled={adding || !actionEnabled || addedStateLoading}
           onClick={() => onAdd(item)}
         >
           {added
-            ? t('common.added', { defaultValue: 'Added' })
+            ? (addedActionEnabled
+                ? (addedActionLabel ?? t('common.refresh', { defaultValue: 'Refresh' }))
+                : t('common.added', { defaultValue: 'Added' }))
             : t('common.add', { defaultValue: 'Add' })}
         </Button>
       </div>
@@ -135,16 +132,8 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
         {description || t('settings.skillsMarket.noDescription', { defaultValue: '暂无描述。' })}
       </div>
 
-      {(visibleResolvedTags.length > 0 || visibleRawTags.length > 0) && (
+      {visibleRawTags.length > 0 && (
         <div className='mt-12px flex flex-wrap items-center gap-6px'>
-          {visibleResolvedTags.map((tag) => (
-            <span
-              key={tag.key}
-              className='inline-flex items-center rounded-[12px] px-8px py-1px text-11px leading-16px bg-[var(--color-fill-2)] text-[var(--color-text-2)] border border-solid border-[var(--color-border-2)]'
-            >
-              {resolveTagLabel(tag, localeKey)}
-            </span>
-          ))}
           {visibleRawTags.map((tag) => (
             <span
               key={tag}

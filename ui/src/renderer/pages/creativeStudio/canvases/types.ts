@@ -6,7 +6,7 @@
 
 import type { CreativeCanvasSummary } from '../domain';
 
-export type CreativeStudioCanvasesLoadState = 'loading' | 'ready' | 'error';
+type CreativeStudioCanvasesLoadState = 'loading' | 'ready' | 'error';
 
 export interface CreativeStudioCanvasesSnapshot {
   status: CreativeStudioCanvasesLoadState;
@@ -14,7 +14,7 @@ export interface CreativeStudioCanvasesSnapshot {
   error?: string;
 }
 
-export interface CreativeStudioCanvasArchiveCapabilities {
+interface CreativeStudioCanvasArchiveCapabilities {
   canImport: boolean;
   canExport: boolean;
 }

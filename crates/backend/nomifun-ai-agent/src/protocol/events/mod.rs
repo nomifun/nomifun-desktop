@@ -1,4 +1,3 @@
-pub mod permission;
 pub mod session_updates;
 pub mod tool_call;
 
@@ -7,9 +6,8 @@ use ts_rs::TS;
 
 pub use nomifun_api_types::AgentStreamErrorData as ErrorEventData;
 
-pub use permission::PermissionEventData;
 pub use session_updates::{
-    AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, PlanEventData, SkillSuggestEventData,
+    AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, SkillSuggestEventData,
     ThinkingEventData,
 };
 pub use tool_call::{
@@ -32,8 +30,8 @@ pub enum AgentStreamEvent {
     ToolGroup(Vec<ToolGroupEntry>),
     AgentStatus(AgentStatusEventData),
     Thinking(ThinkingEventData),
-    Plan(PlanEventData),
-    Permission(PermissionEventData),
+    /// The canonical task-plan snapshot changed; this is not a chat message.
+    TaskPlanChanged,
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     SlashCommandsUpdated(serde_json::Value),
@@ -74,9 +72,12 @@ pub struct SessionAssignedEventData {
 }
 
 /// Data for the `Text` event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextEventData {
     pub content: String,
+    /// Canonical model-step identity shared by realtime and durable history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u16>,
 }
 
 /// Data for the `Tips` event.
@@ -152,6 +153,8 @@ pub enum TurnStopReason {
     Refusal,
     /// Turn was cancelled / aborted (server or transport, not a clean finish).
     Cancelled,
+    /// Execution is durably suspended, not completed; owner authorization is required to continue.
+    Paused,
 }
 
 #[cfg(test)]
@@ -213,8 +216,7 @@ mod tests {
 
     #[test]
     fn text_event_roundtrip() {
-        let event = AgentStreamEvent::Text(TextEventData {
-            content: "Hello world".into(),
+        let event = AgentStreamEvent::Text(TextEventData { step: None, content: "Hello world".into(),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "content");
@@ -242,6 +244,10 @@ mod tests {
     #[test]
     fn tool_call_event_roundtrip() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: tool_call::ToolCallIdentity {
+                capability_id: Some("workspace.files".into()),
+                action_id: Some("workspace.files/read".into()),
+            },
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: json!({ "path": "/tmp/a.txt" }),
@@ -256,11 +262,18 @@ mod tests {
         assert_eq!(json["type"], "tool_call");
         assert_eq!(json["data"]["call_id"], "call-1");
         assert_eq!(json["data"]["status"], "running");
+        assert_eq!(json["data"]["capability_id"], "workspace.files");
+        assert_eq!(json["data"]["action_id"], "workspace.files/read");
+        let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed, AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: tool_call::ToolCallIdentity { action_id: Some(action), .. }, ..
+        }) if action == "workspace.files/read"));
     }
 
     #[test]
     fn tool_call_event_includes_enriched_fields() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
             args: json!({}),
@@ -281,6 +294,7 @@ mod tests {
     #[test]
     fn tool_call_retry_identity_roundtrips_and_legacy_events_default_to_none() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "nomi-call-2".into(),
             name: "nomi_delegate".into(),
             args: json!({ "strategy": "parallel" }),
@@ -328,6 +342,7 @@ mod tests {
     #[test]
     fn tool_call_event_omits_none_fields() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
             args: json!({}),
@@ -476,7 +491,7 @@ mod tests {
                 }),
                 "output_discarded",
             ),
-            (AgentStreamEvent::Text(TextEventData { content: "x".into() }), "content"),
+            (AgentStreamEvent::Text(TextEventData { step: None, content: "x".into() }), "content"),
             (
                 AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning }),
                 "tips",
@@ -506,12 +521,37 @@ mod tests {
     fn thinking_event_roundtrip() {
         let event = AgentStreamEvent::Thinking(ThinkingEventData {
             content: "Analyzing...".into(),
+            step: Some(2),
             subject: Some("code review".into()),
             duration: Some(1500),
             status: Some("in_progress".into()),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "thinking");
+        assert_eq!(json["data"]["step"], 2);
         assert_eq!(json["data"]["duration"], 1500);
+        let AgentStreamEvent::Thinking(decoded) = serde_json::from_value(json).unwrap() else {
+            panic!("expected thinking event");
+        };
+        assert_eq!(decoded.step, Some(2));
+    }
+
+    #[test]
+    fn thinking_completion_roundtrip_preserves_its_step() {
+        let event = AgentStreamEvent::Thinking(ThinkingEventData {
+            content: String::new(),
+            step: Some(3),
+            subject: None,
+            duration: None,
+            status: Some("done".into()),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["data"]["step"], 3);
+        assert_eq!(json["data"]["status"], "done");
+        let AgentStreamEvent::Thinking(decoded) = serde_json::from_value(json).unwrap() else {
+            panic!("expected thinking event");
+        };
+        assert_eq!(decoded.step, Some(3));
+        assert_eq!(decoded.status.as_deref(), Some("done"));
     }
 }

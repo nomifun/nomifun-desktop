@@ -24,7 +24,7 @@ const references: CreativeCanvasImageComposerReference[] = [
 const wrap = (content: React.ReactNode) => <I18nextProvider i18n={i18n}>{content}</I18nextProvider>;
 
 describe('CreativeCanvasReferenceList', () => {
-  test('falls back from a broken thumbnail to the original without changing reference actions', () => {
+  test('previews the original image from its thumbnail while keeping node location available', () => {
     const activations: string[] = [];
     const reference = {
       ...references[1],
@@ -35,14 +35,46 @@ describe('CreativeCanvasReferenceList', () => {
       references={[reference]}
       onActivate={(id) => activations.push(id)}
     />));
-    const button = getByRole('button', { name: '定位参考 猫咪' });
+    const button = getByRole('button', { name: '预览参考 猫咪' });
     const image = button.querySelector('img')!;
     expect(image.getAttribute('src')).toBe(reference.thumbnailUrl);
 
     fireEvent.error(image);
     expect(button.querySelector('img')?.getAttribute('src')).toBe(reference.originalUrl);
     fireEvent.click(button);
+    expect(document.querySelector('img[alt="猫咪"]')?.getAttribute('src')).toBe(reference.originalUrl);
+    expect(document.querySelector<HTMLElement>('.arco-modal-wrapper')?.style.zIndex).toBe('1700');
+    expect(activations).toEqual([]);
+    fireEvent.click(getByRole('button', { name: '关闭图片预览' }));
+    fireEvent.click(getByRole('button', { name: '定位参考 猫咪' }));
     expect(activations).toEqual([reference.nodeId]);
+  });
+
+  test('opens a playable video preview with its poster above the canvas overlay stack', () => {
+    const reference: CreativeCanvasImageComposerReference = {
+      ...references[1],
+      kind: 'video',
+      label: '运镜参考',
+      thumbnailUrl: '/reference-poster.jpg',
+      originalUrl: '/reference-video.mp4',
+    };
+    const { getByRole, container } = render(wrap(
+      <CreativeCanvasReferenceList references={[reference]} />
+    ));
+    const button = getByRole('button', { name: '预览参考 运镜参考' });
+    expect(button.querySelector('img')?.getAttribute('src')).toBe(reference.thumbnailUrl);
+
+    fireEvent.click(button);
+
+    const player = document.querySelector<HTMLElement>('[data-creative-video-player]');
+    const video = player?.querySelector('video');
+    expect(player).not.toBeNull();
+    expect(video?.getAttribute('src')).toBe(reference.originalUrl);
+    expect(video?.getAttribute('poster')).toBe(reference.thumbnailUrl);
+    expect(document.querySelector<HTMLElement>('.arco-modal-wrapper')?.style.zIndex).toBe('1700');
+    fireEvent.click(getByRole('button', { name: '关闭视频预览' }));
+    expect(document.querySelector('[data-creative-video-player]')).toBeNull();
+    expect(container.querySelector('[data-creative-media-preview="video"]')).not.toBeNull();
   });
 
   test('selects valid and unavailable references in one batch while preserving the base image', () => {

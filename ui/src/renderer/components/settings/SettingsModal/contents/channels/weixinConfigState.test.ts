@@ -16,6 +16,7 @@ import {
   applyWeixinPairingMutations,
   buildWeixinEnableConfig,
   findWeixinPluginStatusById,
+  formatWeixinLoginFailure,
   isWeixinRuntimeConnected,
 } from './weixinConfigState';
 
@@ -109,6 +110,20 @@ describe('WeChat login configuration', () => {
         bot_token: 'token-1',
       },
     });
+  });
+
+  test('keeps the backend cause in a failed-login message', () => {
+    expect(
+      formatWeixinLoginFailure(
+        '微信登录失败',
+        'configured network path failed; direct retry also failed'
+      )
+    ).toBe(
+      '微信登录失败: configured network path failed; direct retry also failed'
+    );
+    expect(formatWeixinLoginFailure('微信登录失败', '   ')).toBe(
+      '微信登录失败'
+    );
   });
 });
 

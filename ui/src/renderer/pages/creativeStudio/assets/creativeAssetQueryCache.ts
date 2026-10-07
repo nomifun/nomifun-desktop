@@ -10,7 +10,7 @@ import type {
   CreativeAssetQuery,
 } from './types';
 
-export const CREATIVE_ASSET_QUERY_CACHE_TTL_MS = 30_000;
+const CREATIVE_ASSET_QUERY_CACHE_TTL_MS = 30_000;
 
 const MAX_CACHE_ENTRIES_PER_CLIENT = 64;
 

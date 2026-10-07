@@ -10,7 +10,6 @@ import {
   applyProviderAutoConfiguration,
   applyProviderCompatibilityMode,
   buildProviderAutoConfigurationTargets,
-  DEFAULT_REQUIRED_OUTPUT_LIMIT,
   isAutoConfigurationPlatform,
   normalizeProviderBaseUrlForCompatibilityMode,
   providerCompatibilityAuthScheme,
@@ -21,6 +20,7 @@ import {
 } from './providerAutoConfiguration';
 import {
   emptyCapabilityDraft,
+  validateModelDefinition,
   type ModelProtocolManifest,
 } from './providerModelAdvanced';
 
@@ -79,6 +79,40 @@ const manifest = (
 });
 
 describe('provider auto configuration', () => {
+  test('required-output protocol discovery never invents a model recommendation', () => {
+    const anthropic=descriptor('anthropic.messages',['header_key:x-api-key'],true);
+    const definition={model:'unknown-model',capabilities:[emptyCapabilityDraft('chat')]};
+    const target=buildProviderAutoConfigurationTargets(definition,{chat:manifest([anthropic])},'header_key:x-api-key',false)[0]!;
+    const detection=selectProviderAutoConfiguration(target,[{candidate:target.candidates[0]!}])!;
+    expect(detection.outputLimit).toBeUndefined();
+    const applied=applyProviderAutoConfiguration(definition,[detection]);
+    expect(applied.capabilities[0].outputLimit).toBeUndefined();
+    const validation=validateModelDefinition(applied,{chat:manifest([anthropic])},'https://provider.example',[],[],[],'header_key:x-api-key');
+    expect(validation.errors.some(error=>error.code==='output_ceiling_required')).toBe(true);
+    const optional=descriptor('openai.chat_text',['bearer']);
+    const optionalTarget=buildProviderAutoConfigurationTargets(definition,{chat:manifest([optional])},'bearer',false)[0]!;
+    expect(selectProviderAutoConfiguration(optionalTarget,[{candidate:optionalTarget.candidates[0]!}])?.outputLimit).toBeUndefined();
+  });
+
+  test('transport mode changes preserve custom limits and parameters without weakening destination reset', () => {
+    const customized={model:'m',capabilities:[{...emptyCapabilityDraft('chat'),transportSource:'user' as const,
+      protocol:'openai.chat_text',contextLimit:1_000_000,outputLimit:100_000,
+      providerParamsJson:'{"reasoning_effort":"high","temperature":0.2}',
+      baseUrlOverride:'https://old.example',allowCrossOriginCredentials:true}]};
+    const anthropic=applyProviderCompatibilityMode(customized,'anthropic',true);
+    expect(anthropic.capabilities[0].outputLimit).toBe(100_000);
+    expect(anthropic.capabilities[0]).toMatchObject({contextLimit:1_000_000,
+      providerParamsJson:customized.capabilities[0].providerParamsJson,baseUrlOverride:'',allowCrossOriginCredentials:false});
+    expect(validateModelDefinition(anthropic,{chat:manifest([descriptor('anthropic.messages',['header_key:x-api-key'],true)])},
+      'https://provider.example',[],[],[],'header_key:x-api-key').errors.some(error=>error.code==='invalid_provider_params')).toBe(true);
+    const openai=applyProviderCompatibilityMode(anthropic,'openai',true);
+    expect(openai.capabilities[0].outputLimit).toBe(100_000);
+    expect(openai.capabilities[0].providerParamsJson).toBe(customized.capabilities[0].providerParamsJson);
+    const automatic=applyProviderCompatibilityMode(openai,'auto',true);
+    expect(automatic.capabilities[0].outputLimit).toBe(100_000);
+    expect(automatic.capabilities[0].providerParamsJson).toBe(customized.capabilities[0].providerParamsJson);
+  });
+
   test('is limited to Custom and New API', () => {
     expect(isAutoConfigurationPlatform('custom')).toBe(true);
     expect(isAutoConfigurationPlatform('new-api')).toBe(true);
@@ -161,8 +195,8 @@ describe('provider auto configuration', () => {
       transportSource: 'user',
       protocol: 'anthropic.messages',
       endpoint: '',
-      providerParamsJson: '',
-      outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT,
+      providerParamsJson: '{"temperature":0.2}',
+      outputLimit: undefined,
     });
 
     const openai = applyProviderCompatibilityMode(claude, 'openai', true);
@@ -279,7 +313,6 @@ describe('provider auto configuration', () => {
       authScheme: 'header_key:x-api-key',
       confidence: 'verified',
       suggestedBaseUrl: 'https://gateway.example',
-      outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT,
     });
   });
 
@@ -309,7 +342,7 @@ describe('provider auto configuration', () => {
       protocol: 'anthropic.messages',
       authScheme: 'header_key:x-api-key',
       confidence: 'verified' as const,
-      outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT,
+      outputLimit: 8_192,
     };
     const applied = applyProviderAutoConfiguration(
       { model: 'm', capabilities: [blank] },
@@ -319,7 +352,7 @@ describe('provider auto configuration', () => {
       transportSource: 'recommendation',
       protocol: 'anthropic.messages',
       connectionRole: 'default',
-      outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT,
+      outputLimit: 8_192,
     });
 
     for (const transportSource of ['user', 'persisted'] as const) {

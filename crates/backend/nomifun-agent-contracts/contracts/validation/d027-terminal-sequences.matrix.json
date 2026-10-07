@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0.0",
+  "sequences": [
+    {
+      "case_kind": "no_durable_accepted_operation",
+      "deadline_rule": "immediate",
+      "steps": [
+        "stop-nomi-admission",
+        "cancel",
+        "dispose-runtime",
+        "kill-descendants",
+        "prove-outstanding-exact-zero",
+        "d024-delete-agent-session"
+      ],
+      "handoff_waits_for_reconcile": false,
+      "same_session_runtime_switch_allowed": false,
+      "configurable_drain_timeout_allowed": false,
+      "outstanding_after": {
+        "opening_sessions": 0,
+        "ready_sessions": 0,
+        "running_sessions": 0,
+        "unacknowledged_runtime_actions": 0,
+        "active_turns": 0,
+        "model_requests": 0,
+        "tool_dispatches": 0,
+        "effect_dispatches": 0,
+        "tasks": 0,
+        "descendant_processes": 0,
+        "leases": 0,
+        "resource_handles": 0,
+        "private_writes": 0,
+        "fallback_paths": 0,
+        "runtime_reachability": 0
+      }
+    },
+    {
+      "case_kind": "durable_accepted_operation",
+      "deadline_rule": "minimum_of_operation_and_all_ancestor_existing_finite_deadlines",
+      "steps": [
+        "stop-nomi-admission",
+        "wait-existing-deadline-minimum",
+        "cancel",
+        "dispose-runtime",
+        "kill-descendants",
+        "durable-uncertain-handoff",
+        "prove-outstanding-exact-zero",
+        "d024-delete-agent-session"
+      ],
+      "handoff_waits_for_reconcile": false,
+      "same_session_runtime_switch_allowed": false,
+      "configurable_drain_timeout_allowed": false,
+      "outstanding_after": {
+        "opening_sessions": 0,
+        "ready_sessions": 0,
+        "running_sessions": 0,
+        "unacknowledged_runtime_actions": 0,
+        "active_turns": 0,
+        "model_requests": 0,
+        "tool_dispatches": 0,
+        "effect_dispatches": 0,
+        "tasks": 0,
+        "descendant_processes": 0,
+        "leases": 0,
+        "resource_handles": 0,
+        "private_writes": 0,
+        "fallback_paths": 0,
+        "runtime_reachability": 0
+      }
+    }
+  ]
+}

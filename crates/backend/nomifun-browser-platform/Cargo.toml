@@ -13,8 +13,16 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-tracing.workspace = true
-uuid.workspace = true
+sha2.workspace = true
+url.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+tempfile.workspace = true
+dunce.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

@@ -279,6 +279,34 @@
   -webkit-line-clamp: 3;
 }
 
+.handoffReason {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.handoffReason > strong {
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.handoffReason > span,
+.handoffResolution {
+  display: -webkit-box;
+  max-height: 40px;
+  overflow: hidden;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .noteMoreButton {
   color: var(--color-text-3) !important;
 }

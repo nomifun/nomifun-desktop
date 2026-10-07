@@ -1,5 +1,5 @@
 use crate::error::DbError;
-use crate::models::WebhookRow;
+use crate::models::{WebhookPatch, WebhookRow};
 
 /// Data access abstraction for the `webhooks` table.
 ///
@@ -12,9 +12,9 @@ pub trait IWebhookRepository: Send + Sync {
     /// the repository returns the persisted row.
     async fn insert(&self, row: &WebhookRow) -> Result<WebhookRow, DbError>;
 
-    /// Replace the mutable columns (name/platform/url/secret/description/enabled/
-    /// updated_at) of an existing webhook. Returns `DbError::NotFound` if absent.
-    async fn update(&self, row: &WebhookRow) -> Result<(), DbError>;
+    /// Atomically apply supplied fields and return the persisted row.
+    /// Returns `DbError::NotFound` if absent.
+    async fn update(&self, webhook_id: &str, patch: &WebhookPatch) -> Result<WebhookRow, DbError>;
 
     /// Delete a webhook by its stable business ID. Returns `DbError::NotFound`
     /// if absent.

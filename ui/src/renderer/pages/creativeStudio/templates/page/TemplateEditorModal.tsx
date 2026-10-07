@@ -19,14 +19,15 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { parseProviderId } from '@/common/types/ids';
+import { OutputLimitInput } from '@/renderer/pages/settings/components/OutputLimitInput';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import {
-  imageWorkbenchFixedSizeOptions,
-  imageWorkbenchSizePolicyForModel,
-} from '../../workbenches/image';
-import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
-import { exactWorkbenchModelOptions } from '../../workbenches/runtime';
+  imageGenerationFixedSizeOptions,
+  imageGenerationSizePolicyForModel,
+} from '@renderer/creation/parameters/image';
+import ImageSizePicker from '@renderer/creation/parameters/ImageSizePicker';
+import { exactGenerationModelOptions } from '@renderer/creation/modelSelection';
 import {
   cloneTemplateDefinition,
   type CreativeTemplateDefinitionV1,
@@ -366,7 +367,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
     const expectedTask: CreativeTemplateImageTask =
       generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
     const options = modelCatalog
-      ? exactWorkbenchModelOptions(modelCatalog, expectedTask)
+      ? exactGenerationModelOptions(modelCatalog, expectedTask)
       : [];
     const selectedModel = generate.generation.model
       ? options.find(
@@ -375,8 +376,8 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
             option.model === generate.generation.model.model
         )
       : null;
-    const policy = imageWorkbenchSizePolicyForModel(selectedModel);
-    const sizeOptions = imageWorkbenchFixedSizeOptions(policy.options);
+    const policy = imageGenerationSizePolicyForModel(selectedModel);
+    const sizeOptions = imageGenerationFixedSizeOptions(policy.options);
     const selectedSize =
       sizeOptions.find(
         (option) =>
@@ -447,9 +448,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
       autoFocus={false}
       unmountOnExit
       confirmLoading={saving}
-      getPopupContainer={() =>
-        document.getElementById('creative-studio-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onCancel}
       onOk={onSave}
     >
@@ -657,8 +656,8 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                   option.providerId === selection.providerId &&
                   option.model === selection.model
               );
-              const policy = imageWorkbenchSizePolicyForModel(selectedModel);
-              const size = imageWorkbenchFixedSizeOptions(policy.options).find(
+              const policy = imageGenerationSizePolicyForModel(selectedModel);
+              const size = imageGenerationFixedSizeOptions(policy.options).find(
                 (option) => !option.disabled
               );
               onChange(
@@ -779,15 +778,10 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                     defaultValue: 'Maximum planning output tokens',
                   })}
                 </span>
-                <InputNumber
-                  min={128}
-                  max={32_768}
-                  step={128}
-                  value={promptPlanning?.maxTokens ?? 4096}
-                  onChange={(maxTokens) =>
-                    typeof maxTokens === 'number' &&
-                    onChange(patchPromptPlanning(template, { maxTokens }))
-                  }
+                <OutputLimitInput
+                  value={promptPlanning?.maxTokens ?? undefined}
+                  onChange={(maxTokens) => onChange(patchPromptPlanning(template, { maxTokens }))}
+                  compact
                 />
               </label>
               <div className={styles.twoColumns}>

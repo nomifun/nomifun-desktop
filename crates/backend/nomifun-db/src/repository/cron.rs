@@ -24,9 +24,11 @@ pub struct UpdateCronJobParams {
     pub payload_message: Option<String>,
     pub execution_mode: Option<String>,
     pub agent_config: Option<Option<String>>,
+    /// Set/clear the immutable Agent launch snapshot. Cron only persists the
+    /// already materialized value supplied by its application service.
     pub preset_id: Option<Option<String>>,
     pub preset_revision: Option<Option<i64>>,
-    pub preset_snapshot: Option<Option<String>>,
+    pub agent_snapshot: Option<Option<String>>,
     /// Target conversation. `Some(Some(id))` binds a conversation, `Some(None)`
     /// clears it to NULL, `None` leaves it unchanged.
     pub conversation_id: Option<Option<String>>,
@@ -114,6 +116,23 @@ pub trait ICronRepository: Send + Sync {
     /// Inserts a new cron job row.
     async fn insert(&self, row: &CronJobRow) -> Result<(), DbError>;
 
+    /// Atomically inserts a Cron job and binds both sides of its canonical
+    /// Session relation.
+    ///
+    /// Implementations must authenticate and lock either the canonical
+    /// live `agent_sessions` row, then
+    /// commit `cron_jobs.conversation_id` in the same transaction. Legacy
+    /// targets additionally commit `conversations.cron_job_id`; canonical
+    /// targets intentionally have no mutable back-reference. The bind is a
+    /// CAS: an unbound Session may be claimed and a different existing Cron
+    /// relation is a conflict.
+    async fn insert_with_session_relation(&self, row: &CronJobRow) -> Result<(), DbError> {
+        let _ = row;
+        Err(DbError::Init(
+            "Cron repository does not implement atomic Session relation insertion".to_owned(),
+        ))
+    }
+
     /// Updates a cron job by its stable business ID with the provided fields.
     /// Returns `DbError::NotFound` if absent.
     async fn update(
@@ -124,6 +143,10 @@ pub trait ICronRepository: Send + Sync {
     ) -> Result<(), DbError>;
 
     /// Deletes a cron job by business ID. Returns `DbError::NotFound` if absent.
+    ///
+    /// A job with a non-terminal durable run reservation must return
+    /// `DbError::Conflict`. Deletion must never erase the recovery authority
+    /// for a turn that may already have been accepted by the Session owner.
     async fn delete(&self, user_id: &str, cron_job_id: &str) -> Result<(), DbError>;
 
     /// Returns a single cron job by business ID, or `None` if not found.
@@ -154,13 +177,17 @@ pub trait ICronRepository: Send + Sync {
         conversation_id: &str,
     ) -> Result<Vec<CronJobRow>, DbError>;
 
-    /// Deletes all cron jobs associated with a conversation.
-    /// Returns the number of deleted rows.
+    /// Deletes all cron jobs associated with a Conversation or canonical
+    /// AgentSession and returns their exact stable job IDs for process-local
+    /// timer/artifact cleanup.
+    ///
+    /// The operation is all-or-nothing and must return `DbError::Conflict`
+    /// when any selected job owns a non-terminal durable run reservation.
     async fn delete_by_conversation(
         &self,
         user_id: &str,
         conversation_id: &str,
-    ) -> Result<u64, DbError>;
+    ) -> Result<Vec<String>, DbError>;
 
     /// Inserts one execution record and prunes older rows for the same job so
     /// each job retains at most [`CRON_RUN_HISTORY_LIMIT`] rows.

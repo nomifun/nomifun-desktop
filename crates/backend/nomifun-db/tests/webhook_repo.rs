@@ -1,6 +1,6 @@
 //! Integration tests for the webhook + tag_settings repositories.
 
-use nomifun_db::models::{TagSettingRow, WebhookRow};
+use nomifun_db::models::{TagSettingPatch, WebhookPatch, WebhookRow};
 use nomifun_db::{
     ITagSettingRepository, IWebhookRepository, SqliteTagSettingRepository, SqliteWebhookRepository,
     init_database_memory,
@@ -44,11 +44,13 @@ async fn webhook_crud_roundtrip() {
     let all = repo.list_all().await.unwrap();
     assert_eq!(all.len(), 2);
     // update
-    let mut upd = got.clone();
-    upd.name = "Renamed".into();
-    upd.enabled = false;
-    upd.updated_at = 9;
-    repo.update(&upd).await.unwrap();
+    let updated = repo.update(&got.webhook_id, &WebhookPatch {
+        name: Some("Renamed".into()), enabled: Some(false), updated_at: 9,
+        ..Default::default()
+    }).await.unwrap();
+    assert_eq!(updated.name, "Renamed");
+    assert_eq!(updated.created_at, got.created_at);
+    assert_eq!(updated.secret, got.secret);
     let after = repo
         .get_by_webhook_id(&created.webhook_id)
         .await
@@ -56,6 +58,26 @@ async fn webhook_crud_roundtrip() {
         .unwrap();
     assert_eq!(after.name, "Renamed");
     assert!(!after.enabled);
+    let changed = repo.update(&created.webhook_id, &WebhookPatch {
+        url: Some("https://example.invalid/new".into()),
+        platform: Some("http".into()),
+        description: Some(String::new()),
+        secret: Some(Some("replacement".into())),
+        enabled: Some(true),
+        updated_at: 10,
+        ..Default::default()
+    }).await.unwrap();
+    assert_eq!(changed.name, "Renamed");
+    assert_eq!(changed.url, "https://example.invalid/new");
+    assert_eq!(changed.platform, "http");
+    assert!(changed.description.is_empty());
+    assert_eq!(changed.secret.as_deref(), Some("replacement"));
+    assert!(changed.enabled);
+    let cleared = repo.update(&created.webhook_id, &WebhookPatch {
+        secret: Some(None), updated_at: 11, ..Default::default()
+    }).await.unwrap();
+    assert_eq!(cleared.secret, None);
+    assert_eq!(cleared.url, changed.url);
     // delete
     repo.delete(&created.webhook_id).await.unwrap();
     assert!(
@@ -73,9 +95,7 @@ async fn webhook_update_and_delete_missing_is_not_found() {
     let missing = "0190f5fe-7c00-7a00-8000-000000000999";
     let err = repo.delete(missing).await.unwrap_err();
     assert!(matches!(err, nomifun_db::DbError::NotFound(_)));
-    let mut ghost = sample_webhook();
-    ghost.webhook_id = missing.to_string();
-    let err = repo.update(&ghost).await.unwrap_err();
+    let err = repo.update(missing, &WebhookPatch::default()).await.unwrap_err();
     assert!(matches!(err, nomifun_db::DbError::NotFound(_)));
 }
 
@@ -90,11 +110,10 @@ async fn webhook_delete_sets_tag_setting_reference_null() {
         .unwrap()
         .webhook_id;
     tag_repo
-        .upsert(&TagSettingRow {
-            tag: "alpha".into(),
-            webhook_id: Some(webhook_id.clone()),
-            description: "bound".into(),
-            notify_events: "done".into(),
+        .upsert("alpha", &TagSettingPatch {
+            webhook_id: Some(Some(webhook_id.clone())),
+            description: Some("bound".into()),
+            notify_events: Some("done".into()),
             updated_at: 1,
         })
         .await
@@ -122,40 +141,34 @@ async fn tag_setting_upsert_get_list_delete() {
     assert!(repo.get("alpha").await.unwrap().is_none());
 
     // upsert (insert)
-    repo.upsert(&TagSettingRow {
-        tag: "alpha".into(),
-        webhook_id: Some(webhook_id.clone()),
-        description: "queue alpha".into(),
-        notify_events: "done,failed,needs_review".to_string(),
+    repo.upsert("alpha", &TagSettingPatch {
+        webhook_id: Some(Some(webhook_id.clone())),
+        description: Some("queue alpha".into()),
         updated_at: 5,
+        ..Default::default()
     })
     .await
     .unwrap();
     let got = repo.get("alpha").await.unwrap().unwrap();
     assert_eq!(got.webhook_id, Some(webhook_id));
 
-    // upsert (update — same key replaces)
-    repo.upsert(&TagSettingRow {
-        tag: "alpha".into(),
-        webhook_id: None,
-        description: "unbound now".into(),
-        notify_events: "done,failed,needs_review".to_string(),
+    // upsert (update — explicit null clears; omitted events are retained)
+    repo.upsert("alpha", &TagSettingPatch {
+        webhook_id: Some(None),
+        description: Some("unbound now".into()),
         updated_at: 6,
+        ..Default::default()
     })
     .await
     .unwrap();
     let got = repo.get("alpha").await.unwrap().unwrap();
     assert_eq!(got.webhook_id, None);
     assert_eq!(got.description, "unbound now");
+    assert_eq!(got.notify_events, "done,failed,needs_review");
+    assert_eq!(got.updated_at, 6);
 
     // list
-    repo.upsert(&TagSettingRow {
-        tag: "beta".into(),
-        webhook_id: None,
-        description: String::new(),
-        notify_events: "done,failed,needs_review".to_string(),
-        updated_at: 7,
-    })
+    repo.upsert("beta", &TagSettingPatch { updated_at: 7, ..Default::default() })
     .await
     .unwrap();
     assert_eq!(repo.list_all().await.unwrap().len(), 2);
@@ -164,6 +177,28 @@ async fn tag_setting_upsert_get_list_delete() {
     repo.delete("alpha").await.unwrap();
     assert!(repo.get("alpha").await.unwrap().is_none());
     repo.delete("alpha").await.unwrap(); // no error on absent
+}
+
+#[tokio::test]
+async fn invalid_tag_binding_rolls_back_all_patch_fields() {
+    let db = init_database_memory().await.unwrap();
+    let repo = SqliteTagSettingRepository::new(db.pool().clone());
+    repo.upsert("alpha", &TagSettingPatch {
+        description: Some("keep".into()), notify_events: Some(String::new()),
+        updated_at: 7, ..Default::default()
+    }).await.unwrap();
+    for missing in ["invalid", "0190f5fe-7c00-7a00-8000-000000000999"] {
+        let error = repo.upsert("alpha", &TagSettingPatch {
+            webhook_id: Some(Some(missing.into())), description: Some("lost".into()),
+            updated_at: 8, ..Default::default()
+        }).await.unwrap_err();
+        assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+        let kept = repo.get("alpha").await.unwrap().unwrap();
+        assert_eq!(kept.description, "keep");
+        assert_eq!(kept.webhook_id, None);
+        assert!(kept.notify_events.is_empty());
+        assert_eq!(kept.updated_at, 7);
+    }
 }
 
 #[tokio::test]

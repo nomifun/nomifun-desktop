@@ -32,7 +32,7 @@ export const compactCapabilityUrlSummary = (value: string): string => {
   }
 };
 
-export const getActionableCapabilityErrorTasks = (
+const getActionableCapabilityErrorTasks = (
   errors: readonly CapabilityValidationIssue[]
 ): Set<ModelTask> => {
   const tasks = new Set<ModelTask>();

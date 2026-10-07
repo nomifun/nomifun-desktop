@@ -1651,12 +1651,12 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct TemplateDraftPersistenceCounts {
-        conversations: i64,
-        messages: i64,
+        agent_sessions: i64,
+        agent_messages: i64,
         projects: i64,
         templates: i64,
         template_runs: i64,
-        agent_sessions: i64,
+        creative_studio_agent_sessions: i64,
         proposal_receipts: i64,
         creation_tasks: i64,
         assets: i64,
@@ -1673,12 +1673,12 @@ mod tests {
                 .unwrap()
         }
         TemplateDraftPersistenceCounts {
-            conversations: count(database, "conversations").await,
-            messages: count(database, "messages").await,
+            agent_sessions: count(database, "agent_sessions").await,
+            agent_messages: count(database, "agent_messages").await,
             projects: count(database, "creative_studio_projects").await,
             templates: count(database, "creative_studio_templates").await,
             template_runs: count(database, "creative_studio_template_runs").await,
-            agent_sessions: count(database, "creative_studio_agent_sessions").await,
+            creative_studio_agent_sessions: count(database, "creative_studio_agent_sessions").await,
             proposal_receipts: count(database, "creative_studio_agent_proposal_receipts").await,
             creation_tasks: count(database, "creation_tasks").await,
             assets: count(database, "workshop_assets").await,
@@ -1775,17 +1775,14 @@ mod tests {
         .await
         .unwrap();
         nomifun_db::sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, extra, model, status, source, created_at, updated_at) \
-             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', ?, 'finished', 'nomifun', 1, 1)",
+            "INSERT INTO agent_sessions \
+                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at) \
+             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
         )
         .bind(&conversation_id)
         .bind(&owner_id)
-        .bind(serde_json::json!({
-            "provider_id": provider_id,
-            "model": "chat-model",
-            "use_model": "chat-model"
-        }).to_string())
         .execute(database.pool())
         .await
         .unwrap();
@@ -1814,16 +1811,21 @@ mod tests {
                 )
             };
             nomifun_db::sqlx::query(
-                "INSERT INTO messages \
-                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-                 VALUES (?, ?, ?, 'text', ?, ?, 'finish', 0, ?)",
+                "INSERT INTO agent_messages \
+                    (session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                     projection_json, semantic_digest) \
+                 VALUES (?, ?, ?, ?, 'message', \
+                         json_object('correlation_id', ?, 'state', 'completed', \
+                                     'position', ?, 'content', json(?)), ?)",
             )
-            .bind(message_id)
             .bind(&conversation_id)
             .bind(message_id)
-            .bind(content.to_string())
-            .bind(position)
             .bind(i64::try_from(index + 1).unwrap())
+            .bind(i64::try_from(index + 1).unwrap())
+            .bind(message_id)
+            .bind(position)
+            .bind(content.to_string())
+            .bind(format!("{:064x}", index + 1))
             .execute(database.pool())
             .await
             .unwrap();

@@ -5,40 +5,54 @@
  */
 
 import type { IMcpServer } from '@/common/config/storage';
-import { getAgents } from '@/renderer/hooks/agent/useAgents';
-import { Message, Button, Dropdown, Menu, Modal } from '@arco-design/web-react';
-import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { Down, Plus } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
+import { getAgents } from '@/renderer/hooks/agent/useAgents';
+import { useMcpConnection,useMcpModal,useMcpOAuth,useMcpServerCRUD } from '@/renderer/hooks/mcp';
+import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
+import { supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
-import ExtensionMcpServerItem from '@/renderer/pages/settings/ToolsSettings/ExtensionMcpServerItem';
-import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
 import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
-import { useMcpServers, useMcpConnection, useMcpModal, useMcpServerCRUD, useMcpOAuth } from '@/renderer/hooks/mcp';
-import {
-  extensionMcpUiKey,
-  mcpServerUiKey,
-  type ExtensionMcpServerContribution,
-} from '@/renderer/hooks/mcp/extensionCatalog';
+import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
+import { Button,Dropdown,Menu,Message,Modal } from '@arco-design/web-react';
+import { Down,Plus } from '@icon-park/react';
+import React,{ useCallback,useEffect,useMemo,useRef,useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 type MessageInstance = Required<ReturnType<typeof Message.useMessage>[0]>;
+const MCP_SERVER_PAGE_SIZE = 10;
 
 const ModalMcpManagementSection: React.FC<{
   message: MessageInstance;
   mcpServers: IMcpServer[];
-  extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
-}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers }) => {
+  headerActionHost: HTMLDivElement | null;
+}> = ({ message, mcpServers, setMcpServers, saveMcpServers, headerActionHost }) => {
   const { t } = useTranslation();
   const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const previousServerCount = useRef(visibleMcpServers.length);
+  const totalPages = Math.max(1, Math.ceil(visibleMcpServers.length / MCP_SERVER_PAGE_SIZE));
+  const effectivePage = Math.min(currentPage, totalPages);
+  const paginatedMcpServers = useMemo(() => {
+    const start = (effectivePage - 1) * MCP_SERVER_PAGE_SIZE;
+    return visibleMcpServers.slice(start, start + MCP_SERVER_PAGE_SIZE);
+  }, [effectivePage, visibleMcpServers]);
+
+  useEffect(() => {
+    const serverWasAdded = visibleMcpServers.length > previousServerCount.current;
+    setCurrentPage((page) => (serverWasAdded ? totalPages : Math.min(page, totalPages)));
+    previousServerCount.current = visibleMcpServers.length;
+  }, [totalPages, visibleMcpServers.length]);
 
   const handleAuthRequired = useCallback(
     (server: IMcpServer) => {
-      markLoginRequired(server.mcp_server_id);
+      if (supportsMcpOAuthLogin(server.transport)) {
+        markLoginRequired(server.mcp_server_id);
+      }
     },
     [markLoginRequired]
   );
@@ -136,9 +150,7 @@ const ModalMcpManagementSection: React.FC<{
   }, []);
 
   useEffect(() => {
-    const httpServers = mcpServers.filter(
-      (s) => s.transport.type === 'http' || s.transport.type === 'sse' || s.transport.type === 'streamable_http'
-    );
+    const httpServers = mcpServers.filter((server) => supportsMcpOAuthLogin(server.transport));
     if (httpServers.length > 0) {
       httpServers.forEach((server) => {
         void checkOAuthStatus(server);
@@ -206,20 +218,17 @@ const ModalMcpManagementSection: React.FC<{
 
   return (
     <div className='flex min-h-0 flex-col gap-10px'>
-      <div className='flex gap-8px items-center justify-between'>
-        <div className='text-14px text-t-primary'>{t('settings.mcpSettings')}</div>
-        <div>{renderAddButton()}</div>
-      </div>
+      {headerActionHost && createPortal(renderAddButton(), headerActionHost)}
 
       <div className='flex-1 min-h-0'>
-        {visibleMcpServers.length === 0 && extensionMcpServers.length === 0 ? (
+        {visibleMcpServers.length === 0 ? (
           <div className='py-20px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
             {t('settings.mcpNoServersFound')}
           </div>
         ) : (
           <NomiScrollArea className='max-h-360px max-h-none' disableOverflow>
             <div className='space-y-10px'>
-              {visibleMcpServers.map((server) => {
+              {paginatedMcpServers.map((server) => {
                 const uiKey = mcpServerUiKey(server.mcp_server_id);
                 return (
                   <McpServerItem
@@ -237,19 +246,19 @@ const ModalMcpManagementSection: React.FC<{
                   />
                 );
               })}
-              {extensionMcpServers.map((server) => {
-                const uiKey = extensionMcpUiKey(server.source_key);
-                return (
-                  <ExtensionMcpServerItem
-                    key={uiKey}
-                    server={server}
-                    isCollapsed={mcpCollapseKey[uiKey] || false}
-                    onToggleCollapse={() => toggleServerCollapse(uiKey)}
-                  />
-                );
-              })}
             </div>
           </NomiScrollArea>
+        )}
+        {visibleMcpServers.length > MCP_SERVER_PAGE_SIZE && (
+          <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end'>
+            <NomiPagination
+              current={effectivePage}
+              pageSize={MCP_SERVER_PAGE_SIZE}
+              total={visibleMcpServers.length}
+              showTotal
+              onChange={(page) => setCurrentPage(page)}
+            />
+          </div>
         )}
       </div>
 
@@ -282,21 +291,6 @@ const ModalMcpManagementSection: React.FC<{
   );
 };
 
-const ToolsModalContent: React.FC = () => {
-  const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
-  const { mcpServers, extensionMcpServers, saveMcpServers, setMcpServers } = useMcpServers();
-  return (
-    <ToolsModalContentWithState
-      mcpMessage={mcpMessage}
-      mcpMessageContext={mcpMessageContext}
-      mcpServers={mcpServers}
-      extensionMcpServers={extensionMcpServers}
-      saveMcpServers={saveMcpServers}
-      setMcpServers={setMcpServers}
-    />
-  );
-};
-
 /**
  * State-injected variant so hosts that already own the MCP server state (e.g.
  * the /mcp hub page with its market tabs) can share one `useMcpServers`
@@ -306,10 +300,10 @@ export const ToolsModalContentWithState: React.FC<{
   mcpMessage: MessageInstance;
   mcpMessageContext: React.ReactNode;
   mcpServers: IMcpServer[];
-  extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
-}> = ({ mcpMessage, mcpMessageContext, mcpServers, extensionMcpServers, saveMcpServers, setMcpServers }) => {
+  headerActionHost: HTMLDivElement | null;
+}> = ({ mcpMessage, mcpMessageContext, mcpServers, saveMcpServers, setMcpServers, headerActionHost }) => {
   return (
     <div className='flex flex-col h-full w-full'>
       {mcpMessageContext}
@@ -323,9 +317,9 @@ export const ToolsModalContentWithState: React.FC<{
             <ModalMcpManagementSection
               message={mcpMessage}
               mcpServers={mcpServers}
-              extensionMcpServers={extensionMcpServers}
               setMcpServers={setMcpServers}
               saveMcpServers={saveMcpServers}
+              headerActionHost={headerActionHost}
             />
           </NomiScrollArea>
         </div>
@@ -333,5 +327,3 @@ export const ToolsModalContentWithState: React.FC<{
     </div>
   );
 };
-
-export default ToolsModalContent;

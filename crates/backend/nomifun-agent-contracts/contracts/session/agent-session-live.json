@@ -1,0 +1,45 @@
+{
+  "record_kind": "live",
+  "record": {
+    "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000001",
+    "owner_ref": {
+      "principal_kind": "user",
+      "principal_id": "user-001"
+    },
+    "metadata": {
+      "title": "Contract fixture session",
+      "archived": false,
+      "pinned": false
+    },
+    "agent_binding": {
+      "preset_revision_ref": {
+        "preset_id": "coding.codex",
+        "revision": 1,
+        "revision_digest": "sha256:preset-revision-001"
+      },
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-001",
+        "snapshot_digest": "sha256:snapshot-001"
+      },
+      "typed_resource_bindings": [
+        {
+          "binding_id": "resource-binding-workspace-001",
+          "resource_kind": "workspace",
+          "resource_id": "workspace-001",
+          "owner_id": "user-001",
+          "operations": [
+            "read",
+            "write",
+            "execute"
+          ],
+          "typed_parameters": {}
+        }
+      ],
+      "binding_version": 1
+    },
+    "remote_binding_provenance": null,
+    "parent_session_id": null,
+    "fork_base_payload_id": null,
+    "next_seq": 1
+  }
+}

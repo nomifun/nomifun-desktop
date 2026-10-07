@@ -126,7 +126,7 @@ const render = (
   );
 
 describe('unified model definition editor rendering and interactions', () => {
-  test('keeps all nine capabilities intact when editing an existing model', () => {
+  test('keeps every canonical capability intact when editing an existing model', () => {
     const definition: ModelDefinitionDraft = {
       model: 'user-entered/model-not-in-catalog',
       capabilities: MODEL_TASK_ORDER.map((task) => ({
@@ -141,8 +141,8 @@ describe('unified model definition editor rendering and interactions', () => {
     for (const task of MODEL_TASK_ORDER) {
       expect(html.includes(`data-capability-card="${task}"`)).toBe(true);
     }
-    expect((html.match(/data-capability-card=/g) ?? []).length).toBe(9);
-    expect((html.match(/data-remove-model-task=/g) ?? []).length).toBe(9);
+    expect((html.match(/data-capability-card=/g) ?? []).length).toBe(MODEL_TASK_ORDER.length);
+    expect((html.match(/data-remove-model-task=/g) ?? []).length).toBe(MODEL_TASK_ORDER.length);
     expect(html.includes('value="user-entered/model-not-in-catalog"')).toBe(true);
     expect(html.includes('data-readonly-model-id="true"')).toBe(true);
     expect(html.includes('data-primary-model-task-picker')).toBe(false);
@@ -154,6 +154,11 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(chatHeader.indexOf('</button>')).toBeLessThan(
       chatHeader.indexOf('data-remove-model-task="chat"')
     );
+    const advancedAt = chatHeader.indexOf('data-capability-disclosure="chat"');
+    const advancedButton = chatHeader.slice(chatHeader.lastIndexOf('<button', advancedAt), chatHeader.indexOf('</button>', advancedAt));
+    expect(advancedButton.includes('高级配置')).toBe(true);
+    expect(advancedButton.includes('data-capability-summary')).toBe(false);
+    expect(chatHeader.indexOf('data-capability-summary="chat"')).toBeGreaterThan(chatHeader.indexOf('</button>', advancedAt));
     expect(html.includes('https://api.stepfun.com/v1')).toBe(true);
     expect(html.includes('data-endpoint-field="content_endpoint"')).toBe(true);
     expect(html.includes('/v1/videos/{id}/content')).toBe(true);
@@ -269,53 +274,36 @@ describe('unified model definition editor rendering and interactions', () => {
     );
   });
 
-  test('shows the declared task inside the picker and unlocks the model input', () => {
-    // Regression: the task control used to reset to its placeholder after each
-    // pick, so the form looked like it had discarded the choice and the user
-    // never reached the model field — leaving save blocked on `model_required`.
-    // The declared set is now the control's own value, rendered as tags in it.
-    const html = render({ model: '', capabilities: [emptyCapabilityDraft('chat')] });
-
-    expect(html.includes('data-model-task-picker')).toBe(true);
-    // Arco renders a multi-select's value as tags inside the field.
-    expect(html.includes('对话')).toBe(true);
-    expect(html.includes('data-declared-tasks')).toBe(true);
-    // One task is enough to unlock the model field; the placeholder must no
-    // longer be the "pick a task first" prompt.
-    expect(html.includes('请先在上方选择任务')).toBe(false);
-    expect(html.includes('搜索目录模型，或直接输入官网模型 ID')).toBe(true);
-  });
-
-  test('puts the supported-task picker before one unified catalog and free-text model input', () => {
+  test('opens model input without requiring task or ability declarations', () => {
     const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
       catalogSuggestions: [
-        {
-          value: 'chat-model',
-          label: 'Chat model',
-          tasks: ['chat'],
-          traits: [],
-        },
-        {
-          value: 'image-model',
-          label: 'Image model',
-          tasks: ['image_generation'],
-          traits: [],
-        },
+        { value: 'chat-model', label: 'Chat model', tasks: ['chat'], traits: [] },
+        { value: 'image-model', label: 'Image model', tasks: ['image_generation'], traits: [] },
+        { value: 'future-model', label: 'Future model', tasks: [], traits: [] },
       ],
     });
-
-    // The task picker must exist with zero capabilities: it is the only control
-    // that can create the first one, so gating it would deadlock the form.
-    expect(html.includes('data-model-task-picker')).toBe(true);
-    expect(html.indexOf('data-model-task-picker')).toBeLessThan(
-      html.indexOf('data-unified-model-input')
-    );
-    expect(html.includes('data-model-catalog-picker')).toBe(false);
-    expect(html.includes('data-primary-model-task-picker')).toBe(false);
-    expect(html.includes('disabled=""')).toBe(true);
-    expect(html.includes('请先在上方选择任务')).toBe(true);
+    expect(html.includes('data-model-task-picker')).toBe(false);
+    expect(html.includes('data-model-catalog-count="3"')).toBe(true);
+    expect(html.includes('data-unified-model-input')).toBe(true);
+    expect(html.includes('请先在上方选择任务')).toBe(false);
+    expect(html.includes('搜索供应商模型，或直接输入模型 ID')).toBe(true);
+    expect(html.indexOf('data-unified-model-input')).toBeLessThan(html.indexOf('data-model-purpose-picker'));
+    expect(html.includes('data-model-purpose-required')).toBe(true);
   });
 
+  test('a configured chat route keeps the entire catalog available', () => {
+    const html = render({ model: 'chat-model', capabilities: [emptyCapabilityDraft('chat')] }, manifests, 'bearer', [], {
+      catalogSuggestions: [
+        { value: 'chat-model', label: 'Chat model', tasks: ['chat'], traits: [] },
+        { value: 'image-model', label: 'Image model', tasks: ['image_generation'], traits: [] },
+        { value: 'future-model', label: 'Future model', tasks: [], traits: [] },
+      ],
+    });
+    expect(html.includes('data-model-catalog-count="3"')).toBe(true);
+    expect(html.includes('data-model-task-picker')).toBe(false);
+    expect(html.includes('data-add-call-route')).toBe(true);
+    expect(html.includes('data-model-call-route-picker')).toBe(false);
+  });
   test('keeps the optional model alias behind a compact control beside the model input', () => {
     const html = render({
       model: 'step-ready',
@@ -347,24 +335,16 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(disclosure.includes('w-full')).toBe(false);
   });
 
-  test('keeps traits answerable without expanding a capability card', () => {
-    const html = render({
-      model: 'step-ready',
-      capabilities: [
-        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
-      ],
-    });
-
-    // Traits describe what the model can do — the same kind of question as the
-    // task itself. They must sit outside the collapsed transport details.
-    expect(html.includes('data-capability-traits="chat"')).toBe(true);
-    expect(html.indexOf('data-capability-traits="chat"')).toBeLessThan(
-      html.indexOf('data-capability-details="chat"')
-    );
+  test('uses native abilities without manual capability selectors', () => {
+    const html = render({ model: 'step-ready', capabilities: [
+      { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+    ] });
+    expect(html.includes('data-capability-traits')).toBe(false);
+    expect(html.includes('内容理解与搜索能力')).toBe(false);
+    expect(html.includes('data-automatic-model-abilities')).toBe(false);
     expect(html.includes('data-capability-expanded="false"')).toBe(true);
   });
-
-  test('groups both token ceilings under one heading', () => {
+  test('places Chat context and output side by side on the homepage without an advanced duplicate', () => {
     const html = render({
       model: 'step-ready',
       capabilities: [
@@ -373,13 +353,94 @@ describe('unified model definition editor rendering and interactions', () => {
     });
 
     expect(html.includes('data-token-limits')).toBe(true);
+    expect(html.includes('data-model-context-settings="chat"')).toBe(true);
+    expect(html.includes('data-model-compaction-threshold')).toBe(true);
+    expect(html.includes('自动压缩阈值')).toBe(true);
+    expect(html.indexOf('data-model-context-settings="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
     expect(html.includes('上下文窗口')).toBe(true);
     expect(html.includes('最大输出（tokens）')).toBe(true);
     expect(html.includes('data-output-limit-input')).toBe(true);
-    expect(html.includes('未设置最大输出，将使用供应商默认值。')).toBe(true);
+    const detailsAt = html.indexOf('data-capability-details="chat"');
+    const homepage = html.slice(html.indexOf('data-model-context-settings="chat"'), detailsAt);
+    expect(homepage.includes('上下文与输出')).toBe(true);
+    expect(homepage.includes('data-model-output-settings="chat"')).toBe(true);
+    expect(homepage.indexOf('data-output-limit-input')).toBeLessThan(homepage.indexOf('data-model-compaction-threshold'));
+    expect(html.slice(detailsAt).includes('data-output-limit-input')).toBe(false);
+    expect((html.match(/data-output-limit-input=/g) ?? []).length).toBe(1);
+    expect(html.includes(zhSettings.outputLimitProviderDefault)).toBe(true);
+    expect(zhSettings.outputLimitProviderDefault.includes('服务商/模型')).toBe(true);
   });
 
-  test('only exposes catalog models compatible with the selected primary type', () => {
+  test('Chat output and context validation stays on the homepage', () => {
+    const requiredChat = manifest('chat');
+    requiredChat.protocols[0].requires_output_ceiling = true;
+    const capability = { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' };
+    const missing = render({ model: 'needs-output', capabilities: [capability] }, { chat: requiredChat }, 'bearer', [
+      { task: 'chat', code: 'output_ceiling_required' },
+    ]);
+    expect(missing.includes('data-output-limit-required')).toBe(true);
+    expect(missing.includes('data-capability-error="output_ceiling_required"')).toBe(true);
+    expect(missing.includes('data-capability-expanded="false"')).toBe(true);
+    expect(missing.indexOf('data-output-limit-required')).toBeLessThan(missing.indexOf('data-capability-details="chat"'));
+    const invalid = render({ model: 'invalid-limit', capabilities: [{ ...capability, contextLimit: -1 }] }, { chat: requiredChat }, 'bearer', [
+      { task: 'chat', code: 'invalid_token_limit' },
+    ]);
+    expect(invalid.includes('data-capability-error="invalid_token_limit"')).toBe(true);
+    expect(invalid.includes('data-capability-expanded="false"')).toBe(true);
+  });
+
+  test('non-Chat output limits retain their task-specific advanced editor', () => {
+    const requiredSpeech = manifest('speech_synthesis');
+    requiredSpeech.protocols[0].requires_output_ceiling = true;
+    const html = render({ model: 'speech', capabilities: [
+      { ...emptyCapabilityDraft('speech_synthesis'), transportSource: 'persisted' as const, protocol: 'stepfun.speech_synthesis' },
+    ] }, { speech_synthesis: requiredSpeech }, 'bearer', [{ task: 'speech_synthesis', code: 'output_ceiling_required' }]);
+    expect(html.includes('data-model-output-settings')).toBe(false);
+    expect(html.includes('data-capability-expanded="true"')).toBe(true);
+    expect(html.indexOf('data-output-limit-required')).toBeGreaterThan(html.indexOf('data-capability-details="speech_synthesis"'));
+  });
+
+  test('retains model reasoning depth in the advanced Chat settings', () => {
+    const chatManifest = manifest('chat');
+    chatManifest.recommendation!.protocol_id = 'openai.chat_text';
+    chatManifest.protocols[0] = {
+      ...chatManifest.protocols[0],
+      protocol_id: 'openai.chat_text',
+      platforms: ['stepfun'],
+    };
+    const html = render(
+      {
+        model: 'step-3.7-flash',
+        capabilities: [{
+          ...emptyCapabilityDraft('chat'),
+          protocol: 'openai.chat_text',
+          providerParamsJson: '{"reasoning_effort":"medium"}',
+        }],
+      },
+      { ...manifests, chat: chatManifest }
+    );
+
+    expect(html.includes('data-reasoning-effort-control="true"')).toBe(true);
+    expect(html.includes('思考深度')).toBe(true);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="medium")(?=[^>]*aria-pressed="true")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="high")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="xhigh")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="max")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="ultra")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html.includes('新会话、预设 Agent、健康检查')).toBe(true);
+
+    const unsupported = render({
+      model: 'claude',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'anthropic.messages' }],
+    });
+    expect(unsupported).toMatch(/<button(?=[^>]*data-reasoning-effort="auto")(?=[^>]*aria-pressed="true")[^>]*>/);
+    expect(unsupported.includes('data-reasoning-effort="low"')).toBe(false);
+    expect(unsupported.includes('当前协议不提供统一的思考深度映射')).toBe(true);
+  });
+
+  test('keeps chat and unknown model IDs visible when an image interface is configured', () => {
     const html = render(
       { model: '', capabilities: [emptyCapabilityDraft('image_generation')] },
       manifests,
@@ -409,7 +470,7 @@ describe('unified model definition editor rendering and interactions', () => {
       }
     );
 
-    expect(html.includes('data-filtered-catalog-count="1"')).toBe(true);
+    expect(html.includes('data-model-catalog-count="3"')).toBe(true);
   });
 
   test('keeps ready capability details collapsed behind accessible advanced controls', () => {
@@ -429,7 +490,8 @@ describe('unified model definition editor rendering and interactions', () => {
         .length
     ).toBe(2);
     expect(html.includes('data-capability-summary="chat"')).toBe(true);
-    expect(html.includes('查看调用配置')).toBe(true);
+    expect(html.includes('高级配置')).toBe(true);
+    expect(html.includes('查看调用配置')).toBe(false);
     expect(html.includes('默认配置已就绪')).toBe(true);
   });
 

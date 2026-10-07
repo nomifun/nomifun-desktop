@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0.0",
+  "outcomes": [
+    {
+      "case_kind": "request_admission_committed_before_fence",
+      "outcome": "continue_previously_admitted_operation_to_finite_boundary",
+      "expected_error_code": null,
+      "existing_session_mutated": false,
+      "existing_binding_mutated": false,
+      "cascade_cancelled": false,
+      "explicit_agent_session_id_required": false
+    },
+    {
+      "case_kind": "fence_committed_before_old_credential_admission",
+      "outcome": "reject_remote_auth_required_before_binding_or_session_lookup",
+      "expected_error_code": "REMOTE_AUTH_REQUIRED",
+      "existing_session_mutated": false,
+      "existing_binding_mutated": false,
+      "cascade_cancelled": false,
+      "explicit_agent_session_id_required": false
+    },
+    {
+      "case_kind": "replacement_credential_after_fence",
+      "outcome": "continue_existing_session_for_same_owner_with_explicit_session_id",
+      "expected_error_code": null,
+      "existing_session_mutated": false,
+      "existing_binding_mutated": false,
+      "cascade_cancelled": false,
+      "explicit_agent_session_id_required": true
+    }
+  ]
+}

@@ -11,8 +11,13 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::model_task::{ModelTask, ModelTrait};
+use crate::model_task::{ModelTask, ModelTechnicalCapability, ModelTrait};
 use crate::provider::{HealthStatus, ProviderHealthCheckErrorKind};
+
+/// Nomi-owned metadata, persisted with provider parameters but never sent to
+/// an upstream model API. Absence preserves existing combined-window policy;
+/// it is not evidence about historical user-authored values.
+pub const MODEL_CONTEXT_LIMIT_KIND_PARAM: &str = "_nomifun_context_limit_kind";
 
 fn empty_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
@@ -48,6 +53,27 @@ where
     Ok(traits)
 }
 
+fn deserialize_unique_technical_capabilities<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ModelTechnicalCapability>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let capabilities = Vec::<ModelTechnicalCapability>::deserialize(deserializer)?;
+    let mut unique = HashSet::with_capacity(capabilities.len());
+    if capabilities
+        .iter()
+        .copied()
+        .all(|capability| unique.insert(capability))
+    {
+        Ok(capabilities)
+    } else {
+        Err(D::Error::custom(
+            "unsupported technical capabilities must not contain duplicates",
+        ))
+    }
+}
+
 fn deserialize_non_empty_capabilities<'de, D>(
     deserializer: D,
 ) -> Result<Vec<ProviderModelCapabilityInput>, D::Error>
@@ -66,6 +92,15 @@ where
         if !tasks.insert(capability.task) {
             return Err(D::Error::custom(format!(
                 "provider model capability task '{}' is duplicated",
+                serde_json::to_value(capability.task)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".to_owned())
+            )));
+        }
+        if capability.task != ModelTask::Chat && !capability.traits.is_empty() {
+            return Err(D::Error::custom(format!(
+                "provider model capability task '{}' cannot declare Chat input/search traits",
                 serde_json::to_value(capability.task)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
@@ -135,6 +170,11 @@ pub struct ProviderModelCapabilityInput {
     #[serde(default)]
     #[ts(optional, type = "number")]
     pub output_limit: Option<i64>,
+    /// Chat context occupancy percentage that triggers automatic compaction.
+    /// Omission retains the runtime's 75% policy.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub compaction_threshold_pct: Option<u8>,
 }
 
 /// Latest health observation for one task-scoped capability.
@@ -166,6 +206,14 @@ pub struct CapabilityHealth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub attempted_url: Option<String>,
+    /// Runtime-only negative evidence. Missing entries are optimistic support;
+    /// users cannot author this set from the model editor.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_unique_technical_capabilities"
+    )]
+    pub unsupported_technical_capabilities: Vec<ModelTechnicalCapability>,
 }
 
 /// Persisted task-scoped capability returned with its owning model.
@@ -201,6 +249,9 @@ pub struct ProviderModelCapabilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub output_limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub compaction_threshold_pct: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<CapabilityHealth>,
@@ -299,7 +350,7 @@ mod tests {
     fn capability() -> serde_json::Value {
         json!({
             "task": "speech_synthesis",
-            "traits": ["audio_output", "streaming"],
+            "traits": [],
             "protocol": "stepfun.audio_speech",
             "connection_role": "default",
             "endpoint": "/audio/speech",
@@ -350,7 +401,7 @@ mod tests {
             "model": "duplicate-traits",
             "capabilities": [{
                 "task": "chat",
-                "traits": ["streaming", "streaming"],
+                "traits": ["vision_input", "vision_input"],
                 "protocol": "openai.chat_text",
                 "connection_role": "default"
             }]
@@ -366,7 +417,7 @@ mod tests {
             "model": "unique-traits",
             "capabilities": [{
                 "task": "chat",
-                "traits": ["streaming", "function_calling"],
+                "traits": ["vision_input", "web_search"],
                 "protocol": "openai.chat_text",
                 "connection_role": "default"
             }]
@@ -374,8 +425,32 @@ mod tests {
         .unwrap();
         assert_eq!(
             valid.capabilities[0].traits,
-            vec![ModelTrait::Streaming, ModelTrait::FunctionCalling]
+            vec![ModelTrait::VisionInput, ModelTrait::WebSearch]
         );
+
+        for retired in ["function_calling", "reasoning", "streaming", "realtime"] {
+            let value = json!({
+                "model": "technical-trait-is-not-user-authored",
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": [retired],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default"
+                }]
+            });
+            assert!(serde_json::from_value::<ProviderModelInput>(value).is_err());
+        }
+
+        let non_chat_trait = json!({
+            "model": "image-model",
+            "capabilities": [{
+                "task": "image_generation",
+                "traits": ["vision_input"],
+                "protocol": "openai.images",
+                "connection_role": "default"
+            }]
+        });
+        assert!(serde_json::from_value::<ProviderModelInput>(non_chat_trait).is_err());
     }
 
     #[test]

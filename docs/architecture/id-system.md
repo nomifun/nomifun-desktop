@@ -122,9 +122,9 @@ CREATE TABLE conversations (
 Examples of stable v3 entities include users, conversations, messages,
 terminal sessions, providers, requirements, agent executions and templates,
 Agent Execution Participant/Step/Attempt/Template Participant, knowledge
-bases, attachments, user presets, Creative Studio projects/templates/template
+bases, attachments, user presets, Creation projects/templates/template
 runs/Agent sessions/assets/creation tasks, and Channel Plugin/User/Session.
-Creative Studio uses `project_id`, `template_id`, `template_run_id`,
+Creation uses `project_id`, `template_id`, `template_run_id`,
 `session_id`, `asset_id`, and `creation_task_id`; embedded graph nodes and
 connections also carry canonical UUIDv7 identities in the project document.
 Requirements use `requirement_id` plus a human-facing `display_no`. The Agent
@@ -214,8 +214,8 @@ CREATE INDEX idx_cron_job_runs_cron_job_id
     ON cron_job_runs(cron_job_id);
 ```
 
-`messages.conversation_id` logically targets
-`conversations.conversation_id`; `cron_job_runs.cron_job_id` logically targets
+`agent_messages.agent_session_id` logically targets
+`agent_sessions.agent_session_id`; `cron_job_runs.cron_job_id` logically targets
 `cron_jobs.cron_job_id`. Neither relationship is declared to SQLite.
 
 Do not store both `conversation_id` and `conversation_row_id`, or any equivalent

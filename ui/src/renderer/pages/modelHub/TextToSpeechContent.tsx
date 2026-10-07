@@ -58,6 +58,7 @@ const TextToSpeechContent: React.FC = () => {
     <div className='flex flex-col gap-14px'>
       <ModalityModelsPanel
         modality='tts'
+        defaultModelPreferenceKey='models.default.speechSynthesis'
         titleKey='settings.modelHub.modality.ttsTitle'
         subtitleKey='settings.modelHub.modality.ttsSubtitle'
       />

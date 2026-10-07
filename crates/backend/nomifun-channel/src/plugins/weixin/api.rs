@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aes::Aes128;
@@ -23,6 +24,11 @@ use super::types::{
 };
 
 const ILINK_APP_ID: &str = "bot";
+
+/// Bound TCP + TLS setup separately from the longer QR/status and long-poll
+/// request budgets. A broken local system proxy should fail over promptly
+/// instead of consuming the whole login timeout before the direct retry.
+const WEIXIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// AES-128-ECB ciphertext size for `n` plaintext bytes (PKCS7 always pads, so a
 /// full-block plaintext still grows by one block).
@@ -130,19 +136,56 @@ fn ensure_send_message_success(response: &SendMessageResponse) -> Result<(), Cha
 
 /// HTTP client for the WeChat iLink Bot API.
 pub(crate) struct WeixinApi {
+    /// Normal application transport. With reqwest's workspace features this
+    /// honors process and operating-system proxy settings.
     client: Client,
+    /// Explicit proxy-free fallback for iLink's replay-safe bootstrap/poll
+    /// requests. It is selected only after the configured path fails while
+    /// establishing a connection; HTTP/API errors never bypass the proxy.
+    direct_client: Client,
+    use_direct_transport: AtomicBool,
     base_url: String,
     bot_token: String,
+    request_timeout: Duration,
 }
 
 impl WeixinApi {
-    pub fn new(client: Client, base_url: &str, bot_token: &str) -> Self {
+    pub fn new(base_url: &str, bot_token: &str, request_timeout: Duration) -> Result<Self, reqwest::Error> {
+        let client = Client::builder()
+            .connect_timeout(WEIXIN_CONNECT_TIMEOUT)
+            .timeout(request_timeout)
+            .build()?;
+        let direct_client = Client::builder()
+            .no_proxy()
+            .connect_timeout(WEIXIN_CONNECT_TIMEOUT)
+            .timeout(request_timeout)
+            .build()?;
+
+        Ok(Self::with_clients(
+            client,
+            direct_client,
+            base_url,
+            bot_token,
+            request_timeout,
+        ))
+    }
+
+    fn with_clients(
+        client: Client,
+        direct_client: Client,
+        base_url: &str,
+        bot_token: &str,
+        request_timeout: Duration,
+    ) -> Self {
         let base = base_url.trim_end_matches('/');
 
         Self {
             client,
+            direct_client,
+            use_direct_transport: AtomicBool::new(false),
             base_url: base.to_string(),
             bot_token: bot_token.to_string(),
+            request_timeout,
         }
     }
 
@@ -151,28 +194,84 @@ impl WeixinApi {
         &self.bot_token
     }
 
+    #[cfg(test)]
+    fn uses_direct_transport(&self) -> bool {
+        self.use_direct_transport.load(Ordering::Relaxed)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    fn active_client(&self) -> &Client {
+        if self.use_direct_transport.load(Ordering::Relaxed) {
+            &self.direct_client
+        } else {
+            &self.client
+        }
+    }
+
+    /// Send a request on the currently selected route. Replay-safe iLink
+    /// requests may retry once without any proxy when the configured route
+    /// fails during connection establishment (including a proxy CONNECT/TLS
+    /// failure). A successful retry pins this API instance to direct transport,
+    /// so later non-idempotent sends do not first hit the known-broken route.
+    async fn send_request<F>(
+        &self,
+        endpoint: &str,
+        allow_direct_connect_fallback: bool,
+        build_request: F,
+    ) -> Result<reqwest::Response, ChannelError>
+    where
+        F: Fn(&Client) -> reqwest::RequestBuilder,
+    {
+        let already_direct = self.use_direct_transport.load(Ordering::Relaxed);
+        match build_request(self.active_client()).send().await {
+            Ok(response) => Ok(response),
+            Err(configured_error)
+                if allow_direct_connect_fallback && !already_direct && configured_error.is_connect() =>
+            {
+                warn!(
+                    endpoint,
+                    error = %configured_error,
+                    "WeChat configured network path failed; retrying without proxy"
+                );
+                match build_request(&self.direct_client).send().await {
+                    Ok(response) => {
+                        self.use_direct_transport.store(true, Ordering::Relaxed);
+                        warn!(endpoint, "WeChat switched this connection to direct transport");
+                        Ok(response)
+                    }
+                    Err(direct_error) => Err(ChannelError::PlatformApi(format!(
+                        "{endpoint} request failed via configured network path ({configured_error}); direct retry also failed ({direct_error})"
+                    ))),
+                }
+            }
+            Err(error) => Err(ChannelError::PlatformApi(format!(
+                "{endpoint} request failed: {error}"
+            ))),
+        }
+    }
 
     async fn authenticated_post<T: DeserializeOwned>(
         &self,
         endpoint: &str,
         body: &impl Serialize,
         timeout: Duration,
+        allow_direct_connect_fallback: bool,
     ) -> Result<T, ChannelError> {
         let url = format!("{}/{}", self.base_url, endpoint);
         let headers = authenticated_headers(&self.bot_token)?;
 
         let resp = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .timeout(timeout)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| ChannelError::PlatformApi(format!("{endpoint} request failed: {e}")))?;
+            .send_request(endpoint, allow_direct_connect_fallback, |client| {
+                client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .timeout(timeout)
+                    .json(body)
+            })
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -189,13 +288,14 @@ impl WeixinApi {
         let url = format!("{}/{}", self.base_url, endpoint);
 
         let resp = self
-            .client
-            .get(&url)
-            .headers(common_headers())
-            .query(query)
-            .send()
-            .await
-            .map_err(|e| ChannelError::PlatformApi(format!("{endpoint} request failed: {e}")))?;
+            .send_request(endpoint, true, |client| {
+                client
+                    .get(&url)
+                    .headers(common_headers())
+                    .query(query)
+                    .timeout(self.request_timeout)
+            })
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -274,7 +374,11 @@ impl WeixinApi {
 
         let timeout = long_poll_timeout + Duration::from_secs(10);
 
-        self.authenticated_post("ilink/bot/getupdates", &body, timeout).await
+        // A cursor-based getupdates call is replay-safe: durable inbound
+        // receipts deduplicate a response if the configured route failed after
+        // the provider had already produced it.
+        self.authenticated_post("ilink/bot/getupdates", &body, timeout, true)
+            .await
     }
 
     // -----------------------------------------------------------------------
@@ -310,7 +414,9 @@ impl WeixinApi {
         };
 
         let response: SendMessageResponse = self
-            .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT)
+            // Never replay a message send on a transport error: the provider
+            // may have accepted it before the connection was interrupted.
+            .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT, false)
             .await
             .map_err(|e| {
                 warn!(to_user_id, error = %e, "sendmessage failed");
@@ -378,7 +484,7 @@ impl WeixinApi {
             base_info: base_info(),
         };
         let upload_resp: GetUploadUrlResponse = self
-            .authenticated_post("ilink/bot/getuploadurl", &upload_req, WEIXIN_API_TIMEOUT)
+            .authenticated_post("ilink/bot/getuploadurl", &upload_req, WEIXIN_API_TIMEOUT, false)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(format!("getuploadurl failed: {e}")))?;
         // The live iLink API returns a ready-to-use CDN URL (`upload_full_url`,
@@ -437,7 +543,7 @@ impl WeixinApi {
             base_info: base_info(),
         };
         let response: SendMessageResponse = self
-            .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT)
+            .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT, false)
             .await
             .map_err(|e| {
                 warn!(to_user_id, error = %e, "send media message failed");
@@ -461,7 +567,7 @@ impl WeixinApi {
         let mut last_err = String::new();
         for attempt in 1..=MAX_ATTEMPTS {
             match self
-                .client
+                .active_client()
                 .post(upload_url)
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .timeout(WEIXIN_API_TIMEOUT)
@@ -538,17 +644,135 @@ mod tests {
 
     #[test]
     fn api_stores_credentials() {
-        let client = Client::new();
-        let api = WeixinApi::new(client, "https://ilinkai.weixin.qq.com/", "tok_abc");
+        let api = WeixinApi::new(
+            "https://ilinkai.weixin.qq.com/",
+            "tok_abc",
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert_eq!(api.base_url, "https://ilinkai.weixin.qq.com");
         assert_eq!(api.bot_token(), "tok_abc");
     }
 
     #[test]
     fn api_normalizes_trailing_slash() {
-        let client = Client::new();
-        let api = WeixinApi::new(client, "https://ilinkai.weixin.qq.com///", "tok");
+        let api = WeixinApi::new(
+            "https://ilinkai.weixin.qq.com///",
+            "tok",
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert!(api.base_url.ends_with("com"));
+    }
+
+    #[tokio::test]
+    async fn replay_safe_qr_request_falls_back_to_direct_after_proxy_connect_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"qrcode":"ticket-direct","qrcode_img_content":"https://example.test/qr","ret":0}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        // Reserve then release a loopback port so the configured proxy path
+        // deterministically gets connection-refused. The direct client must
+        // still reach the real target listener above.
+        let unavailable_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_proxy_addr = unavailable_proxy.local_addr().unwrap();
+        drop(unavailable_proxy);
+
+        let request_timeout = Duration::from_secs(2);
+        let configured_client = Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{unavailable_proxy_addr}")).unwrap())
+            .connect_timeout(Duration::from_millis(250))
+            .timeout(request_timeout)
+            .build()
+            .unwrap();
+        let direct_client = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(250))
+            .timeout(request_timeout)
+            .build()
+            .unwrap();
+        let api = WeixinApi::with_clients(
+            configured_client,
+            direct_client,
+            &format!("http://{target_addr}"),
+            "",
+            request_timeout,
+        );
+
+        let qr = api.get_bot_qrcode().await.unwrap();
+        assert_eq!(qr.qrcode.as_deref(), Some("ticket-direct"));
+        assert!(api.uses_direct_transport());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_replay_safe_request_never_uses_direct_fallback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let direct_attempt = tokio::spawn(async move {
+            let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(1), target.accept()).await
+            else {
+                return false;
+            };
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            true
+        });
+
+        let unavailable_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_proxy_addr = unavailable_proxy.local_addr().unwrap();
+        drop(unavailable_proxy);
+
+        let request_timeout = Duration::from_secs(2);
+        let configured_client = Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{unavailable_proxy_addr}")).unwrap())
+            .connect_timeout(Duration::from_millis(250))
+            .timeout(request_timeout)
+            .build()
+            .unwrap();
+        let direct_client = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(250))
+            .timeout(request_timeout)
+            .build()
+            .unwrap();
+        let api = WeixinApi::with_clients(
+            configured_client,
+            direct_client,
+            &format!("http://{target_addr}"),
+            "",
+            request_timeout,
+        );
+        let url = format!("http://{target_addr}/unsafe-send");
+
+        let result = api
+            .send_request("unsafe-send", false, |client| client.post(&url))
+            .await;
+
+        assert!(result.is_err());
+        assert!(!api.uses_direct_transport());
+        assert!(!direct_attempt.await.unwrap());
     }
 
     #[test]

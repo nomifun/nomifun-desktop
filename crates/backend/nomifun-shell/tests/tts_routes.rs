@@ -24,12 +24,11 @@ use nomifun_shell::{NoopSystemOpener, ShellRouterState, ShellService, SttService
 const TEST_KEY: [u8; 32] = [0x42; 32];
 
 /// Real in-memory DB + the production adapter set behind the shell router.
-/// Returns the router and the pool for seeding. The `Database` handle is
-/// forgotten (not dropped) so the in-memory pool stays alive for the test.
+/// Returns the router and the shared pool for seeding; these references keep
+/// the in-memory database alive without leaking the Database wrapper.
 async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
-    std::mem::forget(db);
 
     let invoke = Arc::new(ModelInvokeService::new(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
@@ -217,50 +216,6 @@ async fn tts_model_without_speech_capability_is_400_without_network() {
 }
 
 #[tokio::test]
-async fn tts_empty_text_is_400() {
-    let (app, pool) = setup().await;
-    let pid = seed_provider(
-        &pool,
-        "https://unused.example",
-        "tts-1",
-        "speech_synthesis",
-    )
-    .await;
-
-    let resp = app
-        .oneshot(tts_request(json!({
-            "provider_id": pid,
-            "model": "tts-1",
-            "text": "   ",
-        })))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn tts_text_over_4096_chars_is_400() {
-    let (app, pool) = setup().await;
-    let pid = seed_provider(
-        &pool,
-        "https://unused.example",
-        "tts-1",
-        "speech_synthesis",
-    )
-    .await;
-
-    let resp = app
-        .oneshot(tts_request(json!({
-            "provider_id": pid,
-            "model": "tts-1",
-            "text": "x".repeat(4097),
-        })))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
 async fn tts_upstream_401_maps_to_bad_gateway() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -286,9 +241,9 @@ async fn tts_upstream_401_maps_to_bad_gateway() {
 }
 
 #[tokio::test]
-async fn tts_unwired_invoke_service_is_500() {
-    // Unit-style state without the invoke service: the route degrades to an
-    // internal error rather than panicking (mirrors provider_service: None).
+async fn tts_validates_text_before_requiring_invoke() {
+    // Unwired invoke makes input-validation regressions fail locally without
+    // reaching a provider. Valid text still gets the explicit config error.
     let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
     let state = ShellRouterState {
         shell_service: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
@@ -299,13 +254,27 @@ async fn tts_unwired_invoke_service_is_500() {
         provider_service: None,
         model_invoke_service: None,
     };
-    let resp = shell_routes(state)
-        .oneshot(tts_request(json!({
-            "provider_id": "018f0000-0000-7000-8000-000000000001",
-            "model": "tts-1",
-            "text": "hi",
-        })))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let app = shell_routes(state);
+    for (text, expected_status) in [
+        (String::new(), StatusCode::BAD_REQUEST),
+        ("   ".to_owned(), StatusCode::BAD_REQUEST),
+        ("x".repeat(4097), StatusCode::BAD_REQUEST),
+        ("界".repeat(4097), StatusCode::BAD_REQUEST),
+        ("界".repeat(4096), StatusCode::INTERNAL_SERVER_ERROR),
+        ("hi".to_owned(), StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let resp = app.clone()
+            .oneshot(tts_request(json!({
+                "provider_id": "018f0000-0000-7000-8000-000000000001",
+                "model": "tts-1",
+                "text": text,
+            })))
+            .await.unwrap();
+        assert_eq!(resp.status(), expected_status);
+        if expected_status == StatusCode::INTERNAL_SERVER_ERROR {
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(body["error"].as_str().unwrap().contains("model invoke service is unavailable"));
+        }
+    }
 }

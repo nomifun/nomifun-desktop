@@ -59,7 +59,7 @@ describe('tools.textToSpeech client service', () => {
     configService.setLocal(TEXT_TO_SPEECH_CONFIG_KEY, persistedConfig);
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       request = {
-        url: String(input),
+        url: new URL(String(input), 'http://127.0.0.1:13400').pathname,
         method: init?.method,
         body: typeof init?.body === 'string' ? init.body : undefined,
       };
@@ -69,7 +69,7 @@ describe('tools.textToSpeech client service', () => {
     await saveTextToSpeechConfig(null);
 
     expect(request).toEqual({
-      url: 'http://127.0.0.1:13400/api/settings/client',
+      url: '/api/settings/client',
       method: 'PUT',
       body: JSON.stringify({ [TEXT_TO_SPEECH_CONFIG_KEY]: null }),
     });

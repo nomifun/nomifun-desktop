@@ -30,29 +30,20 @@ pub trait ICreationTaskRepository: Send + Sync {
         creation_task_id: &str,
     ) -> Result<Option<CreationTaskRow>, DbError>;
 
-    /// Newest-first keyset page for one exact standalone-workbench aggregate.
-    /// Implementations fetch `limit + 1` rows so the service can derive an
-    /// opaque continuation cursor without a count query.
-    async fn list_standalone_workbench_tasks_page(
-        &self,
-        params: ListStandaloneWorkbenchTasksParams<'_>,
-    ) -> Result<Vec<CreationTaskRow>, DbError> {
-        let _ = params;
-        Err(DbError::Init(
-            "standalone workbench task paging is unavailable in this repository".into(),
-        ))
+
+
+    async fn list_conversation_tasks(&self, conversation_id: &str) -> Result<Vec<CreationTaskRow>, DbError> {
+        Ok(self.list_all_tasks().await?.into_iter().filter(|row| row.conversation_id.as_deref() == Some(conversation_id)).collect())
     }
 
-    /// Atomically tombstone one exact terminal standalone-owner batch. Existing
-    /// tombstones are idempotent. Implementations return rows in request order.
-    async fn retire_standalone_workbench_tasks(
+    /// Server-owned attachment references for one exact user turn. This reads
+    /// existing message metadata; references from other turns are never inferred.
+    async fn conversation_message_creation_references(
         &self,
-        params: RetireStandaloneWorkbenchTasksParams<'_>,
-    ) -> Result<Vec<CreationTaskRow>, DbError> {
-        let _ = params;
-        Err(DbError::Init(
-            "standalone workbench task retirement is unavailable in this repository".into(),
-        ))
+        _conversation_id: &str,
+        _message_id: &str,
+    ) -> Result<Option<serde_json::Value>, DbError> {
+        Ok(None)
     }
 
     /// Complete task inventory for boot-time artifact reconciliation. Unlike
@@ -99,39 +90,15 @@ pub struct IdempotentCreationTask {
     pub inserted: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct CreationTaskPageCursorRef<'a> {
-    pub submitted_at: i64,
-    pub creation_task_id: &'a str,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ListStandaloneWorkbenchTasksParams<'a> {
-    pub workbench_kind: &'a str,
-    pub active_only: bool,
-    pub before: Option<CreationTaskPageCursorRef<'a>>,
-    /// Requested visible page size. The repository reads one additional row.
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RetireStandaloneWorkbenchTasksParams<'a> {
-    pub workbench_kind: &'a str,
-    pub task_ids: &'a [String],
-    pub deleted_at: i64,
-}
-
 /// Strict canonical Creative Studio task owner. No field is shared between
-/// the two branches, so callers cannot accidentally reinterpret a template
+/// its branches, so callers cannot accidentally reinterpret a template
 /// step as a canvas node.
 #[derive(Debug, Clone, Copy)]
 pub enum CreativeTaskOwnerRef<'a> {
+    ConversationTurn { conversation_id: &'a str, message_id: &'a str },
     CanvasNode {
         project_id: &'a str,
         node_id: &'a str,
-    },
-    StandaloneWorkbench {
-        workbench_kind: &'a str,
     },
     TemplateStep {
         template_id: &'a str,

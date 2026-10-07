@@ -1,8 +1,10 @@
 //! Input synthesis via enigo.
 //!
 //! Enigo handles are not `Send`, so each operation constructs a fresh Enigo
-//! inside `tokio::task::spawn_blocking` and the whole blocking task is
-//! wrapped in a 10s timeout. On macOS, Enigo's keyboard path queries Carbon
+//! inside `tokio::task::spawn_blocking`. A 10s deadline marks the result
+//! uncertain, but an already-admitted task remains joined until its pressed
+//! input is released; no native worker is detached after timeout. On macOS,
+//! Enigo's keyboard path queries Carbon
 //! TIS/TSM input-source APIs, so the actual Enigo construction and operation
 //! are synchronously dispatched to the main queue. Coordinates passed in here
 //! are already absolute screen coordinates (mapped from screenshot space by
@@ -24,6 +26,7 @@ const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pause between press and release (and between repeated clicks) so target
 /// apps register distinct events.
 const CLICK_PAUSE: Duration = Duration::from_millis(20);
+const DRAG_STEPS: i64 = 8;
 
 /// Scroll direction accepted by the `scroll` action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,42 +180,62 @@ fn new_enigo() -> Result<Enigo, String> {
     })
 }
 
-fn run_input_task_blocking<T, F>(task: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    crate::macos_main::run_blocking(task)
-}
-
 fn run_enigo_operation_blocking<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
 {
-    run_input_task_blocking(move || {
+    crate::macos_main::run_blocking(move || {
         let mut enigo = new_enigo()?;
         op(&mut enigo)
     })
 }
 
-/// Run an input operation on a fresh Enigo instance inside spawn_blocking,
-/// bounded by a 10s timeout.
+/// Run an input operation on a fresh Enigo instance inside spawn_blocking.
+/// The 10s deadline bounds when success can be reported, while an admitted
+/// worker stays joined through cleanup before any timeout error is returned.
 async fn with_enigo<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
 {
     let handle = tokio::task::spawn_blocking(move || run_enigo_operation_blocking(op));
-    match tokio::time::timeout(INPUT_TIMEOUT, handle).await {
+    join_input_task(handle, INPUT_TIMEOUT).await
+}
+
+async fn join_input_task<T>(
+    mut handle: tokio::task::JoinHandle<Result<T, String>>,
+    timeout: Duration,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    match tokio::time::timeout(timeout, &mut handle).await {
         Ok(Ok(result)) => result,
         Ok(Err(join_err)) => Err(format!("Input task failed: {join_err}")),
-        Err(_) => Err(format!(
-            "Input operation timed out after {}s. The system may be blocking \
-             synthetic input. {}",
-            INPUT_TIMEOUT.as_secs(),
-            permissions::accessibility_hint_detailed()
-        )),
+        Err(_) => {
+            // `spawn_blocking` tasks cannot be cancelled after they start. A
+            // detached input task could still hold a key/button or apply a
+            // late effect after the caller observed the timeout. Retain and
+            // join the exact admitted task before reporting its uncertain
+            // result; the Engine host can then withhold cleanup proof while a
+            // native input operation remains live.
+            let settled = match handle.await {
+                Ok(Ok(_)) => "The admitted input task settled after the deadline; no background input task remains, but its effect may already be visible.".to_owned(),
+                Ok(Err(error)) => format!(
+                    "The admitted input task settled after the deadline with an error ({error}); no background input task remains, but OS input cleanup may be incomplete."
+                ),
+                Err(join_error) => format!(
+                    "The admitted input task failed after the deadline ({join_error}); no background input task remains, but OS input cleanup is unproven."
+                ),
+            };
+            Err(format!(
+                "Input operation timed out after {}s. {settled} Do not retry automatically; \
+                 observe the current desktop first. The system may be blocking synthetic input. {}",
+                timeout.as_secs_f64(),
+                permissions::accessibility_hint_detailed()
+            ))
+        }
     }
 }
 
@@ -221,6 +244,157 @@ fn input_err(e: enigo::InputError) -> String {
         "Input synthesis failed: {e}. {}",
         permissions::accessibility_hint()
     )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReleaseReport {
+    Clean,
+    Recovered(Vec<String>),
+    Unproven(Vec<String>),
+}
+
+/// Release in reverse press order. A first failure is retried once while the
+/// exact obligation remains recorded; a failed retry stays in `pressed` so a
+/// surrounding guard can make another best-effort attempt during unwinding.
+fn release_obligations<T: Copy>(
+    pressed: &mut Vec<T>,
+    mut release: impl FnMut(T) -> Result<(), String>,
+) -> ReleaseReport {
+    let mut first_errors = Vec::new();
+    let mut retry_reverse = Vec::new();
+    while let Some(input) = pressed.pop() {
+        if let Err(error) = release(input) {
+            first_errors.push(error);
+            retry_reverse.push(input);
+        }
+    }
+    retry_reverse.reverse();
+    *pressed = retry_reverse;
+    if pressed.is_empty() {
+        return ReleaseReport::Clean;
+    }
+
+    let mut retry_errors = Vec::new();
+    let mut remaining_reverse = Vec::new();
+    while let Some(input) = pressed.pop() {
+        if let Err(error) = release(input) {
+            retry_errors.push(error);
+            remaining_reverse.push(input);
+        }
+    }
+    remaining_reverse.reverse();
+    *pressed = remaining_reverse;
+    first_errors.extend(retry_errors);
+    if pressed.is_empty() {
+        ReleaseReport::Recovered(first_errors)
+    } else {
+        ReleaseReport::Unproven(first_errors)
+    }
+}
+
+struct PressedInputGuard<'a> {
+    enigo: &'a mut Enigo,
+    buttons: Vec<Button>,
+    keys: Vec<enigo::Key>,
+}
+
+impl<'a> PressedInputGuard<'a> {
+    fn new(enigo: &'a mut Enigo) -> Self {
+        Self {
+            enigo,
+            buttons: Vec::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    fn press_button(&mut self, button: Button) -> Result<(), String> {
+        // Record before invoking the OS. A reported press failure can still be
+        // partial, so cleanup must issue the matching release.
+        self.buttons.push(button);
+        if let Err(error) = self.enigo.button(button, Direction::Press) {
+            let press_error = input_err(error);
+            let cleanup = self.release_all();
+            return Err(combine_input_and_cleanup_error(press_error, cleanup));
+        }
+        Ok(())
+    }
+
+    fn press_key(&mut self, key: enigo::Key) -> Result<(), String> {
+        self.keys.push(key);
+        if let Err(error) = self.enigo.key(key, Direction::Press) {
+            let press_error = input_err(error);
+            let cleanup = self.release_all();
+            return Err(combine_input_and_cleanup_error(press_error, cleanup));
+        }
+        Ok(())
+    }
+
+    fn move_abs(&mut self, x: i32, y: i32) -> Result<(), String> {
+        move_abs(self.enigo, x, y)
+    }
+
+    fn release_all(&mut self) -> Result<(), String> {
+        let key_report = release_obligations(&mut self.keys, |key| {
+            self.enigo
+                .key(key, Direction::Release)
+                .map_err(input_err)
+        });
+        let button_report = release_obligations(&mut self.buttons, |button| {
+            self.enigo
+                .button(button, Direction::Release)
+                .map_err(input_err)
+        });
+        release_reports_result(key_report, button_report)
+    }
+}
+
+impl Drop for PressedInputGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keys.is_empty() || !self.buttons.is_empty() {
+            let _ = self.release_all();
+        }
+    }
+}
+
+fn release_reports_result(
+    key_report: ReleaseReport,
+    button_report: ReleaseReport,
+) -> Result<(), String> {
+    let mut recovered = Vec::new();
+    let mut unproven = Vec::new();
+    for (label, report) in [("key", key_report), ("mouse button", button_report)] {
+        match report {
+            ReleaseReport::Clean => {}
+            ReleaseReport::Recovered(errors) => recovered.push(format!(
+                "{label} release initially failed but its exact retry succeeded: {}",
+                errors.join(" | ")
+            )),
+            ReleaseReport::Unproven(errors) => unproven.push(format!(
+                "{label} release remained unproven after an exact retry: {}",
+                errors.join(" | ")
+            )),
+        }
+    }
+    if !unproven.is_empty() {
+        return Err(format!(
+            "Input cleanup is unproven; do not retry or continue input until the desktop is re-observed. {}",
+            unproven.join("; ")
+        ));
+    }
+    if !recovered.is_empty() {
+        return Err(format!(
+            "Input cleanup recovered after a release failure; all recorded keys/buttons are released, but the input effect is uncertain. {}",
+            recovered.join("; ")
+        ));
+    }
+    Ok(())
+}
+
+fn combine_input_and_cleanup_error(input_error: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => format!("{input_error} Input cleanup released every recorded key/button."),
+        Err(cleanup_error) => format!("{input_error} {cleanup_error}"),
+    }
 }
 
 /// Move the cursor to absolute screen coordinates.
@@ -243,27 +417,35 @@ pub async fn click(x: i32, y: i32, button: Button, count: u32) -> Result<(), Str
     .await
 }
 
+fn drag_axis(start: i32, end: i32, step: i64) -> i32 {
+    (i64::from(start) + (i64::from(end) - i64::from(start)) * step / DRAG_STEPS) as i32
+}
+
 /// Press at (start), drag to (end), release. Includes intermediate moves so
 /// apps that track motion register the drag.
 pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
     with_enigo(move |enigo| {
         move_abs(enigo, start_x, start_y)?;
-        enigo
-            .button(Button::Left, Direction::Press)
-            .map_err(input_err)?;
+        let mut pressed = PressedInputGuard::new(enigo);
+        pressed.press_button(Button::Left)?;
         std::thread::sleep(CLICK_PAUSE);
-        // A few intermediate steps make drags more reliable than a teleport.
-        const STEPS: i32 = 8;
-        for i in 1..=STEPS {
-            let ix = start_x + (end_x - start_x) * i / STEPS;
-            let iy = start_y + (end_y - start_y) * i / STEPS;
-            move_abs(enigo, ix, iy)?;
-            std::thread::sleep(Duration::from_millis(10));
+        let movement = (|| {
+            // A few intermediate steps make drags more reliable than a teleport.
+            for i in 1..=DRAG_STEPS {
+                pressed.move_abs(
+                    drag_axis(start_x, end_x, i),
+                    drag_axis(start_y, end_y, i),
+                )?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })();
+        // Even a failed intermediate move must release the button we pressed.
+        let cleanup = pressed.release_all();
+        match (movement, cleanup) {
+            (Ok(()), cleanup) => cleanup,
+            (Err(error), cleanup) => Err(combine_input_and_cleanup_error(error, cleanup)),
         }
-        enigo
-            .button(Button::Left, Direction::Release)
-            .map_err(input_err)?;
-        Ok(())
     })
     .await
 }
@@ -276,25 +458,12 @@ pub async fn type_text(text: String) -> Result<(), String> {
 /// Press a key combo: press front-to-back, release back-to-front.
 pub async fn key_combo(keys: Vec<enigo::Key>) -> Result<(), String> {
     with_enigo(move |enigo| {
-        let mut pressed: Vec<enigo::Key> = Vec::with_capacity(keys.len());
+        let mut pressed = PressedInputGuard::new(enigo);
         for key in &keys {
-            if let Err(e) = enigo.key(*key, Direction::Press) {
-                // Release anything already held before bailing out.
-                for held in pressed.iter().rev() {
-                    let _ = enigo.key(*held, Direction::Release);
-                }
-                return Err(input_err(e));
-            }
-            pressed.push(*key);
+            pressed.press_key(*key)?;
         }
         std::thread::sleep(CLICK_PAUSE);
-        let mut result = Ok(());
-        for key in pressed.iter().rev() {
-            if let Err(e) = enigo.key(*key, Direction::Release) {
-                result = Err(input_err(e));
-            }
-        }
-        result
+        pressed.release_all()
     })
     .await
 }
@@ -337,6 +506,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drag_interpolation_handles_full_coordinate_range() {
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, 0), i32::MIN);
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, DRAG_STEPS), i32::MAX);
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, DRAG_STEPS / 2), -1);
+        assert_eq!(drag_axis(i32::MAX, i32::MIN, DRAG_STEPS), i32::MIN);
+        assert_eq!(drag_axis(10, 90, 1), 20);
+        assert_eq!(drag_axis(90, 10, 1), 80);
+    }
+
+    #[test]
     fn scroll_direction_parses_all_variants() {
         assert_eq!(ScrollDirection::parse("up").unwrap(), ScrollDirection::Up);
         assert_eq!(
@@ -357,6 +536,80 @@ mod tests {
     fn scroll_direction_unknown_is_error() {
         let err = ScrollDirection::parse("diagonal").unwrap_err();
         assert!(err.contains("diagonal"));
+    }
+
+    #[tokio::test]
+    async fn admitted_input_timeout_waits_for_pressed_state_cleanup() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let pressed = Arc::new(AtomicBool::new(false));
+        let worker_pressed = Arc::clone(&pressed);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let handle = tokio::task::spawn_blocking(move || {
+            worker_pressed.store(true, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            worker_pressed.store(false, Ordering::SeqCst);
+            Ok::<_, String>(())
+        });
+        started_rx.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let error = join_input_task(handle, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        assert!(
+            !pressed.load(Ordering::SeqCst),
+            "a reported timeout must not abandon an admitted task with input still pressed"
+        );
+    }
+
+    #[test]
+    fn release_failure_retries_only_the_exact_remaining_obligation() {
+        let mut pressed = vec![1_u8, 2_u8];
+        let mut attempts = Vec::new();
+        let mut failed_once = false;
+        let report = release_obligations(&mut pressed, |input| {
+            attempts.push(input);
+            if input == 2 && !failed_once {
+                failed_once = true;
+                Err("injected release failure".to_owned())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempts, vec![2, 1, 2]);
+        assert!(pressed.is_empty());
+        assert_eq!(
+            report,
+            ReleaseReport::Recovered(vec!["injected release failure".to_owned()])
+        );
+    }
+
+    #[test]
+    fn repeated_release_failure_retains_the_exact_cleanup_obligation() {
+        let mut pressed = vec![1_u8, 2_u8];
+        let mut attempts = Vec::new();
+        let report = release_obligations(&mut pressed, |input| {
+            attempts.push(input);
+            (input != 2)
+                .then_some(())
+                .ok_or_else(|| format!("release {input} rejected"))
+        });
+        assert_eq!(attempts, vec![2, 1, 2]);
+        assert_eq!(pressed, vec![2]);
+        assert_eq!(
+            report,
+            ReleaseReport::Unproven(vec![
+                "release 2 rejected".to_owned(),
+                "release 2 rejected".to_owned(),
+            ])
+        );
     }
 
     // --- virtual-desktop coordinate normalization (Windows actuation fix) ---

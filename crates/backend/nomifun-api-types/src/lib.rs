@@ -3,56 +3,61 @@ mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
 mod agent_execution;
+mod execution_constraints;
+pub use execution_constraints::*;
 mod agent_execution_template;
+mod agent_platform;
 mod auth;
 mod channel;
-mod confirmation;
 mod connection_test;
 mod conversation;
 mod cron;
 mod custom_agent;
-mod extension;
 mod file;
 mod idmm;
 mod knowledge;
 mod lifecycle;
-mod managed_model;
+mod model_failover;
 mod mcp;
 mod mcp_bridge;
 mod model_capability;
 pub mod model_protocol;
 pub mod model_task;
 mod office;
-mod preset;
+mod plugin_platform;
 mod provider;
 mod provider_connection;
 mod provider_model;
 mod requirement;
 mod response;
+mod runtime_build;
+pub use runtime_build::*;
 mod serde_util;
 mod session_ops;
 mod shell;
 mod skill;
 mod system;
 mod terminal;
+mod task_plan;
+pub use task_plan::*;
 mod webhook;
 mod websocket;
 
 pub use session_ops::{
-    AgentModeResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModeRequest,
-    SetModelRequest, SideQuestionRequest, SideQuestionResponse, WorkspaceBrowseQuery,
-    WorkspaceEntry,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModelRequest, SideQuestionRequest,
+    SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
-    NomiBuildExtra, NomiGoalSpec, SessionMcpServer, SessionMcpTransport, SlashCommandItem,
-    SummonConfig,
+    NomiBuildExtra, NomiGoalSpec, NomiMcpCapabilityPolicy, NomiRuntimeProfile,
+    SlashCommandItem,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
 };
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
-    AgentErrorResolutionTarget, AgentStreamErrorData,
+    AgentErrorResolutionTarget, AgentStreamErrorData, AgentTaskIncompleteReason,
+    ModelFailureDiagnostic, ModelFailureReason,
 };
 pub use agent_execution::{
     AddExecutionStepsRequest, AdjustAgentExecutionRequest, AdoptExecutionStepOutputRequest,
@@ -71,6 +76,7 @@ pub use agent_execution_template::{
     AgentExecutionTemplateParticipantInput, CreateAgentExecutionTemplateRequest,
     CreateExecutionFromTemplateRequest, UpdateAgentExecutionTemplateRequest,
 };
+pub use agent_platform::*;
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,
@@ -86,19 +92,14 @@ pub use channel::{
     RejectPairingRequest, RevokeUserRequest, SetGroupAccessRequest, SyncChannelSettingsRequest,
     TestPluginExtraConfig, TestPluginRequest, TestPluginResponse, UserAuthorizedPayload,
 };
-pub use confirmation::{
-    ApprovalCheckQuery, ApprovalCheckResponse, ConfirmRequest, ConfirmationListResponse,
-};
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
-    ActiveCountResponse, CloneConversationRequest, ConversationArtifactKind,
-    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
+    ActiveCountResponse, CloneConversationRequest,
     ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse,
     MessageResponse, MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest,
-    UpdateConversationRequest,
+    PluginDeliveryRequirement, SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
 };
 pub use cron::{
     CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto,
@@ -110,11 +111,6 @@ pub use custom_agent::{
     CustomAgentAdvancedOverrides, CustomAgentUpsertRequest, DeleteCustomAgentResponse,
     SetEnabledRequest,
 };
-pub use extension::{
-    DisableExtensionRequest, EnableExtensionRequest, ExtensionSummaryResponse, GetI18nRequest,
-    GetPermissionsRequest, GetRiskLevelRequest, HubExtensionListItem, HubOperationResponse,
-    HubUpdateInfo, InstallExtensionRequest, PermissionDetailResponse, PermissionSummaryResponse,
-};
 pub use file::{
     BrowseDirectoryQuery, BrowseDirectoryResponse, BrowseEntry, CancelZipRequest, CopyFilesRequest,
     CopyFilesResponse, CreateDirectoryRequest, FetchRemoteImageRequest, FileChangeInfoResponse,
@@ -125,10 +121,10 @@ pub use file::{
     WorkspaceOfficeWatchRequest, WriteFileRequest, ZipFileEntry, ZipRequest,
 };
 pub use idmm::{
-    BlockedBehavior, BudgetConfig, BypassModelRef, CategoryMode, CategoryRules, DecisionStrategy,
-    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmState, IdmmTargetKind,
-    InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule, PermissionRule,
-    ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
+    IdmmDecisionExplanation, IdmmDecisionModel, IdmmDecisionNotice, IdmmDecisionNoticeStatus,
+    IdmmDecisionSource, IdmmQuestionRef,
+    IdmmBypassModelRef, IdmmConfig, IdmmIntervention, IdmmInterventionKind,
+    IdmmInterventionStatus, IdmmMode, IdmmRunState, IdmmScanScope, IdmmState,
 };
 pub use knowledge::{
     CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,
@@ -144,11 +140,7 @@ pub use lifecycle::{
     GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult,
     UpdateReleaseInfo, UpdateWorkDirRequest,
 };
-pub use managed_model::{
-    ManagedModel, ManagedModelHealthBatchResult, ManagedModelHealthErrorKind,
-    ManagedModelHealthResult, ManagedModelHealthStatus, ManagedModelServiceAvailability,
-    ManagedModelServiceStatus, SetManagedModelEnabledRequest, SetManagedModelServiceEnabledRequest,
-};
+pub use model_failover::ModelFailoverConfig;
 pub use mcp::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerEntry,
     DetectedMcpServerResponse, ImportMcpServerRequest, McpAuthMethod, McpConnectionTestErrorCode,
@@ -157,8 +149,8 @@ pub use mcp::{
     OAuthStatusResponse, TestMcpConnectionRequest, UpdateMcpServerRequest,
 };
 pub use mcp_bridge::{
-    ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
-    GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL, GATEWAY_LIST_TOOLS_OPERATION,
+    GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,
+    GATEWAY_LIST_TOOLS_OPERATION,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig, GatewayMcpConfig,
     KNOWLEDGE_CAPABILITY_DOMAIN, KNOWLEDGE_READ_TOOL, KNOWLEDGE_SEARCH_TOOL, KNOWLEDGE_WRITE_TOOL,
     KnowledgeCapabilityClaims, KnowledgeCapabilityScope, KnowledgeMcpChildConfig,
@@ -173,7 +165,10 @@ pub use model_protocol::{
     ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
     ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
-pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
+pub use model_task::{
+    ModelTask, ModelTechnicalCapability, ModelTrait, infer_catalog_tasks_and_traits,
+    parse_persisted_model_traits, verified_catalog_tasks_and_traits,
+};
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,
@@ -181,25 +176,22 @@ pub use office::{
     SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
     StopPreviewRequest, is_preview_capability,
 };
-pub use preset::{
-    AgentPreference, CreatePresetRequest, CreatePresetTagRequest, ImportPresetsRequest,
-    ImportPresetsResult, KnowledgeBaseBinding, ModelPreference, PresetImportError,
-    PresetKnowledgePolicy, PresetOverrides, PresetResponse, PresetSource, PresetTagDimension,
-    PresetTagResponse, PresetTarget, ResolvePresetRequest, ResolvedPresetSnapshot,
-    SetPresetStateRequest, SkillBinding, UpdatePresetRequest, UpdatePresetTagRequest,
-};
+pub use plugin_platform::*;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
-    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus, ModelInfo,
+    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus,
+    ModelCatalogSource, ModelContextLimitKind, ModelInfo, ModelTaskSource, ModelTokenLimitSources,
     ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
     ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,
 };
+pub mod model_gateway;
+pub use model_gateway::*;
 pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,
 };
 pub use provider_model::{
-    CapabilityHealth, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
+    CapabilityHealth, MODEL_CONTEXT_LIMIT_KIND_PARAM, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse, SaveProviderModelRequest,
     validate_model_traits_unique,
 };
@@ -218,13 +210,13 @@ pub use shell::{
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
-    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
-    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadBuiltinResourceRequest,
-    ReadPresetRuleRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
+    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse,
+    NamedPathResponse, ReadBuiltinResourceRequest,
+    ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SetSkillTagsRequest,
     SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,
     SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse,
-    SkillPathsResponse, SkillSourceResponse, WritePresetRuleRequest,
+    SkillPathsResponse, SkillSourceResponse,
 };
 pub use system::{
     ClientPreferencesResponse, SystemSettingsResponse, UpdateClientPreferencesRequest,

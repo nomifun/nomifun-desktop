@@ -103,12 +103,11 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('onCopy={handleCopyPrompt}')).toBe(true);
     expect(source.includes('promptInsertTargetNodeId')).toBe(false);
     expect(source.includes('creativeTextNodeFromPrompt')).toBe(false);
-    expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(true);
-    expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(false);
+    expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(false);
     expect(source.includes("onAddDirector={() => addNode('director')}")).toBe(
-      true
+      false
     );
-    expect(source.includes('handleOpenDirector(nodeId)')).toBe(true);
+    expect(source.includes('handleOpenDirector(nodeId)')).toBe(false);
   });
 
   test('resolves typed interaction intents through real product boundaries', () => {
@@ -125,7 +124,6 @@ describe('Creative Canvas product route composition', () => {
       'hasImageContent={Boolean(node.data.assetId)}',
       'navigator.clipboard.read()',
       'manualUploadRejectionMessage',
-      'pendingPanoramaChoice',
       '<CreativeCanvasImageToolbar',
       '<CreativeCanvasImageComposer',
       '<CreativeCanvasVideoComposer',
@@ -144,11 +142,11 @@ describe('Creative Canvas product route composition', () => {
       'canvasAudioComposeProtocolProfile',
       'confirmCanvasAudioComposeSubmission',
       'orphanCanvasAudioComposeTask',
-      'key={`${projectId}:audio:${audioTaskRuntimeEpoch}`}',
+      'key={`${projectId}:audio`}',
       'confirmCanvasVideoComposeSubmission',
       'orphanCanvasVideoComposeTask',
-      'videoTaskRuntimeEpoch',
-      'key={`${projectId}:video:${videoTaskRuntimeEpoch}`}',
+      'runtime.dismissSubmission(request.failureOrder)',
+      'key={`${projectId}:video`}',
       'buildCreativeImageMaskReference',
       'uploadCreativeImageMaskReference',
       'prepareCanvasImageMaskEdit',
@@ -164,10 +162,9 @@ describe('Creative Canvas product route composition', () => {
       'canvasCommands.connect(source.id, derived.id',
       'const flush = await editor.flush()',
       'imageToolBusyRef.current',
-      'creativeStudioDirectorProjectPath(projectId)',
-      "state.document.nodes.filter((node) => node.type === 'director')",
-      "handleBottomViewChange('timeline')",
       'onOpen={onOpen}',
+      'onRename={(_, title) => handleRenameNode(node.id, title)}',
+      '{ ...node, name: nextName }',
       'onToggleLock={onToggleLock}',
       "intent.mode === 'edit-text'",
       'setEditingTextNodeId(node.id)',
@@ -176,6 +173,10 @@ describe('Creative Canvas product route composition', () => {
     ]) {
       expect(source.includes(token)).toBe(true);
     }
+    expect(source.includes('creativeStudioDirectorProjectPath(projectId)')).toBe(false);
+    expect(source.includes("state.document.nodes.filter((node) => node.type === 'director')")).toBe(false);
+    expect(source.includes("handleBottomViewChange('timeline')")).toBe(false);
+    expect(source.includes('onTimelineDelete')).toBe(false);
     expect(source.includes('URL.createObjectURL')).toBe(false);
     expect(source.includes('data:image/')).toBe(false);
   });
@@ -199,7 +200,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.taskExists(')).toBe(true);
     expect(source.includes('creativeStudio.canvas.tasks.recovering')).toBe(true);
     expect(source.includes('正在恢复图片任务…')).toBe(false);
-    expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
+    expect(source.includes('catalogImageModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
     expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);
     expect(source.includes('mergeKey: `image-composer:${nodeId}`')).toBe(true);
     expect(source.includes('imageComposeDrafts')).toBe(false);
@@ -217,9 +218,9 @@ describe('Creative Canvas product route composition', () => {
     expect(
       wiring.includes("import('@renderer/pages/creativeStudio/canvas/product')")
     ).toBe(true);
-    expect(wiring.includes('path="canvas/:canvasId"')).toBe(true);
+    expect(wiring.includes("CANVAS_PATTERN = '/nomi/canvases/:canvasId'")).toBe(true);
     expect(wiring.includes('path="canvas/:projectId"')).toBe(false);
-    expect(wiring.includes('/workshop/canvases')).toBe(true);
+    expect(wiring.includes('/nomi/canvases')).toBe(true);
     expect(wiring.includes('/api/creative-studio/canvases/{canvasId}/agent-ops')).toBe(
       true
     );
@@ -245,23 +246,26 @@ describe('Creative Canvas product route composition', () => {
     expect(style.includes('--creative-canvas-grid-line: color-mix(')).toBe(true);
   });
 
-  test('keeps the compact icon toolbar centered at the top of the canvas', () => {
+  test('splits compact controls between the top actions and side rail', () => {
     expect(
-      /\.toolbarPositioner\s*\{[\s\S]*?padding:\s*16px 16px 0;[\s\S]*?grid-row:\s*2;[\s\S]*?align-self:\s*start;[\s\S]*?justify-content:\s*center;/.test(
+      /\.topBar\s*\{[\s\S]*?grid-row:\s*1;[\s\S]*?align-self:\s*start;[\s\S]*?pointer-events:\s*none;/.test(
         chromeStyle
       )
     ).toBe(true);
-    expect(/\.toolDock\s*\{[\s\S]*?height:\s*42px;/.test(chromeStyle)).toBe(
+    expect(/\.topPrimaryActions,[\s\S]*?\.topActions\s*\{[\s\S]*?height:\s*42px;/.test(chromeStyle)).toBe(
       true
     );
+    expect(chromeSource.includes("data-node-kind={kind}")).toBe(true);
+    expect(chromeSource.includes("aria-haspopup='dialog'")).toBe(true);
+    expect(chromeSource.includes('styles.toolbarPositioner')).toBe(false);
     expect(style.includes('transform: translateY(-4px)')).toBe(false);
     expect(style.includes('translate(clamp(0px, 10vw, 142px), -4px)')).toBe(false);
     expect(/\.toolbarButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(style)).toBe(true);
     expect(/\.iconButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(chromeStyle)).toBe(true);
-    expect(/\.toolbarButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(style)).toBe(true);
-    expect(/\.iconButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(chromeStyle)).toBe(true);
-    expect(source.includes('strokeWidth: 3')).toBe(true);
-    expect(chromeSource.includes('strokeWidth: 3')).toBe(true);
+    expect(/\.toolbarButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*18px;[\s\S]*?height:\s*18px;[\s\S]*?line-height:\s*0;/.test(style)).toBe(true);
+    expect(/\.iconButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*18px;[\s\S]*?height:\s*18px;[\s\S]*?line-height:\s*0;/.test(chromeStyle)).toBe(true);
+    expect(source.includes('strokeWidth: 3.5')).toBe(true);
+    expect(chromeSource.includes('strokeWidth: 3.5')).toBe(true);
     expect(style.includes('opacity: 0.52')).toBe(true);
     expect(chromeStyle.includes('opacity: 0.52')).toBe(true);
   });

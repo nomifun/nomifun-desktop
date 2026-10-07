@@ -25,7 +25,7 @@ const PRESET_COLORS = [
   '#86909C', // grey
 ];
 
-export type KnowledgeTagManagementModalProps = {
+type KnowledgeTagManagementModalProps = {
   visible: boolean;
   onClose: () => void;
   tags: IKnowledgeTag[];

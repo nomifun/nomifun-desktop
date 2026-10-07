@@ -5,6 +5,70 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Long-running coding Agent recovery is more resilient.** Windows native
+  process tools resolve executable names from PATH, failed commands enter
+  explicit replanning, and completion feedback identifies stale evidence.
+  Rephrased requirement IDs no longer trap a plan update: their original
+  obligations stay unchanged while the independent step statuses advance;
+  unchanged plan submissions no longer create pointless revisions.
+  Coding turns have a larger bounded step budget. Context compaction now
+  tolerates verbose summaries, retries truncated output with fresh identities,
+  and splits only the rejected source range when needed. Each preparation has
+  a bounded summarization budget. If those attempts still cannot summarize
+  history, the Agent continues with an explicit verification warning;
+  canonical events remain intact. Isolated later model-output truncations get
+  a fresh bounded continuation window and exhausted windows are reported as
+  incomplete tasks rather than generic upstream failures.
+
+- **Agent Workbench now controls the default Agent for new Guid conversations.**
+  Users can choose any conversation-capable official Agent or saved personal
+  Agent, while one-off Guid draft switches no longer overwrite that default.
+  Existing selections are retained as an upgrade fallback, and unavailable
+  defaults safely return to the General Agent.
+
+- **Explicit multi-Agent and subagent requests launch real collaboration again.**
+  The unified Runtime now consumes each Session's delegation policy, restores
+  the collaboration guidance lost with the legacy Runtime removal, and routes
+  high-confidence requests such as “设计一个多 Agent 集群测试” or “use a
+  subagent” to the canonical `agent/delegate` Action. Disabled delegation is
+  removed from the model-visible tool plan instead of being advertised and
+  rejected only after a call.
+
+- **The anonymous NomiFun Free Models service has been removed.** The built-in
+  provider, public upstream proxy, catalog refresh scheduler, health endpoints,
+  model-hub page, and no-key product claims are gone. Provider rows created by
+  older builds are disabled and hidden as compatibility tombstones so immutable
+  Agent and execution history remains structurally valid.
+
+- **AutoWork once again runs in the bound main AgentSession.** Requirements
+  still use AgentExecution for durable Attempts, retries, recovery and terminal
+  receipts, but no longer create a `Collaboration · Requirement` child Session
+  or open the collaboration canvas. The hidden AutoWork turn and streamed Agent
+  result remain in the main conversation, internal automation links are never
+  cleaned up as child transcripts, and generic collaboration controls cannot
+  mutate the queue-owned execution.
+
+- **Intelligent Decision (IDMM) is restored on canonical AgentSessions.** Each
+  Session can opt into a model-free rule guard or rules plus an explicitly
+  selected bypass model. The supervisor recovers retryable provider faults and
+  safe model-stage stalls, answers explicit safe choices, records bounded
+  idempotent interventions, and never interrupts an in-flight tool or approves
+  credential, payment, permission, or destructive prompts. The global model
+  failover queue is now frozen into newly created Nomi Session routes; existing
+  immutable Sessions are not rebound. Agent Workbench now stores IDMM under a
+  Revision's runtime policy (not the Capability Catalog); each new Session
+  receives that frozen default once and can then override it independently.
+
+- **Breaking: MiniApp and Plugin are one Plugin product model.** Products,
+  projects, immutable releases, capabilities, surfaces and managed storage use
+  Plugin identities and plugin_* tables. The old MiniApp API, CLI, bridge names
+  and wire aliases are removed. UI and Service are composable release roles,
+  not mutually exclusive product kinds. Creation optionally accepts
+  service_source; subsequent source revisions can add or remove the service.
+  This is a clean-start development database cutover, not an in-place upgrade
+  of existing MiniApp databases. Back up needed data before rebuilding a
+  development database; no existing database is automatically deleted.
+
 - **Remote MCP and REST access is now installation-scoped.** NomiFun Desktop
   issues one high-privilege access token at `/api/webui/access-token`; it no
   longer binds to, impersonates, or inherits configuration from a companion.
@@ -222,6 +286,11 @@ notes at a high level rather than a complete historical log.
   tool provider. That is the opposite arrow and was never part of ACP.
 
 ## v0.6.3 - 2026-08-15
+
+> Historical note (retired terminology): this release entry records the former
+> Mini App product as shipped in v0.6.3. The current product is Plugin-only,
+> using `/plugins`, `/plugins/run/:id`, and `/api/plugins/**`; the routes,
+> identifiers, and storage model below are not active compatibility contracts.
 
 - **New feature (小程序 / mini-apps).** A conversation could always generate a web
   page, but the page died with the workspace: to use it again you had to dig up the
@@ -649,7 +718,7 @@ notes at a high level rather than a complete historical log.
   you need before upgrading. The UI/API contract version was bumped
   accordingly (`suggestions_new` is gone from the companion status shape and
   `suggestions_added` from the learn result).
-  The summoned-session `propose_companion_memory` capability went with it:
+  The `propose_companion_memory` capability went with it:
   suggestion cards were its only storage and its only review surface, so it has
   no confirm-before-write channel left. Restoring it needs a new design.
 

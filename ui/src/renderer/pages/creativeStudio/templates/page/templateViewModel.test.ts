@@ -20,6 +20,13 @@ describe('template page view model', () => {
   test('creates valid single and multi-image definitions', () => {
     expect(validateTemplateDefinition(createBlankTemplate('single-image')).ok).toBe(true);
     expect(validateTemplateDefinition(createBlankTemplate('multi-image-series')).ok).toBe(true);
+    const multi=createBlankTemplate('multi-image-series');
+    const planner=multi.steps.find(step=>step.kind==='draft-prompts');
+    if(planner?.kind!=='draft-prompts')throw new Error('missing planner');
+    expect(planner.planning.maxTokens).toBeUndefined();
+    planner.planning.maxTokens=100_000;
+    const copied=duplicateTemplate(multi).steps.find(step=>step.kind==='draft-prompts');
+    expect(copied?.kind==='draft-prompts'&&copied.planning.maxTokens).toBe(100_000);
   });
 
   test('round trips known structured template variables without interpolating strings', () => {

@@ -1,0 +1,3020 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use include_dir::{Dir, include_dir};
+use sha2::{Digest, Sha256};
+use tracing::{debug, warn};
+
+use crate::constants::{
+    BUILTIN_AUTO_SKILLS_SUBDIR, BUILTIN_RULES_DIR_NAME, COMMON_SKILL_DIRS, CRON_SKILLS_DIR_NAME, SKILL_MANIFEST_FILE,
+    SKILLS_DIR_NAME,
+};
+use crate::error::SkillError;
+
+/// Built-in skill corpus embedded into the binary at compile time.
+///
+/// The corpus is authoritative at build time; an optional on-disk override
+/// (`NOMIFUN_BUILTIN_SKILLS_PATH`) is consulted at runtime for rapid
+/// iteration and E2E fixtures.
+static BUILTIN_SKILLS: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/assets/builtin-skills");
+
+/// Name of the environment variable that, when set, overrides the embedded
+/// corpus with an on-disk directory. Consumed by
+/// [`resolve_skill_paths`] when building [`SkillPaths`].
+pub const BUILTIN_SKILLS_ENV_VAR: &str = "NOMIFUN_BUILTIN_SKILLS_PATH";
+
+/// Expose the embedded builtin skills corpus for startup
+/// materialization. Consumers outside this crate should not depend on
+/// `include_dir` directly.
+pub fn builtin_skills_corpus() -> &'static Dir<'static> {
+    &BUILTIN_SKILLS
+}
+
+/// Build the on-disk materialization version for the embedded builtin skill
+/// corpus. This deliberately includes a content fingerprint, not just the app
+/// version, so asset-only changes refresh `{data_dir}/builtin-skills` even
+/// when the crate version stays unchanged during development.
+pub fn builtin_skills_materialize_version(app_version: &str) -> String {
+    let fingerprint = builtin_skills_corpus_fingerprint();
+    format!("{app_version}+skills.{}", &fingerprint[..12])
+}
+
+/// Deterministic SHA-256 fingerprint for the embedded builtin skill corpus.
+pub fn builtin_skills_corpus_fingerprint() -> String {
+    let mut files = Vec::new();
+    collect_corpus_files(&BUILTIN_SKILLS, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (path, contents) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(contents);
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn collect_corpus_files(dir: &'static Dir<'static>, out: &mut Vec<(String, &'static [u8])>) {
+    for file in dir.files() {
+        out.push((file.path().to_string_lossy().into_owned(), file.contents()));
+    }
+    for subdir in dir.dirs() {
+        collect_corpus_files(subdir, out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill paths resolution
+// ---------------------------------------------------------------------------
+
+/// Resolved base directories for skill and rule management.
+///
+/// `builtin_skills_dir` always points at a real on-disk directory.
+/// In production it resolves to `{data_dir}/builtin-skills/`, populated
+/// at startup by [`crate::startup_materialize::materialize_if_needed`].
+/// In dev/test it can be redirected via [`BUILTIN_SKILLS_ENV_VAR`].
+#[derive(Debug, Clone)]
+pub struct SkillPaths {
+    /// Root data directory (~/.nomifun/).
+    pub data_dir: PathBuf,
+    /// User-created skills directory (~/.nomifun/skills/).
+    pub user_skills_dir: PathBuf,
+    /// Per-job cron skills directory (~/.nomifun/cron/skills/).
+    pub cron_skills_dir: PathBuf,
+    /// Built-in skills directory on disk. Always set.
+    /// Points to `{data_dir}/builtin-skills/` in production (populated at
+    /// startup by `startup_materialize::materialize_if_needed`) or
+    /// wherever [`BUILTIN_SKILLS_ENV_VAR`] points in dev mode.
+    pub builtin_skills_dir: PathBuf,
+    /// Built-in rules directory (app bundle resource).
+    pub builtin_rules_dir: PathBuf,
+}
+
+/// Resolve standard skill paths.
+///
+/// `app_resource_dir` is the application's bundled resource directory
+/// (e.g. the binary's parent or a configured resource path); only
+/// `builtin_rules_dir` is still derived from it — built-in skills live
+/// under `data_dir` (materialized at startup from the embedded corpus)
+/// unless redirected via [`BUILTIN_SKILLS_ENV_VAR`].
+///
+/// `data_dir` is the user-level data root (e.g. `~/.nomifun/`) and
+/// determines where user skills and the built-in skills tree
+/// (`{data_dir}/builtin-skills/`) live. Per-conversation
+/// agent skills are no longer materialized on disk — see
+/// [`resolve_skill_sources`] for current library source lookup.
+pub fn resolve_skill_paths(app_resource_dir: &Path, data_dir: &Path) -> SkillPaths {
+    let builtin_override = std::env::var(BUILTIN_SKILLS_ENV_VAR)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    resolve_skill_paths_with_override(app_resource_dir, data_dir, builtin_override)
+}
+
+fn resolve_skill_paths_with_override(app_resource_dir: &Path, data_dir: &Path, builtin_override: Option<PathBuf>) -> SkillPaths {
+    SkillPaths {
+        data_dir: data_dir.to_path_buf(),
+        user_skills_dir: data_dir.join(SKILLS_DIR_NAME),
+        cron_skills_dir: data_dir.join(CRON_SKILLS_DIR_NAME),
+        builtin_skills_dir: builtin_override.unwrap_or_else(|| data_dir.join(crate::constants::BUILTIN_SKILLS_DIR_NAME)),
+        builtin_rules_dir: app_resource_dir.join(BUILTIN_RULES_DIR_NAME),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A'. 伙伴自进化技能：分层范围 + 路径助手 + 写原语
+//
+// 专属技能落 {user_skills_dir}/companion/{companion_id}/{name}/，共享技能落
+// {user_skills_dir}/shared/{name}/，草稿落 {user_skills_dir}/_drafts/{companion_id}/{name}/。
+// 正文以磁盘 SKILL.md 为事实源（companion store 的 companion_skills 表只存元数据）。
+// ---------------------------------------------------------------------------
+
+/// 技能归属范围：`Shared`（全员可用）或 `Companion(id)`（伙伴专属）。
+#[derive(Debug, Clone)]
+pub enum SkillScope {
+    Shared,
+    Companion(String),
+}
+
+/// `{user_skills_dir}/companion`
+pub fn companion_skills_root(paths: &SkillPaths) -> PathBuf {
+    paths.user_skills_dir.join("companion")
+}
+
+/// `{user_skills_dir}/shared`
+pub fn shared_skills_root(paths: &SkillPaths) -> PathBuf {
+    paths.user_skills_dir.join("shared")
+}
+
+/// `{user_skills_dir}/_drafts`
+pub fn drafts_root(paths: &SkillPaths) -> PathBuf {
+    paths.user_skills_dir.join("_drafts")
+}
+
+/// Resolve the on-disk directory for a scoped skill. `draft=true` routes to the
+/// review staging area. Both `name` and any `companion_id` are validated against
+/// path traversal via [`validate_filename`].
+pub fn skill_dir_for(
+    paths: &SkillPaths,
+    scope: &SkillScope,
+    name: &str,
+    draft: bool,
+) -> Result<PathBuf, SkillError> {
+    validate_filename(name)?;
+    let base = match (scope, draft) {
+        (SkillScope::Companion(cid), false) => {
+            validate_filename(cid)?;
+            companion_skills_root(paths).join(cid)
+        }
+        (SkillScope::Companion(cid), true) => {
+            validate_filename(cid)?;
+            drafts_root(paths).join(cid)
+        }
+        (SkillScope::Shared, _) => shared_skills_root(paths),
+    };
+    Ok(base.join(name))
+}
+
+/// 起草一份技能所需的字段。`name`/`description` 必填，其余可选。
+#[derive(Debug, Clone)]
+pub struct SkillDraftInput {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: Option<String>,
+    pub allowed_tools: Option<String>,
+    pub paths: Option<String>,
+    pub body: String,
+}
+
+/// 拼一份合法 SKILL.md：YAML frontmatter（name/description 必填，其余可选）+ 正文。
+pub fn build_skill_md(input: &SkillDraftInput) -> String {
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("name: {}\n", input.name));
+    fm.push_str(&format!("description: {}\n", input.description));
+    if let Some(w) = &input.when_to_use {
+        if !w.is_empty() {
+            fm.push_str(&format!("when-to-use: {w}\n"));
+        }
+    }
+    if let Some(t) = &input.allowed_tools {
+        if !t.is_empty() {
+            fm.push_str(&format!("allowed-tools: {t}\n"));
+        }
+    }
+    if let Some(p) = &input.paths {
+        if !p.is_empty() {
+            fm.push_str(&format!("paths: {p}\n"));
+        }
+    }
+    fm.push_str("---\n\n");
+    fm.push_str(&input.body);
+    if !input.body.ends_with('\n') {
+        fm.push('\n');
+    }
+    fm
+}
+
+/// 把 agent 起草的字段物化成磁盘上的 SKILL.md（整条自进化链路唯一缺失的底层原语）。
+/// 空 description 直接拒（frontmatter 双侧契约）；`draft=true` 落到审阅暂存区。
+pub async fn create_skill(
+    paths: &SkillPaths,
+    scope: &SkillScope,
+    draft: bool,
+    input: &SkillDraftInput,
+) -> Result<PathBuf, SkillError> {
+    validate_filename(&input.name)?;
+    if input.description.trim().is_empty() {
+        return Err(SkillError::InvalidSkillPath(format!(
+            "skill '{}' has empty description",
+            input.name
+        )));
+    }
+    let dir = skill_dir_for(paths, scope, &input.name, draft)?;
+    tokio::fs::create_dir_all(&dir).await?;
+    let content = build_skill_md(input);
+    tokio::fs::write(dir.join(SKILL_MANIFEST_FILE), content).await?;
+    debug!(skill = %input.name, dir = %dir.display(), draft, "companion skill created");
+    Ok(dir)
+}
+
+/// 应用内编辑：整文覆写一份已存在技能的 SKILL.md，但写前校验 frontmatter 合法且 description 非空。
+pub async fn write_skill(
+    paths: &SkillPaths,
+    scope: &SkillScope,
+    draft: bool,
+    name: &str,
+    full_markdown: &str,
+) -> Result<(), SkillError> {
+    let (_n, desc) = parse_frontmatter_fields(full_markdown).ok_or_else(|| {
+        SkillError::InvalidSkillPath(format!("invalid frontmatter for skill '{name}'"))
+    })?;
+    if desc.trim().is_empty() {
+        return Err(SkillError::InvalidSkillPath(format!(
+            "skill '{name}' has empty description"
+        )));
+    }
+    let dir = skill_dir_for(paths, scope, name, draft)?;
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join(SKILL_MANIFEST_FILE), full_markdown).await?;
+    Ok(())
+}
+
+/// Copy a skill's SKILL.md from one scope to another (skill transfer / 互教). Reads the active
+/// source SKILL.md and writes it into the target's active dir (validated by `write_skill`).
+pub async fn copy_skill(
+    paths: &SkillPaths,
+    from: &SkillScope,
+    to: &SkillScope,
+    name: &str,
+) -> Result<(), SkillError> {
+    let src = skill_dir_for(paths, from, name, false)?;
+    let content = tokio::fs::read_to_string(src.join(SKILL_MANIFEST_FILE)).await?;
+    write_skill(paths, to, false, name, &content).await
+}
+
+// ---------------------------------------------------------------------------
+// A. Built-in resource reading
+// ---------------------------------------------------------------------------
+
+/// Read a built-in rule file by name.
+///
+/// Returns the file content as a string. Returns an empty string if the
+/// file does not exist (graceful degradation per API spec).
+pub async fn read_builtin_rule(
+    paths: &SkillPaths,
+    file_name: &str,
+) -> Result<String, SkillError> {
+    validate_filename(file_name)?;
+    let file_path = paths.builtin_rules_dir.join(file_name);
+    read_file_or_empty(&file_path).await
+}
+
+/// Read a built-in skill file by name.
+///
+/// `file_name` is a relative path inside the built-in skills corpus
+/// (e.g. `"auto-inject/cron/SKILL.md"` or
+/// `"planning-with-files/SKILL.md"`). Returns
+/// the file content as a string, or an empty string if the file does not
+/// exist (preserves the legacy graceful-degradation contract consumed by
+/// the renderer).
+///
+/// Reads from `paths.builtin_skills_dir`, which is always populated at
+/// startup by [`crate::startup_materialize::materialize_if_needed`].
+/// Rejects `..`-style traversal.
+pub async fn read_builtin_skill(
+    paths: &SkillPaths,
+    file_name: &str,
+) -> Result<String, SkillError> {
+    validate_builtin_skill_path(file_name)?;
+    let file_path = paths.builtin_skills_dir.join(file_name);
+    read_file_or_empty(&file_path).await
+}
+
+// ---------------------------------------------------------------------------
+// C. Skill listing & info
+// ---------------------------------------------------------------------------
+
+/// Origin of a listed skill.
+///
+/// Matches the renderer contract in
+/// `src/common/adapter/ipcBridge.ts::listAvailableSkills`, which filters the
+/// Skills UI by this value. The production Skill Library emits only
+/// `Builtin` / `Custom`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSource {
+    Builtin,
+    Custom,
+}
+
+/// A discovered skill item for listing.
+///
+/// For `source=Builtin`, `location` is the absolute path of the on-disk
+/// SKILL.md under `paths.builtin_skills_dir` (populated at startup by
+/// [`crate::startup_materialize::materialize_if_needed`]). The
+/// `relative_location` carries the relative path suitable for
+/// `POST /api/skills/builtin-skill` (e.g. `"auto-inject/cron/SKILL.md"`
+/// or `"planning-with-files/SKILL.md"`). Other sources leave
+/// `relative_location` `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillListItem {
+    pub name: String,
+    pub description: String,
+    pub location: String,
+    pub relative_location: Option<String>,
+    pub is_custom: bool,
+    pub source: SkillSource,
+}
+
+/// List all available skills (built-in + user custom), deduplicated.
+///
+/// User custom skills override built-in skills with the same name.
+///
+/// For built-in entries, the caller sees an absolute `location` pointing
+/// at `paths.builtin_skills_dir/.../SKILL.md` — the tree is populated
+/// at startup by
+/// [`crate::startup_materialize::materialize_if_needed`] so downstream
+/// consumers (e.g. the SkillsHubSettings export-symlink flow) can
+/// resolve the path on disk. `relative_location` is populated for
+/// built-ins only.
+pub async fn list_available_skills(
+    paths: &SkillPaths,
+) -> Result<Vec<SkillListItem>, SkillError> {
+    let mut builtin_skills = std::collections::HashMap::new();
+
+    // 1. Built-in skills (lower priority)
+    for item in list_builtin_skills(paths).await {
+        builtin_skills.insert(item.name.clone(), item);
+    }
+
+    // 2. User custom skills (higher priority, overrides builtin)
+    let mut custom_skills = Vec::new();
+    if let Ok(entries) = scan_skill_dirs(&paths.user_skills_dir).await {
+        for item in entries {
+            builtin_skills.remove(&item.name);
+            custom_skills.push(SkillListItem {
+                name: item.name,
+                description: item.description,
+                location: item.path,
+                relative_location: None,
+                is_custom: true,
+                source: SkillSource::Custom,
+            });
+        }
+    }
+
+    custom_skills.sort_by(|a, b| {
+        skill_modified_time(&b.location)
+            .cmp(&skill_modified_time(&a.location))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut builtin_items: Vec<SkillListItem> = builtin_skills.into_values().collect();
+    builtin_items.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut result = custom_skills;
+    result.extend(builtin_items);
+    Ok(result)
+}
+
+/// Emit a [`SkillListItem`] for every built-in skill (both auto-inject
+/// and opt-in). All paths resolve directly against
+/// `paths.builtin_skills_dir`.
+async fn list_builtin_skills(paths: &SkillPaths) -> Vec<SkillListItem> {
+    list_builtin_skills_from_disk(&paths.builtin_skills_dir).await
+}
+
+async fn list_builtin_skills_from_disk(dir: &Path) -> Vec<SkillListItem> {
+    let mut items = Vec::new();
+
+    // Top-level opt-in skills (siblings of auto-inject/).
+    if let Ok(top) = scan_skill_dirs(dir).await {
+        for s in top {
+            if s.name == BUILTIN_AUTO_SKILLS_SUBDIR {
+                continue;
+            }
+            // Use the on-disk directory name (basename of scanned path)
+            // rather than the frontmatter name, so the path we emit
+            // matches the real filesystem layout when the two disagree.
+            let dir_name = Path::new(&s.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&s.name)
+                .to_string();
+            let rel = format!("{dir_name}/{SKILL_MANIFEST_FILE}");
+            let location = dir
+                .join(&dir_name)
+                .join(SKILL_MANIFEST_FILE)
+                .to_string_lossy()
+                .into_owned();
+            items.push(SkillListItem {
+                name: s.name,
+                description: s.description,
+                location,
+                relative_location: Some(rel),
+                is_custom: false,
+                source: SkillSource::Builtin,
+            });
+        }
+    }
+
+    // auto-inject children.
+    let auto_dir = dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
+    if let Ok(auto) = scan_skill_dirs(&auto_dir).await {
+        for s in auto {
+            let dir_name = Path::new(&s.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&s.name)
+                .to_string();
+            let rel = format!("{BUILTIN_AUTO_SKILLS_SUBDIR}/{dir_name}/{SKILL_MANIFEST_FILE}");
+            let location = auto_dir
+                .join(&dir_name)
+                .join(SKILL_MANIFEST_FILE)
+                .to_string_lossy()
+                .into_owned();
+            items.push(SkillListItem {
+                name: s.name,
+                description: s.description,
+                location,
+                relative_location: Some(rel),
+                is_custom: false,
+                source: SkillSource::Builtin,
+            });
+        }
+    }
+
+    items
+}
+
+/// A skill discovered during directory scanning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScannedSkill {
+    pub name: String,
+    pub description: String,
+    pub path: String,
+}
+
+/// An auto-injected built-in skill.
+///
+/// Returned by `GET /api/skills/builtin-auto`. `location` is the
+/// relative path the frontend passes back into
+/// `POST /api/skills/builtin-skill`, e.g. `"auto-inject/cron/SKILL.md"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinAutoSkillItem {
+    pub name: String,
+    pub description: String,
+    pub location: String,
+}
+
+/// List built-in skills that are auto-injected into every preset.
+///
+/// Reads from `{paths.builtin_skills_dir}/auto-inject/`. A missing
+/// `auto-inject/` directory yields an empty list, matching the
+/// graceful-degradation semantics used elsewhere in this module.
+pub async fn list_builtin_auto_skills(
+    paths: &SkillPaths,
+) -> Result<Vec<BuiltinAutoSkillItem>, SkillError> {
+    let auto_dir = paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
+    let mut items = list_auto_skills_from_disk(&auto_dir).await;
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(items)
+}
+
+/// Built-in skill → (audience_tags, scenario_tags) seed map, loaded from the
+/// embedded `skill-tags.json`. Graceful: missing/malformed → empty map.
+pub fn load_builtin_skill_tags() -> HashMap<String, (Vec<String>, Vec<String>)> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        name: String,
+        #[serde(default)]
+        audience_tags: Vec<String>,
+        #[serde(default)]
+        scenario_tags: Vec<String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Manifest {
+        #[serde(default)]
+        skills: Vec<Entry>,
+    }
+    let bytes = match BUILTIN_SKILLS.get_file("skill-tags.json") {
+        Some(f) => f.contents(),
+        None => return HashMap::new(),
+    };
+    let manifest: Manifest = serde_json::from_slice(bytes).unwrap_or_default();
+    manifest
+        .skills
+        .into_iter()
+        .map(|e| (e.name, (e.audience_tags, e.scenario_tags)))
+        .collect()
+}
+
+/// Built-in skill display metadata for localized UI surfaces. This lives beside
+/// the tag seed so the Skills Hub can localize descriptions without changing the
+/// executable `SKILL.md` files that agents read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BuiltinSkillDisplayMetadata {
+    pub name_i18n: HashMap<String, String>,
+    pub description_i18n: HashMap<String, String>,
+}
+
+pub fn load_builtin_skill_display_metadata() -> HashMap<String, BuiltinSkillDisplayMetadata> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        name: String,
+        #[serde(default)]
+        name_i18n: HashMap<String, String>,
+        #[serde(default)]
+        description_i18n: HashMap<String, String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Manifest {
+        #[serde(default)]
+        skills: Vec<Entry>,
+    }
+    let bytes = match BUILTIN_SKILLS.get_file("skill-tags.json") {
+        Some(f) => f.contents(),
+        None => return HashMap::new(),
+    };
+    let manifest: Manifest = serde_json::from_slice(bytes).unwrap_or_default();
+    manifest
+        .skills
+        .into_iter()
+        .filter_map(|e| {
+            if e.name_i18n.is_empty() && e.description_i18n.is_empty() {
+                return None;
+            }
+            Some((
+                e.name,
+                BuiltinSkillDisplayMetadata {
+                    name_i18n: e.name_i18n,
+                    description_i18n: e.description_i18n,
+                },
+            ))
+        })
+        .collect()
+}
+
+async fn list_auto_skills_from_disk(auto_dir: &Path) -> Vec<BuiltinAutoSkillItem> {
+    let entries = match scan_skill_dirs(auto_dir).await {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .map(|s| {
+            let dir_name = Path::new(&s.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&s.name);
+            let location = format!("{BUILTIN_AUTO_SKILLS_SUBDIR}/{dir_name}/{SKILL_MANIFEST_FILE}");
+            BuiltinAutoSkillItem {
+                name: s.name,
+                description: s.description,
+                location,
+            }
+        })
+        .collect()
+}
+
+/// Read skill info from a SKILL.md file without importing.
+///
+/// Returns `(name, description)` extracted from frontmatter.
+pub async fn read_skill_info(skill_path: &Path) -> Result<(String, String), SkillError> {
+    let skill_file = if skill_path.is_dir() {
+        skill_path.join(SKILL_MANIFEST_FILE)
+    } else {
+        skill_path.to_path_buf()
+    };
+
+    let content = tokio::fs::read_to_string(&skill_file)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => SkillError::SkillNotFound(skill_path.display().to_string()),
+            _ => SkillError::Io(error),
+        })?;
+
+    let (name, description) = parse_frontmatter_fields(&content).ok_or_else(|| {
+        SkillError::InvalidSkillPath(format!(
+            "No valid frontmatter in {}",
+            skill_file.display()
+        ))
+    })?;
+
+    // Fallback: use directory name if name is empty
+    let final_name = if name.is_empty() {
+        skill_file
+            .parent()
+            .and_then(Path::file_name)
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        name
+    };
+
+    Ok((final_name, description))
+}
+
+// ---------------------------------------------------------------------------
+// D. Skill import / export / delete
+// ---------------------------------------------------------------------------
+
+/// Import a skill by copying its directory to the user skills directory.
+///
+/// Returns the skill name.
+pub async fn import_skill(paths: &SkillPaths, skill_path: &Path) -> Result<String, SkillError> {
+    let skill_path = normalize_import_source_path(skill_path)?;
+    let (name, _) = read_skill_info(&skill_path).await?;
+    validate_filename(&name)?;
+
+    let target_dir = paths.user_skills_dir.join(&name);
+    tokio::fs::create_dir_all(&paths.user_skills_dir).await?;
+    let skill_path = checked_transfer_source(&skill_path, &target_dir).await?;
+
+    // A same-name entry may be an imported directory link. Remove the entry
+    // itself before copying so a ZIP refresh cannot write through a Windows
+    // junction (or a Unix symlink) into the external source directory.
+    remove_path_entry(&target_dir).await?;
+    copy_dir_recursive(&skill_path, &target_dir).await?;
+
+    debug!(skill = %name, target = %target_dir.display(), "skill imported (copy)");
+    Ok(name)
+}
+
+/// Import a skill by creating a symlink in the user skills directory.
+///
+/// Returns the skill name.
+pub async fn import_skill_with_symlink(
+    paths: &SkillPaths,
+    skill_path: &Path,
+) -> Result<String, SkillError> {
+    let skill_path = normalize_import_source_path(skill_path)?;
+    let (name, _) = read_skill_info(&skill_path).await?;
+    validate_filename(&name)?;
+
+    let target_link = paths.user_skills_dir.join(&name);
+    tokio::fs::create_dir_all(&paths.user_skills_dir).await?;
+    let skill_path = checked_transfer_source(&skill_path, &target_link).await?;
+
+    remove_path_entry(&target_link).await?;
+
+    // Materialize the link, degrading to a recursive copy when the platform
+    // symlink/junction primitive fails (non-NTFS removable media, UNC/network
+    // source, path-too-long, locked target, or Windows symlink privilege).
+    // This preserves folder imports on filesystems without directory-link support.
+    link_skill_or_fallback_copy(&skill_path, &target_link).await?;
+
+    debug!(skill = %name, link = %target_link.display(), "skill imported (symlink)");
+    Ok(name)
+}
+
+/// Maximum directory depth descended when scanning a user-selected folder (or
+/// extracted zip) for skills. Bounds the walk so picking a huge tree (e.g. a
+/// drive root) cannot trigger a full-disk scan. Descent stops early at any
+/// directory containing `SKILL.md`, so this only caps `SKILL.md`-less nesting.
+const MAX_IMPORT_SCAN_DEPTH: usize = 6;
+
+/// Import one skill, a parent directory containing skills, or a zip archive.
+///
+/// Directory inputs preserve the existing symlink behavior. Zip inputs are
+/// extracted into an internal temporary directory, then copied into the user
+/// skills directory so imported skills do not point at disposable files.
+///
+/// A directory that is not itself a skill is scanned **recursively** (bounded
+/// by [`MAX_IMPORT_SCAN_DEPTH`]) so the user can pick a parent/grandparent or a
+/// nested skill bundle — not just a folder whose immediate children are skills.
+/// Multi-skill imports are **best-effort**: one malformed skill is skipped
+/// (with a warning) rather than aborting the whole import and leaving the
+/// already-linked skills orphaned. An error is only returned when *no* skill
+/// could be imported, preserving the precise reason for the single-skill case.
+pub async fn import_skills_with_symlink(
+    paths: &SkillPaths,
+    source_path: &Path,
+) -> Result<Vec<String>, SkillError> {
+    if is_zip_path(source_path) {
+        return import_skills_from_zip(paths, source_path).await;
+    }
+
+    let source_path = normalize_import_source_path(source_path)?;
+
+    if source_path.is_dir() {
+        if source_path.join(SKILL_MANIFEST_FILE).exists() {
+            return Ok(vec![import_skill_with_symlink(paths, &source_path).await?]);
+        }
+
+        let mut skill_dirs = Vec::new();
+        collect_skill_dirs_recursive(&source_path, &mut skill_dirs, MAX_IMPORT_SCAN_DEPTH).await?;
+        if skill_dirs.is_empty() {
+            return Err(SkillError::InvalidSkillPath(format!(
+                "No skill directories found in {}",
+                source_path.display()
+            )));
+        }
+
+        let mut imported = Vec::new();
+        let mut last_err: Option<SkillError> = None;
+        for skill_dir in &skill_dirs {
+            match import_skill_with_symlink(paths, skill_dir).await {
+                Ok(name) => imported.push(name),
+                Err(e) => {
+                    warn!(skill_dir = %skill_dir.display(), error = %e, "skipping skill that failed to import");
+                    last_err = Some(e);
+                }
+            }
+        }
+        if imported.is_empty() {
+            return Err(last_err.unwrap_or_else(|| {
+                SkillError::InvalidSkillPath(format!(
+                    "No importable skills found in {}",
+                    source_path.display()
+                ))
+            }));
+        }
+        imported.sort();
+        imported.dedup();
+        return Ok(imported);
+    }
+
+    Err(SkillError::InvalidSkillPath(format!(
+        "Expected a skill directory, parent directory, SKILL.md, or zip archive: {}",
+        source_path.display()
+    )))
+}
+
+async fn import_skills_from_zip(
+    paths: &SkillPaths,
+    archive_path: &Path,
+) -> Result<Vec<String>, SkillError> {
+    let temp_root = paths.user_skills_dir.join(".import-tmp");
+    tokio::fs::create_dir_all(&temp_root).await?;
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let extract_dir = temp_root.join(format!("skills-{}-{nonce}", std::process::id()));
+    tokio::fs::create_dir_all(&extract_dir).await?;
+
+    let archive = archive_path.to_path_buf();
+    let destination = extract_dir.clone();
+    let extraction =
+        tokio::task::spawn_blocking(move || crate::zip_safe::extract_zip_archive(&archive, &destination))
+            .await
+            .map_err(|e| {
+                SkillError::InvalidSkillPath(format!("Zip extraction task failed: {e}"))
+            })?;
+
+    if let Err(err) = extraction {
+        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        let _ = tokio::fs::remove_dir(&temp_root).await;
+        return Err(err);
+    }
+
+    let result = async {
+        let mut skill_dirs = Vec::new();
+        collect_skill_dirs_recursive(&extract_dir, &mut skill_dirs, MAX_IMPORT_SCAN_DEPTH).await?;
+        if skill_dirs.is_empty() {
+            return Err(SkillError::InvalidSkillPath(format!(
+                "No skill directories found in {}",
+                archive_path.display()
+            )));
+        }
+
+        let mut imported = Vec::new();
+        for skill_dir in skill_dirs {
+            imported.push(import_skill(paths, &skill_dir).await?);
+        }
+        imported.sort();
+        imported.dedup();
+        Ok(imported)
+    }
+    .await;
+
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let _ = tokio::fs::remove_dir(&temp_root).await;
+    result
+}
+
+fn is_zip_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
+fn skill_modified_time(path: &str) -> SystemTime {
+    std::fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+fn normalize_import_source_path(source_path: &Path) -> Result<PathBuf, SkillError> {
+    if source_path.is_file() {
+        let file_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name == SKILL_MANIFEST_FILE {
+            return source_path.parent().map(Path::to_path_buf).ok_or_else(|| {
+                SkillError::InvalidSkillPath(source_path.display().to_string())
+            });
+        }
+        return Err(SkillError::InvalidSkillPath(source_path.display().to_string()));
+    }
+    Ok(source_path.to_path_buf())
+}
+
+/// Export a skill by creating a symlink in the target directory.
+pub async fn export_skill_with_symlink(
+    skill_path: &Path,
+    target_dir: &Path,
+) -> Result<(), SkillError> {
+    let skill_name = skill_path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .ok_or_else(|| SkillError::InvalidSkillPath(skill_path.display().to_string()))?;
+
+    let target_link = target_dir.join(&skill_name);
+    tokio::fs::create_dir_all(target_dir).await?;
+    let skill_path = checked_transfer_source(skill_path, &target_link).await?;
+
+    remove_path_entry(&target_link).await?;
+
+    create_symlink(&skill_path, &target_link).await?;
+
+    debug!(
+        skill = %skill_name,
+        link = %target_link.display(),
+        "skill exported (symlink)"
+    );
+    Ok(())
+}
+
+/// Resolve the source before replacing an entry. Reject overlap in either
+/// direction: deleting an ancestor destroys the source, while copying/linking
+/// into a descendant creates a recursive tree. Do not follow the final target
+/// link: replacing that link does not delete its external source.
+async fn checked_transfer_source(source: &Path, target: &Path) -> Result<PathBuf, SkillError> {
+    let source = tokio::fs::canonicalize(source).await.map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => SkillError::SkillNotFound(source.display().to_string()),
+        _ => SkillError::Io(error),
+    })?;
+    let parent = target.parent().ok_or_else(|| SkillError::InvalidSkillPath(target.display().to_string()))?;
+    let name = target.file_name().ok_or_else(|| SkillError::InvalidSkillPath(target.display().to_string()))?;
+    let target_entry = match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) if !metadata_is_link_or_reparse(&metadata) => tokio::fs::canonicalize(target).await?,
+        Ok(_) => tokio::fs::canonicalize(parent).await?.join(name),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::canonicalize(parent).await?.join(name)
+        }
+        Err(error) => return Err(SkillError::Io(error)),
+    };
+    if source.starts_with(&target_entry) || target_entry.starts_with(&source) {
+        return Err(SkillError::InvalidSkillPath(format!(
+            "skill source and destination overlap: {} / {}", source.display(), target.display()
+        )));
+    }
+    Ok(source)
+}
+
+/// Delete a user-custom skill by name.
+///
+/// Returns an error if the skill is built-in or does not exist.
+pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), SkillError> {
+    // Safety: reject path traversal. Shares [`validate_filename`] rather than
+    // re-deriving the rules — this join feeds a *recursive delete*, so an
+    // escape here is the costliest in the module, and the inline check this
+    // replaced also let `""` and `"."` through, both of which resolve back to
+    // `user_skills_dir` itself.
+    validate_filename(skill_name)?;
+
+    let user_path = paths.user_skills_dir.join(skill_name);
+
+    if !remove_path_entry(&user_path).await? {
+        // Check if it exists as a built-in (disk override → filesystem,
+        // otherwise embedded corpus).
+        if builtin_skill_exists(paths, skill_name) {
+            return Err(SkillError::BuiltinSkillDeletion(skill_name.to_string()));
+        }
+        return Err(SkillError::SkillNotFound(skill_name.to_string()));
+    }
+
+    debug!(skill = %skill_name, "skill deleted");
+    Ok(())
+}
+
+/// Remove an entry without following a link outside the managed skills tree.
+///
+/// Windows directory junctions are reported as symlinks by
+/// [`std::fs::symlink_metadata`], but Windows rejects `DeleteFile` for them
+/// with `ERROR_ACCESS_DENIED` (os error 5). Try `remove_dir` for every link
+/// first: it removes directory links and junctions themselves, never their
+/// targets. A file link reports `NotADirectory`, so it is removed with
+/// `remove_file` instead. `symlink_metadata` also lets callers remove dangling
+/// links that `Path::exists` would otherwise hide.
+///
+/// Returns `false` only when no directory entry exists at `path`.
+async fn remove_path_entry(path: &Path) -> Result<bool, SkillError> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(SkillError::Io(error)),
+    };
+
+    if metadata_is_link_or_reparse(&metadata) {
+        match tokio::fs::remove_dir(path).await {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                tokio::fs::remove_file(path).await?;
+                return Ok(true);
+            }
+            Err(error) => return Err(SkillError::Io(error)),
+        }
+    }
+
+    if metadata.is_dir() {
+        // ZIP imports may retain Windows read-only attributes, which makes
+        // remove_dir_all fail with Access Denied (os error 5).
+        clear_readonly_for_deletion(path)?;
+        tokio::fs::remove_dir_all(path).await?;
+    } else {
+        clear_readonly_for_deletion(path)?;
+        tokio::fs::remove_file(path).await?;
+    }
+
+    Ok(true)
+}
+
+/// Clear read-only attributes without following symlinks outside the skill.
+///
+/// Windows exposes a read-only file attribute that blocks recursive deletion.
+/// On Unix, `Permissions::set_readonly(false)` would broaden the file mode to
+/// world-writable, so no attribute rewrite is necessary or safe there.
+#[cfg(windows)]
+fn clear_readonly_for_deletion(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            clear_readonly_for_deletion(&entry?.path())?;
+        }
+    }
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn clear_readonly_for_deletion(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Check whether a skill name exists in the built-in corpus — either as
+/// a top-level opt-in skill or under `auto-inject/`. Consults the
+/// on-disk tree at `paths.builtin_skills_dir`.
+fn builtin_skill_exists(paths: &SkillPaths, skill_name: &str) -> bool {
+    paths.builtin_skills_dir.join(skill_name).is_dir()
+        || paths
+            .builtin_skills_dir
+            .join(BUILTIN_AUTO_SKILLS_SUBDIR)
+            .join(skill_name)
+            .is_dir()
+}
+
+// ---------------------------------------------------------------------------
+// D2. Per-agent skill resolution
+// ---------------------------------------------------------------------------
+
+/// Current library source facts used by non-Agent configuration validation.
+/// Runtime Skill content is captured separately into the canonical Snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSkillSource {
+    pub name: String,
+    pub source_path: PathBuf,
+}
+
+/// Resolve logical names for product configuration validation. User entries
+/// override builtins, auto entries and Cron sources. This does not materialize
+/// workspace links or provide runtime content/authority.
+pub async fn resolve_skill_sources(
+    paths: &SkillPaths,
+    scope_id: &str,
+    skills: &[String],
+) -> Result<Vec<ResolvedSkillSource>, SkillError> {
+    validate_filename(scope_id)?;
+
+    let mut resolved = Vec::with_capacity(skills.len());
+    for name in skills {
+        if name.is_empty() {
+            continue;
+        }
+        if validate_filename(name).is_err() {
+            warn!(skill = %name, "skipping skill with invalid name");
+            continue;
+        }
+        match resolve_skill_source_path(paths, name) {
+            Some(source_path) => resolved.push(ResolvedSkillSource {
+                name: name.clone(),
+                source_path,
+            }),
+            None => warn!(skill = %name, "skill not found in any source"),
+        }
+    }
+
+    resolved.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(resolved)
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Resolve a skill name to its on-disk source directory using the same
+/// search order as [`resolve_skill_sources`]. Returns `None` if
+/// no matching directory exists in any known source.
+fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Option<PathBuf> {
+    // Keep execution precedence aligned with `list_available_skills`: a
+    // user-authored skill intentionally overrides a same-name builtin.
+    let user = paths.user_skills_dir.join(name);
+    if user.is_dir() {
+        return Some(user);
+    }
+    let top = paths.builtin_skills_dir.join(name);
+    if top.is_dir() {
+        return Some(top);
+    }
+    let auto = paths
+        .builtin_skills_dir
+        .join(BUILTIN_AUTO_SKILLS_SUBDIR)
+        .join(name);
+    if auto.is_dir() {
+        return Some(auto);
+    }
+    let cron = paths.cron_skills_dir.join(name);
+    if cron.is_dir() {
+        return Some(cron);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// E. Scanning & discovery
+// ---------------------------------------------------------------------------
+
+/// Scan a directory for subdirectories containing SKILL.md.
+pub async fn scan_for_skills(folder_path: &Path) -> Result<Vec<ScannedSkill>, SkillError> {
+    scan_skill_dirs(folder_path).await
+}
+
+/// Named filesystem path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedPath {
+    pub name: String,
+    pub path: String,
+}
+
+/// Detect common skill paths relative to the user's home directory.
+///
+/// Returns paths that actually exist on the filesystem.
+pub async fn detect_common_skill_paths() -> Vec<NamedPath> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    for (name, rel_path, _slug) in COMMON_SKILL_DIRS {
+        let full_path = home.join(rel_path);
+        if full_path.exists() {
+            result.push(NamedPath {
+                name: (*name).to_string(),
+                path: full_path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    result
+}
+
+/// An external skill source with discovered skills.
+///
+/// `source` is a stable slug identifying the origin — matches the
+/// `ExternalSkillSourceResponse.source` contract consumed by the renderer.
+/// Values are drawn from [`COMMON_SKILL_DIRS`] for built-in entries or
+/// `format!("custom-{path}")` for user-added paths, so they stay unique
+/// across the returned list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalSkillSource {
+    pub name: String,
+    pub path: String,
+    pub source: String,
+    pub skill_count: usize,
+    pub skills: Vec<ScannedSkill>,
+}
+
+/// Compute the stable `source` slug for a custom external path.
+fn custom_source_slug(path: &str) -> String {
+    format!("custom-{path}")
+}
+
+/// Discover external skills from common paths and custom external paths.
+///
+/// The returned list preserves deterministic `source` slugs — see
+/// [`ExternalSkillSource::source`] for the contract.
+pub async fn detect_and_count_external_skills(
+    custom_paths: &[NamedPath],
+) -> Vec<ExternalSkillSource> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+
+    let mut sources = Vec::new();
+
+    // 1. Common paths (iterate the constant table so we keep the per-entry slug).
+    for (name, rel_path, slug) in COMMON_SKILL_DIRS {
+        let full_path = home.join(rel_path);
+        if !full_path.exists() {
+            continue;
+        }
+        if let Ok(skills) = scan_skill_dirs(&full_path).await {
+            sources.push(ExternalSkillSource {
+                name: (*name).to_string(),
+                path: full_path.to_string_lossy().into_owned(),
+                source: (*slug).to_string(),
+                skill_count: skills.len(),
+                skills,
+            });
+        }
+    }
+
+    // 2. Custom external paths
+    for np in custom_paths {
+        let path = Path::new(&np.path);
+        if let Ok(skills) = scan_skill_dirs(path).await {
+            sources.push(ExternalSkillSource {
+                name: np.name.clone(),
+                path: np.path.clone(),
+                source: custom_source_slug(&np.path),
+                skill_count: skills.len(),
+                skills,
+            });
+        }
+    }
+
+    sources
+}
+
+/// Get the user and built-in skill directory paths.
+///
+/// Both values are real on-disk paths. The built-in path points at the
+/// tree populated at startup by
+/// [`crate::startup_materialize::materialize_if_needed`], or at the
+/// [`BUILTIN_SKILLS_ENV_VAR`] override when set.
+pub fn get_skill_paths(paths: &SkillPaths) -> (String, String) {
+    (
+        paths.user_skills_dir.to_string_lossy().into_owned(),
+        paths.builtin_skills_dir.to_string_lossy().into_owned(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Read a file and return its content, or an empty string if it does not exist.
+async fn read_file_or_empty(path: &Path) -> Result<String, SkillError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(SkillError::Io(e)),
+    }
+}
+
+/// Validate a filename to prevent path traversal. The name must be usable as a
+/// single path segment appended to a base directory.
+///
+/// `':'` is rejected outright. A leading `<letter>:` makes `base.join(name)`
+/// *drive-relative* on Windows: `Path::is_absolute("c:evil")` is `false`, so an
+/// absolute-path guard never fires, yet `join` discards the base and resolves
+/// against the current directory of that drive. A later `':'` opens an NTFS
+/// alternate data stream, where the bytes land on a hidden stream of a
+/// differently-named visible file and `Path::extension` reads the stream name
+/// instead of the file's. Neither is a legal Windows path segment, so this
+/// costs no usable name.
+///
+/// A lone `"."` is rejected because `base.join(".")` resolves back to `base`,
+/// which would aim a per-skill delete or write at the whole skills tree.
+fn validate_filename(name: &str) -> Result<(), SkillError> {
+    if name.is_empty()
+        || name == "."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+    {
+        return Err(SkillError::PathTraversal(name.to_string()));
+    }
+    Ok(())
+}
+
+/// Validate a relative path inside the built-in skill corpus. Allows
+/// forward slashes (paths like `"auto-inject/cron/SKILL.md"` are
+/// normal) but forbids empty segments, backslashes, leading slash,
+/// absolute paths, and any `..` component.
+/// Rejects `':'` in any segment for the reasons given on [`validate_filename`]
+/// — note that `Path::new("z:x/y").is_absolute()` is `false` on Windows, so the
+/// absolute check below does not cover a drive prefix.
+fn validate_builtin_skill_path(rel: &str) -> Result<(), SkillError> {
+    if rel.is_empty() || rel.contains('\\') || rel.contains("..") || rel.starts_with('/') {
+        return Err(SkillError::PathTraversal(rel.to_string()));
+    }
+    if rel.contains(':') {
+        return Err(SkillError::PathTraversal(rel.to_string()));
+    }
+    if rel.split('/').any(|seg| seg.is_empty() || seg == ".") {
+        return Err(SkillError::PathTraversal(rel.to_string()));
+    }
+    if Path::new(rel).is_absolute() {
+        return Err(SkillError::PathTraversal(rel.to_string()));
+    }
+    Ok(())
+}
+
+/// Scan a directory for subdirectories containing a SKILL.md file.
+async fn scan_skill_dirs(dir: &Path) -> Result<Vec<ScannedSkill>, SkillError> {
+    let mut result = Vec::new();
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(e) => return Err(SkillError::Io(e)),
+    };
+
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let skill_file = entry_path.join(SKILL_MANIFEST_FILE);
+        if !skill_file.exists() {
+            continue;
+        }
+
+        match tokio::fs::read_to_string(&skill_file).await {
+            Ok(content) => {
+                if let Some((name, description)) = parse_frontmatter_fields(&content) {
+                    let final_name = if name.is_empty() {
+                        entry_path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    } else {
+                        name
+                    };
+                    result.push(ScannedSkill {
+                        name: final_name,
+                        description,
+                        path: entry_path.to_string_lossy().into_owned(),
+                    });
+                } else {
+                    warn!(
+                        path = %skill_file.display(),
+                        "skipping skill: SKILL.md has no valid frontmatter (missing/empty description?)"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    path = %skill_file.display(),
+                    error = %e,
+                    "failed to read SKILL.md"
+                );
+            }
+        }
+    }
+
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(result)
+}
+
+async fn collect_skill_dirs_recursive(
+    dir: &Path,
+    result: &mut Vec<PathBuf>,
+    max_depth: usize,
+) -> Result<(), SkillError> {
+    if dir.join(SKILL_MANIFEST_FILE).exists() {
+        result.push(dir.to_path_buf());
+        return Ok(());
+    }
+
+    if max_depth == 0 {
+        return Ok(());
+    }
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SkillError::Io(e)),
+    };
+
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            Box::pin(collect_skill_dirs_recursive(
+                &entry_path,
+                result,
+                max_depth - 1,
+            ))
+            .await?;
+        }
+    }
+
+    result.sort();
+    Ok(())
+}
+
+/// Parse SKILL.md frontmatter to extract name and description.
+///
+/// Expected format:
+/// ```text
+/// ---
+/// name: skill-name
+/// description: One line description
+/// ---
+/// Body content here...
+/// ```
+///
+/// `description` may also be a YAML block scalar (`|` / `>`, with optional
+/// chomping indicators) or have its value on the following indented line(s);
+/// such continuations are gathered into the value rather than mis-read as the
+/// literal indicator `"|"`/`">"` or dropped entirely. Surrounding quotes on a
+/// single-line value are stripped. A `description` that resolves to empty (or
+/// is absent) yields `None` — the description is the agent's trigger text and
+/// is treated as required, consistent with the Skills spec.
+fn parse_frontmatter_fields(content: &str) -> Option<(String, String)> {
+    let mut document_lines = content.trim_start().lines();
+    if document_lines.next()?.trim_end() != "---" {
+        return None;
+    }
+
+    // Closing fence must be on its own line so a `---` inside a value doesn't
+    // truncate the block.
+    let mut lines = Vec::new();
+    loop {
+        let line = document_lines.next()?;
+        if line.trim_end() == "---" {
+            break;
+        }
+        lines.push(line);
+    }
+
+    let mut name = String::new();
+    let mut description = String::new();
+
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        i += 1;
+
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(val) = strip_yaml_key(line, "name") {
+            name = unquote(val.trim()).to_string();
+        } else if let Some(val) = strip_yaml_key(line, "description") {
+            let val = val.trim();
+            let is_block = val.starts_with('|') || val.starts_with('>');
+            if is_block || val.is_empty() {
+                // Folded (`>` or plain next-line) joins with spaces; literal
+                // (`|`) preserves line breaks.
+                let folded = !val.starts_with('|');
+                let mut collected: Vec<String> = Vec::new();
+                while i < lines.len() {
+                    let cont = lines[i];
+                    if cont.trim().is_empty() {
+                        collected.push(String::new());
+                        i += 1;
+                        continue;
+                    }
+                    // Continuation lines are indented; a column-0 line starts a
+                    // new key and ends the block.
+                    if cont.len() == cont.trim_start().len() {
+                        break;
+                    }
+                    collected.push(cont.trim().to_string());
+                    i += 1;
+                }
+                while collected.last().is_some_and(|s| s.is_empty()) {
+                    collected.pop();
+                }
+                description = if folded {
+                    collected
+                        .join(" ")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    collected.join("\n")
+                };
+            } else {
+                description = unquote(val).to_string();
+            }
+        }
+    }
+
+    if description.trim().is_empty() {
+        return None;
+    }
+
+    Some((name, description))
+}
+
+/// Strip a `key:` prefix from an already-trimmed line, returning the raw value
+/// (which may be empty). Rejects look-alike keys such as `namespace:` for
+/// `name`.
+fn strip_yaml_key<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.strip_prefix(key)?.strip_prefix(':')
+}
+
+/// Remove a single pair of matching surrounding quotes, if present.
+fn unquote(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Recursively copy a directory.
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), SkillError> {
+    tokio::fs::create_dir_all(dst).await?;
+
+    let mut entries = tokio::fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+
+        if entry_path.is_dir() {
+            Box::pin(copy_dir_recursive(&entry_path, &dest_path)).await?;
+        } else {
+            tokio::fs::copy(&entry_path, &dest_path).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Try to symlink `src` into `dst`; on failure, fall back to a recursive
+/// copy of the source directory.
+///
+/// Motivation: on Windows machines without "Developer Mode" or admin
+/// privileges, `CreateSymbolicLinkW` fails with `os error 1314`
+/// (`ERROR_PRIVILEGE_NOT_HELD`). Auto-injected builtin skills under each
+/// backend's `.<backend>/skills/` directory then become invisible to the
+/// CLI agent — silently degrading the product. Falling back to a copy
+/// keeps the skills discoverable; the trade-off is that copies do not
+/// track upstream changes until the next link pass clears them. The
+/// fallback applies on every platform (Linux/macOS shouldn't normally
+/// hit this, but we keep behavior uniform so a future EPERM/EROFS sandbox
+/// also stays healthy).
+///
+/// Logs a `warn!` with the OS error kind and `raw_os_error` so we can
+/// keep tracking 1314 vs other failure modes in telemetry. No
+/// user-identifying data is logged — only the source/target paths
+/// (already considered safe to log elsewhere in this module) and the
+/// error code.
+async fn link_skill_or_fallback_copy(src: &Path, dst: &Path) -> Result<(), SkillError> {
+    finish_skill_link(src, dst, create_symlink(src, dst).await).await
+}
+
+async fn finish_skill_link(src: &Path, dst: &Path, result: Result<(), SkillError>) -> Result<(), SkillError> {
+    match result {
+        Ok(()) => Ok(()),
+        // A competing writer won the name after our existence check. Copying
+        // now would overwrite its files, or follow its link into another tree.
+        Err(SkillError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(SkillError::Io(error))
+        }
+        Err(e) => {
+            // Surface the raw OS error so dashboards can keep counting 1314
+            // (ERROR_PRIVILEGE_NOT_HELD) separately from other failure modes.
+            let raw_os_error = match &e {
+                SkillError::Io(io_err) => io_err.raw_os_error(),
+                _ => None,
+            };
+            warn!(
+                src = %src.display(),
+                dst = %dst.display(),
+                error = %e,
+                raw_os_error = ?raw_os_error,
+                "create_symlink failed; falling back to copy_dir_recursive"
+            );
+            copy_dir_recursive(src, dst).await
+        }
+    }
+}
+
+/// Create a symlink (platform-aware).
+#[cfg(unix)]
+async fn create_symlink(src: &Path, dst: &Path) -> Result<(), SkillError> {
+    tokio::fs::symlink(src, dst)
+        .await
+        .map_err(SkillError::Io)
+}
+
+#[cfg(windows)]
+async fn create_symlink(src: &Path, dst: &Path) -> Result<(), SkillError> {
+    // On Windows, directory symlinks require `SeCreateSymbolicLink`
+    // (Developer Mode or Admin), which most users don't have — this is
+    // the source of the Sentry I1 family of `os error 1314` failures.
+    //
+    // NTFS junctions are an unprivileged alternative for *directory*
+    // targets: the kernel exposes them via `FSCTL_SET_REPARSE_POINT`
+    // which does not require the symlink privilege. Use them whenever
+    // possible. File targets cannot be junctioned, so they fall back to
+    // `tokio::fs::symlink_file`; in the rare cases that fails the
+    // outer `link_skill_or_fallback_copy` wrapper still rescues us via
+    // `copy_dir_recursive`.
+    if src.is_dir() {
+        let src = src.to_path_buf();
+        let dst = dst.to_path_buf();
+        tokio::task::spawn_blocking(move || junction::create(&src, &dst))
+            .await
+            .map_err(|e| {
+                SkillError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("junction::create join error: {e}"),
+                ))
+            })?
+            .map_err(SkillError::Io)
+    } else {
+        tokio::fs::symlink_file(src, dst)
+            .await
+            .map_err(SkillError::Io)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_paths_default_and_override_without_process_environment_mutation() {
+        let data = Path::new("data");
+        let resource = Path::new("resources");
+        for builtin_override in [None, Some(PathBuf::from("fixture-skills"))] {
+            let expected = builtin_override.clone().unwrap_or_else(|| data.join("builtin-skills"));
+            let paths = resolve_skill_paths_with_override(resource, data, builtin_override);
+            assert_eq!(paths.builtin_skills_dir, expected);
+            assert_eq!(paths.user_skills_dir, data.join("skills"));
+            assert_eq!(paths.cron_skills_dir, data.join("cron/skills"));
+            assert_eq!(paths.builtin_rules_dir, resource.join("builtin-rules"));
+        }
+    }
+
+    #[test]
+    fn builtin_skills_materialize_version_includes_corpus_fingerprint() {
+        let fingerprint = builtin_skills_corpus_fingerprint();
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+        let version = builtin_skills_materialize_version("1.2.3");
+        assert_eq!(version, format!("1.2.3+skills.{}", &fingerprint[..12]));
+    }
+
+    /// Build a `SkillPaths` rooted at a temp dir for self-evolution path/write tests.
+    fn test_paths(tmp: &TempDir) -> SkillPaths {
+        SkillPaths {
+            data_dir: tmp.path().to_path_buf(),
+            user_skills_dir: tmp.path().join(SKILLS_DIR_NAME),
+            cron_skills_dir: tmp.path().join(CRON_SKILLS_DIR_NAME),
+            builtin_skills_dir: tmp.path().join("builtin-skills"),
+            builtin_rules_dir: tmp.path().join("rules"),
+        }
+    }
+
+    #[test]
+    fn skill_dir_for_scopes_and_rejects_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(&tmp);
+        let active =
+            skill_dir_for(&paths, &SkillScope::Companion("c1".into()), "weekly", false).unwrap();
+        assert!(
+            active.ends_with("skills/companion/c1/weekly"),
+            "{}",
+            active.display()
+        );
+        let draft =
+            skill_dir_for(&paths, &SkillScope::Companion("c1".into()), "weekly", true).unwrap();
+        assert!(
+            draft.ends_with("skills/_drafts/c1/weekly"),
+            "{}",
+            draft.display()
+        );
+        let shared = skill_dir_for(&paths, &SkillScope::Shared, "fmt", false).unwrap();
+        assert!(
+            shared.ends_with("skills/shared/fmt"),
+            "{}",
+            shared.display()
+        );
+        assert!(
+            skill_dir_for(
+                &paths,
+                &SkillScope::Companion("../x".into()),
+                "weekly",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            skill_dir_for(
+                &paths,
+                &SkillScope::Companion("c1".into()),
+                "../escape",
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_writes_valid_manifest_and_rejects_empty_desc() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(&tmp);
+        let input = SkillDraftInput {
+            name: "weekly-report".into(),
+            description: "把本周工作汇总成周报".into(),
+            when_to_use: Some("当用户说‘出周报’或周五收尾时".into()),
+            allowed_tools: None,
+            paths: None,
+            body: "## 步骤\n1. 收集本周已完成任务\n2. 按项目归类\n3. 生成 markdown 周报".into(),
+        };
+        let dir = create_skill(&paths, &SkillScope::Companion("c1".into()), true, &input)
+            .await
+            .unwrap();
+        let manifest = dir.join(SKILL_MANIFEST_FILE);
+        assert!(manifest.exists());
+        // 能被既有 read_skill_info 正确回读（frontmatter 合法）
+        let (name, desc) = read_skill_info(&dir).await.unwrap();
+        assert_eq!(name, "weekly-report");
+        assert_eq!(desc, "把本周工作汇总成周报");
+        // 空 description 必须拒
+        let bad = SkillDraftInput {
+            description: "".into(),
+            ..input.clone()
+        };
+        assert!(
+            create_skill(&paths, &SkillScope::Companion("c1".into()), true, &bad)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_skill_overwrites_and_validates() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(&tmp);
+        let md = "---\nname: fmt\ndescription: 统一代码风格\n---\n\n步骤略\n";
+        write_skill(&paths, &SkillScope::Shared, false, "fmt", md)
+            .await
+            .unwrap();
+        let dir = skill_dir_for(&paths, &SkillScope::Shared, "fmt", false).unwrap();
+        let (name, desc) = read_skill_info(&dir).await.unwrap();
+        assert_eq!(name, "fmt");
+        assert_eq!(desc, "统一代码风格");
+        // 缺 frontmatter / 空 description → 拒
+        assert!(
+            write_skill(
+                &paths,
+                &SkillScope::Shared,
+                false,
+                "fmt",
+                "no frontmatter here"
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            write_skill(
+                &paths,
+                &SkillScope::Shared,
+                false,
+                "fmt",
+                "---\nname: fmt\ndescription:\n---\nx"
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in skill tag seed
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn load_builtin_skill_tags_has_known_entries() {
+        let m = super::load_builtin_skill_tags();
+        assert!(!m.is_empty());
+        let planning = m
+            .get("planning-with-files")
+            .expect("planning-with-files seeded");
+        assert!(planning.1.iter().any(|s| s == "planning"));
+    }
+
+    #[tokio::test]
+    async fn load_builtin_skill_display_metadata_has_known_entries() {
+        let m = super::load_builtin_skill_display_metadata();
+        let planning = m
+            .get("planning-with-files")
+            .expect("planning-with-files display metadata seeded");
+        assert_eq!(
+            planning.name_i18n.get("zh-CN").map(String::as_str),
+            Some("文件化规划")
+        );
+        assert!(
+            planning
+                .description_i18n
+                .get("zh-CN")
+                .is_some_and(|desc| desc.contains("计划"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Frontmatter parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_frontmatter_valid() {
+        let content = "---\nname: my-skill\ndescription: A useful skill\n---\nBody content here.";
+        let (name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert_eq!(name, "my-skill");
+        assert_eq!(desc, "A useful skill");
+    }
+
+    #[test]
+    fn parse_frontmatter_empty_name() {
+        let content = "---\nname: \ndescription: Has description\n---\nBody";
+        let (name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert!(name.is_empty());
+        assert_eq!(desc, "Has description");
+    }
+
+    #[test]
+    fn parse_frontmatter_no_opening() {
+        let content = "name: test\ndescription: desc\n---\nbody";
+        assert!(parse_frontmatter_fields(content).is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_no_closing() {
+        let content = "---\nname: test\ndescription: desc";
+        assert!(parse_frontmatter_fields(content).is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_requires_complete_fence_lines() {
+        for (open, close) in [("---suffix", "---"), ("---", "---suffix"), ("----", "----")] {
+            assert!(parse_frontmatter_fields(&format!("{open}\nname: test\ndescription: desc\n{close}\nbody")).is_none());
+        }
+        assert_eq!(parse_frontmatter_fields("---\r\nname: test\r\ndescription: desc\r\n---\r\nbody"), Some(("test".into(), "desc".into())));
+    }
+
+    #[test]
+    fn parse_frontmatter_missing_description() {
+        let content = "---\nname: test\n---\nbody";
+        assert!(parse_frontmatter_fields(content).is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_block_scalar_pipe() {
+        let content =
+            "---\nname: multiline\ndescription: |\n  First line of the description.\n  Second line of the description.\n---\nBody";
+        let (name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert_eq!(name, "multiline");
+        assert!(desc.contains("First line of the description."));
+        assert!(desc.contains("Second line of the description."));
+        // Literal block preserves the line break...
+        assert!(desc.contains('\n'));
+        // ...and the raw indicator must never leak as the value.
+        assert_ne!(desc, "|");
+    }
+
+    #[test]
+    fn parse_frontmatter_block_scalar_folded() {
+        let content = "---\nname: folded\ndescription: >\n  first line\n  second line\n---\nBody";
+        let (name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert_eq!(name, "folded");
+        // Folded scalar joins continuation lines with a single space.
+        assert_eq!(desc, "first line second line");
+        assert_ne!(desc, ">");
+    }
+
+    #[test]
+    fn parse_frontmatter_value_on_next_line() {
+        let content = "---\nname: nextline\ndescription:\n  A description on the following indented line.\n---\nBody";
+        let (name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert_eq!(name, "nextline");
+        assert_eq!(desc, "A description on the following indented line.");
+    }
+
+    #[test]
+    fn parse_frontmatter_strips_quotes() {
+        let content = "---\nname: quoted\ndescription: \"A quoted description.\"\n---\nBody";
+        let (_name, desc) = parse_frontmatter_fields(content).unwrap();
+        assert_eq!(desc, "A quoted description.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Filename validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_filename_normal() {
+        assert!(validate_filename("code-review.md").is_ok());
+    }
+
+    #[test]
+    fn validate_filename_path_traversal() {
+        assert!(validate_filename("../etc/passwd").is_err());
+        assert!(validate_filename("foo/bar.md").is_err());
+        assert!(validate_filename("foo\\bar.md").is_err());
+    }
+
+    #[test]
+    fn validate_filename_empty() {
+        assert!(validate_filename("").is_err());
+    }
+
+    /// Every rejected name below survives the `/`, `\`, `..`, empty check set
+    /// yet still escapes — or widens — `base.join(name)` on Windows.
+    #[test]
+    fn validate_filename_rejects_drive_relative_ads_and_self() {
+        for bad in ["c:evil", "C:evil", "z:", "payload.exe:x.md", "."] {
+            assert!(validate_filename(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    /// The concrete escape: a drive-prefixed name must never leave the base.
+    /// `is_absolute()` is `false` for `c:evil`, which is why a name-level
+    /// rejection is the only guard that catches it.
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_skill_name_cannot_escape_base() {
+        let base = Path::new("C:\\dest\\skills");
+        let bad = "c:evil";
+        assert!(!Path::new(bad).is_absolute(), "premise: reads as relative");
+        assert!(
+            !base.join(bad).starts_with(base),
+            "premise: join escapes the base, so validation must reject it"
+        );
+        assert!(validate_filename(bad).is_err());
+    }
+
+    /// A lone `"."` resolves `join` back to the base, which would aim
+    /// `delete_skill`'s recursive delete at the whole skills tree.
+    #[test]
+    fn dot_skill_name_would_resolve_to_the_base_itself() {
+        let base = Path::new("skills");
+        assert_eq!(base.join("."), base);
+        assert!(validate_filename(".").is_err());
+    }
+
+    #[test]
+    fn validate_builtin_skill_path_rejects_drive_prefix_and_dot_segment() {
+        for bad in ["c:evil/SKILL.md", "skills/z:x", "skills/./SKILL.md", "."] {
+            assert!(validate_builtin_skill_path(bad).is_err(), "must reject {bad:?}");
+        }
+        assert!(validate_builtin_skill_path("code-review/SKILL.md").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in resource reading
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_builtin_rule_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let rules_dir = tmp.path().join(BUILTIN_RULES_DIR_NAME);
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(rules_dir.join("code-review.md"), "# Review rules").unwrap();
+
+        let paths = SkillPaths {
+            data_dir: tmp.path().to_path_buf(),
+            user_skills_dir: tmp.path().join(SKILLS_DIR_NAME),
+            cron_skills_dir: tmp.path().join(CRON_SKILLS_DIR_NAME),
+            builtin_skills_dir: tmp.path().join(crate::constants::BUILTIN_SKILLS_DIR_NAME),
+            builtin_rules_dir: rules_dir,
+        };
+
+        let content = read_builtin_rule(&paths, "code-review.md").await.unwrap();
+        assert_eq!(content, "# Review rules");
+    }
+
+    #[tokio::test]
+    async fn read_builtin_rule_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let content = read_builtin_rule(&paths, "nonexistent.md").await.unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_builtin_rule_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let result = read_builtin_rule(&paths, "../secret.md").await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill listing
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_skills_builtin_and_custom() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        let builtin_dir = disk_builtin_dir(&paths).to_path_buf();
+
+        // Create builtin skills
+        create_skill_in_dir(&builtin_dir, "review", "Code review skill");
+        create_skill_in_dir(&builtin_dir, "debug", "Debugging skill");
+
+        // Create custom skill (overrides review)
+        create_skill_in_dir(&paths.user_skills_dir, "review", "Custom review skill");
+        create_skill_in_dir(&paths.user_skills_dir, "my-skill", "My custom skill");
+
+        let skills = list_available_skills(&paths).await.unwrap();
+
+        assert_eq!(skills.len(), 3); // debug + review (custom) + my-skill
+
+        let review = skills.iter().find(|s| s.name == "review").unwrap();
+        assert!(review.is_custom);
+        assert_eq!(review.description, "Custom review skill");
+        assert_eq!(review.source, SkillSource::Custom);
+
+        let debug_skill = skills.iter().find(|s| s.name == "debug").unwrap();
+        assert!(!debug_skill.is_custom);
+        assert_eq!(debug_skill.source, SkillSource::Builtin);
+        assert_eq!(
+            debug_skill.relative_location.as_deref(),
+            Some("debug/SKILL.md")
+        );
+
+        let my_skill = skills.iter().find(|s| s.name == "my-skill").unwrap();
+        assert_eq!(my_skill.source, SkillSource::Custom);
+        assert!(my_skill.relative_location.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_skills_empty_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let skills = list_available_skills(&paths).await.unwrap();
+        assert!(skills.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in auto skills
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_builtin_auto_skills_from_disk_override() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        let builtin_dir = disk_builtin_dir(&paths).to_path_buf();
+        let auto_dir = builtin_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
+
+        create_skill_in_dir(&auto_dir, "cron", "Schedule recurring tasks");
+        create_skill_in_dir(&auto_dir, "skill-creator", "Scaffold a new skill");
+
+        // A top-level built-in skill (NOT under auto-inject/) must be excluded.
+        create_skill_in_dir(&builtin_dir, "review", "Top-level builtin");
+
+        let autos = list_builtin_auto_skills(&paths).await.unwrap();
+
+        assert_eq!(autos.len(), 2);
+        let names: std::collections::HashSet<_> = autos.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains("cron"));
+        assert!(names.contains("skill-creator"));
+        assert!(!names.contains("review"));
+
+        let cron = autos.iter().find(|s| s.name == "cron").unwrap();
+        assert_eq!(cron.description, "Schedule recurring tasks");
+        assert_eq!(cron.location, "auto-inject/cron/SKILL.md");
+
+        // Frontmatter names identify skills, not necessarily their directories.
+        std::fs::rename(auto_dir.join("cron"), auto_dir.join("renamed-directory")).unwrap();
+        let autos = list_builtin_auto_skills(&paths).await.unwrap();
+        let cron = autos.iter().find(|s| s.name == "cron").unwrap();
+        assert_eq!(cron.location, "auto-inject/renamed-directory/SKILL.md");
+        assert!(read_builtin_skill(&paths, &cron.location).await.unwrap().contains("Schedule recurring tasks"));
+    }
+
+    #[tokio::test]
+    async fn list_builtin_auto_skills_missing_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        // No auto-inject/ directory created under the disk override.
+
+        let autos = list_builtin_auto_skills(&paths).await.unwrap();
+        assert!(autos.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill info
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_skill_info_valid() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: my-skill\ndescription: A test skill\n---\nBody",
+        )
+        .unwrap();
+
+        let (name, desc) = read_skill_info(&skill_dir).await.unwrap();
+        assert_eq!(name, "my-skill");
+        assert_eq!(desc, "A test skill");
+    }
+
+    #[tokio::test]
+    async fn read_skill_info_missing() {
+        let tmp = TempDir::new().unwrap();
+        let result = read_skill_info(&tmp.path().join("nonexistent")).await;
+        assert!(matches!(result, Err(SkillError::SkillNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn read_skill_info_uses_manifest_parent_and_preserves_io_errors() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("directory-name");
+        std::fs::create_dir(&dir).unwrap();
+        let manifest = dir.join(SKILL_MANIFEST_FILE);
+        std::fs::write(&manifest, "---\nname: \ndescription: Description\n---\nBody").unwrap();
+        assert_eq!(read_skill_info(&manifest).await.unwrap().0, "directory-name");
+        assert_eq!(read_skill_info(&dir).await.unwrap(), read_skill_info(&manifest).await.unwrap());
+        std::fs::write(&manifest, [0xff]).unwrap();
+        assert!(matches!(read_skill_info(&dir).await, Err(SkillError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill import / delete
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_skill_copies_directory() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        // Create source skill
+        let source_dir = tmp.path().join("source-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: imported\ndescription: Imported skill\n---\nBody",
+        )
+        .unwrap();
+        std::fs::write(source_dir.join("extra.txt"), "extra data").unwrap();
+
+        let name = import_skill(&paths, &source_dir).await.unwrap();
+        assert_eq!(name, "imported");
+
+        // Verify the skill was copied
+        let imported_dir = paths.user_skills_dir.join("imported");
+        assert!(imported_dir.join(SKILL_MANIFEST_FILE).exists());
+        assert!(imported_dir.join("extra.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn import_skill_with_symlink_creates_link() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let source_dir = tmp.path().join("link-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: linked\ndescription: Linked skill\n---\nBody",
+        )
+        .unwrap();
+
+        let name = import_skill_with_symlink(&paths, &source_dir)
+            .await
+            .unwrap();
+        assert_eq!(name, "linked");
+
+        let link_path = paths.user_skills_dir.join("linked");
+        assert!(link_path.is_symlink());
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_imports_selected_skill_manifest_parent() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let source_dir = tmp.path().join("single-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: selected-manifest\ndescription: Selected manifest skill\n---\nBody",
+        )
+        .unwrap();
+
+        let names = import_skills_with_symlink(&paths, &source_dir.join(SKILL_MANIFEST_FILE))
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["selected-manifest"]);
+
+        let link_path = paths.user_skills_dir.join("selected-manifest");
+        assert!(link_path.is_symlink());
+        assert_eq!(std::fs::canonicalize(&link_path).unwrap(), std::fs::canonicalize(source_dir).unwrap());
+        assert!(link_path.join(SKILL_MANIFEST_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_imports_parent_directory_children() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let source_dir = tmp.path().join("skill-pack");
+        create_skill_in_dir(&source_dir, "alpha", "Alpha skill");
+        create_skill_in_dir(&source_dir, "beta", "Beta skill");
+
+        let names = import_skills_with_symlink(&paths, &source_dir)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert!(paths.user_skills_dir.join("alpha").is_symlink());
+        assert!(paths.user_skills_dir.join("beta").is_symlink());
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_imports_nested_bundle() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        // Skills nested two levels deep: pack/category/<skill>/SKILL.md.
+        let nested = tmp.path().join("pack").join("category");
+        create_skill_in_dir(&nested, "deep-alpha", "Deep alpha skill");
+        create_skill_in_dir(&nested, "deep-beta", "Deep beta skill");
+
+        // Picking the grandparent "pack" only works with recursive scanning —
+        // neither it nor its immediate child contains a SKILL.md.
+        let names = import_skills_with_symlink(&paths, &tmp.path().join("pack"))
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["deep-alpha", "deep-beta"]);
+        assert!(paths.user_skills_dir.join("deep-alpha").exists());
+        assert!(paths.user_skills_dir.join("deep-beta").exists());
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_best_effort_skips_bad_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let pack = tmp.path().join("mixed-pack");
+        create_skill_in_dir(&pack, "good-skill", "A valid skill");
+        // Malformed sibling: frontmatter present but no description -> rejected.
+        let bad_dir = pack.join("bad-skill");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(
+            bad_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: bad-skill\n---\nBody",
+        )
+        .unwrap();
+
+        // The bad skill is skipped; the good one still imports (non-atomic,
+        // best-effort) instead of aborting the whole request.
+        let names = import_skills_with_symlink(&paths, &pack).await.unwrap();
+        assert_eq!(names, vec!["good-skill"]);
+        assert!(paths.user_skills_dir.join("good-skill").exists());
+        assert!(!paths.user_skills_dir.join("bad-skill").exists());
+    }
+
+    #[tokio::test]
+    async fn list_available_skills_orders_custom_skills_by_newest_import_first() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let older_dir = tmp.path().join("older-source");
+        let newer_dir = tmp.path().join("newer-source");
+        std::fs::create_dir_all(&older_dir).unwrap();
+        std::fs::create_dir_all(&newer_dir).unwrap();
+        std::fs::write(
+            older_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: older-skill\ndescription: Older skill\n---\nBody",
+        )
+        .unwrap();
+        std::fs::write(
+            newer_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: newer-skill\ndescription: Newer skill\n---\nBody",
+        )
+        .unwrap();
+
+        import_skill_with_symlink(&paths, &older_dir).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        import_skill_with_symlink(&paths, &newer_dir).await.unwrap();
+
+        let skills = list_available_skills(&paths).await.unwrap();
+        let names: Vec<_> = skills.into_iter().map(|skill| skill.name).collect();
+        assert_eq!(names[0], "newer-skill");
+        assert_eq!(names[1], "older-skill");
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_imports_zip_package() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let zip_path = tmp.path().join("skills.zip");
+
+        write_test_zip(
+            &zip_path,
+            &[
+                (
+                    "bundle/zip-one/SKILL.md",
+                    "---\nname: zip-one\ndescription: First zipped skill\n---\nBody",
+                ),
+                ("bundle/zip-one/data.txt", "payload"),
+                (
+                    "bundle/zip-two/SKILL.md",
+                    "---\nname: zip-two\ndescription: Second zipped skill\n---\nBody",
+                ),
+            ],
+        );
+
+        let names = import_skills_with_symlink(&paths, &zip_path).await.unwrap();
+        assert_eq!(names, vec!["zip-one", "zip-two"]);
+        assert!(
+            paths
+                .user_skills_dir
+                .join("zip-one")
+                .join(SKILL_MANIFEST_FILE)
+                .exists()
+        );
+        assert!(
+            paths
+                .user_skills_dir
+                .join("zip-one")
+                .join("data.txt")
+                .exists()
+        );
+        assert!(!paths.user_skills_dir.join("zip-one").is_symlink());
+        assert!(
+            !paths
+                .user_skills_dir
+                .join(".import-tmp")
+                .join("skills.zip")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn zip_import_replaces_existing_link_without_mutating_source() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let source_dir = tmp.path().join("external-skill");
+        let zip_path = tmp.path().join("replacement.zip");
+
+        create_skill_in_dir(tmp.path(), "external-skill", "External source skill");
+        std::fs::write(source_dir.join("source-only.txt"), "original").unwrap();
+        import_skill_with_symlink(&paths, &source_dir).await.unwrap();
+
+        write_test_zip(
+            &zip_path,
+            &[
+                (
+                    "bundle/external-skill/SKILL.md",
+                    "---\nname: external-skill\ndescription: Replacement skill\n---\nReplacement body",
+                ),
+                ("bundle/external-skill/replacement-only.txt", "replacement"),
+            ],
+        );
+
+        let names = import_skills_with_symlink(&paths, &zip_path).await.unwrap();
+
+        assert_eq!(names, vec!["external-skill"]);
+        let managed_skill = paths.user_skills_dir.join("external-skill");
+        assert!(!std::fs::symlink_metadata(&managed_skill)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(managed_skill.join("replacement-only.txt").exists());
+        assert!(!source_dir.join("replacement-only.txt").exists());
+        assert_eq!(std::fs::read_to_string(source_dir.join("source-only.txt")).unwrap(), "original");
+        assert!(std::fs::read_to_string(source_dir.join(SKILL_MANIFEST_FILE))
+            .unwrap()
+            .contains("External source skill"));
+    }
+
+    #[tokio::test]
+    async fn import_skills_with_symlink_rejects_zip_slip_entries() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let zip_path = tmp.path().join("evil.zip");
+
+        write_test_zip(&zip_path, &[("../escape.txt", "outside")]);
+
+        let result = import_skills_with_symlink(&paths, &zip_path).await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+        assert!(!tmp.path().join("escape.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn import_skill_rejects_traversal_name() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        // Create a skill whose frontmatter name contains path traversal
+        let source_dir = tmp.path().join("evil-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: ../../../etc/evil\ndescription: Malicious skill\n---\nBody",
+        )
+        .unwrap();
+
+        let result = import_skill(&paths, &source_dir).await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+    }
+
+    #[tokio::test]
+    async fn import_skill_with_symlink_rejects_traversal_name() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let source_dir = tmp.path().join("evil-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: ../../escape\ndescription: Malicious skill\n---\nBody",
+        )
+        .unwrap();
+
+        let result = import_skill_with_symlink(&paths, &source_dir).await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_custom_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        create_skill_in_dir(&paths.user_skills_dir, "to-delete", "Will be deleted");
+
+        delete_skill(&paths, "to-delete").await.unwrap();
+        assert!(!paths.user_skills_dir.join("to-delete").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_skill_removes_dangling_user_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let source_dir = tmp.path().join("external-skill");
+
+        create_skill_in_dir(tmp.path(), "external-skill", "External skill");
+        import_skill_with_symlink(&paths, &source_dir).await.unwrap();
+        std::fs::remove_dir_all(&source_dir).unwrap();
+
+        delete_skill(&paths, "external-skill").await.unwrap();
+
+        let link_path = paths.user_skills_dir.join("external-skill");
+        assert!(matches!(
+            std::fs::symlink_metadata(link_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn delete_skill_removes_imported_junction_without_deleting_source() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let source_dir = tmp.path().join("external-skill");
+
+        create_skill_in_dir(tmp.path(), "external-skill", "External skill");
+        import_skill_with_symlink(&paths, &source_dir).await.unwrap();
+
+        let link_path = paths.user_skills_dir.join("external-skill");
+        assert!(std::fs::symlink_metadata(&link_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        delete_skill(&paths, "external-skill").await.unwrap();
+
+        assert!(matches!(
+            std::fs::symlink_metadata(&link_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(source_dir.join(SKILL_MANIFEST_FILE).exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn delete_custom_skill_with_readonly_files_on_windows() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        create_skill_in_dir(&paths.user_skills_dir, "readonly-skill", "Will be deleted");
+        let skill_file = paths
+            .user_skills_dir
+            .join("readonly-skill")
+            .join("SKILL.md");
+        let mut permissions = std::fs::metadata(&skill_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&skill_file, permissions).unwrap();
+
+        delete_skill(&paths, "readonly-skill").await.unwrap();
+        assert!(!paths.user_skills_dir.join("readonly-skill").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_readonly_for_deletion_preserves_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("readonly.txt");
+        std::fs::write(&file, "payload").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        clear_readonly_for_deletion(&file).unwrap();
+
+        assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o444);
+    }
+
+    #[tokio::test]
+    async fn delete_builtin_skill_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        let builtin_dir = disk_builtin_dir(&paths).to_path_buf();
+
+        create_skill_in_dir(&builtin_dir, "protected", "Built-in skill");
+
+        let result = delete_skill(&paths, "protected").await;
+        assert!(matches!(
+            result,
+            Err(SkillError::BuiltinSkillDeletion(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let result = delete_skill(&paths, "ghost").await;
+        assert!(matches!(result, Err(SkillError::SkillNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_skill_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+
+        let result = delete_skill(&paths, "../etc").await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Scanning
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn scan_for_skills_finds_valid() {
+        let tmp = TempDir::new().unwrap();
+        create_skill_in_dir(tmp.path(), "skill-a", "First skill");
+        create_skill_in_dir(tmp.path(), "skill-b", "Second skill");
+
+        // Create a dir without SKILL.md (should be ignored)
+        std::fs::create_dir_all(tmp.path().join("not-a-skill")).unwrap();
+
+        let skills = scan_for_skills(tmp.path()).await.unwrap();
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "skill-a");
+        assert_eq!(skills[1].name, "skill-b");
+    }
+
+    #[tokio::test]
+    async fn scan_for_skills_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let skills = scan_for_skills(tmp.path()).await.unwrap();
+        assert!(skills.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_for_skills_nonexistent_dir() {
+        let skills = scan_for_skills(Path::new("/nonexistent/path"))
+            .await
+            .unwrap();
+        assert!(skills.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Export
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn export_skill_creates_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join(SKILL_MANIFEST_FILE),
+            "---\nname: my-skill\ndescription: Test\n---\nBody",
+        )
+        .unwrap();
+
+        let target_dir = tmp.path().join("exports");
+        export_skill_with_symlink(&source_dir, &target_dir)
+            .await
+            .unwrap();
+
+        let link = target_dir.join("my-skill");
+        assert!(link.is_symlink());
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn make_test_paths(base: &Path) -> SkillPaths {
+        // Hand out an empty on-disk builtin-skills dir. Tests that need
+        // specific fixtures seed it via `create_skill_in_dir`; tests
+        // that want the full real corpus use `make_embedded_paths`.
+        SkillPaths {
+            data_dir: base.to_path_buf(),
+            user_skills_dir: base.join(SKILLS_DIR_NAME),
+            cron_skills_dir: base.join(CRON_SKILLS_DIR_NAME),
+            builtin_skills_dir: base.join(crate::constants::BUILTIN_SKILLS_DIR_NAME),
+            builtin_rules_dir: base.join(BUILTIN_RULES_DIR_NAME),
+        }
+    }
+
+    /// Return `SkillPaths` pre-populated with the real embedded builtin
+    /// skills corpus materialized to disk. Use this for tests that
+    /// previously relied on the embedded-corpus fallback.
+    async fn make_embedded_paths(base: &Path) -> SkillPaths {
+        crate::startup_materialize::materialize_embedded_builtin_skills(
+            base,
+            &BUILTIN_SKILLS,
+            "test-version",
+        )
+        .await
+        .expect("failed to materialize embedded corpus for test");
+        make_test_paths(base)
+    }
+
+    /// Return a `SkillPaths` rooted at `base` with an on-disk
+    /// `builtin_skills_dir`, so tests can seed fixtures in that dir.
+    fn make_disk_builtin_paths(base: &Path) -> SkillPaths {
+        make_test_paths(base)
+    }
+
+    fn disk_builtin_dir(paths: &SkillPaths) -> &Path {
+        &paths.builtin_skills_dir
+    }
+
+    fn create_skill_in_dir(base: &Path, name: &str, description: &str) {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(SKILL_MANIFEST_FILE),
+            format!("---\nname: {name}\ndescription: {description}\n---\nBody content for {name}."),
+        )
+        .unwrap();
+    }
+
+    fn write_test_zip(path: &Path, entries: &[(&str, &str)]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        for (name, content) in entries {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+
+        zip.finish().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedded corpus
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn embedded_lists_auto_inject_from_corpus() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let autos = list_builtin_auto_skills(&paths).await.unwrap();
+        assert!(
+            autos.len() >= 3,
+            "expected ≥3 auto-inject entries, got {}",
+            autos.len()
+        );
+        assert!(
+            !autos.iter().any(|item| item.name == "officecli"),
+            "officecli must remain an opt-in builtin skill"
+        );
+        for item in &autos {
+            assert!(
+                item.location.starts_with("auto-inject/"),
+                "location must start with auto-inject/, got {}",
+                item.location
+            );
+            assert!(item.location.ends_with("/SKILL.md"));
+            assert!(!item.description.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_reads_builtin_skill_content() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let content = read_builtin_skill(&paths, "auto-inject/cron/SKILL.md")
+            .await
+            .unwrap();
+        assert!(!content.is_empty(), "embedded cron SKILL.md is empty");
+        assert!(
+            content.trim_start().starts_with("---"),
+            "expected frontmatter, got: {}",
+            content.chars().take(80).collect::<String>()
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let result = read_builtin_skill(&paths, "../etc/passwd").await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+
+        let result = read_builtin_skill(&paths, "auto-inject/../../secret").await;
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+    }
+
+    #[tokio::test]
+    async fn embedded_handles_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let content = read_builtin_skill(&paths, "nonexistent/SKILL.md")
+            .await
+            .unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disk_override_reads_from_disk_not_embedded() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        let builtin_dir = disk_builtin_dir(&paths).to_path_buf();
+        let auto_dir = builtin_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
+        create_skill_in_dir(&auto_dir, "fixture-only", "Fixture-only skill");
+
+        let autos = list_builtin_auto_skills(&paths).await.unwrap();
+        let names: Vec<&str> = autos.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"fixture-only"),
+            "disk override should reflect seeded skill; got {names:?}"
+        );
+        // Embedded skills (e.g. `cron`) must NOT leak into the disk view.
+        assert!(
+            !names.contains(&"cron"),
+            "disk override must not include embedded skills"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_skills_builtin_has_relative_location_from_embedded() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let skills = list_available_skills(&paths).await.unwrap();
+        let builtins: Vec<_> = skills
+            .iter()
+            .filter(|s| s.source == SkillSource::Builtin)
+            .collect();
+        assert!(!builtins.is_empty(), "no builtin skills listed");
+        for s in &builtins {
+            let rel = s
+                .relative_location
+                .as_deref()
+                .expect("builtin must have relative_location");
+            assert!(
+                rel.ends_with("/SKILL.md"),
+                "relative_location must end in /SKILL.md, got {rel}"
+            );
+            assert!(
+                s.location
+                    .contains(crate::constants::BUILTIN_SKILLS_DIR_NAME),
+                "builtin location must live under the view dir, got {}",
+                s.location
+            );
+            // Lazy materialization wrote SKILL.md to disk.
+            assert!(
+                std::path::Path::new(&s.location).exists(),
+                "materialized view missing: {}",
+                s.location
+            );
+        }
+
+        let officecli = builtins
+            .iter()
+            .find(|skill| skill.name == "officecli")
+            .expect("officecli builtin skill listed");
+        assert_eq!(
+            officecli.relative_location.as_deref(),
+            Some("officecli/SKILL.md")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Materialize (symlink contract)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn source_resolution_empty_list_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let list = resolve_skill_sources(&paths, "conv-empty", &[])
+            .await
+            .unwrap();
+        assert!(list.is_empty());
+        // No per-conversation dir should be created.
+        assert!(!paths.data_dir.join("agent-skills").exists());
+        assert!(!paths.data_dir.join("conversations").exists());
+    }
+
+    #[tokio::test]
+    async fn source_resolution_resolves_auto_inject_skill_by_name() {
+        // Auto-inject skills are resolved only when the caller names
+        // them explicitly (see canonical Agent snapshot materialization).
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let resolved = resolve_skill_sources(&paths, "conv-named", &["cron".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "cron");
+        // source_path points at the real on-disk auto-inject directory.
+        let expected = paths
+            .builtin_skills_dir
+            .join(BUILTIN_AUTO_SKILLS_SUBDIR)
+            .join("cron");
+        assert_eq!(resolved[0].source_path, expected);
+        assert!(resolved[0].source_path.is_dir());
+        assert!(resolved[0].source_path.join(SKILL_MANIFEST_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn source_resolution_resolves_opt_in_top_level_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let resolved = resolve_skill_sources(
+            &paths,
+            "conv-opt",
+            &["planning-with-files".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "planning-with-files");
+        let expected = paths.builtin_skills_dir.join("planning-with-files");
+        assert_eq!(resolved[0].source_path, expected);
+    }
+
+    #[tokio::test]
+    async fn source_resolution_resolves_user_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+        create_skill_in_dir(&paths.user_skills_dir, "my-custom", "A user skill");
+
+        let resolved = resolve_skill_sources(&paths, "conv-user", &["my-custom".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].source_path,
+            paths.user_skills_dir.join("my-custom")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_resolution_user_skill_overrides_same_name_builtin() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+        create_skill_in_dir(
+            &paths.user_skills_dir,
+            "planning-with-files",
+            "User override",
+        );
+
+        let resolved = resolve_skill_sources(
+            &paths,
+            "conv-user-override",
+            &["planning-with-files".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].source_path,
+            paths.user_skills_dir.join("planning-with-files")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_resolution_silently_skips_unknown_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let resolved =
+            resolve_skill_sources(&paths, "conv-missing", &["no-such-skill".to_owned()])
+                .await
+                .unwrap();
+        assert!(resolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_resolution_skips_invalid_names_but_keeps_valid_ones() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let resolved = resolve_skill_sources(
+            &paths,
+            "conv-mixed",
+            &[
+                "".to_owned(),
+                "../evil".to_owned(),
+                "foo/bar".to_owned(),
+                "cron".to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "cron");
+    }
+
+    #[tokio::test]
+    async fn source_resolution_returns_sorted_list_with_source_paths() {
+        // Deterministic ordering — callers rely on it for stable symlink
+        // layouts and for easier debugging / snapshot tests.
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let resolved = resolve_skill_sources(
+            &paths,
+            "conv-sorted",
+            &["planning-with-files".to_owned(), "cron".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].name, "cron");
+        assert_eq!(resolved[1].name, "planning-with-files");
+        for entry in &resolved {
+            assert!(entry.source_path.is_absolute());
+            assert!(entry.source_path.is_dir());
+        }
+    }
+
+    #[tokio::test]
+    async fn source_resolution_rejects_bad_conversation_id() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let err = resolve_skill_sources(&paths, "../evil", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SkillError::PathTraversal(_)));
+    }
+
+    #[tokio::test]
+    async fn source_resolution_does_not_touch_disk_beyond_reads() {
+        // Guardrail: the symlink contract forbids any per-conversation
+        // directory on disk. Verify the function only reads the sources
+        // and never writes.
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+
+        let _ = resolve_skill_sources(&paths, "conv-pure", &["cron".to_owned()])
+            .await
+            .unwrap();
+        assert!(!paths.data_dir.join("agent-skills").exists());
+        assert!(!paths.data_dir.join("conversations").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Windows symlink → copy_dir_recursive fallback
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn link_conflict_does_not_overwrite_the_winning_directory() {
+        let tmp = TempDir::new().unwrap();
+        create_skill_in_dir(tmp.path(), "source", "Source");
+        create_skill_in_dir(tmp.path(), "winner", "Winner");
+        let target = tmp.path().join("winner");
+        let before = std::fs::read(target.join(SKILL_MANIFEST_FILE)).unwrap();
+        let error = link_skill_or_fallback_copy(&tmp.path().join("source"), &target).await.unwrap_err();
+        assert!(matches!(error, SkillError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists));
+        assert_eq!(std::fs::read(target.join(SKILL_MANIFEST_FILE)).unwrap(), before);
+    }
+
+    /// Inject only this operation's link error; no process-global override
+    /// may change another test's junction/symlink behavior.
+    #[tokio::test]
+    async fn link_failure_falls_back_to_copy_without_global_overrides() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let source_root = tmp.path().join("sources");
+
+        // Seed a fake skill source directory with a SKILL.md and a
+        // nested file so we can verify the copy is recursive.
+        let skill_source = source_root.join("my-skill");
+        std::fs::create_dir_all(skill_source.join("nested")).unwrap();
+        std::fs::write(
+            skill_source.join(SKILL_MANIFEST_FILE),
+            "---\nname: my-skill\ndescription: test\n---\nbody",
+        )
+        .unwrap();
+        std::fs::write(skill_source.join("nested").join("data.txt"), "payload").unwrap();
+
+        let target = workspace.join(".claude/skills").join("my-skill");
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected link failure");
+        finish_skill_link(&skill_source, &target, Err(SkillError::Io(error))).await.unwrap();
+        assert!(target.exists(), "target directory must exist");
+        // It must NOT be a symlink — fallback path uses copy_dir_recursive.
+        let meta = tokio::fs::symlink_metadata(&target).await.unwrap();
+        assert!(
+            !meta.file_type().is_symlink(),
+            "fallback must produce a real directory, not a symlink"
+        );
+        assert!(target.is_dir(), "target must be a directory");
+
+        // Verify the contents were copied recursively.
+        let manifest = std::fs::read_to_string(target.join(SKILL_MANIFEST_FILE)).unwrap();
+        assert!(manifest.contains("name: my-skill"));
+        let nested = std::fs::read_to_string(target.join("nested").join("data.txt")).unwrap();
+        assert_eq!(nested, "payload");
+    }
+}

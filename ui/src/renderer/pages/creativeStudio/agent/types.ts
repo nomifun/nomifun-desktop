@@ -5,6 +5,9 @@
  */
 
 import type { CreativeModelSelectionRef } from '../models';
+import type { ReactNode } from 'react';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
 
 export type CreativeStudioAgentView = 'chat' | 'history';
 export type CreativeStudioAgentPanelLoadState = 'loading' | 'ready' | 'failed';
@@ -20,31 +23,41 @@ interface CreativeStudioAgentMessageBase {
   text: string;
 }
 
-export interface CreativeStudioAgentUserMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentUserMessage extends CreativeStudioAgentMessageBase {
   role: 'user';
   status: 'complete';
 }
 
-export interface CreativeStudioAgentCompleteMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentCompleteMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'complete';
 }
 
-export interface CreativeStudioAgentRunningMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentRunningMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'running';
   activityLabel?: string;
 }
 
-export interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'failed';
   errorMessage: string;
+  /** Transient canonical diagnostics; the exclusive history wire stays authoritative. */
+  error?: AgentStreamErrorInfo;
+  turnId?: string;
+  timestamp?: number;
 }
 
-export interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'stopped';
+}
+
+interface CreativeStudioAgentPausedMessage extends CreativeStudioAgentMessageBase {
+  role: 'assistant';
+  status: 'paused';
+  pause: ConversationPauseNotice;
 }
 
 export type CreativeStudioAgentMessage =
@@ -52,7 +65,9 @@ export type CreativeStudioAgentMessage =
   | CreativeStudioAgentCompleteMessage
   | CreativeStudioAgentRunningMessage
   | CreativeStudioAgentFailedMessage
+  | CreativeStudioAgentPausedMessage
   | CreativeStudioAgentStoppedMessage;
+// Paused rows are transient observations, not durable completed history.
 
 export interface CreativeStudioAgentSendInput {
   prompt: string;
@@ -76,7 +91,7 @@ export interface CreativeStudioAgentSkillOption {
   description: string;
 }
 
-export type CreativeStudioAgentProposalState =
+type CreativeStudioAgentProposalState =
   | 'ready'
   | 'applying'
   | 'applied'
@@ -101,6 +116,8 @@ export interface CreativeStudioAgentPanelProps {
   loadState: CreativeStudioAgentPanelLoadState;
   sessions: readonly CreativeStudioAgentSessionSummary[];
   activeSessionId: string | null;
+  /** Canonical Agent Session identity, distinct from the Canvas chat-session ID. */
+  conversationId?: string;
   messages: readonly CreativeStudioAgentMessage[];
   draft: string;
   model: CreativeModelSelectionRef | null;
@@ -113,6 +130,7 @@ export interface CreativeStudioAgentPanelProps {
   isRunning: boolean;
   errorMessage?: string;
   disabled?: boolean;
+  agentSelector?: ReactNode;
   onViewChange(view: CreativeStudioAgentView): void;
   onNewSession(): void;
   onSelectSession(sessionId: string): void;

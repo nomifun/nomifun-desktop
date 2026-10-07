@@ -1,0 +1,39 @@
+{
+  "record_kind": "deleting",
+  "record": {
+    "live": {
+      "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000002",
+      "owner_ref": {
+        "principal_kind": "user",
+        "principal_id": "user-001"
+      },
+      "metadata": {
+        "title": "Deleting contract fixture",
+        "archived": false,
+        "pinned": false
+      },
+      "agent_binding": {
+        "preset_revision_ref": {
+          "preset_id": "chat.minimal",
+          "revision": 1,
+          "revision_digest": "sha256:preset-revision-002"
+        },
+        "resolved_snapshot_ref": {
+          "snapshot_id": "snapshot-002",
+          "snapshot_digest": "sha256:snapshot-002"
+        },
+        "typed_resource_bindings": [],
+        "binding_version": 1
+      },
+      "remote_binding_provenance": {
+        "remote_binding_id": "remote-binding-001",
+        "binding_version": 3
+      },
+      "parent_session_id": null,
+      "fork_base_payload_id": null,
+      "next_seq": 9
+    },
+    "delete_operation_id": "delete-operation-001",
+    "admission_fenced_at": 1788000000000
+  }
+}

@@ -11,7 +11,7 @@ import {
 import { clientToCanvas, type CanvasPoint, type CanvasViewport } from '../core';
 import type { CanvasIntegrationIntent } from './types';
 
-export interface CanvasDropImportRejection {
+interface CanvasDropImportRejection {
   file: File;
   reason: CreativeAssetUploadRejection;
 }
@@ -58,7 +58,6 @@ export function validateCanvasDropImport(
           file: first.file,
           kind: first.kind,
           worldPosition: clientToCanvas(localClientPosition, viewport),
-          panoramaChoice: first.kind === 'image' ? 'after-upload-if-2-to-1' : 'not-applicable',
         }
       : null,
     rejected,

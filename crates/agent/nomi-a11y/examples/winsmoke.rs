@@ -11,9 +11,28 @@
 
 #[cfg(target_os = "windows")]
 fn main() {
+    use std::io::Write;
     use std::{thread::sleep, time::Duration};
 
     use nomi_a11y::{ElementAction, ObserveOpts, Snapshot, Target};
+
+    struct SmokeResources {
+        child: Option<std::process::Child>,
+        tmp: Option<std::path::PathBuf>,
+    }
+
+    impl Drop for SmokeResources {
+        fn drop(&mut self) {
+            if let Some(c) = &mut self.child {
+                if c.kill().is_ok() {
+                    let _ = c.wait();
+                }
+            }
+            if let Some(tmp) = &self.tmp {
+                let _ = std::fs::remove_file(tmp);
+            }
+        }
+    }
 
     fn dump(snap: &Snapshot) {
         println!(
@@ -33,27 +52,56 @@ fn main() {
         }
     }
 
-    let arg_pid: Option<i32> = std::env::args().nth(1).and_then(|s| s.parse().ok());
+    let arg_pid = match std::env::args().nth(1) {
+        Some(s) => match s.parse::<i32>() {
+            Ok(pid) if pid > 0 => Some(pid),
+            _ => {
+                eprintln!("Expected a positive process id; no application was launched.");
+                return;
+            }
+        },
+        None => None,
+    };
+
+    let engine = match nomi_a11y::create_engine() {
+        Ok(e) => e,
+        Err(e) => {
+            println!("FATAL: create_engine failed: {e}");
+            return;
+        }
+    };
+    let mut resources = SmokeResources { child: None, tmp: None };
 
     // A temp file with known content lets us verify the TextPattern read path
     // (the Win11 RichEdit Notepad exposes text via TextPattern, not ValuePattern).
     const MARKER: &str = "你好世界";
-    let tmp = std::env::temp_dir().join("nomi_winsmoke.txt");
-    let _ = std::fs::write(&tmp, format!("NomiFun TextPattern 验证 Hello {MARKER}\n第二行 line two\n"));
-
-    let mut child = None;
     let target_pid = match arg_pid {
         Some(p) => {
             println!("== using provided pid {p} ==");
             Some(p)
         }
         None => {
+            let tmp = std::env::temp_dir()
+                .join(format!("nomi_winsmoke_{}.txt", std::process::id()));
+            let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("Cannot create smoke file (existing files are preserved): {e}");
+                    return;
+                }
+            };
+            resources.tmp = Some(tmp.clone());
+            if let Err(e) = writeln!(file, "NomiFun TextPattern 验证 Hello {MARKER}\n第二行 line two") {
+                eprintln!("Cannot write smoke file: {e}");
+                return;
+            }
+            drop(file);
             println!("== launching notepad.exe on {} ==", tmp.display());
             match std::process::Command::new("notepad.exe").arg(&tmp).spawn() {
                 Ok(c) => {
                     let p = c.id() as i32;
                     println!("   spawned notepad, launcher pid = {p}");
-                    child = Some(c);
+                    resources.child = Some(c);
                     sleep(Duration::from_millis(2500)); // allow the file to load
                     Some(p)
                 }
@@ -65,13 +113,6 @@ fn main() {
         }
     };
 
-    let engine = match nomi_a11y::create_engine() {
-        Ok(e) => e,
-        Err(e) => {
-            println!("FATAL: create_engine failed: {e}");
-            return;
-        }
-    };
     println!("capabilities: {:?}", engine.capabilities());
 
     println!("\n== observe(foreground) ==");
@@ -107,21 +148,17 @@ fn main() {
                 pid_snap = Some(s);
             }
             Err(e) => {
-                println!("  observe(pid) error: {e} (Store Notepad reparents; using foreground)")
+                println!("  observe(pid) error: {e} (actuation will be skipped)")
             }
         }
     }
 
-    let snap = pid_snap
-        .filter(|s| !s.entries.is_empty())
-        .or_else(|| fg.ok().filter(|s| !s.entries.is_empty()));
+    // Desktop observation is diagnostic only: never write into an unrelated
+    // foreground application if the requested/launched process cannot be read.
+    let snap = pid_snap.filter(|s| s.pid == target_pid && !s.entries.is_empty());
 
     let Some(snap) = snap else {
         println!("\nNo usable snapshot with elements; aborting actuation phase.");
-        if let Some(mut c) = child {
-            let _ = c.kill();
-        }
-        let _ = std::fs::remove_file(&tmp);
         return;
     };
 
@@ -173,12 +210,6 @@ fn main() {
     );
     println!("  invoke with old generation → {stale:?}");
 
-    if let Some(mut c) = child {
-        sleep(Duration::from_millis(300));
-        let _ = c.kill();
-        println!("\n(killed spawned notepad)");
-    }
-    let _ = std::fs::remove_file(&tmp);
     println!("\n== done ==");
 }
 

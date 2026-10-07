@@ -4,8 +4,11 @@
 //! - [`ModelTask`] is the stable task key on an exact provider-model capability
 //!   row. That row selects a protocol descriptor, which owns the transport and
 //!   endpoint contract.
-//! - [`ModelTrait`] is a within-task refinement (mostly for Chat models):
-//!   whether a chat model accepts image input, calls functions, reasons, etc.
+//! - [`ModelTrait`] is advisory provider/catalog metadata for Chat input and
+//!   search. It never disables input representable by the selected protocol.
+//! - [`ModelTechnicalCapability`] is host-managed, optimistic runtime state:
+//!   capabilities are available unless a complete provider error proves that
+//!   one is unsupported.
 //! Name-based derivation is catalog suggestion logic only; persisted task
 //! capability rows are the sole runtime authority.
 use serde::{Deserialize, Serialize};
@@ -32,6 +35,8 @@ pub enum ModelTask {
     ImageEdit,
     /// Video generation from text and/or image input.
     VideoGeneration,
+    /// Music composition (instrumental or vocals), distinct from TTS.
+    MusicGeneration,
     /// Text-to-speech synthesis (TTS).
     SpeechSynthesis,
     /// Speech-to-text recognition or transcription (ASR).
@@ -42,29 +47,79 @@ pub enum ModelTask {
     Rerank,
 }
 
-/// Within-task refinement of a model's abilities. Mostly modifies [`ModelTask::Chat`].
+/// Advisory semantic metadata from a provider or model catalog.
+///
+/// Function calling, reasoning and streaming are intentionally absent. They
+/// are runtime capabilities, not configuration checkboxes. Missing metadata
+/// does not disable a model's native input or search support. Realtime is a
+/// standalone [`ModelTask::RealtimeConversation`] and must never be duplicated
+/// as a Chat trait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTrait {
     /// Chat model accepts image input (vision understanding).
     VisionInput,
-    /// Chat model supports tool/function calling.
-    FunctionCalling,
-    /// Chat model is a reasoning model.
-    Reasoning,
     /// Chat model has built-in web search.
     WebSearch,
     /// Chat model accepts audio content as input.
     AudioInput,
-    /// Chat model can return generated audio alongside/instead of text.
-    AudioOutput,
     /// Chat model accepts video input for understanding (not generation).
     VideoInput,
-    /// Model supports a provider-specific realtime transport.
-    Realtime,
-    /// Model supports incremental/streaming output.
+}
+
+/// Host-managed technical capability. Every Chat model starts optimistic;
+/// only explicit, machine-readable provider evidence records an unsupported
+/// capability. Users never author these values.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTechnicalCapability {
+    FunctionCalling,
+    Reasoning,
     Streaming,
+}
+
+/// Decode persisted traits written by older builds without preserving their
+/// technical checkboxes. Unknown values still fail closed; only the retired
+/// technical/realtime/audio-output vocabulary is ignored.
+pub fn parse_persisted_model_traits(raw: &str) -> Result<Vec<ModelTrait>, String> {
+    let values = serde_json::from_str::<Vec<String>>(raw)
+        .map_err(|error| format!("traits must be a JSON string array: {error}"))?;
+    let mut traits = Vec::with_capacity(values.len());
+    for value in values {
+        let model_trait = match value.as_str() {
+            "vision_input" => Some(ModelTrait::VisionInput),
+            "video_input" => Some(ModelTrait::VideoInput),
+            "audio_input" => Some(ModelTrait::AudioInput),
+            "web_search" => Some(ModelTrait::WebSearch),
+            // Retired user-authored/system-detail values. Technical support is
+            // optimistic now; absence from the negative observation set means
+            // supported.
+            "function_calling" | "reasoning" | "streaming" | "realtime"
+            | "audio_output" => None,
+            other => return Err(format!("unknown model trait {other:?}")),
+        };
+        if let Some(model_trait) = model_trait {
+            if traits.contains(&model_trait) {
+                return Err(format!("duplicate model trait {value:?}"));
+            }
+            traits.push(model_trait);
+        }
+    }
+    Ok(traits)
 }
 
 // --- Catalog suggestion seeds (extend the model_capability.rs heuristic) ---
@@ -118,22 +173,26 @@ fn is_unified_ark_seedream_model(model: &str) -> bool {
     .any(|family| base.contains(family))
 }
 
-/// Provider/model combinations whose official task is known and whose name is
-/// either ambiguous or actively misleading to generic substring inference.
-/// Keep this table intentionally small: live provider catalogs decide which
-/// model IDs are available, while this function only supplies their task
-/// metadata to the provider -> modality -> model picker.
-fn verified_provider_profile(
+/// Exact provider/model combinations whose official task is known. Family or
+/// substring matches belong only in [`infer_catalog_tasks_and_traits`], so a
+/// newly encountered model cannot inherit a documented task from its name.
+/// Keep this table intentionally small: live catalogs determine availability,
+/// while these profiles supply task suggestions with documented provenance.
+pub fn verified_catalog_tasks_and_traits(
     platform: &str,
     model: &str,
 ) -> Option<(Vec<ModelTask>, Vec<ModelTrait>)> {
     use ModelTask::*;
-    let base = base_model_name(model);
+    let base = model.trim().to_ascii_lowercase();
 
     match platform {
-        "ark" | "volcengine" if is_unified_ark_seedream_model(model) => {
-            Some((vec![ImageGeneration, ImageEdit], vec![]))
-        }
+        "agnes" => match base.as_str() {
+            "agnes-image-2.1-flash" => {
+                Some((vec![ImageGeneration, ImageEdit], vec![]))
+            }
+            "agnes-video-v2.0" => Some((vec![VideoGeneration], vec![])),
+            _ => None,
+        },
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             match base.as_str() {
                 "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
@@ -154,6 +213,7 @@ fn verified_provider_profile(
             | "minimax-hailuo-02" => Some((vec![VideoGeneration], vec![])),
             "image-01" | "image-01-live" => Some((vec![ImageGeneration], vec![])),
             "speech-2.8-hd" | "speech-2.8-turbo" => Some((vec![SpeechSynthesis], vec![])),
+            "music-3.0" | "music-2.6" => Some((vec![MusicGeneration], vec![])),
             _ => None,
         },
         "openai" => match base.as_str() {
@@ -184,15 +244,7 @@ fn verified_provider_profile(
         "stepfun" | "stepfun-plan" => match base.as_str() {
             "stepaudio-2.5-asr" => Some((vec![SpeechRecognition], vec![])),
             "stepaudio-2.5-tts" => Some((vec![SpeechSynthesis], vec![])),
-            "stepaudio-2.5-realtime" => Some((
-                vec![RealtimeConversation],
-                vec![
-                    ModelTrait::AudioInput,
-                    ModelTrait::AudioOutput,
-                    ModelTrait::Realtime,
-                    ModelTrait::Streaming,
-                ],
-            )),
+            "stepaudio-2.5-realtime" => Some((vec![RealtimeConversation], vec![])),
             "stepaudio-2.5-chat" => Some((vec![Chat], vec![ModelTrait::AudioInput])),
             "step-3.7-flash" => Some((
                 vec![Chat],
@@ -228,23 +280,8 @@ fn verified_provider_profile(
             | "glm-4.1v-thinking-flashx"
             | "glm-4.1v-thinking-flash" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
             // These are conversational audio models, not batch ASR/TTS tasks.
-            "glm-realtime" => Some((
-                vec![RealtimeConversation],
-                vec![
-                    ModelTrait::AudioInput,
-                    ModelTrait::AudioOutput,
-                    ModelTrait::Realtime,
-                    ModelTrait::Streaming,
-                ],
-            )),
-            "glm-4-voice" => Some((
-                vec![Chat],
-                vec![
-                    ModelTrait::AudioInput,
-                    ModelTrait::AudioOutput,
-                    ModelTrait::Streaming,
-                ],
-            )),
+            "glm-realtime" => Some((vec![RealtimeConversation], vec![])),
+            "glm-4-voice" => Some((vec![Chat], vec![ModelTrait::AudioInput])),
             _ => None,
         },
         "moonshot-cn" | "moonshot-global" => match base.as_str() {
@@ -252,20 +289,14 @@ fn verified_provider_profile(
             // repo has no video content part to send anyway (`ContentBlock` has
             // no video variant and the chat path emits only text and
             // `image_url`), so declaring it produced a badge that meant nothing.
-            "kimi-k3" | "kimi-k2.6" | "kimi-k2.5" => Some((
-                vec![Chat],
-                vec![ModelTrait::VisionInput, ModelTrait::Streaming],
-            )),
+            "kimi-k3" | "kimi-k2.6" | "kimi-k2.5" => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
             // The code models accept images too; omitting `VisionInput` made the
             // app silently drop attachments the vendor would have accepted.
-            "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => Some((
-                vec![Chat],
-                vec![ModelTrait::VisionInput, ModelTrait::Streaming],
-            )),
-            _ if base.contains("vision-preview") => Some((
-                vec![Chat],
-                vec![ModelTrait::VisionInput, ModelTrait::Streaming],
-            )),
+            "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => {
+                Some((vec![Chat], vec![ModelTrait::VisionInput]))
+            }
             _ => None,
         },
         "lingyi" if base == "yi-vision-v2" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
@@ -293,8 +324,19 @@ pub fn infer_catalog_tasks_and_traits(
     platform: &str,
     model: &str,
 ) -> (Vec<ModelTask>, Vec<ModelTrait>) {
-    if let Some(profile) = verified_provider_profile(platform, model) {
+    if let Some(profile) = verified_catalog_tasks_and_traits(platform, model) {
         return profile;
+    }
+
+    // Family matching is still useful as an advisory suggestion, but it must
+    // not acquire the evidence of an exact officially documented model ID.
+    if matches!(platform, "ark" | "volcengine") && is_unified_ark_seedream_model(model) {
+        return (vec![ModelTask::ImageGeneration, ModelTask::ImageEdit], vec![]);
+    }
+    if matches!(platform, "moonshot-cn" | "moonshot-global")
+        && base_model_name(model).contains("vision-preview")
+    {
+        return (vec![ModelTask::Chat], vec![ModelTrait::VisionInput]);
     }
 
     let base = base_model_name(model);
@@ -321,12 +363,6 @@ pub fn infer_catalog_tasks_and_traits(
     // 4. Audio / embedding / rerank (mutually exclusive families, checked in priority order).
     if REALTIME_INCLUDE.iter().any(|k| base.contains(k)) {
         push_unique(&mut tasks, ModelTask::RealtimeConversation);
-        traits.extend([
-            ModelTrait::AudioInput,
-            ModelTrait::AudioOutput,
-            ModelTrait::Realtime,
-            ModelTrait::Streaming,
-        ]);
     } else if RERANK_INCLUDE.iter().any(|k| base.contains(k)) {
         push_unique(&mut tasks, ModelTask::Rerank);
     } else if EMBEDDING_INCLUDE.iter().any(|k| base.contains(k)) {
@@ -365,6 +401,16 @@ mod tests {
     }
 
     #[test]
+    fn only_exact_documented_profiles_confirm_a_task() {
+        assert!(verified_catalog_tasks_and_traits("mimo", "mimo-v2.5-asr").is_some());
+        assert!(verified_catalog_tasks_and_traits("mimo", "mimo-v2.5-asr-future").is_none());
+        assert!(verified_catalog_tasks_and_traits("openai", "opaque-future-id").is_none());
+        assert!(verified_catalog_tasks_and_traits("openai", "my-whisper-model").is_none());
+        assert!(verified_catalog_tasks_and_traits("ark", "seedream-5.0-custom").is_none());
+        assert!(verified_catalog_tasks_and_traits("moonshot-cn", "custom-vision-preview").is_none());
+    }
+
+    #[test]
     fn vision_chat_model_has_chat_task_and_vision_trait() {
         let (tasks, traits) = infer_catalog_tasks_and_traits("openai", "gpt-4o");
         assert_eq!(tasks, vec![ModelTask::Chat]);
@@ -400,6 +446,18 @@ mod tests {
         assert_eq!(
             tasks_of("openai", "gpt-image-2"),
             vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+        );
+    }
+
+    #[test]
+    fn agnes_media_models_use_their_native_tasks() {
+        assert_eq!(
+            tasks_of("agnes", "agnes-image-2.1-flash"),
+            vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+        );
+        assert_eq!(
+            tasks_of("agnes", "agnes-video-v2.0"),
+            vec![ModelTask::VideoGeneration]
         );
     }
 
@@ -468,14 +526,7 @@ mod tests {
             infer_catalog_tasks_and_traits("stepfun-plan", "stepaudio-2.5-realtime");
         assert_eq!(tasks, vec![ModelTask::RealtimeConversation]);
         assert!(!tasks.contains(&ModelTask::Chat));
-        for expected in [
-            ModelTrait::AudioInput,
-            ModelTrait::AudioOutput,
-            ModelTrait::Realtime,
-            ModelTrait::Streaming,
-        ] {
-            assert!(traits.contains(&expected), "missing {expected:?}");
-        }
+        assert!(traits.is_empty(), "the realtime task owns transport semantics");
 
         let (tasks, traits) = infer_catalog_tasks_and_traits("stepfun", "stepaudio-2.5-chat");
         assert_eq!(tasks, vec![ModelTask::Chat]);
@@ -552,6 +603,7 @@ mod tests {
         let (_, traits) = infer_catalog_tasks_and_traits("stepfun-plan", "step-3.7-flash");
         assert!(traits.contains(&ModelTrait::VisionInput));
         assert!(traits.contains(&ModelTrait::VideoInput));
+        assert_eq!(traits.len(), 2, "technical capabilities are not user traits");
     }
 
     #[test]
@@ -559,21 +611,11 @@ mod tests {
         let (tasks, traits) = infer_catalog_tasks_and_traits("zhipu", "glm-realtime");
         assert_eq!(tasks, vec![ModelTask::RealtimeConversation]);
         assert!(!tasks.contains(&ModelTask::Chat));
-        for expected in [
-            ModelTrait::AudioInput,
-            ModelTrait::AudioOutput,
-            ModelTrait::Realtime,
-            ModelTrait::Streaming,
-        ] {
-            assert!(traits.contains(&expected), "missing {expected:?}");
-        }
+        assert!(traits.is_empty(), "the realtime task owns transport semantics");
 
         let (tasks, traits) = infer_catalog_tasks_and_traits("zhipu", "glm-4-voice");
         assert_eq!(tasks, vec![ModelTask::Chat]);
-        assert!(traits.contains(&ModelTrait::AudioInput));
-        assert!(traits.contains(&ModelTrait::AudioOutput));
-        assert!(traits.contains(&ModelTrait::Streaming));
-        assert!(!traits.contains(&ModelTrait::Realtime));
+        assert_eq!(traits, vec![ModelTrait::AudioInput]);
     }
 
     #[test]
@@ -585,7 +627,6 @@ mod tests {
             // No VideoInput: this repo cannot send a video content part, so the
             // trait was a badge with nothing behind it.
             assert!(!traits.contains(&ModelTrait::VideoInput), "{model}");
-            assert!(traits.contains(&ModelTrait::Streaming), "{model}");
         }
 
         // The code models do accept images; omitting the trait made the app
@@ -648,20 +689,25 @@ mod tests {
             "\"audio_input\""
         );
         assert_eq!(
-            serde_json::to_string(&ModelTrait::AudioOutput).unwrap(),
-            "\"audio_output\""
-        );
-        assert_eq!(
             serde_json::to_string(&ModelTrait::VideoInput).unwrap(),
             "\"video_input\""
         );
         assert_eq!(
-            serde_json::to_string(&ModelTrait::Realtime).unwrap(),
-            "\"realtime\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ModelTrait::Streaming).unwrap(),
+            serde_json::to_string(&ModelTechnicalCapability::Streaming).unwrap(),
             "\"streaming\""
         );
+    }
+
+    #[test]
+    fn persisted_legacy_technical_traits_are_retired_without_becoming_user_traits() {
+        assert_eq!(
+            parse_persisted_model_traits(
+                r#"["vision_input","function_calling","reasoning","streaming","realtime","audio_output"]"#,
+            )
+            .unwrap(),
+            vec![ModelTrait::VisionInput]
+        );
+        assert!(parse_persisted_model_traits(r#"["unknown_trait"]"#).is_err());
+        assert!(parse_persisted_model_traits(r#"["vision_input","vision_input"]"#).is_err());
     }
 }

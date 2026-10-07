@@ -1,3 +1,4 @@
+import { effectiveImageReferenceInputLimit, imageReferenceInputPolicy } from '@renderer/creation/parameters/imageReferencePolicy';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -14,7 +15,7 @@ import {
   Refresh,
   Ungroup,
 } from '@icon-park/react';
-import { Button, Modal, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import React, {
   useCallback,
@@ -26,26 +27,23 @@ import React, {
 } from 'react';
 import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import {
   creativeAssetClient,
   isCreativeAssetDeleted,
+  saveCreativeAssetAs,
   subscribeCreativeAssetDeletion,
   type CreativeAsset,
   type CreativeAssetKind,
   useCreativeAssetPickerDialog,
   useCreativeAssets,
 } from '../../assets';
+import type { CreativeAssetUploadRejection } from '../../assets/page/model';
 import {
-  creativeAssetDownloadName,
-  type CreativeAssetUploadRejection,
-} from '../../assets/page/model';
-import {
-  CREATIVE_STUDIO_PROJECTS_PATH,
-  CREATIVE_STUDIO_TEMPLATES_PATH,
-  creativeStudioDirectorProjectPath,
-} from '../../app/routes';
+  CANVASES_PATH,
+  TEMPLATES_PATH,
+} from '../../app/resourceRoutes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
   isCreativeCanvasUserNode,
@@ -64,22 +62,15 @@ import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
 import {
-  effectiveImageReferenceInputLimit,
-  imageWorkbenchSizePolicyForModel,
-  imageWorkbenchSelectableSizeOptions,
-  imageReferenceInputPolicy,
-  normalizeImageWorkbenchSettingsSize,
-  type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchModelIdentity,
-  type ImageWorkbenchSettings,
-} from '../../workbenches/image';
-import {
-  exactWorkbenchModelOptions,
-  imageWorkbenchModelOptions,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type CreativeWorkbenchReferences,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+  imageGenerationSizePolicyForModel,
+  imageGenerationSelectableSizeOptions,
+  normalizeImageGenerationSettingsSize,
+  type ImageGenerationAspectRatioOption,
+  type ImageGenerationModelIdentity,
+  type ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
+import { type CanvasGenerationRuntimeSnapshot, type GenerationReferences, type PreparedCanvasGenerationRun } from '../generation';
+import { exactGenerationModelOptions, imageGenerationModelOptions as catalogImageModelOptions } from '@renderer/creation/modelSelection';
 import type {
   CreativeTemplateDefinitionV1,
   CreativeTemplateRunAggregateV1,
@@ -90,7 +81,10 @@ import {
 } from '../../templates/page';
 import { useCreativeTemplateRuntime } from '../../templates/runtime';
 import { creativeTemplateRepository } from '../../templates/services';
-import { CreativeCanvasChrome } from '../chrome';
+import {
+  CreativeCanvasChrome,
+  type CreativeCanvasResourceView,
+} from '../chrome';
 import type { CanvasInteractionTool } from '../components';
 import {
   canRedoCanvas,
@@ -138,7 +132,11 @@ import {
   type CreativeImageSplitParams,
   type UploadedCreativeImageSplitPiece,
 } from '../imageTools';
-import { CreativeNodeView } from '../nodes';
+import {
+  appendTimelineClips,
+  CreativeNodeView,
+  type CreativeTimelineAssetPresentation,
+} from '../nodes';
 import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
@@ -151,16 +149,16 @@ import CreativeCanvasImageComposer, {
   type CreativeCanvasImageComposerReference,
 } from './CreativeCanvasImageComposer';
 import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
+import { canvasNodeDisplayNames } from './nodeDisplayNames';
+import { canvasMediaNodeSize } from '../core/mediaNodeSize';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
 import {
-  CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
   CreativeCanvasUnavailablePanel,
 } from './CreativeCanvasPanels';
-import CreativeCanvasTimelinePanel from './CreativeCanvasTimelinePanel';
 import CreativeCanvasTemplatePanel from './CreativeCanvasTemplatePanel';
 import {
   CreativeCanvasProductAssetLibrary,
@@ -169,7 +167,6 @@ import {
 } from './CreativeCanvasProductLibraries';
 import {
   canvasImageComposeDraftFromState,
-  canvasImageComposeTaskSummary,
   DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
@@ -202,7 +199,6 @@ import {
   canvasAudioComposeDraftFromState,
   canvasAudioComposeEligibility,
   canvasAudioComposeProtocolProfile,
-  canvasAudioComposeTaskSummary,
   canvasAudioComposeVoiceAfterModelChange,
   DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT,
   latestCanvasAudioComposeConfig,
@@ -215,7 +211,6 @@ import { orphanCanvasAudioComposeTask } from './canvasAudioComposerRuntime';
 import {
   canvasVideoComposeDraftFromState,
   canvasVideoComposeMode,
-  canvasVideoComposeTaskSummary,
   DEFAULT_CANVAS_VIDEO_COMPOSE_DRAFT,
   latestCanvasVideoComposeConfig,
   prepareCanvasVideoCompose,
@@ -227,6 +222,7 @@ import {
 import { orphanCanvasVideoComposeTask } from './canvasVideoComposerRuntime';
 import {
   createCreativeCanvasProductNode,
+  CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
   creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
@@ -235,11 +231,11 @@ import {
   canLeaveCreativeCanvasAfterFlush,
   creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
+  restoreCreativeCanvasSessionPanels,
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
   withCreativeCanvasLeftPanelOpen,
-  withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightPanelWidth,
   withCreativeCanvasRightView,
@@ -254,6 +250,8 @@ import {
   uploadCanvasImageNodeAsset,
 } from './imageNodeUpload';
 import { registerCreativeCanvasProductBeforeLeave } from './beforeLeave';
+import { useCanvasComposeRequests } from './useCanvasComposeRequests';
+import { canvasNodeGenerationTaskSummary, pendingCanvasNodeGenerationConfigs } from './canvasNodeGeneration';
 import styles from './CreativeCanvasProductRoute.module.css';
 
 const INITIAL_SAVE: CanvasCasSaveSnapshot = {
@@ -263,7 +261,7 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   error: null,
 };
 
-const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+const INITIAL_CANVAS_TASK_RUNTIME: CanvasGenerationRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -310,11 +308,6 @@ interface ProductCreateNodeMenuState {
   connection: ConnectionCreateNodeIntent | null;
 }
 
-interface PendingPanoramaChoice {
-  asset: CreativeAsset;
-  worldPosition: CanvasPoint;
-}
-
 interface PendingImageCrop {
   nodeId: string;
   asset: CreativeAsset;
@@ -326,7 +319,7 @@ interface PendingImageSplit {
 }
 
 interface PendingImageMaskSubmission {
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   reference: CreativeTaskReference;
   failureOrder: number;
 }
@@ -339,35 +332,20 @@ interface PendingImageMaskEdit {
 
 interface PendingCanvasImageComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
-}
-
-interface CanvasImageComposeIssue {
-  nodeId: string;
-  message: string;
 }
 
 interface PendingCanvasVideoComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
-}
-
-interface CanvasVideoComposeIssue {
-  nodeId: string;
-  message: string;
 }
 
 interface PendingCanvasAudioComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
-}
-
-interface CanvasAudioComposeIssue {
-  nodeId: string;
-  message: string;
 }
 
 interface AgentDocumentState {
@@ -377,9 +355,9 @@ interface AgentDocumentState {
 
 const iconProps = {
   theme: 'outline' as const,
-  size: 17,
+  size: 18,
   fill: 'currentColor',
-  strokeWidth: 3,
+  strokeWidth: 3.5,
 };
 
 function measuredSize(element: HTMLElement | null): CreativeSize {
@@ -461,7 +439,7 @@ const invalidCanvasImageComposerReferences = (
     const issue = issueByConnectionId.get(connection.id);
     if (!issue || source?.type === 'text') continue;
     const assetId =
-      source && (source.type === 'image' || source.type === 'panorama')
+      source?.type === 'image'
         ? source.data.assetId
         : 'assetId' in issue
           ? issue.assetId
@@ -543,9 +521,9 @@ const canvasTextComposerReferences = (
   };
 });
 
-const canvasImageWorkbenchReferences = (
+const canvasImageGenerationReferences = (
   resolution: CanvasImageReferenceResolution
-): CreativeWorkbenchReferences => ({
+): GenerationReferences => ({
   assets: resolution.references.map((reference) => reference.asset),
   bindings: resolution.references.map((reference) => ({
     assetId: reference.assetId,
@@ -629,20 +607,12 @@ const centeredNodePosition = (
   kind: CreativeCanvasUserNodeKind,
   worldPosition: CanvasPoint
 ): CanvasPoint => {
-  const size = CREATIVE_CANVAS_PRODUCT_NODE_SIZES[kind];
+  const size = CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[kind];
   return {
     x: worldPosition.x - size.width / 2,
     y: worldPosition.y - size.height / 2,
   };
 };
-
-const isTwoToOneImage = (asset: CreativeAsset): boolean =>
-  asset.kind === 'image' &&
-  asset.width !== null &&
-  asset.height !== null &&
-  asset.width > 0 &&
-  asset.height > 0 &&
-  Math.abs(asset.width / asset.height - 2) <= 0.03;
 
 const connectionErrorMessage = (
   code: Extract<
@@ -673,14 +643,6 @@ const connectionErrorMessage = (
       return t('creativeStudio.canvas.connection.errors.configToConfig', {
         defaultValue: '两个生成任务记录不能直接连接',
       });
-    case 'director_output_not_supported':
-      return t('creativeStudio.canvas.connection.errors.directorInputOnly', {
-        defaultValue: '导演节点只能接收输入',
-      });
-    case 'director_requires_image_input':
-      return t('creativeStudio.canvas.connection.errors.directorImageOnly', {
-        defaultValue: '导演节点只接受图片或全景图输入',
-      });
     case 'no_valid_drop_target':
       return t('creativeStudio.canvas.connection.errors.invalidDropTarget', {
         defaultValue: '请将连接拖到目标节点卡片上',
@@ -696,7 +658,7 @@ const manualUploadRejectionMessage = (
     case 'audio_unsupported':
       return t('creativeStudio.canvas.upload.audioUnsupported', {
         defaultValue:
-          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入资产库。',
       });
     case 'file_too_large':
       return t('creativeStudio.canvas.upload.assetTooLarge', {
@@ -794,14 +756,14 @@ const SaveRecoveryAction: React.FC<{
 
 const CanvasTaskRuntimeAction: React.FC<{
   label: string;
-  snapshot: CreativeWorkbenchRuntimeSnapshot;
+  snapshot: CanvasGenerationRuntimeSnapshot;
   busy: boolean;
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
 }> = ({ label, snapshot, busy, onCancel, onRetry }) => {
   const { t } = useTranslation();
   const taskLabel = (
-    _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
+    _task: CanvasGenerationRuntimeSnapshot['entries'][number]['task']
   ) => label;
   const requestError = snapshot.entries.find(
     (entry) => entry.requestError !== null
@@ -896,9 +858,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
   // Legacy local adapter: the migrated product internals still use projectId.
   const projectId = canvasId;
   const navigate = useNavigate();
+  const location = useLocation();
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
+  const openingCanvasTitle = useMemo(() => {
+    if (!location.state || typeof location.state !== 'object') return null;
+    if (!('canvasSummary' in location.state)) return null;
+    const summary = location.state.canvasSummary;
+    if (!summary || typeof summary !== 'object') return null;
+    if (
+      !('canvasId' in summary) ||
+      summary.canvasId !== canvasId ||
+      !('title' in summary) ||
+      typeof summary.title !== 'string'
+    ) {
+      return null;
+    }
+    return summary.title;
+  }, [canvasId, location.state]);
   const modelCatalog = useNomiCreativeModelCatalog();
   const templateRuntime = useCreativeTemplateRuntime();
   const templateAssetPicker = useCreativeAssetPickerDialog();
@@ -914,7 +892,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
   const imageNodeUploadTargetRef = useRef<string | null>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
-    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+    restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
   const hydratedPanelsRef = useRef<{
     projectId: string;
@@ -958,8 +936,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [miniMapOpen, setMiniMapOpen] = useState(false);
   const [miniMapDragging, setMiniMapDragging] = useState(false);
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
-    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+    restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
+  const [resourceDialogView, setResourceDialogView] =
+    useState<CreativeCanvasResourceView | null>(null);
+  const [resourceDialogPopupContainer, setResourceDialogPopupContainer] =
+    useState<HTMLElement | null>(null);
+  const [timelineAssetTargetId, setTimelineAssetTargetId] = useState<string | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
@@ -976,8 +959,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<CreativeCanvasContextMenuState | null>(null);
   const [createNodeMenu, setCreateNodeMenu] =
     useState<ProductCreateNodeMenuState | null>(null);
-  const [pendingPanoramaChoice, setPendingPanoramaChoice] =
-    useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
   const [previewImageNode, setPreviewImageNode] =
     useState<Extract<CreativeCanvasNode, { type: 'image' }> | null>(null);
@@ -1005,38 +986,53 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [imageMaskError, setImageMaskError] = useState<string | null>(null);
   const [imageTaskRuntime, setImageTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
-  const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
   const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
     useState(false);
-  const [imageComposeBusy, setImageComposeBusy] = useState(false);
-  const [imageComposeIssue, setImageComposeIssue] =
-    useState<CanvasImageComposeIssue | null>(null);
-  const [imageComposeSubmission, setImageComposeSubmission] =
-    useState<PendingCanvasImageComposeSubmission | null>(null);
+  const {
+    busy: imageComposeBusy,
+    busyNodes: imageComposeBusyNodes,
+    isBusy: imageComposeIsBusy,
+    setBusy: setImageComposeBusy,
+    issues: imageComposeIssues,
+    setIssue: setImageComposeIssue,
+    submissions: imageComposeSubmissions,
+    setSubmission: setImageComposeSubmission,
+    reset: resetImageComposeRequests,
+  } = useCanvasComposeRequests<PendingCanvasImageComposeSubmission>(projectId);
   const [videoTaskRuntime, setVideoTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [videoTaskRuntimeReady, setVideoTaskRuntimeReady] = useState(false);
-  const [videoTaskRuntimeEpoch, setVideoTaskRuntimeEpoch] = useState(0);
   const [videoTaskRuntimeActionBusy, setVideoTaskRuntimeActionBusy] =
     useState(false);
-  const [videoComposeBusy, setVideoComposeBusy] = useState(false);
-  const [videoComposeIssue, setVideoComposeIssue] =
-    useState<CanvasVideoComposeIssue | null>(null);
-  const [videoComposeSubmission, setVideoComposeSubmission] =
-    useState<PendingCanvasVideoComposeSubmission | null>(null);
+  const {
+    busy: videoComposeBusy,
+    busyNodes: videoComposeBusyNodes,
+    isBusy: videoComposeIsBusy,
+    setBusy: setVideoComposeBusy,
+    issues: videoComposeIssues,
+    setIssue: setVideoComposeIssue,
+    submissions: videoComposeSubmissions,
+    setSubmission: setVideoComposeSubmission,
+    reset: resetVideoComposeRequests,
+  } = useCanvasComposeRequests<PendingCanvasVideoComposeSubmission>(projectId);
   const [audioTaskRuntime, setAudioTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [audioTaskRuntimeReady, setAudioTaskRuntimeReady] = useState(false);
-  const [audioTaskRuntimeEpoch, setAudioTaskRuntimeEpoch] = useState(0);
   const [audioTaskRuntimeActionBusy, setAudioTaskRuntimeActionBusy] =
     useState(false);
-  const [audioComposeBusy, setAudioComposeBusy] = useState(false);
-  const [audioComposeIssue, setAudioComposeIssue] =
-    useState<CanvasAudioComposeIssue | null>(null);
-  const [audioComposeSubmission, setAudioComposeSubmission] =
-    useState<PendingCanvasAudioComposeSubmission | null>(null);
+  const {
+    busy: audioComposeBusy,
+    busyNodes: audioComposeBusyNodes,
+    isBusy: audioComposeIsBusy,
+    setBusy: setAudioComposeBusy,
+    issues: audioComposeIssues,
+    setIssue: setAudioComposeIssue,
+    submissions: audioComposeSubmissions,
+    setSubmission: setAudioComposeSubmission,
+    reset: resetAudioComposeRequests,
+  } = useCanvasComposeRequests<PendingCanvasAudioComposeSubmission>(projectId);
   const [agentDocumentState, setAgentDocumentState] =
     useState<AgentDocumentState | null>(null);
   const [agentOpsApplyBusy, setAgentOpsApplyBusy] = useState(false);
@@ -1114,38 +1110,67 @@ const CreativeCanvasProductRoute: React.FC = () => {
     enabled: Boolean(projectId),
     query: assetQuery,
   });
+  const timelineLibrary = useCreativeAssets({
+    enabled: Boolean(projectId),
+    query: {
+      inLibrary: true,
+      sort: 'updated_desc',
+    },
+  });
   const imageMaskModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageComposeModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => catalogImageModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageGenerationModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => catalogImageModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const imageGenerationExactOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const videoModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'video_generation'),
     [modelCatalog]
   );
   const audioModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'speech_synthesis'),
+    () => exactGenerationModelOptions(modelCatalog, 'speech_synthesis'),
     [modelCatalog]
   );
 
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
     for (const asset of assets.assets) merged.set(asset.id, asset);
+    for (const asset of timelineLibrary.assets) merged.set(asset.id, asset);
     for (const asset of canvasReferenceAssets.values()) merged.set(asset.id, asset);
     knownAssetsRef.current = merged;
     return merged;
-  }, [assets.assets, canvasReferenceAssets]);
+  }, [assets.assets, canvasReferenceAssets, timelineLibrary.assets]);
+
+  const timelineLibraryPresentations = useMemo(
+    () => timelineLibrary.assets.flatMap((asset): CreativeTimelineAssetPresentation[] => {
+      if (
+        !asset.inLibrary ||
+        isCreativeAssetDeleted(asset) ||
+        (asset.kind !== 'image' && asset.kind !== 'video')
+      ) return [];
+      return [{
+        assetId: asset.id,
+        kind: asset.kind,
+        title: asset.title,
+        src: asset.originalUrl,
+        thumbnailSrc: asset.thumbnailUrl,
+        width: asset.width,
+        height: asset.height,
+        mimeType: asset.mimeType,
+      }];
+    }),
+    [timelineLibrary.assets]
+  );
 
   const selectedCanvasImageReferenceAssetIds = useMemo(() => {
     if (!canvasState || canvasState.selection.nodeIds.length !== 1) return [];
@@ -1160,16 +1185,52 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const canvasMediaAssetIds = useMemo(() => [...new Set([
     ...selectedCanvasImageReferenceAssetIds,
     ...(canvasState?.document.nodes.flatMap((node) => {
+      if (node.type === 'timeline') {
+        return node.data.clips.map((clip) => clip.assetId);
+      }
       if (node.type === 'video') {
         return [node.data.assetId, node.data.posterAssetId].filter(
           (assetId): assetId is string => Boolean(assetId)
         );
       }
-      return (node.type === 'image' || node.type === 'panorama' || node.type === 'audio')
+      return (node.type === 'image' || node.type === 'audio')
         && node.data.assetId ? [node.data.assetId] : [];
     }) ?? []),
   ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
   const canvasMediaAssetKey = canvasMediaAssetIds.join('\u0000');
+  const nodeDisplayNames = useMemo(
+    () => canvasNodeDisplayNames(canvasState?.document.nodes ?? [], knownAssetsById, t),
+    [canvasState?.document.nodes, knownAssetsById, t]
+  );
+  const reconcileMediaSize = useCallback((
+    nodeId: string, assetId: string, media: { width: number | null; height: number | null }
+  ) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const node = editor.getState().document.nodes.find((item) => item.id === nodeId);
+    if (!node || (node.type !== 'image' && node.type !== 'video') ||
+        node.data.assetId !== assetId) return;
+    const known = knownAssetsRef.current.get(assetId);
+    if (known && isCreativeAssetDeleted(known)) return;
+    // Prefer full-resolution metadata over a potentially cropped thumbnail.
+    const dimensions = known?.width && known.height ? known
+      : node.type === 'image' && node.data.naturalSize ? node.data.naturalSize : media;
+    const size = canvasMediaNodeSize(dimensions, node.size);
+    if (Math.abs(size.width - node.size.width) < 0.01 &&
+        Math.abs(size.height - node.size.height) < 0.01) return;
+    editor.dispatch(canvasCommands.reconcileRuntimeNode({ ...node, size }));
+  }, []);
+
+  useEffect(() => {
+    const nodes = editorRef.current?.getState().document.nodes ?? [];
+    for (const node of nodes) {
+      if ((node.type !== 'image' && node.type !== 'video') || !node.data.assetId) continue;
+      const asset = knownAssetsById.get(node.data.assetId);
+      if (asset && !isCreativeAssetDeleted(asset) && asset.kind === node.type) {
+        reconcileMediaSize(node.id, asset.id, asset);
+      }
+    }
+  }, [knownAssetsById, canvasMediaAssetKey, projectId, reconcileMediaSize]);
 
   useEffect(() => {
     let active = true;
@@ -1244,9 +1305,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
     imageToolAbortRef.current = null;
     imageNodeUploadTargetRef.current = null;
     if (imageNodeUploadInputRef.current) imageNodeUploadInputRef.current.value = '';
-    const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
+    const defaultPanels = restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS);
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
+    setResourceDialogView(null);
+    setResourceDialogPopupContainer(null);
+    setTimelineAssetTargetId(null);
     hydratedPanelsRef.current = null;
     canvasStateRef.current = null;
     setCanvasState(null);
@@ -1259,7 +1323,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCanvasReferenceAssets(new Map());
     setContextMenu(null);
     setCreateNodeMenu(null);
-    setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
     setPreviewImageNode(null);
     setPendingImageCrop(null);
@@ -1277,25 +1340,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageMaskError(null);
     setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
     setImageTaskRuntimeReady(false);
-    setImageTaskRuntimeEpoch(0);
     setImageTaskRuntimeActionBusy(false);
-    setImageComposeBusy(false);
-    setImageComposeIssue(null);
-    setImageComposeSubmission(null);
+    resetImageComposeRequests();
     setVideoTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
     setVideoTaskRuntimeReady(false);
-    setVideoTaskRuntimeEpoch(0);
     setVideoTaskRuntimeActionBusy(false);
-    setVideoComposeBusy(false);
-    setVideoComposeIssue(null);
-    setVideoComposeSubmission(null);
+    resetVideoComposeRequests();
     setAudioTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
     setAudioTaskRuntimeReady(false);
-    setAudioTaskRuntimeEpoch(0);
     setAudioTaskRuntimeActionBusy(false);
-    setAudioComposeBusy(false);
-    setAudioComposeIssue(null);
-    setAudioComposeSubmission(null);
+    resetAudioComposeRequests();
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     imageToolBusyRef.current = false;
@@ -1354,7 +1408,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (save.status === 'idle' && hydrated.revision !== detail.project.revision);
     if (!shouldHydratePanels) return;
 
-    const nextPanels = structuredClone(detail.document.panels);
+    const nextPanels = restoreCreativeCanvasSessionPanels(
+      detail.document.panels,
+      hydrated?.projectId === projectId ? panelsRef.current.left.open : false
+    );
     panelsRef.current = nextPanels;
     setPanels(nextPanels);
     hydratedPanelsRef.current = {
@@ -1376,11 +1433,38 @@ const CreativeCanvasProductRoute: React.FC = () => {
     editorRef.current?.setPanels(nextPanels);
   }, []);
 
-  const handleLeftViewChange = useCallback(
-    (view: CreativeStudioPanelState['left']['activeView']) => {
-      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+  const handleResourceViewChange = useCallback(
+    (
+      view: CreativeCanvasResourceView | null,
+      popupContainer: HTMLElement | null = null
+    ) => {
+      if (view === null || view === 'assets') {
+        setSelectedAssetIds(new Set());
+      }
+      if (view === 'assets') {
+        setAssetSearch('');
+        setAssetKind('all');
+      }
+      if (view !== 'assets') setTimelineAssetTargetId(null);
+      setResourceDialogPopupContainer(view === null ? null : popupContainer);
+      setResourceDialogView(view);
+      if (view !== null && panelsRef.current.left.open) {
+        persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, false));
+      }
     },
     [persistPanels]
+  );
+
+  const handleLeftViewChange = useCallback(
+    (view: CreativeStudioPanelState['left']['activeView']) => {
+      if (view !== 'canvas') {
+        handleResourceViewChange(view);
+        return;
+      }
+      setResourceDialogView(null);
+      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+    },
+    [handleResourceViewChange, persistPanels]
   );
 
   const handleLeftPanelOpenChange = useCallback(
@@ -1402,13 +1486,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       persistPanels(
         withCreativeCanvasRightPanelWidth(panelsRef.current, width)
       );
-    },
-    [persistPanels]
-  );
-
-  const handleBottomViewChange = useCallback(
-    (view: CreativeStudioPanelState['bottom']['activeView'] | null) => {
-      persistPanels(withCreativeCanvasBottomView(panelsRef.current, view));
     },
     [persistPanels]
   );
@@ -1518,8 +1595,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const openPromptLibrary = useCallback(() => {
-    handleLeftViewChange('prompts');
-  }, [handleLeftViewChange]);
+    handleResourceViewChange('prompts');
+  }, [handleResourceViewChange]);
 
   const prepareCenteredInsertion = useCallback(() => {
     const editor = editorRef.current;
@@ -1543,45 +1620,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const insertion = prepareCenteredInsertion();
       if (!insertion) return;
       const { editor, state, viewportSize } = insertion;
-      if (kind === 'director') {
-        const directors = state.document.nodes.filter(
-          (node) => node.type === 'director'
-        );
-        if (directors.length > 0) {
-          editor.dispatch(
-            canvasCommands.setSelection(directors.map((node) => node.id))
-          );
-          handleBottomViewChange('timeline');
-          setNotice(
-            directors.length === 1
-              ? t('creativeStudio.canvas.notices.directorSelected', {
-                  defaultValue: '画布已有唯一导演节点，已为你选中。',
-                })
-              : t('creativeStudio.canvas.notices.directorConflict', {
-                  defaultValue: '画布存在多个导演节点，请在时间线面板中处理冲突。',
-                })
-          );
-          return;
-        }
-      }
       const node = createCreativeCanvasProductNode(
         kind,
         state,
         viewportSize
       );
       editor.dispatch(canvasCommands.addNode(node));
-      if (kind === 'director') {
-        handleBottomViewChange('timeline');
-        setNotice(
-          t('creativeStudio.canvas.notices.directorCreated', {
-            defaultValue: '已创建当前画布唯一的导演节点。',
-          })
-        );
-      } else {
-        setNotice(null);
-      }
+      setNotice(null);
     },
-    [handleBottomViewChange, prepareCenteredInsertion, save.revision]
+    [prepareCenteredInsertion, save.revision]
   );
 
   const handleMiniMapNavigate = useCallback(
@@ -1829,7 +1876,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [flushBeforeLeave, navigate]);
 
   const handleOpenTemplateCenter = useCallback(async () => {
-    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_TEMPLATES_PATH);
+    if (await flushBeforeLeave()) navigate(TEMPLATES_PATH);
   }, [flushBeforeLeave, navigate]);
 
   const templateRunner = useMemo<CreativeTemplateRunnerPort>(
@@ -1867,7 +1914,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const insertAssetAtWorld = useCallback(
-    (asset: CreativeAsset, worldPosition: CanvasPoint, asPanorama = false) => {
+    (asset: CreativeAsset, worldPosition: CanvasPoint) => {
       const editor = editorRef.current;
       if (!editor) {
         throw new Error(
@@ -1877,30 +1924,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
       }
       const state = editor.getState();
-      const kind = asPanorama ? 'panorama' : asset.kind;
-      const position = centeredNodePosition(kind, worldPosition);
-      const node = asPanorama
-        ? {
-            ...createCreativeCanvasProductNode(
-              'panorama',
-              state,
-              measuredSize(canvasHostRef.current),
-              { position }
-            ),
-            data: {
-              assetId: asset.id,
-              projection: 'equirectangular' as const,
-              yaw: 0,
-              pitch: 0,
-              fieldOfView: 75,
-            },
-          }
-        : creativeNodeFromAsset(
-            asset,
-            state,
-            measuredSize(canvasHostRef.current),
-            { position }
-          );
+      const position = centeredNodePosition(asset.kind, worldPosition);
+      const node = creativeNodeFromAsset(
+        asset,
+        state,
+        measuredSize(canvasHostRef.current),
+        { position }
+      );
       knownAssetsRef.current = new Map(knownAssetsRef.current).set(
         asset.id,
         asset
@@ -1909,13 +1939,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setNotice(
         t('creativeStudio.canvas.notices.assetInserted', {
           title: asset.title,
-          kind: asPanorama
-            ? t('creativeStudio.canvas.nodeKinds.panorama', {
-                defaultValue: '全景图',
-              })
-            : t('creativeStudio.canvas.notices.assetKind', {
-                defaultValue: '素材',
-              }),
+          kind: t('creativeStudio.canvas.notices.assetKind', {
+            defaultValue: '素材',
+          }),
           defaultValue: '已将“{{title}}”插入为{{kind}}节点。',
         })
       );
@@ -1925,11 +1951,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const importCanvasFile = useCallback(
-    async (
-      file: File,
-      worldPosition: CanvasPoint,
-      panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable'
-    ) => {
+    async (file: File, worldPosition: CanvasPoint) => {
       if (assetImportBusyRef.current) {
         setNotice(
           t('creativeStudio.canvas.notices.uploadBusy', {
@@ -1960,21 +1982,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
               })
             )
         );
-        if (
-          panoramaChoice === 'after-upload-if-2-to-1' &&
-          isTwoToOneImage(asset)
-        ) {
-          setPendingPanoramaChoice({
-            asset,
-            worldPosition: { ...worldPosition },
-          });
-          setNotice(
-            t('creativeStudio.canvas.notices.panoramaDetected', {
-              defaultValue: '检测到真实 2:1 图片，请选择普通图片或全景图节点。',
-            })
-          );
-          return;
-        }
         insertAssetAtWorld(asset, worldPosition);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
@@ -2066,7 +2073,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!editor) {
           throw new Error(
             t('creativeStudio.canvas.errors.closedAfterUpload', {
-              defaultValue: '画布已经关闭，图片保留在素材库中。',
+              defaultValue: '画布已经关闭，图片保留在资产库中。',
             })
           );
         }
@@ -2078,7 +2085,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!source) {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeRemovedAfterUpload', {
-              defaultValue: '图片节点已被删除，上传结果保留在素材库中。',
+              defaultValue: '图片节点已被删除，上传结果保留在资产库中。',
             })
           );
         }
@@ -2097,7 +2104,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeTaskProtected', {
               defaultValue:
-                '图片节点当前受运行任务保护；上传素材已保留在素材库中。',
+                '图片节点当前受运行任务保护；上传素材已保留在资产库中。',
             })
           );
         }
@@ -2198,17 +2205,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
       try {
         const asset = await resolveCanvasImageAsset(node);
         if (activeProjectIdRef.current !== projectId) return;
-        const anchor = document.createElement('a');
-        anchor.href = asset.originalUrl;
-        anchor.download = creativeAssetDownloadName(asset);
-        anchor.rel = 'noopener noreferrer';
-        anchor.click();
+        await saveCreativeAssetAs(
+          asset,
+          t('common.saveAs', { defaultValue: '另存为' })
+        );
       } catch (error) {
         if (activeProjectIdRef.current !== projectId) return;
         setNotice(error instanceof Error ? error.message : String(error));
       }
     },
-    [projectId, resolveCanvasImageAsset]
+    [projectId, resolveCanvasImageAsset, t]
   );
 
   const handleOpenImageSplit = useCallback(
@@ -2293,7 +2299,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.cropSourceChanged', {
               defaultValue:
-                '原图片节点已被删除或替换；裁剪素材已保存在素材库中。',
+                '原图片节点已被删除或替换；裁剪素材已保存在资产库中。',
             })
           );
         }
@@ -2622,18 +2628,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleOpenImageMaskEdit = useCallback(
     async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
-      const runtime = imageTaskRuntimeRef.current?.snapshot();
-      const runtimeBlocked =
-        !imageTaskRuntimeReady ||
-        !runtime ||
-        runtime.submittingCount > 0 ||
-        runtime.recoveringCount > 0 ||
-        runtime.submissionFailures.length > 0 ||
-        runtime.requestError !== null ||
-        runtime.entries.some(
-          (entry) =>
-            entry.task.status === 'queued' || entry.task.status === 'running'
-        );
+      const runtimeBlocked = !imageTaskRuntimeReady || !imageTaskRuntimeRef.current ||
+        imageComposeIsBusy(node.id) || imageTaskRuntimeRef.current?.isNodeBusy(node.id) || pendingCanvasNodeGenerationConfigs(
+          editorRef.current?.getState().document ?? { nodes: [] }, node.id,
+          editorRef.current?.getPendingTaskIds()
+        ).length > 0;
       if (
         imageToolBusyRef.current ||
         assetImportBusyRef.current ||
@@ -2643,7 +2642,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           runtimeBlocked
             ? t('creativeStudio.canvas.notices.maskTaskBusy', {
                 defaultValue:
-                  '已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。',
+                  '当前图片节点有任务正在运行、恢复或等待确认，请先处理该任务。',
               })
             : t('creativeStudio.canvas.notices.imageOperationBusy', {
                 defaultValue: '已有图片或素材操作正在进行，请等待完成。',
@@ -2671,6 +2670,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     },
     [
       imageMaskModelOptions,
+      imageComposeIsBusy,
       imageTaskRuntimeReady,
       projectId,
       resolveCanvasImageAsset,
@@ -2689,7 +2689,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       result: Awaited<
         ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>
       >,
-      plan: PreparedCreativeWorkbenchRun
+      plan: PreparedCanvasGenerationRun
     ) => {
       if (result.kind === 'admitted') {
         setPendingImageMaskEdit(null);
@@ -2732,6 +2732,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const editor = editorRef.current;
       const runtime = imageTaskRuntimeRef.current;
       if (!request || !editor || !runtime || imageToolBusyRef.current) return;
+      if (!request.submission && (imageComposeIsBusy(request.nodeId) || runtime.isNodeBusy(request.nodeId) || pendingCanvasNodeGenerationConfigs(
+        editor.getState().document, request.nodeId, editor.getPendingTaskIds()
+      ).length > 0)) {
+        setImageMaskError(t('creativeStudio.canvas.errors.imageTaskBusy'));
+        return;
+      }
 
       imageToolBusyRef.current = true;
       setImageMaskBusy(true);
@@ -2905,7 +2911,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setImageMaskBusy(false);
       }
     },
-    [applyImageMaskAdmission, modelCatalog, pendingImageMaskEdit, projectId]
+    [applyImageMaskAdmission, imageComposeIsBusy, modelCatalog, pendingImageMaskEdit, projectId]
   );
 
   const abandonImageMaskSubmission = useCallback(async () => {
@@ -2939,8 +2945,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         projectId,
         reference: request.submission.reference,
       });
-      setImageTaskRuntimeEpoch((value) => value + 1);
-      setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+      runtime.dismissSubmission(request.submission.failureOrder);
       setPendingImageMaskEdit(null);
       setImageMaskProgress(null);
       setNotice(
@@ -2992,12 +2997,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyImageComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>>
     ) => {
+      if (activeProjectIdRef.current !== projectId) return;
       if (result.kind === 'admitted') {
-        setImageComposeSubmission(null);
-        setImageComposeIssue(null);
+        setImageComposeSubmission(null, nodeId);
+        setImageComposeIssue(null, nodeId);
         setNotice(
           t('creativeStudio.canvas.notices.imageTaskSubmitted', {
             defaultValue:
@@ -3019,7 +3025,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }),
       });
     },
-    []
+    [projectId, setImageComposeIssue, setImageComposeSubmission]
   );
 
   const generateFromCanvasImage = useCallback(
@@ -3027,11 +3033,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
       nodeId: string,
       prompt: string,
       mentions: readonly CreativeImagePromptMention[],
-      settings: ImageWorkbenchSettings
+      settings: ImageGenerationSettings
     ) => {
       const editor = editorRef.current;
       const runtime = imageTaskRuntimeRef.current;
-      if (!editor || !runtime || imageToolBusyRef.current || imageComposeSubmission) return;
+      if (!editor || !runtime || imageToolBusyRef.current || imageComposeIsBusy(nodeId) || imageComposeSubmissions.has(nodeId)) return;
+      if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(editor.getState().document, nodeId, editor.getPendingTaskIds()).length > 0) {
+        setImageComposeIssue({
+          nodeId,
+          message: t('creativeStudio.canvas.errors.imageTaskBusy'),
+        });
+        return;
+      }
       if (!settings.model || modelCatalog.status !== 'ready') {
         setImageComposeIssue({
           nodeId,
@@ -3041,28 +3054,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         return;
       }
-      const snapshot = runtime.snapshot();
-      if (
-        snapshot.submittingCount > 0 ||
-        snapshot.recoveringCount > 0 ||
-        snapshot.submissionFailures.length > 0 ||
-        snapshot.requestError !== null ||
-        snapshot.entries.some(
-          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
-        )
-      ) {
-        setImageComposeIssue({
-          nodeId,
-          message: t('creativeStudio.canvas.errors.imageTaskBusy', {
-            defaultValue: '已有图片任务正在处理，请等待完成。',
-          }),
-        });
-        return;
-      }
-
-      imageToolBusyRef.current = true;
-      setImageComposeBusy(true);
-      setImageComposeIssue(null);
+      setImageComposeBusy(true, nodeId);
+      setImageComposeIssue(null, nodeId);
       let prepared: ReturnType<typeof prepareCanvasImageCompose> | null = null;
       let canvasOwned = false;
       try {
@@ -3097,6 +3090,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
+        if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(currentState.document, nodeId, editor.getPendingTaskIds()).length > 0) {
+          throw new Error(t('creativeStudio.canvas.errors.imageTaskBusy'));
+        }
         const currentSource = currentState.document.nodes.find(
           (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
             node.id === nodeId && node.type === 'image'
@@ -3221,7 +3217,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           viewportSize: measuredSize(canvasHostRef.current),
           sourceNode: source,
           sourceAsset,
-          references: canvasImageWorkbenchReferences(referenceResolution),
+          references: canvasImageGenerationReferences(referenceResolution),
           catalog: modelCatalog,
           model: selectedModel,
           prompt,
@@ -3237,19 +3233,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         const at = Date.now();
         const mergeKey = `image-compose:${source.id}:${prepared.plan.input.idempotencyKey}`;
-        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey, select: false }));
         editor.dispatch(
           canvasCommands.connect(source.id, prepared.configNode.id, {
             sourceHandle: prepared.connection.sourceHandle,
             targetHandle: prepared.connection.targetHandle,
             at,
             mergeKey,
+            select: false,
           })
         );
         canvasOwned = true;
         const result = await runtime.submit(prepared.plan);
         applyImageComposeAdmission(nodeId, prepared.plan, result);
       } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
         let message = error instanceof Error ? error.message : String(error);
         if (canvasOwned && prepared) {
           try {
@@ -3278,13 +3276,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           setImageComposeIssue({ nodeId, message });
         }
       } finally {
-        imageToolBusyRef.current = false;
-        setImageComposeBusy(false);
+        setImageComposeBusy(false, nodeId);
       }
     },
     [
       applyImageComposeAdmission,
-      imageComposeSubmission,
+      imageComposeIsBusy,
+      imageComposeSubmissions,
       imageGenerationExactOptions,
       imageMaskModelOptions,
       modelCatalog,
@@ -3294,19 +3292,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const retryCanvasImageComposeSubmission = useCallback(
     async (nodeId: string) => {
-      const request = imageComposeSubmission;
+      const request = imageComposeSubmissions.get(nodeId);
       const runtime = imageTaskRuntimeRef.current;
       if (
         !request ||
         request.nodeId !== nodeId ||
         !runtime ||
-        imageToolBusyRef.current
+        imageToolBusyRef.current || imageComposeIsBusy(nodeId)
       ) {
         return;
       }
-      imageToolBusyRef.current = true;
-      setImageComposeBusy(true);
-      setImageComposeIssue(null);
+      setImageComposeBusy(true, nodeId);
+      setImageComposeIssue(null, nodeId);
       try {
         const result = await runtime.retrySubmission(
           request.failureOrder,
@@ -3319,22 +3316,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
           message: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        imageToolBusyRef.current = false;
-        setImageComposeBusy(false);
+        setImageComposeBusy(false, nodeId);
       }
     },
-    [applyImageComposeAdmission, imageComposeSubmission]
+    [applyImageComposeAdmission, imageComposeIsBusy, imageComposeSubmissions]
   );
 
   const applyVideoComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasVideoTaskRuntimeBridgeHandle['submit']>>
     ) => {
+      if (activeProjectIdRef.current !== projectId) return;
       if (result.kind === 'admitted') {
-        setVideoComposeSubmission(null);
-        setVideoComposeIssue(null);
+        setVideoComposeSubmission(null, nodeId);
+        setVideoComposeIssue(null, nodeId);
         setNotice(
           t('creativeStudio.canvas.notices.videoTaskSubmitted', {
             defaultValue:
@@ -3352,23 +3349,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }),
       });
     },
-    []
+    [projectId, setVideoComposeIssue, setVideoComposeSubmission]
   );
 
   const generateFromCanvasVideo = useCallback(
     async (
       nodeId: string,
       prompt: string,
-      settings: CanvasVideoComposeSettings
+      settings: CanvasVideoComposeSettings,
+      mentions: readonly CreativeImagePromptMention[] = []
     ) => {
       const editor = editorRef.current;
       const runtime = videoTaskRuntimeRef.current;
       if (
         !editor ||
         !runtime ||
-        videoComposeBusy ||
-        videoComposeSubmission
+        videoComposeIsBusy(nodeId) ||
+        videoComposeSubmissions.has(nodeId)
       ) {
+        return;
+      }
+      if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(editor.getState().document, nodeId, editor.getPendingTaskIds()).length > 0) {
+        setVideoComposeIssue({
+          nodeId,
+          message: t('creativeStudio.canvas.errors.videoTaskBusy'),
+        });
         return;
       }
       if (!settings.model || modelCatalog.status !== 'ready') {
@@ -3380,27 +3385,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         return;
       }
-      const snapshot = runtime.snapshot();
-      if (
-        snapshot.submittingCount > 0 ||
-        snapshot.recoveringCount > 0 ||
-        snapshot.submissionFailures.length > 0 ||
-        snapshot.requestError !== null ||
-        snapshot.entries.some(
-          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
-        )
-      ) {
-        setVideoComposeIssue({
-          nodeId,
-          message: t('creativeStudio.canvas.errors.videoTaskBusy', {
-            defaultValue: '已有视频任务正在处理，请等待完成。',
-          }),
-        });
-        return;
-      }
-
-      setVideoComposeBusy(true);
-      setVideoComposeIssue(null);
+      setVideoComposeBusy(true, nodeId);
+      setVideoComposeIssue(null, nodeId);
       let prepared: ReturnType<typeof prepareCanvasVideoCompose> | null = null;
       let canvasOwned = false;
       try {
@@ -3430,19 +3416,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
-        const reference =
+        const references =
           mode.kind === 'i2v'
-            ? (knownAssetsRef.current.get(mode.assetId) ??
-              (await creativeAssetClient.get(mode.assetId)))
-            : null;
-        if (reference && reference.kind !== 'image') {
+            ? await Promise.all(
+                mode.assetIds.map((id) =>
+                  knownAssetsRef.current.get(id) ?? creativeAssetClient.get(id)
+                )
+              )
+            : [];
+        if (references.some((reference) => reference.kind !== 'image')) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoReferenceResolutionFailed', {
               defaultValue: 'I2V 引用没有解析为真实图片素材。',
             })
           );
         }
-        if (reference) {
+        for (const reference of references) {
           knownAssetsRef.current = new Map(knownAssetsRef.current).set(
             reference.id,
             reference
@@ -3452,6 +3441,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
+        if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(currentState.document, nodeId, editor.getPendingTaskIds()).length > 0) {
+          throw new Error(t('creativeStudio.canvas.errors.videoTaskBusy'));
+        }
         const currentSource = currentState.document.nodes.find(
           (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
             node.id === nodeId && node.type === 'video'
@@ -3462,7 +3454,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           currentSource.data.assetId !== null ||
           currentMode.kind !== mode.kind ||
           (mode.kind === 'i2v' &&
-            (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
+            (currentMode.kind !== 'i2v' ||
+              currentMode.assetIds.length !== mode.assetIds.length ||
+              currentMode.assetIds.some((id, index) => id !== mode.assetIds[index])))
         ) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoSourceChangedBeforeTask', {
@@ -3470,8 +3464,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
+        // Resolve stable node identities against the graph after async hydration.
+        // Never send a stale @ alias or silently drop an invalid inbound edge.
+        const resolution = resolveCanvasImageReferences(currentState, nodeId, references);
+        const compilation = compileCanvasImageReferencePrompt(
+          prompt,
+          mentions.map((mention) => ({
+            sourceNodeId: mention.sourceNodeId,
+            start: mention.start,
+            end: mention.end,
+            tokenText: `@${mention.fallbackLabel}`,
+          })),
+          resolution.references,
+          resolution.textReferences
+        );
+        const blocker: CanvasImageGenerationBlocker | undefined = resolution.issues[0]
+          ? { code: 'reference_resolution_failed', issue: resolution.issues[0] }
+          : compilation.issues[0]
+            ? { code: 'prompt_compilation_failed', issue: compilation.issues[0] }
+            : undefined;
+        if (blocker || !compilation.ok) {
+          throw new Error(canvasImageGenerationBlockerMessage(blocker, t) ??
+            t('creativeStudio.canvas.errors.videoReferenceResolutionFailed'));
+        }
         const durableSource = withCanvasVideoComposeDraft(currentSource, {
           prompt,
+          mentions: structuredClone([...mentions]),
           settings: {
             ...settings,
             model: {
@@ -3497,19 +3515,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
             task: 'video_generation',
             capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
           },
-          references: reference
-            ? {
-                assets: [reference],
-                bindings: [
-                  {
-                    assetId: reference.id,
-                    kind: 'image',
-                    role: 'reference',
-                  },
-                ],
-              }
-            : { assets: [], bindings: [] },
-          prompt,
+          references: {
+            assets: resolution.references.map((reference) => reference.asset),
+            bindings: resolution.references.map((reference) => ({
+              assetId: reference.assetId,
+              kind: 'image' as const,
+              role: 'reference' as const,
+            })),
+          },
+          prompt: compilation.providerPrompt,
           settings: {
             resolution: settings.resolution,
             aspectRatio: settings.aspectRatio,
@@ -3518,19 +3532,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         const at = Date.now();
         const mergeKey = `video-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
-        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey, select: false }));
         editor.dispatch(
           canvasCommands.connect(nodeId, prepared.configNode.id, {
             sourceHandle: prepared.connection.sourceHandle,
             targetHandle: prepared.connection.targetHandle,
             at,
             mergeKey,
+            select: false,
           })
         );
         canvasOwned = true;
         const result = await runtime.submit(prepared.plan);
         applyVideoComposeAdmission(nodeId, prepared.plan, result);
       } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
         let message = error instanceof Error ? error.message : String(error);
         if (canvasOwned && prepared) {
           try {
@@ -3559,28 +3575,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
           setVideoComposeIssue({ nodeId, message });
         }
       } finally {
-        setVideoComposeBusy(false);
+        setVideoComposeBusy(false, nodeId);
       }
     },
     [
       applyVideoComposeAdmission,
       modelCatalog,
       projectId,
-      videoComposeBusy,
-      videoComposeSubmission,
+      videoComposeIsBusy,
+      videoComposeSubmissions,
       videoModelOptions,
     ]
   );
 
   const retryCanvasVideoComposeSubmission = useCallback(
     async (nodeId: string) => {
-      const request = videoComposeSubmission;
+      const request = videoComposeSubmissions.get(nodeId);
       const runtime = videoTaskRuntimeRef.current;
-      if (!request || request.nodeId !== nodeId || !runtime || videoComposeBusy) {
+      if (!request || request.nodeId !== nodeId || !runtime || videoComposeIsBusy(nodeId)) {
         return;
       }
-      setVideoComposeBusy(true);
-      setVideoComposeIssue(null);
+      setVideoComposeBusy(true, nodeId);
+      setVideoComposeIssue(null, nodeId);
       try {
         const result = await runtime.retrySubmission(
           request.failureOrder,
@@ -3593,15 +3609,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
           message: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        setVideoComposeBusy(false);
+        setVideoComposeBusy(false, nodeId);
       }
     },
-    [applyVideoComposeAdmission, videoComposeBusy, videoComposeSubmission]
+    [applyVideoComposeAdmission, videoComposeIsBusy, videoComposeSubmissions]
   );
 
   const confirmCanvasVideoComposeSubmission = useCallback(
     async (nodeId: string) => {
-      const request = videoComposeSubmission;
+      const request = videoComposeSubmissions.get(nodeId);
       const runtime = videoTaskRuntimeRef.current;
       const editor = editorRef.current;
       if (
@@ -3609,12 +3625,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         request.nodeId !== nodeId ||
         !runtime ||
         !editor ||
-        videoComposeBusy
+        videoComposeIsBusy(nodeId)
       ) {
         return;
       }
-      setVideoComposeBusy(true);
-      setVideoComposeIssue(null);
+      setVideoComposeBusy(true, nodeId);
+      setVideoComposeIssue(null, nodeId);
       const reference = canvasVideoTaskReferenceFromPlan(request.plan);
       try {
         const exists = await runtime.taskExists(reference);
@@ -3640,8 +3656,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
           reference,
         });
         if (activeProjectIdRef.current !== projectId) return;
-        setVideoComposeSubmission(null);
-        setVideoTaskRuntimeEpoch((value) => value + 1);
+        setVideoComposeSubmission(null, nodeId);
+        runtime.dismissSubmission(request.failureOrder);
         setVideoComposeIssue({
           nodeId,
           message: t('creativeStudio.canvas.notices.videoTaskMissing', {
@@ -3658,15 +3674,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }
       } finally {
         if (activeProjectIdRef.current === projectId) {
-          setVideoComposeBusy(false);
+          setVideoComposeBusy(false, nodeId);
         }
       }
     },
     [
       applyVideoComposeAdmission,
       projectId,
-      videoComposeBusy,
-      videoComposeSubmission,
+      videoComposeIsBusy,
+      videoComposeSubmissions,
     ]
   );
 
@@ -3705,12 +3721,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyAudioComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasAudioTaskRuntimeBridgeHandle['submit']>>
     ) => {
+      if (activeProjectIdRef.current !== projectId) return;
       if (result.kind === 'admitted') {
-        setAudioComposeSubmission(null);
-        setAudioComposeIssue(null);
+        setAudioComposeSubmission(null, nodeId);
+        setAudioComposeIssue(null, nodeId);
         setNotice(
           t('creativeStudio.canvas.notices.audioTaskSubmitted', {
             defaultValue:
@@ -3728,7 +3745,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }),
       });
     },
-    []
+    [projectId, setAudioComposeIssue, setAudioComposeSubmission]
   );
 
   const generateFromCanvasAudio = useCallback(
@@ -3739,7 +3756,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
     ) => {
       const editor = editorRef.current;
       const runtime = audioTaskRuntimeRef.current;
-      if (!editor || !runtime || audioComposeBusy || audioComposeSubmission) {
+      if (!editor || !runtime || audioComposeIsBusy(nodeId) || audioComposeSubmissions.has(nodeId)) {
+        return;
+      }
+      if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(editor.getState().document, nodeId, editor.getPendingTaskIds()).length > 0) {
+        setAudioComposeIssue({
+          nodeId,
+          message: t('creativeStudio.canvas.errors.audioTaskBusy'),
+        });
         return;
       }
       if (!settings.model || modelCatalog.status !== 'ready') {
@@ -3751,28 +3775,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         return;
       }
-      const snapshot = runtime.snapshot();
-      if (
-        snapshot.submittingCount > 0 ||
-        snapshot.recoveringCount > 0 ||
-        snapshot.submissionFailures.length > 0 ||
-        snapshot.requestError !== null ||
-        snapshot.entries.some(
-          (entry) =>
-            entry.task.status === 'queued' || entry.task.status === 'running'
-        )
-      ) {
-        setAudioComposeIssue({
-          nodeId,
-          message: t('creativeStudio.canvas.errors.audioTaskBusy', {
-            defaultValue: '已有音频任务正在处理，请等待完成。',
-          }),
-        });
-        return;
-      }
-
-      setAudioComposeBusy(true);
-      setAudioComposeIssue(null);
+      setAudioComposeBusy(true, nodeId);
+      setAudioComposeIssue(null, nodeId);
       let prepared: ReturnType<typeof prepareCanvasAudioCompose> | null = null;
       let canvasOwned = false;
       try {
@@ -3811,6 +3815,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
+        if (runtime.isNodeBusy(nodeId) || pendingCanvasNodeGenerationConfigs(currentState.document, nodeId, editor.getPendingTaskIds()).length > 0) {
+          throw new Error(t('creativeStudio.canvas.errors.audioTaskBusy'));
+        }
         const currentSource = currentState.document.nodes.find(
           (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
             node.id === nodeId && node.type === 'audio'
@@ -3859,7 +3866,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const at = Date.now();
         const mergeKey = `audio-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
         editor.dispatch(
-          canvasCommands.addNode(prepared.configNode, { at, mergeKey })
+          canvasCommands.addNode(prepared.configNode, { at, mergeKey, select: false })
         );
         editor.dispatch(
           canvasCommands.connect(nodeId, prepared.configNode.id, {
@@ -3867,12 +3874,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
             targetHandle: prepared.connection.targetHandle,
             at,
             mergeKey,
+            select: false,
           })
         );
         canvasOwned = true;
         const result = await runtime.submit(prepared.plan);
         applyAudioComposeAdmission(nodeId, prepared.plan, result);
       } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
         let message = error instanceof Error ? error.message : String(error);
         if (canvasOwned && prepared) {
           try {
@@ -3902,14 +3911,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }
       } finally {
         if (activeProjectIdRef.current === projectId) {
-          setAudioComposeBusy(false);
+          setAudioComposeBusy(false, nodeId);
         }
       }
     },
     [
       applyAudioComposeAdmission,
-      audioComposeBusy,
-      audioComposeSubmission,
+      audioComposeIsBusy,
+      audioComposeSubmissions,
       audioModelOptions,
       modelCatalog,
       projectId,
@@ -3918,13 +3927,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const retryCanvasAudioComposeSubmission = useCallback(
     async (nodeId: string) => {
-      const request = audioComposeSubmission;
+      const request = audioComposeSubmissions.get(nodeId);
       const runtime = audioTaskRuntimeRef.current;
-      if (!request || request.nodeId !== nodeId || !runtime || audioComposeBusy) {
+      if (!request || request.nodeId !== nodeId || !runtime || audioComposeIsBusy(nodeId)) {
         return;
       }
-      setAudioComposeBusy(true);
-      setAudioComposeIssue(null);
+      setAudioComposeBusy(true, nodeId);
+      setAudioComposeIssue(null, nodeId);
       try {
         const result = await runtime.retrySubmission(
           request.failureOrder,
@@ -3937,15 +3946,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
           message: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        setAudioComposeBusy(false);
+        setAudioComposeBusy(false, nodeId);
       }
     },
-    [applyAudioComposeAdmission, audioComposeBusy, audioComposeSubmission]
+    [applyAudioComposeAdmission, audioComposeIsBusy, audioComposeSubmissions]
   );
 
   const confirmCanvasAudioComposeSubmission = useCallback(
     async (nodeId: string) => {
-      const request = audioComposeSubmission;
+      const request = audioComposeSubmissions.get(nodeId);
       const runtime = audioTaskRuntimeRef.current;
       const editor = editorRef.current;
       if (
@@ -3953,12 +3962,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         request.nodeId !== nodeId ||
         !runtime ||
         !editor ||
-        audioComposeBusy
+        audioComposeIsBusy(nodeId)
       ) {
         return;
       }
-      setAudioComposeBusy(true);
-      setAudioComposeIssue(null);
+      setAudioComposeBusy(true, nodeId);
+      setAudioComposeIssue(null, nodeId);
       const reference = canvasAudioTaskReferenceFromPlan(request.plan);
       try {
         const exists = await runtime.taskExists(reference);
@@ -3980,8 +3989,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }
         await orphanCanvasAudioComposeTask({ editor, projectId, reference });
         if (activeProjectIdRef.current !== projectId) return;
-        setAudioComposeSubmission(null);
-        setAudioTaskRuntimeEpoch((value) => value + 1);
+        setAudioComposeSubmission(null, nodeId);
+        runtime.dismissSubmission(request.failureOrder);
         setAudioComposeIssue({
           nodeId,
           message: t('creativeStudio.canvas.notices.audioTaskMissing', {
@@ -3998,14 +4007,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }
       } finally {
         if (activeProjectIdRef.current === projectId) {
-          setAudioComposeBusy(false);
+          setAudioComposeBusy(false, nodeId);
         }
       }
     },
     [
       applyAudioComposeAdmission,
-      audioComposeBusy,
-      audioComposeSubmission,
+      audioComposeIsBusy,
+      audioComposeSubmissions,
       projectId,
     ]
   );
@@ -4094,13 +4103,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 `clipboard-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`,
                 { type: mediaType }
               );
-              await importCanvasFile(
-                file,
-                worldPosition,
-                mediaType.startsWith('image/')
-                  ? 'after-upload-if-2-to-1'
-                  : 'not-applicable'
-              );
+              await importCanvasFile(file, worldPosition);
               return;
             }
             if (item.types.includes('text/plain')) {
@@ -4123,57 +4126,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [importCanvasFile, insertClipboardText]
-  );
-
-  const handleOpenDirector = useCallback(
-    async (requestedNodeId?: string) => {
-      const editor = editorRef.current;
-      if (!editor || save.revision === null) return;
-      const directors = editor
-        .getState()
-        .document.nodes.filter((node) => node.type === 'director');
-      handleBottomViewChange('timeline');
-      if (directors.length === 0) {
-        setNotice(
-          t('creativeStudio.canvas.notices.addDirectorFirst', {
-            defaultValue: '请先添加导演节点，再进入 3D 导演台。',
-          })
-        );
-        return;
-      }
-      if (directors.length > 1) {
-        editor.dispatch(
-          canvasCommands.setSelection(directors.map((node) => node.id))
-        );
-        setNotice(
-          t('creativeStudio.canvas.notices.resolveDirectorConflict', {
-            defaultValue:
-              '画布存在多个导演节点。请只保留一个，再进入 3D 导演台。',
-          })
-        );
-        return;
-      }
-      const director = directors[0];
-      if (requestedNodeId && requestedNodeId !== director.id) {
-        setNotice(
-          t('creativeStudio.canvas.notices.directorMissing', {
-            defaultValue: '请求的导演节点已不存在，请从时间线面板重新打开。',
-          })
-        );
-        return;
-      }
-      editor.dispatch(canvasCommands.setSelection([director.id]));
-      if (await flushBeforeLeave()) {
-        navigate(creativeStudioDirectorProjectPath(projectId));
-      }
-    },
-    [
-      flushBeforeLeave,
-      handleBottomViewChange,
-      navigate,
-      projectId,
-      save.revision,
-    ]
   );
 
   const handleIntegrationIntent = useCallback(
@@ -4252,10 +4204,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
             return;
           }
           setEditingTextNodeId(null);
-          if (intent.mode === 'open-director') {
-            await handleOpenDirector(intent.nodeId);
-            return;
-          }
           persistPanels(
             withCreativeCanvasRightView(panelsRef.current, 'properties')
           );
@@ -4279,11 +4227,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           return;
         }
         case 'asset/import-file':
-          await importCanvasFile(
-            intent.file,
-            intent.worldPosition,
-            intent.panoramaChoice
-          );
+          await importCanvasFile(intent.file, intent.worldPosition);
           return;
         case 'asset/import-feedback': {
           const first = intent.rejected[0];
@@ -4310,7 +4254,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [
       dismissInteractionOverlays,
       dispatch,
-      handleOpenDirector,
       importCanvasFile,
       openCreateNodeMenu,
       persistPanels,
@@ -4363,40 +4306,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const menu = createNodeMenu;
       if (!editor || !menu || save.revision === null) return;
       const state = editor.getState();
-      const directors =
-        kind === 'director'
-          ? state.document.nodes.filter((node) => node.type === 'director')
-          : [];
-      if (directors.length > 1) {
-        editor.dispatch(
-          canvasCommands.setSelection(directors.map((node) => node.id))
-        );
-        handleBottomViewChange('timeline');
-        setNotice(
-          t('creativeStudio.canvas.notices.directorCreateConflict', {
-            defaultValue:
-              '画布存在多个导演节点，请先处理冲突，未创建新的导演节点。',
-          })
-        );
-        dismissInteractionOverlays();
-        return;
-      }
-      const reusedDirector = directors[0] ?? null;
-      const node =
-        reusedDirector ??
-        createCreativeCanvasProductNode(
-          kind,
-          state,
-          measuredSize(canvasHostRef.current),
-          { position: centeredNodePosition(kind, menu.worldPosition) }
-        );
+      const node = createCreativeCanvasProductNode(
+        kind,
+        state,
+        measuredSize(canvasHostRef.current),
+        { position: centeredNodePosition(kind, menu.worldPosition) }
+      );
 
       if (menu.connection) {
         const candidateDocument = {
           ...state.document,
-          nodes: reusedDirector
-            ? state.document.nodes
-            : [...state.document.nodes, node],
+          nodes: [...state.document.nodes, node],
         };
         const at = Date.now();
         const mergeKey = `create-connected:${node.id}`;
@@ -4417,63 +4337,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
           return;
         }
 
-        if (!reusedDirector) {
-          editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
-        }
+        editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
         for (const command of resolution.commands) editor.dispatch(command);
         editor.dispatch(canvasCommands.setSelection([node.id]));
         const batch = resolution.intents.find((intent) => intent.type === 'connection/batch-created');
         setNotice(
-          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount }) : reusedDirector
-            ? t('creativeStudio.canvas.notices.directorReusedAndConnected', {
-                defaultValue: '已复用画布唯一的导演节点并完成连接。',
-              })
+          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount })
             : t('creativeStudio.canvas.notices.nodeCreatedAndConnected', {
                 defaultValue: '已创建节点并完成连接。',
               })
         );
       } else {
-        if (reusedDirector) {
-          editor.dispatch(canvasCommands.setSelection([node.id]));
-          setNotice(
-            t('creativeStudio.canvas.notices.directorSelected', {
-              defaultValue: '画布已有唯一导演节点，已为你选中。',
-            })
-          );
-        } else {
-          editor.dispatch(canvasCommands.addNode(node));
-          setNotice(
-            t('creativeStudio.canvas.notices.nodeCreatedAtPosition', {
-              defaultValue: '已在指定位置创建节点。',
-            })
-          );
-        }
-      }
-      if (kind === 'director') {
-        handleBottomViewChange('timeline');
+        editor.dispatch(canvasCommands.addNode(node));
+        setNotice(
+          t('creativeStudio.canvas.notices.nodeCreatedAtPosition', {
+            defaultValue: '已在指定位置创建节点。',
+          })
+        );
       }
       dismissInteractionOverlays();
     },
     [
       createNodeMenu,
       dismissInteractionOverlays,
-      handleBottomViewChange,
       save.revision,
     ]
-  );
-
-  const resolvePendingPanoramaChoice = useCallback(
-    (asPanorama: boolean) => {
-      const choice = pendingPanoramaChoice;
-      if (!choice) return;
-      setPendingPanoramaChoice(null);
-      try {
-        insertAssetAtWorld(choice.asset, choice.worldPosition, asPanorama);
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : String(error));
-      }
-    },
-    [insertAssetAtWorld, pendingPanoramaChoice]
   );
 
   useEffect(
@@ -4486,7 +4374,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setRecoveryBusy(true);
     try {
       if (await flushBeforeLeave()) {
-        navigate(CREATIVE_STUDIO_PROJECTS_PATH);
+        navigate(CANVASES_PATH);
       }
     } finally {
       setRecoveryBusy(false);
@@ -4561,6 +4449,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [dispatch]
   );
 
+  const handleRenameNode = useCallback((nodeId: string, name: string) => {
+    const editor = editorRef.current;
+    const nextName = name.trim();
+    if (!editor || !nextName || nextName.length > 80) return;
+    const node = editor.getState().document.nodes.find(
+      (candidate) => candidate.id === nodeId
+    );
+    if (!node || node.locked || node.type === 'config' || node.name === nextName) return;
+    editor.dispatch(
+      canvasCommands.updateNode(
+        { ...node, name: nextName },
+        { mergeKey: `node:${node.id}:name` }
+      )
+    );
+  }, []);
+
   const handleToggleAsset = useCallback((assetId: string) => {
     setSelectedAssetIds((current) => {
       const next = new Set(current);
@@ -4569,6 +4473,116 @@ const CreativeCanvasProductRoute: React.FC = () => {
       return next;
     });
   }, []);
+
+  const appendAssetsToTimeline = useCallback(
+    (nodeId: string, selectedAssets: readonly CreativeAsset[]) => {
+      const editor = editorRef.current;
+      if (!editor) return 0;
+      const node = editor.getState().document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'timeline' }> =>
+          candidate.id === nodeId && candidate.type === 'timeline'
+      );
+      if (!node || node.locked) return 0;
+      const compatible = selectedAssets.filter(
+        (asset): asset is CreativeAsset & { kind: 'image' | 'video' } =>
+          !isCreativeAssetDeleted(asset) &&
+          (asset.kind === 'image' || asset.kind === 'video')
+      );
+      if (compatible.length === 0) {
+        setNotice(
+          t('creativeStudio.canvas.timeline.noCompatibleAssets', {
+            defaultValue: '时间线只支持图片和视频素材。',
+          })
+        );
+        return 0;
+      }
+
+      const known = new Map(knownAssetsRef.current);
+      for (const asset of compatible) known.set(asset.id, asset);
+      knownAssetsRef.current = known;
+      setCanvasReferenceAssets((current) => {
+        const next = new Map(current);
+        for (const asset of compatible) next.set(asset.id, asset);
+        return next;
+      });
+
+      editor.dispatch(
+        canvasCommands.updateNode({
+          ...node,
+          data: appendTimelineClips(
+            node.data,
+            compatible.map((asset) => ({ id: asset.id, kind: asset.kind })),
+            uuidv7
+          ),
+        })
+      );
+      setSelectedAssetIds(new Set());
+      setNotice(
+        t('creativeStudio.canvas.timeline.assetsAdded', {
+          count: compatible.length,
+          defaultValue: '已向时间线添加 {{count}} 项素材。',
+        })
+      );
+      return compatible.length;
+    },
+    [t]
+  );
+
+  const openTimelineAssetLibrary = useCallback(
+    (nodeId: string, popupContainer: HTMLElement | null) => {
+      setTimelineAssetTargetId(nodeId);
+      handleResourceViewChange('assets', popupContainer);
+    },
+    [handleResourceViewChange]
+  );
+
+  const handleTimelineUploadFiles = useCallback(
+    async (nodeId: string, files: readonly File[]) => {
+      if (assetImportBusyRef.current) {
+        setNotice(
+          t('creativeStudio.canvas.notices.uploadBusy', {
+            defaultValue: '已有素材正在上传，请等待完成。',
+          })
+        );
+        return;
+      }
+      const compatible = files.filter(
+        (file) => file.type.startsWith('image/') || file.type.startsWith('video/')
+      );
+      if (compatible.length === 0) return;
+      assetImportBusyRef.current = true;
+      setAssetImportBusy(true);
+      setNotice(
+        t('creativeStudio.canvas.timeline.uploading', {
+          count: compatible.length,
+          defaultValue: '正在上传 {{count}} 项时间线素材…',
+        })
+      );
+      try {
+        const uploaded = await Promise.all(
+          compatible.map((file) =>
+            creativeAssetClient.upload(file, {
+              title: file.name,
+              tags: ['canvas-import', 'timeline'],
+              inLibrary: true,
+            })
+          )
+        );
+        if (activeProjectIdRef.current !== projectId) return;
+        appendAssetsToTimeline(nodeId, uploaded);
+        void assets.reload();
+        void timelineLibrary.reload();
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        assetImportBusyRef.current = false;
+        setAssetImportBusy(false);
+      }
+    },
+    [appendAssetsToTimeline, assets, projectId, t, timelineLibrary]
+  );
 
   const handleInsertAssets = useCallback(
     (selectedAssets: readonly CreativeAsset[]) => {
@@ -4649,6 +4663,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     void copyText(selection.prompt)
       .then(() => {
         setSelectedPromptId(selection.id);
+        handleResourceViewChange(null);
         setNotice(
           t('creativeStudio.canvas.notices.promptCopied', {
             title: selection.title,
@@ -4663,7 +4678,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           })
         );
       });
-  }, []);
+  }, [handleResourceViewChange, t]);
 
   const selection = useMemo(
     () => creativeCanvasProductSelectionCapabilities(canvasState),
@@ -4690,12 +4705,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
         connections: agentContextDocument.connections,
       },
       canvasRevision: save.revision,
+      canvasTitle: project.detail?.project.projectId === projectId
+        ? project.detail.project.title
+        : null,
       selectedNodeIds: agentContextSelectedNodeIds,
     });
   }, [
     agentContextDocument,
     agentContextSelectedNodeIds,
     projectId,
+    project.detail?.project.projectId,
+    project.detail?.project.title,
     save.revision,
   ]);
   const productDisabled =
@@ -4706,35 +4726,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   useEffect(() => {
     if (productDisabled) setEditingTextNodeId(null);
   }, [productDisabled]);
-  const imageTaskRuntimeBlocksNew =
-    imageTaskRuntime.submittingCount > 0 ||
-    imageTaskRuntime.recoveringCount > 0 ||
-    imageTaskRuntime.submissionFailures.length > 0 ||
-    imageTaskRuntime.requestError !== null ||
-    imageTaskRuntime.entries.some(
-      (entry) =>
-        entry.task.status === 'queued' || entry.task.status === 'running'
-    );
-  const videoTaskRuntimeBlocksNew =
-    videoTaskRuntime.submittingCount > 0 ||
-    videoTaskRuntime.recoveringCount > 0 ||
-    videoTaskRuntime.submissionFailures.length > 0 ||
-    videoTaskRuntime.requestError !== null ||
-    videoTaskRuntime.entries.some(
-      (entry) =>
-        entry.task.status === 'queued' || entry.task.status === 'running'
-    );
-  const audioTaskRuntimeBlocksNew =
-    audioTaskRuntime.submittingCount > 0 ||
-    audioTaskRuntime.recoveringCount > 0 ||
-    audioTaskRuntime.submissionFailures.length > 0 ||
-    audioTaskRuntime.requestError !== null ||
-    audioTaskRuntime.entries.some(
-      (entry) =>
-        entry.task.status === 'queued' || entry.task.status === 'running'
-    );
   const canvasTitle =
     project.detail?.project.title ??
+    openingCanvasTitle ??
     (project.isLoading
       ? t('creativeStudio.canvas.loadingTitle', {
           defaultValue: '正在载入画布…',
@@ -4746,7 +4740,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const compact = viewportSize.width < 760;
   const canvasLayoutStyle = {
     '--creative-canvas-right-panel-width': `${panels.right.width}px`,
-    '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
   } as React.CSSProperties;
 
   const renderCanvasState = canvasState;
@@ -4786,44 +4779,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   );
 
-  const history = renderCanvasState ? (
-    <CreativeCanvasHistoryPanel
-      state={renderCanvasState}
-      onUndo={() => dispatch(canvasCommands.undo())}
-      onRedo={() => dispatch(canvasCommands.redo())}
-    />
-  ) : (
-    <CreativeCanvasUnavailablePanel
-      kind="generic"
-      title={t('creativeStudio.canvas.loading.historyTitle', {
-        defaultValue: '正在载入撤销状态',
-      })}
-      description={t('creativeStudio.canvas.loading.historyDescription', {
-        defaultValue: '历史面板仅展示当前编辑会话的真实撤销栈。',
-      })}
-    />
-  );
-
-  const timeline = renderCanvasState ? (
-    <CreativeCanvasTimelinePanel
-      state={renderCanvasState}
-      disabled={productDisabled}
-      onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
-      onAddDirector={() => addNode('director')}
-      onOpenDirector={(nodeId) => void handleOpenDirector(nodeId)}
-    />
-  ) : (
-    <CreativeCanvasUnavailablePanel
-      kind="generic"
-      title={t('creativeStudio.canvas.loading.timelineTitle', {
-        defaultValue: '正在载入导演时间线',
-      })}
-      description={t('creativeStudio.canvas.loading.documentValidation', {
-        defaultValue: '等待画布文档通过 canonical v1 校验。',
-      })}
-    />
-  );
-
   return (
     <main
       className={styles.root}
@@ -4832,17 +4787,20 @@ const CreativeCanvasProductRoute: React.FC = () => {
       data-canvas-id={canvasId}
     >
       <CreativeCanvasChrome
+        canvasId={canvasId}
         canvasTitle={canvasTitle}
+        onRenameCanvas={project.detail ? async (title) => { await project.rename(title); } : undefined}
         saveStatus={save.status}
         saveMessage={saveMessage}
         tool={tool}
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
-        leftOpen={panels.left.open}
+        leftOpen={panels.left.open && panelViews.left === 'canvas'}
         leftView={panelViews.left}
+        resourceView={resourceDialogView}
+        resourceDialogPopupContainer={resourceDialogPopupContainer}
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
-        bottomView={panelViews.bottom}
         compact={compact}
         disabled={productDisabled}
         onBackToCanvases={() => void handleBackToCanvases()}
@@ -4852,9 +4810,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onRedo={() => dispatch(canvasCommands.redo())}
         onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
+        onResourceViewChange={handleResourceViewChange}
         onRightViewChange={handleRightViewChange}
         onRightPanelWidthChange={handleRightPanelWidthChange}
-        onBottomViewChange={handleBottomViewChange}
         slots={{
           canvas: (
             <div ref={canvasHostRef} className={styles.canvasHost}>
@@ -4889,9 +4847,42 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   onToggleLock,
                   dragHandleProps,
                 }) => {
+                  const timelineAssets = node.type === 'timeline'
+                    ? new Map<string, CreativeTimelineAssetPresentation>(
+                        node.data.clips.flatMap((clip) => {
+                          const asset = knownAssetsById.get(clip.assetId);
+                          if (
+                            !asset ||
+                            (asset.kind !== 'image' && asset.kind !== 'video')
+                          ) {
+                            return [];
+                          }
+                          return [[
+                            clip.assetId,
+                            {
+                              assetId: clip.assetId,
+                              kind: asset.kind,
+                              title: asset.title,
+                              src: asset.originalUrl,
+                              thumbnailSrc: asset.thumbnailUrl,
+                              deleted: isCreativeAssetDeleted(asset),
+                              width: asset.width,
+                              height: asset.height,
+                              mimeType: asset.mimeType,
+                            },
+                          ]];
+                        })
+                      )
+                    : undefined;
                   const nodeView = (
                     <CreativeNodeView
                       node={node}
+                      title={nodeDisplayNames.get(node.id)}
+                      onMediaSize={(size) => {
+                        if ((node.type === 'image' || node.type === 'video') && node.data.assetId) {
+                          reconcileMediaSize(node.id, node.data.assetId, size);
+                        }
+                      }}
                       selected={selected}
                       placement="contained"
                       asset={
@@ -4902,6 +4893,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       }
                       onActivate={onActivate}
                       onOpen={onOpen}
+                      onRename={(_, title) => handleRenameNode(node.id, title)}
                       onToggleLock={onToggleLock}
                       onPointerDown={dragHandleProps.onPointerDown}
                       textEditing={
@@ -4915,6 +4907,54 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       onTextEditingComplete={
                         node.type === 'text'
                           ? () => finishInlineTextEditing(node.id)
+                          : undefined
+                      }
+                      timelineAssets={timelineAssets}
+                      timelineLibraryAssets={
+                        node.type === 'timeline'
+                          ? timelineLibraryPresentations
+                          : undefined
+                      }
+                      timelineLibraryLoading={
+                        node.type === 'timeline' ? timelineLibrary.loading : undefined
+                      }
+                      onTimelineChange={
+                        node.type === 'timeline'
+                          ? (data, mergeKey) => {
+                              const editor = editorRef.current;
+                              const latest = editor?.getState().document.nodes.find(
+                                (candidate): candidate is Extract<
+                                  CreativeCanvasNode,
+                                  { type: 'timeline' }
+                                > => candidate.id === node.id && candidate.type === 'timeline'
+                              );
+                              if (!editor || !latest || latest.locked) return;
+                              editor.dispatch(
+                                canvasCommands.updateNode(
+                                  { ...latest, data },
+                                  mergeKey ? { mergeKey } : undefined
+                                )
+                              );
+                            }
+                          : undefined
+                      }
+                      onTimelineAddAsset={
+                        node.type === 'timeline'
+                          ? (assetId) => {
+                              const asset = knownAssetsById.get(assetId);
+                              if (asset) appendAssetsToTimeline(node.id, [asset]);
+                            }
+                          : undefined
+                      }
+                      onTimelineRequestAssets={
+                        node.type === 'timeline'
+                          ? (popupContainer) =>
+                              openTimelineAssetLibrary(node.id, popupContainer)
+                          : undefined
+                      }
+                      onTimelineUploadFiles={
+                        node.type === 'timeline'
+                          ? (files) => handleTimelineUploadFiles(node.id, files)
                           : undefined
                       }
                     />
@@ -4958,14 +4998,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             }
                           : null,
                     };
-                    const referenceAsset =
-                      mode.kind === 'i2v'
-                        ? knownAssetsById.get(mode.assetId) ?? null
-                        : null;
                     const singleSelected =
                       selected && canvasState?.selection.nodeIds.length === 1;
                     const retrySubmission =
-                      videoComposeSubmission?.nodeId === node.id;
+                      videoComposeSubmissions.has(node.id);
+                    const referenceResolution = canvasState
+                      ? resolveCanvasImageReferences(canvasState, node.id, [...knownAssetsById.values()])
+                      : null;
+                    const composerReferences = referenceResolution && canvasState
+                      ? [
+                          ...canvasImageComposerReferences(referenceResolution.references),
+                          ...canvasTextComposerReferences(referenceResolution.textReferences, t),
+                          ...invalidCanvasImageComposerReferences(
+                            canvasState, node.id, referenceResolution, knownAssetsById, t
+                          ),
+                        ].sort((left, right) => left.ordinal - right.ordinal)
+                      : [];
+                    const referenceError = referenceResolution?.issues[0]
+                      ? canvasImageGenerationBlockerMessage({
+                          code: 'reference_resolution_failed',
+                          issue: referenceResolution.issues[0],
+                        }, t)
+                      : null;
                     return (
                       <div className={styles.nodeComposerHost} data-video-composer-host>
                         {nodeView}
@@ -4973,51 +5027,49 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           <CreativeCanvasVideoComposer
                             nodeId={node.id}
                             mode={mode.kind}
-                            reference={
-                              mode.kind === 'i2v'
-                                ? {
-                                    name:
-                                      referenceAsset?.title ??
-                                      t('creativeStudio.canvas.video.connectedImage', {
-                                        defaultValue: '已连接图片',
-                                      }),
-                                    previewUrl:
-                                      referenceAsset?.thumbnailUrl ??
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                    originalUrl:
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                  }
-                                : null
-                            }
+                            references={composerReferences}
                             initialPrompt={composeDraft.prompt}
+                            initialMentions={composeDraft.mentions}
+                            generateBlocked={Boolean(referenceError)}
                             settings={composeSettings}
                             modelOptions={videoModelOptions}
-                            task={canvasVideoComposeTaskSummary(composeConfig)}
+                            task={canvasNodeGenerationTaskSummary(
+                              canvasState?.document ?? { nodes: [] },
+                              node.id,
+                              composeConfig,
+                              editorRef.current?.getPendingTaskIds(),
+                              videoTaskRuntimeRef.current?.isNodeBusy(node.id)
+                            )}
+                            submitting={videoComposeBusyNodes.has(node.id)}
                             disabled={
                               productDisabled ||
                               assetImportBusy ||
-                              videoComposeBusy ||
-                              !videoTaskRuntimeReady ||
-                              (!retrySubmission &&
-                                videoTaskRuntimeBlocksNew &&
-                                composeConfig?.data.status !== 'queued' &&
-                                composeConfig?.data.status !== 'running')
+                              videoComposeBusyNodes.has(node.id) ||
+                              !videoTaskRuntimeReady
                             }
                             error={
-                              videoComposeIssue?.nodeId === node.id
-                                ? videoComposeIssue.message
+                              videoComposeIssues.has(node.id)
+                                ? videoComposeIssues.get(node.id)?.message
                                 : mode.kind === 'unsupported'
                                   ? mode.message
-                                  : null
+                                  : referenceError
                             }
                             retrySubmission={retrySubmission}
-                            onPromptChange={(prompt) =>
+                            onPromptChange={(change) =>
                               updateVideoComposeDraft(node.id, (current) => ({
                                 ...current,
-                                prompt,
+                                prompt: change.value,
+                                mentions: structuredClone(change.mentions),
                               }))
+                            }
+                            onReferenceActivate={(sourceNodeId) =>
+                              dispatch(canvasCommands.setSelection([sourceNodeId]))
+                            }
+                            onReferenceDisconnect={(connectionId) =>
+                              dispatch(canvasCommands.deleteEdges([connectionId]))
+                            }
+                            onReferencesDisconnect={(connectionIds) =>
+                              dispatch(canvasCommands.deleteEdges(connectionIds))
                             }
                             onOpenPromptLibrary={() =>
                               openPromptLibrary()
@@ -5046,11 +5098,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 settings: { ...current.settings, seconds },
                               }))
                             }
-                            onGenerate={(prompt) =>
+                            onGenerate={(prompt, mentions) =>
                               void generateFromCanvasVideo(
                                 node.id,
                                 prompt,
-                                composeSettings
+                                composeSettings,
+                                mentions
                               )
                             }
                             onRetrySubmission={() =>
@@ -5110,7 +5163,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     const singleSelected =
                       selected && canvasState?.selection.nodeIds.length === 1;
                     const retrySubmission =
-                      audioComposeSubmission?.nodeId === node.id;
+                      audioComposeSubmissions.has(node.id);
                     return (
                       <div
                         className={styles.nodeComposerHost}
@@ -5123,7 +5176,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             initialPrompt={composeDraft.prompt}
                             settings={composeSettings}
                             modelOptions={audioModelOptions}
-                            task={canvasAudioComposeTaskSummary(composeConfig)}
+                            task={canvasNodeGenerationTaskSummary(
+                              canvasState?.document ?? { nodes: [] },
+                              node.id,
+                              composeConfig,
+                              editorRef.current?.getPendingTaskIds(),
+                              audioTaskRuntimeRef.current?.isNodeBusy(node.id)
+                            )}
+                            submitting={audioComposeBusyNodes.has(node.id)}
                             voiceSupported={protocolProfile.fieldSupport.voice}
                             voiceRequired={protocolProfile.voiceRequired}
                             formatSupported={protocolProfile.fieldSupport.format}
@@ -5131,17 +5191,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             disabled={
                               productDisabled ||
                               assetImportBusy ||
-                              audioComposeBusy ||
+                              audioComposeBusyNodes.has(node.id) ||
                               !audioTaskRuntimeReady ||
-                              eligibility.kind === 'unsupported' ||
-                              (!retrySubmission &&
-                                audioTaskRuntimeBlocksNew &&
-                                composeConfig?.data.status !== 'queued' &&
-                                composeConfig?.data.status !== 'running')
+                              eligibility.kind === 'unsupported'
                             }
                             error={
-                              audioComposeIssue?.nodeId === node.id
-                                ? audioComposeIssue.message
+                              audioComposeIssues.has(node.id)
+                                ? audioComposeIssues.get(node.id)?.message
                                 : eligibility.kind === 'unsupported'
                                   ? eligibility.message
                                   : null
@@ -5312,12 +5368,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       : []),
                   ].sort((left, right) => left.ordinal - right.ordinal);
-                  const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
-                  const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
+                  const composeSizePolicy = imageGenerationSizePolicyForModel(resolvedModel);
+                  const composeSizeOptions = imageGenerationSelectableSizeOptions(
                     composeSizePolicy.options
                   );
-                  const composeSettings: ImageWorkbenchSettings =
-                    normalizeImageWorkbenchSettingsSize(
+                  const composeSettings: ImageGenerationSettings =
+                    normalizeImageGenerationSettingsSize(
                       {
                         ...composeDraft.settings,
                         model: resolvedModel
@@ -5331,7 +5387,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     );
                   const singleSelected =
                     selected && canvasState?.selection.nodeIds.length === 1;
-                  const retrySubmission = imageComposeSubmission?.nodeId === node.id;
+                  const retrySubmission = imageComposeSubmissions.has(node.id);
                   return (
                     <CreativeCanvasImageToolbar
                       nodeId={node.id}
@@ -5343,8 +5399,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         imageCropBusy ||
                         imageSplitBusy ||
                         imageMaskBusy ||
-                        imageComposeBusy ||
-                        imageTaskRuntimeBlocksNew
+                        imageComposeBusyNodes.has(node.id) ||
+                        pendingCanvasNodeGenerationConfigs(
+                          canvasState?.document ?? { nodes: [] }, node.id,
+                          editorRef.current?.getPendingTaskIds()
+                        ).length > 0
                       }
                       onInfo={() => {
                         handleRightViewChange('properties');
@@ -5378,23 +5437,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           aspectRatioOptions={composeSizeOptions}
                           maxCount={composeSizePolicy.maxCount}
                           modelOptions={composeModelOptions}
-                          task={canvasImageComposeTaskSummary(composeConfig)}
+                          task={canvasNodeGenerationTaskSummary(
+                            canvasState?.document ?? { nodes: [] },
+                            node.id,
+                            composeConfig,
+                            editorRef.current?.getPendingTaskIds(),
+                            imageTaskRuntimeRef.current?.isNodeBusy(node.id)
+                          )}
+                          submitting={imageComposeBusyNodes.has(node.id)}
                           disabled={
                             productDisabled ||
                             assetImportBusy ||
                             imageCropBusy ||
                             imageSplitBusy ||
                             imageMaskBusy ||
-                            imageComposeBusy ||
-                            (!retrySubmission &&
-                              imageTaskRuntimeBlocksNew &&
-                              composeConfig?.data.status !== 'queued' &&
-                              composeConfig?.data.status !== 'running')
+                            imageComposeBusyNodes.has(node.id) ||
+                            !imageTaskRuntimeReady
                           }
                           generateBlocked={!generationGate.allowed}
                           error={
-                            imageComposeIssue?.nodeId === node.id
-                              ? imageComposeIssue.message
+                            imageComposeIssues.has(node.id)
+                              ? imageComposeIssues.get(node.id)?.message
                               : generationBlockerMessage
                           }
                           retrySubmission={retrySubmission}
@@ -5420,7 +5483,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
                           }
-                          onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
+                          onModelChange={(model: ImageGenerationModelIdentity | null) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => {
@@ -5433,9 +5496,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                   : null;
                                 return {
                                   ...current,
-                                  settings: normalizeImageWorkbenchSettingsSize(
+                                  settings: normalizeImageGenerationSettingsSize(
                                     { ...current.settings, model },
-                                    imageWorkbenchSizePolicyForModel(modelOption)
+                                    imageGenerationSizePolicyForModel(modelOption)
                                   ),
                                 };
                               }
@@ -5459,7 +5522,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               })
                             )
                           }
-                          onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
+                          onAspectRatioChange={(option: ImageGenerationAspectRatioOption) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => ({
@@ -5626,11 +5689,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 search={assetSearch}
                 kind={assetKind}
                 selectedIds={selectedAssetIds}
+                acceptedKinds={timelineAssetTargetId ? ['image', 'video'] : undefined}
                 disabled={productDisabled}
                 onSearchChange={setAssetSearch}
                 onKindChange={setAssetKind}
                 onToggleAsset={handleToggleAsset}
-                onInsert={handleInsertAssets}
+                onInsert={(selectedAssets) => {
+                  if (timelineAssetTargetId) {
+                    appendAssetsToTimeline(timelineAssetTargetId, selectedAssets);
+                    return;
+                  }
+                  handleInsertAssets(selectedAssets);
+                }}
+                onCancel={() => handleResourceViewChange(null)}
               />
             ),
             prompts: (
@@ -5678,15 +5749,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             ),
             properties,
           },
-          bottom: {
-            history,
-            timeline,
-          },
         }}
       />
       {imageTaskRuntimeReady && project.detail ? (
         <CanvasImageTaskRuntimeBridge
-          key={`${projectId}:${imageTaskRuntimeEpoch}`}
+          key={`${projectId}:image`}
           ref={imageTaskRuntimeRef}
           projectId={projectId}
           initialDocument={project.detail.document}
@@ -5705,7 +5772,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       ) : null}
       {videoTaskRuntimeReady && project.detail ? (
         <CanvasVideoTaskRuntimeBridge
-          key={`${projectId}:video:${videoTaskRuntimeEpoch}`}
+          key={`${projectId}:video`}
           ref={videoTaskRuntimeRef}
           projectId={projectId}
           initialDocument={project.detail.document}
@@ -5724,7 +5791,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       ) : null}
       {audioTaskRuntimeReady && project.detail ? (
         <CanvasAudioTaskRuntimeBridge
-          key={`${projectId}:audio:${audioTaskRuntimeEpoch}`}
+          key={`${projectId}:audio`}
           ref={audioTaskRuntimeRef}
           projectId={projectId}
           initialDocument={project.detail.document}
@@ -5840,39 +5907,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         })}
         onChange={(event) => void handleImageNodeUploadChange(event)}
       />
-      <Modal
-        title={t('creativeStudio.canvas.panorama.dialogTitle', {
-          defaultValue: '选择 2:1 图片的节点类型',
-        })}
-        visible={pendingPanoramaChoice !== null}
-        closable={false}
-        maskClosable={false}
-        escToExit={false}
-        footer={
-          <div className={styles.panoramaActions}>
-            <Button onClick={() => resolvePendingPanoramaChoice(false)}>
-              {t('creativeStudio.canvas.panorama.asImage', {
-                defaultValue: '作为普通图片',
-              })}
-            </Button>
-            <Button
-              type="primary"
-              onClick={() => resolvePendingPanoramaChoice(true)}
-            >
-              {t('creativeStudio.canvas.panorama.asPanorama', {
-                defaultValue: '作为全景图',
-              })}
-            </Button>
-          </div>
-        }
-      >
-        <p className={styles.panoramaDescription}>
-          {t('creativeStudio.canvas.panorama.dialogDescription', {
-            defaultValue:
-              '图片已经真实上传并保存在素材库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
-          })}
-        </p>
-      </Modal>
     </main>
   );
 };

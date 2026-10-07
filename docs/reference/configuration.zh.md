@@ -56,11 +56,12 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `mcp-knowledge-stdio` | 每会话 knowledge search 的 MCP stdio server。 |
 | `mcp-gateway-stdio` | 平台 Gateway 工具的内部 stdio 传输；只接受宿主签发、带作用域、有效期和签名的能力声明。 |
 | `mcp-open-stdio` | 暴露可靠 OS `open` 工具的 MCP stdio server。 |
-| `mcp-computer-stdio` | 暴露 desktop computer-use 工具的 MCP stdio server。 |
 | `terminal-hook --event <kind>` | 一次性 terminal 生命周期 hook relay。 |
 | `doctor` | 自检：填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按智能体维度的可用性表格。 |
-| `tools` | 以 JSON 列出 Remote 能力名称与描述。 |
-| `call <name> [json-args]` | 通过 `/v1` 调用运行中实例上的 Remote 能力。 |
+| `remote open <binding_id>` | 打开 canonical Remote AgentSession。 |
+| `remote turn <agent_session_id> <json-input>` | 在显式 Remote AgentSession 上启动一轮。 |
+| `remote observe <agent_session_id>` | 从 `--after-seq` 后读取 Remote Session Event/消息。 |
+| `remote cancel <agent_session_id>` | 取消显式 Session 的活动 Turn。 |
 
 ## 共享环境变量
 
@@ -74,8 +75,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
 | `SHELL` | 智能体引擎（Linux/macOS） | 智能体引擎派生子进程时使用的 shell。在 systemd 下的 Linux 服务器上请显式设置（系统账户通常没有 `$SHELL`）。 |
-| `NOMIFUN_URL` | `nomicore call` | 调用 Remote capability 时使用的运行中实例 base URL。 |
-| `NOMIFUN_ACCESS_TOKEN` | `nomifun-app`、`nomicore call` | `/mcp`、`/mcp-agent` 与 `/v1` 使用的安装级访问令牌；不绑定伙伴。 |
+| `NOMIFUN_URL` | `nomicore remote` | 使用 canonical Remote 操作时的运行中实例 base URL。 |
+| `NOMIFUN_ACCESS_TOKEN` | Fresh-v4 host、`nomicore remote` | `/mcp` 与 `/api/remote/*` 使用的安装级令牌；启动值会播种/轮换持久 verifier，且不绑定伙伴。 |
 
 代码库不集成 `SENTRY_DSN`：这个环境变量并未被读取。
 
@@ -113,9 +114,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
   `NomiFun-beta` 等**同级目录**——channel 目录永远不嵌套在 stable 根
   之内。根脚本中的 `dev`、
   `dev:web`、`build:fast` 选择 dev；已安装应用、`serve:web` 与 release
-  构建保持 stable。需要把 stable 快照复制到开发目录时运行
-  `bun run seed:dev`；需要显式位置时则使用 `NOMIFUN_DATA_DIR` 或
-  `--data-dir`。
+  构建保持 stable。需要显式位置时使用 `NOMIFUN_DATA_DIR` 或 `--data-dir`；
+  开发启动不会从 stable 数据集导入历史 Agent 状态。
 - 后端启动时（早于打开数据库）会对 `{data_dir}/server.lock` 取一把
   OS 级**排他锁**。同一数据目录上的第二个后端进程会快速失败，错误
   信息会指出持有者（pid + 可执行文件名）并给出两条出路：关掉另一个

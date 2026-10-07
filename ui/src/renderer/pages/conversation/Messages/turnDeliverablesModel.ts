@@ -10,17 +10,14 @@ import type {
 } from '@/common/chat/chatLib';
 import type { PersistedToolArtifact } from '@/common/types/platform/toolCallTypes';
 import type { MessageId } from '@/common/types/ids';
-import { parseDiff, type FileChangeInfo } from '@/renderer/utils/file/diffUtils';
-import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
+import type { FileChangeInfo } from '@/renderer/utils/file/diffUtils';
 import type { TurnDisclosureProcessState, TurnDisclosureRole } from './turnDisclosureModel';
-import type { WriteFileResult } from './types';
 
 export type TurnDeliverableTier = 'receipt' | 'reported';
 
 export type TurnDeliverableCarrier =
   | 'tool_call_artifact'
   | 'tool_call_args'
-  | 'tool_group_write_file'
   | 'write_file_diff';
 
 export interface TurnDeliverableSource {
@@ -310,34 +307,11 @@ const draftsFromToolCall = (message: IMessageToolCall): DeliverableDraft[] => {
   return drafts;
 };
 
-const draftsFromToolGroup = (message: IMessageToolGroup): DeliverableDraft[] => {
-  if (!Array.isArray(message.content)) return [];
-  const sourceIds = messageSourceIds(message);
-  const drafts: DeliverableDraft[] = [];
-
-  for (const entry of message.content) {
-    if (!isSuccessfulWriteFileResult(entry)) continue;
-    const display = entry.result_display as WriteFileResult;
-    const info = parseDiff(display.file_diff, display.file_name);
-    drafts.push({
-      path: info.fullPath,
-      tier: 'reported',
-      insertions: info.insertions,
-      deletions: info.deletions,
-      diff: info.diff,
-      source: { carrier: 'tool_group_write_file', callId: entry.call_id, sourceMessageIds: sourceIds },
-    });
-  }
-
-  return drafts;
-};
-
 const draftsFromCandidate = (candidate: TurnDeliverableCandidate): DeliverableDraft[] => {
   const drafts: DeliverableDraft[] = [];
 
   for (const message of candidate.toolMessages ?? []) {
     if (message.type === 'tool_call') drafts.push(...draftsFromToolCall(message));
-    else if (message.type === 'tool_group') drafts.push(...draftsFromToolGroup(message));
   }
 
   for (const info of candidate.fileDiffs ?? []) {
@@ -440,7 +414,7 @@ const mergeDraft = (
  * Aggregate the verified file deliverables of every successfully closed turn.
  *
  * The invariants enforced here mirror the backend's delivery semantics:
- * running/waiting turns emit nothing, canceled turns emit nothing, and a turn
+ * running turns emit nothing, canceled turns emit nothing, and a turn
  * whose final observed item failed emits nothing. A mid-turn failure that the
  * agent recovered from does not disqualify the turn — failed tool calls simply
  * contribute no drafts.
@@ -473,7 +447,7 @@ export function collectTurnDeliverables(
   for (const [turnId, drafts] of draftsByTurn) {
     const gate = options.turnGates.get(turnId);
     if (!gate || gate.running) continue;
-    if (gate.state === 'canceled' || gate.state === 'failed' || gate.state === 'running' || gate.state === 'waiting') {
+    if (gate.state === 'canceled' || gate.state === 'failed' || gate.state === 'running') {
       continue;
     }
     const terminalState = terminalStateByTurn.get(turnId);

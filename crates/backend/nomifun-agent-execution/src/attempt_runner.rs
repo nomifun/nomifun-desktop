@@ -7,37 +7,29 @@
 //! observed output. The scheduler is therefore able to cancel an attempt as
 //! soon as the conversation exists, without a correlation-id race.
 
-use std::collections::BTreeSet;
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{
-    AgentRuntimeRegistry,
-    artifact_store::{ArtifactStore, PersistedArtifact},
-};
 use nomifun_api_types::{
-    CreateConversationRequest, ExecutionModelPool, ExecutionModelRef, ExecutionParticipant,
-    ListMessagesQuery, MessageResponse, SendMessageRequest,
+    ConversationResponse, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
+    ExecutionParticipant,
+    AgentResolvedSnapshot, SendMessageRequest,
 };
 use nomifun_common::{
     AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy,
-    MAX_AGENT_DELEGATION_DEPTH, MessagePosition, MessageStatus, MessageType, ProviderId,
+    MAX_AGENT_DELEGATION_DEPTH, ProviderId,
     ProviderWithModel,
 };
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
 use nomifun_db::AgentExecutionTurnAuthority;
 use serde_json::{Value, json};
 
-const ARTIFACT_RECEIPT_PAGE_SIZE: u32 = 100;
-// Keep receipt consumption aligned with ArtifactStore::verify_existing_path.
-// The store repeats this limit against real metadata before reading bytes, so
-// a forged small receipt cannot make us hash an arbitrarily large file.
-const MAX_VERIFIED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+use crate::delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
+
 const DELIVERY_RECEIPT_GRACE: Duration = Duration::from_secs(5);
+const DELIVERY_RECEIPT_WAIT_POLL: Duration = Duration::from_millis(500);
 const DELIVERY_RECEIPT_POLL: Duration = Duration::from_millis(100);
 pub(crate) const MISSING_DELIVERY_RECEIPT_CODE: &str = "agent_delivery_receipt_missing";
 
@@ -50,6 +42,33 @@ pub(crate) type AttemptStarted = Box<
         ) -> Pin<Box<dyn Future<Output = Result<AgentExecutionTurnAuthority, AppError>> + Send>>
         + Send,
 >;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttemptSessionTarget {
+    /// Ordinary collaboration owns a separate immutable audit transcript.
+    ChildAttempt,
+    /// AutoWork drives the exact AgentSession selected by the user. The
+    /// Session is not created, renamed, or later cleaned up as an Attempt.
+    AutomationLead { conversation_id: String },
+}
+
+fn attempt_turn_input(
+    session_target: &AttemptSessionTarget,
+    canonical: bool,
+    brief: &str,
+    step_spec: &str,
+) -> Result<(String, &'static str, bool), AppError> {
+    if matches!(session_target, AttemptSessionTarget::AutomationLead { .. }) {
+        return Ok((step_spec.to_owned(), "autowork", true));
+    }
+    let content = if canonical {
+        serde_json::to_string(&json!({ "task_brief": brief, "step_spec": step_spec }))
+            .map_err(|error| AppError::Internal(format!("encode Attempt input: {error}")))?
+    } else {
+        step_spec.to_owned()
+    };
+    Ok((content, "agent_execution", false))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptOutcome {
@@ -72,11 +91,13 @@ pub(crate) trait AttemptRunner: Send + Sync {
     async fn execute(
         &self,
         owner_id: &str,
+        session_target: AttemptSessionTarget,
         participant: &ExecutionParticipant,
         execution_model_pool: &[ExecutionModelRef],
         workspace_dir: Option<&str>,
         step_title: &str,
         tool_policy: AgentToolPolicy,
+        managed_process_only: bool,
         delegation_policy: DelegationPolicy,
         delegation_depth: i64,
         decision_policy: DecisionPolicy,
@@ -115,74 +136,189 @@ pub(crate) trait AttemptRunner: Send + Sync {
         Ok(())
     }
 
-    async fn read_final_output(&self, _owner_id: &str, _conversation_id: &str) -> Option<String> {
-        None
+    /// Recover only a terminal output verified through the same canonical query
+    /// as ordinary settlement. The caller supplies the public operation key.
+    async fn recover_outcome(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+    ) -> Result<Option<RecoveredAttemptOutcome>, AppError> {
+        Ok(None)
     }
 
-    async fn read_output_files(&self, _owner_id: &str, _conversation_id: &str) -> Vec<String> {
-        Vec::new()
+    async fn read_adoptable_output(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<AttemptOutcome>, AppError> {
+        Ok(None)
     }
 
-    async fn last_error_retryable(&self, _owner_id: &str, _conversation_id: &str) -> bool {
-        false
-    }
-
-    async fn last_error_present(&self, _owner_id: &str, _conversation_id: &str) -> bool {
-        false
-    }
-
-    async fn last_error_summary(&self, _owner_id: &str, _conversation_id: &str) -> Option<String> {
-        None
-    }
 }
 
-/// Production adapter. `ConversationService` owns the real Agent runtime; this
-/// type only performs the create/send/wait/read choreography for one attempt.
-pub(crate) struct ConversationAttemptRunner {
-    conv: ConversationService,
-    execution_port: AgentExecutionConversationPort,
+/// Narrow, stateless typed Session command/query surface used by Agent
+/// Execution.
+///
+/// Implementations own no session facts and cannot mint a second identity.
+/// Durable turn authority remains with the canonical session owner. The
+/// application supplies the implementation from its single Session owner.
+#[async_trait]
+pub trait AgentExecutionSessionPort: Send + Sync {
+    async fn create_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    async fn create_from_agent_snapshot_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        snapshot: AgentResolvedSnapshot,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    async fn discard_unlinked_creation(
+        &self,
+        owner_id: &str,
+        creation_key: &str,
+    ) -> Result<(), AppError>;
+
+    async fn deliver_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        authority: AgentExecutionTurnAuthority,
+        request: SendMessageRequest,
+    ) -> Result<AgentExecutionDelivery, AppError>;
+
+    async fn delivery_result(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<AgentExecutionDelivery>, AppError>;
+
+    /// An exact public operation key, or the latest closed Turn for explicit
+    /// adoption. Implementations authorize the Session before resolving its
+    /// canonical operation and read only canonical events, payloads and effects.
+    async fn read_turn_output(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<Option<AgentExecutionTurnOutput>, AppError>;
+
+    async fn get(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64>;
+
+    async fn cancel_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), AppError>;
+
+    /// Stop one persisted canonical Turn using the durable effect identity.
+    /// Replays and delayed delivery must never select the current successor.
+    async fn cancel_turn_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        cancellation_operation_id: &str,
+        target_operation_id: &str,
+    ) -> Result<(), AppError>;
+
+    async fn steer_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError>;
+
+    async fn steer_turn_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        target_operation_id: &str,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError>;
+
+    async fn project_assistant_message_idempotent(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        content: &str,
+        origin: &str,
+    ) -> Result<String, AppError>;
 }
 
-impl ConversationAttemptRunner {
-    pub fn new(conv: ConversationService, runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> Self {
-        let execution_port = conv.agent_execution_port(runtime_registry);
-        Self {
-            conv,
-            execution_port,
-        }
+/// Production adapter.  All runtime/turn work goes through the typed session
+/// surface above; this type only performs the create/send/wait/read choreography
+/// for one attempt.
+pub(crate) struct AgentSessionAttemptRunner {
+    session: Arc<dyn AgentExecutionSessionPort>,
+}
+
+impl AgentSessionAttemptRunner {
+    pub fn new(session: Arc<dyn AgentExecutionSessionPort>) -> Self {
+        Self { session }
     }
 
-    async fn await_turn(&self, conversation_id: &str, timeout: Duration, poll: Duration) -> bool {
+    /// Wait only on the operation-scoped durable receipt exposed by the
+    /// execution port. Runtime idleness is observational and can race receipt
+    /// finalization; it must not be a second completion authority.
+    async fn await_delivery_receipt(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<AgentExecutionDelivery>, AppError> {
         let deadline = Instant::now() + timeout;
         loop {
-            if !self.conv.runtime_summary_for(conversation_id).await.is_processing {
-                return true;
+            if let Some(receipt) = self
+                .session
+                .delivery_result(owner_id, conversation_id, operation_id)
+                .await?
+                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
+            {
+                return Ok(Some(receipt));
             }
             if Instant::now() >= deadline {
-                return false;
+                break;
             }
-            tokio::time::sleep(poll).await;
+            tokio::time::sleep(DELIVERY_RECEIPT_WAIT_POLL).await;
         }
-    }
 
-    async fn recent_messages(&self, owner_id: &str, conversation_id: &str) -> Option<Value> {
-        let messages = self
-            .conv
-            .list_messages(
-                owner_id,
-                conversation_id,
-                ListMessagesQuery {
-                    page: Some(1),
-                    page_size: Some(10),
-                    order: Some("desc".to_owned()),
-                    content_mode: None,
-                    cursor: None,
-                    day: None,
-                },
-            )
-            .await
-            .ok()?;
-        serde_json::to_value(messages).ok()
+        // Preserve the existing short commit grace: a runtime owner can finish
+        // immediately before its durable receipt finalizer commits.
+        let grace_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
+        loop {
+            if let Some(receipt) = self
+                .session
+                .delivery_result(owner_id, conversation_id, operation_id)
+                .await?
+                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
+            {
+                return Ok(Some(receipt));
+            }
+            if Instant::now() >= grace_deadline {
+                break;
+            }
+            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
+        }
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -194,205 +330,85 @@ impl ConversationAttemptRunner {
         authority: AgentExecutionTurnAuthority,
         content: &str,
         origin: &str,
+        hidden: bool,
         timeout: Duration,
     ) -> Result<AttemptOutcome, AppError> {
         let delivery = self
-            .execution_port
+            .session
             .deliver_turn(
                 owner_id,
                 conversation_id,
                 operation_id,
                 authority,
                 SendMessageRequest {
+                    plugin_delivery: None,
                     content: content.to_owned(),
                     files: vec![],
                     inject_skills: vec![],
-                    hidden: false,
+                    hidden,
                     origin: Some(origin.to_owned()),
                     channel_platform: None,
                 },
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
-        if delivery.completed {
-            let projection = self
-                .output_files_for_turn(owner_id, conversation_id, &boundary_message_id)
-                .await;
-            return Ok(AttemptOutcome {
-                conversation_id: conversation_id.to_owned(),
-                text: delivery.result_text,
-                output_files: projection.files,
-                ok: delivery.result_ok.unwrap_or(false) && projection.integrity_ok,
-                tokens: self.conv.take_turn_tokens(conversation_id),
-                error: delivery.result_error,
-                error_code: delivery.result_error_code,
-                error_retryable: delivery.result_error_retryable,
-            });
-        }
-        let became_idle = self
-            .await_turn(conversation_id, timeout, Duration::from_millis(500))
-            .await;
-        // A runtime can become idle a few milliseconds before the durable
-        // receipt finalizer commits (especially on macOS under filesystem or
-        // SQLite contention). Never convert that small commit window into a
-        // timeout; wait briefly for the exact operation receipt instead.
-        let receipt_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
-        loop {
-            if let Some(receipt) = self
-                .execution_port
-                .delivery_result(owner_id, conversation_id, operation_id)
+        let receipt = if delivery.completed || delivery.paused_reason.is_some() {
+            Some(delivery)
+        } else {
+            self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
                 .await?
-                .filter(|receipt| receipt.completed)
-            {
-                let projection = self
-                    .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
-                    .await;
-                return Ok(AttemptOutcome {
-                    conversation_id: conversation_id.to_owned(),
-                    text: receipt.result_text,
-                    output_files: projection.files,
-                    ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
-                    tokens: self.conv.take_turn_tokens(conversation_id),
-                    error: receipt.result_error,
-                    error_code: receipt.result_error_code,
-                    error_retryable: receipt.result_error_retryable,
-                });
+        };
+        if let Some(receipt) = receipt {
+            if !receipt.completed && let Some(reason) = receipt.paused_reason {
+                return Ok(paused_delivery_outcome(
+                    conversation_id, &reason, self.session.take_turn_tokens(conversation_id),
+                ));
             }
-            if Instant::now() >= receipt_deadline {
-                break;
-            }
-            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
+            let output = self.session.read_turn_output(
+                owner_id, conversation_id, Some(operation_id),
+            ).await?;
+            let Some(output) = output.filter(|output| {
+                output.delivery.completed && output.delivery.message_id == receipt.message_id
+            }) else {
+                return Ok(missing_delivery_receipt_outcome(
+                    conversation_id, self.session.take_turn_tokens(conversation_id),
+                ));
+            };
+            return Ok(completed_delivery_outcome(
+                conversation_id, output, self.session.take_turn_tokens(conversation_id),
+            ));
         }
-        // Runtime idleness is not a delivery receipt. Reading the newest
-        // assistant row here could select a previous or concurrently delivered
-        // turn and falsely complete this attempt. Without the exact operation
-        // receipt above, fail closed and let the scheduler retry/report the
-        // missing terminal delivery.
+        // Runtime state and transcript contents are not completion evidence.
+        // Without the exact operation receipt, fail closed and let the
+        // scheduler report the ambiguous result without replaying its effects.
         tracing::warn!(
             conversation_id,
             operation_id,
             boundary_message_id,
-            runtime_became_idle = became_idle,
-            "agent turn became idle without a completed delivery receipt"
+            "agent turn reached its receipt deadline without a completed delivery receipt"
         );
         Ok(missing_delivery_receipt_outcome(
             conversation_id,
-            self.conv.take_turn_tokens(conversation_id),
+            self.session.take_turn_tokens(conversation_id),
         ))
     }
 
-    /// Project only artifact receipts belonging to the exact delivered turn.
-    ///
-    /// The durable delivery receipt identifies the exact right-side user row.
-    /// Tool rows use a separate wire-turn id, stamped identically into their
-    /// `msg_id` and `content.turn_id`. We page newest-first to that user-row
-    /// boundary, reset at any intervening user turn, require the tool ids to be
-    /// self-consistent, and fail closed unless the boundary is found.
-    async fn output_files_for_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        boundary_message_id: &str,
-    ) -> ArtifactProjectionResult {
-        self.output_files_from_projection(
-            owner_id,
-            conversation_id,
-            TurnArtifactProjection::for_boundary(boundary_message_id),
-        )
-        .await
-    }
 
-    async fn latest_output_files(&self, owner_id: &str, conversation_id: &str) -> Vec<String> {
-        self.output_files_from_projection(
-            owner_id,
-            conversation_id,
-            TurnArtifactProjection::for_latest_turn(),
-        )
-        .await
-        .files
-    }
-
-    async fn output_files_from_projection(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        mut projection: TurnArtifactProjection<'_>,
-    ) -> ArtifactProjectionResult {
-        let mut page = 1_u32;
-        loop {
-            let messages = match self
-                .conv
-                .list_messages(
-                    owner_id,
-                    conversation_id,
-                    ListMessagesQuery {
-                        page: Some(page),
-                        page_size: Some(ARTIFACT_RECEIPT_PAGE_SIZE),
-                        order: Some("desc".to_owned()),
-                        content_mode: None,
-                        cursor: None,
-                        day: None,
-                    },
-                )
-                .await
-            {
-                Ok(messages) => messages,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        conversation_id,
-                        requested_boundary = projection.boundary_label(),
-                        "failed to page current-turn artifact receipts"
-                    );
-                    return ArtifactProjectionResult::failed();
-                }
-            };
-            projection.ingest_page(&messages.items);
-            if projection.boundary_seen() || !messages.has_more {
-                break;
-            }
-            let Some(next_page) = page.checked_add(1) else {
-                return ArtifactProjectionResult::failed();
-            };
-            page = next_page;
-        }
-
-        let workspace = self
-            .conversation_workspace(owner_id, conversation_id)
-            .await;
-        projection.finish(workspace.as_deref())
-    }
-
-    async fn conversation_workspace(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Option<PathBuf> {
-        let conversation = self.conv.get(owner_id, conversation_id).await.ok()?;
-        let workspace = conversation
-            .extra
-            .get("workspace")
-            .and_then(Value::as_str)?
-            .trim();
-        if workspace.is_empty() {
-            return None;
-        }
-        let canonical = std::fs::canonicalize(workspace).ok()?;
-        canonical.is_dir().then_some(canonical)
-    }
 }
 
 #[async_trait]
-impl AttemptRunner for ConversationAttemptRunner {
+impl AttemptRunner for AgentSessionAttemptRunner {
     #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
         owner_id: &str,
+        session_target: AttemptSessionTarget,
         participant: &ExecutionParticipant,
         execution_model_pool: &[ExecutionModelRef],
         workspace_dir: Option<&str>,
         step_title: &str,
         tool_policy: AgentToolPolicy,
+        managed_process_only: bool,
         delegation_policy: DelegationPolicy,
         delegation_depth: i64,
         decision_policy: DecisionPolicy,
@@ -425,67 +441,102 @@ impl AttemptRunner for ConversationAttemptRunner {
             use_model: Some(model),
         };
 
-        let mut extra = build_agent_extra(
+        let canonical = participant.agent_snapshot.as_ref()
+            .is_some_and(|snapshot| snapshot.canonical_binding.is_some());
+        let mut extra = if canonical {
+            // The immutable Agent owns persona, skills and capability grants.
+            // An Attempt supplies task data and a separate subtractive ceiling.
+            let constraints = nomifun_api_types::ExecutionConstraints {
+                version: 1,
+                tool_scope: tool_policy,
+                exclude_delegation: delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
+                managed_process_only,
+            };
+            let mut extra = json!({ nomifun_api_types::EXECUTION_CONSTRAINTS_KEY: constraints });
+            if let Some(workspace) = workspace_dir.map(str::trim).filter(|value| !value.is_empty()) {
+                extra["workspace"] = json!(workspace);
+            }
+            extra
+        } else { build_agent_extra(
             brief,
             workspace_dir,
             participant.system_prompt.as_deref(),
             &participant.enabled_skills,
             &participant.disabled_builtin_skills,
             tool_policy,
+            managed_process_only,
             delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
-        );
-        if let Some(snapshot) = participant.preset_snapshot.as_ref() {
+        ) };
+        if let Some(snapshot) = participant.agent_snapshot.as_ref() {
             extra["preset_id"] = Value::String(snapshot.preset_id.clone());
             extra["preset_revision"] = Value::Number(snapshot.preset_revision.into());
-            extra["preset_snapshot"] = serde_json::to_value(snapshot)
+            extra["agent_snapshot"] = serde_json::to_value(snapshot)
                 .map_err(|error| AppError::Internal(format!("encode preset snapshot: {error}")))?;
         }
 
-        let request = CreateConversationRequest {
-            r#type: AgentType::Nomi,
-            name: Some(format!("协作 · {}", step_title.trim())),
-            model: Some(provider),
-            source: None,
-            channel_chat_id: None,
-            preset_id: None,
-            preset_overrides: None,
-            delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
-                DelegationPolicy::Disabled
-            } else {
-                delegation_policy
-            },
-            execution_model_pool: Some(ExecutionModelPool::Range {
-                models: execution_model_pool.to_vec(),
-            }),
-            decision_policy,
-            execution_template_id: None,
-            extra,
-        };
-        let created = if let Some(snapshot) = participant.preset_snapshot.clone() {
-            self.conv
-                .create_from_preset_snapshot_idempotent(
-                    owner_id,
-                    request,
-                    snapshot,
-                    attempt_creation_key,
-                )
-                .await
-        } else {
-            self.conv
-                .create_idempotent(owner_id, request, attempt_creation_key)
-                .await
-        };
-        let conversation = match created {
-            Ok(conversation) => conversation,
-            Err(error) => {
-                if let Err(cleanup_error) = self
-                    .conv
-                    .discard_unlinked_creation(owner_id, attempt_creation_key)
-                    .await
-                {
-                    tracing::warn!(%cleanup_error, "failed to discard partially-created attempt conversation");
+        let creates_child = matches!(&session_target, AttemptSessionTarget::ChildAttempt);
+        let conversation = match &session_target {
+            AttemptSessionTarget::ChildAttempt => {
+                let request = CreateConversationRequest {
+                    r#type: AgentType::Nomi,
+                    name: Some(format!("协作 · {}", step_title.trim())),
+                    model: Some(provider),
+                    source: None,
+                    channel_chat_id: None,
+                    preset_id: None,
+                    delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
+                        DelegationPolicy::Disabled
+                    } else {
+                        delegation_policy
+                    },
+                    execution_model_pool: Some(ExecutionModelPool::Range {
+                        models: execution_model_pool.to_vec(),
+                    }),
+                    decision_policy,
+                    execution_template_id: None,
+                    extra,
+                };
+                let created = if let Some(snapshot) = participant.agent_snapshot.clone() {
+                    self.session
+                        .create_from_agent_snapshot_idempotent(
+                            owner_id,
+                            request,
+                            snapshot,
+                            attempt_creation_key,
+                        )
+                        .await
+                } else {
+                    self.session
+                        .create_idempotent(owner_id, request, attempt_creation_key)
+                        .await
+                };
+                match created {
+                    Ok(conversation) => conversation,
+                    Err(error) => {
+                        if let Err(cleanup_error) = self
+                            .session
+                            .discard_unlinked_creation(owner_id, attempt_creation_key)
+                            .await
+                        {
+                            tracing::warn!(%cleanup_error, "failed to discard partially-created attempt conversation");
+                        }
+                        return Err(error);
+                    }
                 }
-                return Err(error);
+            }
+            AttemptSessionTarget::AutomationLead { conversation_id } => {
+                let conversation = self.session.get(owner_id, conversation_id).await?;
+                if conversation.conversation_id != *conversation_id {
+                    return Err(AppError::Conflict(
+                        "AutoWork Session lookup returned a different AgentSession".to_owned(),
+                    ));
+                }
+                if conversation.agent_snapshot.as_ref() != participant.agent_snapshot.as_ref() {
+                    return Err(AppError::Conflict(
+                        "AutoWork lead Agent snapshot changed after execution admission".to_owned(),
+                    ));
+                }
+                conversation
             }
         };
 
@@ -497,15 +548,17 @@ impl AttemptRunner for ConversationAttemptRunner {
             // If the link commit succeeded but its acknowledgement was lost,
             // the Conversation deletion guard rejects this cleanup.  Otherwise
             // the creation key and row are removed together, leaving no orphan.
-            match self
-                .conv
-                .discard_unlinked_creation(owner_id, attempt_creation_key)
-                .await
-            {
-                Ok(()) => {}
-                Err(AppError::Conflict(_)) => {}
-                Err(cleanup_error) => {
-                    tracing::warn!(%cleanup_error, "failed to discard unlinked attempt conversation");
+            if creates_child {
+                match self
+                    .session
+                    .discard_unlinked_creation(owner_id, attempt_creation_key)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(AppError::Conflict(_)) => {}
+                    Err(cleanup_error) => {
+                        tracing::warn!(%cleanup_error, "failed to discard unlinked attempt conversation");
+                    }
                 }
             }
             return Err(error);
@@ -513,13 +566,19 @@ impl AttemptRunner for ConversationAttemptRunner {
         };
 
         let operation_id = format!("{attempt_creation_key}:initial-turn");
+        // Durable user input, not a replacement for the Agent's system rules.
+        // JSON boundaries preserve arbitrary brief/step text without delimiters
+        // that can be closed by the task itself. Retries encode the same input.
+        let (task_input, origin, hidden) =
+            attempt_turn_input(&session_target, canonical, brief, step_spec)?;
         self.deliver_turn(
             owner_id,
             &conversation.conversation_id,
             &operation_id,
             authority,
-            step_spec,
-            "agent_execution",
+            &task_input,
+            origin,
+            hidden,
             timeout,
         )
         .await
@@ -541,6 +600,7 @@ impl AttemptRunner for ConversationAttemptRunner {
             authority,
             input,
             "agent_execution_decision",
+            false,
             timeout,
         )
         .await
@@ -551,45 +611,34 @@ impl AttemptRunner for ConversationAttemptRunner {
         owner_id: &str,
         attempt_creation_key: &str,
     ) -> Result<(), AppError> {
-        self.conv
+        self.session
             .discard_unlinked_creation(owner_id, attempt_creation_key)
             .await
     }
 
-    async fn read_final_output(&self, owner_id: &str, conversation_id: &str) -> Option<String> {
-        self.recent_messages(owner_id, conversation_id)
-            .await
-            .as_ref()
-            .and_then(latest_assistant_text)
+    async fn read_adoptable_output(
+        &self, owner_id: &str, conversation_id: &str,
+    ) -> Result<Option<AttemptOutcome>, AppError> {
+        Ok(self.session.read_turn_output(owner_id, conversation_id, None).await?
+            .filter(|output| output.delivery.completed)
+            .map(|output| completed_delivery_outcome(conversation_id, output, None)))
     }
 
-    async fn read_output_files(&self, owner_id: &str, conversation_id: &str) -> Vec<String> {
-        // Adoption has no stored delivery id, but the latest canonical
-        // right-side boundary is reliable: only its immediately preceding
-        // newest-first segment is considered, never the whole conversation.
-        self.latest_output_files(owner_id, conversation_id).await
+    async fn recover_outcome(
+        &self, owner_id: &str, conversation_id: &str, operation_id: &str,
+    ) -> Result<Option<RecoveredAttemptOutcome>, AppError> {
+        let Some(output) = self.session.read_turn_output(
+            owner_id, conversation_id, Some(operation_id),
+        ).await?.filter(|output| output.delivery.completed) else { return Ok(None); };
+        let terminal_event_id = output.terminal_event_id.clone().ok_or_else(||
+            AppError::Conflict("terminal AgentExecution output has no canonical boundary".into()))?;
+        Ok(Some(RecoveredAttemptOutcome {
+            canonical_operation_id: output.canonical_operation_id.clone(),
+            terminal_event_id,
+            outcome: completed_delivery_outcome(conversation_id, output, None),
+        }))
     }
 
-    async fn last_error_retryable(&self, owner_id: &str, conversation_id: &str) -> bool {
-        self.recent_messages(owner_id, conversation_id)
-            .await
-            .as_ref()
-            .is_some_and(latest_error_retryable)
-    }
-
-    async fn last_error_present(&self, owner_id: &str, conversation_id: &str) -> bool {
-        self.recent_messages(owner_id, conversation_id)
-            .await
-            .as_ref()
-            .is_some_and(latest_error_present)
-    }
-
-    async fn last_error_summary(&self, owner_id: &str, conversation_id: &str) -> Option<String> {
-        self.recent_messages(owner_id, conversation_id)
-            .await
-            .as_ref()
-            .and_then(latest_error_summary)
-    }
 }
 
 /// Runtime configuration only. Execution/step/attempt identity is intentionally
@@ -602,10 +651,31 @@ fn build_agent_extra(
     enabled_skills: &[String],
     disabled_builtin_skills: &[String],
     tool_policy: AgentToolPolicy,
+    managed_process_only: bool,
     exclude_delegation: bool,
 ) -> Value {
-    let restricted = tool_policy_allowed_tools(tool_policy);
-    let system_prompt = restricted
+    let restricted = managed_process_only
+        .then(managed_process_allowed_tools)
+        .or_else(|| tool_policy_allowed_tools(tool_policy));
+    let system_prompt = if managed_process_only {
+        format!(
+            "{brief}\n\n\
+             ## Managed process lifecycle authority (strict)\n\
+             The only workspace action tools available for this Attempt are: {}. \
+             Start the requested process exactly once, carry its exact process_id through \
+             observation and cleanup, and do not call file, search, exec_command/Bash, VCS, \
+             Artifact, delegation, or discovery tools. Runtime control tools such as \
+             report_completion remain available but grant no workspace authority.",
+            restricted
+                .as_ref()
+                .expect("managed process tools are present")
+                .iter()
+                .map(|tool| format!("`{tool}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        restricted
         .as_ref()
         .map(|tools| {
             format!(
@@ -623,9 +693,9 @@ fn build_agent_extra(
                     .join(", ")
             )
         })
-        .unwrap_or_else(|| brief.to_owned());
+        .unwrap_or_else(|| brief.to_owned())
+    };
     let mut extra = json!({
-        "session_mode": "yolo",
         "system_prompt": system_prompt,
         "preset_enabled_skills": enabled_skills,
         "exclude_auto_inject_skills": disabled_builtin_skills,
@@ -655,29 +725,29 @@ fn tool_policy_allowed_tools(policy: AgentToolPolicy) -> Option<Vec<&'static str
     }
 }
 
-fn latest_assistant_text(value: &Value) -> Option<String> {
-    match value {
-        Value::Array(values) => values.iter().find_map(latest_assistant_text),
-        Value::Object(map) => {
-            let is_text = map.get("position").and_then(Value::as_str) == Some("left")
-                && map.get("type").and_then(Value::as_str) == Some("text");
-            if is_text
-                && let Some(text) = map
-                    .get("content")
-                    .and_then(|content| content.get("content"))
-                    .and_then(Value::as_str)
-            {
-                return Some(text.to_owned());
-            }
-            map.values().find_map(latest_assistant_text)
-        }
-        _ => None,
-    }
+fn managed_process_allowed_tools() -> Vec<&'static str> {
+    vec![
+        "start_process",
+        "poll_process",
+        "write_process_stdin",
+        "close_process_stdin",
+        "resize_process",
+        "cancel_process",
+    ]
 }
 
 /// Runtime idleness and transcript contents are observational only. The
 /// operation-scoped durable receipt is the sole authority which may mark an
 /// Agent turn successful, so its absence always produces a failed outcome.
+fn paused_delivery_outcome(conversation_id: &str, reason: &str, tokens: Option<i64>) -> AttemptOutcome {
+    AttemptOutcome {
+        conversation_id: conversation_id.to_owned(), text: None, output_files: Vec::new(),
+        ok: false, tokens,
+        error: Some(format!("agent_execution_paused: Agent turn paused ({reason}); no completed delivery exists. Automatic task replay is blocked.")),
+        error_code: Some("agent_execution_paused".into()), error_retryable: Some(false),
+    }
+}
+
 fn missing_delivery_receipt_outcome(
     conversation_id: &str,
     tokens: Option<i64>,
@@ -697,369 +767,325 @@ fn missing_delivery_receipt_outcome(
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ArtifactProjectionResult {
-    files: Vec<String>,
-    integrity_ok: bool,
-}
-
-impl ArtifactProjectionResult {
-    fn failed() -> Self {
-        Self {
-            files: Vec::new(),
-            integrity_ok: false,
-        }
+fn completed_delivery_outcome(
+    conversation_id: &str,
+    output: AgentExecutionTurnOutput,
+    tokens: Option<i64>,
+) -> AttemptOutcome {
+    let mut receipt = output.delivery;
+    if receipt.result_ok == Some(true) && !output.integrity_ok {
+        // The Turn already completed. Verification failure cannot authorize
+        // replaying successful external effects in a new Attempt.
+        receipt.result_error = Some("Agent output receipts could not be verified".to_owned());
+        receipt.result_error_code = Some("agent_artifact_verification_failed".to_owned());
+        receipt.result_error_retryable = Some(false);
+    }
+    AttemptOutcome {
+        conversation_id: conversation_id.to_owned(),
+        text: receipt.result_text,
+        output_files: output.output_files,
+        ok: receipt.result_ok.unwrap_or(false) && output.integrity_ok,
+        tokens,
+        error: receipt.result_error,
+        error_code: receipt.result_error_code,
+        error_retryable: receipt.result_error_retryable,
     }
 }
 
-#[derive(Debug)]
-struct TurnArtifactProjection<'a> {
-    boundary_message_id: Option<&'a str>,
-    boundary_seen: bool,
-    receipts: Vec<PersistedArtifact>,
-    invalid_artifact_claim: bool,
-}
-
-impl<'a> TurnArtifactProjection<'a> {
-    fn for_boundary(boundary_message_id: &'a str) -> Self {
-        Self {
-            boundary_message_id: Some(boundary_message_id),
-            boundary_seen: false,
-            receipts: Vec::new(),
-            invalid_artifact_claim: false,
-        }
-    }
-
-    fn for_latest_turn() -> Self {
-        Self {
-            boundary_message_id: None,
-            boundary_seen: false,
-            receipts: Vec::new(),
-            invalid_artifact_claim: false,
-        }
-    }
-
-    fn ingest_page(&mut self, messages: &[MessageResponse]) {
-        if self.boundary_seen {
-            return;
-        }
-        for message in messages {
-            if is_right_turn_boundary(message) {
-                if self
-                    .boundary_message_id
-                    .map_or(true, |boundary| message.message_id == boundary)
-                {
-                    self.boundary_seen = true;
-                    return;
-                }
-                // We crossed a more recent turn. Receipts collected above that
-                // boundary belong to it, not to the requested delivery.
-                self.receipts.clear();
-                self.invalid_artifact_claim = false;
-                continue;
-            }
-            let has_claim = message_has_artifact_claim(message);
-            match completed_artifact_receipts(message) {
-                Some(receipts) => self.receipts.extend(receipts),
-                None if has_claim => self.invalid_artifact_claim = true,
-                None => {}
-            }
-        }
-    }
-
-    fn boundary_seen(&self) -> bool {
-        self.boundary_seen
-    }
-
-    fn boundary_label(&self) -> &str {
-        self.boundary_message_id.unwrap_or("<latest>")
-    }
-
-    fn finish(self, workspace: Option<&Path>) -> ArtifactProjectionResult {
-        if !self.boundary_seen {
-            return ArtifactProjectionResult::failed();
-        }
-        if self.receipts.is_empty() {
-            return ArtifactProjectionResult {
-                files: Vec::new(),
-                integrity_ok: !self.invalid_artifact_claim,
-            };
-        }
-        let Some(workspace) = workspace else {
-            return ArtifactProjectionResult::failed();
-        };
-        let mut files = BTreeSet::new();
-        let mut integrity_ok = !self.invalid_artifact_claim;
-        for receipt in &self.receipts {
-            match verify_artifact_receipt(workspace, receipt) {
-                Some(path) => {
-                    files.insert(path);
-                }
-                None => integrity_ok = false,
-            }
-        }
-        ArtifactProjectionResult {
-            files: files.into_iter().collect(),
-            integrity_ok,
-        }
-    }
-}
-
-fn is_right_turn_boundary(message: &MessageResponse) -> bool {
-    message.msg_id.as_deref() == Some(message.message_id.as_str())
-        && message.r#type == MessageType::Text
-        && message.position == Some(MessagePosition::Right)
-        && message.status == Some(MessageStatus::Finish)
-}
-
-fn message_has_artifact_claim(message: &MessageResponse) -> bool {
-    match message.r#type {
-        MessageType::ToolCall => message
-            .content
-            .get("artifacts")
-            .is_some_and(|artifacts| !artifacts.as_array().is_some_and(Vec::is_empty)),
-        _ => false,
-    }
-}
-
-fn completed_artifact_receipts(message: &MessageResponse) -> Option<Vec<PersistedArtifact>> {
-    let wire_turn_id = message.msg_id.as_deref()?;
-    if wire_turn_id.trim().is_empty()
-        || message.status != Some(MessageStatus::Finish)
-        || message.content.get("turn_id").and_then(Value::as_str) != Some(wire_turn_id)
-        || message
-            .content
-            .get("artifact_delivery_committed")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return None;
-    }
-
-    match message.r#type {
-        MessageType::ToolCall => {
-            if message.content.get("status").and_then(Value::as_str) != Some("completed") {
-                return None;
-            }
-            let artifacts = message.content.get("artifacts")?.as_array()?;
-            artifacts
-                .iter()
-                .cloned()
-                .map(serde_json::from_value::<PersistedArtifact>)
-                .collect::<Result<Vec<_>, _>>()
-                .ok()
-        }
-        _ => None,
-    }
-}
-
-fn verify_artifact_receipt(workspace: &Path, artifact: &PersistedArtifact) -> Option<String> {
-    if artifact.id.trim().is_empty()
-        || artifact.mime_type.trim().is_empty()
-        || artifact.path.trim().is_empty()
-        || artifact.relative_path.trim().is_empty()
-        || artifact.size_bytes == 0
-        || artifact.size_bytes > MAX_VERIFIED_ARTIFACT_BYTES
-        || artifact.sha256.len() != 64
-        || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return None;
-    }
-
-    if !Path::new(&artifact.path).is_absolute() {
-        return None;
-    }
-    portable_relative_path(&artifact.relative_path)?;
-
-    // Reuse the authoritative delivery verifier: canonical workspace
-    // containment, regular/non-empty file checks, the 512 MiB metadata cap,
-    // complete format validation, and SHA-256 are all repeated here.
-    let verified = ArtifactStore::new(workspace)
-        .verify_existing_path(&artifact.path)
-        .ok()?;
-    if verified.kind != artifact.kind
-        || verified.mime_type != artifact.mime_type
-        || verified.relative_path != artifact.relative_path
-        || verified.size_bytes != artifact.size_bytes
-        || !verified.sha256.eq_ignore_ascii_case(&artifact.sha256)
-    {
-        return None;
-    }
-
-    Some(verified.path)
-}
-
-fn portable_relative_path(value: &str) -> Option<PathBuf> {
-    let mut path = PathBuf::new();
-    for segment in value.split('/') {
-        if segment.is_empty()
-            || matches!(segment, "." | "..")
-            || segment.contains(['\\', ':', '\0'])
-        {
-            return None;
-        }
-        path.push(segment);
-    }
-    (!path.as_os_str().is_empty() && !path.is_absolute()).then_some(path)
-}
-
-fn latest_error_retryable(value: &Value) -> bool {
-    find_error_object(value)
-        .and_then(|error| error.get("retryable"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn find_error_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
-    match value {
-        Value::Array(values) => values.iter().find_map(find_error_object),
-        Value::Object(object) => {
-            let content = object.get("content");
-            if content
-                .and_then(Value::as_object)
-                .and_then(|content| content.get("type"))
-                .and_then(Value::as_str)
-                == Some("error")
-            {
-                return content
-                    .and_then(Value::as_object)
-                    .and_then(|content| content.get("error"))
-                    .and_then(Value::as_object);
-            }
-            object.values().find_map(find_error_object)
-        }
-        _ => None,
-    }
-}
-
-fn latest_error_present(value: &Value) -> bool {
-    find_error_object(value).is_some()
-}
-
-fn latest_error_summary(value: &Value) -> Option<String> {
-    let error = find_error_object(value)?;
-    match (
-        error.get("code").and_then(Value::as_str),
-        error.get("message").and_then(Value::as_str),
-    ) {
-        (Some(code), Some(message)) => Some(format!("{code}: {message}")),
-        (Some(code), None) => Some(code.to_owned()),
-        (None, Some(message)) => Some(message.to_owned()),
-        (None, None) => None,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveredAttemptOutcome {
+    pub outcome: AttemptOutcome,
+    pub canonical_operation_id: String,
+    pub terminal_event_id: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{TimestampMs, generate_id};
-    use sha2::{Digest, Sha256};
+    use nomifun_common::{ConversationStatus, TimestampMs, generate_id};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000201";
-    const CURRENT_WIRE_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000211";
     const CURRENT_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000212";
-    const NEWER_WIRE_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000213";
-    const NEWER_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000214";
-    const OLDER_WIRE_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000215";
-    const OLDER_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000216";
 
-    fn sha256_hex(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+    struct RecordingSessionPort {
+        conversation: ConversationResponse,
+        create_calls: AtomicUsize,
+        delivered: Mutex<Option<(String, SendMessageRequest)>>,
+        receipt: Option<AgentExecutionDelivery>,
     }
 
-    fn message(
-        id: &str,
-        msg_id: &str,
-        message_type: MessageType,
-        position: MessagePosition,
-        status: MessageStatus,
-        content: Value,
-    ) -> MessageResponse {
-        MessageResponse {
-            message_id: id.to_owned(),
-            conversation_id: CONVERSATION_ID.to_owned(),
-            msg_id: Some(msg_id.to_owned()),
-            r#type: message_type,
-            content,
-            position: Some(position),
-            status: Some(status),
-            hidden: false,
-            created_at: TimestampMs::from(1),
+    #[async_trait]
+    impl AgentExecutionSessionPort for RecordingSessionPort {
+        async fn create_idempotent(
+            &self,
+            _owner_id: &str,
+            _request: CreateConversationRequest,
+            _creation_key: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::Conflict("unexpected child Session creation".to_owned()))
+        }
+
+        async fn create_from_agent_snapshot_idempotent(
+            &self,
+            _owner_id: &str,
+            _request: CreateConversationRequest,
+            _snapshot: AgentResolvedSnapshot,
+            _creation_key: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::Conflict("unexpected child Session creation".to_owned()))
+        }
+
+        async fn discard_unlinked_creation(
+            &self,
+            _owner_id: &str,
+            _creation_key: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn deliver_turn(
+            &self,
+            _owner_id: &str,
+            conversation_id: &str,
+            _operation_id: &str,
+            _authority: AgentExecutionTurnAuthority,
+            request: SendMessageRequest,
+        ) -> Result<AgentExecutionDelivery, AppError> {
+            *self.delivered.lock().unwrap() = Some((conversation_id.to_owned(), request));
+            Err(AppError::Conflict("captured AutoWork turn".to_owned()))
+        }
+
+        async fn delivery_result(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<Option<AgentExecutionDelivery>, AppError> {
+            Ok(self.receipt.clone())
+        }
+
+        async fn read_turn_output(
+            &self, _owner_id: &str, _conversation_id: &str, _operation_id: Option<&str>,
+        ) -> Result<Option<AgentExecutionTurnOutput>, AppError> { Ok(None) }
+
+        async fn get(
+            &self,
+            _owner_id: &str,
+            conversation_id: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            assert_eq!(conversation_id, self.conversation.conversation_id);
+            Ok(self.conversation.clone())
+        }
+
+        fn take_turn_tokens(&self, _conversation_id: &str) -> Option<i64> {
+            None
+        }
+
+        async fn cancel_for_execution(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn cancel_turn_for_execution(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _cancellation_operation_id: &str,
+            _target_operation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn steer_turn(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: SendMessageRequest,
+        ) -> Result<String, AppError> {
+            Ok(generate_id())
+        }
+
+        async fn steer_turn_for_execution(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _target_operation_id: &str,
+            _request: SendMessageRequest,
+        ) -> Result<String, AppError> {
+            Ok(generate_id())
+        }
+
+        async fn project_assistant_message_idempotent(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _content: &str,
+            _origin: &str,
+        ) -> Result<String, AppError> {
+            Ok(generate_id())
         }
     }
 
-    fn boundary(id: &str) -> MessageResponse {
-        message(
-            id,
-            id,
-            MessageType::Text,
-            MessagePosition::Right,
-            MessageStatus::Finish,
-            json!({"content":"generate the requested artifact"}),
+    #[test]
+    fn autowork_turn_keeps_the_requirement_on_the_main_session_boundary() {
+        let target = AttemptSessionTarget::AutomationLead {
+            conversation_id: CONVERSATION_ID.to_owned(),
+        };
+        let (content, origin, hidden) =
+            attempt_turn_input(&target, true, "shared execution wrapper", "exact requirement")
+                .unwrap();
+        assert_eq!(content, "exact requirement");
+        assert_eq!(origin, "autowork");
+        assert!(hidden, "the queue instruction is not a user-authored chat message");
+
+        let (content, origin, hidden) = attempt_turn_input(
+            &AttemptSessionTarget::ChildAttempt,
+            true,
+            "shared execution wrapper",
+            "child step",
         )
+        .unwrap();
+        assert!(content.contains("task_brief"));
+        assert_eq!(origin, "agent_execution");
+        assert!(!hidden);
     }
 
-    fn artifact_receipt(workspace: &Path, file_name: &str, bytes: &[u8]) -> Value {
-        let path = workspace.join(file_name);
-        std::fs::write(&path, bytes).unwrap();
-        let canonical = std::fs::canonicalize(path).unwrap();
-        json!({
-            "id": generate_id(),
-            "kind": "file",
-            "mime_type": "application/octet-stream",
-            "path": canonical.to_string_lossy(),
-            "relative_path": file_name,
-            "size_bytes": bytes.len(),
-            "sha256": sha256_hex(bytes),
+    fn recording_session(receipt: Option<AgentExecutionDelivery>) -> Arc<RecordingSessionPort> {
+        let conversation = ConversationResponse {
+            conversation_id: CONVERSATION_ID.to_owned(),
+            name: "main Agent".to_owned(),
+            r#type: AgentType::Nomi,
+            model: None,
+            reasoning_effort: None,
+            status: ConversationStatus::Finished,
+            runtime: None,
+            source: None,
+            pinned: false,
+            pinned_at: None,
+            channel_chat_id: None,
+            preset_id: None,
+            preset_revision: None,
+            agent_snapshot: None,
+            delegation_policy: DelegationPolicy::Automatic,
+            execution_model_pool: None,
+            decision_policy: DecisionPolicy::Automatic,
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
+            created_at: TimestampMs::from(1),
+            modified_at: TimestampMs::from(1),
+            extra: json!({}),
+        };
+        Arc::new(RecordingSessionPort {
+            conversation,
+            create_calls: AtomicUsize::new(0),
+            delivered: Mutex::new(None),
+            receipt,
         })
     }
 
-    fn completed_tool_message(call_id: &str, turn_id: &str, artifact: Value) -> MessageResponse {
-        message(
-            &generate_id(),
-            turn_id,
-            MessageType::ToolCall,
-            MessagePosition::Left,
-            MessageStatus::Finish,
-            json!({
-                "call_id": call_id,
-                "name": "generate_file",
-                "status": "completed",
-                "turn_id": turn_id,
-                "artifact_delivery_committed": true,
-                "artifacts": [artifact],
-            }),
-        )
+    #[tokio::test]
+    async fn canonical_pause_stops_receipt_wait_without_claiming_completion_or_retry() {
+        let receipt = AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
+            paused_reason: Some("EXECUTION_MODEL_INVALID_REQUEST".into()),
+            result_ok: None, result_text: None, result_error: None,
+            result_error_code: None, result_error_retryable: None,
+        };
+        let runner = AgentSessionAttemptRunner::new(recording_session(Some(receipt.clone())));
+        let observed = tokio::time::timeout(Duration::from_secs(1), runner.await_delivery_receipt(
+            "owner", CONVERSATION_ID, "operation", Duration::from_secs(30 * 60),
+        )).await.expect("a canonical pause must not wait for the full attempt deadline").unwrap().unwrap();
+        assert_eq!(observed, receipt);
+        let outcome = paused_delivery_outcome(CONVERSATION_ID, observed.paused_reason.as_deref().unwrap(), Some(7));
+        assert!(!outcome.ok);
+        assert_eq!(outcome.error_retryable, Some(false));
+        assert_eq!(outcome.error_code.as_deref(), Some("agent_execution_paused"));
+        assert!(outcome.output_files.is_empty());
+        assert!(outcome.text.is_none());
     }
 
-    fn projected_result(
-        workspace: &Path,
-        boundary_id: &str,
-        pages: &[Vec<MessageResponse>],
-    ) -> ArtifactProjectionResult {
-        let workspace = std::fs::canonicalize(workspace).unwrap();
-        let mut projection = TurnArtifactProjection::for_boundary(boundary_id);
-        for page in pages {
-            projection.ingest_page(page);
-        }
-        projection.finish(Some(&workspace))
-    }
-
-    fn projected_paths(
-        workspace: &Path,
-        boundary_id: &str,
-        pages: &[Vec<MessageResponse>],
-    ) -> Vec<String> {
-        projected_result(workspace, boundary_id, pages).files
-    }
-
-    fn projected_latest_paths(workspace: &Path, pages: &[Vec<MessageResponse>]) -> Vec<String> {
-        let workspace = std::fs::canonicalize(workspace).unwrap();
-        let mut projection = TurnArtifactProjection::for_latest_turn();
-        for page in pages {
-            projection.ingest_page(page);
-        }
-        projection.finish(Some(&workspace)).files
+    #[tokio::test]
+    async fn autowork_reuses_the_bound_session_without_calling_session_creation() {
+        let session = recording_session(None);
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let participant = ExecutionParticipant {
+            participant_id: generate_id(),
+            execution_id: generate_id(),
+            source_agent_id: generate_id(),
+            preset_id: None,
+            preset_revision: None,
+            agent_snapshot: None,
+            provider_id: Some(generate_id()),
+            model: Some("model".to_owned()),
+            role: Some("requirement_owner".to_owned()),
+            capability: None,
+            constraints: None,
+            description: None,
+            system_prompt: None,
+            enabled_skills: Vec::new(),
+            disabled_builtin_skills: Vec::new(),
+            sort_order: 0,
+            introduced_in_revision: 0,
+            retired_in_revision: None,
+            created_at: 1,
+        };
+        let execution_id = participant.execution_id.clone();
+        let step_id = generate_id();
+        let attempt_id = generate_id();
+        let callback_attempt_id = attempt_id.clone();
+        let outcome = runner
+            .execute(
+                "owner",
+                AttemptSessionTarget::AutomationLead {
+                    conversation_id: CONVERSATION_ID.to_owned(),
+                },
+                &participant,
+                &[],
+                None,
+                "Requirement",
+                AgentToolPolicy::Full,
+                false,
+                DelegationPolicy::Automatic,
+                0,
+                DecisionPolicy::Automatic,
+                &attempt_id,
+                "shared wrapper",
+                "[AutoWork] perform exact requirement",
+                Duration::from_millis(1),
+                Box::new(move |conversation_id| {
+                    Box::pin(async move {
+                        assert_eq!(conversation_id, CONVERSATION_ID);
+                        Ok(AgentExecutionTurnAuthority {
+                            execution_id,
+                            step_id,
+                            attempt_id: callback_attempt_id,
+                            expected_step_version: 1,
+                            expected_attempt_version: 1,
+                            lease_owner: "lease".to_owned(),
+                        })
+                    })
+                }),
+            )
+            .await;
+        assert!(matches!(outcome, Err(AppError::Conflict(message)) if message == "captured AutoWork turn"));
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+        let (conversation_id, request) = session.delivered.lock().unwrap().take().unwrap();
+        assert_eq!(conversation_id, CONVERSATION_ID);
+        assert_eq!(request.origin.as_deref(), Some("autowork"));
+        assert!(request.hidden);
+        assert_eq!(request.content, "[AutoWork] perform exact requirement");
     }
 
     #[test]
@@ -1071,6 +1097,7 @@ mod tests {
             &[],
             &[],
             AgentToolPolicy::Full,
+            false,
             false,
         );
         assert!(extra.get("execution_id").is_none());
@@ -1088,6 +1115,7 @@ mod tests {
             &[],
             &[],
             AgentToolPolicy::Full,
+            false,
             true,
         );
         assert_eq!(extra["gateway_excluded_tools"], json!(["nomi_delegate"]));
@@ -1117,6 +1145,7 @@ mod tests {
             &[],
             AgentToolPolicy::ReadOnly,
             false,
+            false,
         );
         let prompt = extra["system_prompt"].as_str().unwrap();
         assert!(prompt.contains("`Read`, `Grep`, `Glob`"));
@@ -1125,229 +1154,49 @@ mod tests {
     }
 
     #[test]
-    fn idle_without_delivery_receipt_ignores_old_or_concurrent_assistant_text() {
-        let unrelated_transcript = json!([
-            {
-                "type": "text",
-                "position": "left",
-                "content": {"content": "concurrent turn finished"}
+    fn managed_process_attempt_exposes_only_lifecycle_actions() {
+        let extra = build_agent_extra(
+            "start and stop helper",
+            None,
+            None,
+            &[],
+            &[],
+            AgentToolPolicy::Full,
+            true,
+            false,
+        );
+        assert_eq!(
+            extra["allowed_tools"],
+            json!([
+                "start_process",
+                "poll_process",
+                "write_process_stdin",
+                "close_process_stdin",
+                "resize_process",
+                "cancel_process"
+            ])
+        );
+        let prompt = extra["system_prompt"].as_str().unwrap();
+        assert!(prompt.contains("Managed process lifecycle authority"));
+        assert!(prompt.contains("do not call file, search, exec_command/Bash"));
+        assert!(prompt.contains("report_completion remain available"));
+    }
+
+    #[test]
+    fn receipt_verification_failure_does_not_authorize_replay() {
+        let output = AgentExecutionTurnOutput {
+            canonical_operation_id: "operation".into(), terminal_event_id: Some("terminal".into()),
+            delivery: AgentExecutionDelivery {
+                message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true,
+                paused_reason: None, result_ok: Some(true), result_text: Some("done".into()),
+                result_error: None, result_error_code: None, result_error_retryable: Some(false),
             },
-            {
-                "type": "text",
-                "position": "left",
-                "content": {"content": "historical turn finished"}
-            }
-        ]);
-        // This is exactly the transcript signal the legacy fallback trusted.
-        assert_eq!(
-            latest_assistant_text(&unrelated_transcript).as_deref(),
-            Some("concurrent turn finished")
-        );
-
-        let outcome = missing_delivery_receipt_outcome(CONVERSATION_ID, Some(17));
+            output_files: Vec::new(), integrity_ok: false,
+        };
+        let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
         assert!(!outcome.ok);
-        assert_eq!(outcome.text, None);
-        assert!(outcome.output_files.is_empty());
-        assert_eq!(outcome.tokens, Some(17));
-        assert_eq!(
-            outcome.error_code.as_deref(),
-            Some(MISSING_DELIVERY_RECEIPT_CODE)
-        );
+        assert_eq!(outcome.error_code.as_deref(), Some("agent_artifact_verification_failed"));
         assert_eq!(outcome.error_retryable, Some(false));
-    }
-
-    #[test]
-    fn nested_error_messages_are_visible_to_attempt_settlement() {
-        let transcript = json!({
-            "items": [
-                {
-                    "type": "tips",
-                    "content": {
-                        "type": "error",
-                        "error": {
-                            "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
-                            "message": "provider stream protocol violation",
-                            "retryable": true
-                        }
-                    }
-                }
-            ],
-            "has_more": false
-        });
-        assert!(latest_error_present(&transcript));
-        assert!(latest_error_retryable(&transcript));
-        assert_eq!(
-            latest_error_summary(&transcript).as_deref(),
-            Some("USER_LLM_PROVIDER_GATEWAY_ERROR: provider stream protocol violation")
-        );
-    }
-
-    #[test]
-    fn historical_turn_artifact_is_not_projected() {
-        let temp = tempfile::tempdir().unwrap();
-        let newer = artifact_receipt(temp.path(), "newer.bin", b"newer");
-        let older = artifact_receipt(temp.path(), "older.bin", b"older");
-        let pages = vec![vec![
-            completed_tool_message("newer-tool", NEWER_WIRE_TURN_ID, newer),
-            boundary(NEWER_USER_TURN_ID),
-            boundary(CURRENT_USER_TURN_ID),
-            completed_tool_message("older-tool", OLDER_WIRE_TURN_ID, older),
-        ]];
-
-        assert!(projected_paths(temp.path(), CURRENT_USER_TURN_ID, &pages).is_empty());
-    }
-
-    #[test]
-    fn latest_turn_adoption_ignores_older_receipts() {
-        let temp = tempfile::tempdir().unwrap();
-        let historical_receipt = artifact_receipt(temp.path(), "historical-latest.bin", b"old");
-        let pages = vec![vec![
-            boundary(CURRENT_USER_TURN_ID),
-            completed_tool_message("old-tool", OLDER_WIRE_TURN_ID, historical_receipt),
-            boundary(OLDER_USER_TURN_ID),
-        ]];
-
-        assert!(projected_latest_paths(temp.path(), &pages).is_empty());
-    }
-
-    #[test]
-    fn running_and_error_tool_calls_do_not_project_artifacts() {
-        let temp = tempfile::tempdir().unwrap();
-        let error_receipt = artifact_receipt(temp.path(), "error.bin", b"error");
-        let running_receipt = artifact_receipt(temp.path(), "running.bin", b"running");
-        let errored = message(
-            "0190f5fe-7c00-7a00-8000-000000000226",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::ToolCall,
-            MessagePosition::Left,
-            MessageStatus::Error,
-            json!({
-                "status": "error",
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "artifacts": [error_receipt],
-            }),
-        );
-        let running = message(
-            "0190f5fe-7c00-7a00-8000-000000000227",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::ToolCall,
-            MessagePosition::Left,
-            MessageStatus::Work,
-            json!({
-                "status": "running",
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "artifacts": [running_receipt],
-            }),
-        );
-        let pages = vec![vec![running, errored, boundary(CURRENT_USER_TURN_ID)]];
-
-        assert!(projected_paths(temp.path(), CURRENT_USER_TURN_ID, &pages).is_empty());
-    }
-
-    #[test]
-    fn legacy_or_provisional_receipts_without_atomic_commit_marker_fail_closed() {
-        let temp = tempfile::tempdir().unwrap();
-        let generic_receipt = artifact_receipt(temp.path(), "legacy-generic.bin", b"legacy generic");
-        let mut generic = completed_tool_message(
-            "legacy-tool",
-            CURRENT_WIRE_TURN_ID,
-            generic_receipt,
-        );
-        generic
-            .content
-            .as_object_mut()
-            .unwrap()
-            .remove("artifact_delivery_committed");
-        let pages = vec![vec![generic, boundary(CURRENT_USER_TURN_ID)]];
-
-        let result = projected_result(temp.path(), CURRENT_USER_TURN_ID, &pages);
-        assert!(result.files.is_empty());
-        assert!(!result.integrity_ok);
-    }
-
-    #[test]
-    fn mismatched_size_and_hash_are_rejected() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut wrong_size = artifact_receipt(temp.path(), "size.bin", b"size");
-        wrong_size["size_bytes"] = json!(99);
-        let mut wrong_hash = artifact_receipt(temp.path(), "hash.bin", b"hash");
-        wrong_hash["sha256"] = json!("0".repeat(64));
-        let mut oversized = artifact_receipt(temp.path(), "oversized.bin", b"small");
-        oversized["size_bytes"] = json!(MAX_VERIFIED_ARTIFACT_BYTES + 1);
-        let pages = vec![vec![
-            completed_tool_message("size-tool", CURRENT_WIRE_TURN_ID, wrong_size),
-            completed_tool_message("hash-tool", CURRENT_WIRE_TURN_ID, wrong_hash),
-            completed_tool_message("oversized-tool", CURRENT_WIRE_TURN_ID, oversized),
-            boundary(CURRENT_USER_TURN_ID),
-        ]];
-
-        let result = projected_result(temp.path(), CURRENT_USER_TURN_ID, &pages);
-        assert!(result.files.is_empty());
-        assert!(!result.integrity_ok);
-    }
-
-    #[test]
-    fn artifact_path_outside_workspace_is_rejected() {
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let receipt = artifact_receipt(outside.path(), "outside.bin", b"outside");
-        let pages = vec![vec![
-            completed_tool_message("tool", CURRENT_WIRE_TURN_ID, receipt),
-            boundary(CURRENT_USER_TURN_ID),
-        ]];
-
-        assert!(projected_paths(workspace.path(), CURRENT_USER_TURN_ID, &pages).is_empty());
-    }
-
-    #[test]
-    fn current_completed_tool_receipts_are_verified_and_deduplicated() {
-        let temp = tempfile::tempdir().unwrap();
-        let receipt = artifact_receipt(temp.path(), "current.bin", b"current artifact");
-        let expected = receipt["path"].as_str().unwrap().to_owned();
-        let pages = vec![vec![
-            completed_tool_message("tool-a", CURRENT_WIRE_TURN_ID, receipt.clone()),
-            completed_tool_message("tool-b", CURRENT_WIRE_TURN_ID, receipt),
-            boundary(CURRENT_USER_TURN_ID),
-        ]];
-
-        assert_eq!(
-            projected_paths(temp.path(), CURRENT_USER_TURN_ID, &pages),
-            vec![expected.clone()]
-        );
-        assert_eq!(projected_latest_paths(temp.path(), &pages), vec![expected]);
-    }
-
-    #[test]
-    fn projection_crosses_page_size_and_requires_canonical_boundary() {
-        let temp = tempfile::tempdir().unwrap();
-        let receipt = artifact_receipt(temp.path(), "paged.bin", b"paged artifact");
-        let expected = receipt["path"].as_str().unwrap().to_owned();
-        let mut first_page = vec![completed_tool_message(
-            "tool",
-            CURRENT_WIRE_TURN_ID,
-            receipt,
-        )];
-        for _ in 1..ARTIFACT_RECEIPT_PAGE_SIZE {
-            first_page.push(message(
-                &generate_id(),
-                CURRENT_WIRE_TURN_ID,
-                MessageType::Text,
-                MessagePosition::Left,
-                MessageStatus::Finish,
-                json!({"content":"progress"}),
-            ));
-        }
-        assert_eq!(first_page.len(), ARTIFACT_RECEIPT_PAGE_SIZE as usize);
-        let second_page = vec![boundary(CURRENT_USER_TURN_ID)];
-
-        assert_eq!(
-            projected_paths(
-                temp.path(),
-                CURRENT_USER_TURN_ID,
-                &[first_page.clone(), second_page]
-            ),
-            vec![expected]
-        );
-        assert!(projected_paths(temp.path(), CURRENT_USER_TURN_ID, &[first_page]).is_empty());
+        assert_eq!(outcome.tokens, Some(7));
     }
 }

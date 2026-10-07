@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nomifun-agent-contracts.workspace = true
 nomifun-auth.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true
@@ -17,12 +18,12 @@ serde_json.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
-getrandom.workspace = true
 futures.workspace = true
 aws-config.workspace = true
 aws-sdk-bedrock.workspace = true
 semver.workspace = true
 dirs.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true }

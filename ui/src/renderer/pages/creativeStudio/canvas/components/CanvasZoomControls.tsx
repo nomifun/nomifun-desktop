@@ -18,9 +18,9 @@ import { useTranslation } from 'react-i18next';
 
 import styles from './CanvasZoomControls.module.css';
 
-export type CanvasZoomBackground = 'dots' | 'lines' | 'blank';
+type CanvasZoomBackground = 'dots' | 'lines' | 'blank';
 
-export interface CanvasZoomControlLabels {
+interface CanvasZoomControlLabels {
   zoomOut: string;
   zoomIn: string;
   zoomSlider: string;
@@ -59,7 +59,7 @@ const iconProps = {
   theme: 'outline' as const,
   size: 16,
   fill: 'currentColor',
-  strokeWidth: 3,
+  strokeWidth: 3.5,
 };
 
 /**
@@ -164,10 +164,10 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
               setZoomMenuOpen(false);
             }}
           >
+            <span>{t(`creativeStudio.canvas.backgrounds.${background}`)}</span>
             <span className={styles.selectionIndicator} aria-hidden='true'>
               {background === selectedBackground ? <CheckOne {...iconProps} /> : null}
             </span>
-            <span>{t(`creativeStudio.canvas.backgrounds.${background}`)}</span>
           </button>
         ))}
       </div>

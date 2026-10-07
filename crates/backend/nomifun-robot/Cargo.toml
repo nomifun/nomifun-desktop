@@ -54,7 +54,7 @@ ort = { workspace = true }
 # skipping one test. This makes the feature implicit for tests only.
 nomifun-robot = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
-# The MCP proxy is only correct if it is driven over real HTTP, headers and all.
+# The fake-device integration test drives the real OTA/device HTTP surface.
 reqwest = { workspace = true }
 # `test-util` is not in tokio's `full`, and the downlink pacer's cadence tests
 # need `start_paused` virtual time rather than real 60 ms sleeps.

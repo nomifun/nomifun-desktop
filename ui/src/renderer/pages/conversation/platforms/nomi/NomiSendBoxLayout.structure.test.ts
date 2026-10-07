@@ -10,23 +10,43 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('Nomi sendbox control layout', () => {
+  test('uses the compact stacked composer for the desktop companion surface', () => {
+    const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const composer = readSource(new URL('../../../../components/chat/Composer.tsx', import.meta.url));
+    const css = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+
+    expect(source.includes('compactStacked={compactProductComposer}')).toBe(true);
+    expect(source.includes('defaultMultiLine\n')).toBe(true);
+    expect(source.includes('lockMultiLine\n')).toBe(true);
+    expect(source.includes('defaultMultiLine={!compactProductComposer}')).toBe(false);
+    expect(source.includes("bottomHint={compactProductComposer ? ' '")).toBe(false);
+    expect(composer.indexOf('{compactStacked && attachments}')).toBeLessThan(
+      composer.indexOf('<Input.TextArea')
+    );
+    expect(composer.includes("data-composer-layout={compactStacked ? 'compact-stacked' : 'adaptive'}")).toBe(true);
+    expect(composer.includes('const resolvedSingleLine = compactStacked ? false : singleLine')).toBe(true);
+    expect(composer.includes('data-composer-editor-row')).toBe(true);
+    expect(composer.includes('autoSize={resolvedSingleLine || compactStacked ? false')).toBe(true);
+    expect(css.includes('.sendbox-panel--compact-stacked')).toBe(true);
+    expect(css.includes('padding: 10px 12px !important')).toBe(true);
+    expect(css.includes('height: 40px !important')).toBe(true);
+  });
+
   test('renders context usage as a click ring before the model selector and removes turn metrics copy', () => {
     const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
-    const sendBoxSource = readSource(new URL('../../../../components/chat/SendBox/index.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('../../../../components/chat/Composer.tsx', import.meta.url));
     const contextRingSource = readSource(new URL('./ContextUsageRing.tsx', import.meta.url));
     const useNomiMessageSource = readSource(new URL('./useNomiMessage.ts', import.meta.url));
     const sendBoxIndex = source.indexOf('<SendBox');
     const rightToolsIndex = source.indexOf('rightTools={');
     const modelIndex = source.indexOf('<NomiModelSelector', rightToolsIndex);
     const contextRingIndex = source.indexOf('<ContextUsageRing', rightToolsIndex);
-    const collaboratorIndex = source.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
 
     expect(sendBoxIndex).toBeGreaterThan(-1);
     expect(rightToolsIndex).toBeGreaterThan(sendBoxIndex);
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(source.includes('topRightTools={')).toBe(false);
+    expect(source.includes('topRightTools=')).toBe(false);
     expect(source.includes('ContextUsagePill')).toBe(false);
     expect(source.includes("data-testid='nomi-context-usage-slot'")).toBe(false);
     expect(source.includes("data-testid='nomi-turn-metrics'")).toBe(false);
@@ -52,49 +72,35 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('merges collaboration models and policy into one control next to the main model', () => {
+  test('keeps collaboration configuration on Guid and omits the redundant conversation composer trigger', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const sharedControl = readSource(new URL('../../../../components/collaboration/CollaborationComposerControl.tsx', import.meta.url));
+    const homeSource = readSource(new URL('../../../guid/GuidPage.tsx', import.meta.url));
 
-    const collaborationBlock = chatSource.slice(
-      chatSource.indexOf('const collaborationControlNode'),
-      chatSource.indexOf('const { groups: healGroups'),
-    );
-    expect(collaborationBlock.includes('<GuidCollaboratorSelector')).toBe(true);
-    expect(collaborationBlock.includes('onChange={onCollaboratorsChange}')).toBe(true);
-    expect(collaborationBlock.includes('panelFooter={')).toBe(true);
-    expect(collaborationBlock.includes('<CollaborationPolicyControl')).toBe(true);
-    expect(collaborationBlock.includes('onChange={onCollaborationPolicyChange}')).toBe(true);
-    expect(collaborationBlock.includes('embedded')).toBe(true);
-    expect(collaborationBlock.includes("triggerLabel={t('collaboration.policy.button'")).toBe(true);
-    expect(collaborationBlock.includes("className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'")).toBe(true);
-    expect(chatSource.includes('extraRightTools={collaborationPolicyNode}')).toBe(false);
-
-    const rightToolsIndex = sendBoxSource.indexOf('rightTools={');
-    const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
-    const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
-    const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
-    const permissionIndex = sendBoxSource.indexOf('<AgentModeSelector', rightToolsIndex);
-
-    expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
-    expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(permissionIndex).toBeGreaterThan(collaboratorIndex);
+    expect(homeSource.includes('<CollaborationComposerControl')).toBe(true);
+    expect(homeSource.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
+    expect(sharedControl.includes('panelFooter={')).toBe(true);
+    expect(sharedControl.includes('<CollaborationPolicyControl')).toBe(true);
+    expect(sharedControl.includes('embedded')).toBe(true);
+    expect(sharedControl.includes("triggerLabel={t('collaboration.policy.button'")).toBe(true);
+    expect(sharedControl.includes("className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'")).toBe(true);
+    expect(chatSource.includes('CollaborationComposerControl')).toBe(false);
+    expect(chatSource.includes('collaborationControlNode')).toBe(false);
+    expect(nomiChatSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker')).toBe(true);
   });
 
-  test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {
+  test('does not load frozen collaboration configuration solely for the conversation composer', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
 
-    expect(chatSource.includes('import { reconcileModelRefs, sameModelRefs }')).toBe(true);
-    expect(chatSource.includes('const activeCollaborators = collaboratorReconciliation?.active ?? []')).toBe(true);
-    expect(chatSource.includes('value={activeCollaborators}')).toBe(true);
-    expect(
-      /buildConversationModelPool\(\s*\{ provider_id: _provider\.id, model: modelName \},\s*activeCollaborators,\s*\)/.test(
-        chatSource,
-      ),
-    ).toBe(true);
-    expect(chatSource.includes('collaboratorReconciliation.removed.length === 0')).toBe(true);
-    expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
+    expect(chatSource.includes('agentExecutionTemplate.get')).toBe(false);
+    expect(chatSource.includes('useExecutionModelPool')).toBe(false);
+    expect(chatSource.includes('reconcileModelRefs')).toBe(false);
+    expect(chatSource.includes('buildConversationModelPool')).toBe(false);
+    expect(chatSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
   });
 
   test('supports embedding the policy panel behind the unified collaboration trigger', () => {
@@ -108,32 +114,130 @@ describe('Nomi sendbox control layout', () => {
     expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
   });
 
+  test('allows idle-session model switches while keeping preset resource restrictions', () => {
+    const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const selectorSource = readSource(new URL('../../../../components/chat/ChatModelSelector.tsx', import.meta.url));
+
+    expect(chatSource.includes('modelLocked')).toBe(false);
+    expect(chatSource.includes('const hasPreset = Boolean(conversation.preset_id);')).toBe(true);
+    expect(chatSource.includes('useAgentCapabilityResourceKinds')).toBe(false);
+    expect(chatSource.includes('required_resource_kinds')).toBe(true);
+    expect(chatSource.includes('readOnly: true')).toBe(false);
+    expect(chatSource.includes('conversation.switchModel.invoke')).toBe(true);
+
+    expect(nomiChatSource.includes('modelLocked')).toBe(false);
+    expect(sendBoxSource.includes('hideAdvancedControls || modelLocked')).toBe(false);
+    expect(sendBoxSource.includes('{!modelLocked && (')).toBe(false);
+    expect(sendBoxSource.includes('modelLocked')).toBe(false);
+    expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
+    expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(true);
+    expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
+    expect(selectorSource.includes('const modelControl = disabled ? modelTrigger')).toBe(true);
+    expect(selectorSource.indexOf('{modelControl}')).toBeLessThan(
+      selectorSource.indexOf('{reasoningControl}')
+    );
+    expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
+    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice)')).toBe(true);
+  });
+
+  test('switches the current AgentSession in place instead of navigating back to Guid', () => {
+    const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const agentSwitchBlock = chatSource.slice(
+      chatSource.indexOf('const switchCurrentConversationAgent'),
+      chatSource.indexOf('const frozenPresetId'),
+    );
+
+    expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
+    expect(chatSource.includes('useAgentPresets()')).toBe(true);
+    expect(agentSwitchBlock.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchBlock.includes('agentPlatform.sessions.applyAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchBlock.includes("navigate('/guid', { state })")).toBe(false);
+    expect(agentSwitchBlock.includes('expected_binding_version')).toBe(true);
+    expect(agentSwitchBlock.includes('handoff_mode')).toBe(true);
+    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(false);
+    expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
+    expect(agentSwitchBlock.includes('creation.draft')).toBe(true);
+    expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes('prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer')).toBe(true);
+    expect(sendBoxSource.includes('taskPlan={taskPlan}')).toBe(true);
+  });
+
+  test('waits for passive readiness without requiring an unnecessary warmup POST', () => {
+    const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const initialMessageBlock = source.slice(
+      source.indexOf('// Handle the Guid handoff only after passive warmup'),
+      source.indexOf('const onSendHandler'),
+    );
+
+    expect(initialMessageBlock.includes('!initialDeliveryReady')).toBe(true);
+    expect(initialMessageBlock.includes('initialDeliveryReady')).toBe(true);
+    expect(initialMessageBlock.includes('sessionCapabilities.loading || !sessionCapabilities.state')).toBe(true);
+    expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
+    expect(source.includes('setInitialDeliveryReady(true)')).toBe(true);
+    expect(source.includes('useSlashCommands')).toBe(false);
+  });
+
+  test('consuming the Agent identity draft cannot strand the Guid initial message', () => {
+    const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const handoffBlock = source.slice(
+      source.indexOf('// Handle the Guid handoff only after passive warmup'),
+      source.indexOf('const onSendHandler'),
+    );
+    const draftBranch = handoffBlock.slice(
+      handoffBlock.indexOf('if (!sessionStorage.getItem(draftProcessedKey))'),
+      handoffBlock.indexOf("const storageKey = sessionStorageKey('initial-message-nomi'"),
+    );
+
+    expect(draftBranch.includes('sessionStorage.removeItem(draftStorageKey)')).toBe(true);
+    expect(draftBranch.includes('return;')).toBe(false);
+    expect(handoffBlock.indexOf('const processInitialMessage')).toBeGreaterThan(
+      handoffBlock.indexOf('sessionStorage.removeItem(draftStorageKey)'),
+    );
+  });
+
+  test('generation task polling follows the frozen creation.media grant', () => {
+    const chatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const conversationSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    expect(chatSource.includes('creationTasksEnabled?: boolean')).toBe(true);
+    expect(chatSource.includes('enabled={creationTasksEnabled}')).toBe(true);
+    expect(conversationSource.includes("enabled_capabilities.includes('creation.media') === true")).toBe(true);
+  });
+
+  test('ordinary turns cannot override the frozen Agent while creation reuses only that binding', () => {
+    const source = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const sendBox = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const admission = source.slice(source.indexOf('const frozenPresetId'), source.indexOf('const selectCreationMode ='));
+    expect(admission.includes('return frozenPresetId;')).toBe(true);
+    expect(admission.includes('prepareOfficialAgent')).toBe(false);
+    expect(sendBox.includes('creation.resolvePreset?.() ?? creation.presetId')).toBe(true);
+    expect(sendBox.includes('preset_id: presetId')).toBe(false);
+  });
+
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
-    const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
+    const modelSource = readSource(new URL('../../../../components/chat/ChatModelSelector.tsx', import.meta.url));
     const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+    const responsiveCss = readSource(new URL('../../../../components/chat/ResponsiveComposerRow.module.css', import.meta.url));
     const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
-    const modeSource = readSource(new URL('../../../../components/agent/AgentModeSelector.tsx', import.meta.url));
-    const summonSource = readSource(new URL('../../components/SummonPanel/index.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
-    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
-    expect(sendBoxCss.includes('@container sendbox-config (max-width: 560px)')).toBe(true);
-    expect(sendBoxCss.includes('.sendbox-responsive-label')).toBe(true);
+    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(false);
+    expect(responsiveCss.includes("[data-compact='true']")).toBe(true);
+    expect(responsiveCss.includes('.sendbox-responsive-label')).toBe(true);
     expect(sendBoxCss.includes(".nomi-sendbox-collaboration-btn[aria-pressed='true']")).toBe(true);
-    expect(sendBoxCss.includes('max-width 160ms ease')).toBe(true);
-    expect(sendBoxCss.includes('@media (hover: hover) and (pointer: fine)')).toBe(true);
-    expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);
-    expect(sendBoxCss.includes('display: inline-flex !important')).toBe(true);
+    expect(responsiveCss.includes(':hover, :focus-visible')).toBe(true);
+    expect(responsiveCss.includes('display: inline-flex !important')).toBe(true);
 
-    for (const source of [modelSource, collaboratorSource, modeSource]) {
+    for (const source of [modelSource, collaboratorSource]) {
       expect(source.includes('<Tooltip')).toBe(false);
       expect(source.includes('sendbox-responsive-label')).toBe(true);
       expect(source.includes('aria-label=')).toBe(true);
     }
-    const summonControlSource = summonSource.slice(summonSource.indexOf('const SummonControl'));
-    expect(summonControlSource.includes('<Tooltip')).toBe(false);
-    expect(summonSource.includes('sendbox-responsive-label')).toBe(true);
-    expect(summonSource.includes("className='nomi-sendbox-summon-btn'")).toBe(true);
   });
 });

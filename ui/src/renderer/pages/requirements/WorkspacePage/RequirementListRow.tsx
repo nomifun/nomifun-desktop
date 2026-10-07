@@ -88,7 +88,7 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
       tabIndex={0}
       onClick={() => onOpenDetail(item.requirement_id)}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') {
+        if (e.target === e.currentTarget && e.key === 'Enter') {
           e.preventDefault();
           onOpenDetail(item.requirement_id);
         }
@@ -185,7 +185,7 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
             aria-label={t('requirements.actions.delete')}
             title={t('requirements.actions.delete')}
             onKeyDown={(e) => {
-              if (e.key === ' ') {
+              if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 (e.currentTarget as HTMLElement).click();
               }

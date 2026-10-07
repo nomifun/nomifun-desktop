@@ -30,8 +30,8 @@ describe('knowledge consumer unmount binding transform', () => {
   test('turns the binding off when the last mounted base is removed', () => {
     expect(removeBaseFromBinding(binding({ kb_ids: [KB_A] }), KB_A)).toEqual({
       enabled: false,
-      writeback: true,
-      writeback_eagerness: 'auto',
+      writeback: false,
+      writeback_eagerness: 'manual',
       channel_write_enabled: true,
       kb_ids: [],
     });

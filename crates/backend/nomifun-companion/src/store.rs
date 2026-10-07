@@ -366,6 +366,12 @@ impl MemoryImportTransaction<'_> {
 }
 
 impl CompanionStore {
+    /// App teardown closes the shared pool even if cached consumers retain a clone.
+    /// Idempotent; waits for in-flight connections to return before releasing files.
+    pub(crate) async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// Validate and stage a complete memory-bundle merge in one SQLite
     /// transaction. No row is visible to other connections until the returned
     /// transaction is committed.
@@ -775,6 +781,7 @@ fn invalid_disk_id(field: &str, value: &str, error: impl std::fmt::Display) -> A
 /// removes any non-v3 dataset before this crate starts, so this crate creates
 /// only the current schema and never transforms existing rows.
 const STORE_VERSION: i64 = 3;
+const MAX_INDEXES_PER_TABLE: usize = 5;
 
 #[derive(Debug, Clone, Copy)]
 struct ColumnContract {
@@ -1255,6 +1262,29 @@ async fn validate_named_indexes(pool: &SqlitePool) -> Result<(), AppError> {
         return Err(AppError::Internal(format!(
             "companion store index set is not the exact v3 baseline: expected {expected_names:?}, found {actual_names_set:?}"
         )));
+    }
+
+    // Count UNIQUE auto-indexes as well as named indexes. The side store owns
+    // these tables, so exceeding the same physical B-tree budget as the main
+    // database is schema drift rather than a harmless implementation detail.
+    for table in BASELINE_TABLES {
+        let rows = sqlx::query("SELECT name FROM pragma_index_list(?) ORDER BY name")
+            .bind(table.name)
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+        if rows.len() > MAX_INDEXES_PER_TABLE {
+            let names = rows
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect::<Vec<_>>();
+            return Err(AppError::Internal(format!(
+                "companion store table {} exceeds the physical index budget: {} > {}; indexes={names:?}",
+                table.name,
+                rows.len(),
+                MAX_INDEXES_PER_TABLE,
+            )));
+        }
     }
 
     for contract in BASELINE_INDEXES {
@@ -3244,7 +3274,7 @@ impl CompanionStore {
 
 // ---------------------------------------------------------------------------
 // 自进化：技能注册表 / 挖矿统计 / 反馈回流
-// 正文以磁盘 SKILL.md 为事实源（见 nomifun-extension::skill_service）；这里只存
+// 正文以磁盘 SKILL.md 为事实源（见 nomifun-skill-library::skill_service）；这里只存
 // 元数据 + 溯源 + 生命周期。共享技能已作为产品概念删除：每个技能行都属于恰好
 // 一个伙伴（companion_id）；companion_id = NULL 只是启动迁移还没认领的遗留行。
 // ---------------------------------------------------------------------------
@@ -4047,6 +4077,27 @@ impl CompanionStore {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn shutdown_releases_disk_store_with_retained_clones() {
+        let root = tempfile::tempdir().unwrap();
+        let store = super::CompanionStore::open(root.path(), None).await.unwrap();
+        let retained = store.clone();
+        sqlx::query("SELECT 1").execute(&retained.pool).await.unwrap();
+        store.close().await;
+        assert!(sqlx::query("SELECT 1").execute(&retained.pool).await.is_err());
+        retained.close().await;
+        // Require actual file release while clones remain alive. SQLx's SQLite
+        // worker may finish its final close just after the pool future resolves.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(root.path()) {
+                Ok(()) => break,
+                Err(error) if tokio::time::Instant::now() >= deadline => panic!("store files remained open: {error}"),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    }
+
     use super::*;
 
     fn companion_fixture(sequence: u64) -> String {

@@ -1,4 +1,6 @@
 .root {
+  --creative-canvas-control-ink: color-mix(in srgb, var(--color-text-1) 88%, transparent);
+  --creative-canvas-zoom-menu-offset-x: 48px;
   position: relative;
   display: grid;
   width: 100%;
@@ -6,10 +8,14 @@
   min-width: 0;
   min-height: 0;
   grid-template-columns: 0 minmax(0, 1fr) 360px;
-  grid-template-rows: 56px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background: var(--color-bg-1);
   color: var(--color-text-1);
+}
+
+.root[data-left-open='true'] {
+  --creative-canvas-zoom-menu-offset-x: 320px;
 }
 
 .root[data-right-view='closed'] {
@@ -33,18 +39,38 @@
 }
 
 .topBar {
-  z-index: 30;
+  z-index: 70;
   display: flex;
   min-width: 0;
   grid-column: 2;
   grid-row: 1;
+  align-self: start;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 0 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-2) 82%, transparent);
-  background: color-mix(in srgb, var(--color-bg-1) 84%, transparent);
-  backdrop-filter: blur(16px) saturate(125%);
+  gap: 12px;
+  margin: 10px 14px;
+  pointer-events: none;
+}
+
+.topPrimaryActions,
+.topActions {
+  display: flex;
+  min-width: 0;
+  height: 38px;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 90%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--color-bg-2) 95%, transparent);
+  box-shadow: none;
+  color: var(--creative-canvas-control-ink);
+  pointer-events: auto;
+  backdrop-filter: blur(18px) saturate(135%);
+}
+
+.topPrimaryActions {
+  max-width: min(760px, calc(100% - 170px));
 }
 
 .backButton,
@@ -69,17 +95,16 @@
 }
 
 .backButton {
-  min-width: 0;
-  height: 34px;
-  flex: 0 0 auto;
-  gap: 7px;
-  padding: 0 10px;
-  border-radius: 9px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  padding: 0;
+  border-radius: 8px;
   background: transparent;
-  color: var(--color-text-2);
+  color: var(--creative-canvas-control-ink);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 620;
 }
 
 .backButton:hover:not(:disabled) {
@@ -90,31 +115,39 @@
 .projectIdentity {
   display: flex;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  padding: 0 4px;
 }
 
 .projectIdentity h1 {
-  max-width: min(38vw, 380px);
+  max-width: min(32vw, 330px);
   margin: 0;
   overflow: hidden;
   color: var(--color-text-1);
-  font-size: 14px;
-  font-weight: 680;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.titleEditor { position: relative; min-width: 0; }
+.editableTitle { cursor: text; border-radius: 4px; }
+.editableTitle:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 3px; }
+.titleInput { box-sizing: border-box; width: 220px; max-width: min(32vw, 330px); height: 28px; padding: 3px 6px; border: 1px solid rgb(var(--primary-6)); border-radius: 5px; background: var(--color-bg-2); color: var(--color-text-1); font: inherit; font-size: 13px; outline: none; }
+.titleInput[aria-invalid='true'] { border-color: rgb(var(--red-6)); }
+.titleError { position: absolute; top: calc(100% + 4px); left: 0; z-index: 1; padding: 4px 8px; border: 1px solid var(--color-border-2); border-radius: 5px; background: var(--color-bg-2); color: rgb(var(--red-6)); font-size: 12px; white-space: nowrap; }
+
 .saveState {
   display: inline-flex;
   min-width: 0;
-  height: 26px;
+  height: 22px;
   align-items: center;
-  gap: 5px;
-  padding: 0 8px;
+  gap: 4px;
+  padding: 0 6px;
   border-radius: 999px;
   background: var(--color-fill-1);
   color: var(--color-text-3);
@@ -144,7 +177,6 @@
   color: rgb(var(--danger-6));
 }
 
-.topActions,
 .panelTabs {
   display: flex;
   min-width: 0;
@@ -154,6 +186,26 @@
 .topActions {
   flex: 0 0 auto;
   gap: 3px;
+}
+
+.headerEditActions,
+.customEditActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+}
+
+.backLabel,
+.tabLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .customTopActions {
@@ -168,7 +220,7 @@
   min-width: 0;
   min-height: 0;
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 1;
   overflow: hidden;
   background: var(--color-bg-1);
 }
@@ -193,17 +245,17 @@
 .leftPanel {
   position: absolute;
   z-index: 60;
-  top: 68px;
-  bottom: 76px;
+  top: 50%;
+  bottom: auto;
   left: 14px;
-  width: min(320px, calc(100% - 28px));
+  width: 48px;
+  max-height: calc(100% - 156px);
   flex-direction: row;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
-  box-shadow:
-    0 18px 48px color-mix(in srgb, #000 16%, transparent),
-    0 2px 8px color-mix(in srgb, #000 8%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
+  box-shadow: none;
+  transform: translateY(-50%);
   backdrop-filter: blur(20px) saturate(135%);
   transition:
     width 180ms ease,
@@ -217,7 +269,7 @@
   position: relative;
   width: 100%;
   grid-column: 3;
-  grid-row: 1 / 3;
+  grid-row: 1;
   border-left: 1px solid var(--color-border-2);
   background: var(--color-bg-2);
 }
@@ -264,14 +316,21 @@
 
 .leftTabs {
   display: flex;
-  width: 50px;
+  width: 46px;
   min-height: 0;
-  flex: 0 0 50px;
+  flex: 0 0 46px;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px 5px;
-  border-right: 1px solid color-mix(in srgb, var(--color-border-2) 78%, transparent);
-  background: color-mix(in srgb, var(--color-fill-1) 62%, transparent);
+  gap: 2px;
+  padding: 6px 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 0;
+  background: transparent;
+  scrollbar-width: none;
+}
+
+.leftTabs::-webkit-scrollbar {
+  display: none;
 }
 
 .leftTabs button,
@@ -281,18 +340,18 @@
   justify-content: center;
   gap: 4px;
   background: transparent;
-  color: var(--color-text-3);
+  color: var(--creative-canvas-control-ink);
   cursor: pointer;
   font-size: 11px;
   font-weight: 620;
 }
 
 .leftTabs button {
-  width: 38px;
-  min-height: 38px;
-  flex: 0 0 38px;
+  width: 36px;
+  min-height: 36px;
+  flex: 0 0 36px;
   padding: 0;
-  border-radius: 10px;
+  border-radius: 9px;
   flex-direction: column;
   transition:
     background-color 120ms ease,
@@ -313,7 +372,7 @@
 
 .leftTabs button[data-active='true'] {
   background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent);
   color: rgb(var(--primary-6));
 }
 
@@ -344,22 +403,19 @@
   display: block;
 }
 
-.tabLabel {
-  position: absolute;
-  width: 1px;
+.railDivider {
+  width: 24px;
   height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  flex: 0 0 1px;
+  margin: 4px auto;
+  background: color-mix(in srgb, var(--color-border-3) 82%, transparent);
 }
 
 .leftCollapseButton {
   display: grid;
-  width: 38px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 36px;
+  height: 32px;
+  flex: 0 0 32px;
   place-items: center;
   margin-top: auto;
   padding: 0;
@@ -384,29 +440,25 @@
   border-top: 1px solid color-mix(in srgb, var(--color-border-2) 74%, transparent);
 }
 
-.leftPanel[data-left-open='false'] {
-  top: 50%;
-  right: auto;
-  bottom: auto;
-  width: 50px;
-  min-height: 0;
-  transform: translateY(-50%);
-  border-radius: 17px;
+.leftPanel[data-left-open='true'] {
+  top: 64px;
+  bottom: 72px;
+  width: min(320px, calc(100% - 28px));
+  max-height: none;
+  transform: none;
+  border-radius: 15px;
 }
 
-.leftPanel[data-left-open='false'] .leftTabs {
-  width: 100%;
-  flex-basis: auto;
-  padding: 8px 4px;
-  border-right: 0;
-  background: transparent;
+.leftPanel[data-left-open='true'] .leftTabs {
+  border-right: 1px solid color-mix(in srgb, var(--color-border-2) 78%, transparent);
+  background: color-mix(in srgb, var(--color-fill-1) 62%, transparent);
 }
 
 .leftPanel[data-left-open='false'] .leftTabs button {
-  width: 40px;
-  min-height: 40px;
-  flex-basis: 40px;
-  border-radius: 11px;
+  width: 36px;
+  min-height: 36px;
+  flex-basis: 36px;
+  border-radius: 9px;
 }
 
 .leftPanel[data-left-open='false'] .leftTabs button[data-active='true'] {
@@ -460,63 +512,6 @@
   flex: 1 1 auto;
 }
 
-.bottomPanel {
-  z-index: 35;
-  display: flex;
-  height: min(34vh, 300px);
-  min-width: 0;
-  min-height: 160px;
-  margin: 0 16px 16px;
-  grid-column: 2;
-  grid-row: 2;
-  align-self: end;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--color-border-2);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--color-bg-2) 95%, transparent);
-  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(18px) saturate(125%);
-}
-
-.toolbarPositioner {
-  z-index: 50;
-  display: flex;
-  min-width: 0;
-  padding: 16px 16px 0;
-  grid-column: 2;
-  grid-row: 2;
-  align-self: start;
-  justify-content: center;
-  pointer-events: none;
-}
-
-.toolDock {
-  display: flex;
-  width: max-content;
-  max-width: 100%;
-  height: 42px;
-  min-width: 0;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  color: var(--color-text-1);
-  pointer-events: auto;
-  scrollbar-color: var(--color-fill-4) transparent;
-  scrollbar-width: thin;
-  backdrop-filter: blur(18px) saturate(135%);
-}
-
-.toolDock > * {
-  flex: 0 0 auto;
-}
-
 .iconButton {
   height: 30px;
   padding: 0;
@@ -535,6 +530,14 @@
   width: 30px;
   flex: 0 0 30px;
   place-items: center;
+}
+
+/* Icon Park glyphs render as inline SVG wrappers; give every top-bar icon a
+   grid box so icons and text share the same center line. */
+.topBar :global(.i-icon) {
+  display: grid;
+  place-items: center;
+  line-height: 0;
 }
 
 /* Arco Tooltip wraps disabled controls in a span and moves the supplied class
@@ -556,8 +559,8 @@
 
 .iconButton :global(.i-icon) {
   display: grid;
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
   place-items: center;
   line-height: 0;
   vertical-align: middle;
@@ -613,7 +616,7 @@
 
 .divider {
   width: 1px;
-  height: 20px;
+  height: 18px;
   flex: 0 0 1px;
   margin: 0 2px;
   background: var(--color-border-2);
@@ -698,6 +701,24 @@
   color: rgb(var(--primary-6));
 }
 
+.canvasResourceContent[data-creative-resource-dialog='assets'] {
+  padding: 18px 14px 10px;
+}
+
+.canvasResourceContent[data-creative-resource-dialog='assets'] > [data-product-asset-library] {
+  display: flex;
+  flex-direction: column;
+}
+
+.canvasResourceContent[data-creative-resource-dialog='assets'] > [data-product-asset-library] > [data-asset-picker-content] {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.canvasResourceContent[data-creative-resource-dialog='assets'] [data-asset-picker-empty] {
+  min-height: 240px;
+}
+
 .spin {
   animation: creative-canvas-chrome-spin 0.9s linear infinite;
 }
@@ -722,7 +743,7 @@
 }
 
 .root[data-compact='true'] .backButton {
-  width: 34px;
+  width: 30px;
   justify-content: center;
   padding: 0;
 }
@@ -751,7 +772,7 @@
   }
 
   .backButton {
-    width: 34px;
+    width: 30px;
     justify-content: center;
     padding: 0;
   }
@@ -792,96 +813,8 @@
     max-width: 24vw;
   }
 
-  .saveState span {
-    display: none;
-  }
-
-  .bottomPanel {
-    margin-inline: 10px;
-  }
-
-  .toolbarPositioner {
-    padding-inline: 10px;
-  }
 }
 
-@media (max-width: 640px) {
-  .root,
-  .root[data-compact='true'] {
-    grid-template-columns:
-      0
-      minmax(0, 1fr)
-      minmax(
-        240px,
-        min(
-          55vw,
-          clamp(240px, var(--creative-canvas-right-panel-width, 260px), 560px)
-        )
-      );
-    grid-template-rows: 50px minmax(0, 1fr);
-  }
-
-  .root[data-right-view='closed'],
-  .root[data-compact='true'][data-right-view='closed'] {
-    grid-template-columns: 0 minmax(0, 1fr) 0;
-  }
-
-  .leftPanel {
-    top: 58px;
-    bottom: 64px;
-    left: 8px;
-    width: min(320px, calc(100% - 16px));
-  }
-
-  .leftPanel[data-left-open='false'] {
-    top: 50%;
-    left: 8px;
-    width: 50px;
-  }
-
-  .projectIdentity {
-    gap: 5px;
-  }
-
-  .projectIdentity h1 {
-    max-width: 31vw;
-    font-size: 13px;
-  }
-
-  .saveState {
-    width: 26px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .topActions {
-    gap: 0;
-  }
-
-  .customTopActions {
-    display: none;
-  }
-
-  .panelHeader {
-    min-height: 50px;
-  }
-
-  .bottomPanel {
-    height: min(40vh, 260px);
-    min-height: 140px;
-    margin: 0 8px 12px;
-  }
-
-  .toolbarPositioner {
-    padding: 10px 8px 0;
-  }
-
-  .toolDock {
-    height: 40px;
-    padding-block: 3px;
-    border-radius: 11px;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .iconButton,

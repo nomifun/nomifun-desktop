@@ -8,7 +8,7 @@
   flex-direction: column;
   overflow: visible;
   border: 2px solid var(--creative-canvas-node-stroke, var(--color-border-2));
-  border-radius: 24px;
+  border-radius: 10px;
   background: var(--creative-canvas-node-fill, var(--color-fill-3));
   box-shadow: none;
   color: var(--color-text-1);
@@ -31,12 +31,8 @@
   --creative-node-accent: rgb(var(--primary-6));
 }
 
-.frame[data-node-type='panorama'] {
+.frame[data-node-type='timeline'] {
   --creative-node-accent: rgb(var(--primary-5));
-}
-
-.frame[data-node-type='director'] {
-  --creative-node-accent: color-mix(in srgb, rgb(var(--primary-6)) 66%, rgb(var(--danger-6)));
 }
 
 .frame[data-node-selected='true'] {
@@ -66,8 +62,8 @@
 .header {
   position: absolute;
   top: -30px;
-  right: 12px;
-  left: 12px;
+  right: 0;
+  left: 0;
   z-index: 10;
   display: flex;
   min-height: 24px;
@@ -94,6 +90,77 @@
   font-weight: 620;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nodeTitle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-3);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.nodeTitle[data-renamable='true'] {
+  cursor: text;
+}
+
+.nodeTitle:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid color-mix(in srgb, rgb(var(--primary-6)) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.nodeTypeIcon {
+  display: flex;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+/* IconPark wraps its SVG in an inline span; remove its baseline whitespace. */
+.nodeTypeIcon :global(.i-icon),
+.nodeTypeIcon :global(svg) {
+  display: block;
+  width: 18px;
+  height: 18px;
+  line-height: 0;
+}
+
+.nodeName {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeNameInput {
+  width: min(220px, 100%);
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 1px 5px;
+  border: 1px solid rgb(var(--primary-6));
+  border-radius: 5px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  line-height: 20px;
+  outline: none;
+  pointer-events: auto;
+}
+
+.nodeNameInput:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
 }
 
 .status[data-status='failed'] {

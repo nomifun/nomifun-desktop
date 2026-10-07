@@ -6,8 +6,9 @@
 
 import { Spin } from '@arco-design/web-react';
 import { Brain, Right } from '@icon-park/react';
+import type { ThinkingContentDisplayLength } from '@/common/config/thinkingDisplay';
 import classNames from 'classnames';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 
 import styles from './ThinkingProcessDisplay.module.css';
 
@@ -18,6 +19,8 @@ export interface ThinkingProcessDisplayProps {
   state: ThinkingProcessDisplayState;
   subject?: string;
   content?: string;
+  /** Optional formatted body; content still identifies streaming updates. */
+  children?: React.ReactNode;
   startedAt?: number;
   /** Stable identity used to reset local elapsed/expansion state between rows. */
   identityKey?: string;
@@ -28,6 +31,10 @@ export interface ThinkingProcessDisplayProps {
   onExpandedChange?: (expanded: boolean) => void;
   runningFallbackLabel?: string;
   completedLabel?: string;
+  completedSummary?: string;
+  bodyLength?: ThinkingContentDisplayLength;
+  /** Disable the row clock when its enclosing turn already shows total time. */
+  showElapsedTime?: boolean;
   formatElapsedTime?: (seconds: number) => string;
   className?: string;
   role?: React.AriaRole;
@@ -47,6 +54,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   state,
   subject = '',
   content = '',
+  children,
   startedAt,
   identityKey,
   variant = 'standalone',
@@ -55,21 +63,26 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   onExpandedChange,
   runningFallbackLabel = 'Thinking...',
   completedLabel = 'Thought complete',
+  completedSummary = '',
+  bodyLength = 'full',
+  showElapsedTime = true,
   formatElapsedTime = defaultFormatElapsedTime,
   className,
   role,
 }) => {
   const isDone = state === 'completed';
   const isProcessVariant = variant === 'process';
-  const defaultExpanded = expanded ?? (isProcessVariant ? !isDone : true);
+  const defaultExpanded = expanded ?? true;
   const [internalExpanded, setInternalExpanded] = useState(() => defaultExpanded);
   const resolvedExpanded = expanded ?? internalExpanded;
   const [elapsedTime, setElapsedTime] = useState(() => {
     const initialStartedAt = startedAt ?? Date.now();
-    return isDone ? 0 : Math.max(0, Math.floor((Date.now() - initialStartedAt) / 1000));
+    return isDone || !showElapsedTime ? 0 : Math.max(0, Math.floor((Date.now() - initialStartedAt) / 1000));
   });
   const startTimeRef = useRef<number>(startedAt ?? Date.now());
   const bodyRef = useRef<HTMLDivElement>(null);
+  const bodyId = useId();
+  const Header = disclosure ? 'button' : 'div';
 
   useEffect(() => {
     if (expanded !== undefined) return;
@@ -77,7 +90,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   }, [defaultExpanded, expanded, identityKey]);
 
   useEffect(() => {
-    if (isDone) return;
+    if (isDone || !showElapsedTime) return;
 
     startTimeRef.current = startedAt ?? Date.now();
     setElapsedTime(Math.max(0, Math.floor((Date.now() - startTimeRef.current) / 1000)));
@@ -86,7 +99,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [identityKey, isDone, startedAt]);
+  }, [identityKey, isDone, showElapsedTime, startedAt]);
 
   useEffect(() => {
     if (disclosure && !isDone && resolvedExpanded && bodyRef.current) {
@@ -103,9 +116,10 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
     onExpandedChange?.(nextExpanded);
   };
 
+  const runningLabel = subject.trim() || runningFallbackLabel;
   const summaryText = isDone
-    ? completedLabel
-    : `${subject.trim() || runningFallbackLabel} · ${formatElapsedTime(elapsedTime)}`;
+    ? [completedLabel, completedSummary].filter(Boolean).join(' · ')
+    : showElapsedTime ? `${runningLabel} · ${formatElapsedTime(elapsedTime)}` : runningLabel;
 
   return (
     <div
@@ -116,9 +130,11 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
       )}
       data-thinking-process-state={state}
       data-thinking-process-disclosure={disclosure}
+      data-thinking-body-length={bodyLength}
       role={role}
     >
-      <div
+      <Header
+        type={disclosure ? 'button' : undefined}
         className={classNames(
           styles.header,
           isProcessVariant && styles.headerProcess,
@@ -126,6 +142,8 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
         )}
         data-thinking-process-header
         onClick={disclosure ? handleToggle : undefined}
+        aria-expanded={disclosure ? resolvedExpanded : undefined}
+        aria-controls={disclosure ? bodyId : undefined}
       >
         <span className={styles.headerIcon}>
           {!isDone ? <Spin size={12} /> : <Brain theme='outline' size='14' />}
@@ -141,18 +159,22 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
             <Right theme='outline' size='12' />
           </span>
         ) : null}
-      </div>
+      </Header>
       {disclosure ? (
         <div
           ref={bodyRef}
+          id={bodyId}
           className={classNames(
             styles.body,
+            children != null && styles.bodyRich,
             isProcessVariant && styles.bodyProcess,
+            bodyLength !== 'full' && styles.bodyLimited,
+            bodyLength === 'compact' && styles.bodyCompact,
             !resolvedExpanded && styles.collapsed
           )}
           data-thinking-process-body
         >
-          {content}
+          {children ?? content}
         </div>
       ) : null}
     </div>

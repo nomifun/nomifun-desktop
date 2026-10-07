@@ -157,7 +157,7 @@ export function createPlannerTaskInput(
       rendered.value,
       '</brief>',
     ].join('\n'),
-    max_tokens: entry.step.planning.maxTokens,
+    ...(entry.step.planning.maxTokens == null ? {} : { max_tokens: entry.step.planning.maxTokens }),
   };
   return {
     ...identity,
@@ -177,7 +177,7 @@ function inputAssets(inputs: readonly CreativeTemplateInputValue[], variableIds:
   return assets;
 }
 
-export function imageReferenceAssetIds(
+function imageReferenceAssetIds(
   run: CreativeTemplateRunAggregateV1,
   step: CreativeTemplateGenerateImagesStep
 ): string[] {

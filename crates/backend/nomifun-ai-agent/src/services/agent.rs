@@ -7,7 +7,7 @@
 //!
 //! Session-scoped operations (mode/model/config/usage/capabilities/
 //! slash-commands/side-question/workspace) now live in
-//! `nomifun-conversation::ConversationService`, which dispatches through
+//! the canonical AgentSession owner, which dispatches through
 //! `AgentRuntimeHandle`. This service retains agent-catalog listing and
 //! model-provider health checks.
 

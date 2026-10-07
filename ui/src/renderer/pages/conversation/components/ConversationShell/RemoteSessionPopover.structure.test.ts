@@ -30,7 +30,7 @@ describe('remote session entry', () => {
   });
 
   test('shares one launcher with the settings host book', () => {
-    // Two copies of "create a conversation with extra.ssh_host_id" would drift:
+    // Two copies of "create a conversation with a canonical SSH binding" would drift:
     // the model check, the cache seeding and the history refresh all have to
     // happen, and only the hook is guaranteed to do them.
     expect(hostBookSource.includes('useOpenSshSession')).toBe(true);

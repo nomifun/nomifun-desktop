@@ -12,7 +12,6 @@ import enSettings from '@/renderer/services/i18n/locales/en-US/settings.json';
 const read = (file: string) => readFileSync(new URL(file, import.meta.url), 'utf8');
 const panel = read('./ModalityModelsPanel.tsx');
 const pageHeader = read('./ModelHubPageHeader.tsx');
-const free = read('./FreeModelsContent.tsx');
 const providers = read('../../components/settings/SettingsModal/contents/ModelModalContent.tsx');
 const chat = read('./ChatModelsContent.tsx');
 const realtime = read('./RealtimeModelsContent.tsx');
@@ -45,13 +44,14 @@ const MODALITY_KEYS = [
   'emptyHint',
   'manageModels',
   'toggleFailed',
-  'descriptionPlaceholder',
-  'descriptionSave',
-  'descriptionFailed',
+  'editModelConfiguration',
+  'editModelSaveFailed',
+  'editModelUnavailable',
   'modelDisabled',
   'defaultRow',
   'chatDefaultHint',
   'traitVision',
+  'functionCallingUnsupported',
 ] as const;
 
 describe('modality panel', () => {
@@ -60,8 +60,9 @@ describe('modality panel', () => {
     expect(panel.includes('buildModalityGroups(providers')).toBe(true);
     expect(panel.includes('providerModel.list')).toBe(false);
     // The management list reads the complete provider tree so disabled rows
-    // remain visible. Only the default image picker asks for runnable models.
-    expect(panel.includes("useModelsForTask('image_generation')")).toBe(true);
+    // remain visible. Only the task-specific default picker asks for runnable models.
+    expect(panel.includes('useModelsForTask(')).toBe(true);
+    expect(panel.includes('[...spec.technical]')).toBe(true);
     expect(panel.includes('modelDisabled')).toBe(true);
   });
 
@@ -93,7 +94,7 @@ describe('modality panel', () => {
     expect(pageHeader.includes("text-15px font-600 leading-20px text-t-primary")).toBe(true);
     expect(pageHeader.includes("text-12px leading-18px text-t-tertiary")).toBe(true);
 
-    for (const surface of [panel, free, providers]) {
+    for (const surface of [panel, providers]) {
       expect(surface.includes('<ModelHubPageHeader')).toBe(true);
       expect(surface.includes("flex flex-col bg-2 rd-16px")).toBe(false);
       expect(surface.includes("flex min-h-0 flex-col rd-16px bg-2")).toBe(false);
@@ -146,6 +147,8 @@ describe('modality panel', () => {
 
   test('copy exists in both locales', () => {
     for (const locale of [zhSettings, enSettings]) {
+      expect(typeof locale.modelHub.creation.musicTitle).toBe('string');
+      expect(typeof locale.modelHub.creation.musicSubtitle).toBe('string');
       const modality = (locale as unknown as { modelHub: { modality: Record<string, string> } })
         .modelHub.modality;
       for (const key of MODALITY_KEYS) {

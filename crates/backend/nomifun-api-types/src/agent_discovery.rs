@@ -6,8 +6,8 @@
 //! returned over HTTP. The DB row feeds everything.
 //!
 //! Handshake-derived fields (`agent_capabilities` / `auth_methods` /
-//! `config_options` / `available_modes` / `available_models` /
-//! `available_commands`) stay as opaque JSON so this crate carries no
+//! `config_options` / `available_models` / `available_commands`) stay as
+//! opaque JSON so this crate carries no
 //! protocol-decoding dependency — the ai-agent crate typed-decodes
 //! them when it needs to.
 
@@ -23,8 +23,6 @@ pub enum AgentSource {
     Internal,
     /// Seeded from the migration.
     Builtin,
-    /// Installed from the extension hub.
-    Extension,
     /// User-defined row.
     Custom,
 }
@@ -38,8 +36,8 @@ pub struct AgentEnvEntry {
     pub description: Option<String>,
 }
 
-/// Source-specific bookkeeping (how to probe, how to upgrade, which Hub
-/// package it came from).
+/// Source-specific bookkeeping (how to probe and how to identify a custom
+/// installation).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSourceInfo {
     /// Primary CLI binary checked for availability.
@@ -48,12 +46,7 @@ pub struct AgentSourceInfo {
     /// Extra binary required when the row spawns via a bridge (e.g. `bun`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_binary: Option<String>,
-    /// Hub package identifier when `agent_source = "extension"`. Extension
-    /// rows still use a bare UUIDv7 `agent_id`; this field carries the
-    /// extension's catalog/package identity separately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hub_package_id: Option<String>,
-    /// Version string for Hub or custom rows.
+    /// Version string for custom rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -91,6 +84,7 @@ pub struct BehaviorPolicy {
 /// the frontend verbatim, and typed-decoded inside `nomifun-ai-agent`
 /// when the adapter needs them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentHandshake {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_capabilities: Option<serde_json::Value>,
@@ -98,8 +92,6 @@ pub struct AgentHandshake {
     pub auth_methods: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_options: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_modes: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_models: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,13 +155,6 @@ pub struct AgentMetadata {
     #[serde(default)]
     pub behavior_policy: BehaviorPolicy,
 
-    /// Native mode id that Nomi's legacy `yolo` / `yoloNoSandbox`
-    /// aliases resolve to before calling `session/set_mode`. `None`
-    /// means the backend has no "yolo" equivalent and the alias should
-    /// pass through unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_id: Option<String>,
-
     /// Display ordering key — smaller values appear first. The range
     /// scheme is documented in `007_agent_metadata_sort_order.sql`.
     pub sort_order: i64,
@@ -188,7 +173,6 @@ mod tests {
         for (variant, expected) in [
             (AgentSource::Internal, "internal"),
             (AgentSource::Builtin, "builtin"),
-            (AgentSource::Extension, "extension"),
             (AgentSource::Custom, "custom"),
         ] {
             let s = serde_json::to_string(&variant).unwrap();
@@ -220,7 +204,6 @@ mod tests {
             env: vec![],
             native_skills_dirs: None,
             behavior_policy: BehaviorPolicy::default(),
-            yolo_id: None,
             sort_order: 3100,
             handshake: AgentHandshake::default(),
         };
@@ -234,6 +217,16 @@ mod tests {
         assert!(v.get("team_capable").is_none());
         assert!(v.get("command").is_none());
         assert!(v.get("icon").is_none());
+
+        let mut legacy = v;
+        legacy["yolo_id"] = json!("yolo");
+        assert!(serde_json::from_value::<AgentMetadata>(legacy).is_err());
+        assert!(
+            serde_json::from_value::<AgentHandshake>(json!({
+                "available_modes": []
+            }))
+            .is_err()
+        );
     }
 
     #[test]

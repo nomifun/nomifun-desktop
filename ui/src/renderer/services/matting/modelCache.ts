@@ -144,8 +144,3 @@ export function ensureMattingModel(onProgress?: ModelProgress): Promise<void> {
   }
   return p;
 }
-
-/** True if the model is already cached (cheap check for UI hints). */
-export async function isMattingModelReady(): Promise<boolean> {
-  return cachedModelOk(await openCache());
-}

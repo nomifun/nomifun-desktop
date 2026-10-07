@@ -5,10 +5,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import type { ISshLinkPhase } from '@/common/adapter/ipcBridge';
+import type { ISshLinkPhase, IdmmRunState } from '@/common/adapter/ipcBridge';
 
 import { CAPABILITY_COLORS } from './CapabilityIcon';
-import { SSH_STATUS_COLOR } from './capabilityStatusColors';
+import { IDMM_STATUS_COLOR, SSH_STATUS_COLOR } from './capabilityStatusColors';
 
 /** The seven phases the backend's SshLinkPhase can serialize. */
 const ALL_PHASES: ISshLinkPhase[] = [
@@ -46,5 +46,16 @@ describe('SSH link phase colours', () => {
     for (const phase of ALL_PHASES) {
       expect(palette.has(SSH_STATUS_COLOR[phase])).toBe(true);
     }
+  });
+});
+
+describe('IDMM run-state colours', () => {
+  test('covers every state and reserves red for a failed intervention', () => {
+    const states: IdmmRunState[] = ['off', 'monitoring', 'intervening', 'degraded'];
+    expect(Object.keys(IDMM_STATUS_COLOR).sort()).toEqual([...states].sort());
+    expect(IDMM_STATUS_COLOR.off).toBe(CAPABILITY_COLORS.off);
+    expect(IDMM_STATUS_COLOR.monitoring).toBe(CAPABILITY_COLORS.active);
+    expect(IDMM_STATUS_COLOR.intervening).toBe(CAPABILITY_COLORS.armed);
+    expect(IDMM_STATUS_COLOR.degraded).toBe(CAPABILITY_COLORS.danger);
   });
 });

@@ -4,13 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  Camera,
-  PanoramaHorizontal,
-  Pic,
-  VideoTwo,
-  Voice,
-} from '@icon-park/react';
+import { Pic, VideoTwo, Voice } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,6 +12,9 @@ import type { CreativeCanvasNodeKind } from '../../domain/schema';
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import CreativeNodeFrame from './CreativeNodeFrame';
 import CreativeVideoNodeMedia from './CreativeVideoNodeMedia';
+import CreativeTimelineNode, {
+  type CreativeTimelineAssetPresentation,
+} from './CreativeTimelineNode';
 import type {
   CreativeNodeAssetPresentation,
   CreativeNodeOfKind,
@@ -59,6 +56,9 @@ const nodeCallbacks = <K extends CreativeCanvasNodeKind>(
 ) => ({
   onActivate: props.onActivate ? () => props.onActivate?.(node) : undefined,
   onOpen: props.onOpen ? () => props.onOpen?.(node) : undefined,
+  onRename: props.onRename
+    ? (title: string) => props.onRename?.(node, title)
+    : undefined,
   onToggleLock: props.onToggleLock ? () => props.onToggleLock?.(node) : undefined,
 });
 
@@ -165,8 +165,9 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   );
 };
 
-interface CreativeAssetNodeProps<K extends 'image' | 'video' | 'audio' | 'panorama'>
+interface CreativeAssetNodeProps<K extends 'image' | 'video' | 'audio'>
   extends CreativeNodePresentationProps<K> {
+  onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
   title?: string;
   emptyLabel?: string;
@@ -178,6 +179,7 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   asset,
   title,
   emptyLabel,
+  onMediaSize,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -199,9 +201,10 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
           kind='image'
           className={styles.imageMedia}
           src={asset?.originalSrc ?? asset?.src}
-          posterSrc={asset?.src}
+          posterSrc={node.data.naturalSize ? asset?.src : asset?.originalSrc ?? asset?.src}
           alt={asset?.alt ?? node.data.alt}
           fit={node.data.fit}
+          onImageSize={onMediaSize}
         />
       ) : (
         <EmptyMedia
@@ -220,6 +223,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   asset,
   title,
   emptyLabel,
+  onMediaSize,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -243,6 +247,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
           title={resolvedTitle}
           selected={props.selected}
           onActivate={nodeCallbacks(node, props).onActivate}
+          onMediaSize={onMediaSize}
         />
       ) : (
         <EmptyMedia
@@ -266,7 +271,9 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
-  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.audio');
+  const resolvedTitle = title ?? (
+    node.data.title || t('creativeStudio.canvas.nodeKinds.audio')
+  );
   const resolvedEmptyLabel =
     asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
       : emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
@@ -276,7 +283,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      title={node.data.title || resolvedTitle}
+      title={resolvedTitle}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
@@ -292,8 +299,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
             aria-label={
               asset?.alt ??
               asset?.label ??
-              node.data.title ??
-              resolvedTitle
+              (node.data.title || resolvedTitle)
             }
             onPointerDown={(event) => event.stopPropagation()}
           />
@@ -309,110 +315,14 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   );
 };
 
-export interface CreativePanoramaNodeProps extends CreativeAssetNodeProps<'panorama'> {
-  preview?: React.ReactNode;
-}
-
-export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
-  asset,
-  preview,
-  title,
-  emptyLabel,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const resolved = Boolean(node.data.assetId && asset?.src);
-  const resolvedTitle =
-    title ?? t('creativeStudio.canvas.nodeKinds.panorama');
-  const resolvedEmptyLabel =
-    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
-      : emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
-  return (
-    <CreativeNodeFrame
-      node={node}
-      title={resolvedTitle}
-      footer={t('creativeStudio.canvas.nodes.panorama.orientation', {
-        yaw: Math.round(node.data.yaw),
-        pitch: Math.round(node.data.pitch),
-      })}
-      {...sharedFrameProps(props)}
-    >
-      {preview && !asset?.deleted ? (
-        <div className={styles.previewSlot} data-node-preview='panorama'>
-          {preview}
-        </div>
-      ) : resolved ? (
-        <CreativeMediaPreview
-          kind='image'
-          className={styles.imageMedia}
-          src={asset?.originalSrc ?? asset?.src}
-          posterSrc={asset?.src}
-          alt={asset?.alt ?? asset?.label ?? resolvedTitle}
-        />
-      ) : (
-        <EmptyMedia
-          icon={<PanoramaHorizontal theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={resolvedEmptyLabel}
-          assetId={node.data.assetId}
-        />
-      )}
-    </CreativeNodeFrame>
-  );
-};
-
-export interface CreativeDirectorNodeProps extends CreativeNodePresentationProps<'director'> {
-  title?: string;
-  emptyLabel?: string;
-  preview?: React.ReactNode;
-}
-
-export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
-  title,
-  emptyLabel,
-  preview,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const timeline = Math.max(0, node.data.timelineMs);
-  const duration = Math.max(0, node.data.durationMs);
-  const resolvedTitle =
-    title ?? t('creativeStudio.canvas.nodeKinds.director');
-  const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.director.empty');
-  return (
-    <CreativeNodeFrame
-      node={node}
-      title={resolvedTitle}
-      footer={`${formatMilliseconds(timeline)} / ${formatMilliseconds(duration)}`}
-      {...sharedFrameProps(props)}
-    >
-      {preview ? (
-        <div className={styles.previewSlot} data-node-preview='director'>
-          {preview}
-        </div>
-      ) : (
-        <div className={styles.directorContent}>
-          <Camera theme='outline' size={28} fill='currentColor' strokeWidth={2.5} />
-          <strong>{node.data.cameraId ?? resolvedEmptyLabel}</strong>
-          <progress
-            value={Math.min(timeline, duration)}
-            max={Math.max(duration, 1)}
-            aria-label={t('creativeStudio.canvas.nodes.director.timeline')}
-          />
-        </div>
-      )}
-    </CreativeNodeFrame>
-  );
-};
-
 export interface CreativeGroupNodeProps extends CreativeNodePresentationProps<'group'> {
+  title?: string;
   titleFallback?: string;
   children?: React.ReactNode;
 }
 
 export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
+  title,
   titleFallback,
   children,
   ...props
@@ -428,7 +338,7 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      title={node.data.title || resolvedTitleFallback}
+      title={title ?? (node.data.title || resolvedTitleFallback)}
       variant='group'
       {...sharedFrameProps({ ...props, style: groupStyle })}
     >
@@ -440,13 +350,23 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
 };
 
 export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCanvasNodeKind> & {
+  title?: string;
+  onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
-  panoramaPreview?: React.ReactNode;
-  directorPreview?: React.ReactNode;
   groupContent?: React.ReactNode;
   textEditing?: boolean;
   onTextChange?: (text: string) => void;
   onTextEditingComplete?: () => void;
+  timelineAssets?: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
+  timelineLibraryAssets?: readonly CreativeTimelineAssetPresentation[];
+  timelineLibraryLoading?: boolean;
+  onTimelineChange?: (
+    data: CreativeNodeOfKind<'timeline'>['data'],
+    mergeKey?: string
+  ) => void;
+  onTimelineAddAsset?: (assetId: string) => void;
+  onTimelineRequestAssets?: (popupContainer: HTMLElement | null) => void;
+  onTimelineUploadFiles?: (files: readonly File[]) => void | Promise<void>;
 };
 
 /** User-facing views for persisted canvas nodes; task-record configs stay headless. */
@@ -469,12 +389,22 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
       return <CreativeVideoNode {...props} node={node} asset={props.asset} />;
     case 'audio':
       return <CreativeAudioNode {...props} node={node} asset={props.asset} />;
-    case 'panorama':
-      return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
+    case 'timeline':
+      return (
+        <CreativeTimelineNode
+          {...props}
+          node={node}
+          assets={props.timelineAssets ?? new Map()}
+          libraryAssets={props.timelineLibraryAssets}
+          libraryLoading={props.timelineLibraryLoading}
+          onChange={props.onTimelineChange}
+          onAddAsset={props.onTimelineAddAsset}
+          onRequestAssets={props.onTimelineRequestAssets}
+          onUploadFiles={props.onTimelineUploadFiles}
+        />
+      );
     case 'config':
       return null;
-    case 'director':
-      return <CreativeDirectorNode {...props} node={node} preview={props.directorPreview} />;
     case 'group':
       return <CreativeGroupNode {...props} node={node}>{props.groupContent}</CreativeGroupNode>;
   }
@@ -482,10 +412,9 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
 
 export const CREATIVE_NODE_VIEW_KINDS = [
   'image',
-  'panorama',
   'text',
   'video',
   'audio',
-  'director',
+  'timeline',
   'group',
 ] as const satisfies readonly Exclude<CreativeCanvasNodeKind, 'config'>[];

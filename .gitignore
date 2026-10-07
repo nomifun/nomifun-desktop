@@ -5,7 +5,15 @@
 /build-task*/
 /build.noindex/
 /build.*.noindex/
+**/build-task*/
+**/build.noindex/
+**/build.*.noindex/
 /.tmp-*/
+# Local verification transcripts; preserve locally, never stage as release inputs.
+/.tmp-*.out
+/.tmp-*.err
+/.tmp-*.txt
+/.tmp-idmm-demo-report.json
 # Local VMware HGFS/ext4 bind-mount rollback directories
 /*.hgfs-before-bind-*/
 Cargo.lock.bak
@@ -74,7 +82,7 @@ Thumbs.db
 # Visual brainstorming companion (transient mockups)
 .superpowers/
 
-# Isolated Codex development worktrees
+# Isolated agent development worktrees
 .worktrees/
 
 # Repository policy: GitHub Actions workflows are forbidden. Keep these

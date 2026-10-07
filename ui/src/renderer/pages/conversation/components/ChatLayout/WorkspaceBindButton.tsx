@@ -1,40 +1,37 @@
 import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import type { TChatConversation } from '@/common/config/storage';
-import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { FolderFocus } from '@icon-park/react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 interface WorkspaceBindButtonProps {
   /**
-   * Conversation whose `extra.workspace` will be redirected to the picked
-   * directory. Required to issue the PATCH; when absent the button hides.
+   * Current conversation identity. It is never mutated; when absent the
+   * new-conversation entry hides.
    */
   conversation_id?: ConversationId;
 }
 
 /**
- * Workspace Bind Button — shown in the workspace panel header for **temporary**
- * sessions (`conversation.extra.is_temporary_workspace === true`). It lets the
- * user redirect the session's workspace to a real folder on disk, so the agent
- * works directly inside that directory.
+ * A temporary Session's frozen workspace cannot be redirected in place. This
+ * entry lets the user choose a real folder and carries it into Guid as the
+ * explicit workspace for a new AgentSession.
  *
  * Picking a directory relies on the native open dialog, so the entry only makes
  * sense inside the desktop shell — it hides in WebUI/browser mode. Visual
  * language mirrors {@link WorkspaceOpenButton} (text button, small size, folder
  * icon family) so the two occupy the same slot interchangeably.
  *
- * On success the conversation cache is refreshed; the backend re-derives
- * `is_temporary_workspace` as false on the next read (the workspace now lives
- * outside `data_dir`), which flips the header over to `WorkspaceOpenButton` and
- * replaces the "Temporary Space" label with the real path — all existing logic.
+ * The current conversation, history, Snapshot, and resource authority remain
+ * unchanged.
  */
 const WorkspaceBindButton: React.FC<WorkspaceBindButtonProps> = ({ conversation_id }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [message, messageHolder] = useArcoMessage();
   const [binding, setBinding] = useState(false);
 
@@ -51,20 +48,9 @@ const WorkspaceBindButton: React.FC<WorkspaceBindButtonProps> = ({ conversation_
       const target = dirs?.[0]?.trim();
       if (!target) return;
 
-      const ok = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversation_id,
-        updates: { extra: { workspace: target } as TChatConversation['extra'] },
+      void navigate('/guid', {
+        state: { workspace: target, resetAgentSelection: true },
       });
-
-      if (ok) {
-        // Re-pull the conversation so `extra.workspace` /
-        // `extra.is_temporary_workspace` propagate to every consumer
-        // (WorkspaceRailBody, header, collapse preference).
-        await refreshConversationCache(conversation_id);
-        message.success(t('conversation.workspace.bindWorkspace.success'));
-      } else {
-        message.error(t('conversation.workspace.bindWorkspace.failed'));
-      }
     } catch (error) {
       console.error('[WorkspaceBindButton] Failed to bind workspace directory:', error);
       message.error(t('conversation.workspace.bindWorkspace.failed'));

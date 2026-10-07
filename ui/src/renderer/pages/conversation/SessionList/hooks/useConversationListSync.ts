@@ -6,10 +6,12 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
-import type { ConversationId, MessageId, SshHostId } from '@/common/types/ids';
+import type { ConversationId, MessageId } from '@/common/types/ids';
+import { conversationSshHostId } from '../../utils/conversationSshBinding';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
   getConversationRuntimeAuthority,
+  getConversationPauseNotice,
   isCompleteMessageProjection,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { addEventListener } from '@/renderer/utils/emitter';
@@ -55,9 +57,7 @@ export const isGeneratingStreamMessage = (message: {
     type === 'start' ||
     type === 'thought' ||
     type === 'thinking' ||
-    type === 'tool_group' ||
-    type === 'permission' ||
-    type === 'plan'
+    type === 'tool_group'
   );
 };
 
@@ -122,33 +122,26 @@ export const shouldAcceptSidebarTurnCompletion = ({
   return !activeTurnId || !completedTurnId || activeTurnId === completedTurnId;
 };
 
-/** Host id of an SSH-bound session, or undefined for every other conversation. */
-const sshHostIdOf = (conversation: TChatConversation): SshHostId | undefined =>
-  (conversation.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
-
-/** Device id of a robot thread, or undefined for every other conversation. A
- *  robot thread also carries a companion marker (its companion GROUP key), so it
- *  is matched on `robot_id` explicitly rather than being lumped with companions. */
-const robotIdOf = (conversation: TChatConversation): string | undefined =>
-  (conversation.extra as { robot_id?: string } | undefined)?.robot_id;
-
 /**
  * Snapshot arrays must keep their identity while the underlying rows are
  * unchanged, otherwise every `useSyncExternalStore` consumer re-renders on each
  * refresh (and refreshes are frequent: every stream/turn/list event triggers one).
  */
-const isSameConversationList = (previous: TChatConversation[], next: TChatConversation[]): boolean =>
+export const isSameConversationList = (previous: TChatConversation[], next: TChatConversation[]): boolean =>
   previous.length === next.length &&
-  previous.every((item, index) => item.id === next[index].id && item.modified_at === next[index].modified_at);
+  previous.every((item, index) =>
+    item.id === next[index].id &&
+    item.modified_at === next[index].modified_at &&
+    item.agent_snapshot?.canonical_binding?.binding_version ===
+      next[index].agent_snapshot?.canonical_binding?.binding_version &&
+    conversationSshHostId(item) === conversationSshHostId(next[index]),
+  );
 
 type ConversationListSyncSnapshot = {
   conversations: TChatConversation[];
   /** SSH-bound sessions, excluded from `conversations` and grouped by host in
    *  their own sidebar section (SshSessionGroup). */
   sshConversations: TChatConversation[];
-  /** Robot threads, excluded from `conversations` and grouped by device in their
-   *  own sidebar section (RobotSessionGroup). */
-  robotConversations: TChatConversation[];
   generatingConversationIds: Set<ConversationId>;
   completionUnreadConversationIds: Set<ConversationId>;
 };
@@ -158,7 +151,6 @@ const listeners = new Set<() => void>();
 let isStoreInitialized = false;
 let conversationsState: TChatConversation[] = [];
 let sshConversationsState: TChatConversation[] = [];
-let robotConversationsState: TChatConversation[] = [];
 let generatingConversationIdsState = new Set<ConversationId>();
 let completionUnreadConversationIdsState = new Set<ConversationId>();
 let conversation_idsState = new Set<ConversationId>();
@@ -167,7 +159,6 @@ let activeConversationIdState: ConversationId | null = null;
 let snapshotState: ConversationListSyncSnapshot = {
   conversations: conversationsState,
   sshConversations: sshConversationsState,
-  robotConversations: robotConversationsState,
   generatingConversationIds: generatingConversationIdsState,
   completionUnreadConversationIds: completionUnreadConversationIdsState,
 };
@@ -176,7 +167,6 @@ const emitStoreChange = () => {
   snapshotState = {
     conversations: conversationsState,
     sshConversations: sshConversationsState,
-    robotConversations: robotConversationsState,
     generatingConversationIds: generatingConversationIdsState,
     completionUnreadConversationIds: completionUnreadConversationIdsState,
   };
@@ -198,8 +188,6 @@ const refreshConversations = () => {
     .then((result) => {
       const items = result?.items;
       if (items && Array.isArray(items)) {
-        // Legacy rows from the pre-provider-probe health check flow are hidden
-        // from normal history. New health checks must not create conversations.
         // Companion conversations — the desktop bubble, the chat tab, AND every
         // IM-channel turn — all share ONE per-companion session that lives in
         // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
@@ -214,35 +202,28 @@ const refreshConversations = () => {
         // so the group never costs a second full fetch.
         const filteredData: TChatConversation[] = [];
         const sshConversations: TChatConversation[] = [];
-        const robotConversations: TChatConversation[] = [];
         for (const conversation of items) {
           if (isOrdinaryWorkConversation(conversation)) {
             filteredData.push(conversation);
-          } else if (sshHostIdOf(conversation) != null) {
+          } else if (conversationSshHostId(conversation) != null) {
             sshConversations.push(conversation);
-          } else if (robotIdOf(conversation) != null) {
-            robotConversations.push(conversation);
           }
         }
         conversationsState = filteredData;
         sshConversationsState = isSameConversationList(sshConversationsState, sshConversations)
           ? sshConversationsState
           : sshConversations;
-        robotConversationsState = isSameConversationList(robotConversationsState, robotConversations)
-          ? robotConversationsState
-          : robotConversations;
         for (const conversation of items) {
           const activeTurnId = getExactSidebarActiveTurnId(conversation);
           if (activeTurnId) {
             activeTurnIdsState.set(conversation.id, activeTurnId);
-          } else if (conversation.status === 'finished') {
+          } else if (conversation.status === 'finished' || getConversationPauseNotice(conversation)) {
             activeTurnIdsState.delete(conversation.id);
             clearGenerating(conversation.id);
           }
         }
-        // Use ALL conversation IDs (including legacy health-check rows) so the
-        // responseStream listener recognises them as known and doesn't
-        // trigger an infinite refreshConversations loop.
+        // Track every listed Session so events for dedicated Companion/SSH
+        // surfaces do not trigger a redundant work-list refresh.
         conversation_idsState = new Set(items.map((conversation) => conversation.id));
         emitStoreChange();
         return;
@@ -250,7 +231,6 @@ const refreshConversations = () => {
 
       conversationsState = [];
       sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
-      robotConversationsState = robotConversationsState.length === 0 ? robotConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -260,7 +240,6 @@ const refreshConversations = () => {
       console.error('[SessionList] Failed to load conversations:', error);
       conversationsState = [];
       sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
-      robotConversationsState = robotConversationsState.length === 0 ? robotConversationsState : [];
       conversation_idsState = new Set();
       activeTurnIdsState = new Map();
       generatingConversationIdsState = new Set();
@@ -325,6 +304,8 @@ const initializeConversationListSyncStore = () => {
   // may have dropped conversation.listChanged frames (delete/create while
   // offline), so reload the durable conversation snapshot.
   ipcBridge.conversation.reconnected.on(() => refreshConversations());
+  ipcBridge.conversation.turnPaused.on(() => refreshConversations());
+  ipcBridge.agentPlatform.sessions.onAgentChanged.on(() => refreshConversations());
   ipcBridge.conversation.listChanged.on((event) => {
     if (event.action === 'deleted') {
       activeTurnIdsState.delete(event.conversation_id);
@@ -435,7 +416,7 @@ export const useConversationListSync = () => {
     initializeConversationListSyncStore();
   }, []);
 
-  const { conversations, sshConversations, robotConversations, generatingConversationIds, completionUnreadConversationIds } =
+  const { conversations, sshConversations, generatingConversationIds, completionUnreadConversationIds } =
     useSyncExternalStore(subscribeConversationListSync, getConversationListSyncSnapshot, getConversationListSyncSnapshot);
 
   const clearCompletionUnread = useCallback((conversation_id: ConversationId) => {
@@ -463,7 +444,6 @@ export const useConversationListSync = () => {
   return {
     conversations,
     sshConversations,
-    robotConversations,
     isConversationGenerating,
     hasCompletionUnread,
     clearCompletionUnread,

@@ -36,7 +36,7 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
         // as a video model. `openai.videos` stays in the registry until the
         // shutdown so already-saved capabilities keep resolving; delete the spec
         // and its adapter after that date.
-        VideoGeneration => None,
+        VideoGeneration | MusicGeneration => None,
         SpeechSynthesis => route("openai.audio_speech"),
         SpeechRecognition => route("openai.audio_transcriptions"),
         Embedding => route("openai.embeddings"),
@@ -48,17 +48,23 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
 /// Return the verified configuration recommendation for `(platform, task)`.
 ///
 /// `None` means there is no unconditional platform default. In particular,
-/// `custom` and `new-api` stay absent here so runtime probes never guess a
-/// protocol. The model-aware configuration manifest may separately recommend
+/// `custom`, `new-api` and `nomifun-model-gateway` stay absent here so runtime
+/// probes never guess a protocol. The model-aware configuration manifest may separately recommend
 /// a registry-verified generic protocol for `custom`; callers must persist it.
 pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
 
     match (platform, task) {
-        ("custom" | "new-api", _) => None,
+        ("custom" | "new-api" | "nomifun-model-gateway", _) => None,
 
         // OpenAI native endpoints. OpenAI does not expose rerank.
         ("openai", task) => openai_route(task),
+
+        // Agnes media endpoints use provider-specific request fields and a
+        // video_id-based polling endpoint. Chat remains OpenAI compatible.
+        ("agnes", Chat) => route("openai.chat_text"),
+        ("agnes", ImageGeneration | ImageEdit) => route("agnes.images"),
+        ("agnes", VideoGeneration) => route("agnes.video_jobs"),
 
         // Gemini native generateContent adapters.
         ("gemini", ImageGeneration | ImageEdit) => route("gemini.generate_content"),
@@ -67,6 +73,12 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
         // These Chat transports execute through the Nomi provider layer.
         ("anthropic", Chat) => route("anthropic.messages"),
         ("bedrock", Chat) => route("bedrock.anthropic_messages"),
+
+        // Vertex Claude requires project_id and location/region URL segments
+        // that the generic route target contract cannot inject independently.
+        // Keep every known platform spelling explicit and deny-by-default until
+        // a provider-specific route contract exists.
+        ("vertex" | "vertex-ai" | "gemini-vertex-ai", Chat) => None,
 
         // Deepgram's REST speech endpoints. Voice Agent WebSocket realtime is
         // intentionally not routed until a dedicated session adapter ships.
@@ -92,6 +104,7 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
 
         // MiniMax TTS has a provider-specific request/response codec.
         ("minimax", SpeechSynthesis) => route("minimax.t2a"),
+        ("minimax", MusicGeneration) => route("minimax.music"),
         // MiMo audio models use specialized chat-completions serializers.
         ("mimo", SpeechRecognition) => route("mimo.chat_asr"),
         ("mimo", SpeechSynthesis) => route("mimo.chat_tts"),
@@ -204,13 +217,14 @@ mod tests {
 
     #[test]
     fn custom_gateways_have_no_unconditional_preset_defaults() {
-        for platform in ["custom", "new-api"] {
+        for platform in ["custom", "new-api", "nomifun-model-gateway"] {
             for task in [
                 Chat,
                 RealtimeConversation,
                 ImageGeneration,
                 ImageEdit,
                 VideoGeneration,
+                MusicGeneration,
                 SpeechSynthesis,
                 SpeechRecognition,
                 Embedding,
@@ -242,6 +256,29 @@ mod tests {
         assert_eq!(platform_route("gemini", ImageEdit), plain("gemini.generate_content"));
         for task in [VideoGeneration, SpeechSynthesis, SpeechRecognition, Embedding, Rerank] {
             assert_eq!(platform_route("gemini", task), None, "(gemini, {task:?})");
+        }
+    }
+
+    #[test]
+    fn agnes_routes_media_to_its_native_contracts() {
+        assert_eq!(platform_route("agnes", Chat), plain("openai.chat_text"));
+        assert_eq!(
+            platform_route("agnes", ImageGeneration),
+            plain("agnes.images")
+        );
+        assert_eq!(platform_route("agnes", ImageEdit), plain("agnes.images"));
+        assert_eq!(
+            platform_route("agnes", VideoGeneration),
+            plain("agnes.video_jobs")
+        );
+        for task in [
+            RealtimeConversation,
+            SpeechSynthesis,
+            SpeechRecognition,
+            Embedding,
+            Rerank,
+        ] {
+            assert_eq!(platform_route("agnes", task), None, "(agnes, {task:?})");
         }
     }
 
@@ -368,7 +405,7 @@ mod tests {
             platform_route("bedrock", Chat),
             plain("bedrock.anthropic_messages")
         );
-        for platform in ["gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
+        for platform in ["vertex", "gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
             for task in [
                 Chat,
                 RealtimeConversation,
@@ -381,6 +418,29 @@ mod tests {
                 Rerank,
             ] {
                 assert_eq!(platform_route(platform, task), None, "({platform}, {task:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_platforms_have_no_implicit_route_for_any_task() {
+        for platform in ["vertex", "vertex-ai", "gemini-vertex-ai"] {
+            for task in [
+                Chat,
+                RealtimeConversation,
+                ImageGeneration,
+                ImageEdit,
+                VideoGeneration,
+                SpeechSynthesis,
+                SpeechRecognition,
+                Embedding,
+                Rerank,
+            ] {
+                assert_eq!(
+                    platform_route(platform, task),
+                    None,
+                    "({platform}, {task:?}) must remain explicitly unsupported"
+                );
             }
         }
     }

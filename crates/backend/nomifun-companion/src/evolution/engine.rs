@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::{AppError, CompanionSkillId, generate_id, now_ms};
-use nomifun_extension::constants::SKILL_MANIFEST_FILE;
-use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
+use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
+use nomifun_skill_library::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 
 use crate::collector::{EVOLVE_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
@@ -25,8 +25,6 @@ const MAX_EVENTS_PER_RUN: usize = 500;
 const TICK_SECONDS: u64 = 60;
 /// Per-companion `companion_runtime_state` key for this loop's schedule stamp.
 const LAST_EVOLVE_TS_KEY: &str = "last_evolve_ts";
-const DRAFT_MAX_TOKENS: u32 = 1200;
-const CRITIC_MAX_TOKENS: u32 = 256;
 /// 一次最多起草几个新技能（避免单轮爆量骚扰）。
 const MAX_DRAFTS_PER_RUN: usize = 3;
 /// 重水合转录行的单行字符上限（控 drafter 上下文成本）。
@@ -301,7 +299,7 @@ impl EvolutionEngine {
         let draft_user = prompt::build_draft_prompt(p, &context);
         let mut draft: Option<DraftOutput> = None;
         for attempt in 0..2 {
-            match self.completer.complete(provider_id, model, prompt::DRAFT_SYSTEM, &draft_user, DRAFT_MAX_TOKENS).await {
+            match self.completer.complete(provider_id, model, prompt::DRAFT_SYSTEM, &draft_user, None).await {
                 Ok(raw) => match prompt::parse_draft_output(&raw) {
                     Ok(d) if !d.name.trim().is_empty() && !d.description.trim().is_empty() => {
                         draft = Some(d);
@@ -317,7 +315,7 @@ impl EvolutionEngine {
 
         // Critic.
         let critic_user = prompt::build_critic_prompt(&draft, p);
-        let approved = match self.completer.complete(provider_id, model, prompt::CRITIC_SYSTEM, &critic_user, CRITIC_MAX_TOKENS).await {
+        let approved = match self.completer.complete(provider_id, model, prompt::CRITIC_SYSTEM, &critic_user, None).await {
             Ok(raw) => prompt::parse_critic_output(&raw).map(|v| v.approve).unwrap_or(false),
             Err(e) => return Err(e),
         };
@@ -347,7 +345,7 @@ impl EvolutionEngine {
                 {
                     if let Ok(existing_body) = tokio::fs::read_to_string(dir.join(SKILL_MANIFEST_FILE)).await {
                         let merge_user = prompt::build_merge_prompt(&existing_body, &draft, p);
-                        match self.completer.complete(provider_id, model, prompt::MERGE_SYSTEM, &merge_user, DRAFT_MAX_TOKENS).await {
+                        match self.completer.complete(provider_id, model, prompt::MERGE_SYSTEM, &merge_user, None).await {
                             Ok(raw) => {
                                 if let Ok(merged) = prompt::parse_draft_output(&raw) {
                                     if !merged.description.trim().is_empty() && !merged.body.trim().is_empty() {
@@ -499,7 +497,7 @@ impl EvolutionEngine {
         let draft_user = prompt::build_draft_prompt(&p, &context);
         let mut draft: Option<DraftOutput> = None;
         for _ in 0..2 {
-            match self.completer.complete(&model.provider_id, &model.model, prompt::DRAFT_SYSTEM, &draft_user, DRAFT_MAX_TOKENS).await {
+            match self.completer.complete(&model.provider_id, &model.model, prompt::DRAFT_SYSTEM, &draft_user, None).await {
                 Ok(raw) => {
                     if let Ok(d) = prompt::parse_draft_output(&raw) {
                         if !d.name.trim().is_empty() && !d.description.trim().is_empty() {
@@ -614,7 +612,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl CompanionCompleter for ScriptedCompleter {
-        async fn complete(&self, _p: &str, _m: &str, system: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, system: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             if system == prompt::DRAFT_SYSTEM {
                 Ok(self.draft.clone())
             } else {
@@ -631,7 +629,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl CompanionCompleter for CapturingCompleter {
-        async fn complete(&self, _p: &str, _m: &str, system: &str, user: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, system: &str, user: &str, _t: Option<u32>) -> Result<String, AppError> {
             if system == prompt::DRAFT_SYSTEM {
                 self.draft_prompts.lock().await.push(user.to_owned());
                 Ok(self.draft.clone())
@@ -648,8 +646,6 @@ mod tests {
             cron_skills_dir: dir.join("cron/skills"),
             builtin_skills_dir: dir.join("builtin-skills"),
             builtin_rules_dir: dir.join("rules"),
-            preset_rules_dir: dir.join("preset-rules"),
-            preset_skills_dir: dir.join("preset-skills"),
         })
     }
 
@@ -863,7 +859,7 @@ mod tests {
     struct VersioningCompleter;
     #[async_trait::async_trait]
     impl CompanionCompleter for VersioningCompleter {
-        async fn complete(&self, _p: &str, _m: &str, system: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, system: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             if system == prompt::DRAFT_SYSTEM {
                 Ok(r#"{"name":"grep-read-edit-flow","description":"d","when_to_use":"w","body":"new"}"#.into())
             } else if system == prompt::CRITIC_SYSTEM {

@@ -2,13 +2,14 @@ import type { SlashCommandItem } from '@/common/chat/slash/types';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 
-// Match slash followed by command name (alphanumeric, underscore, hyphen only)
-// 匹配斜杠后跟命令名（仅允许字母数字、下划线、连字符）
-const SLASH_QUERY_RE = /^\/([a-zA-Z0-9_-]*)$/;
+// Command names are a single token, including exact namespaced Skill IDs
+// (for example /skill:acme.review). This only filters the server's catalog;
+// it does not resolve an identity or authorize command execution.
+const SLASH_QUERY_RE = /^\/([^\s]*)$/;
 
 export function matchSlashQuery(input: string): string | null {
   const match = input.match(SLASH_QUERY_RE);
-  return match ? match[1] : null;
+  return match && match[0].length === input.length ? match[1] : null;
 }
 
 function getSelectionBehavior(command: SlashCommandItem): 'execute' | 'insert' {

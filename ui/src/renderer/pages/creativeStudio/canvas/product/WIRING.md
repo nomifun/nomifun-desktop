@@ -5,13 +5,13 @@ canonical `canvasId` through `useParams` and keeps `CreativeCanvasEditor` as
 the only reducer and CAS persistence owner.
 
 The production router mounts this default export at
-`/workshop/canvas/:canvasId` inside `CreativeStudioFocusShell`.
+`/nomi/canvases/:canvasId` inside the resource portal boundary.
 It keeps the route split with
 `import('@renderer/pages/creativeStudio/canvas/product')` and the nested
-`path="canvas/:canvasId"` contract.
+`CANVAS_PATTERN = '/nomi/canvases/:canvasId'` contract.
 
-The product's own “返回项目” action awaits the editor CAS `flush()` and only
-The product returns to the Canvas library at `/workshop/canvases` after
+The product's own return action awaits the editor CAS `flush()` and
+returns to the Canvas library at `/nomi/canvases` after
 `noop` or `saved`. A
 `conflict` or `error` stays on the canvas and exposes explicit reload/retry.
 The product chrome is the single visible save/recovery surface and therefore
@@ -20,17 +20,26 @@ message without leaking Canvas IDs or backend diagnostics; only the backend
 code `REVISION_CONFLICT` enables “重新载入远端”. A generic business 409 remains
 an ordinary save error and does not invite the user to discard local work.
 
-The surrounding `CreativeStudioFocusShell` awaits the exported
-`requestCreativeCanvasProductBeforeLeave()` before product navigation. The
+The global sidebar and titlebar await the exported
+`requestCreativeCanvasProductBeforeLeave()` gate before navigation. The
 product route registers and unregisters its active Editor flush gate
 automatically; do not create a second persistence controller.
 
-The shell imports only the lightweight coordination function from
+Navigation imports only the lightweight coordination function from
 `@renderer/pages/creativeStudio/canvas/product/beforeLeave`, so it does not
 eagerly load the product route chunk.
 
-Panel open/view changes call the Editor's canonical `setPanels` port; saved
-width/height values also drive the product layout. Properties dispatch the
+The canvas-owned generation controller, plans and recovery live in
+`../generation`. They reject conversation and template owners. Pure model
+selection, input identity and parameter policies live in `@renderer/creation`;
+the retained canvas has no dependency on an independent generation page or its
+history controller. The resource boundary supplies `resource-page-portal-root`
+without a second product sidebar.
+
+Visible panel open/view changes call the Editor's canonical `setPanels` port;
+the saved right-panel width drives the product layout. The v1 document's retired
+bottom-panel state remains compatibility-only and is ignored by the renderer.
+Properties dispatch the
 type-safe core `node/update` command and therefore participate in normal undo,
 CAS save, conflict, and reload behavior. Background changes use the same CAS
 port. The right-side Agent uses the owner-only Creative Studio session resolver,
@@ -40,13 +49,7 @@ an active exclusive Agent turn, then flushes the Editor. The left template panel
 uses the canonical template repository and durable run controller, opens the
 same typed runner and real asset picker as the standalone center, and resolves
 successful result IDs through the authenticated asset-detail endpoint before
-inserting canonical nodes. The bottom timeline now projects the Canvas's one
-canonical Director node without inventing global tracks or keyframes. It shows
-the saved scene pointer, camera pointer and timeline/duration values, and opens
-the real Director product only after the canvas CAS leave gate succeeds. New UI
-creation paths enforce one Director node per Canvas; malformed documents with
-multiple Director nodes remain visible as a fail-closed conflict. The Director
-close action returns to this same Canvas.
+inserting canonical nodes.
 
 The authenticated Agent mutation gateway is
 `POST /api/creative-studio/canvases/{canvasId}/agent-ops`. Its wrapper accepts
@@ -149,8 +152,8 @@ document controller:
 
 - `image-mask-edit` uploads the blue-marked reference as a hidden real asset.
 - `image-node-compose` submits exact `image_generation` / `t2i` only when the
-  active image node has neither a base asset nor directly connected image or
-  panorama assets. Otherwise it submits exact `image_edit` / `i2i`: the active
+  active image node has neither a base asset nor directly connected image
+  assets. Otherwise it submits exact `image_edit` / `i2i`: the active
   node's base image is pinned first and valid direct media inputs follow durable
   connection order. The inline composer shows that same ordered reference list.
   `@` selections persist occurrence-level node bindings and compile only those
@@ -175,12 +178,31 @@ Mount recovery accepts only either exact operation marker. A
 transport-ambiguous create keeps the same config and idempotency key for safe
 retry; only an authoritative 404 may clear an orphaned pending reference.
 
+New image, video, and audio runs append independent task slots to each runtime.
+Admission, uncertain submissions, and retry state are scoped to the authored
+node, so queued/running tasks and recovery never disable other nodes' composers.
+The same source remains serial: a new run is rejected while its earlier task is
+submitting, queued, running, recovering, or awaiting durable terminal settlement.
+The runtime resolves each generated config owner back to the authored source
+node, and the composer checks all pending configs for that source, including
+image mask edits. Other source nodes can submit and run concurrently.
+Prompt editing remains available while that node's generation is running;
+submission becomes available again after completion. A transport-ambiguous
+submission permits only a same-key retry until its outcome is confirmed.
+Confirming a missing submission retires that slot without
+remounting the runtime or interrupting other workers. Cancel targets only the
+selected task; cancel-all captures existing tasks and excludes later runs.
+Task config nodes and results are inserted without changing the user's selection.
+
 The video runtime owns only `video-node-compose`. It accepts an empty video
-node as exact `video_generation` / `t2v`, or the same empty node with exactly
-one directly connected real image as `i2v`. It maps 720p/1080p and the supported
+node as exact `video_generation` / `t2v`, or the same empty node with directly
+connected real images as `i2v`. References are deduplicated and ordered by
+connection order, shown in that order and preserved through task recovery.
+Agnes sends multiple images as ordered `extra_body.image` keyframes; other
+adapters retain their own input limits. It maps 720p/1080p and the supported
 aspect ratios to concrete width/height, fixes repeat to one, keeps canvas owner
 identity in `config.data.operation`, and never forwards local metadata through
-provider parameters. V2V, multiple/first-last-frame references, audio/video
+provider parameters. V2V, explicit first/last-frame role controls, audio/video
 references, and provider-specific camera controls stay explicitly unavailable.
 
 The audio runtime owns only `audio-node-compose`. Its first deliverable accepts
@@ -189,8 +211,10 @@ real audio result. Exact adapter protocol profiles decide whether Voice ID and
 MP3/WAV format controls are exposed, whether voice is required, and the text
 limit; unknown protocols receive prompt only. Speed, instructions, reference
 audio, VoiceClone, AAC, and PCM are never sent by this slice. Successful
-settlement fills the same audio node ID, clears only the now-inapplicable draft
-model, and removes pending last. Failed/canceled configs remain auditable, and
+settlement fills an empty source audio node, or creates a config-linked output
+if the source gained an asset before completion or during legacy task recovery.
+It clears the filled source's
+now-inapplicable draft model and removes pending last. Failed/canceled configs remain auditable, and
 ambiguous submission offers same-key retry plus an explicit status check that
 cleans only an authoritative 404 orphan.
 
@@ -200,9 +224,10 @@ a viewport portal when the canvas column cannot contain them.
 
 The inline composer opens only for one selected image. A successful empty-node
 `t2i` task idempotently fills that source node with the first real result; any
-additional results become config-linked image nodes. If the empty source gains
-a different asset before completion, settlement fails closed instead of
-overwriting it. Existing-image `i2i` always writes new config-linked results and
+additional results become config-linked image nodes. If the source gains
+a different asset before completion, the result becomes a new config-linked
+node, preserving both outputs. Video and audio follow the same rule.
+Existing-image `i2i` always writes new config-linked results and
 never mutates the source asset.
 
 The same single-selection boundary owns the reference-style image toolbar.
@@ -222,5 +247,5 @@ narrow canvas column cannot contain it.
 The migration reader for `nomifun.creative-studio/v1` may still carry an
 internal `projectId`, and legacy project-document/repository adapters may
 translate that historical shape. Those adapters are not the public Canvas API:
-the product library is `/workshop/canvases`, the route parameter is `canvasId`,
+the product library is `/nomi/canvases`, the route parameter is `canvasId`,
 and the Agent endpoint is scoped by `canvasId`.

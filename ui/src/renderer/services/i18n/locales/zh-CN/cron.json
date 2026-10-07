@@ -131,6 +131,7 @@
       "workspaceHint": "可选：设置文件操作的项目文件夹",
       "selectFolder": "选择文件夹",
       "clearFolder": "清除",
+      "workspaceUnavailable": "所选项目目录“{{workspacePath}}”不存在或无法访问。请恢复该目录，或重新选择一个现有目录后再保存任务。",
       "model": "模型",
       "nomiModelRequired": "请为 Nomi 选择模型",
       "removedPresetLabel": "已移除的设定（{{id}}）",

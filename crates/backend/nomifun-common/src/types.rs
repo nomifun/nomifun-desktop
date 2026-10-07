@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -71,33 +70,6 @@ impl ProviderWithModel {
     }
 }
 
-/// A pending tool-call confirmation item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Confirmation {
-    pub id: String,
-    pub call_id: String,
-    pub title: Option<String>,
-    pub action: Option<String>,
-    pub description: String,
-    pub command_type: Option<String>,
-    pub options: Vec<ConfirmationOption>,
-    /// Optional inline preview image (a `data:image/png;base64,...` URL). Used by the
-    /// browser takeover approval so a silent (headless) session can still show the user
-    /// the current page they are approving an irreversible action on. `None` for all
-    /// non-browser confirmations. `#[serde(default)]` keeps older payloads deserializable
-    /// and omits the field from the wire when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub screenshot: Option<String>,
-}
-
-/// A single option within a confirmation dialog.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfirmationOption {
-    pub label: String,
-    pub value: serde_json::Value,
-    pub params: Option<HashMap<String, String>>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,26 +98,5 @@ mod tests {
 
         let json = serde_json::to_value(&p).unwrap();
         assert!(json.get("use_model").is_none());
-    }
-
-    #[test]
-    fn test_confirmation_serde() {
-        let c = Confirmation {
-            id: "c1".into(),
-            call_id: "call1".into(),
-            title: Some("Run command?".into()),
-            action: None,
-            description: "Execute shell command".into(),
-            command_type: Some("bash".into()),
-            options: vec![ConfirmationOption {
-                label: "Allow".into(),
-                value: serde_json::json!(true),
-                params: None,
-            }],
-            screenshot: None,
-        };
-        let json = serde_json::to_value(&c).unwrap();
-        assert_eq!(json["call_id"], "call1");
-        assert_eq!(json["command_type"], "bash");
     }
 }

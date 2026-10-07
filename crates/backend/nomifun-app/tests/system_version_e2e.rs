@@ -222,12 +222,7 @@ async fn full_system_flow_e2e() {
         .unwrap();
     let json = body_json(resp).await;
     let providers = json["data"].as_array().unwrap();
-    assert_eq!(providers.len(), 2);
-    assert!(
-        providers
-            .iter()
-            .any(|provider| provider["platform"] == "nomifun-free-model")
-    );
+    assert_eq!(providers.len(), 1);
     assert!(
         providers
             .iter()

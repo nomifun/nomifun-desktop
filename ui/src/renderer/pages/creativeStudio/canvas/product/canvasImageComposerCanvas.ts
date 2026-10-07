@@ -4,66 +4,65 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+ImageGenerationInterfaceMode,
+ImageGenerationQuality,
+ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
 import type { CreativeAsset } from '../../assets';
 import type {
-  CreativeCanvasConnection,
-  CreativeCanvasNode,
-  CreativeImagePromptMention,
-  CreativeProjectDocument,
-  CreativeSize,
+CreativeCanvasConnection,
+CreativeCanvasNode,
+CreativeImagePromptMention,
+CreativeProjectDocument,
+CreativeSize,
 } from '../../domain';
 import type {
-  CreativeModelCatalogSnapshot,
-  CreativeModelOption,
-  CreativeModelSelectionRef,
+CreativeModelCatalogSnapshot,
+CreativeModelSelectionRef
 } from '../../models';
 import {
-  isCanvasNodeTaskOwner,
-  type CreativeTask,
-  type CreativeTaskReference,
+isCanvasNodeTaskOwner,
+type CreativeTask,
+type CreativeTaskReference,
 } from '../../tasks';
-import type {
-  ImageWorkbenchInterfaceMode,
-  ImageWorkbenchQuality,
-  ImageWorkbenchSettings,
-  ImageWorkbenchTaskSummary,
-} from '../../workbenches/image';
+import { canvasResumeRequestsFromDocument,prepareCanvasImageRun,type CanvasGenerationResumeRequest,type GenerationReferences,type PreparedCanvasGenerationRun } from '../generation';
+
+import { validateCanvasConnection,type CanvasState } from '../core';
+import { creativeStudioProductText } from './i18n';
 import {
-  prepareImageWorkbenchRun,
-  workbenchResumeRequestsFromDocument,
-  type CreativeWorkbenchReferences,
-  type CreativeWorkbenchResumeRequest,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
-import { validateCanvasConnection, type CanvasState } from '../core';
-import {
-  canvasTaskResultPosition,
-  nextCanvasImageTaskPosition,
+canvasTaskResultPosition,
+nextCanvasImageTaskPosition,
 } from './imageTaskCanvasLayout';
 import {
-  createCreativeCanvasProductNode,
-  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+createCreativeCanvasProductNode,
+CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
-import { creativeStudioProductText } from './i18n';
 
-export const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
+const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
 
+export interface CanvasImageComposeTaskSummary {
+  state: ConfigNode['data']['status'];
+  pendingCount: number;
+  message?: string;
+}
+
 export interface CanvasImageComposeDraft {
   prompt: string;
   mentions?: CreativeImagePromptMention[];
-  settings: ImageWorkbenchSettings;
+  settings: ImageGenerationSettings;
 }
 
 export interface PreparedCanvasImageCompose {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
 }
 
-export const DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS: ImageWorkbenchSettings = {
+export const DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS: ImageGenerationSettings = {
   model: null,
   interfaceMode: 'images',
   quality: 'auto',
@@ -73,10 +72,10 @@ export const DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS: ImageWorkbenchSettings = {
   count: 1,
 };
 
-const interfaceMode = (value: unknown): ImageWorkbenchInterfaceMode =>
+const interfaceMode = (value: unknown): ImageGenerationInterfaceMode =>
   value === 'responses' ? 'responses' : 'images';
 
-const quality = (value: unknown): ImageWorkbenchQuality =>
+const quality = (value: unknown): ImageGenerationQuality =>
   value === 'high' || value === 'medium' || value === 'low' ? value : 'auto';
 
 const dimension = (value: unknown): number | null =>
@@ -91,7 +90,7 @@ const count = (value: unknown): number =>
 
 export function canvasImageComposeSettings(
   config: ConfigNode | null
-): ImageWorkbenchSettings {
+): ImageGenerationSettings {
   if (!config) return structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS);
   const aspect = config.data.parameters.aspect;
   return {
@@ -185,7 +184,7 @@ export function clearCanvasImageComposeDraftModel(node: ImageNode): ImageNode {
 
 export function canvasImageComposeTaskSummary(
   config: ConfigNode | null
-): ImageWorkbenchTaskSummary {
+): CanvasImageComposeTaskSummary {
   if (!config) return { state: 'idle', pendingCount: 0 };
   const pending = config.data.status === 'queued' || config.data.status === 'running';
   return {
@@ -231,48 +230,20 @@ export function latestCanvasImageComposeConfig(
   return matches.at(-1) ?? null;
 }
 
-export function preferredCanvasImageComposeModel(
-  options: readonly CreativeModelOption[],
-  previous: CreativeModelSelectionRef | null,
-  source: CreativeAsset | null
-): CreativeModelSelectionRef | null {
-  const match = (candidate: CreativeModelSelectionRef | null) =>
-    candidate
-      ? (options.find(
-          (option) =>
-            option.providerId === candidate.providerId &&
-            option.model === candidate.model
-        ) ?? null)
-      : null;
-  const retained = match(previous);
-  if (retained) return { providerId: retained.providerId, model: retained.model };
-  const origin =
-    source?.origin?.providerId && source.origin.model
-      ? match({
-          providerId:
-            source.origin.providerId as CreativeModelSelectionRef['providerId'],
-          model: source.origin.model,
-        })
-      : null;
-  if (origin) return { providerId: origin.providerId, model: origin.model };
-  const only = options.length === 1 ? options[0] : null;
-  return only ? { providerId: only.providerId, model: only.model } : null;
-}
-
 export function prepareCanvasImageCompose(input: {
   projectId: string;
   state: CanvasState;
   viewportSize: CreativeSize;
   sourceNode: ImageNode;
   sourceAsset: CreativeAsset | null;
-  references?: CreativeWorkbenchReferences;
+  references?: GenerationReferences;
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef;
   /** User-authored text retained for the Canvas and history UI. */
   prompt: string;
   /** Exact mention-resolved text sent to the selected Provider. */
   providerPrompt?: string;
-  settings: Omit<ImageWorkbenchSettings, 'model'>;
+  settings: Omit<ImageGenerationSettings, 'model'>;
 }): PreparedCanvasImageCompose {
   const sourceAssetId = input.sourceNode.data.assetId;
   if (
@@ -287,7 +258,7 @@ export function prepareCanvasImageCompose(input: {
       )
     );
   }
-  const references: CreativeWorkbenchReferences = input.references ??
+  const references: GenerationReferences = input.references ??
     (input.sourceAsset
       ? {
           assets: [input.sourceAsset],
@@ -323,7 +294,7 @@ export function prepareCanvasImageCompose(input: {
     input.viewportSize,
     { position: configPosition, locked: true }
   );
-  const plan = prepareImageWorkbenchRun({
+  const plan = prepareCanvasImageRun({
     catalog: input.catalog,
     canvasId: input.projectId,
     nodeId: base.id,
@@ -389,11 +360,11 @@ export function prepareCanvasImageCompose(input: {
 
 export function canvasImageComposeResumeRequests(
   document: CreativeProjectDocument
-): CreativeWorkbenchResumeRequest[] {
+): CanvasGenerationResumeRequest[] {
   const owners = new Set(
     document.nodes.filter(isCanvasImageComposeConfig).map((node) => node.id)
   );
-  return workbenchResumeRequestsFromDocument(document).filter(
+  return canvasResumeRequestsFromDocument(document).filter(
     (request) =>
       request.reference.owner.kind === 'canvas_node' &&
       owners.has(request.reference.owner.nodeId)
@@ -511,11 +482,12 @@ export function reconcileCanvasImageComposeConfig(
 
 export function canvasImageComposeResultPosition(
   nodes: readonly CreativeCanvasNode[],
-  config: ConfigNode
+  config: ConfigNode,
+  size: CreativeSize = CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
 ): { x: number; y: number } {
   return canvasTaskResultPosition(
     nodes,
     config,
-    CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
+    size
   );
 }

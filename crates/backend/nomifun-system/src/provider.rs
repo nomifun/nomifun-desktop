@@ -15,7 +15,6 @@ use nomifun_model_invoke::{AuthMaterial, AuthScheme};
 use serde::de::DeserializeOwned;
 
 use crate::bedrock_probe::service::validate_bedrock_auth;
-use crate::managed_model::is_managed_provider_platform;
 use crate::provider_connection::{
     PreparedProviderConnection, credentials_have_values, decrypt_credentials,
     encrypt_credentials, normalize_auth_scheme, prepare_new_connection,
@@ -28,13 +27,47 @@ use crate::provider_model::{
     validate_provider_params,
 };
 
+const RETIRED_ANONYMOUS_FREE_MODEL_PLATFORM: &str = "nomifun-free-model";
+
+pub(crate) fn is_retired_provider_platform(platform: &str) -> bool {
+    platform
+        .trim()
+        .eq_ignore_ascii_case(RETIRED_ANONYMOUS_FREE_MODEL_PLATFORM)
+}
+
+/// Disable provider rows left by releases that shipped the removed anonymous
+/// free-model service. Rows remain as integrity tombstones for immutable Agent
+/// and execution history, but no retired provider may remain invokable.
+pub async fn disable_retired_provider_platforms(
+    repo: &dyn IProviderRepository,
+) -> Result<usize, AppError> {
+    let retired = repo
+        .list()
+        .await?
+        .into_iter()
+        .filter(|provider| provider.enabled && is_retired_provider_platform(&provider.platform))
+        .collect::<Vec<_>>();
+    for provider in &retired {
+        repo.update(
+            &provider.provider_id,
+            provider.config_revision,
+            UpdateProviderParams {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
+    Ok(retired.len())
+}
+
 #[derive(Clone)]
 pub struct ProviderService {
-    repo: Arc<dyn IProviderRepository>,
-    model_repo: Arc<dyn IProviderModelRepository>,
-    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-    connection_repo: Arc<dyn IProviderConnectionRepository>,
-    encryption_key: [u8; 32],
+    pub(crate) repo: Arc<dyn IProviderRepository>,
+    pub(crate) model_repo: Arc<dyn IProviderModelRepository>,
+    pub(crate) capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
+    pub(crate) connection_repo: Arc<dyn IProviderConnectionRepository>,
+    pub(crate) encryption_key: [u8; 32],
     coordinator: Option<SharedProviderDeletionCoordinator>,
 }
 
@@ -65,7 +98,13 @@ impl ProviderService {
     }
 
     pub async fn list(&self) -> Result<Vec<ProviderResponse>, AppError> {
-        let providers = self.repo.list().await?;
+        let providers = self
+            .repo
+            .list()
+            .await?
+            .into_iter()
+            .filter(|provider| !is_retired_provider_platform(&provider.platform))
+            .collect::<Vec<_>>();
         let models = rows_to_model_responses(
             self.model_repo.list().await?,
             self.capability_repo.list().await?,
@@ -98,8 +137,8 @@ impl ProviderService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_managed_provider_platform(&provider.platform) {
-            return Err(managed_mutation_error());
+        if is_retired_provider_platform(&provider.platform) {
+            return Err(retired_provider_error());
         }
         let credentials =
             decrypt_credentials(&provider.credentials_encrypted, &self.encryption_key)?;
@@ -112,19 +151,23 @@ impl ProviderService {
         &self,
         req: CreateProviderRequest,
     ) -> Result<ProviderResponse, AppError> {
-        reject_managed_platform(&req.platform)?;
+        let platform = req.platform.trim();
+        if platform.eq_ignore_ascii_case(crate::model_gateway::PLATFORM) {
+            return Err(AppError::BadRequest("Use model-gateway/create to import the validated catalog atomically".into()));
+        }
+        reject_retired_platform(platform)?;
         validate_provider_id(req.provider_id.as_deref())?;
-        validate_required_text("platform", &req.platform)?;
+        validate_required_text("platform", platform)?;
         validate_required_text("name", &req.name)?;
         validate_sort_order(req.sort_order)?;
         let bedrock_config = normalize_bedrock_config(req.bedrock_config.as_ref());
         let auth_scheme = validate_provider_auth(
-            &req.platform,
+            platform,
             &req.auth_scheme,
             &req.credentials,
             bedrock_config.as_ref(),
         )?;
-        validate_provider_base_url(&req.platform, &req.base_url)?;
+        validate_provider_base_url(platform, &req.base_url)?;
 
         let prepared_connections = req
             .connections
@@ -134,13 +177,13 @@ impl ProviderService {
         let connection_targets = unique_connection_targets(&prepared_connections)?;
         for capability in &req.initial_model.capabilities {
             validate_known_provider_model_task(
-                &req.platform,
+                platform,
                 &req.initial_model.model,
                 capability.task,
             )?;
         }
         validate_capability_set(
-            &req.platform,
+            platform,
             &req.base_url,
             &auth_scheme,
             &connection_targets,
@@ -172,7 +215,7 @@ impl ProviderService {
         let bedrock_config = serialize_opt(&bedrock_config, "bedrock_config")?;
         let params = CreateProviderParams {
             provider_id: req.provider_id.as_deref(),
-            platform: req.platform.trim(),
+            platform,
             name: req.name.trim(),
             base_url: req.base_url.trim(),
             auth_scheme: &auth_scheme,
@@ -217,8 +260,13 @@ impl ProviderService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_managed_provider_platform(&existing.platform) {
-            return Err(managed_mutation_error());
+        if is_retired_provider_platform(&existing.platform) {
+            return Err(retired_provider_error());
+        }
+        if existing.platform == crate::model_gateway::PLATFORM
+            && (req.base_url.is_some() || req.credentials.is_some() || req.auth_scheme.is_some())
+        {
+            return Err(AppError::BadRequest("Gateway address and key must be updated together through model-gateway/connection".into()));
         }
         if let Some(name) = req.name.as_deref() {
             validate_required_text("name", name)?;
@@ -267,11 +315,11 @@ impl ProviderService {
             }
             _ => None,
         };
-        let bedrock_json = req
-            .bedrock_config
-            .as_ref()
-            .map(|config| serialize_json(config, "bedrock_config"))
-            .transpose()?;
+        let bedrock_json = if req.bedrock_config.is_some() {
+            serialize_opt(&next_bedrock, "bedrock_config")?
+        } else {
+            None
+        };
         let provider = self
             .repo
             .update(
@@ -306,8 +354,8 @@ impl ProviderService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_managed_provider_platform(&source.platform) {
-            return Err(managed_mutation_error());
+        if is_retired_provider_platform(&source.platform) {
+            return Err(retired_provider_error());
         }
         let clone_name = name
             .map(str::trim)
@@ -328,11 +376,6 @@ impl ProviderService {
 
     pub async fn delete(&self, provider_id: &str) -> Result<(), AppError> {
         validate_provider_id(Some(provider_id))?;
-        if let Some(provider) = self.repo.find_by_id(provider_id).await?
-            && is_managed_provider_platform(&provider.platform)
-        {
-            return Err(managed_mutation_error());
-        }
         let lifecycle_barrier = self
             .coordinator
             .as_ref()
@@ -390,6 +433,7 @@ impl ProviderService {
                 provider_params: response.provider_params,
                 context_limit: response.context_limit,
                 output_limit: response.output_limit,
+                compaction_threshold_pct: response.compaction_threshold_pct,
             };
             validate_capability(
                 platform,
@@ -402,7 +446,7 @@ impl ProviderService {
         Ok(())
     }
 
-    fn row_to_response(
+    pub(crate) fn row_to_response(
         &self,
         row: Provider,
         models: Vec<ProviderModelResponse>,
@@ -427,12 +471,12 @@ impl ProviderService {
     }
 }
 
-struct ConnectionTarget {
-    base_url: String,
-    auth_scheme: String,
+pub(crate) struct ConnectionTarget {
+    pub(crate) base_url: String,
+    pub(crate) auth_scheme: String,
 }
 
-fn unique_connection_targets(
+pub(crate) fn unique_connection_targets(
     connections: &[PreparedProviderConnection],
 ) -> Result<HashMap<String, ConnectionTarget>, AppError> {
     let mut targets = HashMap::with_capacity(connections.len());
@@ -456,7 +500,7 @@ fn unique_connection_targets(
     Ok(targets)
 }
 
-fn validate_capability_set(
+pub(crate) fn validate_capability_set(
     platform: &str,
     default_base_url: &str,
     default_auth_scheme: &str,
@@ -486,7 +530,7 @@ fn validate_capability_set(
     Ok(())
 }
 
-fn validate_capability(
+pub(crate) fn validate_capability(
     platform: &str,
     default_base_url: &str,
     default_auth_scheme: &str,
@@ -496,6 +540,7 @@ fn validate_capability(
     validate_protocol(platform, capability)?;
     validate_positive_token_limit("context_limit", capability.context_limit)?;
     validate_positive_token_limit("output_limit", capability.output_limit)?;
+    crate::provider_model::validate_compaction_threshold(capability)?;
     validate_provider_params(
         &capability.protocol,
         capability.task,
@@ -590,10 +635,6 @@ pub(crate) fn validate_provider_base_url(platform: &str, base_url: &str) -> Resu
             ))
         };
     }
-    validate_base_url(base_url)
-}
-
-pub(crate) fn validate_base_url(base_url: &str) -> Result<(), AppError> {
     crate::provider_model::validate_base_url(base_url)
 }
 
@@ -649,16 +690,16 @@ fn api_keys_from_credentials(credentials: &serde_json::Value) -> Result<Vec<Stri
         .collect()
 }
 
-fn reject_managed_platform(platform: &str) -> Result<(), AppError> {
-    if is_managed_provider_platform(platform.trim()) {
-        return Err(managed_mutation_error());
+fn reject_retired_platform(platform: &str) -> Result<(), AppError> {
+    if is_retired_provider_platform(platform) {
+        return Err(retired_provider_error());
     }
     Ok(())
 }
 
-fn managed_mutation_error() -> AppError {
+fn retired_provider_error() -> AppError {
     AppError::Forbidden(
-        "Managed model providers must be changed through their dedicated model-service API".into(),
+        "This retired built-in provider can no longer be used or modified".into(),
     )
 }
 
@@ -691,6 +732,76 @@ pub(crate) fn deserialize_opt<T: DeserializeOwned>(
 mod tests {
     use super::*;
     use nomifun_api_types::BedrockAuthMethod;
+    use nomifun_db::{
+        NewProviderModelCapability, SqliteProviderConnectionRepository,
+        SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
+        SqliteProviderRepository, init_database_memory,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn retired_builtin_provider_is_disabled_and_hidden() {
+        let db = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let provider_id = ProviderId::new().into_string();
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            provider_params: "{}",
+            ..Default::default()
+        }];
+        repo.create(
+            CreateProviderParams {
+                provider_id: Some(&provider_id),
+                platform: RETIRED_ANONYMOUS_FREE_MODEL_PLATFORM,
+                name: "Retired built-in provider",
+                base_url: "http://127.0.0.1:1/v1",
+                auth_scheme: "bearer",
+                credentials_encrypted: "retired",
+                enabled: true,
+                bedrock_config: None,
+                sort_order: None,
+            },
+            &NewProviderModel {
+                model: "retired-model",
+                enabled: true,
+                sort_order: 0,
+                description: None,
+                capabilities: &capabilities,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            disable_retired_provider_platforms(repo.as_ref())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            !repo
+                .find_by_id(&provider_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+
+        let service = ProviderService::new(
+            repo,
+            Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(
+                db.pool().clone(),
+            )),
+            Arc::new(SqliteProviderConnectionRepository::new(db.pool().clone())),
+            [0u8; 32],
+        );
+        assert!(service.list().await.unwrap().is_empty());
+    }
 
     #[test]
     fn provider_auth_is_explicit_and_validated() {

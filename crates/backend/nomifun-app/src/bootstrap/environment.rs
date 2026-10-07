@@ -117,12 +117,32 @@ impl WorkRootLock {
     }
 }
 
-/// Layer 1: Logging + config resolution.
-///
-/// Cheap, synchronous, no IO beyond creating the log directory.
-/// All subcommands that need logging and config should call this first.
+/// Layer 1: canonical data-root resolution + logging + config resolution.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
-    let log_dir = cli.log_dir.clone().unwrap_or_else(|| cli.data_dir.join("logs"));
+    init_environment_inner(cli, merged_path)
+}
+
+/// Initialize the current in-process Nomi-core host against the same canonical
+/// root used by every other database-owning command.
+pub fn init_nomi_core_environment(
+    cli: &Cli,
+    merged_path: &str,
+) -> Result<ServerEnvironment> {
+    init_environment_inner(cli, merged_path)
+}
+
+fn init_environment_inner(
+    cli: &Cli,
+    merged_path: &str,
+) -> Result<ServerEnvironment> {
+    let startup_data_dir =
+        super::data_root::normalize_requested_startup_data_root(
+            cli.data_dir.clone(),
+        );
+    let log_dir = cli
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| startup_data_dir.join("logs"));
     // Export the *actual* log dir so `nomifun_system::sysinfo::resolve_log_dir`
     // (which the settings UI reads via GET /api/system/info) reports where logs
     // truly land instead of its own independent default — otherwise the UI shows
@@ -153,7 +173,7 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
 
     // Take data-dir authority before resolving any pending reset or legacy
     // work-root recovery hint from its control files.
-    let server_lock = Arc::new(acquire_server_lock(&cli.data_dir)?);
+    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
     let data_dir = server_lock.protected_data_dir().to_path_buf();
     let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
     nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
@@ -308,20 +328,30 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         });
     }
 
-    let migration_status = match nomifun_db::inspect_supported_migration_lineage(pool).await {
-        Ok(status) => status,
+    let agent_clean_cut = match nomifun_db::requires_agent_store_clean_cut(pool).await {
+        Ok(required) => required,
         Err(error) => {
             return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database migration lineage is not a supported embedded prefix: {error}"
+                "database Agent Store cutover identity could not be verified: {error}"
             )));
         }
     };
-    // The full ID registry describes the latest embedded schema. A valid older
-    // migration prefix necessarily lacks later tables/columns, so defer the
-    // complete contract until init_database applies the missing suffix. The
-    // baseline identity checks below still authenticate the dataset before any
-    // writable open.
-    if migration_status == nomifun_db::MigrationLineageStatus::Current {
+    // The DB owner performs the recognized Agent-only cutover in one
+    // transaction. Keep the non-Agent installation identity checks below;
+    // the current Agent schema contract applies after that commit.
+    let lineage_current = if agent_clean_cut {
+        false
+    } else {
+        match nomifun_db::validate_known_migration_lineage_prefix(pool).await {
+            Ok(current) => current,
+            Err(error) => {
+                return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                    "database migration lineage is not a recognized canonical prefix: {error}"
+                )));
+            }
+        }
+    };
+    if lineage_current {
         if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
             return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database does not satisfy the complete v3 ID schema contract: {error}"
@@ -332,60 +362,31 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
                 "database does not satisfy the complete v3 ID data contract: {error}"
             )));
         }
+        if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database does not satisfy the canonical Agent Store schema contract: {error}"
+            )));
+        }
     }
 
-    let schema_matches = table_has_column_contract(pool, "users", "id", "INTEGER", false, true)
-        .await?
-        && table_has_column_contract(pool, "users", "user_id", "TEXT", true, false).await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "id",
-            "INTEGER",
-            false,
-            true,
+    for (table, column, declared_type, not_null, primary_key) in [
+        ("users", "id", "INTEGER", false, true),
+        ("users", "user_id", "TEXT", true, false),
+        ("installation_identity", "id", "INTEGER", false, true),
+        ("installation_identity", "singleton_key", "TEXT", true, false),
+        ("installation_identity", "owner_user_id", "TEXT", true, false),
+        ("agent_metadata", "id", "INTEGER", false, true),
+        ("agent_metadata", "agent_id", "TEXT", true, false),
+    ] {
+        if !table_has_column_contract(
+            pool, table, column, declared_type, not_null, primary_key,
         )
         .await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "singleton_key",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "owner_user_id",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "agent_metadata",
-            "id",
-            "INTEGER",
-            false,
-            true,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "agent_metadata",
-            "agent_id",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?;
-    if !schema_matches {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
-            "core database identity columns do not match the v3 schema".into(),
-        ));
+        {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(
+                "core database identity columns do not match the v3 schema".into(),
+            ));
+        }
     }
 
     let identities: Vec<(String, String)> = nomifun_db::sqlx::query_as(
@@ -445,6 +446,7 @@ async fn probe_existing_v3_database(path: &Path) -> Result<ExistingV3DatabasePro
         .filename(path)
         .create_if_missing(false)
         .read_only(true)
+        .foreign_keys(true)
         .busy_timeout(DATABASE_PROBE_BUSY_TIMEOUT);
     let pool = PoolOptions::<Sqlite>::new()
         .max_connections(1)
@@ -514,10 +516,9 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
     // it is deliberately non-destructive when a database file exists.  The
     // app probe below is the only authority allowed to classify/retire that
     // database. Receipt-valid databases still have to prove a supported
-    // embedded migration prefix plus the baseline installation identity
-    // contract. Fully migrated databases additionally prove the complete
-    // schema/data contract here; supported prefixes prove it after
-    // init_database applies the missing suffix.
+    // exact embedded baseline plus the complete schema/data and installation
+    // identity contracts. Historical prefixes are preserved for an explicit
+    // reset; startup never mutates them in place.
     match nomifun_common::factory_reset::prepare_v3_dataset(
         &config.data_dir,
         &config.work_dir,
@@ -629,7 +630,7 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
     // dataset marker and the caller has committed to bootstrapping/opening the
     // data layer. Browser-local state is outside SQLite, so the value scopes
     // every entity cache key to exactly this post-reset generation.
-    let storage_generation = load_or_create_storage_generation(&config.data_dir)?;
+    let storage_generation = load_and_publish_storage_generation(&config.data_dir)?;
     let receipt_status =
         nomifun_common::factory_reset::inspect_v3_dataset_receipt(
             &config.data_dir,
@@ -648,15 +649,6 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
             &config.work_dir,
             &storage_generation,
         )?;
-    }
-    // SAFETY: initialization is still single-threaded and happens before any
-    // service or route can read this variable.
-    unsafe {
-        std::env::set_var("NOMIFUN_STORAGE_GENERATION", &storage_generation);
-    }
-    if receipt_status
-        != nomifun_common::factory_reset::DatasetReceiptStatus::Current
-    {
         nomifun_common::factory_reset::write_v3_dataset_bootstrap_binding(
             &config.data_dir,
             &config.work_dir,
@@ -664,6 +656,16 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn load_and_publish_storage_generation(data_dir: &Path) -> Result<String> {
+    let storage_generation = load_or_create_storage_generation(data_dir)?;
+    // SAFETY: host bootstrap is single-threaded before services and routes are
+    // published; system-info is the only later reader of this variable.
+    unsafe {
+        std::env::set_var("NOMIFUN_STORAGE_GENERATION", &storage_generation);
+    }
+    Ok(storage_generation)
 }
 
 impl ServerEnvironment {
@@ -763,933 +765,85 @@ pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha384};
-    use sqlx::migrate::{Migrate, Migrator};
 
-    static TEST_MIGRATOR: Migrator = sqlx::migrate!("../nomifun-db/migrations");
+    #[tokio::test]
+    async fn probe_accepts_database_created_from_the_canonical_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        database.close().await;
 
-    const V3_BASELINE_SQL: &str =
-        include_str!("../../../nomifun-db/migrations/001_v3_baseline.sql");
-
-    fn v3_baseline_checksum() -> Vec<u8> {
-        Sha384::digest(V3_BASELINE_SQL.as_bytes()).to_vec()
-    }
-
-    async fn create_migrations_table(pool: &SqlitePool) {
-        nomifun_db::sqlx::query(
-            "CREATE TABLE _sqlx_migrations (\
-                version BIGINT PRIMARY KEY, \
-                description TEXT NOT NULL, \
-                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                success BOOLEAN NOT NULL, \
-                checksum BLOB NOT NULL, \
-                execution_time BIGINT NOT NULL\
-             )",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    fn test_config(data_dir: &Path, work_dir: &Path) -> AppConfig {
-        AppConfig {
-            data_dir: data_dir.to_path_buf(),
-            work_dir: work_dir.to_path_buf(),
-            ..AppConfig::default()
-        }
-    }
-
-    /// Serialize tests that drive `prepare_v3_data_layer`.
-    ///
-    /// That path writes PROCESS-GLOBAL env vars (`NOMIFUN_DATA_DIR`,
-    /// `NOMIFUN_WORK_DIR`, `NOMIFUN_STORAGE_GENERATION`). Rust runs tests as
-    /// parallel threads inside one process, so two of these racing each other
-    /// overwrite one another's paths and a test then reads a sibling's data dir —
-    /// which is why they passed when filtered down and failed only in the full
-    /// workspace run, where the whole binary's tests share the process.
-    async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        LOCK.lock().await
-    }
-
-    fn finalize_test_dataset(data: &Path, generation: &str, retired_before: bool) {
-        std::fs::write(data.join("storage-generation"), generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt(data, generation).unwrap();
-        if retired_before {
-            let retired = data.join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
-            std::fs::create_dir_all(&retired).unwrap();
-            let root = data.canonicalize().unwrap();
-            let marker = serde_json::json!({
-                "version": 1,
-                "operation_id": uuid::Uuid::now_v7().to_string(),
-                "generation": generation,
-                "data_dir": root,
-                "work_dir": root,
-                "reason": "non_v3_dataset",
-                "requested_at": 1,
-                "completed_at": 2,
-            });
-            std::fs::write(
-                retired.join("automatic-legacy-retirement.completed.json"),
-                serde_json::to_vec(&marker).unwrap(),
-            )
-            .unwrap();
-        }
+        assert_eq!(
+            probe_existing_v3_database(&path).await.unwrap(),
+            ExistingV3DatabaseProbe::Current
+        );
     }
 
     #[tokio::test]
-    async fn published_059_boots_and_upgrades_without_reusing_automatic_retirement() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let config = test_config(data.path(), data.path());
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(config.database_path())
-                    .create_if_missing(true),
-            )
+    async fn probe_rejects_an_unrecognized_agent_store_lineage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        // Keep the current schema valid so rejection comes from the unknown
+        // receipt lineage rather than bypassing its generation CHECK.
+        sqlx::query("UPDATE _sqlx_migrations SET version = 6")
+            .execute(database.pool())
             .await
             .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        connection.ensure_migrations_table().await.unwrap();
-        for migration in TEST_MIGRATOR
-            .iter()
-            .filter(|migration| migration.version <= 59)
-        {
-            connection.apply(migration).await.unwrap();
-        }
-        drop(connection);
-        let owner = nomifun_common::UserId::new();
-        sqlx::query("INSERT INTO users (user_id, username, password_hash, created_at, updated_at) VALUES (?, 'admin', '', 1, 1)")
-            .bind(owner.as_str()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO installation_identity (singleton_key, owner_user_id) VALUES ('installation', ?)")
-            .bind(owner.as_str()).execute(&pool).await.unwrap();
-        let asset = nomifun_common::WorkshopAssetId::new();
-        sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, text_content, in_library, created_at, updated_at) VALUES (?, 'text', 'keep history', '[]', 'original content', 1, 1, 1)")
-            .bind(asset.as_str()).execute(&pool).await.unwrap();
-        let checksum: Vec<u8> =
-            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 59")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let encoded = format!(
-            "{:x}",
-            Sha384::digest(include_bytes!(
-                "../../../nomifun-db/migrations/059_workshop_asset_content_deletion.sql"
-            ))
-        );
-        assert_eq!(
-            encoded,
-            "ae3e1cbb9d66050fc6c5c631b3f578cb15c12a4d7aaf6be284974765b050c91ab9d08ccdae271702b4cee36f9d536f65"
-        );
-        pool.close().await;
-        let generation = uuid::Uuid::now_v7().to_string();
-        finalize_test_dataset(data.path(), &generation, true);
-        let receipt = data
-            .path()
-            .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE);
-        let receipt_before = std::fs::read(&receipt).unwrap();
-        let retired = data
-            .path()
-            .join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
-        let marker = retired.join("automatic-legacy-retirement.completed.json");
-        let marker_before = std::fs::read(&marker).unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
-        let db = nomifun_db::init_database(&config.database_path())
-            .await
-            .unwrap();
-        nomifun_db::validate_id_schema_contract(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
-                .fetch_one(db.pool())
-                .await
-                .unwrap(),
-            60
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, Vec<u8>>(
-                "SELECT checksum FROM _sqlx_migrations WHERE version = 59"
-            )
-            .fetch_one(db.pool())
-            .await
-            .unwrap(),
-            checksum
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT text_content FROM workshop_assets WHERE asset_id = ?"
-            )
-            .bind(asset.as_str())
-            .fetch_one(db.pool())
-            .await
-            .unwrap(),
-            "original content"
-        );
-        db.close().await;
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
-        assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
-        assert_eq!(std::fs::read(marker).unwrap(), marker_before);
-        assert_eq!(std::fs::read_dir(retired).unwrap().count(), 1);
         assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
+            !nomifun_db::requires_agent_store_clean_cut(database.pool())
+                .await
+                .unwrap()
         );
-    }
+        database.close().await;
 
-    #[tokio::test]
-    async fn v3_validation_failures_preserve_data_with_or_without_prior_retirement() {
-        let _env = env_guard().await;
-        for (corruption, expected) in [
-            (
-                "UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 59",
-                "migration 59",
-            ),
-            (
-                "DROP TABLE installation_identity",
-                "identity tables are missing",
-            ),
-            (
-                "DROP TRIGGER restrict_template_run_deleted_assets_update",
-                "schema contract",
-            ),
-        ] {
-            for retired_before in [false, true] {
-                let data = tempfile::tempdir().unwrap();
-                let config = test_config(data.path(), data.path());
-                let db = nomifun_db::init_database(&config.database_path())
-                    .await
-                    .unwrap();
-                sqlx::query(corruption).execute(db.pool()).await.unwrap();
-                db.close().await;
-                let generation = uuid::Uuid::now_v7().to_string();
-                finalize_test_dataset(data.path(), &generation, retired_before);
-                let media = data.path().join("workshop/assets/keep.bin");
-                std::fs::create_dir_all(media.parent().unwrap()).unwrap();
-                std::fs::write(&media, b"keep original media").unwrap();
-                let before = std::fs::read(config.database_path()).unwrap();
-                let receipt = data
-                    .path()
-                    .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE);
-                let receipt_before = std::fs::read(&receipt).unwrap();
-                let retired = data
-                    .path()
-                    .join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
-                let marker = retired.join("automatic-legacy-retirement.completed.json");
-                let marker_before = std::fs::read(&marker).ok();
-
-                let error = prepare_v3_data_layer(&config)
-                    .await
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains(expected), "{error}");
-                assert!(
-                    error.contains("preserved without automatic retirement"),
-                    "{error}"
-                );
-                assert!(!error.contains("already consumed"), "{error}");
-                assert_eq!(std::fs::read(config.database_path()).unwrap(), before);
-                assert_eq!(std::fs::read(media).unwrap(), b"keep original media");
-                assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
-                assert_eq!(
-                    std::fs::read_to_string(data.path().join("storage-generation")).unwrap(),
-                    generation
-                );
-                assert_eq!(std::fs::read(marker).ok(), marker_before);
-                assert_eq!(
-                    std::fs::read_dir(retired)
-                        .map(|entries| entries.count())
-                        .unwrap_or(0),
-                    usize::from(retired_before)
-                );
-                assert!(
-                    !data
-                        .path()
-                        .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                        .exists()
-                );
-                assert!(
-                    !data
-                        .path()
-                        .join(nomifun_common::factory_reset::V3_DATASET_RESET_REQUEST_FILE)
-                        .exists()
-                );
+        match probe_existing_v3_database(&path).await.unwrap() {
+            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+                assert!(reason.contains("migration lineage"), "{reason}");
             }
+            other => panic!("unknown Agent lineage must fail closed: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn probe_accepts_database_created_from_all_embedded_migrations() {
+    async fn probe_rejects_an_edited_canonical_baseline_checksum() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
-        database.close().await;
-
-        assert_eq!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Current
-        );
-    }
-
-    #[tokio::test]
-    async fn probe_accepts_supported_migration_prefix_for_incremental_upgrade() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        create_migrations_table(&pool).await;
-        nomifun_db::sqlx::raw_sql(V3_BASELINE_SQL)
-            .execute(&pool)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-                 (version, description, success, checksum, execution_time) \
-             VALUES (1, 'v3 baseline', 1, ?, 0)",
-        )
-        .bind(v3_baseline_checksum())
-        .execute(&pool)
-        .await
-        .unwrap();
-        let owner = nomifun_common::UserId::new();
-        nomifun_db::sqlx::query(
-            "INSERT INTO users \
-                 (user_id, username, password_hash, created_at, updated_at) \
-             VALUES (?, 'admin', '', 1, 1)",
-        )
-        .bind(owner.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO installation_identity (singleton_key, owner_user_id) \
-             VALUES ('installation', ?)",
-        )
-        .bind(owner.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        assert_eq!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Current
-        );
-
-        let upgraded = nomifun_db::init_database(&path).await.unwrap();
-        assert_eq!(
-            nomifun_db::inspect_supported_migration_lineage(upgraded.pool())
-                .await
-                .unwrap(),
-            nomifun_db::MigrationLineageStatus::Current
-        );
-        let applied: i64 =
-            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-                .fetch_one(upgraded.pool())
-                .await
-                .unwrap();
-        assert!(applied > 1, "embedded migration suffix must be applied");
-        upgraded.close().await;
-    }
-
-    #[tokio::test]
-    async fn probe_rejects_unknown_future_migration_lineage() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        let latest: i64 =
-            nomifun_db::sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-                .fetch_one(database.pool())
-                .await
-                .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-                 (version, description, success, checksum, execution_time) \
-             VALUES (?, 'unknown future migration', 1, X'00', 0)",
-        )
-        .bind(latest + 1)
-        .execute(database.pool())
-        .await
-        .unwrap();
-        database.close().await;
-
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::RequiresRepair(reason)
-                if reason.contains("migration lineage")
-        ));
-    }
-
-    #[tokio::test]
-    async fn finalized_current_database_is_ready_for_doctor() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let path = data.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        database.close().await;
-        let generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(data.path().join("storage-generation"), &generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt(data.path(), &generation)
-            .unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&test_config(data.path(), data.path()))
-                .await
-                .unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
-        assert!(path.is_file());
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
-        );
-    }
-
-    #[tokio::test]
-    async fn probe_rejects_forged_v3_lineage_when_core_schema_is_legacy() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        create_migrations_table(&pool).await;
-        nomifun_db::sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-                 (version, description, success, checksum, execution_time) \
-             VALUES (1, 'v3 baseline', 1, ?, 0)",
-        )
-        .bind(v3_baseline_checksum())
-        .execute(&pool)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "CREATE TABLE users (id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "CREATE TABLE installation_identity (\
-                id TEXT PRIMARY KEY, \
-                singleton_key TEXT NOT NULL, \
-                owner_user_id TEXT NOT NULL\
-             )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "CREATE TABLE agent_metadata (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::RequiresRepair(reason)
-                if reason.contains("core database identity columns")
-        ));
-    }
-
-    #[tokio::test]
-    async fn probe_rejects_v3_database_with_tampered_baseline_checksum() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        nomifun_db::sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
             .execute(database.pool())
             .await
             .unwrap();
         database.close().await;
 
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::RequiresRepair(reason)
-                if reason.contains("migration lineage")
-        ));
+        match probe_existing_v3_database(&path).await.unwrap() {
+            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+                assert!(reason.contains("migration lineage"), "{reason}");
+            }
+            other => panic!("edited lineage must fail closed: {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn probe_rejects_current_lineage_with_invalid_managed_origin_id() {
+    async fn probe_rejects_schema_damage_without_retiring_the_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
-        let mut connection = database.pool().acquire().await.unwrap();
-        nomifun_db::sqlx::query("PRAGMA ignore_check_constraints = ON")
-            .execute(&mut *connection)
+        sqlx::query("DROP INDEX idx_agent_events_correlation")
+            .execute(database.pool())
             .await
             .unwrap();
-        let asset_id = nomifun_common::WorkshopAssetId::new();
-        nomifun_db::sqlx::query(
-            "INSERT INTO workshop_assets \
-                (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
-             VALUES (?, 'image', 'corrupt origin', '[]', 1, \
-                     '{\"provider_id\":null}', 1, 1)",
-        )
-        .bind(asset_id.as_str())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query("PRAGMA ignore_check_constraints = OFF")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        drop(connection);
         database.close().await;
 
-        let probe = probe_existing_v3_database(&path).await.unwrap();
-        assert!(
-            matches!(
-                &probe,
-            ExistingV3DatabaseProbe::RequiresRepair(reason)
-                if reason.contains("complete v3 ID data contract")
-                    && reason.contains("origin.provider_id")
-            ),
-            "unexpected v3 probe result: {probe:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn explicit_reset_overrides_current_receipt_and_retires_managed_side_store() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let config = test_config(data.path(), data.path());
-        let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
-        database.close().await;
-        let generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(data.path().join("storage-generation"), &generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt(data.path(), &generation)
-            .unwrap();
-        std::fs::create_dir_all(data.path().join("knowledge")).unwrap();
-        std::fs::write(
-            data.path().join("knowledge/stale-index"),
-            b"pre-reset side store",
-        )
-        .unwrap();
-        nomifun_common::factory_reset::request_v3_dataset_reset(
-            data.path(),
-            data.path(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        let plan =
-            nomifun_common::factory_reset::read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("explicit reset must stay pending until all side stores initialize");
-        assert_eq!(
-            plan.reason,
-            nomifun_common::factory_reset::DatasetResetReason::ExplicitFactoryReset
-        );
-        assert!(!config.database_path().exists());
-        assert!(!data.path().join("knowledge").exists());
-        assert!(
-            data.path()
-                .join(plan.retired_dir)
-                .join("knowledge/stale-index")
-                .is_file()
-        );
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE)
-                .exists(),
-            "the stale pre-reset receipt must be quarantined"
-        );
-    }
-
-    #[tokio::test]
-    async fn finalize_publishes_receipt_only_after_side_store_bootstrap_succeeds() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let config = test_config(data.path(), data.path());
-        std::fs::write(config.database_path(), b"old database").unwrap();
-        std::fs::create_dir_all(data.path().join("companion")).unwrap();
-        std::fs::write(data.path().join("companion/old-state"), b"old").unwrap();
-        nomifun_common::factory_reset::request_v3_dataset_reset(
-            data.path(),
-            data.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        install_storage_generation_environment(&config).unwrap();
-        let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
-        database.close().await;
-
-        let side_store = data.path().join("companion/current-state");
-        std::fs::create_dir_all(side_store.parent().unwrap()).unwrap();
-        std::fs::write(&side_store, b"current").unwrap();
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE)
-                .exists(),
-            "database and side-store bootstrap alone must not publish the final receipt"
-        );
-        assert!(
-            data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .is_dir()
-        );
-
-        finalize_data_layer(&config).unwrap();
-
-        assert!(side_store.is_file());
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
-        );
-        nomifun_common::factory_reset::require_current_v3_dataset_for_work_dir(
-            data.path(),
-            data.path(),
-        )
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn forged_receipt_retires_legacy_database_before_writable_init() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let path = data.path().join("nomifun-backend.db");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query("CREATE TABLE legacy_sentinel (value TEXT NOT NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO legacy_sentinel (value) VALUES ('must-not-migrate')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        let generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(data.path().join("storage-generation"), &generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt(data.path(), &generation)
-            .unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&test_config(data.path(), data.path()))
-                .await
-                .unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        assert!(
-            !path.exists(),
-            "the rejected database must be retired before init_database can open it"
-        );
-        let plan =
-            nomifun_common::factory_reset::read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("probe-triggered reset must remain pending for full server bootstrap");
-        let retired_database = data
-            .path()
-            .join(plan.retired_dir)
-            .join("nomifun-backend.db");
-        assert!(retired_database.is_file());
-
-        let retired_options = SqliteConnectOptions::new()
-            .filename(&retired_database)
-            .create_if_missing(false)
-            .read_only(true);
-        let retired = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(retired_options)
-            .await
-            .unwrap();
-        let sentinel: String =
-            nomifun_db::sqlx::query_scalar("SELECT value FROM legacy_sentinel")
-                .fetch_one(&retired)
-                .await
-                .unwrap();
-        assert_eq!(sentinel, "must-not-migrate");
-        retired.close().await;
-    }
-
-    #[tokio::test]
-    async fn valid_v3_database_without_receipt_is_not_retired_before_probe() {
-        let data = tempfile::tempdir().unwrap();
-        let path = data.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        database.close().await;
-        let generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(data.path().join("storage-generation"), &generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_bootstrap_binding(
-            data.path(),
-            data.path(),
-            &generation,
-        )
-        .unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&test_config(data.path(), data.path()))
-                .await
-                .unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        assert!(path.is_file());
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
-        );
-    }
-
-    #[tokio::test]
-    async fn valid_v3_database_without_any_lifecycle_binding_fails_closed() {
-        let data = tempfile::tempdir().unwrap();
-        let path = data.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        database.close().await;
-        let generation_path = data.path().join("storage-generation");
-        if generation_path.exists() {
-            std::fs::remove_file(&generation_path).unwrap();
+        match probe_existing_v3_database(&path).await.unwrap() {
+            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+                assert!(reason.contains("schema contract"), "{reason}");
+            }
+            other => panic!("damaged schema must fail closed: {other:?}"),
         }
-
-        let error = prepare_v3_data_layer(&test_config(data.path(), data.path()))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("neither a matching finalized receipt"));
-        assert!(path.is_file());
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
-        );
-    }
-
-    #[tokio::test]
-    async fn work_root_change_plan_resumes_after_request_clear_crash_gap() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let old_work = tempfile::tempdir().unwrap();
-        let new_work = tempfile::tempdir().unwrap();
-        let config = test_config(data.path(), new_work.path());
-        let database =
-            nomifun_db::init_database(&config.database_path()).await.unwrap();
-        database.close().await;
-        let old_generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(
-            data.path().join("storage-generation"),
-            &old_generation,
-        )
-        .unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt_for_work_dir(
-            data.path(),
-            old_work.path(),
-            &old_generation,
-        )
-        .unwrap();
-        std::fs::create_dir_all(old_work.path().join("conversations"))
-            .unwrap();
-        let old_sentinel =
-            old_work.path().join("conversations/current-before-change");
-        std::fs::write(&old_sentinel, b"old-current").unwrap();
-
-        nomifun_common::factory_reset::request_v3_dataset_reset_for_work_dir(
-            data.path(),
-            new_work.path(),
-        )
-        .unwrap();
-        let plan =
-            nomifun_common::factory_reset::arm_v3_dataset_reset(
-                data.path(),
-                new_work.path(),
-                nomifun_common::factory_reset::DatasetResetReason::WorkDirChange,
-            )
-            .unwrap();
-        assert!(
-            !data
-                .path()
-                .join(
-                    nomifun_common::factory_reset::V3_DATASET_RESET_REQUEST_FILE,
-                )
-                .exists(),
-            "the immutable plan must have consumed the transient request"
-        );
-        assert!(
-            config.database_path().is_file(),
-            "simulate a crash before the plan applies the old data roots"
-        );
-
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        let resumed =
-            nomifun_common::factory_reset::read_pending_v3_reset(
-                data.path(),
-                new_work.path(),
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(resumed.operation_id, plan.operation_id);
-        assert_eq!(resumed.generation, plan.generation);
-        assert!(!config.database_path().exists());
-        assert!(
-            old_sentinel.is_file(),
-            "the detached old work root is preserved rather than migrated"
-        );
-        assert!(!new_work.path().join("conversations").exists());
-    }
-
-    #[tokio::test]
-    async fn finalized_database_rejects_a_different_resolved_work_root() {
-        let _env = env_guard().await;
-        let data = tempfile::tempdir().unwrap();
-        let first_work = tempfile::tempdir().unwrap();
-        let second_work = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(second_work.path().join("conversations")).unwrap();
-        std::fs::write(
-            second_work.path().join("conversations/legacy.txt"),
-            b"must-not-be-accepted",
-        )
-        .unwrap();
-
-        let path = data.path().join("nomifun-backend.db");
-        let database = nomifun_db::init_database(&path).await.unwrap();
-        database.close().await;
-        let generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(data.path().join("storage-generation"), &generation).unwrap();
-        nomifun_common::factory_reset::write_v3_dataset_receipt_for_work_dir(
-            data.path(),
-            first_work.path(),
-            &generation,
-        )
-        .unwrap();
-
-        let error = prepare_v3_data_layer(&test_config(data.path(), second_work.path()))
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("bound to a different resolved work root")
-        );
-        assert!(path.is_file());
-        assert!(
-            second_work
-                .path()
-                .join("conversations/legacy.txt")
-                .is_file()
-        );
-        assert!(
-            !data
-                .path()
-                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
-                .exists()
-        );
-    }
-
-    #[test]
-    fn external_work_root_lock_blocks_a_second_dataset_until_drop() {
-        let work = tempfile::tempdir().unwrap();
-
-        let first = acquire_work_root_lock(work.path()).unwrap();
-        let error = acquire_work_root_lock(work.path())
-            .expect_err("second dataset must not share a live external work root");
-        assert!(error.to_string().contains("already in use"));
-
-        drop(first);
-        acquire_work_root_lock(work.path()).unwrap();
-    }
-
-    #[test]
-    fn data_dir_as_work_root_also_gets_a_work_root_lock() {
-        let data = tempfile::tempdir().unwrap();
-        let first = acquire_work_root_lock(data.path()).unwrap();
-        let error = acquire_work_root_lock(data.path())
-            .expect_err("a second dataset must not reuse the same resolved work root");
-        assert!(error.to_string().contains("already in use"));
-        drop(first);
-    }
-
-    #[test]
-    fn missing_work_root_is_not_recreated_by_lock_acquisition() {
-        let parent = tempfile::tempdir().unwrap();
-        let missing = parent.path().join("deleted-external-work-root");
-
-        let error = acquire_work_root_lock(&missing)
-            .expect_err("a missing bound work root must fail closed");
-
-        assert!(error.to_string().contains("inspect work dir"));
-        assert!(
-            !missing.exists(),
-            "locking must never silently recreate a deleted work root"
-        );
-    }
-
-    #[test]
-    fn data_root_lock_blocks_cross_dataset_work_root_alias() {
-        let first_data = tempfile::tempdir().unwrap();
-        let second_data = tempfile::tempdir().unwrap();
-        let second_external_work = tempfile::tempdir().unwrap();
-
-        let first_data_lock =
-            acquire_work_root_lock(first_data.path()).unwrap();
-        let _first_external_lock = acquire_distinct_work_root_lock(
-            &first_data_lock,
-            second_data.path(),
-        )
-        .unwrap()
-        .expect("the second data directory is distinct");
-
-        let error = acquire_work_root_lock(second_data.path()).expect_err(
-            "a directory used as dataset one work root cannot concurrently become dataset two data root",
-        );
-
-        assert!(error.to_string().contains("already in use"));
-        assert!(
-            acquire_work_root_lock(second_external_work.path()).is_ok(),
-            "the conflict is scoped to the aliased root"
-        );
     }
 }

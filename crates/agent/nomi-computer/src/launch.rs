@@ -33,19 +33,27 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_absolute_launch_path(value: &str, label: &str) -> Result<(), String> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute() && !path.exists() {
+        return Err(format!("{label} path {value:?} does not exist"));
+    }
+    Ok(())
+}
+
 /// Fail closed on Agent-initiated web-page opens through the operating-system
 /// browser. Every caller of [`launch`] is an Agent surface (the in-process
 /// Computer tool, the computer/open MCP servers, and Gateway capabilities), so
-/// an `http`/`https` target here would bypass the managed Browser Hub's
-/// approval, egress and lifecycle policies and could open a visible window the
+/// an `http`/`https` target here would bypass the explicitly selected Browser
+/// capability and its run ownership and could open a visible window the
 /// user never asked for. Classification is an anchored scheme parse rather
 /// than a substring scan: a local file whose NAME merely contains `http:`
 /// (legal on POSIX, e.g. a saved "Re: http://…" attachment) is not a web
 /// navigation, while scheme-only forms such as `https:example.com` (browsers
 /// normalize them back to a real navigation) and wrapper protocols such as
 /// `microsoft-edge:https://…` still fail closed — the leading scheme of every
-/// nesting level is classified. Trusted user surfaces (the Browser management
-/// page's foreground action and UI-clicked links) do not route through this
+/// nesting level is classified. Trusted user surfaces and UI-clicked links do
+/// not route through this
 /// function.
 pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
     // Wrapper protocols nest at most a handful of levels; bound the unwrap so
@@ -59,9 +67,8 @@ pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
         if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
             return Err(format!(
                 "opening web URLs through the operating-system browser is not available to \
-                 Agent tools ({target:?}). Use the managed Browser tool (browser navigate) to \
-                 read or interact with web pages; the user can foreground a running Primary \
-                 browser lane from the Browser management page when a visible window is needed."
+                 Agent tools ({target:?}). Use the bound Browser Module actions to read or \
+                 interact with web pages."
             ));
         }
         // Descend into the wrapped target (`microsoft-edge:https://…`),
@@ -166,9 +173,11 @@ fn is_url(target: &str) -> bool {
 /// specific `app`. Detached. Returns a human-readable success message.
 pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
     validate_launch_target(target)?;
+    validate_absolute_launch_path(target, "launch target")?;
     validate_agent_web_target(target)?;
     if let Some(app) = app {
         validate_agent_launch_app(app)?;
+        validate_absolute_launch_path(app, "launch application")?;
     }
     let target = target.to_string();
     let app = app.map(|s| s.to_string());
@@ -432,6 +441,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_absolute_target_and_application_paths_fail_before_os_launch() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing = std::env::temp_dir()
+            .join(format!("nomifun-computer-launch-missing-{}-{nonce}", std::process::id()))
+            .join("NomiDefinitelyMissing.app");
+        let missing = missing.to_string_lossy();
+        assert!(!std::path::Path::new(missing.as_ref()).exists());
+        let target_error = validate_absolute_launch_path(&missing, "launch target").unwrap_err();
+        assert!(target_error.contains("does not exist"), "{target_error}");
+        let app_error =
+            validate_absolute_launch_path(&missing, "launch application").unwrap_err();
+        assert!(app_error.contains("does not exist"), "{app_error}");
+        assert!(validate_absolute_launch_path("TextEdit", "launch application").is_ok());
+    }
+
+    #[test]
     fn agent_web_targets_fail_closed_toward_the_managed_browser() {
         assert!(validate_agent_web_target("https://www.example.com").is_err());
         assert!(validate_agent_web_target("http://example.com").is_err());
@@ -445,7 +473,10 @@ mod tests {
         assert!(validate_agent_web_target("microsoft-edge:https://example.com").is_err());
         assert!(validate_agent_web_target("microsoft-edge:https:example.com").is_err());
         let error = validate_agent_web_target("https://example.com").unwrap_err();
-        assert!(error.contains("browser navigate"), "must steer to the managed Browser: {error}");
+        assert!(
+            error.contains("bound Browser Module actions"),
+            "must steer to the authorized Browser Module: {error}"
+        );
         // Apps, files, folders and non-web protocols remain launchable.
         assert!(validate_agent_web_target("C:\\Windows\\notepad.exe").is_ok());
         assert!(validate_agent_web_target("QQ音乐").is_ok());

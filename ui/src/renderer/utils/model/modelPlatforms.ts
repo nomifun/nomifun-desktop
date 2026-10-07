@@ -13,13 +13,15 @@ const buildLogoAssetUrl = (path: string): string =>
  * Stable runtime provider family. The preset `value` is intentionally separate:
  * several commercial plans share one runtime family but have different manifests.
  */
-export type PlatformType =
+type PlatformType =
   | 'gemini'
   | 'gemini-vertex-ai'
   | 'anthropic'
+  | 'agnes'
   | 'openai'
   | 'custom'
   | 'new-api'
+  | 'nomifun-model-gateway'
   | 'bedrock'
   | 'deepseek'
   | 'deepgram'
@@ -69,6 +71,7 @@ export interface PlatformConfig {
 
 export const MODEL_PLATFORMS: PlatformConfig[] = [
   { name: 'Custom', value: 'custom', logo: null, platform: 'custom', i18nKey: 'settings.platformCustom' },
+  { name: 'NomiFun Model Gateway', value: 'nomifun-model-gateway', logo: null, platform: 'nomifun-model-gateway', i18nKey: 'settings.modelGateway.title' },
   {
     name: 'New API',
     value: 'new-api',
@@ -77,6 +80,7 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     i18nKey: 'settings.platformNewApi',
   },
   { name: 'Gemini', value: 'gemini', logo: buildLogoAssetUrl('ai-major/gemini.svg'), platform: 'gemini' },
+  { name: 'Agnes', value: 'Agnes', logo: null, platform: 'agnes' },
   { name: 'OpenAI', value: 'OpenAI', logo: buildLogoAssetUrl('ai-major/openai.svg'), platform: 'openai' },
   {
     name: 'Anthropic',
@@ -272,9 +276,4 @@ export const getProviderLogo = ({
   return MODEL_PLATFORMS.find((item) => item.name.toLowerCase() === normalizedName && item.logo)?.logo ?? null;
 };
 
-export const isGeminiPlatform = (platform: PlatformType): boolean =>
-  platform === 'gemini' || platform === 'gemini-vertex-ai';
-
 export const isCustomOption = (value: string): boolean => value === 'custom';
-
-export { isNewApiPlatform } from '@/common/utils/platformConstants';

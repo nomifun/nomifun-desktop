@@ -150,9 +150,11 @@ describe('expand-all is one level per root, not a recursive crawl', () => {
 });
 
 describe('mount detection', () => {
-  test('requires the binding master switch as well as a non-empty kb_ids', () => {
-    // Matches useWorkpathKnowledge's `enabled && kb_ids.length` so the rail icon
-    // and the session-list capability dot agree.
+  test('uses the live AgentSession Knowledge command for conversations', () => {
+    expect(mounts.includes("target.kind === 'conversation'")).toBe(true);
+    expect(mounts.includes('sessions.getKnowledge')).toBe(true);
+    expect(mounts.includes('sessions.onKnowledgeChanged')).toBe(true);
+    expect(mounts.includes('frozenIds')).toBe(false);
     expect(mounts.includes('binding?.enabled ? binding.kb_ids : []')).toBe(true);
   });
 
@@ -164,6 +166,7 @@ describe('mount detection', () => {
 
   test('refreshes from the knowledge WS events instead of polling', () => {
     expect(mounts.includes('onBindingChanged')).toBe(true);
+    expect(mounts.includes('onKnowledgeChanged')).toBe(true);
     expect(mounts.includes('onBaseCreated')).toBe(true);
     expect(mounts.includes('onBaseUpdated')).toBe(true);
     expect(mounts.includes('onBaseDeleted')).toBe(true);

@@ -11,7 +11,6 @@ import { ipcBridge } from '@/common';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import MarkdownView from '@/renderer/components/Markdown';
 import type {
-  UpdateDownloadProgressEvent,
   UpdateReleaseInfo,
   AutoUpdateInstallPhase,
   AutoUpdateStatus,
@@ -29,7 +28,6 @@ type UpdateStatus =
   | 'downloading'
   | 'downloaded'
   | 'installing'
-  | 'success'
   | 'error';
 
 type UpdateInfo = UpdateReleaseInfo;
@@ -54,13 +52,11 @@ const UpdateModal: React.FC = () => {
   const [status, setStatus] = useState<UpdateStatus>('checking');
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string>('');
-  const [downloadId, setDownloadId] = useState<string | null>(null);
   const [progress, setProgress] = useState({ percent: 0, speed: '', total: 0, transferred: 0 });
   const [installPhase, setInstallPhase] = useState<AutoUpdateInstallPhase>('preparing');
   const [errorMsg, setErrorMsg] = useState('');
-  const [downloadPath, setDownloadPath] = useState('');
   const [releasePageUrl, setReleasePageUrl] = useState('');
-  // Whether electron-updater auto-update is available (determined automatically, not user-controllable)
+  // Whether the native updater has an installable release.
   const [autoUpdateAvailable, setAutoUpdateAvailable] = useState(false);
   const [autoUpdateInfo, setAutoUpdateInfo] = useState<{ version: string; releaseNotes?: string } | null>(null);
   const installRequestedRef = useRef(false);
@@ -77,21 +73,18 @@ const UpdateModal: React.FC = () => {
     setStatus('checking');
     setUpdateInfo(null);
     setCurrentVersion('');
-    setDownloadId(null);
     setProgress({ percent: 0, speed: '', total: 0, transferred: 0 });
     setInstallPhase('preparing');
     installRequestedRef.current = false;
     downloadRequestedRef.current = false;
     downloadVersionRef.current = null;
     setErrorMsg('');
-    setDownloadPath('');
     setReleasePageUrl('');
     setAutoUpdateAvailable(false);
     setAutoUpdateInfo(null);
   };
 
   const includePrerelease = useMemo(() => localStorage.getItem('update.includePrerelease') === 'true', [visible]);
-  const hasCompatibleManualAsset = Boolean(updateInfo?.recommendedAsset);
 
   const openReleasePage = () => {
     const target = releasePageUrl || GITHUB_RELEASES_PAGE;
@@ -131,7 +124,7 @@ const UpdateModal: React.FC = () => {
     setPresentation('compact');
     setStatus('checking');
     try {
-      // Try auto-update (electron-updater) first
+      // Ask the native updater for the release and retained package state.
       let autoUpdateOk = false;
       let retainedVersion: string | null = null;
       let packageState: import('@/common/adapter/tauriShell').TauriUpdatePackageState | null = null;
@@ -197,9 +190,7 @@ const UpdateModal: React.FC = () => {
         reportUpdateAvailable(res.data.latest.version);
         setUpdateInfo(res.data.latest);
         setReleasePageUrl(res.data.latest.htmlUrl || '');
-        if (!res.data.latest.recommendedAsset) {
-          setErrorMsg(t('update.noCompatibleAssetManual'));
-        }
+        setErrorMsg(t('update.noCompatibleAssetManual'));
         setStatus('available');
         return;
       }
@@ -231,26 +222,6 @@ const UpdateModal: React.FC = () => {
     setStatus('downloading');
     setProgress({ percent: 0, speed: '', total: 0, transferred: 0 });
     try {
-      // Prefer the manual path so the URL is the CDN-rewritten asset.url.
-      // Fall back to electron-updater (GitHub) only when the GitHub API manual check failed
-      // but the yml-based auto-update check succeeded — a rare edge case.
-      // 优先走手动路径（URL 是重写后的 CDN 地址）。仅当 GitHub API 失败但 electron-updater 检查成功时，
-      // 回退到 electron-updater 的下载（走 GitHub），保证用户能升级。
-      if (updateInfo?.recommendedAsset) {
-        const asset = updateInfo.recommendedAsset;
-        const res = await ipcBridge.update.download.invoke({
-          url: asset.url,
-          fallbackUrl: asset.fallbackUrl,
-          file_name: asset.name,
-        });
-        if (!res?.success || !res.data) {
-          throw new Error(res?.msg || t('update.downloadStartFailed'));
-        }
-        setDownloadId(res.data.downloadId);
-        setDownloadPath(res.data.file_path);
-        return;
-      }
-
       if (autoUpdateAvailable) {
         const res = await ipcBridge.autoUpdate.download.invoke();
         if (!res?.success) {
@@ -412,36 +383,6 @@ const UpdateModal: React.FC = () => {
     };
   }, [t]);
 
-  useEffect(() => {
-    const removeProgressListener = ipcBridge.update.downloadProgress.on((evt: UpdateDownloadProgressEvent) => {
-      if (!evt) return;
-      if (!downloadId || evt.downloadId !== downloadId) return;
-
-      setProgress({
-        percent: Math.round(evt.percent ?? 0),
-        speed: formatSpeed(evt.bytesPerSecond ?? 0),
-        total: evt.totalBytes ?? 0,
-        transferred: evt.receivedBytes ?? 0,
-      });
-
-      if (evt.status === 'completed') {
-        downloadRequestedRef.current = false;
-        setStatus('success');
-        if (evt.file_path) {
-          setDownloadPath(evt.file_path);
-        }
-      } else if (evt.status === 'error' || evt.status === 'cancelled') {
-        downloadRequestedRef.current = false;
-        setStatus('error');
-        setErrorMsg(evt.error || t('update.downloadFailed'));
-      }
-    });
-
-    return () => {
-      removeProgressListener();
-    };
-  }, [downloadId, t]);
-
   const handleClose = () => {
     if (installRequestedRef.current) return;
     setVisible(false);
@@ -451,20 +392,6 @@ const UpdateModal: React.FC = () => {
     if (status === 'available' || status === 'error') {
       setPresentation('detail');
     }
-  };
-
-  const openFile = () => {
-    if (!downloadPath) return;
-    void ipcBridge.shell.openFile.invoke(downloadPath).catch((error) => {
-      console.error('Failed to open file:', error);
-    });
-  };
-
-  const showInFolder = () => {
-    if (!downloadPath) return;
-    void ipcBridge.shell.showItemInFolder.invoke(downloadPath).catch((error) => {
-      console.error('Failed to show item in folder:', error);
-    });
   };
 
   const renderDisclaimer = (className = '') => (
@@ -632,25 +559,6 @@ const UpdateModal: React.FC = () => {
           </div>
         )}
 
-        {status === 'success' && (
-          <>
-            <div className='update-compact-card__status' aria-live='polite'>
-              <span className='update-compact-card__status-icon update-compact-card__status-icon--success'>
-                <CheckOne theme='filled' size='15' />
-              </span>
-              <div className='update-compact-card__status-label'>{t('update.downloadCompleteTitle')}</div>
-            </div>
-            <div className='update-compact-card__actions'>
-              <Button size='mini' onClick={showInFolder} className='update-compact-card__action'>
-                {t('update.showInFolder')}
-              </Button>
-              <Button type='primary' size='mini' onClick={openFile} className='update-compact-card__action'>
-                {t('update.openFile')}
-              </Button>
-            </div>
-          </>
-        )}
-
         {status === 'error' && (
           <>
             <div className='update-compact-card__error-message' aria-live='polite'>
@@ -693,14 +601,12 @@ const UpdateModal: React.FC = () => {
                 </div>
                 <div className='update-modal__meta-row'>
                   <span className='update-modal__meta-label'>{t('update.sizeLabel')}</span>
-                  <span>
-                    {updateInfo?.recommendedAsset?.size ? formatSize(updateInfo.recommendedAsset.size) : '-'}
-                  </span>
+                  <span>-</span>
                 </div>
                 <div className='update-modal__details-label'>{t('update.detailsLabel')}</div>
               </div>
 
-              {!hasCompatibleManualAsset && !autoUpdateAvailable && (
+              {!autoUpdateAvailable && (
                 <div className='update-modal__compatibility-warning'>
                   {t('update.noCompatibleAssetManual')}
                 </div>
@@ -748,13 +654,9 @@ const UpdateModal: React.FC = () => {
             </div>
             {disclaimer}
             <div className='update-modal__actions'>
-              {!hasCompatibleManualAsset && !autoUpdateAvailable && releasePageUrl ? (
+              {!autoUpdateAvailable && releasePageUrl ? (
                 <Button type='primary' size='small' onClick={openReleasePage} className='update-modal__action'>
                   {t('update.goToRelease')}
-                </Button>
-              ) : autoUpdateAvailable ? (
-                <Button type='primary' size='small' onClick={startDownload} className='update-modal__action'>
-                  {t('update.downloadButton')}
                 </Button>
               ) : (
                 <Button type='primary' size='small' onClick={startDownload} className='update-modal__action'>

@@ -61,6 +61,9 @@ impl ProviderConnectionService {
         req: SaveProviderConnectionRequest,
     ) -> Result<ProviderConnectionResponse, AppError> {
         let provider = self.require_provider(provider_id).await?;
+        if provider.platform == crate::model_gateway::PLATFORM {
+            return Err(AppError::BadRequest("Gateway connections are managed atomically through model-gateway/connection".into()));
+        }
         validate_connection_metadata(&req.role, &req.base_url)?;
         let auth_scheme = normalize_auth_scheme(&req.auth_scheme)?;
         let parsed_scheme = parse_auth_scheme(&auth_scheme)?;
@@ -124,7 +127,10 @@ impl ProviderConnectionService {
     }
 
     pub async fn delete(&self, provider_id: &str, role: &str) -> Result<bool, AppError> {
-        self.require_provider(provider_id).await?;
+        let provider = self.require_provider(provider_id).await?;
+        if provider.platform == crate::model_gateway::PLATFORM {
+            return Err(AppError::BadRequest("Gateway connections are managed atomically through model-gateway/connection".into()));
+        }
         validate_role(role)?;
         Ok(self.repo.delete(provider_id, role).await?)
     }
@@ -169,6 +175,7 @@ impl ProviderConnectionService {
                 provider_params: response.provider_params,
                 context_limit: response.context_limit,
                 output_limit: response.output_limit,
+                compaction_threshold_pct: response.compaction_threshold_pct,
             };
             validate_capability_auth_scheme(&capability, auth_scheme)?;
             validate_capability_urls(&capability, base_url)?;

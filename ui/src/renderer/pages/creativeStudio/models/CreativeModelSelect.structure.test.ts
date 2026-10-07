@@ -24,15 +24,7 @@ await testI18n.use(initReactI18next).init({
   fallbackLng: 'zh-CN',
   resources: {
     'zh-CN': {
-      translation: {
-        settings: {
-          modelHub: {
-            free: {
-              title: 'NomiFun Free Model',
-            },
-          },
-        },
-      },
+      translation: {},
     },
   },
 });
@@ -69,6 +61,12 @@ describe('CreativeModelSelect integration boundary', () => {
     }
     expect(component.includes('<NomiSelect.Option value={optionKey(value)} disabled>')).toBe(true);
     expect(component.includes("role={status === 'error' ? 'alert' : 'status'}")).toBe(true);
+  });
+
+  test('keeps provider transport mechanics out of the product selector', () => {
+    expect(component.includes('option.rawModelId')).toBe(false);
+    expect(component.includes('option.protocol')).toBe(false);
+    expect(component.includes('selected.protocol')).toBe(false);
   });
 
   test('puts an empty-catalog explanation in both the field and status region', () => {

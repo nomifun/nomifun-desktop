@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
@@ -13,10 +13,17 @@ import common from '../../../../services/i18n/locales/zh-CN/common.json';
 import zh from '../../../../services/i18n/locales/zh-CN/creativeStudio.json';
 import type { CreativeAsset } from '../../assets';
 import type { CreativeCanvasNode } from '../../domain';
+import type { CreativeModelCatalogSnapshot } from '../../models';
 import CreativeCanvasImageToolbar from './CreativeCanvasImageToolbar';
+import CreativeImageCropDialog from './CreativeImageCropDialog';
+import CreativeImageMaskEditDialog from './CreativeImageMaskEditDialog';
 import CreativeImagePreviewDialog from './CreativeImagePreviewDialog';
+import CreativeImageSplitDialog from './CreativeImageSplitDialog';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  document.getElementById('resource-page-portal-root')?.remove();
+});
 const i18n = createInstance();
 await i18n.init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creativeStudio: zh, common } } } });
 
@@ -30,6 +37,11 @@ const asset: CreativeAsset = {
   mimeType: 'image/png', width: 1920, height: 1080, bytes: 1, inLibrary: true,
   textContent: null, origin: null, originalUrl: '/original.png', thumbnailUrl: '/thumbnail.png',
   createdAt: 1, updatedAt: 1,
+};
+const emptyCatalog: CreativeModelCatalogSnapshot = {
+  status: 'ready',
+  providers: [],
+  error: null,
 };
 
 const Harness = ({ resolveAsset, onCanvasInput = () => {} }: {
@@ -49,41 +61,89 @@ const Harness = ({ resolveAsset, onCanvasInput = () => {} }: {
         ><article>image node</article></CreativeCanvasImageToolbar>
       </div>
       {visible ? <CreativeImagePreviewDialog node={node} resolveAsset={resolveAsset} onClose={() => setVisible(false)} /> : null}
-      <div id='creative-studio-portal-root' />
+      <div id='resource-page-portal-root' />
       </section>
     </I18nextProvider>
   );
 };
 
 describe('canvas image preview', () => {
+  test.each([
+    ['preview', () => (
+      <CreativeImagePreviewDialog
+        node={node}
+        resolveAsset={() => new Promise<CreativeAsset>(() => {})}
+        onClose={() => {}}
+      />
+    )],
+    ['crop', () => (
+      <CreativeImageCropDialog visible asset={asset} onClose={() => {}} onConfirm={() => {}} />
+    )],
+    ['mask edit', () => (
+      <CreativeImageMaskEditDialog
+        visible
+        asset={asset}
+        catalog={emptyCatalog}
+        model={null}
+        onModelChange={() => {}}
+        onClose={() => {}}
+        onConfirm={() => {}}
+      />
+    )],
+    ['split', () => (
+      <CreativeImageSplitDialog visible asset={asset} onClose={() => {}} onConfirm={() => {}} />
+    )],
+  ] as const)('mounts the %s modal above viewport-portaled canvas controls', (_name, dialog) => {
+    const resourcePortal = document.createElement('div');
+    resourcePortal.id = 'resource-page-portal-root';
+    document.body.append(resourcePortal);
+
+    const view = render(<I18nextProvider i18n={i18n}>{dialog()}</I18nextProvider>);
+    const modal = view.getByRole('dialog');
+    const wrapper = modal.closest<HTMLElement>('.arco-modal-wrapper');
+    const mask = wrapper?.parentElement?.querySelector<HTMLElement>('.arco-modal-mask');
+
+    expect(wrapper?.style.zIndex).toBe('1700');
+    expect(mask?.style.zIndex).toBe('1700');
+    expect(resourcePortal.contains(wrapper)).toBe(false);
+    expect(document.body.contains(wrapper)).toBe(true);
+  });
+
   test('opens the original image, zooms independently and restores focus after closing', async () => {
     let canvasInputs = 0;
     const view = render(<Harness resolveAsset={async () => asset} onCanvasInput={() => { canvasInputs += 1; }} />);
     const previewButton = view.getByRole('button', { name: '预览图片' });
     previewButton.focus();
     fireEvent.click(previewButton);
-    const image = await view.findByRole('img', { name: '猫咪原图' });
+    const image = await view.findByAltText('猫咪原图');
     const dialog = view.getByRole('dialog');
     expect(view.getByTestId('canvas-content').contains(dialog)).toBe(false);
     expect(dialog.querySelector('.arco-modal-footer')).toBeNull();
-    expect(dialog.querySelectorAll('[role="button"], button').length).toBe(1);
+    expect(view.getByRole('group', { name: '图片缩放' })).not.toBeNull();
+    expect(within(dialog).getByRole('button', { name: '图片另存为' })).not.toBeNull();
     expect(image.getAttribute('src')).toBe('/original.png');
+    Object.defineProperties(image, { naturalWidth: { value: 1920 }, naturalHeight: { value: 1080 } });
     fireEvent.load(image);
-    const container = image.parentElement!;
-    expect(container.style.transform).toBe('scale(1, 1)');
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'ArrowUp' });
-    expect(container.style.transform).toBe('scale(1.1, 1.1)');
-    fireEvent.wheel(image, { deltaY: 100 });
-    expect(container.style.transform).toBe('scale(1, 1)');
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'Delete' });
+    const fitButton = view.getByRole('button', { name: '适应窗口' });
+    const fitted = fitButton.textContent;
+    const zoomInButton = view.getByRole('button', { name: '放大图片' });
+    fireEvent.click(zoomInButton);
+    fireEvent.click(zoomInButton);
+    expect(fitButton.textContent).not.toBe(fitted);
+    fireEvent.click(fitButton);
+    expect(fitButton.textContent).toBe(fitted);
+    const closeButton = view.getByRole('button', { name: '关闭图片预览' });
+    fireEvent.keyDown(closeButton, { key: 'Delete' });
     expect(canvasInputs).toBe(0);
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'Escape' });
+    fireEvent.keyDown(closeButton, { key: 'Escape' });
     await waitFor(() => expect(view.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(previewButton));
     fireEvent.click(previewButton);
-    const reopened = await view.findByRole('img', { name: '猫咪原图' });
-    expect(reopened.parentElement!.style.transform).toBe('scale(1, 1)');
-    fireEvent.click(view.getByRole('button', { name: 'Close' }));
+    const reopened = await view.findByAltText('猫咪原图');
+    Object.defineProperties(reopened, { naturalWidth: { value: 1920 }, naturalHeight: { value: 1080 } });
+    fireEvent.load(reopened);
+    expect(view.getByRole('button', { name: '适应窗口' }).textContent).toBe(fitted);
+    fireEvent.click(view.getByRole('button', { name: '关闭图片预览' }));
     expect(view.queryByRole('dialog')).toBeNull();
   });
 
@@ -92,11 +152,11 @@ describe('canvas image preview', () => {
     const pending = new Promise<CreativeAsset>((resolve) => { finish = resolve; });
     const view = render(<Harness resolveAsset={() => pending} />);
     fireEvent.click(view.getByRole('button', { name: '预览图片' }));
-    expect(view.getByRole('status').textContent?.includes(common.loading)).toBe(true);
-    fireEvent.click(view.getByRole('button', { name: 'Close' }));
+    expect(view.getByRole('status').textContent?.includes(common.imagePreview.loading)).toBe(true);
+    fireEvent.click(view.getByRole('button', { name: '关闭图片预览' }));
     await act(async () => { finish(asset); await pending; });
     expect(view.queryByRole('dialog')).toBeNull();
-    expect(view.queryByRole('img', { name: '猫咪原图' })).toBeNull();
+    expect(view.queryByAltText('猫咪原图')).toBeNull();
   });
 
   test('recovers from asset lookup and original image loading failures', async () => {
@@ -109,10 +169,10 @@ describe('canvas image preview', () => {
     fireEvent.click(view.getByRole('button', { name: '预览图片' }));
     expect((await view.findByRole('alert')).textContent?.includes('图片加载失败')).toBe(true);
     fireEvent.click(view.getByRole('button', { name: '重试' }));
-    fireEvent.error(await view.findByRole('img', { name: '猫咪原图' }));
+    fireEvent.error(await view.findByAltText('猫咪原图'));
     expect(view.getByRole('alert').textContent?.includes('图片加载失败')).toBe(true);
     fireEvent.click(view.getByRole('button', { name: '重试' }));
-    fireEvent.load(await view.findByRole('img', { name: '猫咪原图' }));
+    fireEvent.load(await view.findByAltText('猫咪原图'));
     expect(view.queryByRole('alert')).toBeNull();
     expect(attempts).toBe(3);
   });

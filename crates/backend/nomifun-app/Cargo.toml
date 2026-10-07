@@ -13,10 +13,6 @@ path = "src/main.rs"
 # shared filesystem state. The content suite includes a coverage guard so a new
 # top-level test file cannot be silently omitted while autotests is disabled.
 [[test]]
-name = "delivery_notify_integration"
-path = "tests/delivery_notify_integration.rs"
-
-[[test]]
 name = "webui_lan_smoke"
 path = "tests/webui_lan_smoke.rs"
 
@@ -37,8 +33,8 @@ name = "websocket_e2e"
 path = "tests/websocket_e2e.rs"
 
 [[test]]
-name = "gateway_e2e"
-path = "tests/gateway_e2e.rs"
+name = "nomi_core_realtime_stream"
+path = "tests/nomi_core_realtime_stream.rs"
 
 [[test]]
 name = "channel_e2e"
@@ -49,20 +45,13 @@ name = "requirements_e2e"
 path = "tests/requirements_e2e.rs"
 
 [[test]]
-name = "agent_execution_e2e"
-path = "tests/agent_execution_e2e.rs"
-
-[[test]]
-name = "autowork_idmm_cooperation_e2e"
-path = "tests/autowork_idmm_cooperation_e2e.rs"
-
-[[test]]
-name = "agent_integration_e2e"
-path = "tests/agent_integration_e2e.rs"
-
-[[test]]
 name = "agent_provider_health_e2e"
 path = "tests/agent_provider_health_e2e.rs"
+
+[[test]]
+name = "official_preset_catalog_integrity"
+path = "tests/official_preset_catalog_integrity.rs"
+required-features = ["browser-use", "computer-use"]
 
 [[test]]
 name = "connection_test_e2e"
@@ -73,40 +62,24 @@ name = "model_failover_e2e"
 path = "tests/model_failover_e2e.rs"
 
 [[test]]
+name = "idmm_e2e"
+path = "tests/idmm_e2e.rs"
+
+[[test]]
 name = "ssh_host_e2e"
 path = "tests/ssh_host_e2e.rs"
 
 [[test]]
-name = "miniapp_e2e"
-path = "tests/miniapp_e2e.rs"
+name = "plugin_e2e"
+path = "tests/plugin_e2e.rs"
 
 [[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
 
 [[test]]
-name = "companion_e2e"
-path = "tests/companion_e2e.rs"
-
-[[test]]
-name = "conversation_e2e"
-path = "tests/conversation_e2e.rs"
-
-[[test]]
 name = "cron_e2e"
 path = "tests/cron_e2e.rs"
-
-[[test]]
-name = "idmm_e2e"
-path = "tests/idmm_e2e.rs"
-
-[[test]]
-name = "idmm_intervention_e2e"
-path = "tests/idmm_intervention_e2e.rs"
-
-[[test]]
-name = "message_e2e"
-path = "tests/message_e2e.rs"
 
 [[test]]
 name = "auth_e2e"
@@ -129,6 +102,10 @@ name = "startup_smoke"
 path = "tests/startup_smoke.rs"
 
 [[test]]
+name = "desktop_agent_shutdown"
+path = "tests/desktop_agent_shutdown.rs"
+
+[[test]]
 name = "system_auth_e2e"
 path = "tests/system_auth_e2e.rs"
 
@@ -145,20 +122,54 @@ name = "system_version_e2e"
 path = "tests/system_version_e2e.rs"
 
 [[test]]
-name = "work_dir_e2e"
-path = "tests/work_dir_e2e.rs"
-
-[[test]]
 name = "mcp_crud_e2e"
 path = "tests/mcp_crud_e2e.rs"
 
 [[test]]
-name = "remote_mcp_smoke"
-path = "tests/remote_mcp_smoke.rs"
-
-[[test]]
 name = "content_e2e_suite"
 path = "tests/suites/content.rs"
+
+[[test]]
+name = "nomi_core_route_gap"
+path = "tests/nomi_core_route_gap.rs"
+
+[[test]]
+name = "session_capability_selection_e2e"
+path = "tests/session_capability_selection_e2e.rs"
+
+[[test]]
+name = "conversation_task_plan"
+path = "tests/conversation_task_plan.rs"
+
+[[test]]
+name = "nomi_core_first_turn_configuration"
+path = "tests/nomi_core_first_turn_configuration.rs"
+
+[[test]]
+name = "nomi_core_live_provider_smoke"
+path = "tests/nomi_core_live_provider_smoke.rs"
+
+[[test]]
+name = "native_execution_recovery"
+path = "tests/native_execution_recovery.rs"
+
+[[test]]
+name = "native_coding_reliability"
+path = "tests/native_coding_reliability.rs"
+
+[[test]]
+name = "native_media_creation"
+path = "tests/native_media_creation.rs"
+
+[[test]]
+name = "live_agnes_preset_creation"
+path = "tests/live_agnes_preset_creation.rs"
+required-features = ["browser-use", "computer-use"]
+
+[[test]]
+name = "live_text_model_creation"
+path = "tests/live_text_model_creation.rs"
+required-features = ["browser-use", "computer-use"]
 
 [features]
 default = ["telegram", "lark", "dingtalk", "weixin", "wecom", "discord", "matrix", "mattermost", "slack", "twitch", "nostr", "qqbot"]
@@ -175,36 +186,41 @@ twitch = ["nomifun-channel/twitch"]
 nostr = ["nomifun-channel/nostr"]
 qqbot = ["nomifun-channel/qqbot"]
 # Desktop control tools (desktop host enables this; web/server hosts do not).
-# Also pulls the discrete-tool MCP bridge (`mcp-computer-stdio`) deps so codex/
-# ACP sessions get the same computer-use; web/headless builds omit them entirely.
+# The canonical AgentPlatform Computer Role owns the native screen/input
+# implementation; web/headless builds omit the native stack entirely.
 computer-use = [
     "nomifun-ai-agent/computer-use",
-    "nomifun-gateway/computer-use",
     "dep:nomi-computer",
-    "dep:nomi-config",
-    "dep:nomi-tools",
     "dep:nomi-types",
 ]
 # Browser-automation tools (desktop host enables this; web/server hosts do not).
-# The native Nomi executor and Platform Gateway share the process-wide
-# BrowserSessionHub; web/headless builds omit the self-hosted-CDP / Chromium
-# stack entirely.
-# P3-GW1: also forwards to `nomifun-gateway/browser-use` so the Platform Gateway
-# exposes the per-companion `nomi_browser_*` tools (route A). Web/headless builds
-# omit the feature → the gateway registers no browser tools.
+# Native Conversation Workspace plus the new isolated search/render engines.
+# No legacy Headless Hub or BrowserTool facade is linked by this feature.
 browser-use = [
     "nomifun-ai-agent/browser-use",
-    "nomifun-gateway/browser-use",
-    "nomifun-public/browser-use",
-    "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
-    "dep:nomi-process-runtime",
-    "dep:sysinfo",
 ]
+browser-conformance = ["browser-use", "computer-use", "nomi-browser-engine/conformance"]
 
 [dependencies]
 nomifun-common.workspace = true
+tempfile.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-control-plane.workspace = true
+nomifun-agent-domain-support.workspace = true
+nomifun-agent-domain-wave1.workspace = true
+nomifun-agent-domain-wave2.workspace = true
+nomifun-agent-domain-wave3.workspace = true
+nomifun-agent-domain-wave4.workspace = true
+nomifun-agent-domain-wave5.workspace = true
+nomifun-agent-kernel.workspace = true
+nomifun-js-runtime.workspace = true
+nomifun-plugin-platform.workspace = true
+nomifun-plugin-development.workspace = true
+walkdir.workspace = true
+nomifun-chat-model-broker.workspace = true
+nomifun-agent-session.workspace = true
 nomifun-assets.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
@@ -212,30 +228,36 @@ nomifun-realtime.workspace = true
 nomifun-auth.workspace = true
 nomifun-system.workspace = true
 nomifun-file.workspace = true
+nomi-redact.workspace = true
+notify.workspace = true
+dunce.workspace = true
 nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
+nomifun-voice.workspace = true
+nomifun-voice-core.workspace = true
+nomifun-voice-contracts.workspace = true
+nomifun-idmm.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-agent-runtime.workspace = true
+nomifun-engine-core.workspace = true
 nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true
-nomifun-extension.workspace = true
+nomifun-skill-library.workspace = true
 nomifun-channel.workspace = true
 nomifun-cron.workspace = true
 nomifun-requirement.workspace = true
-nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
 nomifun-customer-service.workspace = true
 nomifun-workshop.workspace = true
-nomifun-miniapp.workspace = true
 nomifun-creation.workspace = true
 nomifun-gateway.workspace = true
 nomifun-public.workspace = true
 nomifun-webhook.workspace = true
 nomifun-terminal.workspace = true
-nomifun-preset.workspace = true
 nomifun-robot.workspace = true
 nomifun-runtime.workspace = true
 nomifun-net.workspace = true
@@ -254,38 +276,49 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonschema.workspace = true
+zip.workspace = true
+zeroize.workspace = true
 base64.workspace = true
+hex.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 url.workspace = true
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+dashmap.workspace = true
+sqlx.workspace = true
+git2.workspace = true
 # Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).
 if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
 percent-encoding = "2"
 
-# Computer-use discrete-tool MCP bridge (`mcp-computer-stdio`) — facade over
-# ComputerTool. Optional; only the `computer-use` feature pulls the native
-# screen/input/UI-Automation stack, so web/headless builds stay lean.
+# Computer Role implementation. Optional; only the `computer-use` feature pulls
+# the native screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }
-# Browser facade used by the application-owned managed Host factory. Optional;
-# only the `browser-use` feature pulls the managed browser engine + Chromium,
-# so web/headless builds stay lean.
-nomi-browser = { workspace = true, optional = true }
-# Browser engine types used by the application-owned managed Host and identity
-# vault. Login routes allocate a Primary Hub Lane; they never launch a private
-# engine. Only the browser-use feature pulls this dependency.
+# Browser v2 native contracts and isolated page execution, without the old facade.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
-nomi-process-runtime = { workspace = true, optional = true }
-sysinfo = { workspace = true, optional = true }
-nomi-config = { workspace = true, optional = true }
-nomi-tools = { workspace = true, optional = true }
 nomi-types = { workspace = true, optional = true }
+
+# The in-process macOS desktop backend is the only authority that can report
+# whether the running NomiFun code identity may use the microphone.  Keep the
+# binding target-scoped so Linux/Windows and server-only builds do not link
+# AVFoundation.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -295,22 +328,34 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "1"
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+chromiumoxide.workspace = true
+nomi-process-runtime.workspace = true
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
 clap.workspace = true
 reqwest.workspace = true
-sqlx.workspace = true
 # Enable the `AgentRuntimeHandle::Mock` variant so tests can build fake Agents
 # through the trait-object escape hatch without spawning real CLI processes.
 nomifun-ai-agent = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
-git2.workspace = true
 http-body-util.workspace = true
-tempfile = "3"
+sysinfo.workspace = true
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true
 wiremock = "0.6"
 toml.workspace = true
+
+[[example]]
+name = "browser_gui_fixture"
+path = "examples/browser_gui_fixture.rs"
+required-features = ["browser-use"]
+
+[[test]]
+name = "browser_workspace"
+path = "tests/browser_workspace.rs"
+required-features = ["browser-use"]

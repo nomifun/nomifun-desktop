@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>Native user file chooser fixture</title>
+<style>body{font:16px system-ui;margin:18px}input,button{display:block;padding:8px;margin:12px 0}iframe{width:470px;height:260px;border:2px solid #888}</style>
+<h1>Local native user file selection</h1>
+<label>Fixture files<input id="file" type="file" multiple></label>
+<button id="custom">Choose a temporary file input</button>
+<pre id="result"></pre>
+<iframe id="cross" src="http://localhost:__PORT__/upload-child-cross"></iframe>
+<script>
+window.userFiles=[];window.crossReady=false;
+async function received(event,source,clicked){
+  const files=await Promise.all(Array.from(event.target.files,file=>file.text().then(text=>({name:file.name,text}))));
+  userFiles.push({source,files,trusted:event.isTrusted,clicked});result.textContent=JSON.stringify(userFiles);
+}
+file.onchange=event=>received(event,'root',null);
+custom.onclick=event=>{const input=document.createElement('input');input.type='file';input.onchange=selected=>received(selected,'temporary',event.isTrusted);input.click();};
+addEventListener('message',event=>{
+  if(event.source!==cross.contentWindow||event.origin!=='http://localhost:__PORT__')return;
+  if(event.data?.kind==='ready'){crossReady=true;window.crossPoint=event.data.pickPoint;}
+  if(event.data?.kind==='file'){userFiles.push(event.data);result.textContent=JSON.stringify(userFiles);}
+});
+window.userFileFixtureReady=true;
+</script>

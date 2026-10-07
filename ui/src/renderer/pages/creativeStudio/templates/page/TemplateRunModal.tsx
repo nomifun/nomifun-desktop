@@ -24,7 +24,7 @@ import {
   templateFallbackError,
 } from '../templateI18n';
 
-export interface CreativeTemplateRunRequest {
+interface CreativeTemplateRunRequest {
   template: CreativeTemplateDefinitionV1;
   inputs: CreativeTemplateInputValue[];
   referenceAssetIds: string[];
@@ -34,7 +34,7 @@ export interface CreativeTemplateRunnerPort {
   start(request: CreativeTemplateRunRequest): Promise<void>;
 }
 
-export interface TemplateRunModalProps {
+interface TemplateRunModalProps {
   template: CreativeTemplateDefinitionV1 | null;
   runner?: CreativeTemplateRunnerPort;
   onClose: () => void;
@@ -369,7 +369,6 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
   return (
     <Modal
       visible
-      alignCenter={false}
       className={styles.runModal}
       title={
         template.metadata.name ||
@@ -380,9 +379,7 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
       footer={null}
       autoFocus={false}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById('creative-studio-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onClose}
     >
       <div className={styles.runGrid} data-template-runner>

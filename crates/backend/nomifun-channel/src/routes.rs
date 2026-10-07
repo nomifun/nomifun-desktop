@@ -16,7 +16,6 @@ use nomifun_common::{
     AppError, ChannelPluginId, CompanionId, ConversationId, UuidV7Error,
 };
 use nomifun_db::IChannelRepository;
-use nomifun_extension::{ExtensionRegistry, ResolvedChannelPlugin};
 use serde::{Deserialize, Serialize};
 
 use crate::channel_settings::ChannelSettingsService;
@@ -25,9 +24,7 @@ use crate::manager::{ChannelManager, EnableChannelSpec, PluginFactory};
 use crate::message_service::ChannelAgentProfile;
 use crate::pairing::PairingService;
 use crate::session::SessionManager;
-use crate::types::{PluginConfig, PluginConfigOptions, PluginCredentials, PluginType};
-
-use std::collections::HashMap;
+use crate::types::{PluginConfig, PluginCredentials, PluginType};
 
 // ---------------------------------------------------------------------------
 // Router state
@@ -46,7 +43,6 @@ pub struct ChannelRouterState {
     /// against the live roster. `None` when the host wires channels without
     /// a companion domain — validation is then skipped, not failed.
     pub channel_agent_profile: Option<Arc<dyn ChannelAgentProfile>>,
-    pub extension_registry: ExtensionRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,46 +104,15 @@ async fn get_plugin_status(
     State(state): State<ChannelRouterState>,
 ) -> Result<Json<ApiResponse<Vec<ChannelPluginStatusView>>>, AppError> {
     let statuses = state.manager.get_plugin_status().await?;
-    let extension_plugins = state.extension_registry.get_channel_plugins().await;
-
-    let extension_map: HashMap<String, ResolvedChannelPlugin> = extension_plugins
-        .into_iter()
-        .map(|plugin| (plugin.id.clone(), plugin))
-        .collect();
-
-    let builtin_names: [(&str, &str); 12] = [
-        ("telegram", "Telegram"),
-        ("lark", "Lark"),
-        ("dingtalk", "DingTalk"),
-        ("slack", "Slack"),
-        ("discord", "Discord"),
-        ("matrix", "Matrix"),
-        ("mattermost", "Mattermost"),
-        ("weixin", "WeChat"),
-        ("wecom", "WeCom"),
-        ("qqbot", "QQ Bot"),
-        ("twitch", "Twitch"),
-        ("nostr", "Nostr"),
-    ];
-    let builtin_types: std::collections::HashSet<&str> = builtin_names.iter().map(|(id, _)| *id).collect();
+    // The manager is the sole Channel-owned status source and already omits
+    // unsupported legacy rows. Do not perform a second extension discovery
+    // read here.
 
     // Rows are keyed by their own id — two lark bots are two entries.
-    let mut views: Vec<ChannelPluginStatusView> = Vec::new();
-    for status in statuses {
-        let plugin_type = status.plugin_type.clone();
-        let is_extension = !builtin_types.contains(plugin_type.as_str());
-
-        if is_extension && !extension_map.contains_key(&plugin_type) {
-            continue;
-        }
-
-        views.push(ChannelPluginStatusView::from_manager_status(
-            status,
-            is_extension
-                .then(|| extension_map.get(&plugin_type).map(ChannelExtensionMetaView::from))
-                .flatten(),
-        ));
-    }
+    let mut views: Vec<ChannelPluginStatusView> = statuses
+        .into_iter()
+        .map(ChannelPluginStatusView::from_manager_status)
+        .collect();
 
     views.sort_by(|left, right| {
         left.plugin_type
@@ -186,30 +151,10 @@ struct ChannelPluginStatusView {
     #[serde(skip_serializing_if = "Option::is_none")]
     bot_username: Option<String>,
     active_users: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_extension: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extension_meta: Option<ChannelExtensionMetaView>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ChannelExtensionMetaView {
-    #[serde(rename = "credentialFields")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    credential_fields: Vec<serde_json::Value>,
-    #[serde(rename = "configFields")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    config_fields: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(rename = "extensionName")]
-    extension_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    icon: Option<String>,
 }
 
 impl ChannelPluginStatusView {
-    fn from_manager_status(status: PluginStatusResponse, extension_meta: Option<ChannelExtensionMetaView>) -> Self {
+    fn from_manager_status(status: PluginStatusResponse) -> Self {
         Self {
             plugin_id: status.plugin_id,
             plugin_type: status.plugin_type,
@@ -227,21 +172,6 @@ impl ChannelPluginStatusView {
             has_token: status.has_token,
             bot_username: status.bot_username,
             active_users: status.active_users,
-            is_extension: extension_meta.as_ref().map(|_| true),
-            extension_meta,
-        }
-    }
-
-}
-
-impl From<&ResolvedChannelPlugin> for ChannelExtensionMetaView {
-    fn from(plugin: &ResolvedChannelPlugin) -> Self {
-        Self {
-            credential_fields: plugin.credential_fields.clone(),
-            config_fields: plugin.config_fields.clone(),
-            description: plugin.description.clone(),
-            extension_name: plugin.extension_name.clone(),
-            icon: plugin.icon.clone(),
         }
     }
 }
@@ -260,30 +190,15 @@ async fn enable_plugin(
 
     if req.plugin_id.is_none()
         && let Some(plugin_type) = req.plugin_type.as_deref()
-        && let Some(extension_plugin) = resolve_extension_channel_plugin(&state, plugin_type).await
+        && PluginType::from_str_opt(plugin_type).is_none()
     {
-        let config = build_extension_config(&extension_plugin, &req.config)?;
-        match state
-            .manager
-            .enable_extension_plugin(plugin_type, &extension_plugin.name, &config)
-            .await
-        {
-            Ok(plugin_id) => {
-                return Ok(Json(ApiResponse::ok(EnablePluginResponse {
-                    success: true,
-                    plugin_id: Some(plugin_id),
-                    error: None,
-                })));
-            }
-            Err(e) => {
-                warn!(plugin_type = %plugin_type, error = %e, "enable extension plugin failed");
-                return Ok(Json(ApiResponse::ok(EnablePluginResponse {
-                    success: false,
-                    plugin_id: None,
-                    error: Some(e.to_string()),
-                })));
-            }
-        }
+        return Ok(Json(ApiResponse::ok(EnablePluginResponse {
+            success: false,
+            plugin_id: None,
+            error: Some(format!(
+                "unsupported channel plugin type '{plugin_type}'; extension channel plugins are not supported"
+            )),
+        })));
     }
 
     if let Some(plugin_id) = req.plugin_id.as_deref() {
@@ -443,12 +358,14 @@ async fn test_plugin(
 ) -> Result<Json<ApiResponse<TestPluginResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    if let Some(extension_plugin) = resolve_extension_channel_plugin(&state, &req.plugin_type).await {
-        let _config = build_extension_test_config(&extension_plugin, &req)?;
+    if PluginType::from_str_opt(&req.plugin_type).is_none() {
         return Ok(Json(ApiResponse::ok(TestPluginResponse {
-            success: true,
+            success: false,
             bot_username: None,
-            error: None,
+            error: Some(format!(
+                "unsupported channel plugin type '{}'; extension channel plugins are not supported",
+                req.plugin_type
+            )),
         })));
     }
 
@@ -853,88 +770,6 @@ fn build_test_config(req: &TestPluginRequest) -> PluginConfig {
     }
 }
 
-async fn resolve_extension_channel_plugin(
-    state: &ChannelRouterState,
-    plugin_id: &str,
-) -> Option<ResolvedChannelPlugin> {
-    state
-        .extension_registry
-        .get_channel_plugins()
-        .await
-        .into_iter()
-        .find(|plugin| plugin.id == plugin_id)
-}
-
-fn build_extension_test_config(
-    plugin: &ResolvedChannelPlugin,
-    req: &TestPluginRequest,
-) -> Result<PluginConfig, ChannelError> {
-    let mut map = serde_json::Map::new();
-    if !req.token.is_empty() {
-        map.insert("token".to_string(), serde_json::Value::String(req.token.clone()));
-    }
-    if let Some(extra) = &req.extra_config {
-        if let Some(app_id) = &extra.app_id {
-            map.insert("appId".to_string(), serde_json::Value::String(app_id.clone()));
-        }
-        if let Some(app_secret) = &extra.app_secret {
-            map.insert("appSecret".to_string(), serde_json::Value::String(app_secret.clone()));
-        }
-    }
-    build_extension_config(plugin, &serde_json::Value::Object(map))
-}
-
-fn build_extension_config(
-    plugin: &ResolvedChannelPlugin,
-    raw: &serde_json::Value,
-) -> Result<PluginConfig, ChannelError> {
-    let object = raw
-        .as_object()
-        .ok_or_else(|| ChannelError::InvalidConfig("Extension plugin config must be an object".into()))?;
-
-    let mut credentials = PluginCredentials::default();
-    let mut config_extra = HashMap::new();
-
-    let credential_keys: std::collections::HashSet<String> = plugin
-        .credential_fields
-        .iter()
-        .filter_map(field_key)
-        .map(ToOwned::to_owned)
-        .collect();
-    for field in &plugin.config_fields {
-        if let Some((key, value)) = field_default_entry(field) {
-            config_extra.entry(key.to_string()).or_insert(value);
-        }
-    }
-
-    for (key, value) in object {
-        if credential_keys.contains(key) {
-            credentials.extra.insert(key.clone(), value.clone());
-        } else {
-            config_extra.insert(key.clone(), value.clone());
-        }
-    }
-
-    Ok(PluginConfig {
-        credentials,
-        config: if config_extra.is_empty() {
-            None
-        } else {
-            Some(PluginConfigOptions {
-                mode: None,
-                webhook_url: None,
-                rate_limit: None,
-                require_mention: None,
-                extra: config_extra,
-            })
-        },
-    })
-}
-
-fn field_key(value: &serde_json::Value) -> Option<&str> {
-    value.get("key").and_then(serde_json::Value::as_str)
-}
-
 fn corrupt_channel_id(
     field: &str,
     value: &str,
@@ -943,12 +778,6 @@ fn corrupt_channel_id(
     AppError::Internal(format!(
         "stored {field} contains noncanonical entity ID '{value}': {error}"
     ))
-}
-
-fn field_default_entry(value: &serde_json::Value) -> Option<(&str, serde_json::Value)> {
-    let key = field_key(value)?;
-    let default = value.get("default")?;
-    Some((key, default.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -984,13 +813,6 @@ mod tests {
             db.pool().clone(),
         ));
         let settings_service = Arc::new(ChannelSettingsService::new(pref_repo));
-        let extension_registry = ExtensionRegistry::new(
-            nomifun_extension::ExtensionStateStore::new(std::path::PathBuf::from(
-                "unused-channel-route-test-extension-state.json",
-            )),
-            event_bus,
-            "test".into(),
-        );
         let plugin_factory: Arc<PluginFactory> = Arc::new(Box::new(|_| None));
 
         let now = nomifun_common::now_ms();
@@ -1021,7 +843,6 @@ mod tests {
                 plugin_factory,
                 settings_service,
                 channel_agent_profile: None,
-                extension_registry,
             },
             row.channel_plugin_id,
         )
@@ -1064,6 +885,92 @@ mod tests {
         assert!(matches!(error, AppError::NotFound(message) if message == missing_id));
     }
 
+    #[tokio::test]
+    async fn status_route_omits_legacy_extension_rows() {
+        let (state, _) = group_access_route_state().await;
+        state
+            .repo
+            .create_plugin(&nomifun_db::models::NewChannelPluginRow {
+                r#type: "legacy-channel".into(),
+                name: "Legacy Channel".into(),
+                enabled: true,
+                config: "opaque".into(),
+                status: Some("running".into()),
+                last_connected: Some(nomifun_common::now_ms()),
+                companion_id: None,
+                bot_key: None,
+                owner_domain: "companion".into(),
+                group_access_mode: "allowlist".into(),
+                created_at: nomifun_common::now_ms(),
+                updated_at: nomifun_common::now_ms(),
+            })
+            .await
+            .unwrap();
+
+        let response = get_plugin_status(State(state)).await.unwrap();
+        let statuses = response.0.data.unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].plugin_type, "lark");
+        let json = serde_json::to_value(&statuses[0]).unwrap();
+        assert!(json.get("is_extension").is_none());
+        assert!(json.get("extension_meta").is_none());
+    }
+
+    #[tokio::test]
+    async fn enable_route_rejects_legacy_extension_type_without_persisting() {
+        let (state, _) = group_access_route_state().await;
+        let response = enable_plugin(
+            State(state.clone()),
+            Ok(Json(EnablePluginRequest {
+                plugin_id: None,
+                config: serde_json::json!({ "legacyToken": "secret" }),
+                plugin_type: Some("legacy-channel".into()),
+                companion_id: None,
+                owner_domain: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let result = response.0.data.unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("extension channel plugins are not supported")));
+        assert!(
+            state
+                .repo
+                .get_all_plugins()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.r#type != "legacy-channel")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_rejects_legacy_extension_type() {
+        let (state, _) = group_access_route_state().await;
+        let response = test_plugin(
+            State(state),
+            Ok(Json(TestPluginRequest {
+                plugin_type: "legacy-channel".into(),
+                token: "secret".into(),
+                extra_config: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let result = response.0.data.unwrap();
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("extension channel plugins are not supported")));
+    }
+
     #[test]
     fn group_access_status_view_projects_mode_without_credentials() {
         let plugin_id = nomifun_common::ChannelPluginId::new().into_string();
@@ -1086,7 +993,6 @@ mod tests {
                 bot_username: None,
                 active_users: 0,
             },
-            None,
         );
 
         let json = serde_json::to_value(view).unwrap();

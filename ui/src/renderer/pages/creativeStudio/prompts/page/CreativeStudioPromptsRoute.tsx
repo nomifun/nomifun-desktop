@@ -62,7 +62,7 @@ export interface CreativeStudioPromptsRouteProps {
   notifyError?: (message: string) => void;
 }
 
-/** Standalone `/workshop/prompts` route. It deliberately has no canvas insertion target. */
+/** Asset-library prompt route; insertion targets belong to the canvas picker. */
 export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProps> = ({
   port,
   assetPort = creativeAssetClient,
@@ -193,20 +193,14 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
         }),
         tags: [...new Set([item.category, ...item.tags].filter((value): value is string => Boolean(value)))],
         inLibrary: true,
-        origin:
-          item.source === 'catalog'
-            ? {
-                promptLibrarySource: 'catalog',
-                promptLibraryId: item.id,
-                promptCatalogId: item.id,
-                sourceUrl: item.sourceUrl ?? undefined,
-                license: item.license ?? undefined,
-                licenseUrl: item.licenseUrl ?? undefined,
-              }
-            : {
-                promptLibrarySource: 'preset',
-                promptLibraryId: item.id,
-              },
+        origin: {
+          promptLibrarySource: 'catalog',
+          promptLibraryId: item.id,
+          promptCatalogId: item.id,
+          sourceUrl: item.sourceUrl ?? undefined,
+          license: item.license ?? undefined,
+          licenseUrl: item.licenseUrl ?? undefined,
+        },
       });
       invalidateCreativeAssetQueryCache(assetPort);
       promptMembershipOverridesRef.current.set(key, true);
@@ -256,10 +250,7 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
     setRemoveState('removing');
     setRemoveError(null);
     try {
-      await assetPort.removePromptAsset(
-        item.source === 'catalog' ? 'catalog' : 'preset',
-        item.id
-      );
+      await assetPort.removePromptAsset('catalog', item.id);
       invalidateCreativeAssetQueryCache(assetPort);
       promptMembershipOverridesRef.current.set(key, false);
       if (selectedPromptKeyRef.current === key) {

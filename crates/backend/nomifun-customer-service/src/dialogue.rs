@@ -2,8 +2,9 @@
 //!
 //! Per turn: resolve the `(bot, visitor, chat)` lane, merge any pending
 //! visitor texts, take the context window, build a disposable one-shot engine
-//! request whose tool table is EXACTLY the three read-only customer-service
-//! tools, run it under the per-agent semaphore, persist and return the reply.
+//! request whose tool table is the selected Agent's subset of the three
+//! read-only customer-service tools, run it under the per-agent semaphore,
+//! persist and return the reply.
 //!
 //! Concurrency invariants (spec §设计 C):
 //! - cross-visitor turns run in parallel, capped per agent by
@@ -14,6 +15,8 @@
 //!   `None` and must not send anything).
 
 use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use dashmap::DashMap;
 use nomifun_ai_agent::{OneShotDeps, OneShotTurnRequest, run_one_shot_turn};
@@ -21,10 +24,13 @@ use nomifun_common::text_search::expand_query;
 use nomifun_common::{AppError, KnowledgeBaseId, now_ms};
 use nomifun_db::models::{CsAgentRow, CsAuditEventRow};
 use nomifun_db::{CsDialogueKey, ICustomerServiceRepository, NoteMatchChannel};
-use nomifun_knowledge::KnowledgeService;
+use nomifun_knowledge::{
+    KNOWLEDGE_READ_ACTION_ID, KNOWLEDGE_SEARCH_ACTION_ID, KnowledgeService,
+};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::tools::build_cs_tools;
+use crate::agent_capability::CUSTOMER_SERVICE_NOTES_READ_ACTION_ID;
 
 /// Hard wall-clock budget for one engine turn.
 pub const TURN_TIMEOUT_SECS: u64 = 120;
@@ -34,6 +40,10 @@ pub const WINDOW_MESSAGE_LIMIT: usize = 30;
 pub const WINDOW_CHAR_BUDGET: usize = 8000;
 /// Fixed visitor-facing failure notice (audit carries the real error).
 pub const FALLBACK_ERROR_NOTICE: &str = "暂时无法回复，请稍后再试";
+/// Stable visitor-facing reply while a durable human handoff is pending or
+/// claimed. The incoming text is still appended to the dialogue transcript,
+/// but no additional model turn is started until the handoff is terminal.
+pub const HANDOFF_PENDING_NOTICE: &str = "已转交人工处理，后续消息会保留在当前会话中。";
 /// Notes injected into the prompt from pre-retrieval on the visitor's message.
 ///
 /// Deliberately small: this is a safety net against a badly-chosen tool query,
@@ -45,6 +55,23 @@ pub const PRE_RETRIEVAL_LIMIT: usize = 3;
 #[async_trait::async_trait]
 pub trait TurnRunner: Send + Sync {
     async fn run(&self, req: OneShotTurnRequest) -> Result<String, AppError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomerServiceAgentPolicy {
+    /// Exact target Action IDs, never Context/lifecycle capability fragments.
+    pub capabilities: BTreeSet<String>,
+    pub instructions: String,
+}
+
+#[async_trait::async_trait]
+pub trait CustomerServiceAgentPolicyResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        cs_agent_id: &str,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<CustomerServiceAgentPolicy, AppError>;
 }
 
 /// Production runner: the generic one-shot engine entry.
@@ -74,6 +101,7 @@ pub struct CsDialogueEngine {
     semaphores: DashMap<String, Arc<Semaphore>>,
     /// Per-dialogue lanes (pending buffer + serial lock).
     lanes: DashMap<String, Arc<LaneState>>,
+    agent_policy_resolver: RwLock<Option<Arc<dyn CustomerServiceAgentPolicyResolver>>>,
 }
 
 impl CsDialogueEngine {
@@ -88,6 +116,16 @@ impl CsDialogueEngine {
             runner,
             semaphores: DashMap::new(),
             lanes: DashMap::new(),
+            agent_policy_resolver: RwLock::new(None),
+        }
+    }
+
+    pub fn with_agent_policy_resolver(
+        &self,
+        resolver: Arc<dyn CustomerServiceAgentPolicyResolver>,
+    ) {
+        if let Ok(mut guard) = self.agent_policy_resolver.write() {
+            *guard = Some(resolver);
         }
     }
 
@@ -156,6 +194,49 @@ impl CsDialogueEngine {
             return Ok(None);
         }
 
+        let active_handoff = self
+            .repo
+            .active_handoff_for_dialogue(&dialogue.cs_dialogue_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "failed to inspect customer-service handoff state");
+                FALLBACK_ERROR_NOTICE.to_owned()
+            })?;
+        if let Some(handoff) = active_handoff {
+            // The queue is the authority once a handoff is active. Keep the
+            // complete visitor transcript for the human operator while
+            // preventing a second autonomous answer from racing the handoff.
+            for text in &batch {
+                self.repo
+                    .append_message(&dialogue.cs_dialogue_id, "visitor", text, now_ms())
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(%error, "failed to persist handoff-waiting visitor text");
+                        FALLBACK_ERROR_NOTICE.to_owned()
+                    })?;
+            }
+            self.repo
+                .append_message(
+                    &dialogue.cs_dialogue_id,
+                    "system",
+                    HANDOFF_PENDING_NOTICE,
+                    now_ms(),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "failed to persist handoff-waiting notice");
+                    FALLBACK_ERROR_NOTICE.to_owned()
+                })?;
+            self.audit(
+                &agent.cs_agent_id,
+                "handoff_waiting",
+                &dialogue.cs_dialogue_id,
+                &handoff.cs_handoff_id,
+            )
+            .await;
+            return Ok(Some(HANDOFF_PENDING_NOTICE.to_owned()));
+        }
+
         match self.run_turn(&agent, &dialogue.cs_dialogue_id, &batch).await {
             Ok(reply) => {
                 self.audit(&agent.cs_agent_id, "turn", &dialogue.cs_dialogue_id, "").await;
@@ -188,6 +269,28 @@ impl CsDialogueEngine {
         cs_dialogue_id: &str,
         batch: &[String],
     ) -> Result<String, AppError> {
+        let semaphore = self
+            .semaphores
+            .entry(agent.cs_agent_id.clone())
+            .or_insert_with(|| {
+                Arc::new(Semaphore::new(agent.max_concurrent.clamp(1, 64) as usize))
+            })
+            .clone();
+        let _permit = semaphore
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal("customer-service semaphore closed".into()))?;
+
+        // Either queue may outlive a settings change. Build the request only
+        // after admission, from the current enabled Agent and its current model/tools.
+        let agent = self
+            .repo
+            .get_agent(&agent.cs_agent_id)
+            .await?
+            .filter(|agent| agent.enabled)
+            .ok_or_else(|| {
+                AppError::Conflict("customer-service agent missing or disabled".into())
+            })?;
         let (Some(provider_id), Some(model)) = (agent.provider_id.clone(), agent.model.clone())
         else {
             return Err(AppError::Conflict(
@@ -217,18 +320,58 @@ impl CsDialogueEngine {
                 .await?;
         }
 
+        let policy = self
+            .agent_policy_resolver
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let policy = match policy {
+            Some(resolver) => Some(
+                resolver
+                    .resolve(&agent.cs_agent_id, &provider_id, &model)
+                    .await?,
+            ),
+            None => None,
+        };
+        let allows = |capability: &str| {
+            policy
+                .as_ref()
+                .is_none_or(|policy| policy.capabilities.contains(capability))
+        };
         let kb_ids: Vec<KnowledgeBaseId> = agent
             .knowledge_base_ids_vec()
             .into_iter()
             .filter_map(|id| KnowledgeBaseId::parse(id).ok())
             .collect();
-        // Construction-time whitelist: EXACTLY the three read-only tools.
-        let tools = build_cs_tools(
+        // Construction-time whitelist: only the selected Agent's subset of
+        // these three read-only tools reaches the one-shot engine.
+        let mut tools = build_cs_tools(
             Arc::clone(&self.knowledge),
             Arc::clone(&self.repo),
             &agent.cs_agent_id,
             kb_ids,
         );
+        tools.retain(|tool| match tool.name.as_str() {
+            "knowledge_search" => allows(KNOWLEDGE_SEARCH_ACTION_ID),
+            "knowledge_read" => allows(KNOWLEDGE_READ_ACTION_ID),
+            "cs_notes_search" => allows(CUSTOMER_SERVICE_NOTES_READ_ACTION_ID),
+            _ => false,
+        });
+        let notes = if allows(CUSTOMER_SERVICE_NOTES_READ_ACTION_ID) {
+            self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await
+        } else {
+            Vec::new()
+        };
+        // Dialogue policy belongs to the selected customer scene. It is not an
+        // Agent grant and cannot be disabled by removing a synthetic
+        // `customer.service/context.dialogue` capability from the Action allowlist.
+        let mut system_prompt = build_system_prompt_with_notes(&agent, &notes);
+        if let Some(policy) = policy.as_ref()
+            && !policy.instructions.trim().is_empty()
+        {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(policy.instructions.trim());
+        }
 
         let request = OneShotTurnRequest {
             provider: nomifun_common::ProviderWithModel {
@@ -236,27 +379,12 @@ impl CsDialogueEngine {
                 model,
                 use_model: None,
             },
-            system_prompt: build_system_prompt_with_notes(
-                agent,
-                &self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await,
-            ),
+            system_prompt,
             history,
             user_text,
             tools,
             timeout_secs: TURN_TIMEOUT_SECS,
         };
-
-        let semaphore = self
-            .semaphores
-            .entry(agent.cs_agent_id.clone())
-            .or_insert_with(|| {
-                Arc::new(Semaphore::new(agent.max_concurrent.clamp(1, 64) as usize))
-            })
-            .clone();
-        let _permit = semaphore
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal("customer-service semaphore closed".into()))?;
 
         let reply = self.runner.run(request).await?;
         self.repo
@@ -349,6 +477,21 @@ fn build_system_prompt(agent: &CsAgentRow) -> String {
     prompt
 }
 
+/// Build the exact customer-service dialogue policy for a selected customer
+/// resource. The Agent capability adapter exposes this to Nomi-core so the
+/// scene-derived dialogue middleware uses the same policy as Channel
+/// ingress rather than inventing a second prompt contract.
+pub fn build_agent_dialogue_context(agent: &CsAgentRow) -> String {
+    let mut prompt = build_system_prompt(agent);
+    prompt.push_str(
+        "\n\n人工交接：当访客明确要求人工处理，或问题超出已绑定资料且继续自动回答可能误导时，\
+         使用客服交接能力，把当前 cs_dialogue_id、简明原因和已有事实写入持久交接队列。\
+         工具返回持久 handoff 记录后，再告知访客已转交；不得在没有成功回执时声称完成交接。\
+         客服笔记写入只用于主人明确要求维护的事实，不得把未经验证的访客陈述自动写成客服知识。",
+    );
+    prompt
+}
+
 /// [`build_system_prompt`] plus any notes pre-retrieved for the visitor's own
 /// words.
 ///
@@ -374,9 +517,9 @@ fn build_system_prompt_with_notes(agent: &CsAgentRow, notes: &[String]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{ChannelPluginId, ChannelUserId};
+    use nomifun_common::{ChannelPluginId, ChannelUserId, CsHandoffId, UserId};
     use nomifun_db::SqliteCustomerServiceRepository;
-    use nomifun_db::models::NewCsAgentRow;
+    use nomifun_db::models::{CS_HANDOFF_STATUS_PENDING, CsHandoffRow, NewCsAgentRow};
     use nomifun_realtime::UserEventSink;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -450,9 +593,11 @@ mod tests {
 
     struct OneShotCall {
         user_text: String,
+        model: String,
         history_len: usize,
         tool_names: Vec<String>,
         timeout_secs: u64,
+        system_prompt: String,
     }
 
     impl StubRunner {
@@ -474,9 +619,11 @@ mod tests {
             self.max_in_flight.fetch_max(now, Ordering::SeqCst);
             self.calls.lock().unwrap().push(OneShotCall {
                 user_text: req.user_text.clone(),
+                model: req.provider.model.clone(),
                 history_len: req.history.len(),
                 tool_names: req.tools.iter().map(|tool| tool.name.clone()).collect(),
                 timeout_secs: req.timeout_secs,
+                system_prompt: req.system_prompt.clone(),
             });
             if let Some(barrier) = &self.barrier {
                 barrier.wait().await;
@@ -494,6 +641,95 @@ mod tests {
             ChannelPluginId::new().into_string(),
             ChannelUserId::new().into_string(),
         )
+    }
+
+    struct MinimalPolicy;
+
+    struct ExactActionPolicy;
+
+    #[async_trait::async_trait]
+    impl CustomerServiceAgentPolicyResolver for MinimalPolicy {
+        async fn resolve(
+            &self,
+            _cs_agent_id: &str,
+            _provider_id: &str,
+            _model: &str,
+        ) -> Result<CustomerServiceAgentPolicy, AppError> {
+            Ok(CustomerServiceAgentPolicy {
+                capabilities: BTreeSet::new(),
+                instructions: "MINIMAL_CUSTOMER_AGENT".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CustomerServiceAgentPolicyResolver for ExactActionPolicy {
+        async fn resolve(
+            &self,
+            _cs_agent_id: &str,
+            _provider_id: &str,
+            _model: &str,
+        ) -> Result<CustomerServiceAgentPolicy, AppError> {
+            Ok(CustomerServiceAgentPolicy {
+                capabilities: BTreeSet::from([
+                    KNOWLEDGE_SEARCH_ACTION_ID.to_owned(),
+                    KNOWLEDGE_READ_ACTION_ID.to_owned(),
+                    CUSTOMER_SERVICE_NOTES_READ_ACTION_ID.to_owned(),
+                ]),
+                instructions: String::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_agent_policy_removes_ungranted_tools_but_keeps_scene_dialogue_policy() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 1).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        engine.with_agent_policy_resolver(Arc::new(MinimalPolicy));
+        let (plugin, visitor) = ids();
+        engine
+            .handle_visitor_message(&agent.cs_agent_id, &plugin, &visitor, "chat", "hello")
+            .await
+            .unwrap();
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].tool_names.is_empty());
+        assert!(calls[0].system_prompt.contains("MINIMAL_CUSTOMER_AGENT"));
+        assert!(calls[0].system_prompt.contains("你是客服"));
+    }
+
+    #[tokio::test]
+    async fn selected_agent_policy_admits_tools_by_exact_action_id() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 1).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        engine.with_agent_policy_resolver(Arc::new(ExactActionPolicy));
+        let (plugin, visitor) = ids();
+        engine
+            .handle_visitor_message(&agent.cs_agent_id, &plugin, &visitor, "chat", "hello")
+            .await
+            .unwrap();
+
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].tool_names,
+            vec![
+                "knowledge_search".to_owned(),
+                "knowledge_read".to_owned(),
+                "cs_notes_search".to_owned(),
+            ]
+        );
     }
 
     /// ① 跨访客并发：两个不同访客的回合重叠执行（barrier 证明）。
@@ -655,6 +891,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn queued_turn_rechecks_agent_before_model_execution() {
+        for enabled in [false, true] {
+            let fx = fixture().await;
+            let agent = create_agent(&fx.repo, 1).await;
+            let runner = StubRunner::new(None, 0);
+            let engine = Arc::new(CsDialogueEngine::new(
+                Arc::clone(&fx.repo),
+                Arc::clone(&fx.knowledge),
+                runner.clone(),
+            ));
+            let semaphore = Arc::new(Semaphore::new(1));
+            engine
+                .semaphores
+                .insert(agent.cs_agent_id.clone(), semaphore.clone());
+            let permit = semaphore.acquire().await.unwrap();
+            let (plugin, visitor) = ids();
+            let pending_engine = engine.clone();
+            let agent_id = agent.cs_agent_id.clone();
+            let pending = tokio::spawn(async move {
+                pending_engine
+                    .handle_visitor_message(&agent_id, &plugin, &visitor, "queued-chat", "hi")
+                    .await
+            });
+            // Observing the drained, locked lane proves the initial Agent
+            // snapshot was read. The held permit prevents model execution.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if engine.lanes.iter().any(|lane| {
+                        lane.running.try_lock().is_err() && lane.pending.lock().unwrap().is_empty()
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            fx.repo
+                .update_agent(
+                    &agent.cs_agent_id,
+                    &nomifun_db::UpdateCsAgentParams {
+                        enabled: Some(enabled),
+                        model: Some(Some("updated-model".into())),
+                        ..Default::default()
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+            drop(permit);
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            let calls = runner.calls.lock().unwrap();
+            if enabled {
+                assert_eq!(reply.unwrap().as_deref(), Some("reply to: hi"));
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].model, "updated-model");
+            } else {
+                assert_eq!(reply.unwrap_err(), FALLBACK_ERROR_NOTICE);
+                assert!(
+                    calls.is_empty(),
+                    "a disabled queued Agent must not invoke the model"
+                );
+            }
+        }
+    }
+
     /// 安全断言：回合传给引擎的工具白名单恰为三个只读工具，超时 120s。
     #[tokio::test]
     async fn turn_request_carries_exactly_the_three_read_only_tools() {
@@ -684,6 +990,75 @@ mod tests {
             "tool whitelist must be exactly the three read-only tools"
         );
         assert_eq!(calls[0].timeout_secs, TURN_TIMEOUT_SECS);
+    }
+
+    #[tokio::test]
+    async fn active_handoff_persists_new_visitor_text_without_running_the_model() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 8).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        let (plugin, visitor) = ids();
+        let chat_id = "handoff-chat";
+        let dialogue = fx
+            .repo
+            .get_or_create_dialogue(
+                &agent.cs_agent_id,
+                &CsDialogueKey {
+                    channel_plugin_id: plugin.clone(),
+                    channel_user_id: visitor.clone(),
+                    chat_id: chat_id.into(),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let owner = UserId::new().into_string();
+        fx.repo
+            .request_handoff(&CsHandoffRow {
+                cs_handoff_id: CsHandoffId::new().into_string(),
+                cs_agent_id: agent.cs_agent_id.clone(),
+                cs_dialogue_id: dialogue.cs_dialogue_id.clone(),
+                requested_by: owner.clone(),
+                idempotency_key: "handoff-waiting".into(),
+                reason: "human requested".into(),
+                summary: String::new(),
+                status: CS_HANDOFF_STATUS_PENDING.into(),
+                claimed_by: None,
+                updated_by: owner,
+                resolution: String::new(),
+                created_at: 2,
+                updated_at: 2,
+            })
+            .await
+            .unwrap();
+
+        let reply = engine
+            .handle_visitor_message(
+                &agent.cs_agent_id,
+                &plugin,
+                &visitor,
+                chat_id,
+                "Is anyone there?",
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.as_deref(), Some(HANDOFF_PENDING_NOTICE));
+        assert!(runner.calls.lock().unwrap().is_empty());
+        let messages = fx
+            .repo
+            .list_messages(&dialogue.cs_dialogue_id)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "visitor");
+        assert_eq!(messages[0].content, "Is anyone there?");
+        assert_eq!(messages[1].role, "system");
+        assert_eq!(messages[1].content, HANDOFF_PENDING_NOTICE);
     }
 
     /// 失败路径：runner 错误 → 固定失败提示 + turn_error 审计。

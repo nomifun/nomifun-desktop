@@ -1102,11 +1102,9 @@ mod tests {
 
         for node_type in [
             "image",
-            "panorama",
             "config",
             "video",
             "audio",
-            "director",
             "group",
         ] {
             let error = assert_artifact_rejected(artifact(json!([{

@@ -18,6 +18,12 @@ pub enum McpError {
     #[error("Invalid transport configuration: {0}")]
     InvalidTransport(String),
 
+    #[error("MCP configuration is saved but catalog publication is pending; retry catalog refresh")]
+    CatalogPublicationPending,
+
+    #[error("MCP configuration changed during connection test; result was not saved")]
+    StaleProbe,
+
     #[error("Agent CLI not installed: {0}")]
     AgentNotInstalled(String),
 
@@ -44,6 +50,12 @@ impl From<McpError> for AppError {
             McpError::Conflict(msg) => AppError::Conflict(msg),
             McpError::InvalidEdit(msg) => AppError::BadRequest(msg),
             McpError::InvalidTransport(msg) => AppError::BadRequest(msg),
+            McpError::CatalogPublicationPending => AppError::Conflict(
+                "MCP configuration is saved but catalog publication is pending; retry POST /api/mcp/catalog/refresh".into(),
+            ),
+            McpError::StaleProbe => AppError::Conflict(
+                "MCP configuration changed during connection test; result was not saved".into(),
+            ),
             McpError::AgentNotInstalled(msg) => AppError::BadRequest(msg),
             McpError::AgentOperationFailed(msg) => AppError::Internal(msg),
             McpError::ConnectionFailed(msg) => AppError::BadGateway(msg),

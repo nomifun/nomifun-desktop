@@ -1,0 +1,515 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use nomifun_agent_contracts::{
+    ActionId, AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffEnvelopeV1,
+    AgentHandoffMode, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
+    AgentSessionTombstone,
+    CanonicalErrorCode, CapabilityId, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId,
+    DigestHex, EffectClass,
+    EventId,
+    EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
+    SessionEventAck,
+    SessionEventCursor, SessionEventPayloadRef, SessionEventRecord, SessionForkContract,
+    ResourceBindingId, SessionPayloadBody, SessionPayloadId, StrictJsonValue,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSessionRequest {
+    pub session: AgentSessionLiveRecord,
+    pub created_at: i64,
+    pub operation_id: OperationId,
+    pub producer_id: EventProducerId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_input: Option<StrictJsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_event_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_event_id: Option<EventId>,
+    #[serde(default)]
+    pub initial_active_capability_ids: Vec<String>,
+}
+
+impl CreateSessionRequest {
+    pub fn new(
+        session: AgentSessionLiveRecord,
+        created_at: i64,
+        operation_id: impl Into<OperationId>,
+        producer_id: EventProducerId,
+        idempotency_key: IdempotencyKey,
+        correlation_id: CorrelationId,
+    ) -> Self {
+        Self {
+            session,
+            created_at,
+            operation_id: operation_id.into(),
+            producer_id,
+            idempotency_key,
+            correlation_id,
+            initial_input: None,
+            opening_event_id: None,
+            activation_event_id: None,
+            initial_active_capability_ids: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionCreateResult {
+    pub session: AgentSessionLiveRecord,
+    pub opening_ack: SessionEventAck,
+    pub activation_ack: SessionEventAck,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionEventAppendResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<SessionEventRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack: Option<SessionEventAck>,
+    pub cursor: SessionEventCursor,
+    pub persisted: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHeadProjection {
+    pub session_id: nomifun_agent_contracts::AgentSessionId,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    pub active_set_generation: u64,
+    pub last_seq: u64,
+    pub unread_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageProjection {
+    pub session_id: nomifun_agent_contracts::AgentSessionId,
+    pub projection_id: String,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub presentation_intent: String,
+    /// Source-authored message kind, when available (not inferred from JSON).
+    /// Nomi exposes its persisted `text`, `tool_call`, etc. here.
+    /// Event-based projections may omit it and use presentation_intent instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<String>,
+    /// Source message lifecycle only; never a turn or artifact delivery receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_status: Option<String>,
+    pub projection: serde_json::Value,
+    pub semantic_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionObservation {
+    pub session: AgentSessionLiveRecord,
+    pub head: SessionHeadProjection,
+    pub events: Vec<SessionEventRecord>,
+    pub messages: Vec<MessageProjection>,
+    pub next_cursor: SessionEventCursor,
+}
+
+/// One owner-scoped row for the Session list projection.  The UI-facing
+/// adapter may enrich this with immutable Agent artifacts, but identity,
+/// metadata, lifecycle and ordering all come from the canonical Store.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionListItem {
+    pub session: AgentSessionLiveRecord,
+    pub head: SessionHeadProjection,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionListPage {
+    pub items: Vec<AgentSessionListItem>,
+    pub total: u64,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
+/// Host-resolved full Agent transition. The Store accepts exact facts only; it
+/// never resolves a Preset, model, resource selection, or handoff summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceSessionAgentBinding {
+    pub expected: AgentBindingValue,
+    pub replacement: AgentBindingValue,
+    pub previous_agent_label: String,
+    pub next_agent_label: String,
+    pub transition_id: OperationId,
+    pub request_digest: DigestHex,
+    pub idempotency_key: IdempotencyKey,
+    pub handoff_mode: AgentHandoffMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AgentHandoffEnvelopeV1>,
+    #[serde(default)]
+    pub initial_active_capability_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAgentBindingTransitionResult {
+    pub session: AgentSessionLiveRecord,
+    pub transition: AgentBindingChangedPayloadV1,
+    pub transition_ack: SessionEventAck,
+    pub active_set_ack: SessionEventAck,
+    pub duplicate: bool,
+}
+
+/// The durable outcome of a canonical turn.
+///
+/// This status is derived only from the matching `turn/*` facts. In
+/// particular, text events, projections, and elapsed time never imply a
+/// terminal outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReceiptStatus {
+    NotFound,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// A bounded, read-only view of the canonical turn facts for one
+/// `(AgentSessionId, OperationId)` pair.
+///
+/// `started_event` is present for every status except `NotFound`. A
+/// `terminal_event` is present only for a terminal status and is always the
+/// first matching terminal fact committed after the original start fact.
+/// Once present, that terminal outcome is immutable for the operation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnReceipt {
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub status: TurnReceiptStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_event: Option<SessionEventRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_event: Option<SessionEventRecord>,
+}
+
+/// One atomic, read-only snapshot of the AgentSession facts needed by a
+/// provider/chat admission gate.
+///
+/// The store computes the metadata sets in the same transaction as the live
+/// session and head reads.  Callers must not reconstruct these facts from
+/// separately-timed `get_live_session`, `head`, and `read_events` calls.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCausalityFacts {
+    pub session: AgentSessionLiveRecord,
+    pub head: SessionHeadProjection,
+    pub events: Vec<SessionEventRecord>,
+    pub event_payloads: BTreeMap<String, serde_json::Value>,
+    pub operation_ids: BTreeSet<String>,
+    pub turn_route_identities: BTreeSet<ChatRouteIdentity>,
+    pub execution_generation: u64,
+    pub execution_fence: u64,
+    pub fork_context: Option<crate::ForkContextSnapshot>,
+}
+
+/// Atomic model-operation admission input. The store validates the active
+/// turn, causation link, frozen Snapshot, route revision, and operation
+/// uniqueness in the same transaction that appends the admission event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatOperationClaimRequest {
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub turn_operation_id: OperationId,
+    pub causation_event_id: EventId,
+    pub route_identity: ChatRouteIdentity,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionEventPage {
+    pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
+    pub events: Vec<SessionEventRecord>,
+    pub next_cursor: SessionEventCursor,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectEventRequest {
+    pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
+    pub effect_id: String,
+    pub turn_id: OperationId,
+    pub operation_id: OperationId,
+    pub owner_domain: String,
+    pub capability_module: CapabilityId,
+    pub action_id: ActionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_binding_id: Option<ResourceBindingId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_key: Option<String>,
+    pub input_digest: DigestHex,
+    pub recorded_at: i64,
+    pub event_id: EventId,
+    pub producer_id: EventProducerId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub strategy: EffectStrategy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub causation_event_id: Option<EventId>,
+    pub payload: SessionEventPayloadRef,
+}
+
+/// The only lifecycle policies supported by the first release.
+///
+/// `read_only` has no durable effect lifecycle. `managed_effect` is owned by
+/// this process and can report a known failure. `external_uncertain_effect`
+/// crosses a boundary where a transport failure cannot prove whether the
+/// remote side ran, so the terminal state is `uncertain` and is never retried
+/// implicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectStrategy {
+    ReadOnly,
+    ManagedEffect,
+    ExternalUncertainEffect,
+}
+
+impl EffectStrategy {
+    pub const fn from_effect_class(effect_class: EffectClass) -> Self {
+        match effect_class {
+            EffectClass::Pure | EffectClass::ReadLocal | EffectClass::ReadSensitive => {
+                Self::ReadOnly
+            }
+            EffectClass::ExternalTransmit | EffectClass::Physical => {
+                Self::ExternalUncertainEffect
+            }
+            EffectClass::WriteReversible
+            | EffectClass::WriteDurable
+            | EffectClass::ExecuteLocal
+            | EffectClass::Destructive
+            | EffectClass::Irreversible => Self::ManagedEffect,
+        }
+    }
+
+    pub const fn requires_lifecycle(self) -> bool {
+        !matches!(self, Self::ReadOnly)
+    }
+
+    pub const fn is_external_uncertain(self) -> bool {
+        matches!(self, Self::ExternalUncertainEffect)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::ManagedEffect => "managed_effect",
+            Self::ExternalUncertainEffect => "external_uncertain_effect",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectTerminalState {
+    Succeeded,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectReconcileOutcome {
+    ConfirmedSucceeded { receipt: serde_json::Value },
+    ConfirmedFailed { error: CanonicalErrorCode },
+    StillUncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEffectState {
+    Pending,
+    Returned,
+    Rejected,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEffectRecord {
+    pub effect_id: String,
+    pub agent_session_id: AgentSessionId,
+    pub turn_id: OperationId,
+    pub operation_id: OperationId,
+    pub owner_domain: String,
+    pub capability_module: CapabilityId,
+    pub action_id: ActionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_binding_id: Option<ResourceBindingId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_key: Option<String>,
+    pub input_digest: DigestHex,
+    pub strategy: EffectStrategy,
+    pub state: AgentEffectState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounded_observation: Option<serde_json::Value>,
+    pub started_event_id: EventId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_event_id: Option<EventId>,
+    pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<i64>,
+}
+
+/// A durable effect that prevents physical Session deletion until its outcome
+/// is settled or explicitly reconciled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEffectDeleteBlocker {
+    pub effect_id: String,
+    pub owner_domain: String,
+    pub state: AgentEffectState,
+}
+
+/// A resource owner reported an unprovable cleanup outcome after the Session
+/// admission fence committed. This quarantine is persisted with the Session
+/// and must never be cleared by a process restart or an automatic retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceCleanupUncertainty {
+    pub owner_domain: String,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionDeleteBlockers {
+    pub effects: Vec<AgentEffectDeleteBlocker>,
+    pub resource_cleanup_pending: Vec<String>,
+    pub resource_cleanup_uncertainties: Vec<ResourceCleanupUncertainty>,
+}
+
+impl AgentSessionDeleteBlockers {
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+            && self.resource_cleanup_pending.is_empty()
+            && self.resource_cleanup_uncertainties.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionAutomationConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_requirements: Option<u32>,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitAgentSessionAutomationConfig {
+    pub agent_session_id: AgentSessionId,
+    pub owner_ref: PrincipalRef,
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub tag: Option<String>,
+    pub max_requirements: Option<u32>,
+    pub operation_id: Option<String>,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnabledAgentSessionAutomationConfig {
+    pub session: AgentSessionLiveRecord,
+    pub config: AgentSessionAutomationConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDeletionAuditRecord {
+    pub audit_id: String,
+    pub agent_session_id: AgentSessionId,
+    pub owner_ref: PrincipalRef,
+    pub target_kind: String,
+    pub target_id: String,
+    pub authority: String,
+    pub risk_acknowledged: bool,
+    pub reason_digest: DigestHex,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRehydrationInput {
+    pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_compaction: Option<CompactionCompletedPayload>,
+    pub subsequent_events: Vec<SessionEventRecord>,
+    pub through_cursor: SessionEventCursor,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRequest {
+    pub child_session_id: nomifun_agent_contracts::AgentSessionId,
+    pub child_owner_ref: PrincipalRef,
+    pub child_metadata: AgentSessionMetadata,
+    pub child_agent_binding: AgentBindingValue,
+    pub parent_through_seq: u64,
+    pub created_at: i64,
+    pub producer_id: EventProducerId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub event_id: Option<EventId>,
+    pub base_payload_id: SessionPayloadId,
+    pub base_body: SessionPayloadBody,
+    pub base_media_type: String,
+    #[serde(default)]
+    pub child_initial_active_capability_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkResult {
+    pub child_session: AgentSessionLiveRecord,
+    pub contract: SessionForkContract,
+    pub fork_ack: SessionEventAck,
+    pub child_cursor: SessionEventCursor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteResult {
+    pub tombstone: AgentSessionTombstone,
+    pub operation_id: OperationId,
+}

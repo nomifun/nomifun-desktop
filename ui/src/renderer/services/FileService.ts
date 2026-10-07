@@ -137,10 +137,10 @@ export async function uploadFileViaHttp(
 export const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
 
 /** 支持的文档文件扩展名 */
-export const documentExts = ['.pdf', '.doc', '.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods'];
+const documentExts = ['.pdf', '.doc', '.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods'];
 
 /** 支持的文本文件扩展名 */
-export const textExts = [
+const textExts = [
   '.txt',
   '.md',
   '.json',
@@ -190,12 +190,12 @@ export function getFileExtension(file_name: string): string {
 import { NOMIFUN_TIMESTAMP_REGEX } from '@/common/config/constants';
 
 // 清理Nomifun时间戳后缀，返回原始文件名
-export function cleanNomifunTimestamp(file_name: string): string {
+function cleanNomifunTimestamp(file_name: string): string {
   return file_name.replace(NOMIFUN_TIMESTAMP_REGEX, '$1');
 }
 
 // 从文件路径获取清理后的文件名（用于UI显示）
-export function getCleanFileName(file_path: string): string {
+function getCleanFileName(file_path: string): string {
   const file_name = file_path.split(/[\\/]/).pop() || '';
   return cleanNomifunTimestamp(file_name);
 }

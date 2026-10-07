@@ -7,13 +7,84 @@
 import { describe, expect, test } from 'bun:test';
 import { conversationTarget, parseConversationId, terminalTarget } from '@/common/types/ids';
 import {
+  BROWSER_STORAGE_GENERATION_STORAGE_KEY,
+  agentBrowserStorageGenerationKey,
   browserStorageGenerationKey,
   browserStorageKey,
+  getBrowserStorageGeneration,
+  initializeBrowserStorageGeneration,
+  initializeAgentBrowserStorageGeneration,
+  isCanonicalBrowserStorageGeneration,
   sessionStorageKey,
   setBrowserStorageGeneration,
+  type BrowserStoragePersistence,
 } from './browserStorageKey';
 
+const CANONICAL_GENERATION = '01900000-0000-7000-8000-000000000010';
+const CANONICAL_GENERATION_2 = '01900000-0000-7000-8000-000000000011';
+const CANONICAL_GENERATION_WITH_HEX = '0190f5fe-7c00-7a00-8000-000000000010';
+
+function createStorage(initial?: string): BrowserStoragePersistence {
+  const values = new Map<string, string>();
+  if (initial !== undefined) values.set(BROWSER_STORAGE_GENERATION_STORAGE_KEY, initial);
+  return {
+    getItem(key: string): string | null {
+      return values.get(key) ?? null;
+    },
+    removeItem(key: string): void {
+      values.delete(key);
+    },
+    setItem(key: string, value: string): void {
+      values.set(key, value);
+    },
+  };
+}
+
 describe('browser storage keys', () => {
+  test('an Agent-only generation cut isolates content while preserving domain preferences', () => {
+    const storage = createStorage();
+    setBrowserStorageGeneration(CANONICAL_GENERATION);
+    initializeAgentBrowserStorageGeneration(6);
+    const conversation = conversationTarget('0190f5fe-7c00-7a00-8000-000000000001');
+    const terminal = terminalTarget('0190f5fe-7c00-7a00-8000-000000000001');
+    const agentKeys = [
+      sessionStorageKey('draft', conversation),
+      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('workspace-preview', conversation),
+      agentBrowserStorageGenerationKey('guid-draft:input'),
+      agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),
+      agentBrowserStorageGenerationKey('agent-editor:owner'),
+      agentBrowserStorageGenerationKey('plugin-launch:pending'),
+    ];
+    const terminalKey = sessionStorageKey('workspace-preview', terminal);
+    const preferenceKey = browserStorageGenerationKey('provider-and-theme-preferences');
+    for (const key of agentKeys) storage.setItem(key, 'old Agent content');
+    storage.setItem(terminalKey, 'terminal tabs');
+    storage.setItem(preferenceKey, 'provider and theme');
+    // Pre-clean-cut global keys did not contain any Agent generation segment.
+    storage.setItem(browserStorageGenerationKey('guid-draft:input'), 'unscoped old draft');
+
+    initializeAgentBrowserStorageGeneration(7);
+    const currentKeys = [
+      sessionStorageKey('draft', conversation),
+      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('workspace-preview', conversation),
+      agentBrowserStorageGenerationKey('guid-draft:input'),
+      agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),
+      agentBrowserStorageGenerationKey('agent-editor:owner'),
+      agentBrowserStorageGenerationKey('plugin-launch:pending'),
+    ];
+    for (const key of currentKeys) expect(storage.getItem(key)).toBeNull();
+    expect(getBrowserStorageGeneration()).toBe(CANONICAL_GENERATION);
+    expect(storage.getItem(sessionStorageKey('workspace-preview', terminal))).toBe('terminal tabs');
+    expect(storage.getItem(browserStorageGenerationKey('provider-and-theme-preferences'))).toBe('provider and theme');
+  });
+
+  test('does not manufacture an Agent generation from a missing or malformed backend value', () => {
+    for (const value of [undefined, null, '', '7', 0, -1, 1.5, Infinity]) {
+      expect(() => initializeAgentBrowserStorageGeneration(value)).toThrow(TypeError);
+    }
+  });
   test('includes schema version and entity namespace', () => {
     setBrowserStorageGeneration('01900000-0000-7000-8000-000000000000');
     const conversationKey = sessionStorageKey(
@@ -71,6 +142,7 @@ describe('browser storage keys', () => {
   test('rejects malformed or non-v7 storage generations', () => {
     for (const value of [
       '',
+      'uninitialized',
       '01900000-0000-4000-8000-000000000001',
       '01900000-0000-7000-8000-000000000001 ',
       '01900000-0000-7000-C000-000000000001',
@@ -83,5 +155,90 @@ describe('browser storage keys', () => {
       }
       expect(error instanceof TypeError).toBe(true);
     }
+  });
+
+  test('accepts only canonical lowercase UUIDv7 generation values', () => {
+    expect(isCanonicalBrowserStorageGeneration(CANONICAL_GENERATION)).toBe(true);
+
+    for (const value of [
+      undefined,
+      null,
+      '',
+      'uninitialized',
+      '01900000-0000-4000-8000-000000000001',
+      CANONICAL_GENERATION_WITH_HEX.toUpperCase(),
+      `${CANONICAL_GENERATION}\n`,
+      'gen_01900000-0000-7000-8000-000000000001',
+    ]) {
+      expect(isCanonicalBrowserStorageGeneration(value)).toBe(false);
+    }
+  });
+
+  test('uses the valid backend generation and persists it for the next reload', () => {
+    const storage = createStorage('01900000-0000-7000-8000-000000000012');
+
+    const generation = initializeBrowserStorageGeneration(CANONICAL_GENERATION, storage);
+
+    expect(generation).toBe(CANONICAL_GENERATION);
+    expect(getBrowserStorageGeneration()).toBe(CANONICAL_GENERATION);
+    expect(storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY)).toBe(CANONICAL_GENERATION);
+  });
+
+  test('reuses a valid persisted generation when the backend is temporarily uninitialized', () => {
+    const storage = createStorage(CANONICAL_GENERATION_2);
+
+    const generation = initializeBrowserStorageGeneration('uninitialized', storage);
+
+    expect(generation).toBe(CANONICAL_GENERATION_2);
+    expect(getBrowserStorageGeneration()).toBe(CANONICAL_GENERATION_2);
+  });
+
+  test('discards an invalid persisted value and mints a canonical UUIDv7', () => {
+    const storage = createStorage('legacy-storage-generation');
+
+    const generation = initializeBrowserStorageGeneration('uninitialized', storage);
+
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(generation)).toBe(true);
+    expect(generation).toBe(generation.toLowerCase());
+    expect(storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY)).toBe(generation);
+  });
+
+  test('does not let an empty or legacy persisted value block bootstrap', () => {
+    for (const persisted of ['', 'undefined', 'null', 'legacy-storage-generation']) {
+      const storage = createStorage(persisted);
+      const generation = initializeBrowserStorageGeneration(undefined, storage);
+
+      expect(isCanonicalBrowserStorageGeneration(generation)).toBe(true);
+      expect(storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY)).toBe(generation);
+    }
+  });
+
+  test('reuses the persisted value across a renderer reload', () => {
+    const storage = createStorage();
+
+    const first = initializeBrowserStorageGeneration(undefined, storage);
+    const afterReload = initializeBrowserStorageGeneration(undefined, storage);
+
+    expect(afterReload).toBe(first);
+    expect(afterReload).toBe(getBrowserStorageGeneration());
+  });
+
+  test('does not fail startup when browser storage is unavailable', () => {
+    const unavailable: BrowserStoragePersistence = {
+      getItem(_key: string): string | null {
+        throw new Error('storage unavailable');
+      },
+      removeItem(_key: string): void {
+        throw new Error('storage unavailable');
+      },
+      setItem(_key: string, _value: string): void {
+        throw new Error('storage unavailable');
+      },
+    };
+
+    const generation = initializeBrowserStorageGeneration(undefined, unavailable);
+
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(generation)).toBe(true);
+    expect(generation).toBe(generation.toLowerCase());
   });
 });

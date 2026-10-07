@@ -19,7 +19,12 @@ import { getBaseUrl } from '@/common/adapter/httpBridge';
  * auth: the desktop is single-user and must not show the login screen.
  */
 export const isDesktopShell = (): boolean => {
-  return typeof window !== 'undefined' && Boolean((window as { __backendPort?: number }).__backendPort);
+  if (typeof window === 'undefined') return false;
+  if (Boolean((window as { __backendPort?: number }).__backendPort)) return true;
+  const dev = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV;
+  return Boolean(
+    dev && new URLSearchParams(window.location.search).get('__desktopPreview') === '1'
+  );
 };
 
 /**
@@ -75,7 +80,7 @@ function isAbsoluteAssetUrl(url: string): boolean {
  *
  * Keyed on `isDesktopShell()` (the `__backendPort` signal) — the Tauri renderer
  * is not same-origin with the backend, so without this expansion every
- * backend-relative asset (agent/model logos, extension icons) would point at
+ * backend-relative asset (agent/model logos and managed product assets) would point at
  * the dev/static server instead of the backend and fail to load.
  */
 export const resolveBackendAssetUrl = (url: string | undefined): string | undefined => {
@@ -85,18 +90,6 @@ export const resolveBackendAssetUrl = (url: string | undefined): string | undefi
     return isDesktopShell() ? `${getBaseUrl()}${url}` : url;
   }
   return url;
-};
-
-/**
- * Resolve an extension asset URL for the current environment.
- * Backend-managed extension assets are already emitted as HTTP URLs, so this
- * helper resolves app-relative backend paths into absolute backend URLs when
- * the desktop renderer is not same-origin with the backend process.
- *
- * 将扩展资源 URL 转换为当前环境可用的地址
- */
-export const resolveExtensionAssetUrl = (url: string | undefined): string | undefined => {
-  return resolveBackendAssetUrl(url);
 };
 
 /**

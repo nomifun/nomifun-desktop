@@ -5,7 +5,7 @@
 //! agent CLI (claude/codex/gemini) needs a stdio MCP server it spawns
 //! `current_exe() <subcommand>`, which is whichever host binary is running.
 //! Every host must therefore honor these subcommands or the injected tools
-//! (`requirement_complete`, knowledge, gateway, open, or computer) never
+//! (`requirement_complete`, knowledge, gateway, or open) never
 //! appear in the session — the "single-binary model". `nomicore` dispatches
 //! them via clap; the embedded hosts call [`run_mcp_stdio_subcommand_if_present`]
 //! at the very top of `main`.
@@ -35,7 +35,6 @@ pub fn is_mcp_stdio_cli_command(command: Option<&Command>) -> bool {
                 | Command::McpKnowledgeStdio
                 | Command::McpGatewayStdio
                 | Command::McpOpenStdio
-                | Command::McpComputerStdio
         )
     )
 }
@@ -48,7 +47,6 @@ const MCP_STDIO_SUBCOMMANDS: &[&str] = &[
     "mcp-knowledge-stdio",
     "mcp-gateway-stdio",
     "mcp-open-stdio",
-    "mcp-computer-stdio",
 ];
 
 /// The `terminal-hook` subcommand string. Dispatched alongside MCP bridges (same
@@ -86,7 +84,6 @@ pub fn run_mcp_stdio_subcommand_if_present() -> Option<ExitCode> {
                 "mcp-knowledge-stdio" => super::run_knowledge_stdio().await,
                 "mcp-gateway-stdio" => super::run_gateway_stdio().await,
                 "mcp-open-stdio" => super::run_open_stdio().await,
-                "mcp-computer-stdio" => super::run_computer_stdio().await,
                 // Unreachable: `which` came from `mcp_stdio_subcommand`.
                 other => unreachable!("unclassified mcp stdio subcommand: {other}"),
             }
@@ -148,10 +145,6 @@ mod tests {
             mcp_stdio_subcommand(Some("mcp-open-stdio")),
             Some("mcp-open-stdio")
         );
-        assert_eq!(
-            mcp_stdio_subcommand(Some("mcp-computer-stdio")),
-            Some("mcp-computer-stdio")
-        );
     }
 
     #[test]
@@ -204,7 +197,6 @@ mod tests {
                             | Command::McpKnowledgeStdio
                             | Command::McpGatewayStdio
                             | Command::McpOpenStdio
-                            | Command::McpComputerStdio
                     )
                 ),
                 "'{sub}' parsed but not to an MCP stdio command"

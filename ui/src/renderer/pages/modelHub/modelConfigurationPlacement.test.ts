@@ -71,4 +71,17 @@ describe('model-owned tool configuration placement', () => {
     expect(source.includes("navigate('/mcp')")).toBe(true);
     expect(source.includes('/settings/capabilities?tab=tools')).toBe(false);
   });
+
+  test('exact model links open the requested editor and rows expose negative technical evidence', () => {
+    const providerSource = readSource(
+      '../../components/settings/SettingsModal/contents/ModelModalContent.tsx'
+    );
+    const modalitySource = readSource('./ModalityModelsPanel.tsx');
+
+    expect(providerSource.includes('modelConfigurationTarget(searchParams)')).toBe(true);
+    expect(providerSource.includes('configurationTarget.model === model')).toBe(true);
+    expect(providerSource.includes('withoutModelConfigurationTarget(searchParams)')).toBe(true);
+    expect(modalitySource.includes('unsupported_technical_capabilities')).toBe(true);
+    expect(modalitySource.includes("functionCallingUnsupported")).toBe(true);
+  });
 });

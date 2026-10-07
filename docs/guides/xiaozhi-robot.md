@@ -12,6 +12,14 @@ to your desktop over the LAN instead of using the default `xiaozhi.me` service.
 
 ## What You Need
 
+Once paired, a robot continues its companion's existing desktop conversation, using the same persona, Agent settings, memory and knowledge bindings. Pairing and reconnecting do not create a separate robot conversation or Agent.
+
+Use the device button in the companion conversation header to select the desktop control target. A single paired device is selected automatically; multiple devices require an explicit choice. Desktop replies remain silent by default. After allowing desktop playback in device settings, **Play latest reply on this device** plays an existing reply without generating a new answer.
+
+Device settings show the permissions supported by the connected firmware. Photos, movement and extension tools require their respective permissions. Continuous observation requires an additional permission and remains scoped to the current conversation turn. Revoking permissions, unpairing or disconnecting invalidates earlier device authority. Photos and observations are attached to the originating conversation message.
+
+This version uses a fresh robot data baseline and does not migrate old robot threads, Agent bindings or messages.
+
 - The [NomiFun desktop app](https://github.com/nomifun/nomifun-desktop) running
   on a computer connected to the same LAN as the robot.
 - A compatible XiaoZhi firmware build. The

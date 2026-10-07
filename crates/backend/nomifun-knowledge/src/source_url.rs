@@ -45,13 +45,69 @@ pub struct FetchedPage {
     pub truncated: bool,
 }
 
-/// Page-fetching seam for knowledge URL sources (same late-wire pattern as
-/// [`crate::autogen::KnowledgeCompleter`]). The knowledge crate ships the
-/// trait plus its HTTP implementation ([`HttpFetcher`]); a heavier
-/// browser-rendering backend (`BrowserFetcher`) lives in `nomifun-ai-agent`
-/// and is late-wired via [`crate::service::KnowledgeService::with_url_fetcher`],
-/// so the knowledge crate never gains a browser-engine dependency (the P3
-/// anti-cycle decision ②).
+/// Typed request for the Knowledge-owned headless rendering service.
+///
+/// The request intentionally contains only the source URL. Provider
+/// selection, operation admission, resource binding, and browser lifecycle
+/// belong to the injected port implementation; Knowledge must not carry a
+/// browser runtime or provider-specific handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRenderContentRequest {
+    pub url: String,
+}
+
+impl BrowserRenderContentRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+}
+
+/// Typed result returned by the Knowledge-owned headless renderer. The
+/// service returns raw rendered HTML; Knowledge owns the
+/// HTML-to-Markdown projection used by snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRenderContent {
+    pub final_url: String,
+    pub html: String,
+    pub html_truncated: bool,
+}
+
+/// Consumer-owned port for the Knowledge headless rendering service.
+///
+/// Implementations are expected to dispatch through the resolved Provider
+/// selected for the non-Agent operation. This crate deliberately knows
+/// nothing about browser processes, profiles, or concrete engines.
+#[async_trait::async_trait]
+pub trait BrowserRenderContentPort: Send + Sync {
+    async fn render_content(
+        &self,
+        request: BrowserRenderContentRequest,
+    ) -> Result<BrowserRenderContent, AppError>;
+}
+
+/// Default port used until the application composition root wires the
+/// canonical Browser operation. It is deliberately an error, never an HTTP
+/// fallback or a synthetic rendered result.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableBrowserRenderContentPort;
+
+#[async_trait::async_trait]
+impl BrowserRenderContentPort for UnavailableBrowserRenderContentPort {
+    async fn render_content(
+        &self,
+        _request: BrowserRenderContentRequest,
+    ) -> Result<BrowserRenderContent, AppError> {
+        Err(AppError::Conflict(
+            "Knowledge headless rendering is unavailable; configure its service port"
+                .into(),
+        ))
+    }
+}
+
+/// Page-fetching seam for ordinary (non-rendered) knowledge URL sources.
+/// The knowledge crate ships the trait plus its HTTP implementation
+/// ([`HttpFetcher`]); it is not a substitute for the canonical
+/// `BrowserRenderContentPort`.
 #[async_trait::async_trait]
 pub trait PageFetcher: Send + Sync {
     /// Fetch `raw_url` and return its markdown body (+ title / final URL /
@@ -145,6 +201,25 @@ impl HttpFetcher {
             markdown,
             truncated: response.truncated,
         })
+    }
+}
+
+/// Convert a canonical Browser render result into the common page shape used
+/// by snapshot preparation. The markdown projection remains owned by
+/// Knowledge rather than by a Browser Provider.
+pub fn rendered_content_to_page(content: BrowserRenderContent) -> FetchedPage {
+    let (title, markdown) = html_to_markdown(&content.html);
+    let markdown_truncated = markdown.len() > FETCH_MAX_BYTES;
+    let markdown = if markdown_truncated {
+        truncate_to_bytes(&markdown, FETCH_MAX_BYTES).to_owned()
+    } else {
+        markdown
+    };
+    FetchedPage {
+        final_url: content.final_url,
+        title,
+        markdown,
+        truncated: content.html_truncated || markdown_truncated,
     }
 }
 
@@ -453,12 +528,82 @@ mod tests {
         HttpFetcher::new().allow_private_for_tests()
     }
 
-    // ── PageFetcher seam ─────────────────────────────────────────────
+    // ── canonical render-content port ────────────────────────────────
 
-    /// A non-HTTP [`PageFetcher`] (returns a canned page without touching the
-    /// network) — proves the trait is object-safe and a custom backend can
-    /// stand in for `HttpFetcher` behind `dyn PageFetcher` (the K2
-    /// `BrowserFetcher` seam).
+    #[tokio::test]
+    async fn unavailable_render_content_port_fails_closed() {
+        let error = UnavailableBrowserRenderContentPort
+            .render_content(BrowserRenderContentRequest::new(
+                "https://example.test/app",
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, AppError::Conflict(message) if message.contains("headless rendering")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rendered_content_projection_preserves_html_truncation() {
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://example.test/app".into(),
+            html: "<html><head><title>Rendered</title></head><body><h1>Body</h1></body></html>"
+                .into(),
+            html_truncated: true,
+        });
+        assert_eq!(page.title.as_deref(), Some("Rendered"));
+        assert!(page.markdown.contains("# Body"), "{}", page.markdown);
+        assert!(page.truncated);
+    }
+
+    #[test]
+    fn rendered_content_projection_uses_shared_html_conversion() {
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://spa.example.test/app".into(),
+            html: "<html><head><title>Rendered title</title><script>noise()</script></head><body><h1>Dynamic body</h1><p>Rendered content</p></body></html>".into(),
+            html_truncated: false,
+        });
+        assert_eq!(page.title.as_deref(), Some("Rendered title"));
+        assert_eq!(page.final_url, "https://spa.example.test/app");
+        assert!(page.markdown.contains("# Dynamic body"));
+        assert!(page.markdown.contains("Rendered content"));
+        assert!(!page.markdown.contains("noise()"));
+        assert!(!page.markdown.contains("<data"));
+        assert!(!page.markdown.contains("[REDACTED"));
+        assert!(!page.truncated);
+    }
+
+    #[test]
+    fn rendered_content_projection_truncates_utf8_markdown() {
+        let body = "中".repeat(FETCH_MAX_BYTES / 3 + 100);
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://example.test/large".into(),
+            html: format!("<html><body><p>{body}</p></body></html>"),
+            html_truncated: false,
+        });
+        assert!(page.truncated);
+        assert!(!page.markdown.is_empty());
+        assert!(page.markdown.len() <= FETCH_MAX_BYTES);
+        assert!(page.markdown.ends_with('中'));
+    }
+
+    #[test]
+    fn rendered_content_projection_handles_missing_title() {
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://example.test/no-title".into(),
+            html: "<html><body><p>No title</p></body></html>".into(),
+            html_truncated: false,
+        });
+        assert!(page.title.is_none());
+        assert!(page.markdown.contains("No title"));
+        assert!(!page.truncated);
+    }
+
+    // ── ordinary PageFetcher seam ────────────────────────────────────
+
+    /// A non-HTTP [`PageFetcher`] returns a canned ordinary page without
+    /// touching the network. Rendered sources use the separate typed port.
     struct CannedFetcher(FetchedPage);
 
     #[async_trait::async_trait]

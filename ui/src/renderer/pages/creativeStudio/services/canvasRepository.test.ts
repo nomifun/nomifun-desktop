@@ -12,10 +12,6 @@ import {
   CreativeCanvasRepositoryError,
   createCreativeCanvasRepository,
 } from './canvasRepository';
-import {
-  sortCreativeCanvasSummaries,
-  upsertCreativeCanvasSummary,
-} from './useCreativeCanvases';
 
 const CANVAS_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f112';
 const canvas = {
@@ -140,24 +136,5 @@ describe('Creative Canvas repository', () => {
       expect(error instanceof CreativeCanvasRepositoryError).toBe(true);
       expect(error).toMatchObject({ kind: 'not-found', status: 404 });
     }
-  });
-});
-
-describe('Creative Canvas hook cache helpers', () => {
-  test('sorts newest first and upserts by authoritative canvas id', () => {
-    const older = {
-      ...canvas,
-      canvasId: '0198f8bb-8424-7b3d-8f17-bc6a1676f113',
-      updatedAt: 100,
-    };
-    expect(
-      sortCreativeCanvasSummaries([older, canvas]).map((item) => item.canvasId)
-    ).toEqual([CANVAS_ID, older.canvasId]);
-    expect(
-      upsertCreativeCanvasSummary(
-        [older, canvas],
-        { ...canvas, title: 'Renamed', updatedAt: 300 }
-      )
-    ).toEqual([{ ...canvas, title: 'Renamed', updatedAt: 300 }, older]);
   });
 });

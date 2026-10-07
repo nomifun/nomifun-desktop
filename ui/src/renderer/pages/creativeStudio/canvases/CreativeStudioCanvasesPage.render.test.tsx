@@ -83,4 +83,16 @@ describe('Creative Studio Canvas library presentation', () => {
     expect(selected.includes('Export selected')).toBe(true);
     expect(selected.includes('Delete selected')).toBe(true);
   });
+
+  test('shows an immediate, named opening state on the selected Canvas card', () => {
+    const canvas = CREATIVE_STUDIO_CANVAS_FIXTURES[0];
+    const html = renderPage({
+      initialSnapshot: { status: 'ready', canvases: [canvas] },
+      openingCanvasId: canvas.canvasId,
+    });
+
+    expect(html.includes('data-canvas-opening="true"')).toBe(true);
+    expect(html.includes('aria-busy="true"')).toBe(true);
+    expect(html.includes(`Opening “${canvas.title}”…`)).toBe(true);
+  });
 });

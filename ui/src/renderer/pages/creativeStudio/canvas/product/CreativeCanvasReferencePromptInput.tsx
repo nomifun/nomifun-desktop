@@ -21,7 +21,7 @@ export interface CreativeCanvasPromptReferenceOption {
   /** Stable canvas node identity. Labels and ordinals are presentation only. */
   nodeId: string;
   label: string;
-  kind?: 'image' | 'text';
+  kind?: 'image' | 'video' | 'text';
   textContent?: string;
   mentionLabel?: string;
   thumbnailUrl?: string | null;
@@ -37,7 +37,7 @@ export interface CreativeCanvasReferencePromptChange {
   mentions: CreativeCanvasPromptMentionBinding[];
 }
 
-export type CreativeCanvasPromptMentionIssueCode =
+type CreativeCanvasPromptMentionIssueCode =
   | 'disconnected'
   | 'reference_disabled'
   | 'text_changed';
@@ -48,7 +48,7 @@ export interface CreativeCanvasPromptMentionIssue {
   reason?: string;
 }
 
-export interface CreativeCanvasReferencePromptLabels {
+interface CreativeCanvasReferencePromptLabels {
   input: string;
   insertReference: string;
   connectedReferences: string;
@@ -62,7 +62,7 @@ export interface CreativeCanvasReferencePromptLabels {
   referenceMentionLabel: (ordinal: number) => string;
 }
 
-export interface CreativeCanvasReferencePromptInputProps {
+interface CreativeCanvasReferencePromptInputProps {
   value: string;
   mentions: readonly CreativeCanvasPromptMentionBinding[];
   /** Pass only references directly connected to the active generation node. */
@@ -886,7 +886,7 @@ const CreativeCanvasReferencePromptInput: React.FC<
                           <span className={styles.thumbnailText}>{reference.textContent}</span>
                         ) : reference.thumbnailUrl || reference.originalUrl ? (
                           <CreativeMediaPreview
-                            kind='image'
+                            kind={reference.kind === 'video' ? 'video' : 'image'}
                             src={reference.originalUrl ?? reference.thumbnailUrl}
                             posterSrc={reference.thumbnailUrl}
                             alt=''

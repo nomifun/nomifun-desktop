@@ -13,7 +13,7 @@ import type { ExportZipFile } from '../types';
 
 export const EXPORT_IO_TIMEOUT_MS = 15000;
 
-export const normalizeZipPath = (value: string): string => value.replace(/\\/g, '/').replace(/^\/+/, '');
+const normalizeZipPath = (value: string): string => value.replace(/\\/g, '/').replace(/^\/+/, '');
 
 export const buildTopicFolderName = (conversation: TChatConversation): string => {
   const safeName = sanitizeFileName(conversation.name || conversation.id);

@@ -108,13 +108,6 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     defaultDesc: '开启、关闭和查看需求 AutoWork 状态。',
   },
   {
-    id: 'idmm',
-    titleKey: 'settings.openCapabilities.domainIdmmTitle',
-    defaultTitle: 'IDMM',
-    descKey: 'settings.openCapabilities.domainIdmmDesc',
-    defaultDesc: '模型调度、活动和智能分配相关能力。',
-  },
-  {
     id: 'cron',
     titleKey: 'settings.openCapabilities.domainCronTitle',
     defaultTitle: '计划任务',
@@ -129,25 +122,11 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     defaultDesc: '读取和维护已接入的 MCP server 配置。',
   },
   {
-    id: 'extension',
-    titleKey: 'settings.openCapabilities.domainExtensionTitle',
-    defaultTitle: '扩展',
-    descKey: 'settings.openCapabilities.domainExtensionDesc',
-    defaultDesc: '扩展包、扩展来源和扩展状态相关能力。',
-  },
-  {
     id: 'skill',
     titleKey: 'settings.openCapabilities.domainSkillTitle',
     defaultTitle: 'Skills',
     descKey: 'settings.openCapabilities.domainSkillDesc',
     defaultDesc: '读取、导入和管理技能包。',
-  },
-  {
-    id: 'hub',
-    titleKey: 'settings.openCapabilities.domainHubTitle',
-    defaultTitle: 'Hub',
-    descKey: 'settings.openCapabilities.domainHubDesc',
-    defaultDesc: '浏览、安装和同步 Hub 能力。',
   },
   {
     id: 'system',
@@ -176,13 +155,6 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     defaultTitle: '频道',
     descKey: 'settings.openCapabilities.domainChannelDesc',
     defaultDesc: '管理 IM 频道、配对、授权用户和伙伴绑定。',
-  },
-  {
-    id: 'confirmation',
-    titleKey: 'settings.openCapabilities.domainConfirmationTitle',
-    defaultTitle: '确认队列',
-    descKey: 'settings.openCapabilities.domainConfirmationDesc',
-    defaultDesc: '读取和处理等待用户确认的动作。',
   },
 ];
 
@@ -260,7 +232,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 icon={<WebPage theme='outline' size='18' fill='currentColor' />}
                 title={t('settings.openCapabilities.webuiTitle', { defaultValue: 'WebUI 远程访问' })}
                 description={t('settings.openCapabilities.webuiDesc', {
-                  defaultValue: '启用后，手机、平板或远程浏览器可以打开 NomiFun。二维码登录和账号密码都在这里处理。',
+                  defaultValue: '启用后，其他电脑上的桌面浏览器可以打开 NomiFun。登录链接和账号密码都在这里处理。',
                 })}
               />
               <div className='mt-14px'>
@@ -274,7 +246,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 title={t('settings.openCapabilities.addressStrategyTitle', { defaultValue: '访问地址策略' })}
                 body={t('settings.openCapabilities.addressStrategyDesc', {
                   defaultValue:
-                    'NomiFun 只展示更可能被手机和局域网设备访问的地址；回环、链路本地、基准测试网段等地址不会进入二维码候选。',
+                    'NomiFun 只展示更可能被局域网电脑访问的地址；回环、链路本地、基准测试网段等地址不会进入登录链接候选。',
                 })}
               />
               <EndpointBlock

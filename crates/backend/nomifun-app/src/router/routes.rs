@@ -8,32 +8,31 @@ use axum::http::Method;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use axum::{Router, middleware};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use nomifun_ai_agent::agent_routes;
-use nomifun_assets::{AssetRouterState, asset_routes};
-use nomifun_preset::preset_routes;
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
+};
+use nomifun_agent_control_plane::AgentControlPlane;
+use nomifun_assets::asset_routes;
 use nomifun_auth::{
-    AuthRouterState, AuthState, InstanceOwnerState, TrustState, auth_middleware, auth_routes,
-    csrf_middleware, require_instance_owner_middleware, require_local_trust_middleware,
-    security_headers_middleware, trust_resolve_middleware,
+    AuthRouterState, AuthState, InstallationTokenTrustState, InstanceOwnerState, TrustState,
+    auth_middleware, auth_routes, csrf_middleware, installation_token_trust_resolve_middleware,
+    require_instance_owner_middleware, require_local_product_trust_middleware,
+    require_local_trust_middleware, security_headers_middleware, trust_resolve_middleware,
 };
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
 use nomifun_customer_service::customer_service_routes;
-use nomifun_miniapp::{miniapp_public_routes, miniapp_routes};
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
-use nomifun_conversation::{
-    conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
-};
 use nomifun_cron::cron_routes;
-use nomifun_extension::{extension_routes, hub_routes, skill_routes};
 use nomifun_file::file_routes;
-use nomifun_idmm::idmm_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
 use nomifun_office::{office_proxy_routes, office_routes};
+use nomifun_skill_library::skill_routes;
 use nomifun_agent_execution::{agent_execution_routes, agent_execution_template_routes};
 use nomifun_realtime::{UserEventEnvelope, WebSocketManager, WsHandlerState, ws_upgrade_handler};
 use nomifun_requirement::requirement_routes;
@@ -46,6 +45,7 @@ use crate::services::AppServices;
 
 use super::computer_permissions::{
     computer_permission_status, open_permission_settings, request_computer_permission,
+    request_system_permission, system_permission_status,
 };
 use super::health::{
     health_check, knowledge_global_status_handler, mcp_register_template_handler,
@@ -53,8 +53,32 @@ use super::health::{
     unregister_knowledge_global_handler,
 };
 use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
-use super::state::{ModuleStates, build_module_states, build_ws_state};
+use super::idmm::idmm_routes;
+use super::state::{ModuleStates, try_build_module_states, build_ws_state};
 use super::trace::with_access_log;
+
+
+struct GatewayCatalogAdmission {
+    control_plane: Arc<AgentControlPlane>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_gateway::CapabilityAdmissionPort for GatewayCatalogAdmission {
+    async fn admit(
+        &self,
+        capability: CapabilityRef,
+        consumer: CapabilityConsumer,
+    ) -> Result<CapabilityOperationLock, nomifun_gateway::CapabilityAdmissionError> {
+        self.control_plane
+            .resolve_capability(&capability, consumer)
+            .map_err(|error| {
+                nomifun_gateway::CapabilityAdmissionError::new(
+                    error.code().as_ref(),
+                    error.to_string(),
+                )
+            })
+    }
+}
 
 async fn forward_instance_events(
     mut receiver: tokio::sync::broadcast::Receiver<nomifun_api_types::WebSocketMessage<serde_json::Value>>,
@@ -93,9 +117,6 @@ async fn forward_user_events(
                 // invalidation contains no inventory data: every connection
                 // can safely receive it and refresh its own authenticated
                 // snapshot. Sending directly avoids the already-lagged bus.
-                // Backward-compatible clients refresh on every inventory event;
-                // marker-aware clients explicitly classify this as a resync.
-                //
                 // Coalesced (F61): a sustained burst of unrelated events (
                 // terminal scrollback, agent step updates) produces repeated
                 // lag errors; without coalescing every one became another
@@ -120,10 +141,9 @@ const RESYNC_COALESCE_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// clients that refetched on the previous resync still learn about events
 /// dropped after it.
 ///
-/// Each firing broadcasts TWO frames: the legacy
-/// `browser.inventory.changed` invalidation (backward compat — older clients
-/// only refresh browser inventory on it) and the generic
-/// `sync.resync-required` marker every domain UI can consume.
+/// Each firing broadcasts the generic `sync.resync-required` marker consumed
+/// by the shared client bridge. Retired browser-inventory clients no longer
+/// have a second compatibility event.
 #[derive(Clone)]
 struct LagResyncCoalescer {
     ws_manager: Arc<WebSocketManager>,
@@ -185,12 +205,8 @@ impl LagResyncCoalescer {
         });
     }
 
-    /// One coalesced firing: legacy inventory invalidation first, then the
-    /// generic resync marker, so old clients act on the first frame and
-    /// marker-aware clients on the second.
+    /// One coalesced firing for every connected client.
     fn broadcast_resync(&self, skipped: u64) {
-        self.ws_manager
-            .broadcast_all(crate::browser_inventory_events::browser_inventory_resync_event(skipped));
         self.ws_manager
             .broadcast_all(nomifun_api_types::WebSocketMessage::new(
                 "sync.resync-required",
@@ -215,32 +231,71 @@ fn protect_instance_owner(
         .route_layer(from_fn_with_state(auth_state.clone(), auth_middleware))
 }
 
-/// Create the application router with all routes and global middleware.
+/// Add installation-token resolution outside the normal owner/JWT gates.
+///
+/// The resolver is intentionally non-authoritative for unknown tokens: normal
+/// JWT authentication remains available where the enclosed route group allows
+/// it. Product-local write groups additionally use
+/// `require_local_product_trust_middleware` to reject an ordinary JWT.
+fn admit_headless_installation_owner(
+    router: Router,
+    state: &InstallationTokenTrustState,
+) -> Router {
+    router.route_layer(from_fn_with_state(
+        state.clone(),
+        installation_token_trust_resolve_middleware,
+    ))
+}
+
+fn is_plugin_surface_asset_path(path: &str) -> bool {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    matches!(segments.next(), Some("api"))
+        && matches!(segments.next(), Some("plugins" | "plugin-drafts"))
+        && segments.next().is_some()
+        && matches!(segments.next(), Some("surface"))
+        && matches!(segments.next(), Some("assets"))
+}
+
+/// Fallible Nomi-core router assembly with the current product routes
+/// and global middleware.
 ///
 /// Middleware stack (outermost → innermost):
 /// 1. Security response headers (X-Frame-Options, etc.)
 /// 2. CSRF protection (Double Submit Cookie)
 /// 3. Route handlers (auth routes + system routes + conversation routes + file routes + health check)
-pub async fn create_router(services: &AppServices) -> Router {
+pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router> {
     let boot = Instant::now();
-    tracing::info!("startup: router assembly started");
+    tracing::info!("startup: Nomi-core router assembly started");
 
     // Bridge event bus → WebSocket manager: forward all broadcast events
     // to connected WebSocket clients.
     let event_rx = services.event_bus.subscribe();
     let ws_manager = services.ws_manager.clone();
-    tokio::spawn(forward_instance_events(
-        event_rx,
-        ws_manager,
-        services.authoritative_user_id.clone(),
-    ));
+    let authoritative_user_id = services.authoritative_user_id.clone();
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = forward_instance_events(
+                event_rx,
+                ws_manager,
+                authoritative_user_id,
+            ) => {}
+        }
+    }));
 
     // User-scoped events travel on a separate internal channel. Server-side
     // observers can subscribe without exposing those events to other users,
     // while this bridge delivers each envelope only to its authenticated owner.
     let user_event_rx = services.event_bus.subscribe_user();
     let ws_manager = services.ws_manager.clone();
-    tokio::spawn(forward_user_events(user_event_rx, ws_manager));
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = forward_user_events(user_event_rx, ws_manager) => {}
+        }
+    }));
     match services.knowledge_service.drain_pending_tree_events().await {
         Ok(published) if published > 0 => {
             tracing::info!(published, "startup: published pending knowledge-tree events");
@@ -254,7 +309,7 @@ pub async fn create_router(services: &AppServices) -> Router {
         }
     }
 
-    let (states, channel_components) = build_module_states(services).await;
+    let (states, channel_components) = try_build_module_states(services).await?;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: module states built"
@@ -264,17 +319,19 @@ pub async fn create_router(services: &AppServices) -> Router {
     // The gateway server itself started inside `AppServices::from_config`
     // (before the agent factory, which carries its connection config).
     //
-    // requirement_service / auto_work_runner / idmm_service come from the
-    // ROUTER STATES (not the bare singletons): those instances carry the
-    // conversation-service / terminal-driver attachments the gateway's
-    // autowork + idmm tools need, and share the live loop maps with the REST
-    // routes so a gateway toggle and a UI toggle act on the same state.
-    let gateway_deps = Arc::new(nomifun_gateway::GatewayDeps {
+    // Only retained product-management domains are injected. Requirements,
+    // AutoWork, Schedule and IDMM are no longer broad Gateway Agent tools;
+    // their exact Module/Action or platform owners live outside this host.
+    let gateway_deps = Arc::new(nomifun_gateway::CompatibilityCapabilityHost {
         authoritative_user_id: services.authoritative_user_id.clone(),
-        conversation_service: states.conversation.service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-        cron_service: states.cron.cron_service.clone(),
-        requirement_service: states.requirement.requirement_service.clone(),
+        capability_admission: Arc::new(GatewayCatalogAdmission {
+            control_plane: states.nomi_core_agent_api.control_plane.clone(),
+        }),
+        conversation: Arc::new(
+            super::nomi_core_session::GatewayAgentSessionCapabilityPort::new(
+                states.nomi_core_agent_api.clone(),
+            ),
+        ),
         companion_service: services.companion_service.clone(),
         terminal_service: services.terminal_service.clone(),
         provider_repo: Arc::new(nomifun_db::SqliteProviderRepository::new(
@@ -288,14 +345,12 @@ pub async fn create_router(services: &AppServices) -> Router {
                 services.database.pool().clone(),
             ),
         ),
-        idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
         // Creative Studio project/asset + generation services: the SAME
         // singletons used by `/api/creative-studio/*`, so Gateway operations and
         // product requests observe one project store and one live task queue.
         workshop_service: services.workshop_service.clone(),
         creation_service: services.creation_service.clone(),
-        auto_work_runner: states.requirement.auto_work_runner.clone(),
         // System domain: reuse the SAME service instances the system routes use
         // (states.system is still owned here; it is moved into `system_routes`
         // later in `create_router_with_states`). A gateway theme/toggle/provider
@@ -311,9 +366,6 @@ pub async fn create_router(services: &AppServices) -> Router {
         file_service: states.file.file_service.clone(),
         shell_service: states.shell.shell_service.clone(),
         mcp_config_service: states.mcp.config_service.clone(),
-        extension_registry: states.extension.registry.clone(),
-        hub_index_manager: states.hub.index_manager.clone(),
-        hub_installer: states.hub.installer.clone(),
         skill_paths: states.skill.skill_paths.clone(),
         agent_service: states.agent.service.clone(),
         client_pref_repo: Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
@@ -322,19 +374,6 @@ pub async fn create_router(services: &AppServices) -> Router {
         // REST, model tools and boot recovery share the same public facade and
         // therefore one scheduler handle map and one durable state machine.
         agent_execution_engine: states.agent_execution.clone(),
-        // Gateway is only an adapter to the one process-wide browser hub. An
-        // unsupported/degraded host leaves this as `None`; it never creates a
-        // fallback BrowserTool/Chromium owner inside the Gateway.
-        #[cfg(feature = "browser-use")]
-        browser_registry: services.browser_session_hub.as_ref().map(|hub| {
-            nomifun_gateway::browser_registry::BrowserRegistry::from_hub(
-                hub.as_ref().clone(),
-            )
-        }),
-        // Computer-use: one shared desktop ComputerTool (no per-companion
-        // isolation — the desktop is a single screen).
-        #[cfg(feature = "computer-use")]
-        computer_registry: Some(nomifun_gateway::computer_registry::ComputerRegistry::new()),
     });
     services.inject_gateway_deps(gateway_deps.clone()).await;
     tracing::info!(
@@ -342,42 +381,29 @@ pub async fn create_router(services: &AppServices) -> Router {
         "startup: gateway MCP deps injected"
     );
 
-    // Start the channel message loop.
-    tokio::spawn(
-        channel_components
-            .message_loop
-            .run(channel_components.message_rx),
-    );
+    // Start the channel message loop. Keep its child relays under the same
+    // process-lifetime cancellation/join boundary.
+    let channel_message_loop = channel_components.message_loop;
+    let mut channel_message_rx = channel_components.message_rx;
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        channel_message_loop
+            .run_with_shutdown(&mut channel_message_rx, shutdown)
+            .await;
+    }));
     // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
-    // envelopes from the same in-process bus the conversation service
+    // envelopes from the same in-process bus the canonical Session owner
     // publishes through, recovers persisted queued prompts on startup, and
     // expires stale ones.
-    tokio::spawn(
-        channel_components
-            .queue_drain
-            .run(services.event_bus.subscribe_user()),
-    );
+    let channel_queue_drain = channel_components.queue_drain;
+    let user_event_rx = services.event_bus.subscribe_user();
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        channel_queue_drain
+            .run_with_shutdown(user_event_rx, shutdown)
+            .await;
+    }));
 
-    // Spec D2: register the delivery-notify observer on the conversation
-    // service instance that executes gateway `nomi_send_to_conversation`
-    // turns (the same instance wired into GatewayDeps above). When a watched
-    // turn completes, the observer injects a receipt message into the
-    // requester session; a channel-bound requester relays the companion's
-    // summary to its IM chat through the standard stream relay.
-    let delivery_notify_observer = Arc::new(crate::delivery_notify::DeliveryNotifyObserver::new(
-        states.conversation.service.clone(),
-        services.agent_runtime_registry.clone(),
-        services.authoritative_user_id.clone(),
-        states.channel.repo.clone(),
-        channel_components.manager.clone()
-            as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
-        channel_components.message_service.pending_decisions(),
-        channel_components.message_service.asset_resolver(),
-    ));
-    states
-        .conversation
-        .service
-        .with_turn_completion_observer(delivery_notify_observer);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel message loop spawned"
@@ -386,11 +412,13 @@ pub async fn create_router(services: &AppServices) -> Router {
     // Restore enabled channel plugins (starts receiving IM messages)
     let chan_mgr = channel_components.manager;
     let chan_factory = channel_components.plugin_factory;
+    services.set_channel_manager(chan_mgr.clone());
     {
         let mgr = chan_mgr.clone();
         let factory = chan_factory.clone();
         let companion_service = services.companion_service.clone();
-        tokio::spawn(async move {
+        let shutdown = services.background_shutdown.clone();
+        services.register_background_task(tokio::spawn(async move {
             // Self-heal ghost owner bindings BEFORE restoring: a channel row
             // bound to a 伙伴 that was deleted before the delete-hook existed
             // (or missed by it) keeps reserving its bot identity
@@ -416,10 +444,16 @@ pub async fn create_router(services: &AppServices) -> Router {
                 mgr.reconcile_orphaned_owners(&live_companions).await;
             }
 
-            if let Err(e) = mgr.restore_plugins(&factory).await {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            if let Err(e) = mgr
+                .restore_plugins_with_shutdown(&factory, shutdown.clone())
+                .await
+            {
                 tracing::warn!(error = %e, "failed to restore channel plugins");
             }
-        });
+        }));
     }
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
@@ -430,10 +464,12 @@ pub async fn create_router(services: &AppServices) -> Router {
     // reconnect budget, leaving DB + frontend claiming "running" for a dead
     // plugin. The watchdog persists the real status, broadcasts the change,
     // and attempts rate-limited automatic restarts.
-    let _channel_watchdog = chan_mgr.spawn_watchdog(
+    let channel_watchdog = chan_mgr.spawn_watchdog_with_shutdown(
         chan_factory,
         nomifun_channel::manager::WatchdogConfig::default(),
+        services.background_shutdown.clone(),
     );
+    services.register_background_task(channel_watchdog);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel plugin watchdog spawned"
@@ -443,54 +479,30 @@ pub async fn create_router(services: &AppServices) -> Router {
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: route tree build started"
     );
-    let router = create_router_with_states(services, states);
-    // Remote capability front door (/mcp): installation-token-authenticated MCP,
-    // projecting the SAME Registry/GatewayDeps as the inward stdio bridge. The
-    // bearer token authenticates the installation owner and never selects a
-    // companion; CallerCtx.companion_id remains None.
-    // `nest` (NOT `merge`) scopes its token-auth layer + fallback to `/mcp` so
-    // it can't hijack the app's global 404 fallback. Mounted only here (the full
-    // app), not in `create_router_with_states`, so test harnesses that call that
-    // directly are unaffected. The LAN listener's host_guard (DNS-rebind) still
-    // wraps it at the listener level.
-    let remote_mcp_admission =
-        nomifun_public::RemoteMcpSessionAdmissionAuthority::for_gateway(
-            gateway_deps.as_ref(),
-        );
-    let router = router.nest(
-        "/mcp",
-        nomifun_public::public_mcp_router_with_admission(
-            gateway_deps.clone(),
-            services.instance_token_validator.clone(),
-            None,
-            remote_mcp_admission.clone(),
-        ),
-    );
-    // Curated "agent" profile endpoint — a tight do-work tool list for external
-    // task-delegation agents (sibling of /mcp to avoid the catch-all conflict).
-    let router = router.nest(
-        "/mcp-agent",
-        nomifun_public::public_mcp_router_with_admission(
-            gateway_deps.clone(),
-            services.instance_token_validator.clone(),
-            Some(nomifun_public::AGENT_PROFILE_DOMAINS),
-            remote_mcp_admission,
-        ),
-    );
-    // REST /v1 adapter (human/script-facing), same registry + instance token,
-    // also scoped via nest. Supports ?profile=agent.
-    let router = router.nest(
-        "/v1",
-        nomifun_public::public_rest_router(
-            gateway_deps,
-            services.instance_token_validator.clone(),
-        ),
+    let ws_state = build_ws_state(services);
+    let remote_auth_admission =
+        Arc::new(nomifun_auth::RemoteAuthAdmissionFence::new());
+    let router = create_nomi_core_router_with_all_state(
+        services,
+        states,
+        ws_state,
+        remote_auth_admission.clone(),
     );
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
-        "startup: router assembly completed"
+        "startup: Nomi-core route assembly completed"
     );
-    router
+    Ok(router)
+}
+
+/// Create the current Nomi-core product router.
+///
+/// All compiled-in Engines share this application graph and its Conversation
+/// owner; an Engine does not select or construct a second product host.
+pub async fn create_router(services: &AppServices) -> Router {
+    try_create_router(services)
+        .await
+        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"))
 }
 
 #[cfg(test)]
@@ -513,17 +525,10 @@ mod realtime_bridge_tests {
         serde_json::from_str(&text).expect("forwarded websocket event must be valid JSON")
     }
 
-    /// Each coalesced firing emits the backward-compatible inventory
-    /// invalidation first, then the generic resync marker.
-    async fn receive_resync_pair(
+    async fn receive_resync(
         receiver: &mut mpsc::Receiver<WsOutbound>,
         expected_skipped: u64,
     ) {
-        let inventory = receive_event(receiver).await;
-        assert_eq!(inventory.name, "browser.inventory.changed");
-        assert_eq!(inventory.data["change_kind"], "resync_required");
-        assert_eq!(inventory.data["skipped"], expected_skipped);
-
         let generic = receive_event(receiver).await;
         assert_eq!(generic.name, "sync.resync-required");
         assert_eq!(generic.data["scope"], "all");
@@ -546,7 +551,7 @@ mod realtime_bridge_tests {
         coalescer.on_lag(2);
         coalescer.on_lag(3);
 
-        receive_resync_pair(&mut client_rx, 1).await;
+        receive_resync(&mut client_rx, 1).await;
         assert!(
             client_rx.try_recv().is_err(),
             "suppressed lags must not broadcast before the interval boundary"
@@ -554,7 +559,7 @@ mod realtime_bridge_tests {
 
         // The scheduled trailing task fires at the interval boundary and no
         // invalidation is lost: the suppressed counts accumulate into it.
-        receive_resync_pair(&mut client_rx, 5).await;
+        receive_resync(&mut client_rx, 5).await;
         assert!(
             client_rx.try_recv().is_err(),
             "three lag errors must produce exactly two coalesced firings"
@@ -563,7 +568,7 @@ mod realtime_bridge_tests {
         // A later lag (outside the interval) broadcasts immediately again.
         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         coalescer.on_lag(7);
-        receive_resync_pair(&mut client_rx, 7).await;
+        receive_resync(&mut client_rx, 7).await;
     }
 
     #[tokio::test]
@@ -586,8 +591,8 @@ mod realtime_bridge_tests {
 
         // Instance-bus lag drops instance-scoped events too, so every client
         // gets the same coalesced invalidation as on user-bus lag.
-        receive_resync_pair(&mut client_rx, 1).await;
-        receive_resync_pair(&mut other_rx, 1).await;
+        receive_resync(&mut client_rx, 1).await;
+        receive_resync(&mut other_rx, 1).await;
 
         // The bridge then continues from the newest event, still scoped to
         // the authoritative user.
@@ -607,11 +612,11 @@ mod realtime_bridge_tests {
         // on scheduling rather than the resync contract.
         let bus = Arc::new(BroadcastEventBus::new(1));
         let receiver = bus.subscribe_user();
-        // This first inventory event is observed before the later burst makes
-        // the receiver lag. It models an already-open browser page.
+        // Observe one ordinary owner event before the later burst makes the
+        // receiver lag.
         bus.send_to_user(
             "owner-a",
-            WebSocketMessage::new("browser.inventory.changed", json!({"sequence": 1})),
+            WebSocketMessage::new("before-lag", json!({"sequence": 1})),
         );
 
         let manager = Arc::new(WebSocketManager::new());
@@ -622,7 +627,7 @@ mod realtime_bridge_tests {
         let task = tokio::spawn(forward_user_events(receiver, manager));
 
         let initial = receive_event(&mut owner_rx).await;
-        assert_eq!(initial.name, "browser.inventory.changed");
+        assert_eq!(initial.name, "before-lag");
         assert!(other_rx.try_recv().is_err());
 
         // Pause the task so a deterministic capacity overflow occurs after it
@@ -642,15 +647,9 @@ mod realtime_bridge_tests {
         manager.add_client("owner-b".into(), "token-b".into(), other_tx);
         let task = tokio::spawn(forward_user_events(receiver, manager));
 
-        // Both clients receive the invalidation pair; neither frame carries
-        // any inventory data from the dropped envelopes.
+        // Both clients receive the generic invalidation; it carries no data
+        // from the dropped envelopes.
         for rx in [&mut owner_rx, &mut other_rx] {
-            let inventory = receive_event(rx).await;
-            assert_eq!(inventory.name, "browser.inventory.changed");
-            assert_eq!(inventory.data["change_kind"], "resync_required");
-            assert_eq!(inventory.data["resync_required"], true);
-            assert!(inventory.data.get("sequence").is_none());
-
             let generic = receive_event(rx).await;
             assert_eq!(generic.name, "sync.resync-required");
             assert_eq!(generic.data["scope"], "all");
@@ -683,6 +682,20 @@ pub fn create_router_with_all_state(
     states: ModuleStates,
     ws_state: WsHandlerState,
 ) -> Router {
+    create_nomi_core_router_with_all_state(
+        services,
+        states,
+        ws_state,
+        Arc::new(nomifun_auth::RemoteAuthAdmissionFence::new()),
+    )
+}
+
+fn create_nomi_core_router_with_all_state(
+    services: &AppServices,
+    states: ModuleStates,
+    ws_state: WsHandlerState,
+    remote_auth_admission: Arc<nomifun_auth::RemoteAuthAdmissionFence>,
+) -> Router {
     let boot = Instant::now();
     tracing::info!("startup: route tree build with states started");
     services
@@ -703,16 +716,48 @@ pub fn create_router_with_all_state(
     };
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
+    let installation_token_trust_state = InstallationTokenTrustState {
+        validator: services.instance_token_validator.clone(),
+        authoritative_user_id: services.authoritative_user_id.clone(),
+    };
 
-    // LAN robot gateway. Assembled here because this is where the
-    // `ConversationService` the robot sessions dispatch through exists; the two
+    // Current Nomi-core Agent Settings/AgentSession/Remote surface.  This is
+    // deliberately built from the shared NomiCoreSessionOwner and the
+    // app-local persistent control plane; it does not mount the Fresh-v4
+    // AgentPlatform or its Codex runtime.
+    let nomi_core_agent_authenticated = protect_instance_owner(
+        super::nomi_core_session::build_nomi_core_agent_router(
+            states.nomi_core_agent_api.clone(),
+        ).merge(super::plugin_development::preflight_routes(states.nomi_core_agent_api.clone())),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+    let idmm_authenticated = protect_instance_owner(
+        idmm_routes(states.idmm.clone()),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+    let nomi_core_remote_authenticated =
+        super::nomi_core_session::build_nomi_core_remote_router(
+            states.nomi_core_agent_api.clone(),
+            services.instance_token_validator.clone(),
+            services.authoritative_user_id.clone(),
+            services.jwt_service.clone(),
+            services.user_repo.clone(),
+        );
+    let nomi_core_remote_mcp = super::nomi_core_remote_mcp::build(
+        states.nomi_core_agent_api.clone(),
+        services.instance_token_validator.clone(),
+        services.authoritative_user_id.clone(),
+    );
+
+    // LAN robot gateway. Assembled here with the canonical Session owner; the two
     // faces are mounted separately below because they belong in different
     // middleware groups.
     let robot_faces = services.robot.as_ref().map(|robot| {
         crate::robot_wiring::mount(
             robot,
-            states.conversation.service.clone(),
-            services.agent_runtime_registry.clone(),
+            states.nomi_core_agent_api.session_owner.clone(),
             services.companion_service.clone(),
             services.authoritative_user_id.clone(),
             services.data_dir.clone(),
@@ -725,6 +770,7 @@ pub fn create_router_with_all_state(
         provider_repo: services.provider_repo.clone(),
         token_repo: services.instance_token_repo.clone(),
         token_validator: services.instance_token_validator.clone(),
+        admission: remote_auth_admission,
     };
 
     // System routes protected by auth middleware
@@ -734,19 +780,21 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Conversation routes protected by auth middleware
-    let conversation_authenticated = conversation_routes(states.conversation.clone())
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-
-    let creative_studio_agent_session_authenticated = protect_instance_owner(
-        creative_studio_agent_session_routes(states.conversation.clone()),
+    // Canonical AgentSession and resource routes are mounted from the
+    // Nomi-core router. Retired `/api/conversations/*` routes stay unreachable.
+    #[cfg(feature = "browser-use")]
+    let browser_resource_authenticated = protect_instance_owner(
+        crate::router::browser_workspace::routes(crate::router::browser_workspace::BrowserResourceApiState {
+            resources: services.browser_resources.clone(),
+            attached_chrome: services.attached_chrome.clone(),
+            sessions: states.nomi_core_agent_api.session_owner.canonical().clone(),
+            data_dir: services.data_dir.clone(),
+            operation_locks: states.nomi_core_agent_api.session_owner.session_operation_locks(),
+            close_owner: states.nomi_core_agent_api.browser_user_close.clone(),
+        }).route_layer(middleware::from_fn(require_local_trust_middleware)),
         &auth_mw_state,
         &instance_owner_state,
     );
-
-    let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-
     // SSH host book (owner-only): saved connection profiles + test-connection.
     let ssh_host_authenticated = protect_instance_owner(
         nomifun_ssh::ssh_host_routes(states.ssh_host),
@@ -754,14 +802,26 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // 小程序 (mini-app) library (owner-only): metadata CRUD. The document serve
-    // route is split off into `miniapp_public_routes` below and mounted
-    // auth-exempt, because an iframe document load carries no trust header.
-    // `states.miniapp` is cloned so both routers share the one service.
-    let miniapp_authenticated = protect_instance_owner(
-        miniapp_routes(states.miniapp.clone()),
-        &auth_mw_state,
-        &instance_owner_state,
+    // Unified Plugin reads require the installation owner identity. Mutations
+    // additionally require local product trust.
+    let plugin_assets_public = super::plugin::asset_routes(states.plugin.clone());
+    let plugin_read_authenticated = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::plugin::read_routes(states.plugin.clone()),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
+    );
+    let plugin_write_local = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::plugin::write_routes(states.plugin).route_layer(
+                middleware::from_fn(require_local_product_trust_middleware),
+            ),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
     );
 
     // Unified agent listing/refresh/test routes protected by auth middleware
@@ -806,26 +866,14 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Extension routes protected by auth middleware
-    let extension_authenticated = protect_instance_owner(
-        extension_routes(states.extension),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    // Hub routes protected by auth middleware
-    let hub_authenticated = protect_instance_owner(
-        hub_routes(states.hub),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    // Skill routes protected by auth middleware
-    let skill_authenticated = protect_instance_owner(
+    // This router is the explicitly selected Nomi-core composition. Fresh-v4
+    // owns its control-plane routes in its own application router and never
+    // reaches this Nomi-core skill catalog.
+    let skill_authenticated = Some(protect_instance_owner(
         skill_routes(states.skill),
         &auth_mw_state,
         &instance_owner_state,
-    );
+    ));
 
     // Channel routes protected by auth middleware
     let channel_authenticated = protect_instance_owner(
@@ -841,13 +889,6 @@ pub fn create_router_with_all_state(
     // Requirements Platform routes protected by auth middleware
     let requirement_authenticated = protect_instance_owner(
         requirement_routes(states.requirement),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    // IDMM (Intelligent Decision-Making Mode) routes protected by auth middleware
-    let idmm_authenticated = protect_instance_owner(
-        idmm_routes(states.idmm),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -934,21 +975,30 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Preset catalog and resolver routes protected by auth middleware.
-    let preset_authenticated = protect_instance_owner(
-        preset_routes(states.preset),
+    // Host OS permission inventory + prompt (macOS TCC). The canonical system
+    // surface includes microphone, Accessibility and Screen Recording. Keep
+    // the old Computer-only paths as API-compatible aliases while product UI
+    // converges on /api/system/permissions.
+    let system_permissions_read_authenticated = protect_instance_owner(
+        Router::new()
+            .route("/api/system/permissions", get(system_permission_status))
+            .route("/api/computer/permissions", get(computer_permission_status)),
         &auth_mw_state,
         &instance_owner_state,
     );
-
-    // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
-    // handlers probe/trigger the host process's own grants. Auth-gated like the
-    // other diagnostic endpoints. Registered on every build (handlers degrade to
-    // null/no-op off macOS / non-computer-use), so the shared settings UI can
-    // always query without a 404.
-    let computer_permissions_authenticated = protect_instance_owner(
+    // Prompting TCC or opening a host System Settings pane is a local physical
+    // action. A remotely authenticated owner may inspect readiness but cannot
+    // pop UI or mutate privacy state on the host.
+    let system_permissions_write_local = protect_instance_owner(
         Router::new()
-            .route("/api/computer/permissions", get(computer_permission_status))
+            .route(
+                "/api/system/permissions/request",
+                post(request_system_permission),
+            )
+            .route(
+                "/api/system/permissions/open-settings",
+                post(open_permission_settings),
+            )
             .route(
                 "/api/computer/permissions/request",
                 post(request_computer_permission),
@@ -956,7 +1006,8 @@ pub fn create_router_with_all_state(
             .route(
                 "/api/computer/permissions/open-settings",
                 post(open_permission_settings),
-            ),
+            )
+            .route_layer(middleware::from_fn(require_local_trust_middleware)),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1002,26 +1053,19 @@ pub fn create_router_with_all_state(
     // mints a high-entropy, in-memory session capability in the URL path; these
     // routes accept only that revocable capability and never a caller-owned port.
     let office_proxy = office_proxy_routes(states.office);
-    let public_assets = asset_routes(AssetRouterState::default());
+    let public_assets = asset_routes();
     // Figure-image serving — exempt from auth: `<img>`/`new Image()` can't carry
     // the local-trust header, so the desktop webview would 403 every figure
     // thumbnail and the desktop companion would render blank. GET-only, opaque
     // unguessable ids; listing/creation stay authenticated. See `companion_public_routes`.
     let companion_public = companion_public_routes(states.companion);
 
-    // 创意工坊 asset/thumbnail serving — exempt from auth for the same reason as
+    // 创作 asset/thumbnail serving — exempt from auth for the same reason as
     // companion figure images: `<img>`/`<video>` subresource loads can't carry
     // the local-trust header, so an authenticated route would 403 every asset
     // preview and canvas gallery thumbnail. GET-only, opaque bare UUIDv7 asset
     // and canvas ids; listing/upload/mutation stay authenticated.
     let workshop_public = workshop_public_routes(states.workshop);
-
-    // 小程序 document serving — exempt from auth for the same reason as the
-    // workshop binaries: an `<iframe>` document load can't carry the local-trust
-    // header, so an authenticated route would 403 every mini-app the user opens.
-    // GET-only, opaque bare UUIDv7 ids; every metadata read and every write stays
-    // authenticated.
-    let miniapp_public = miniapp_public_routes(states.miniapp);
 
     // WebSocket upgrade route — exempt from CSRF (no cookie-based
     // double-submit) but still gets security response headers.
@@ -1033,90 +1077,45 @@ pub fn create_router_with_all_state(
         "startup: route groups built"
     );
 
-    // Phase 2b: 「登录我的浏览器」——用户一键拉起可见登录浏览器(共享 profile),登录一次后静默会话复用。
-    // 仅 browser-use 构建(需 CDP 引擎);面向桌面(headful 需显示器)。auth 中间件保护(与其它诊断端点同)。
-    #[cfg(feature = "browser-use")]
-    let browser_login_authenticated = {
-        let login_state = crate::router::browser_login::BrowserLoginState::new(
-            services.browser_session_hub.clone(),
-            services.authoritative_user_id.clone(),
-            // Boot-time snapshot source for the effective-source echo (F67);
-            // the same store the composition root froze into the Hub's engine
-            // template at startup.
-            Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                services.database.pool().clone(),
-            ))),
-        );
-        protect_instance_owner(
-            Router::new()
-                .route(
-                    "/api/browser/login/open",
-                    post(crate::router::browser_login::open_browser_login),
-                )
-                .route(
-                    "/api/browser/login/close",
-                    post(crate::router::browser_login::close_browser_login),
-                )
-                .route(
-                    "/api/browser/login/status",
-                    get(crate::router::browser_login::browser_login_status),
-                )
-                .with_state(login_state),
-            &auth_mw_state,
-            &instance_owner_state,
-        )
-    };
 
-    // Browser inventory and lifecycle management are projections over the
-    // process-wide Hub. Page execution remains Agent-only.
-    // The state may deliberately carry `None` while a browser-enabled host is
-    // degraded; handlers then return a stable 501 and never launch a private
-    // fallback engine.
-    #[cfg(feature = "browser-use")]
-    let (browser_management_user_authenticated, browser_management_owner_authenticated) = {
-        let state = crate::router::browser_management::BrowserManagementState::new(
-            services.browser_session_hub.clone(),
-            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                services.database.pool().clone(),
-            )),
-            services.authoritative_user_id.clone(),
-        );
-        let user_routes =
-            crate::router::browser_management::browser_management_user_routes(state.clone())
-                .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-        let owner_routes = protect_instance_owner(
-            crate::router::browser_management::browser_management_owner_routes(state),
-            &auth_mw_state,
-            &instance_owner_state,
-        );
-        (user_routes, owner_routes)
-    };
 
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(auth_routes(auth_state))
         .merge(crate::router::instance_token_routes::instance_token_routes(instance_token_state))
         .merge(system_authenticated)
-        .merge(computer_permissions_authenticated)
+        .merge(system_permissions_read_authenticated)
+        .merge(system_permissions_write_local)
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
-        .merge(conversation_authenticated)
-        .merge(creative_studio_agent_session_authenticated)
-        .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
-        .merge(miniapp_authenticated)
+        .merge(plugin_assets_public)
+        .merge(plugin_read_authenticated)
+        .merge(plugin_write_local)
         .merge(agent_authenticated)
+        .merge(nomi_core_agent_authenticated)
+        .merge(idmm_authenticated)
+        .merge(nomi_core_remote_authenticated)
+        .nest("/mcp", nomi_core_remote_mcp)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
-        .merge(mcp_authenticated)
-        .merge(extension_authenticated)
-        .merge(hub_authenticated)
-        .merge(skill_authenticated)
+        .merge(mcp_authenticated);
+    let router=match states.mobile_voice{
+        Some(mut mobile_voice)=>{
+            mobile_voice.allowed_origins=ws_state.allowed_origins.clone();
+            let voice_media=super::mobile_voice_host::media_routes(mobile_voice.clone());
+            let voice_api=admit_headless_installation_owner(protect_instance_owner(super::mobile_voice_host::routes(mobile_voice),&auth_mw_state,&instance_owner_state),&installation_token_trust_state);
+            router.merge(voice_api).merge(voice_media)
+        },None=>router,
+    };
+    let router = match skill_authenticated {
+        Some(skill) => router.merge(skill),
+        None => router,
+    }
         .merge(channel_authenticated)
         .merge(cron_authenticated)
         .merge(requirement_authenticated)
-        .merge(idmm_authenticated)
         .merge(companion_authenticated)
         .merge(customer_service_authenticated)
         .merge(workshop_authenticated)
@@ -1127,9 +1126,7 @@ pub fn create_router_with_all_state(
         .merge(agent_execution_template_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
-        .merge(shell_authenticated)
-        .merge(preset_authenticated);
-
+        .merge(shell_authenticated);
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.
     let router = match robot_faces.as_ref() {
@@ -1141,12 +1138,8 @@ pub fn create_router_with_all_state(
         None => router,
     };
 
-    // Phase 2b: mount the login-browser routes (browser-use builds only).
     #[cfg(feature = "browser-use")]
-    let router = router
-        .merge(browser_management_user_authenticated)
-        .merge(browser_management_owner_authenticated)
-        .merge(browser_login_authenticated);
+    let router = router.merge(browser_resource_authenticated);
 
     // CSRF (Double Submit Cookie) protects cookie-authenticated (remote
     // browser) requests. It is skipped entirely under NoAuth, and skips
@@ -1165,8 +1158,7 @@ pub fn create_router_with_all_state(
     .merge(office_proxy)
     .merge(public_assets)
     .merge(companion_public)
-    .merge(workshop_public)
-    .merge(miniapp_public);
+    .merge(workshop_public);
 
     // Robot device face. `nest` (not `merge`) scopes it to `/robot`, and it sits
     // in this post-CSRF group on purpose: a robot presents a bearer token minted
@@ -1209,12 +1201,16 @@ pub fn create_router_with_all_state(
     // Permissive CORS for the desktop's own cross-origin webview (its document
     // origin is `tauri://` / `http://tauri.localhost`, not the loopback port).
     // Safe even on the LAN-bound listener: the trust secret rides a header (not
-    // a cookie), so an `Any`-origin attacker page can neither read it nor read
-    // cross-origin responses. Remote browsers are served same-origin and do not
-    // rely on CORS.
+    // a cookie), so an attacker page can neither read it nor read authenticated
+    // cross-origin responses. The one exception is a Plugin Surface asset:
+    // its sandboxed iframe has the opaque `null` origin, and its bearer URL must
+    // never be readable from an ordinary web origin even if that URL leaks.
+    // Remote browsers are served same-origin and do not rely on CORS.
     if services.auth_policy.allows_local_webview() {
         let cors = CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::predicate(|origin, request| {
+                !is_plugin_surface_asset_path(request.uri.path()) || origin.as_bytes() == b"null"
+            }))
             .allow_methods([
                 Method::GET,
                 Method::POST,

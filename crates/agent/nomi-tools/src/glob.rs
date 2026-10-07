@@ -633,6 +633,39 @@ pub struct GlobTool {
 }
 
 impl GlobTool {
+    fn prepare_scan(&self, input: &Value) -> Result<ScanPlan, ToolResult> {
+        let Some(pattern) = input["pattern"].as_str() else {
+            return Err(ToolResult {
+                content: "Missing required parameter: pattern".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        };
+
+        let root = match input.get("path") {
+            None | Some(Value::Null) => ".",
+            Some(Value::String(path)) => path.as_str(),
+            _ => return Err(ToolResult::error("Glob path must be a string")),
+        };
+        if root.len() > MAX_PATH_BYTES {
+            return Err(ToolResult::error(format!(
+                "Glob path exceeds the {MAX_PATH_BYTES} byte safety limit"
+            )));
+        }
+        let root_path = if Path::new(root).is_relative() {
+            self.cwd.join(root)
+        } else {
+            PathBuf::from(root)
+        };
+
+        let plan = match ScanPlan::new(root_path.clone(), pattern) {
+            Ok(plan) => plan,
+            Err(error) => return Err(ToolResult::error(error)),
+        };
+
+        Ok(plan)
+    }
+
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
     }
@@ -684,31 +717,21 @@ impl Tool for GlobTool {
         false
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.prepare_scan(input).map(|_| ()).map_err(|error| error.content)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(pattern) = input["pattern"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: pattern".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
-        };
-
-        let root = input["path"].as_str().unwrap_or(".");
-        if root.len() > MAX_PATH_BYTES {
-            return ToolResult::error(format!(
-                "Glob path exceeds the {MAX_PATH_BYTES} byte safety limit"
-            ));
-        }
-        let root_path = if Path::new(root).is_relative() {
-            self.cwd.join(root)
-        } else {
-            PathBuf::from(root)
-        };
-
-        let plan = match ScanPlan::new(root_path.clone(), pattern) {
+        let plan = match self.prepare_scan(&input) {
             Ok(plan) => plan,
-            Err(error) => return ToolResult::error(error),
+            Err(error) => return error,
         };
+        let pattern = input["pattern"].as_str().expect("validated pattern");
+        let root_path = plan.display_root.clone();
 
         tracing::debug!(
             cwd = %self.cwd.display(),
@@ -950,6 +973,11 @@ mod tests {
         fs::write(tmp.path().join("marker.txt"), "hello").unwrap();
 
         let tool = GlobTool::new(tmp.path().to_path_buf());
+        for path in [json!(false), json!(42), json!(["."])] {
+            let result = tool.execute(json!({"pattern": "marker.txt", "path": path})).await;
+            assert!(result.is_error, "invalid path must not search the default cwd");
+            assert!(result.content.contains("path must be a string"));
+        }
         let input = json!({"pattern": "marker.txt"});
         let result = tool.execute(input).await;
         assert!(!result.is_error, "unexpected error: {}", result.content);

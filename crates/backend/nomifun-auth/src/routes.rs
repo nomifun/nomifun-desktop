@@ -68,11 +68,12 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
     let api_limiter = Arc::new(RateLimiter::api());
     let action_limiter = Arc::new(RateLimiter::authenticated_action());
 
-    // Start periodic cleanup for rate limiters
+    // Start periodic cleanup for rate limiters and expired QR tokens.
     let cleanup_interval = Duration::from_secs(60);
     auth_limiter.start_cleanup_task(cleanup_interval);
     api_limiter.start_cleanup_task(cleanup_interval);
     action_limiter.start_cleanup_task(cleanup_interval);
+    state.qr_token_store.start_cleanup_task(cleanup_interval);
 
     let auth_state = AuthState {
         jwt_service: state.jwt_service.clone(),
@@ -410,18 +411,23 @@ async fn change_password_handler(
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
-    // Rotate JWT secret to invalidate all sessions
+    // Generate the candidate without changing this process's active secret.
     let new_secret = state
         .jwt_service
-        .rotate_secret()
-        .map_err(|e| AppError::Internal(format!("Secret rotation error: {e}")))?;
+        .generate_secret();
 
-    // Persist new secret to database
+    // Persist before installing it locally. If persistence fails, this process
+    // must continue using the old secret rather than diverging from storage.
     state
         .user_repo
         .update_jwt_secret(current_user.id.as_str(), &new_secret)
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+
+    state
+        .jwt_service
+        .install_secret(new_secret)
+        .map_err(|e| AppError::Internal(format!("Secret installation error: {e}")))?;
 
     Ok(Json(ApiResponse::message("Password changed successfully")))
 }
@@ -464,8 +470,7 @@ async fn change_username_handler(
         state
             .user_repo
             .update_username(current_user.id.as_str(), &trimmed)
-            .await
-            .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+            .await?;
     }
 
     Ok(Json(ApiResponse::ok(ChangeUsernameResponse { username: trimmed })))
@@ -721,8 +726,7 @@ async fn webui_change_username_handler(
         state
             .user_repo
             .update_username(user.user_id.as_str(), &trimmed)
-            .await
-            .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+            .await?;
     }
 
     Ok(Json(ApiResponse::ok(WebuiChangeUsernameResponse { username: trimmed })))
@@ -769,4 +773,305 @@ async fn webui_generate_qr_token_handler(
         token,
         expires_at_ms,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::CurrentUser;
+    use nomifun_common::UserId;
+    use nomifun_db::{DbError, models::User};
+    use std::sync::Mutex;
+
+    const TEST_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    struct StubUserRepo {
+        user: User,
+        jwt_service: Arc<JwtService>,
+        old_token: String,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_jwt_persist: bool,
+    }
+
+    fn test_user(password_hash: String) -> User {
+        User {
+            id: 1,
+            user_id: UserId::parse(TEST_USER_ID).unwrap(),
+            username: "admin".to_owned(),
+            email: None,
+            password_hash,
+            avatar_path: None,
+            jwt_secret: None,
+            created_at: 0,
+            updated_at: 0,
+            last_login: None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IUserRepository for StubUserRepo {
+        async fn has_users(&self) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn get_system_user(&self) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn get_primary_webui_user(&self) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_credentials(&self, _: &str, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_credentials_if_uninitialized(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_password_if_uninitialized(&self, _: &str) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _: &str, _: &str) -> Result<User, DbError> {
+            unreachable!()
+        }
+
+        async fn find_by_username(&self, _: &str) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn find_by_id(&self, id: &str) -> Result<Option<User>, DbError> {
+            Ok((id == TEST_USER_ID).then(|| self.user.clone()))
+        }
+
+        async fn list_users(&self) -> Result<Vec<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn count_users(&self) -> Result<i64, DbError> {
+            unreachable!()
+        }
+
+        async fn update_password(&self, _: &str, _: &str) -> Result<(), DbError> {
+            self.events.lock().unwrap().push("password");
+            Ok(())
+        }
+
+        async fn update_username(&self, _: &str, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn update_jwt_secret(&self, _: &str, _: &str) -> Result<(), DbError> {
+            self.events.lock().unwrap().push("jwt");
+            assert!(
+                self.jwt_service.verify(&self.old_token).is_ok(),
+                "the active JWT secret must remain unchanged until persistence succeeds"
+            );
+            if self.fail_jwt_persist {
+                Err(DbError::Init("injected JWT persistence failure".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn test_state(
+        jwt_service: Arc<JwtService>,
+        user_repo: Arc<dyn IUserRepository>,
+    ) -> AuthRouterState {
+        AuthRouterState {
+            jwt_service,
+            user_repo,
+            cookie_config: Arc::new(CookieConfig {
+                secure: false,
+                same_site: "Lax",
+            }),
+            qr_token_store: Arc::new(QrTokenStore::new()),
+        }
+    }
+
+    fn change_password_request() -> Result<Json<ChangePasswordRequest>, JsonRejection> {
+        Ok(Json(ChangePasswordRequest {
+            current_password: "OldP@ssword1".to_owned(),
+            new_password: "NewP@ssword2".to_owned(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn sliding_renewal_respects_logout_cookies_and_revocation() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use nomifun_common::constants::COOKIE_NAME;
+        use nomifun_db::{SqliteUserRepository, init_database_memory};
+        use tower::ServiceExt;
+
+        let db = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteUserRepository::new(db.pool().clone()));
+        let user = repo.get_system_user().await.unwrap().unwrap();
+        let now = (nomifun_common::now_ms() / 1000) as u64;
+        for case in ["logout", "explicit", "unrelated", "revoke", "rotate"] {
+            let jwt = Arc::new(JwtService::new("renewal-test-secret".into()));
+            let token = jwt.sign_with_window(
+                user.user_id.as_str(), &user.username,
+                now - 20 * 86400, now + 10 * 86400,
+            ).unwrap();
+            let state = test_state(jwt.clone(), repo.clone());
+            let auth_state = AuthState {
+                jwt_service: jwt.clone(),
+                user_repo: repo.clone(),
+                cookie_config: state.cookie_config.clone(),
+            };
+            let handler_jwt = jwt.clone();
+            let handler_token = token.clone();
+            let app = Router::new()
+                .route("/logout", post(logout_handler))
+                .route("/test", post(move || {
+                    let jwt = handler_jwt.clone();
+                    let token = handler_token.clone();
+                    async move {
+                        let mut response = Response::new(Body::empty());
+                        response.headers_mut().append(
+                            header::SET_COOKIE, "other-cookie=value; Path=/".parse().unwrap(),
+                        );
+                        match case {
+                            "explicit" => {
+                                response.headers_mut().append(
+                                    header::SET_COOKIE,
+                                    "nomifun-session=handler-token; Path=/".parse().unwrap(),
+                                );
+                            }
+                            "revoke" => jwt.blacklist_token(&token),
+                            "rotate" => jwt.install_secret("rotated-test-secret".into()).unwrap(),
+                            _ => {}
+                        }
+                        response
+                    }
+                }))
+                .route_layer(from_fn_with_state(auth_state, auth_middleware))
+                .with_state(state);
+            let response = app.oneshot(
+                Request::post(if case == "logout" { "/logout" } else { "/test" })
+                    .header(header::COOKIE, format!("{COOKIE_NAME}={token}"))
+                    .body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{case}");
+            let cookies: Vec<_> = response.headers().get_all(header::SET_COOKIE).iter()
+                .map(|value| value.to_str().unwrap())
+                .filter(|cookie| cookie.starts_with("nomifun-session="))
+                .collect();
+            match case {
+                "logout" => {
+                    assert_eq!(cookies.len(), 1);
+                    assert!(cookies[0].contains("Max-Age=0"));
+                    assert!(jwt.verify(&token).is_err());
+                }
+                "explicit" => assert_eq!(cookies, ["nomifun-session=handler-token; Path=/"]),
+                "unrelated" => {
+                    assert_eq!(cookies.len(), 1);
+                    let renewed = cookies[0].split(';').next().unwrap()
+                        .strip_prefix("nomifun-session=").unwrap();
+                    assert_ne!(renewed, token);
+                    assert!(jwt.verify(renewed).is_ok());
+                }
+                _ => assert!(cookies.is_empty(), "{case} must not renew a revoked session"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn username_conflicts_remain_conflicts_for_both_handlers() {
+        use axum::http::StatusCode;
+        use nomifun_db::{SqliteUserRepository, init_database_memory};
+
+        let db = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteUserRepository::new(db.pool().clone()));
+        let hash = hash_password("OldP@ssword1").unwrap();
+        repo.set_system_user_credentials("admin", &hash).await.unwrap();
+        repo.create_user("taken", &hash).await.unwrap();
+        let user = repo.get_system_user().await.unwrap().unwrap();
+        let state = test_state(Arc::new(JwtService::new("test-secret".into())), repo.clone());
+
+        let remote_error = change_username_handler(
+            State(state.clone()),
+            Extension(CurrentUser { id: user.user_id.clone(), username: user.username }),
+            Ok(Json(ChangeUsernameRequest {
+                current_password: "OldP@ssword1".into(), new_username: "taken".into(),
+            })),
+        ).await.unwrap_err();
+        let local_error = webui_change_username_handler(
+            State(state), Ok(Json(WebuiChangeUsernameRequest { new_username: "taken".into() })),
+        ).await.unwrap_err();
+        assert_eq!(remote_error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(local_error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(repo.find_by_id(user.user_id.as_str()).await.unwrap().unwrap().username, "admin");
+    }
+
+    #[tokio::test]
+    async fn change_password_persists_secret_before_installing_it() {
+        let jwt_service = Arc::new(JwtService::new("old-secret".to_owned()));
+        let old_token = jwt_service.sign(TEST_USER_ID, "admin").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let repo = Arc::new(StubUserRepo {
+            user: test_user(hash_password("OldP@ssword1").unwrap()),
+            jwt_service: jwt_service.clone(),
+            old_token: old_token.clone(),
+            events: events.clone(),
+            fail_jwt_persist: false,
+        });
+        let state = test_state(jwt_service.clone(), repo);
+
+        let response = change_password_handler(
+            axum::extract::State(state),
+            Extension(CurrentUser {
+                id: UserId::parse(TEST_USER_ID).unwrap(),
+                username: "admin".to_owned(),
+            }),
+            change_password_request(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.0.message.as_deref(), Some("Password changed successfully"));
+        assert_eq!(&*events.lock().unwrap(), &["password", "jwt"]);
+        assert!(jwt_service.verify(&old_token).is_err());
+    }
+
+    #[tokio::test]
+    async fn change_password_persistence_failure_keeps_old_secret_active() {
+        let jwt_service = Arc::new(JwtService::new("old-secret".to_owned()));
+        let old_token = jwt_service.sign(TEST_USER_ID, "admin").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let repo = Arc::new(StubUserRepo {
+            user: test_user(hash_password("OldP@ssword1").unwrap()),
+            jwt_service: jwt_service.clone(),
+            old_token: old_token.clone(),
+            events,
+            fail_jwt_persist: true,
+        });
+        let state = test_state(jwt_service.clone(), repo);
+
+        let error = change_password_handler(
+            axum::extract::State(state),
+            Extension(CurrentUser {
+                id: UserId::parse(TEST_USER_ID).unwrap(),
+                username: "admin".to_owned(),
+            }),
+            change_password_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::Internal(message) if message.contains("Database error")));
+        assert!(jwt_service.verify(&old_token).is_ok());
+    }
 }

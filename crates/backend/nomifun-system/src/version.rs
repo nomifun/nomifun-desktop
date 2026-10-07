@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use nomifun_api_types::{GitHubReleaseAsset, UpdateCheckRequest, UpdateCheckResult, UpdateReleaseInfo};
 use nomifun_common::AppError;
@@ -52,19 +53,22 @@ impl VersionCheckService {
 
     /// Check for updates against GitHub Releases.
     pub async fn check_update(&self, req: &UpdateCheckRequest) -> Result<UpdateCheckResult, AppError> {
-        let repo = resolve_repo(req.repo.as_deref());
-        let releases = self.fetch_releases(&repo).await?;
-
         let current = parse_version(&self.current_version)
             .ok_or_else(|| AppError::Internal(format!("invalid current version: {}", self.current_version)))?;
+        let repo = resolve_repo(req.repo.as_deref(), || std::env::var("NOMIFUN_GITHUB_REPO").ok());
+        validate_repo(&repo)?;
+        // Bound the complete paginated check without overriding a caller's
+        // shorter HTTP-client timeout.
+        let releases = tokio::time::timeout(Duration::from_secs(30), self.fetch_releases(&repo))
+            .await
+            .map_err(|_| AppError::BadGateway("GitHub API check timed out".to_owned()))??;
 
-        let platform = crate::sysinfo::get_system_info();
         let best = find_best_release(
             &releases,
             &current,
             req.include_prerelease,
-            &platform.platform,
-            &platform.arch,
+            crate::sysinfo::map_platform(std::env::consts::OS),
+            crate::sysinfo::map_arch(std::env::consts::ARCH),
         );
 
         match best {
@@ -105,12 +109,11 @@ impl VersionCheckService {
                 .header("User-Agent", "nomicore")
                 .send()
                 .await
-                .map_err(|e| AppError::BadGateway(format!("GitHub API request failed: {e}")))?;
+                .map_err(|e| AppError::BadGateway(format!("GitHub API request failed: {}", e.without_url())))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AppError::BadGateway(format!("GitHub API returned {status}: {body}")));
+                return Err(AppError::BadGateway(format!("GitHub API returned {status}")));
             }
 
             let has_next = resp
@@ -122,13 +125,12 @@ impl VersionCheckService {
             let batch: Vec<GitHubRelease> = resp
                 .json()
                 .await
-                .map_err(|e| AppError::BadGateway(format!("Failed to parse GitHub releases: {e}")))?;
+                .map_err(|e| AppError::BadGateway(format!("Failed to parse GitHub releases: {}", e.without_url())))?;
 
-            let batch_len = batch.len();
             all_releases.extend(batch);
 
             page += 1;
-            if !has_next || batch_len < PER_PAGE as usize || page > MAX_PAGES {
+            if !has_next || page > MAX_PAGES {
                 break;
             }
         }
@@ -138,18 +140,32 @@ impl VersionCheckService {
 }
 
 /// Resolve the GitHub repo from request or env or default.
-fn resolve_repo(from_request: Option<&str>) -> String {
+fn resolve_repo(from_request: Option<&str>, from_env: impl FnOnce() -> Option<String>) -> String {
     if let Some(r) = from_request
         && !r.is_empty()
     {
         return r.to_owned();
     }
-    if let Ok(v) = std::env::var("NOMIFUN_GITHUB_REPO")
+    if let Some(v) = from_env()
         && !v.is_empty()
     {
         return v;
     }
     DEFAULT_REPO.to_owned()
+}
+
+fn validate_repo(repo: &str) -> Result<(), AppError> {
+    let valid = repo.split_once('/').is_some_and(|(owner, name)| {
+        !owner.is_empty()
+            && owner.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && !matches!(name, "" | "." | "..")
+            && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("repo must be a GitHub owner/repository name".to_owned()))
+    }
 }
 
 /// Parse a version string, stripping a leading `v` if present.
@@ -181,12 +197,16 @@ fn find_best_release(
             Some(v) => v,
             None => continue,
         };
+        if !include_prerelease && !version.pre.is_empty() {
+            continue;
+        }
         // Must be newer than current
-        if version <= *current {
+        // SemVer build metadata does not affect update precedence.
+        if !version.cmp_precedence(current).is_gt() {
             continue;
         }
         // Keep the highest version
-        let dominated = best.as_ref().is_none_or(|(v, _)| version > *v);
+        let dominated = best.as_ref().is_none_or(|(v, _)| version.cmp_precedence(v).is_gt());
         if dominated {
             best = Some((version, release));
         }
@@ -224,38 +244,58 @@ fn find_best_release(
 /// Match the best asset for the given platform and architecture.
 ///
 /// Uses filename heuristics: the asset name should contain a platform
-/// keyword and an architecture keyword.
+/// keyword (or installer extension) and an architecture keyword at boundaries.
+/// Detached signatures and release-lock metadata are not installable assets.
 fn find_recommended_asset(assets: &[GitHubReleaseAsset], platform: &str, arch: &str) -> Option<GitHubReleaseAsset> {
     let platform_keywords = platform_keywords(platform);
     let arch_keywords = arch_keywords(arch);
+    let installer_extensions: &[&str] = match platform {
+        "win32" => &[".exe", ".msi"],
+        "darwin" => &[".dmg"],
+        "linux" => &[".deb", ".rpm", ".appimage"],
+        _ => &[],
+    };
 
     assets
         .iter()
         .find(|a| {
             let name = a.name.to_lowercase();
-            let has_platform = platform_keywords.iter().any(|k| name.contains(k));
-            let has_arch = arch_keywords.iter().any(|k| name.contains(k));
+            if name.ends_with(".sig") || name.ends_with(".release-lock.json") {
+                return false;
+            }
+            let has_platform = platform_keywords.iter().any(|k| filename_has_keyword(&name, k))
+                || installer_extensions.iter().any(|extension| name.ends_with(extension));
+            let has_arch = arch_keywords.iter().any(|k| filename_has_keyword(&name, k))
+                || (platform == "darwin" && matches!(arch, "x64" | "arm64")
+                    && filename_has_keyword(&name, "universal"));
             has_platform && has_arch
         })
         .cloned()
 }
 
+fn filename_has_keyword(name: &str, keyword: &str) -> bool {
+    name.match_indices(keyword).any(|(index, _)| {
+        !name[..index].ends_with(|c: char| c.is_ascii_alphanumeric())
+            && !name[index + keyword.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
+    })
+}
+
 /// Return filename keywords that identify the given platform.
-fn platform_keywords(platform: &str) -> Vec<&'static str> {
+fn platform_keywords(platform: &str) -> &'static [&'static str] {
     match platform {
-        "darwin" => vec!["darwin", "macos", "mac", "osx"],
-        "win32" => vec!["win", "windows"],
-        "linux" => vec!["linux"],
-        _ => vec![],
+        "darwin" => &["darwin", "macos", "mac", "osx"],
+        "win32" => &["win", "win32", "windows"],
+        "linux" => &["linux"],
+        _ => &[],
     }
 }
 
 /// Return filename keywords that identify the given architecture.
-fn arch_keywords(arch: &str) -> Vec<&'static str> {
+fn arch_keywords(arch: &str) -> &'static [&'static str] {
     match arch {
-        "x64" => vec!["x64", "x86_64", "amd64"],
-        "arm64" => vec!["arm64", "aarch64"],
-        _ => vec![],
+        "x64" => &["x64", "x86_64", "amd64"],
+        "arm64" => &["arm64", "aarch64"],
+        _ => &[],
     }
 }
 
@@ -293,20 +333,16 @@ mod tests {
 
     #[test]
     fn test_resolve_repo_from_request() {
-        assert_eq!(resolve_repo(Some("org/repo")), "org/repo");
+        assert_eq!(resolve_repo(Some("org/repo"), || panic!("request wins")), "org/repo");
     }
 
     #[test]
-    fn test_resolve_repo_empty_request() {
-        let result = resolve_repo(Some(""));
-        // Falls back to env or default
-        assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_resolve_repo_none() {
-        let result = resolve_repo(None);
-        assert!(!result.is_empty());
+    fn test_resolve_repo_fallbacks() {
+        for request in [None, Some("")] {
+            assert_eq!(resolve_repo(request, || Some("configured/repo".to_owned())), "configured/repo");
+            assert_eq!(resolve_repo(request, || Some(String::new())), DEFAULT_REPO);
+            assert_eq!(resolve_repo(request, || None), DEFAULT_REPO);
+        }
     }
 
     #[test]
@@ -424,6 +460,7 @@ mod tests {
         let current = semver::Version::new(1, 0, 0);
         let releases = vec![
             make_release("v3.0.0-beta.1", false, true, vec![]),
+            make_release("v4.0.0-beta.1", false, false, vec![]),
             make_release("v2.0.0", false, false, vec![]),
         ];
 
@@ -433,7 +470,7 @@ mod tests {
 
         // With prerelease
         let best = find_best_release(&releases, &current, true, "darwin", "arm64");
-        assert_eq!(best.unwrap().version, "3.0.0-beta.1");
+        assert_eq!(best.unwrap().version, "4.0.0-beta.1");
     }
 
     #[test]
@@ -521,5 +558,54 @@ mod tests {
         let releases = vec![make_release("v2.0.0", false, false, vec![])];
         let best = find_best_release(&releases, &current, false, "darwin", "arm64");
         assert!(best.is_none(), "equal version should not be an update");
+    }
+
+    #[test]
+    fn build_metadata_does_not_change_update_precedence() {
+        let current = parse_version("2.0.0+build.1").unwrap();
+        let releases = vec![make_release("v2.0.0+build.2", false, false, vec![])];
+        assert!(find_best_release(&releases, &current, false, "linux", "x64").is_none());
+
+        let releases = vec![
+            make_release("v3.0.0+build.1", false, false, vec![]),
+            make_release("v3.0.0+build.2", false, false, vec![]),
+        ];
+        let best = find_best_release(&releases, &current, false, "linux", "x64").unwrap();
+        assert_eq!(best.tag_name, "v3.0.0+build.1", "equal precedence keeps API order");
+    }
+
+    #[test]
+    fn recommended_asset_rejects_substring_and_signature_matches() {
+        for (platform, arch, names, expected) in [
+            ("win32", "x64", vec!["app-darwin-x64.dmg", "app-win-x64.exe.sig", "app-win-x64.exe.release-lock.json", "app-win32-x64.exe"], "app-win32-x64.exe"),
+            ("linux", "arm64", vec!["app-linux-arm64extra.tar.gz", "app-LINUX-AARCH64.tar.gz"], "app-LINUX-AARCH64.tar.gz"),
+            ("darwin", "x64", vec!["app-macro-x64.zip", "app-macos-x86_64.dmg"], "app-macos-x86_64.dmg"),
+        ] {
+            let releases = vec![make_release(
+                "v2.0.0", false, false, names.into_iter().map(make_asset).collect(),
+            )];
+            let best = find_best_release(&releases, &semver::Version::new(1, 0, 0), false, platform, arch).unwrap();
+            assert_eq!(best.recommended_asset.unwrap().name, expected);
+        }
+    }
+
+    #[test]
+    fn recommended_asset_accepts_current_installer_names() {
+        let assets = [
+            "NomiFun_0.7.6_x64-setup.exe.sig",
+            "NomiFun_0.7.6_universal.dmg",
+            "NomiFun_0.7.6_x64-setup.exe",
+            "NomiFun_0.7.6_amd64.deb",
+            "NomiFun_0.7.6_aarch64.AppImage",
+        ];
+        let releases = vec![make_release("v0.7.6", false, false, assets.iter().map(|name| make_asset(name)).collect())];
+        let current = semver::Version::new(0, 7, 5);
+        for (platform, arch, index) in [
+            ("win32", "x64", 2), ("darwin", "x64", 1), ("darwin", "arm64", 1),
+            ("linux", "x64", 3), ("linux", "arm64", 4),
+        ] {
+            assert_eq!(find_best_release(&releases, &current, false, platform, arch).unwrap().recommended_asset.unwrap().name, assets[index]);
+        }
+        assert!(find_best_release(&releases, &current, false, "win32", "arm64").unwrap().recommended_asset.is_none());
     }
 }

@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use nomifun_common::{CompanionId, DelegationPolicy, UserId};
 use serde::{Deserialize, Serialize};
 
-use crate::{GatewayMcpConfig, KnowledgeMountInfo, McpServerId};
+use crate::{GatewayMcpConfig, KnowledgeMountInfo};
 
 macro_rules! optional_id_deserializer {
     ($name:ident, $id:ty) => {
@@ -26,77 +24,6 @@ macro_rules! optional_id_deserializer {
 optional_id_deserializer!(deserialize_companion_id, CompanionId);
 optional_id_deserializer!(deserialize_user_id, UserId);
 
-fn deserialize_required_companion_id<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    CompanionId::parse(value.clone())
-        .map(|_| value)
-        .map_err(serde::de::Error::custom)
-}
-
-/// In-session companion summon marker (spec §设计 B), stored at
-/// `conversation.extra.summon` on ordinary work conversations.
-///
-/// The nomi factory reads it (via [`NomiBuildExtra::summon`]) to materialize
-/// the companion's active skills, register the read-only
-/// `recall_memories` / `propose_companion_memory` tools and inject the live
-/// memory-snapshot context section. The persona is never taken over and
-/// `save_memory` is never registered for a summoned work session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SummonConfig {
-    /// The summoned companion (canonical UUIDv7). Required.
-    #[serde(deserialize_with = "deserialize_required_companion_id")]
-    pub companion_id: String,
-    /// Hand-picked memory ids, re-resolved live each turn under the
-    /// snapshot budget (edits to a memory naturally propagate).
-    #[serde(default)]
-    pub memory_ids: Vec<String>,
-    /// Companion skills excluded from materialization (subtractive; the
-    /// default is every active skill).
-    #[serde(default)]
-    pub skill_exclusions: Vec<String>,
-    /// Server-stamped epoch milliseconds. Required — clients never set it.
-    pub summoned_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SessionMcpTransport {
-    Stdio {
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: HashMap<String, String>,
-    },
-    Http {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-    Sse {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-    StreamableHttp {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionMcpServer {
-    pub mcp_server_id: McpServerId,
-    pub name: String,
-    pub transport: SessionMcpTransport,
-}
-
 /// Opt-in goal-driven continuation for a session. When present, the engine
 /// keeps working toward `objective` across turns (with a completion audit)
 /// until the model proves completion, hits `max_auto_continuations`, or
@@ -109,11 +36,44 @@ pub struct NomiGoalSpec {
     pub max_auto_continuations: Option<usize>,
 }
 
-/// Nomi-specific fields extracted from `extra` in build runtime options.
+/// Server-selected execution profile for the in-process Nomi runtime.
+///
+/// A profile is not a capability grant. The factory validates it against the
+/// already projected tool allowlist and may only reject or further constrain a
+/// build. Ordinary conversations leave the profile unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NomiRuntimeProfile {
+    Coding,
+}
+
+/// Subtractive MCP policy projected from a canonical Agent capability set.
+/// Concrete server identities still come exclusively from typed resource
+/// bindings resolved by the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NomiMcpCapabilityPolicy {
+    pub connect: bool,
+    pub tool_proxy: bool,
+    pub resource: bool,
+    pub oauth: bool,
+}
+
+/// Transitional fields extracted from `extra` while the runtime factory is
+/// being replaced by the canonical Preset/Snapshot/AgentSession path.
+///
+/// The conversation `extra` bag is intentionally broader than this projection:
+/// unknown legacy keys are ignored here. In particular, the retired
+/// `extra.backend` vendor label is not represented, so it cannot become a
+/// runtime selector by being deserialized and echoed into a build request.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NomiBuildExtra {
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Immutable Chat-route provider graph digest frozen into the canonical
+    /// Agent Snapshot. It is a fail-closed build fence, never a credential.
+    #[serde(default)]
+    pub chat_config_revision_digest: Option<String>,
     #[serde(default)]
     pub preset_rules: Option<String>,
     #[serde(default)]
@@ -121,15 +81,6 @@ pub struct NomiBuildExtra {
     /// Opt-in goal-driven continuation (see [`NomiGoalSpec`]).
     #[serde(default)]
     pub goal: Option<NomiGoalSpec>,
-    #[serde(default)]
-    pub session_mode: Option<String>,
-    #[serde(default)]
-    /// Stable MCP server business IDs.
-    pub mcp_server_ids: Option<Vec<McpServerId>>,
-    #[serde(default)]
-    pub session_mcp_servers: Vec<SessionMcpServer>,
-    #[serde(default)]
-    pub backend: Option<String>,
     #[serde(default, deserialize_with = "deserialize_user_id")]
     pub user_id: Option<String>,
     /// Marks a companion conversation: the factory registers its memory tools
@@ -151,8 +102,9 @@ pub struct NomiBuildExtra {
     /// session. Falls back to host config / NOMIFUN_COMPUTER_USE when None.
     #[serde(default)]
     pub computer_use: Option<bool>,
-    /// Opt-in to the Browser tool (CDP automation) for this session.
-    /// Falls back to host config / NOMIFUN_BROWSER_USE when None.
+    /// Exact session projection for the conversation Browser tool. The
+    /// canonical capability host sets this from the selected Browser binding;
+    /// an absent value is disabled and never falls back to host configuration.
     #[serde(default)]
     pub browser_use: Option<bool>,
     /// Platform Gateway MCP stdio bridge config, injected only from
@@ -183,6 +135,13 @@ pub struct NomiBuildExtra {
     /// `None` means there is no companion binding.
     #[serde(default, deserialize_with = "deserialize_companion_id")]
     pub companion_id: Option<String>,
+    /// Server-projected product Agent ceiling. `None` preserves legacy
+    /// Companion sessions; `Some(false)` suppresses the corresponding native
+    /// capability family for a selected Agent that did not grant it.
+    #[serde(default)]
+    pub companion_memory_enabled: Option<bool>,
+    #[serde(default)]
+    pub companion_skills_enabled: Option<bool>,
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The Nomi factory renders
     /// these into a system-prompt section so the agent knows what extended
@@ -213,17 +172,37 @@ pub struct NomiBuildExtra {
     /// conversation 时设置；普通会话恒空 = 不限制。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// When true, an empty `allowed_tools` means deny-all instead of the
+    /// ordinary unrestricted Nomi default.
+    #[serde(default)]
+    pub enforce_tool_allowlist: bool,
+    /// Host-projected subset of `allowed_tools` that remains schema-deferred
+    /// until the session activates it through ToolSearch.
+    #[serde(default)]
+    pub deferred_tools: Vec<String>,
+    /// Server-projected visual-context policy for a canonical Agent preset.
+    /// `Some(false)` is a subtractive fence that prevents image attachment
+    /// loading. `Some(true)` never promotes a model: the runtime still requires
+    /// the exact Chat capability to declare `vision_input`. Ordinary non-preset
+    /// conversations leave this as `None` and retain their model-derived
+    /// attachment behavior.
+    #[serde(default)]
+    pub vision_input: Option<bool>,
+    /// Canonical runtime profile projected from an official Agent revision.
+    /// The Nomi factory accepts `coding` only when the exact bounded coding
+    /// tool policy is present; open JSON cannot use this field to add tools.
+    #[serde(default)]
+    pub runtime_profile: Option<NomiRuntimeProfile>,
+    /// Present for canonical Agent sessions, including an all-false fence.
+    /// `None` preserves existing ordinary-conversation MCP behavior.
+    #[serde(default)]
+    pub mcp_capabilities: Option<NomiMcpCapabilityPolicy>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
     /// The factory always overwrites this from the typed runtime build option;
     /// a same-named value in open-ended JSON is never authoritative.
     #[serde(default = "default_delegation_policy")]
     pub delegation_policy: DelegationPolicy,
-    /// In-session companion summon (spec §设计 B): skills + selected memories
-    /// of one companion loaded read-only into an ordinary work conversation.
-    /// `None` = not summoned (today's behavior, zero regression).
-    #[serde(default)]
-    pub summon: Option<SummonConfig>,
 }
 
 fn default_delegation_policy() -> DelegationPolicy {
@@ -241,72 +220,6 @@ pub struct SlashCommandItem {
 mod tests {
     use super::*;
 
-    const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
-    const COMPANION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
-
-    #[test]
-    fn summon_config_roundtrips_through_serde() {
-        let config = SummonConfig {
-            companion_id: COMPANION_ID.into(),
-            memory_ids: vec!["0190f5fe-7c00-7a00-8abc-000000000002".into()],
-            skill_exclusions: vec!["heavy-refactor".into()],
-            summoned_at: 1_722_000_000_000,
-        };
-        let json = serde_json::to_value(&config).unwrap();
-        let parsed: SummonConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, config);
-    }
-
-    #[test]
-    fn summon_config_lists_default_empty_but_identity_fields_are_required() {
-        let parsed: SummonConfig = serde_json::from_value(serde_json::json!({
-            "companion_id": COMPANION_ID,
-            "summoned_at": 1,
-        }))
-        .unwrap();
-        assert!(parsed.memory_ids.is_empty());
-        assert!(parsed.skill_exclusions.is_empty());
-
-        for invalid in [
-            // companion_id missing entirely
-            serde_json::json!({ "summoned_at": 1 }),
-            // summoned_at missing (server must stamp it before persistence)
-            serde_json::json!({ "companion_id": COMPANION_ID }),
-            // companion_id not a canonical UUIDv7
-            serde_json::json!({ "companion_id": "not-an-id", "summoned_at": 1 }),
-            // unknown fields are rejected (extra.summon is a closed contract)
-            serde_json::json!({
-                "companion_id": COMPANION_ID,
-                "summoned_at": 1,
-                "persona_takeover": true,
-            }),
-        ] {
-            assert!(
-                serde_json::from_value::<SummonConfig>(invalid.clone()).is_err(),
-                "must reject {invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn nomi_build_extra_surfaces_summon_and_defaults_none() {
-        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
-            "summon": {
-                "companion_id": COMPANION_ID,
-                "memory_ids": [],
-                "skill_exclusions": ["x"],
-                "summoned_at": 42,
-            }
-        }))
-        .unwrap();
-        let summon = extra.summon.expect("summon must parse");
-        assert_eq!(summon.companion_id, COMPANION_ID);
-        assert_eq!(summon.skill_exclusions, vec!["x".to_owned()]);
-        assert_eq!(summon.summoned_at, 42);
-
-        let plain: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(plain.summon.is_none(), "absent summon must stay None");
-    }
 
     #[test]
     fn nomi_build_extra_deserializes_delegation_policy() {
@@ -327,6 +240,61 @@ mod tests {
     }
 
     #[test]
+    fn nomi_build_extra_preserves_server_projected_vision_policy() {
+        let enabled: NomiBuildExtra =
+            serde_json::from_value(serde_json::json!({ "vision_input": true })).unwrap();
+        assert_eq!(enabled.vision_input, Some(true));
+
+        let ordinary: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(ordinary.vision_input, None);
+    }
+
+    #[test]
+    fn nomi_build_extra_parses_a_typed_coding_profile_without_granting_tools() {
+        let profile: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "runtime_profile": "coding"
+        }))
+        .unwrap();
+        assert_eq!(profile.runtime_profile, Some(NomiRuntimeProfile::Coding));
+        assert!(profile.allowed_tools.is_empty());
+
+        assert!(
+            serde_json::from_value::<NomiBuildExtra>(serde_json::json!({
+                "runtime_profile": "unknown"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nomi_build_extra_parses_a_subtractive_mcp_capability_policy() {
+        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "mcp_capabilities": {
+                "connect": true,
+                "tool_proxy": true,
+                "resource": false,
+                "oauth": true
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            extra.mcp_capabilities,
+            Some(NomiMcpCapabilityPolicy {
+                connect: true,
+                tool_proxy: true,
+                resource: false,
+                oauth: true,
+            })
+        );
+        assert!(
+            serde_json::from_value::<NomiBuildExtra>(serde_json::json!({
+                "mcp_capabilities": {"connect": true, "server_id": "forged"}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn nomi_build_extra_group_guest_marker_defaults_false_and_parses_true() {
         let plain: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!plain.channel_group_guest);
@@ -342,46 +310,27 @@ mod tests {
     }
 
     #[test]
-    fn session_mcp_server_id_accepts_canonical_uuidv7() {
-        let value = serde_json::json!({
-            "mcp_server_id": MCP_SERVER_ID,
-            "name": "temporary",
-            "transport": { "type": "stdio", "command": "server" }
-        });
-        let parsed: SessionMcpServer = serde_json::from_value(value).unwrap();
-        assert_eq!(parsed.mcp_server_id.as_str(), MCP_SERVER_ID);
+    fn retired_options_are_not_projected_into_runtime_extra() {
+        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "backend": "claude",
+            "summon": {
+                "companion_id": "0190f5fe-7c00-7a00-8abc-000000000001",
+                "memory_ids": ["0190f5fe-7c00-7a00-8abc-000000000002"],
+                "skill_exclusions": [],
+                "summoned_at": 42
+            },
+            "system_prompt": "keep the prompt",
+        }))
+        .unwrap();
+
+        assert_eq!(extra.system_prompt.as_deref(), Some("keep the prompt"));
+        let serialized = serde_json::to_value(extra).unwrap();
+        assert!(serialized.get("summon").is_none());
+        assert!(
+            serialized.get("backend").is_none(),
+            "retired backend labels must not be re-emitted as runtime configuration"
+        );
     }
 
-    #[test]
-    fn session_mcp_server_rejects_legacy_id() {
-        let value = serde_json::json!({
-            "id": 42,
-            "name": "temporary",
-            "transport": { "type": "stdio", "command": "server" }
-        });
-        assert!(serde_json::from_value::<SessionMcpServer>(value).is_err());
-    }
 
-    #[test]
-    fn catalog_mcp_ids_require_canonical_uuidv7_strings() {
-        let id = McpServerId::parse(MCP_SERVER_ID).unwrap();
-        let parsed: NomiBuildExtra =
-            serde_json::from_value(serde_json::json!({ "mcp_server_ids": [id.clone()] })).unwrap();
-        assert_eq!(parsed.mcp_server_ids, Some(vec![id]));
-
-        for invalid in [
-            serde_json::json!([42]),
-            serde_json::json!(["42"]),
-            serde_json::json!(["550e8400-e29b-41d4-a716-446655440000"]),
-            serde_json::json!([format!("mcp_{MCP_SERVER_ID}")]),
-            serde_json::json!([true]),
-        ] {
-            assert!(
-                serde_json::from_value::<NomiBuildExtra>(
-                    serde_json::json!({ "mcp_server_ids": invalid })
-                )
-                .is_err()
-            );
-        }
-    }
 }

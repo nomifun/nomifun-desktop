@@ -3,39 +3,45 @@
 //! `ModuleStates` is the bundle returned by `build_module_states`; each
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
-use std::future::Future;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use axum::http::StatusCode;
 use nomifun_ai_agent::{
-    AgentRouterState, AgentRuntimeRegistry, AgentService,
+    AgentRouterState, AgentRuntimeSessions, AgentService,
+    NomiPlatformBuiltinContextAdmission,
 };
-use nomifun_api_types::TerminalExitEvent;
-use nomifun_preset::{BuiltinPresetRegistry, PresetRouterState, PresetService};
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CanonicalErrorCode, platform_feature_inventory_payload,
+    PluginSourceKind, RuntimeProfileKind, RuntimeTarget, VersionString,
+    digest_payload,
+    agent_store_schema_manifest_payload, official_preset_seed_manifest_payload,
+};
+use nomifun_agent_control_plane::{
+    AgentControlPlane, OfficialTemplateCatalog, PresetRevisionCompiler,
+};
+use nomifun_agent_kernel::{
+    CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
+    MaterializationPolicy,
+};
+use nomifun_agent_control_plane::{
+    KernelCatalogProvider,
+};
+use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
-use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
-use nomifun_conversation::service::QuiescentOrphanReconciliation;
-use nomifun_conversation::{ConversationRouterState, ConversationService};
+use nomifun_common::{AppError, OnTerminalDelete};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository,
-    IAgentMetadataRepository,
-    IIdmmInterventionRepository, IPresetRepository, IPresetStateRepository, IPresetTagRepository,
-    IProviderRepository, SqliteAgentExecutionRepository,
+    IProviderRepository, IRemoteBindingRepository, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
-    SqliteAgentMetadataRepository, SqlitePresetRepository, SqlitePresetStateRepository,
-    SqlitePresetTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteSettingsRepository,
-    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-};
-use nomifun_extension::{
-    PresetRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
-    HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
-    resolve_scan_paths_for_data_dir, resolve_state_file_path,
+    SqliteClientPreferenceRepository,
+    SqliteProviderRepository, SqliteRemoteBindingRepository,
+    SqliteSettingsRepository,
 };
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
-use nomifun_idmm::{IdmmManager, IdmmRouterState};
 use nomifun_knowledge::KnowledgeRouterState;
 use nomifun_mcp::{
     ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService,
@@ -46,7 +52,10 @@ use nomifun_office::{
     OfficeRouterState, OfficecliWatchManager, ProxyService,
     SnapshotService as OfficeSnapshotService,
 };
-use nomifun_agent_execution::{AgentExecutionEngine, AgentExecutionEngineConfig};
+use nomifun_skill_library::{ExternalPathsManager, SkillRouterState};
+use nomifun_agent_execution::{
+    AgentExecutionEngine, AgentExecutionEngineConfig,
+};
 use nomifun_companion::CompanionRouterState;
 use nomifun_workshop::WorkshopRouterState;
 use nomifun_creation::CreationRouterState;
@@ -60,36 +69,41 @@ use nomifun_system::{
 use nomifun_terminal::TerminalRouterState;
 use nomifun_webhook::WebhookRouterState;
 
-use crate::services::AppServices;
-
+use crate::services::{AppServices, BackgroundTaskRegistry};
+use super::nomi_core_control_plane::NomiCoreControlPlaneStore;
+use super::nomi_core_chat_route::NomiCoreDefaultChatRouteResolver;
+use super::nomi_core_session::{
+    NomiCoreAgentApiState,
+    NomiCoreSessionOwner,
+};
+use super::idmm::IdmmRouterState;
 /// All module-level router states bundled into a single struct.
 ///
 /// Reduces parameter bloat on router constructors and makes it easy for
 /// tests to override individual modules.
 pub struct ModuleStates {
+    pub(crate) mobile_voice:Option<super::mobile_voice_host::VoiceRouterState>,
     pub system: SystemRouterState,
-    pub conversation: ConversationRouterState,
     pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
 
     pub connection_test: ConnectionTestRouterState,
     pub file: FileRouterState,
     pub mcp: McpRouterState,
-    pub extension: ExtensionRouterState,
-    pub hub: HubRouterState,
     pub skill: SkillRouterState,
     pub channel: ChannelRouterState,
     pub cron: CronRouterState,
     pub requirement: RequirementRouterState,
-    pub idmm: IdmmRouterState,
+    /// Per-AgentSession intelligent decision supervisor.
+    pub(crate) idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
-    /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
-    pub miniapp: nomifun_miniapp::MiniAppRouterState,
+    /// Unified Plugin Library, Draft, Import, Surface and storage state.
+    pub plugin: super::plugin::PluginRouterState,
     /// 生成引擎 (creation) media task queue.
     pub creation: CreationRouterState,
     pub webhook: WebhookRouterState,
@@ -98,7 +112,10 @@ pub struct ModuleStates {
     pub terminal: TerminalRouterState,
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
-    pub preset: PresetRouterState,
+    /// Canonical Agent Settings/AgentSession/Remote adapter for the current
+    /// Nomi-core product.  It shares the Session owner above and persists its
+    /// control-plane facts in the Nomi-core database tables.
+    pub(crate) nomi_core_agent_api: NomiCoreAgentApiState,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -131,6 +148,8 @@ pub struct ChannelMessageLoopComponents {
     pub message_loop: nomifun_channel::message_loop::ChannelMessageLoop,
     pub message_rx: tokio::sync::mpsc::Receiver<nomifun_channel::types::ChannelIncoming>,
     pub manager: Arc<nomifun_channel::manager::ChannelManager>,
+    pub pairing_service: Arc<nomifun_channel::pairing::PairingService>,
+    pub repository: Arc<dyn nomifun_db::IChannelRepository>,
     pub plugin_factory: Arc<nomifun_channel::manager::PluginFactory>,
     /// Busy-time prompt queue drain (spec D1). The caller spawns
     /// `queue_drain.run(event_bus.subscribe_user())` next to the message loop.
@@ -140,387 +159,163 @@ pub struct ChannelMessageLoopComponents {
     pub message_service: Arc<nomifun_channel::message_service::ChannelMessageService>,
 }
 
-#[derive(Debug, Default)]
-struct BootConversationReconciliationSummary {
-    reconciled: u64,
-    already_terminal: u64,
-    retained_execution_skipped: u64,
-    quarantined: u64,
-}
-
-#[derive(Debug, Clone)]
-struct BootConversationReconciliationCandidate {
-    user_id: String,
-    conversation_id: String,
-    agent_type: String,
-    status: Option<String>,
-    admission_epoch: i64,
-    operation_id: Option<String>,
-}
-
-fn boot_reconciliation_error_is_retryable(error: &AppError) -> bool {
-    matches!(
-        error,
-        AppError::Internal(_)
-            | AppError::BadGateway(_)
-            | AppError::Timeout(_)
-            | AppError::RateLimited
-            | AppError::ProviderUnavailable(_)
-    )
-}
-
-async fn reconcile_unsettled_conversation_turn_pages<
-    ListPage,
-    ListPageFuture,
-    Reconcile,
-    ReconcileFuture,
->(
-    mut list_page: ListPage,
-    mut reconcile: Reconcile,
-) -> BootConversationReconciliationSummary
-where
-    ListPage: FnMut(Option<String>, u32) -> ListPageFuture,
-    ListPageFuture:
-        Future<Output = Result<Vec<BootConversationReconciliationCandidate>, AppError>>,
-    Reconcile: FnMut(String, String) -> ReconcileFuture,
-    ReconcileFuture:
-        Future<Output = Result<QuiescentOrphanReconciliation, AppError>>,
-{
-    let mut summary = BootConversationReconciliationSummary::default();
-    let mut after_conversation_id: Option<String> = None;
-    loop {
-        let mut retry_delay = Duration::from_millis(25);
-        let page = loop {
-            match list_page(
-                after_conversation_id.clone(),
-                MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-            )
-            .await
-            {
-                Ok(page) => break page,
-                Err(error) => {
-                    tracing::error!(
-                        after_conversation_id = after_conversation_id.as_deref(),
-                        error = %error,
-                        "startup Conversation orphan enumeration failed; background work remains fenced"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                }
-            }
-        };
-        if page.is_empty() {
-            break;
-        }
-
-        for candidate in page {
-            let BootConversationReconciliationCandidate {
-                user_id,
-                conversation_id,
-                agent_type,
-                status,
-                admission_epoch,
-                operation_id,
-            } = candidate;
-            let mut retry_delay = Duration::from_millis(25);
-            loop {
-                match reconcile(user_id.clone(), conversation_id.clone()).await {
-                    Ok(QuiescentOrphanReconciliation::Reconciled) => {
-                        summary.reconciled += 1;
-                        tracing::info!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            "startup reconciled a terminal-proof-backed Conversation turn without re-execution"
-                        );
-                        break;
-                    }
-                    Ok(QuiescentOrphanReconciliation::AlreadyTerminal) => {
-                        summary.already_terminal += 1;
-                        break;
-                    }
-                    Ok(QuiescentOrphanReconciliation::RetainedExecutionSkipped) => {
-                        summary.retained_execution_skipped += 1;
-                        tracing::warn!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            "startup left retained Agent Execution Conversation authority to its owning engine"
-                        );
-                        break;
-                    }
-                    Err(error) if boot_reconciliation_error_is_retryable(&error) => {
-                        tracing::error!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            error = %error,
-                            "startup Conversation orphan reconciliation failed transiently; background work remains fenced"
-                        );
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                    }
-                    Err(error) => {
-                        summary.quarantined += 1;
-                        tracing::warn!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            status,
-                            admission_epoch,
-                            operation_id,
-                            error = %error,
-                            "startup quarantined unresolved Conversation turn authority; no runtime was built"
-                        );
-                        break;
-                    }
-                }
-            }
-            after_conversation_id = Some(conversation_id);
-        }
-    }
-    summary
-}
-
-/// Freeze the exact set of unsettled turn generations before any work
-/// producer starts. Only generations in this snapshot may ever be proven
-/// terminal by [`crate::router::boot_terminal_proof::BootTerminalProofProvider`]:
-/// everything admitted later belongs to the current process.
-///
-/// Transient enumeration errors retry with the same classification/backoff as
-/// the sweep below; giving up on one flaky page would silently disable the
-/// terminal-proof provider for the entire boot.
-async fn snapshot_boot_frozen_orphan_generations(
-    conversation_repo: &Arc<dyn nomifun_db::IConversationRepository>,
-) -> Result<
-    std::collections::HashMap<
-        String,
-        crate::router::boot_terminal_proof::FrozenOrphanGeneration,
-    >,
-    AppError,
-> {
-    let mut frozen = std::collections::HashMap::new();
-    let mut after_conversation_id: Option<String> = None;
-    let mut retry_delay = Duration::from_millis(25);
-    loop {
-        let page = match conversation_repo
-            .list_unsettled_turn_admissions(
-                after_conversation_id.as_deref(),
-                MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-            )
-            .await
-            .map_err(AppError::from)
-        {
-            Ok(page) => page,
-            Err(error) if boot_reconciliation_error_is_retryable(&error) => {
-                tracing::error!(
-                    after_conversation_id = after_conversation_id.as_deref(),
-                    error = %error,
-                    "startup terminal-proof snapshot enumeration failed transiently; retrying"
-                );
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if page.is_empty() {
-            break;
-        }
-        for admission in page {
-            after_conversation_id = Some(admission.conversation.conversation_id.clone());
-            frozen.insert(
-                admission.conversation.conversation_id,
-                crate::router::boot_terminal_proof::FrozenOrphanGeneration {
-                    user_id: admission.conversation.user_id,
-                    admission_epoch: admission.admission_epoch,
-                    active_operation_id: admission.active_operation_id,
-                },
-            );
-        }
-    }
-    Ok(frozen)
-}
-
-/// Reconcile every durable Conversation turn authority before any subsystem
-/// capable of producing work is started.
-///
-/// The repository enumeration is only a hint. `ConversationService` re-reads
-/// the exact row/receipt/admission under its preparation gate. A backend
-/// whose generation is covered by the boot terminal-proof provider (frozen
-/// unsettled snapshot + reaped durable process registry, under the retained
-/// server-lock authority) is healed as an `interrupted_by_restart` failure;
-/// everything else stays quarantined. Retained Agent Execution transcripts
-/// stay with their owning engine, while already-terminal rows are harmless
-/// no-ops.
-async fn reconcile_unsettled_conversation_turns_before_background_work(
-    services: &AppServices,
-    conversation_service: &ConversationService,
-) -> BootConversationReconciliationSummary {
-    match services.has_valid_boot_reconciliation_authority().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                "startup Conversation orphan reconciliation skipped: no matching retained server-lock authority"
-            );
-            return BootConversationReconciliationSummary::default();
-        }
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "startup Conversation orphan reconciliation skipped: retained server-lock authority could not be revalidated"
-            );
-            return BootConversationReconciliationSummary::default();
-        }
-    }
-
-    // Persisted exact terminal-proof protocol, boot side. Ordering matters:
-    // (1) reap the durable agent-process registry (verify-by-identity, kill
-    // survivors with proof); (2) freeze the unsettled-generation snapshot;
-    // (3) only then install the proof provider consulted by the sweep below.
-    // The lock authority above guarantees no other backend owns this data
-    // dir, and nothing that produces work has started yet, so the snapshot
-    // exactly names the dead process's generations.
-    let reap_report =
-        nomifun_ai_agent::reap_orphan_agent_processes(&services.data_dir).await;
-    match snapshot_boot_frozen_orphan_generations(&services.conversation_repo).await {
-        Ok(frozen) => {
-            conversation_service.with_terminal_proof_provider(
-                crate::router::boot_terminal_proof::BootTerminalProofProvider::new(
-                    frozen,
-                    reap_report,
-                ),
-            );
-        }
-        Err(error) => {
-            // Without the frozen snapshot no generation can prove; the sweep
-            // then quarantines exactly as before this protocol existed.
-            tracing::error!(
-                error = %error,
-                "startup terminal-proof snapshot failed; restart orphans stay quarantined"
-            );
-        }
-    }
-
-    let conversation_repo = services.conversation_repo.clone();
-    let conversation_service = conversation_service.clone();
-    let runtime_registry = services.agent_runtime_registry.clone();
-    let summary = reconcile_unsettled_conversation_turn_pages(
-        move |after_conversation_id, limit| {
-            let conversation_repo = conversation_repo.clone();
-            async move {
-                conversation_repo
-                    .list_unsettled_turn_admissions(
-                        after_conversation_id.as_deref(),
-                        limit,
-                    )
-                    .await
-                    .map(|admissions| {
-                        admissions
-                            .into_iter()
-                            .map(|admission| {
-                                BootConversationReconciliationCandidate {
-                                    user_id: admission.conversation.user_id,
-                                    conversation_id:
-                                        admission.conversation.conversation_id,
-                                    agent_type: admission.conversation.r#type,
-                                    status: admission.conversation.status,
-                                    admission_epoch: admission.admission_epoch,
-                                    operation_id: admission.active_operation_id,
-                                }
-                            })
-                            .collect()
-                    })
-                    .map_err(AppError::from)
-            }
-        },
-        move |user_id, conversation_id| {
-            let conversation_service = conversation_service.clone();
-            let runtime_registry = runtime_registry.clone();
-            async move {
-                conversation_service
-                    .reconcile_locally_quiescent_orphan_on_boot(
-                        &user_id,
-                        &conversation_id,
-                        &runtime_registry,
-                    )
-                    .await
-            }
-        },
-    )
-    .await;
-
-    tracing::info!(
-        reconciled = summary.reconciled,
-        already_terminal = summary.already_terminal,
-        retained_execution_skipped = summary.retained_execution_skipped,
-        quarantined = summary.quarantined,
-        "startup Conversation turn reconciliation completed before background work"
-    );
-    summary
-}
-
 /// Build all default `ModuleStates` from application services.
+/// Compatibility entry point; production composition must use the fallible
+/// builder so its resource owner can perform startup-failure cleanup.
 pub async fn build_module_states(services: &AppServices) -> (ModuleStates, ChannelMessageLoopComponents) {
+    try_build_module_states(services).await.unwrap_or_else(|error| {
+        panic!("application module-state assembly failed: {error:#}")
+    })
+}
+
+/// Does not publish a router or consume AppServices on failure. The caller
+/// must retain and clean the partially assembled service graph before exit.
+pub(crate) async fn try_build_module_states(
+    services: &AppServices,
+) -> anyhow::Result<(ModuleStates, ChannelMessageLoopComponents)> {
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
-    let (ext_state, hub_state, mut skill_state) = build_extension_states(services).await;
+    let skill_state = build_skill_state(services).await;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
-        "startup: extension states built"
+        "startup: skill state built"
     );
 
-    let scan_paths = resolve_scan_paths_for_data_dir(&services.data_dir);
-    if let Err(error) = ext_state.registry.initialize_with_scan_paths(scan_paths).await {
-        tracing::warn!(error = %error, "extension registry initialize failed");
-    }
-    tracing::info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: extension registry initialized"
-    );
-
-    let preset = build_preset_state(services, ext_state.registry.clone());
-    let cron = build_cron_state(services, preset.service.clone());
-    cron.cron_service.with_preset_service(preset.service.clone());
-
-    // Construct the route ConversationService before any producer starts, then
-    // synchronously classify every unsettled generation while the exact
-    // database-ownership lock is retained. The lock authorizes this sweep but
-    // is not process-tree terminal proof, so unresolved current backends remain
-    // quarantined. This awaited boundary must stay above cron.init, AutoWork
-    // persisted resume, channel/plugin receive loops, and router publication.
-    let conversation = build_conversation_state(services, Some(cron.cron_service.clone()));
-    conversation.service.with_preset_service(preset.service.clone());
-    reconcile_unsettled_conversation_turns_before_background_work(
-        services,
-        &conversation.service,
+    let canonical_session_owner = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(
+        services.database.pool().clone(),
     )
-    .await;
-
-    cron.cron_service.init().await;
-    // Register the process CronService so the agent's native cron tools (wired
-    // via AgentFactoryDeps.cron_sink_factory) can reach it. (Phase 4)
-    nomifun_cron::sink::set_process_cron_service(cron.cron_service.clone());
-    tracing::info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: cron state initialized"
+    .await
+    .map_err(|error| anyhow::anyhow!("canonical AgentSession owner assembly failed: {error:#}"))?;
+    let conversation_owner = Arc::new(NomiCoreSessionOwner::new(
+        canonical_session_owner,
+        services.agent_runtime_sessions.clone(),
+        services.event_bus.clone(),
+        services.background_tasks.clone()
+            as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
+        services.work_dir.join("conversations"),
+        services.database.pool().clone(),
+        services.creation_service.clone(),
+    ));
+    let idmm_service = super::idmm::build_idmm_service(
+        services.authoritative_user_id.clone(),
+        services.database.pool().clone(),
+        conversation_owner.clone(),
+        services.model_invoke_service.clone(),
+        services.work_dir.join("idmm"),
+        services.provider_lifecycle.clone(),
     );
+    conversation_owner.install_idmm(Arc::downgrade(&idmm_service))?;
+    let idmm_state = IdmmRouterState::new(idmm_service.clone(), conversation_owner.clone());
+    let javascript_runtime_foundation =
+        super::javascript_runtime::build_javascript_runtime_foundation(
+            services.database.pool().clone(),
+            services.data_dir.clone(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("JavaScript Runtime foundation composition failed: {error:#}"))?;
+    let plugin_action_dispatcher = Arc::new(
+        super::plugin_ports::RegistryPluginActionDispatcher::default(),
+    );
+    let plugin_ports = super::plugin_ports::build_plugin_service_ports(
+        services.database.pool().clone(),
+        services.encryption_key,
+        plugin_action_dispatcher.clone(),
+        Arc::new(super::plugin_ports::UnavailablePluginDesktopOwner),
+    );
+    let plugin_surface_host = plugin_ports.host.clone();
+    let plugin_service_runtime = Arc::new(nomifun_plugin_platform::PluginServiceRuntime::new(
+        javascript_runtime_foundation.authority(),
+        services.plugin_artifacts.clone(),
+        plugin_ports,
+    ));
+    let plugin_binding_registry = nomifun_plugin_platform::InMemoryPluginBindingRegistry::new(
+        Arc::new(super::plugin_ports::PluginServiceActionRuntime::new(
+            plugin_service_runtime.clone(),
+        )),
+    );
+    super::plugin_ports::register_plugin_binding_owners(&plugin_binding_registry)
+        .map_err(|error| anyhow::anyhow!("Plugin Binding owner registration failed: {error}"))?;
+    plugin_action_dispatcher
+        .install(plugin_binding_registry.clone())
+        .map_err(anyhow::Error::msg)?;
+    let plugin_binding_consumers =
+        super::plugin_ports::PluginBindingConsumers::new(
+            plugin_binding_registry.clone(),
+            plugin_surface_host,
+        );
+    services
+        .plugin_service_runtime
+        .set(plugin_service_runtime.clone())
+        .map_err(|_| anyhow::anyhow!("Plugin Service runtime was installed more than once"))?;
+    let plugin_install = Arc::new(nomifun_plugin_platform::PluginInstallService::new(
+        services.plugin_repository.clone(),
+        services.plugin_artifacts.clone(),
+        services.plugin_data_roots.clone(),
+        plugin_service_runtime.clone(),
+        Arc::new(plugin_binding_registry),
+    ));
+    plugin_install
+        .recover()
+        .await
+        .map_err(|error| anyhow::anyhow!("Plugin mutation recovery failed: {error}"))?;
+    let plugin_state = super::plugin::PluginRouterState::new(
+        services,
+        plugin_install,
+        plugin_service_runtime,
+        plugin_binding_consumers,
+    );
+    plugin_state
+        .recover()
+        .await
+        .map_err(|error| anyhow::anyhow!("Plugin runtime recovery failed: {error}"))?;
+    let (nomi_core_agent_api, nomi_core_wave4_owners, mcp_catalog_publisher) =
+        build_nomi_core_agent_api_state(
+            services,
+            conversation_owner.clone(),
+            idmm_service.clone(),
+            plugin_state.agent.clone(),
+            plugin_state.clone(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
+    #[cfg(feature = "browser-use")]
+    if let Some(attached_chrome) = services.attached_chrome.as_ref() {
+        crate::browser_workspace_provider::install_attached_session_verifier(
+            attached_chrome,
+            nomi_core_agent_api.session_owner.canonical().clone(),
+        )?;
+    }
+    let cron = build_cron_state(services, conversation_owner.clone());
+    nomi_core_agent_api
+        .install_cron_cleanup_owner(cron.cron_service.clone())
+        .map_err(|error| anyhow::anyhow!("Nomi-core Cron cleanup owner installation failed: {error}"))?;
+    cron.cron_service.with_agent_preset_resolver(Arc::new(
+        NomiCoreCronAgentPresetResolver {
+            control_plane: nomi_core_agent_api.control_plane.clone(),
+        },
+    ));
+
+    // Generation-5 Store recovery is owned by NomiCoreSessionOwner. The
+    // retired Conversation orphan sweep is intentionally not part of startup.
 
     // The agent catalog already hydrated at startup (see `lib.rs`).
     // Extension-contributed rows will land in `agent_metadata` in a
     // later step; for now we rely on the builtin + internal seed rows.
 
-    let dispatcher: Arc<dyn PresetRuleDispatcher> = preset.service.clone();
-    skill_state.preset_dispatcher = Some(dispatcher);
-
-    let (channel_state, channel_components) = build_channel_state(services, ext_state.registry.clone()).await;
+    let (channel_state, channel_components) =
+        build_channel_state(services, conversation_owner.clone()).await;
+    nomi_core_wave4_owners
+        .install_channel(
+            Arc::clone(&channel_components.manager),
+            Arc::clone(&channel_components.pairing_service),
+            Arc::clone(&channel_components.repository),
+            Arc::clone(&services.customer_service_service),
+        )
+        .map_err(|error| anyhow::anyhow!("Nomi-core Wave 4 Channel owner installation failed: {error}"))?;
+    nomi_core_wave4_owners
+        .install_channel_ingress(Arc::clone(&channel_components.message_service))
+        .map_err(|error| anyhow::anyhow!("Nomi-core Wave 4 Channel ingress installation failed: {error}"))?;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
     let agent_service = AgentService::new(
@@ -534,24 +329,66 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: module states bundle started"
     );
-    let (requirement_state, idmm_state) = build_requirement_state(services);
+    // AgentExecution owns Attempt, retry, recovery and canonical turn receipt
+    // before AutoWork is allowed to resume any persisted queue binding.
+    let agent_execution = build_agent_execution_engine(
+        services,
+        conversation_owner.clone(),
+    );
+    nomi_core_agent_api
+        .wave5_owner
+        .install_runtime_owners(
+            agent_execution.clone(),
+            cron.cron_service.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("Wave 5 owner installation failed: {error}"))?;
+    let requirement_state = build_requirement_state(
+        services,
+        conversation_owner.clone(),
+        agent_execution.clone(),
+    );
+    nomi_core_agent_api
+        .install_requirement_cleanup_owner(
+            requirement_state.requirement_service.clone(),
+            requirement_state.auto_work_runner.clone(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("Nomi-core Requirement cleanup owner installation failed: {error}")
+        })?;
+    nomi_core_agent_api
+        .recover_deleting_agent_sessions()
+        .await
+        .map_err(|error| anyhow::anyhow!(
+            "canonical AgentSession delete recovery failed: {error}"
+        ))?;
+    cron.cron_service.init().await;
+    tracing::info!(
+        elapsed_ms = boot.elapsed().as_millis(),
+        "startup: canonical delete recovery and cron initialization completed"
+    );
+    agent_execution.spawn_recovery();
+    requirement_state.auto_work_runner.start_sweeper();
+    requirement_state.auto_work_runner.resume_persisted_bindings();
+    let idmm_shutdown = services.background_shutdown.child_token();
+    services.register_background_task(tokio::spawn(idmm_service.run(idmm_shutdown)));
     let companion_state = build_companion_state(
         services,
         channel_components.manager.clone(),
-        preset.service.clone(),
+        conversation_owner.clone(),
     )
-        .with_preset_service(preset.service.clone())
         .with_knowledge_service(services.knowledge_service.clone());
-    // Arm the shared service before execution recovery can start. Every clone
-    // shares this hook slot, so normal chat and Agent attempts observe the same
-    // IDMM supervisor without a boot-time race.
-    let idmm_hook = Arc::new(idmm_state.service.manager().clone());
-    conversation.service.with_supervision_hook(idmm_hook.clone());
-    services.terminal_service.with_terminal_supervision_hook(idmm_hook);
-    let execution_conversation = conversation.service.clone();
+    let voice_journal=Arc::new(nomifun_voice::SharedVoiceJournal::new(services.data_dir.clone()));
+    let mobile_voice=match super::mobile_voice_registry::AppVoiceRegistry::new(services.model_invoke_service.clone(),services.database.pool().clone(),services.authoritative_user_id.clone()){
+    Ok(voice_registry)=>{
+    let voice_authority=Arc::new(super::mobile_voice_authority::AppVoiceAuthority::new(conversation_owner.clone(),voice_registry.clone(),voice_journal.clone(),services.database.pool().clone()));
+    let voice_shutdown=services.background_shutdown.child_token();
+    let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())).with_shutdown_token(voice_shutdown.clone()));
+    let voice_service=Arc::new(nomifun_voice::VoiceSessionService::with_journal(voice_registry.registry.clone(),voice_work,voice_authority.clone(),voice_journal,voice_shutdown.clone()));
+    Some(super::mobile_voice_host::VoiceRouterState{service:voice_service,registry:voice_registry,authority:voice_authority,allowed_origins:Arc::from([]),token_validator:services.instance_token_validator.clone(),jwt:services.jwt_service.clone(),shutdown:voice_shutdown,cleanup_registered:Arc::new(std::sync::atomic::AtomicBool::new(false))})
+    },Err(error)=>{tracing::warn!(error=%error,"optional Mobile voice registration unavailable");None}};
     let states = ModuleStates {
+        mobile_voice,
         system: build_system_state(services),
-        conversation,
         ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
@@ -559,9 +396,11 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         },
         connection_test: build_connection_test_state(),
         file: build_file_state(services),
-        mcp: build_mcp_state(services),
-        extension: ext_state,
-        hub: hub_state,
+        mcp: {
+            let mut state = build_mcp_state(services);
+            state.config_service = state.config_service.with_catalog_publisher(mcp_catalog_publisher);
+            state
+        },
         skill: skill_state,
         channel: channel_state,
         cron,
@@ -576,20 +415,16 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             )),
         },
         workshop: build_workshop_state(services),
-        miniapp: build_miniapp_state(services),
+        plugin: plugin_state,
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
-        // REST routes, model tools and attempt conversations share this one engine
-        // and the same ConversationService/runtime registry as ordinary Nomi chat.
-        agent_execution: build_agent_execution_engine(
-            services,
-            execution_conversation,
-            preset.service.clone(),
-        ),
+        // REST routes, model tools and AutoWork share this one engine and its
+        // canonical Attempt/receipt/recovery state machine.
+        agent_execution,
         terminal: build_terminal_state(services),
         office: build_office_state(services),
         shell: build_shell_state(services),
-        preset,
+        nomi_core_agent_api,
     };
 
     tracing::info!(
@@ -597,36 +432,445 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         "startup: module state build completed"
     );
 
-    (states, channel_components)
+    Ok((states, channel_components))
 }
 
-/// Build the process-wide preset catalog and resolver singleton.
-pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionRegistry) -> PresetRouterState {
-    let pool = services.database.pool().clone();
-    let repo: Arc<dyn IPresetRepository> = Arc::new(SqlitePresetRepository::new(pool.clone()));
-    let state_repo: Arc<dyn IPresetStateRepository> = Arc::new(SqlitePresetStateRepository::new(pool.clone()));
-    let tag_repo: Arc<dyn IPresetTagRepository> = Arc::new(SqlitePresetTagRepository::new(pool.clone()));
-    let agent_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let provider_repo: Arc<dyn IProviderRepository> =
-        Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository> =
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone()));
-    let provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository> =
-        Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(pool));
-    let builtin = Arc::new(BuiltinPresetRegistry::load());
-    let service = Arc::new(PresetService::new(
-        repo,
-        state_repo,
-        tag_repo,
-        agent_repo,
-        provider_repo,
-        provider_model_repo,
-        provider_model_capability_repo,
-        builtin,
-        extension_registry,
-        services.data_dir.clone(),
+/// Build the persistent Agent Settings control plane used by the current
+/// Nomi-core HTTP surface.
+///
+/// This registry is intentionally separate from the Fresh-v4 `AgentPlatform`
+/// runtime. It materializes the canonical inventory with real Nomi-owned wave
+/// registrations for Preview/Save and binds their exact Tool/Context/lifecycle
+/// projections into `NomiCoreSessionOwner` and the existing Conversation/Nomi
+/// engine.
+async fn build_nomi_core_agent_api_state(
+    services: &AppServices,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
+    idmm: Arc<nomifun_idmm::IdmmService>,
+    agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
+    plugin: super::plugin::PluginRouterState,
+) -> anyhow::Result<(
+    NomiCoreAgentApiState,
+    Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+    Arc<dyn nomifun_mcp::service::McpCatalogPublisher>,
+)> {
+    const CONTRACT_VERSION: &str = "1.0.0";
+    let builtin_plan = super::nomi_core_builtins::build(
+        services,
+        conversation_owner.canonical().store().clone(),
+        plugin.clone(),
+    )
+    .await?;
+    let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
+    let wave5_owner = Arc::clone(&builtin_plan.wave5_owner);
+    let robot_owner = builtin_plan.robot_owner.clone();
+    #[cfg(feature = "browser-use")]
+    let browser_owner = Arc::clone(&builtin_plan.browser_owner);
+    wave4_owners
+        .reclaim_orphaned_receipts()
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let registrations = builtin_plan.registrations;
+    let feature_inventory = platform_feature_inventory_payload()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let feature_digest = digest_payload(&feature_inventory)?;
+
+    let mut policy = MaterializationPolicy::stable(CONTRACT_VERSION);
+    policy.allowed_sources.insert(PluginSourceKind::ManagedLocal);
+    policy.available_runtime_features =
+        feature_inventory.runtime_features.clone();
+    // Kernel PluginState is an in-process capability-state cache. Durable
+    // owner data belongs to the Plugin repository/KV and Plugin data roots;
+    // this NomiCore composition does not own the Fresh-v4 `plugin_states`
+    // table and must not open it from the legacy application database.
+    let state_persistence = Arc::new(InMemoryPluginStatePersistence::new());
+    let kernel = Arc::new(KernelRegistry::new(
+        policy,
+        state_persistence,
+    )?);
+    let materialized = kernel
+        .replace_all(registrations.clone())?;
+    let approved_platform_builtin_capability_ids = builtin_plan
+        .tool_capability_ids
+        .union(&builtin_plan.context_capability_ids)
+        .cloned()
+        .chain(builtin_plan.lifecycle_capability_ids.iter().cloned())
+        .chain(
+            builtin_plan
+                .host_dynamic_tool_capability_ids
+                .iter()
+                .cloned(),
+        )
+        .collect::<BTreeSet<_>>();
+    let native_capability_ids = materialized
+        .capabilities
+        .values()
+        .filter(|capability| {
+            capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+                && super::agent_binding_projection::native_capability_available(&capability.manifest)
+                && !approved_platform_builtin_capability_ids
+                    .contains(&capability.manifest.id)
+        })
+        .map(|capability| capability.manifest.id.clone())
+        .collect::<BTreeSet<_>>();
+    let platform_builtin_context_admission = Arc::new(
+        NomiPlatformBuiltinContextAdmission::from_registry(
+            &materialized,
+            builtin_plan.context_capability_ids.clone(),
+            native_capability_ids.clone(),
+        )?,
+    );
+    let unavailable_capabilities = materialized
+        .capabilities
+        .values()
+        .filter(|capability| {
+            capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+        })
+        .filter_map(|capability| {
+            if approved_platform_builtin_capability_ids
+                .contains(&capability.manifest.id)
+            {
+                return None;
+            }
+            (!super::agent_binding_projection::native_capability_available(&capability.manifest)).then(|| {
+                (
+                    capability.manifest.id.clone(),
+                    CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let catalog = Arc::new(
+        KernelCatalogProvider::new(Arc::clone(&kernel))
+            .with_unavailable_capabilities(unavailable_capabilities),
+    );
+    let module_publisher = Arc::new(NomiCoreModuleCatalogPublisher::new(
+        Arc::clone(&kernel),
+        registrations,
+        Arc::new(nomifun_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        )),
+        Arc::clone(&builtin_plan.wave2_owner),
     ));
-    PresetRouterState { service }
+    #[cfg(feature="browser-use")]
+    if let Some(runtime) = services.headless_render.as_ref() {
+        services.knowledge_service.set_browser_render_content_port(
+            super::knowledge_browser::KnowledgeHeadlessRenderPort::bind(runtime.clone()));
+    }
+    let mcp_catalog_publisher: Arc<dyn nomifun_mcp::service::McpCatalogPublisher> =
+        module_publisher;
+    let schema_resolver: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver> =
+        Arc::new(BuiltinToolSchemaAdapter {
+            inner: Arc::clone(&builtin_plan.schema_resolver),
+        });
+
+    let schema_digest = digest_payload(&agent_store_schema_manifest_payload())?;
+    let seed = official_preset_seed_manifest_payload();
+    let installation_role_bindings =
+        super::nomi_core_tool_discovery::installation_binding(&materialized)?;
+    #[cfg(feature = "browser-use")]
+    let installation_role_bindings = {
+        let mut bindings = installation_role_bindings;
+        // Provider ownership and live resource readiness are separate facts.
+        // A dev host without packaged CEF can still own the Attached Chrome
+        // provider contract; an unavailable concrete Browser resource then
+        // narrows the tool surface instead of invalidating the whole Agent.
+        let browser_provider_owned = services.browser_resources.is_some()
+            || services.attached_chrome.is_some();
+        bindings.extend(crate::browser_workspace_provider::installation_binding(
+            &materialized,
+            browser_provider_owned,
+        )?);
+        bindings
+    };
+    #[cfg(feature = "computer-use")]
+    let installation_role_bindings = {
+        let mut bindings = installation_role_bindings;
+        bindings.extend(super::agent_role_host::installation_binding(&materialized)?);
+        bindings
+    };
+    let environment = CompilerEnvironment {
+        resolver_version: VersionString::from(CONTRACT_VERSION),
+        required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+        required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+        runtime_feature_inventory_digest: feature_digest.clone(),
+        available_runtime_features: feature_inventory.runtime_features.clone(),
+        installation_role_bindings,
+        canonical_schema_manifest_digest: schema_digest.clone(),
+        target_contribution_manifest_digest: seed.target_first_party_contribution_digest.clone(),
+        host_target: nomi_core_runtime_target(),
+        host_surface: if cfg!(any(feature = "browser-use", feature = "computer-use")) {
+            "desktop".to_owned()
+        } else {
+            "headless".to_owned()
+        },
+        availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
+    };
+    let templates = OfficialTemplateCatalog::load()?;
+    let compiler = PresetRevisionCompiler::new()
+        .with_canonical_registry(Arc::clone(&kernel), environment.clone())
+        .with_consumer_validator(super::nomi_core_tool_discovery::validate_snapshot);
+    let store = Arc::new(NomiCoreControlPlaneStore::new(
+        services.database.pool().clone(),
+    ));
+    let control_plane = Arc::new(AgentControlPlane::new(
+        store.clone(),
+        catalog,
+        templates,
+        compiler,
+    )
+    .with_installation_role_binding_store(Arc::new(
+        super::nomi_core_role_defaults::NomiCoreRoleBindingStore::new(services.database.pool().clone())
+            .with_host_bindings(environment.installation_role_bindings.clone()),
+    ))
+    .with_default_chat_route_resolver(Arc::new(
+        NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
+    ))
+    .with_session_capabilities_resolver(Arc::new(super::session_capabilities::GlobalSessionCapabilities {
+        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
+        skills: Arc::clone(&services.skill_paths),
+        mcp: Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
+    })));
+    let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
+        .map_err(|error| {
+            anyhow::anyhow!("{}: {}", error.code(), error.message())
+        })?;
+    let product_agent_resolver = Arc::new(
+        super::nomi_core_session::NomiCoreProductAgentResolver::new(
+            Arc::clone(&control_plane),
+            Arc::clone(&services.authoritative_user_id),
+            services.database.pool().clone(),
+            Arc::clone(&services.official_runtime),
+            resource_bindings.clone(),
+        ),
+    );
+    conversation_owner
+        .install_product_agent_resolver(Arc::downgrade(&product_agent_resolver))?;
+    services
+        .cs_dialogue_engine
+        .with_agent_policy_resolver(product_agent_resolver.clone());
+    let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
+        &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
+        super::engine_kernel_session::EngineKernelAssembly {
+            kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
+            context_admission: Arc::clone(&platform_builtin_context_admission),
+            knowledge: Arc::clone(&services.knowledge_service),
+            #[cfg(feature = "browser-use")]
+            browser: browser_owner.clone(),
+            hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(
+                services.database.pool().clone(),
+            ),
+            robot: robot_owner.clone(),
+            agent_plugins,
+            plugin_development: plugin,
+        },
+    )?);
+    services
+        .official_runtime
+        .install(super::unified_runtime_host::factory(
+            engine_sessions.clone(),
+            Arc::clone(&schema_resolver),
+            Arc::clone(&builtin_plan.schema_resolver),
+            builtin_plan.host_dynamic_tool_capability_ids.clone(),
+            idmm,
+        ))?;
+    conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
+    let reconciled_turns = conversation_owner.reconcile_orphaned_active_turns(engine_sessions).await?;
+    if reconciled_turns > 0 {
+        tracing::warn!(
+            reconciled_turns,
+            "scheduled orphaned AgentSession recovery before route publication"
+        );
+    }
+    let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
+        SqliteRemoteBindingRepository::new(services.database.pool().clone()),
+    );
+    // Pending rendered sources must not run against the default unavailable
+    // port before the canonical Kernel/Provider composition is ready.
+    services.spawn_knowledge_resume_task();
+    Ok((
+        NomiCoreAgentApiState::new(
+            services.authoritative_user_id.clone(),
+            conversation_owner,
+            control_plane,
+            remote_repository,
+            services.nomi_core_remote_runtime.clone(),
+            resource_bindings,
+            Arc::clone(&wave4_owners),
+            wave5_owner,
+            product_agent_resolver,
+            services.ssh_pool.clone(),
+            #[cfg(feature = "browser-use")]
+            services.browser_resources.clone(),
+            #[cfg(feature = "browser-use")]
+            services.attached_chrome.clone(),
+            #[cfg(feature = "browser-use")]
+            nomifun_browser_platform::runtime::BrowserProfileStore::new(services.data_dir.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            #[cfg(feature = "browser-use")]
+            browser_owner,
+        ),
+        wave4_owners,
+        mcp_catalog_publisher,
+    ))
+}
+
+struct BuiltinToolSchemaAdapter {
+    inner: Arc<dyn nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_ai_agent::NomiPluginToolSchemaResolver for BuiltinToolSchemaAdapter {
+    async fn resolve(
+        &self,
+        capability: &nomifun_agent_contracts::ResolvedCapability,
+        reference: &nomifun_agent_contracts::CanonicalSchemaRef,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, String> {
+        self.inner.resolve(capability, reference).await
+    }
+}
+
+struct NomiCoreModuleCatalogPublisher {
+    kernel: Arc<KernelRegistry>,
+    base_registrations: Vec<nomifun_agent_kernel::PluginRegistration>,
+    repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+    host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    publish_lock: tokio::sync::Mutex<()>,
+}
+
+impl NomiCoreModuleCatalogPublisher {
+    fn new(
+        kernel: Arc<KernelRegistry>,
+        registrations: Vec<nomifun_agent_kernel::PluginRegistration>,
+        repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+        host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    ) -> Self {
+        let base_registrations = registrations
+            .into_iter()
+            .filter(|registration| {
+                !registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| {
+                        super::nomi_core_mcp_catalog::is_product_tool(capability.id.as_ref())
+                    })
+            })
+            .collect();
+        Self {
+            kernel,
+            base_registrations,
+            repository,
+            host,
+            publish_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_mcp::service::McpCatalogPublisher for NomiCoreModuleCatalogPublisher {
+    async fn refresh(&self) -> Result<(), nomifun_mcp::McpError> {
+        let _guard = self.publish_lock.lock().await;
+        let mut registrations = self.base_registrations.clone();
+        registrations.extend(
+            super::nomi_core_mcp_catalog::load_registrations(
+                self.repository.as_ref(),
+                Arc::clone(&self.host),
+            )
+            .await
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?,
+        );
+        self.kernel
+            .replace_all(registrations)
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        Ok(())
+    }
+}
+
+struct NomiCoreCronAgentPresetResolver {
+    control_plane: Arc<AgentControlPlane>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
+    async fn resolve_snapshot(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+    ) -> Result<AgentResolvedSnapshot, AppError> {
+        let owner = nomifun_agent_contracts::UserId::from(owner_id.to_owned());
+        let editor = self
+            .control_plane
+            .editor(&owner, preset_id, None)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let binding = self
+            .control_plane
+            .resolve_agent_session_binding(&owner, preset_id)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner, &binding)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(format!("invalid Cron owner: {error}")))?;
+        super::agent_binding_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            Some(&editor.preset.display_name),
+        )
+        .map(|resolved| resolved.projection.snapshot)
+    }
+}
+
+pub(super) fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
+    let mut message = format!("{}: {error}", error.code().as_ref());
+    // Preserve compiler explanations across the product-domain adapter. The
+    // outer preset error alone cannot identify an incompatible capability.
+    if let Some(details) = error.details()
+        && let Some(diagnostics) = details.get("diagnostics").and_then(serde_json::Value::as_array)
+    {
+        for diagnostic in diagnostics {
+            if let Some(reason) = diagnostic.get("message").and_then(serde_json::Value::as_str) {
+                message.push_str("; ");
+                message.push_str(reason);
+            }
+        }
+    }
+    match error.status() {
+        StatusCode::BAD_REQUEST => AppError::BadRequest(message),
+        StatusCode::FORBIDDEN => AppError::Forbidden(message),
+        StatusCode::NOT_FOUND => AppError::NotFound(message),
+        StatusCode::CONFLICT => AppError::Conflict(message),
+        StatusCode::UNPROCESSABLE_ENTITY => AppError::UnprocessableEntity(message),
+        _ => AppError::Internal(message),
+    }
+}
+
+fn nomi_core_runtime_target() -> RuntimeTarget {
+    let target = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "unsupported-local-target"
+    };
+    RuntimeTarget::from(target)
 }
 
 /// Build the default `SystemRouterState` from application services.
@@ -656,7 +900,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         workshop: services.workshop_service.clone(),
         execution_repo,
         execution_template_repo,
-        conversation_repo: services.conversation_repo.clone(),
+        pool: pool.clone(),
     });
 
     SystemRouterState {
@@ -684,7 +928,6 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
             connection_repo,
             deletion_coordinator,
         ),
-        managed_model_service: Some(services.managed_model_service.clone()),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
         data_dir: services.data_dir.clone(),
         work_dir: services.work_dir.clone(),
@@ -692,90 +935,9 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     }
 }
 
-/// Build the default `ConversationRouterState` from application services.
-pub fn build_conversation_state(
-    services: &AppServices,
-    cron_service: Option<Arc<nomifun_cron::service::CronService>>,
-) -> ConversationRouterState {
-    let pool = services.database.pool().clone();
-    let conversaion_repo = Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
-        Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let conversation_service = ConversationService::new(
-        services.authoritative_user_id.clone(),
-        services.work_dir.clone(),
-        services.event_bus.clone(),
-        skill_resolver,
-        services.agent_runtime_registry.clone(),
-        conversaion_repo,
-        agent_metadata_repo,
-        services.execution_conversation_boundary.clone(),
-    )
-    .with_runtime_state(services.conversation_runtime_state.clone());
-    conversation_service.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-        services.database.pool().clone(),
-    )));
-    conversation_service.with_knowledge_service(services.knowledge_service.clone());
-    // Phase 3: wire the model-failover deps so a pre-response provider fault on a
-    // nomi turn can switch to the next queued model (plan D5).
-    conversation_service.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
-        services.provider_model_capability_repo.clone(),
-        Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
-    );
-    // Drop the conversation's knowledge binding when the conversation goes away.
-    conversation_service.with_delete_hook(services.knowledge_service.clone());
-    // Clear the conversation-domain owner of any requirement this conversation
-    // owned; the ownership boundary has no FK cascade (spec §9.B).
-    conversation_service.with_delete_hook(
-        services.requirement_service.clone() as Arc<dyn OnConversationDelete>,
-    );
-    // A terminal minted by a conversation is part of that conversation's
-    // resource lifecycle, not a global sidebar session. Deleting the owner is
-    // the final safety net if the agent or user did not close it earlier.
-    conversation_service.with_delete_hook(Arc::new(ConversationTerminalCascade {
-        terminals: services.terminal_service.clone(),
-    }) as Arc<dyn OnConversationDelete>);
-    // Same rule for a remote session's SSH link: the socket, the remote shell and
-    // its cwd belong to the conversation, so they go when it does — with close
-    // forensics, not by letting the transport rot.
-    conversation_service
-        .with_delete_hook(Arc::new(services.ssh_pool.clone()) as Arc<dyn OnConversationDelete>);
-    // Drop this conversation's IDMM decision records (disposable audit trail,
-    // polymorphic target_id with no FK —app-level cascade).
-    conversation_service.with_delete_hook(Arc::new(IdmmRecordCascade {
-        records: Arc::new(SqliteIdmmInterventionRepository::new(services.database.pool().clone())),
-    }) as Arc<dyn OnConversationDelete>);
-    // Remove the conversation's on-disk nomi session file + auto-provisioned
-    // temp workspace so no future conversation can resume stale state
-    // (cross-conversation memory bleed). The per-session `owner_token` binds
-    // any surviving residue to the owning conversation UUIDv7.
-    conversation_service.with_delete_hook(Arc::new(
-        nomifun_ai_agent::runtime_registry::NomiSessionFilesCascade {
-            data_dir: services.data_dir.clone(),
-            work_dir: services.work_dir.clone(),
-        },
-    ) as Arc<dyn OnConversationDelete>);
-    if let Some(hook) = services.runtime_registry_delete_hook.clone() {
-        conversation_service.with_delete_hook(hook);
-    }
-    #[cfg(feature = "browser-use")]
-    if let Some(hub) = services.browser_session_hub.clone() {
-        conversation_service.with_delete_hook(Arc::new(
-            BrowserLaneConversationCascade { hub },
-        ));
-    }
-    if let Some(cron_service) = cron_service {
-        conversation_service.with_delete_hook(cron_service.clone());
-        conversation_service.with_cron_service(Some(cron_service));
-    }
-    ConversationRouterState {
-        service: conversation_service,
-        runtime_registry: services.agent_runtime_registry.clone(),
+impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn register(&self, task: tokio::task::JoinHandle<()>) {
+        BackgroundTaskRegistry::register(self, task);
     }
 }
 
@@ -808,8 +970,10 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
         allowed_roots.push(services.data_dir.clone());
     }
     let browse_roots = nomifun_file::browse::default_browse_roots();
-    let file_service = Arc::new(FileService::new(broadcaster.clone(), allowed_roots.clone()));
-    let watch_service = Arc::new(FileWatchService::new(broadcaster).expect("file watch service initialization"));
+    let file_service = Arc::new(FileService::with_inventory_cache(
+        broadcaster.clone(), allowed_roots.clone(), services.file_inventory.clone(),
+    ));
+    let watch_service = Arc::new(FileWatchService::new(broadcaster, Arc::downgrade(&file_service)).expect("file watch service initialization"));
     let snapshot_service = Arc::new(SnapshotService::new());
     FileRouterState {
         file_service,
@@ -960,7 +1124,7 @@ impl nomifun_channel::message_service::CsRouting for AppCsRouting {
 /// Build the default `ChannelRouterState` and message-loop components.
 pub async fn build_channel_state(
     services: &AppServices,
-    extension_registry: ExtensionRegistry,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> (ChannelRouterState, ChannelMessageLoopComponents) {
     let pool = services.database.pool().clone();
     let repo: Arc<dyn nomifun_db::IChannelRepository> = Arc::new(nomifun_db::SqliteChannelRepository::new(pool));
@@ -991,18 +1155,23 @@ pub async fn build_channel_state(
         .with_group_policy_fence(Arc::clone(&group_policy_fence)),
     );
 
-    // Expired pairing codes are purged only by this background sweep —the
-    // timer existed but had no caller, so stale codes lingered in the DB
-    // indefinitely. Deliberately detached (handle dropped): like the channel
-    // message loop and plugin restore tasks, it runs for the process lifetime.
-    let _pairing_cleanup = nomifun_channel::pairing::PairingService::start_cleanup_timer(repo.clone());
+    // Pairing cleanup owns repository access until its current sweep returns.
+    // Cancel and join it with the existing host background barrier before SQLite
+    // closes, including when native Browser shutdown remains blocked.
+    let pairing_shutdown = services.background_shutdown.child_token();
+    services.register_background_task(
+        nomifun_channel::pairing::PairingService::start_cleanup_timer_with_shutdown(
+            repo.clone(),
+            pairing_shutdown,
+        ),
+    );
 
     let session_manager = Arc::new(nomifun_channel::session::SessionManager::new(repo.clone()));
 
     let plugin_factory: Arc<nomifun_channel::manager::PluginFactory> =
         Arc::new(Box::new(nomifun_channel::plugins::create_plugin));
 
-    // Build channel settings service for per-plugin agent/model configuration
+    // Build channel settings service for per-plugin channel configuration.
     let pref_pool = services.database.pool().clone();
     let pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository> =
         Arc::new(SqliteClientPreferenceRepository::new(pref_pool));
@@ -1010,9 +1179,9 @@ pub async fn build_channel_state(
         pref_repo,
     ));
 
-    // Build message-loop dependencies. The fallback agent type for the
-    // `agent.select` action mirrors `ChannelSettingsService`'s default
-    // ("nomi") so the two resolution paths cannot drift apart.
+    // Build message-loop dependencies. Channel routing and the ActionExecutor
+    // share the same settings service, so their ordinary product defaults
+    // cannot drift apart.
     // 客服域接缝: one adapter instance shared by the message service (turn
     // routing) and the action executor (stranger auto-serve gate).
     let cs_routing: Arc<dyn nomifun_channel::message_service::CsRouting> =
@@ -1025,7 +1194,6 @@ pub async fn build_channel_state(
             Arc::clone(&pairing_service),
             Arc::clone(&session_manager),
             Arc::clone(&channel_settings),
-            "nomi",
         )
         // Opt-in IM → requirement pipeline: the creator is always wired, but the
         // per-platform `routeToRequirement` setting (default off) gates it, so
@@ -1040,55 +1208,6 @@ pub async fn build_channel_state(
         .with_cs_routing(Some(Arc::clone(&cs_routing))),
     );
 
-    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> = Arc::new(
-        nomifun_db::SqliteConversationRepository::new(services.database.pool().clone()),
-    );
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> = Arc::new(
-        nomifun_db::SqliteAgentMetadataRepository::new(services.database.pool().clone()),
-    );
-    let conversation_svc = Arc::new(
-        ConversationService::new(
-            services.authoritative_user_id.clone(),
-            services.work_dir.clone(),
-            services.event_bus.clone(),
-            skill_resolver,
-            services.agent_runtime_registry.clone(),
-            conv_repo,
-            agent_metadata_repo,
-            services.execution_conversation_boundary.clone(),
-        )
-        .with_runtime_state(services.conversation_runtime_state.clone()),
-    );
-    conversation_svc.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-        services.database.pool().clone(),
-    )));
-    // Channel turns on knowledge-bound conversations (companion or workpath)
-    // must resolve the same mount plan and binding signature as every other
-    // entry point. Without this injection `apply_knowledge_mounts` falls back
-    // to unbound workspace authority, whose lease conflicts with the bound
-    // lease held by a desktop-built runtime of the same conversation — the IM
-    // user then gets a permanent "still being processed" busy reply.
-    conversation_svc.with_knowledge_service(services.knowledge_service.clone());
-    // Channel turns run the same Nomi send loop as other conversations.
-    conversation_svc.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
-        services.provider_model_capability_repo.clone(),
-        Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
-    );
-    if let Some(hook) = services.runtime_registry_delete_hook.clone() {
-        conversation_svc.with_delete_hook(hook);
-    }
-    #[cfg(feature = "browser-use")]
-    if let Some(hub) = services.browser_session_hub.clone() {
-        conversation_svc.with_delete_hook(Arc::new(
-            BrowserLaneConversationCascade { hub },
-        ));
-    }
-
     // Channel Agent profile: per-platform companion binding + model resolution
     // and companion-id validation for the binding write route. One instance
     // shared by the message service and the router state.
@@ -1098,10 +1217,10 @@ pub async fn build_channel_state(
             channel_settings: Arc::clone(&channel_settings),
         });
 
+    let channel_sessions: Arc<dyn nomifun_channel::ChannelSessionPort> = conversation_owner;
     let message_service = Arc::new(
         nomifun_channel::message_service::ChannelMessageService::new(
-            conversation_svc,
-            services.agent_runtime_registry.clone(),
+            channel_sessions,
             Arc::clone(&channel_settings),
             repo.clone(),
             owner_user_id,
@@ -1140,19 +1259,20 @@ pub async fn build_channel_state(
 
     let state = ChannelRouterState {
         manager: Arc::clone(&manager),
-        pairing_service,
+        pairing_service: Arc::clone(&pairing_service),
         session_manager,
-        repo,
+        repo: Arc::clone(&repo),
         plugin_factory: Arc::clone(&plugin_factory),
         settings_service: channel_settings,
         channel_agent_profile: Some(channel_agent_profile),
-        extension_registry,
     };
 
     let components = ChannelMessageLoopComponents {
         message_loop,
         message_rx,
         manager,
+        pairing_service,
+        repository: repo,
         plugin_factory,
         queue_drain,
         message_service,
@@ -1164,7 +1284,7 @@ pub async fn build_channel_state(
 /// Build the default `TerminalRouterState` from application services.
 pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     // Late-wire the knowledge service into the terminal singleton (same
-    // pattern as `ConversationService::with_knowledge_service`): terminal
+    // application-owned late-binding pattern): terminal
     // create/relaunch then binds + mounts knowledge bases into the session
     // cwd. Interior mutability means every clone of the singleton (cron
     // executor, AutoWork driver) sees the wiring too.
@@ -1188,6 +1308,7 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     // keep the terminal singleton alive.
     {
         let terminal_service = Arc::downgrade(&services.terminal_service);
+        let background_tasks = services.background_tasks.clone();
         services
             .knowledge_service
             .set_binding_changed_hook(Arc::new(move |kind: &str, key: &str| {
@@ -1198,9 +1319,10 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
                     return;
                 };
                 let key = key.to_owned();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     terminal_service.resync_workpath_knowledge(&key).await;
                 });
+                background_tasks.register(task);
             }));
     }
     // Clear the terminal-domain owner of any requirement this terminal owned;
@@ -1209,16 +1331,8 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     services
         .terminal_service
         .with_delete_hook(services.requirement_service.clone() as Arc<dyn OnTerminalDelete>);
-    // Drop this terminal's IDMM decision records (disposable audit trail,
-    // polymorphic target_id with no FK —app-level cascade, mirror of the
-    // conversation delete hook).
-    services
-        .terminal_service
-        .with_delete_hook(Arc::new(IdmmRecordCascade {
-            records: Arc::new(SqliteIdmmInterventionRepository::new(services.database.pool().clone())),
-        }) as Arc<dyn OnTerminalDelete>);
     let lifecycle_notice = Arc::new(AgentTerminalLifecycleNotice {
-        runtimes: services.agent_runtime_registry.clone(),
+        runtimes: services.agent_runtime_sessions.clone(),
     });
     // `terminal.exit` is emitted only after the PTY exit status and final
     // scrollback have been persisted. Observe the internal owner-scoped event
@@ -1235,118 +1349,40 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
         .with_conversation_notice_sink(lifecycle_notice)
 }
 
-/// Build the `RequirementRouterState` + `IdmmRouterState` from application
-/// services.
-///
-/// Reuses the singleton `requirement_service` (which shares its repo + WS emitter
-/// with the nomi native-tool sink), attaches a `ConversationService` + repo to a
-/// clone for AutoWork config persistence, builds the AutoWork runner, and
-/// constructs the IDMM supervisor sharing the same live-session collaborators
-/// (threaded back into the runner as its `IdmmHandle`).
-pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterState, IdmmRouterState) {
-    let pool = services.database.pool().clone();
-
-    // Build a ConversationService exactly like build_cron_state does, for
-    // injection into the AutoWork runner + config reads/writes.
-    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> =
-        Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
-        Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let conv_service = ConversationService::new(
-        services.authoritative_user_id.clone(),
-        services.work_dir.clone(),
-        services.event_bus.clone(),
-        skill_resolver,
-        services.agent_runtime_registry.clone(),
-        conv_repo.clone(),
-        agent_metadata_repo,
-        services.execution_conversation_boundary.clone(),
-    )
-    .with_runtime_state(services.conversation_runtime_state.clone());
-    // AutoWork-driven turns must resolve knowledge mounts exactly like the
-    // main conversation assembly (and build_cron_state): a knowledge-less
-    // instance would attach unbound workspace authority whose lease conflicts
-    // with the bound lease of a knowledge-wired runtime on the same
-    // conversation.
-    conv_service.with_knowledge_service(services.knowledge_service.clone());
-    // Phase 3: AutoWork-driven nomi turns run the send loop, and IDMM fault
-    // supervision (Task 3) reuses `perform_model_failover` —wire the deps here too.
-    conv_service.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(pool.clone())),
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
-        services.provider_model_capability_repo.clone(),
-        Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
-    );
-
-    // Router-state service: the singleton plus conversation service + repo for
-    // AutoWork config, plus the terminal driver for terminal-target AutoWork. The
-    // sink (built in AppServices) keeps using the plain singleton —it never needs
-    // the autowork-config methods.
-    let terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver> = services.terminal_service.clone();
-    let terminal_repo: Arc<dyn nomifun_db::ITerminalRepository> =
-        Arc::new(nomifun_db::SqliteTerminalRepository::new(pool.clone()));
-    // Shared AutoWork waker: the service fires it when a requirement becomes
-    // claimable so idle AutoWork loops pick up new work without polling delay.
+/// Build the Requirements queue controller over the single AgentExecution
+/// state machine. AutoWork retains only binding, claim and queue policy; it
+/// cannot acquire a Runtime lease or deliver a Conversation turn directly.
+pub fn build_requirement_state(
+    services: &AppServices,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
+    agent_execution: Arc<AgentExecutionEngine>,
+) -> RequirementRouterState {
     let autowork_waker = Arc::new(tokio::sync::Notify::new());
+    let session_config: Arc<dyn nomifun_requirement::AutoWorkSessionConfigPort> =
+        conversation_owner.clone();
     let requirement_service = Arc::new(
         (*services.requirement_service)
             .clone()
-            .with_conversation_service(conv_service.clone(), conv_repo.clone())
-            .with_terminal_driver(terminal_driver.clone())
-            .with_terminal_repo(terminal_repo)
+            .with_session_config_port(session_config)
+            .with_scheduled_session_lookup(conversation_owner.clone())
             .with_autowork_waker(autowork_waker.clone()),
     );
-
-    // -- IDMM: build the supervisor manager + service, sharing the same
-    // ConversationService / repo / terminal driver this AutoWork runner drives, so
-    // IDMM observes the exact same live sessions. The manager is threaded into
-    // AutoWorkRunnerDeps.idmm so AutoWork ensures supervision per turn.
-    let idmm_state = build_idmm_state(
-        services,
-        conv_service.clone(),
-        conv_repo.clone(),
-        terminal_driver.clone(),
-    );
-    let idmm_handle: Arc<dyn nomifun_requirement::IdmmHandle> = Arc::new(idmm_state.service.manager().clone());
-
-    // NOTE: the ConversationSupervisionHook for user-driven chat turns is
-    // registered in `build_module_states` on the ROUTE ConversationService
-    // (`build_conversation_state`'s instance), not here —this `conv_service` is
-    // moved into `AutoWorkRunnerDeps` below and only drives AutoWork, which arms
-    // IDMM per loop iteration via `AutoWorkRunnerDeps.idmm` (so a hook here was
-    // dead code that fooled debugging into thinking arming was wired).
-
+    let execution: Arc<dyn nomifun_requirement::AutoWorkExecutionPort> = agent_execution;
+    let workspace: Arc<dyn nomifun_requirement::AutoWorkWorkspacePort> =
+        conversation_owner.clone();
     let deps = Arc::new(nomifun_requirement::AutoWorkRunnerDeps {
         authoritative_user_id: services.authoritative_user_id.clone(),
         service: requirement_service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-        conversation_service: conv_service,
-        conversation_repo: conv_repo,
-        agent_registry: services.agent_registry.clone(),
-        terminal_driver: Some(terminal_driver),
-        idmm: Some(idmm_handle),
+        execution,
+        workspace,
         wake: autowork_waker,
-        // ACP sessions expose the requirement declaration tools only when the
-        // requirement MCP server started + was plumbed into the agent factory.
-        requirement_mcp_enabled: services.requirement_mcp_config.is_some(),
     });
     let auto_work_runner = Arc::new(nomifun_requirement::AutoWorkRunner::new(deps));
-    // Start the periodic lease sweeper (re-pends stale claims from dead sessions).
-    auto_work_runner.start_sweeper();
-    // Resume every persisted-enabled binding so bound sessions work in the
-    // background from boot —no foreground/session-page visit required.
-    auto_work_runner.resume_persisted_bindings();
-
-    (
-        RequirementRouterState {
-            requirement_service,
-            auto_work_runner,
-        },
-        idmm_state,
-    )
+    services.set_auto_work_runner(auto_work_runner.clone());
+    RequirementRouterState {
+        requirement_service,
+        auto_work_runner,
+    }
 }
 
 /// Build the `WebhookRouterState` (webhook CRUD + per-tag settings). Constructs
@@ -1375,14 +1411,6 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     )
 }
 
-/// Build the 小程序 (mini-app) router state, reusing the singleton
-/// `miniapp_service`. The authenticated CRUD router and the auth-exempt serve
-/// router are both built from this one state, so the document a runner iframe
-/// loads is the document the last solidify wrote.
-pub fn build_miniapp_state(services: &AppServices) -> nomifun_miniapp::MiniAppRouterState {
-    nomifun_miniapp::MiniAppRouterState::new((*services.miniapp_service).clone())
-}
-
 /// Build the 生成引擎 (creation) router state, reusing the singleton
 /// `creation_service`. Creation task/asset reconciliation is completed during
 /// `AppServices::from_config`, before this router can accept new generation
@@ -1395,8 +1423,7 @@ pub fn build_creation_state(services: &AppServices) -> CreationRouterState {
 /// recovery. Planner/router/scheduler/executor remain private engine strategies.
 pub fn build_agent_execution_engine(
     services: &AppServices,
-    conversation: ConversationService,
-    preset_service: Arc<nomifun_preset::PresetService>,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> Arc<AgentExecutionEngine> {
     let repository: Arc<dyn IAgentExecutionRepository> = Arc::new(
         SqliteAgentExecutionRepository::new(services.database.pool().clone()),
@@ -1410,172 +1437,42 @@ pub fn build_agent_execution_engine(
     let provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository> = Arc::new(
         nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone()),
     );
+    // Transitional only: AgentExecution consumes the public typed Session port
+    // and no longer receives the Session owner or Runtime registry as
+    // production configuration. The adapter is a pure delegate over the
+    // existing owner while the canonical AgentSession implementation replaces
+    // the remaining Conversation-backed operations.
+    let session: Arc<dyn nomifun_agent_execution::AgentExecutionSessionPort> =
+        conversation_owner;
     let engine = Arc::new(AgentExecutionEngine::new(AgentExecutionEngineConfig {
         repository,
         template_repository,
         provider_repository,
         provider_model_repository,
         provider_model_capability_repository: services.provider_model_capability_repo.clone(),
-        preset_service,
         realtime: services.ws_manager.clone(),
-        conversation,
-        runtime_registry: services.agent_runtime_registry.clone(),
+        session,
         model_invoke: services.model_invoke_service.clone(),
         workspace_root: services.work_dir.clone(),
+        lifecycle: services.agent_execution_lifecycle.clone(),
     }));
-    {
-        let engine = engine.clone();
-        tokio::spawn(async move {
-            if let Err(error) = engine.recover().await {
-                tracing::error!(%error, "Agent Execution recovery failed");
-            }
-        });
-    }
     engine
-}
-
-/// Build the `IdmmRouterState` (the IDMM supervisor manager + service). Shares
-/// the caller's `ConversationService` / conversation repo / terminal driver so
-/// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs a
-/// the process-wide model invoke resolver from [`AppServices`].
-pub fn build_idmm_state(
-    services: &AppServices,
-    conv_service: ConversationService,
-    conv_repo: Arc<dyn nomifun_db::IConversationRepository>,
-    terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver>,
-) -> IdmmRouterState {
-    let pool = services.database.pool().clone();
-    let records: Arc<dyn IIdmmInterventionRepository> = Arc::new(SqliteIdmmInterventionRepository::new(pool));
-
-    // The sidecar's one-shot completions run against a backup provider; use the
-    // data dir as the (unused-for-supervision) workspace root.
-    let completer: Arc<dyn nomifun_idmm::Completer> = Arc::new(nomifun_idmm::LiveCompleter {
-        model_invoke: services.model_invoke_service.clone(),
-        workspace: services.data_dir.clone(),
-    });
-    let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer));
-
-    let probe_deps = Arc::new(nomifun_idmm::ProbeDeps {
-        conversation_service: conv_service,
-        conversation_repo: conv_repo,
-        terminal_driver,
-        runtime_registry: services.agent_runtime_registry.clone(),
-    });
-
-    let loop_deps = Arc::new(nomifun_idmm::LoopDeps {
-        sidecar: sidecar.clone(),
-        emitter: nomifun_idmm::IdmmEventEmitter::new(services.event_bus.clone()),
-        records: records.clone(),
-    });
-    let manager = IdmmManager::new(loop_deps, probe_deps.clone(), probe_deps.clone());
-    let service = Arc::new(nomifun_idmm::IdmmService::new(
-        probe_deps,
-        sidecar,
-        manager,
-        records.clone(),
-    ));
-
-    // TTL janitor: IDMM records are deliberately disposable (per-target cap is
-    // enforced on insert; this enforces the shared TTL + per-owner backstop). Sweep
-    // once at boot, then hourly. Best-effort —a failed sweep only warns and the
-    // next tick retries.
-    spawn_idmm_record_janitor(records);
-
-    IdmmRouterState::new(service)
-}
-
-/// Spawn the IDMM record TTL janitor: sweeps rows older than `TTL_MS` and
-/// enforces the per-owner hard cap `PER_USER_ACTIVITY_CAP`. Runs once immediately (boot
-/// sweep) then on a ~1h interval. Best-effort —a sweep error only warns and
-/// the next tick retries; the sweep is a backstop on top of the per-target cap
-/// already enforced at insert time.
-fn spawn_idmm_record_janitor(records: Arc<dyn IIdmmInterventionRepository>) {
-    tokio::spawn(async move {
-        // First missed tick fires immediately → boot sweep on the first
-        // iteration, then hourly.
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
-        loop {
-            ticker.tick().await;
-            let cutoff = nomifun_common::now_ms() - nomifun_db::TTL_MS;
-            match records
-                .sweep_all_owners(cutoff, nomifun_db::PER_USER_ACTIVITY_CAP)
-                .await
-            {
-                Ok(removed) if removed > 0 => {
-                    tracing::debug!(removed, "IDMM record janitor swept expired/overflow rows");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "IDMM record janitor sweep failed (will retry)"),
-            }
-        }
-    });
 }
 
 /// Build the `CompanionRouterState` (the "nomi" desktop companion: opt-in event
 /// collection, scheduled learning, memories, companion chat). Reuses the
 /// singleton `services.companion_service` (constructed in `AppServices::from_config`
 /// before the agent factory, which holds its memory sink) and late-wires the
-/// companion thread manager with a `ConversationService` so companion chats
-/// run as real nomi conversations.
+/// companion thread manager with the canonical AgentSession owner.
 pub fn build_companion_state(
     services: &AppServices,
     channel_manager: Arc<nomifun_channel::manager::ChannelManager>,
-    preset_service: Arc<nomifun_preset::PresetService>,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> CompanionRouterState {
-    let pool = services.database.pool().clone();
-    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> =
-        Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
-        Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let conv_service = ConversationService::new(
-        services.authoritative_user_id.clone(),
-        services.work_dir.clone(),
-        services.event_bus.clone(),
-        skill_resolver,
-        services.agent_runtime_registry.clone(),
-        conv_repo,
-        agent_metadata_repo,
-        services.execution_conversation_boundary.clone(),
-    )
-    .with_runtime_state(services.conversation_runtime_state.clone());
-    conv_service.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-        services.database.pool().clone(),
-    )));
-    // Companion threads carry `extra.companion_id`, so the conversation service
-    // mounts the companion-level knowledge binding ('companion', companion_id) at task start —
-    // same injection as the main conversation assembly.
-    conv_service.with_knowledge_service(services.knowledge_service.clone());
-    conv_service.with_preset_service(preset_service);
-    // Phase 3: companion turns run the same nomi send loop, so wire failover too.
-    conv_service.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
-        services.provider_model_capability_repo.clone(),
-        Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
-    );
-    if let Some(hook) = services.runtime_registry_delete_hook.clone() {
-        conv_service.with_delete_hook(hook);
-    }
-    #[cfg(feature = "browser-use")]
-    if let Some(hub) = services.browser_session_hub.clone() {
-        conv_service.with_delete_hook(Arc::new(
-            BrowserLaneConversationCascade { hub },
-        ));
-    }
-
-    let conv_service = Arc::new(conv_service);
-    let robot_model_sync = Arc::new(CompanionRobotModelSync {
-        conversations: conv_service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-        owner_user_id: services.authoritative_user_id.clone(),
-    });
-
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
-    // of truth) clears bound IM sessions and retargets durable robot threads.
+    // of truth) clears bound IM sessions. Physical endpoints share the same
+    // Companion conversation and require no model propagation or boot repair.
     // Deleting a companion likewise clears its channel bindings. All are
     // best-effort cleanup hooks.
     services.companion_service.set_cleanup_hooks(vec![
@@ -1585,28 +1482,22 @@ pub fn build_companion_state(
         Arc::new(CompanionChannelModelSync {
             manager: channel_manager,
         }),
-        robot_model_sync.clone(),
+        Arc::new(CompanionRobotCleanup { robot: services.robot.clone() }),
     ]);
 
-    // Repair robot threads created while their companion had no chat model.
-    // This boot pass is deliberately missing-only: a fallback selected after a
-    // provider fault remains sticky across restart. Explicit settings changes
-    // use the hook above and intentionally retarget every robot thread.
-    let companion_service = services.companion_service.clone();
-    tokio::spawn(async move {
-        for profile in companion_service.list_companions().await {
-            let Some(model) = profile.model.as_ref() else {
-                continue;
-            };
-            robot_model_sync
-                .sync(&profile.companion_id, model, true)
-                .await;
-        }
-    });
 
-    services
-        .companion_service
-        .attach_companion(conv_service, services.agent_runtime_registry.clone());
+    let transcript: Arc<dyn nomifun_companion::evolution::TranscriptSource> =
+        Arc::new(super::nomi_core_session::CanonicalAgentTranscriptSource::new(
+            conversation_owner.clone(),
+            services.authoritative_user_id.clone(),
+        ));
+    let companion_ports = nomifun_companion::companion_ports_from_typed_host(
+        services.authoritative_user_id.clone(),
+        conversation_owner.clone(),
+        conversation_owner,
+        transcript,
+    );
+    services.companion_service.attach_companion(companion_ports);
     CompanionRouterState::new(services.companion_service.clone())
 }
 
@@ -1622,68 +1513,6 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionKnowledgeClea
     async fn on_companion_deleted(&self, companion_id: &str) {
         if let Err(e) = self.knowledge.delete_binding("companion", companion_id).await {
             tracing::warn!(companion_id, error = %e, "failed to delete companion knowledge binding");
-        }
-    }
-}
-
-/// Conversation-delete cascade for agent-created terminal resources. Normal
-/// operation expects the creating agent or the conversation terminal panel to
-/// close these explicitly; this hook is the durable owner-lifecycle fallback.
-struct ConversationTerminalCascade {
-    terminals: Arc<nomifun_terminal::TerminalService>,
-}
-
-/// Conversation deletion is an authority boundary of its own. Runtime
-/// termination normally drops the native owner lease, but Gateway/ACP/remote
-/// lanes may outlive that particular runtime object. Close every Hub lane
-/// attributed to the deleted conversation as a separate idempotent cascade.
-#[cfg(feature = "browser-use")]
-struct BrowserLaneConversationCascade {
-    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
-}
-
-#[cfg(feature = "browser-use")]
-#[async_trait::async_trait]
-impl OnConversationDelete for BrowserLaneConversationCascade {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(error) = self.hub.close_conversation(conversation_id).await {
-            tracing::warn!(
-                conversation_id,
-                code = ?error.code,
-                retryable = error.retryable,
-                "failed to close browser lanes during conversation deletion"
-            );
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl OnConversationDelete for ConversationTerminalCascade {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-        let sessions = match self
-            .terminals
-            .list_for_conversation(user_id, conversation_id)
-            .await
-        {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                tracing::warn!(
-                    conversation_id,
-                    error = %error,
-                    "failed to enumerate conversation-owned terminals during owner cleanup"
-                );
-                return;
-            }
-        };
-        for session in sessions {
-            if let Err(error) = self.terminals.delete(session.terminal_id.as_str()).await {
-                tracing::warn!(
-                    conversation_id,
-                    terminal_id = %session.terminal_id,
-                    error = %error,
-                    "failed to delete conversation-owned terminal during owner cleanup"
-                );
-            }
         }
     }
 }
@@ -1794,7 +1623,7 @@ fn terminal_exit_matches_current_state(
 /// the durable source of truth, while the trusted system-resource notice keeps
 /// a present runtime from relying on stale process state.
 struct AgentTerminalLifecycleNotice {
-    runtimes: Arc<dyn AgentRuntimeRegistry>,
+    runtimes: Arc<dyn AgentRuntimeSessions>,
 }
 
 impl AgentTerminalLifecycleNotice {
@@ -1870,43 +1699,6 @@ impl nomifun_terminal::TerminalConversationNoticeSink for AgentTerminalLifecycle
     }
 }
 
-/// Session-delete cascade for IDMM decision records: `idmm_interventions` has a
-/// polymorphic `target_id` (no FK to cascade), so when a conversation or terminal
-/// is deleted the app layer clears its disposable audit trail here. Best-effort:
-/// failures are logged, never propagated (hook contract —the session is already
-/// gone). Lives in `nomifun-app` so `nomifun-conversation` / `nomifun-terminal`
-/// stay unaware of the IDMM record repo. The `target_id` string matches the
-/// supervisor's probe target (`conversation_id` / `terminal_id` as decimal).
-struct IdmmRecordCascade {
-    records: Arc<dyn IIdmmInterventionRepository>,
-}
-
-#[async_trait::async_trait]
-impl OnConversationDelete for IdmmRecordCascade {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-        if let Err(e) = self
-            .records
-            .delete_for_target(user_id, "conversation", &conversation_id.to_string())
-            .await
-        {
-            tracing::warn!(conversation_id, error = %e, "failed to clear IDMM records on conversation delete");
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl OnTerminalDelete for IdmmRecordCascade {
-    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: &str) {
-        if let Err(e) = self
-            .records
-            .delete_for_target(user_id, "terminal", terminal_id)
-            .await
-        {
-            tracing::warn!(terminal_id, error = %e, "failed to clear IDMM records on terminal delete");
-        }
-    }
-}
-
 /// Companion model-switch / delete → IM channel session sync. The companion's chat model is
 /// the single source of truth; when it changes (or the companion is deleted), the
 /// channel sessions bound to that companion are cleared so the next inbound IM message
@@ -1929,63 +1721,23 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionChannelModelS
     }
 }
 
-/// Companion model-switch / boot repair -> durable robot conversation sync.
-///
-/// Robot threads are intentionally not part of the companion chat registry,
-/// but they carry the same backend-owned `extra.companion_id` identity and use
-/// the companion chat model as their source of truth.
-struct CompanionRobotModelSync {
-    conversations: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    owner_user_id: Arc<str>,
-}
-
-impl CompanionRobotModelSync {
-    async fn sync(
-        &self,
-        companion_id: &str,
-        model: &nomifun_common::ProviderWithModel,
-        only_missing: bool,
-    ) {
-        match self
-            .conversations
-            .sync_robot_thread_models_for_companion(
-                self.owner_user_id.as_ref(),
-                companion_id,
-                model,
-                only_missing,
-                &self.runtime_registry,
-            )
-            .await
-        {
-            Ok(0) => {}
-            Ok(updated) => tracing::info!(
-                companion_id,
-                updated,
-                only_missing,
-                "synchronized companion chat model to robot conversations"
-            ),
-            Err(error) => tracing::warn!(
-                companion_id,
-                %error,
-                only_missing,
-                "failed to synchronize companion chat model to robot conversations"
-            ),
-        }
-    }
+/// Deleting a Companion revokes every physical endpoint bound to it.
+struct CompanionRobotCleanup {
+    robot: Option<Arc<crate::robot_wiring::RobotServices>>,
 }
 
 #[async_trait::async_trait]
-impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotModelSync {
-    async fn on_companion_deleted(&self, _companion_id: &str) {}
-
-    async fn on_companion_model_changed(
-        &self,
-        companion_id: &str,
-        model: Option<&nomifun_common::ProviderWithModel>,
-    ) {
-        if let Some(model) = model {
-            self.sync(companion_id, model, false).await;
+impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotCleanup {
+    async fn on_companion_deleted(&self, companion_id: &str) {
+        let Some(robot) = self.robot.as_ref() else { return; };
+        for record in robot.registry.list().await {
+            if record.companion_id.as_deref() == Some(companion_id) {
+                if let Err(error) = robot.registry.patch(&record.robot_id, None, Some(None)).await {
+                    tracing::warn!(%error, "could not unbind deleted Companion device");
+                }
+                robot.tools.detach_if_disconnected(&robot.registry, &record.robot_id).await;
+                robot.status.mark_offline_if_disconnected(&robot.registry, &record.robot_id, nomifun_common::now_ms()).await;
+            }
         }
     }
 }
@@ -1993,59 +1745,23 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotModelSyn
 /// Build the default `CronRouterState` from application services.
 pub fn build_cron_state(
     services: &AppServices,
-    preset_service: Arc<nomifun_preset::PresetService>,
+    conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> CronRouterState {
     let pool = services.database.pool().clone();
     let cron_repo: Arc<dyn nomifun_db::ICronRepository> = Arc::new(nomifun_db::SqliteCronRepository::new(pool.clone()));
 
-    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> =
-        Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
-        Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let conv_service = ConversationService::new(
-        services.authoritative_user_id.clone(),
-        services.work_dir.clone(),
-        services.event_bus.clone(),
-        skill_resolver,
-        services.agent_runtime_registry.clone(),
-        conv_repo.clone(),
-        agent_metadata_repo,
-        services.execution_conversation_boundary.clone(),
-    )
-    .with_runtime_state(services.conversation_runtime_state.clone());
-    conv_service.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-        services.database.pool().clone(),
-    )));
-    // Cron-spawned conversations mount their bound knowledge bases too —
-    // same injection as the main conversation assembly.
-    conv_service.with_knowledge_service(services.knowledge_service.clone());
-    conv_service.with_preset_service(preset_service);
-    // Phase 3: cron-spawned nomi conversations run the send loop too.
-    conv_service.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
-        services.provider_model_capability_repo.clone(),
-        Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
-    );
-
     let busy_guard = Arc::new(nomifun_cron::busy_guard::CronBusyGuard::new());
+    let cron_sessions: Arc<dyn nomifun_cron::CronSessionPort> = conversation_owner;
     let executor = Arc::new(nomifun_cron::executor::JobExecutor::new(
         services.authoritative_user_id.clone(),
-        services.agent_runtime_registry.clone(),
-        conv_repo,
-        Arc::new(conv_service.clone()),
+        cron_sessions,
         busy_guard,
-        services.work_dir.clone(),
         services.data_dir.clone(),
-        services.event_bus.clone(),
-        services.agent_registry.clone(),
     ));
 
     let tick_service_ref: Arc<CronServiceTickRef> = Arc::new(CronServiceTickRef::default());
     let tick_ref = tick_service_ref.clone();
+    let background_tasks = services.background_tasks.clone();
     let scheduler = Arc::new(nomifun_cron::scheduler::CronScheduler::new(Arc::new(
         move |
             job_id: String,
@@ -2055,7 +1771,7 @@ pub fn build_cron_state(
             generation: u64,
         | {
             let svc = tick_ref.0.lock().unwrap().clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 if let Some(svc) = svc {
                     svc.tick_occurrence_with_generation(
                         &user_id,
@@ -2067,6 +1783,7 @@ pub fn build_cron_state(
                     .await;
                 }
             });
+            background_tasks.register(task);
         },
     )));
 
@@ -2079,12 +1796,16 @@ pub fn build_cron_state(
         emitter,
         services.data_dir.clone(),
     ));
+    cron_service.with_cron_background_task_registrar(
+        services.background_tasks.clone()
+            as Arc<dyn nomifun_cron::CronBackgroundTaskRegistrar>,
+    );
+    services.set_cron_service(cron_service.clone());
 
     tick_service_ref.0.lock().unwrap().replace(cron_service.clone());
 
     CronRouterState {
         cron_service,
-        conversation_service: conv_service,
     }
 }
 
@@ -2146,52 +1867,32 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
 #[derive(Default)]
 struct CronServiceTickRef(std::sync::Mutex<Option<Arc<nomifun_cron::service::CronService>>>);
 
-/// Build the default extension-related router states.
+/// Build the default Skill Library router state.
 ///
-/// Returns `(ExtensionRouterState, HubRouterState, SkillRouterState)`.
-pub async fn build_extension_states(
-    services: &AppServices,
-) -> (ExtensionRouterState, HubRouterState, SkillRouterState) {
+/// Skill discovery and managed paths are owned by `nomifun-skill-library`;
+/// there is no legacy Extension registry or Hub in the production composition.
+pub async fn build_skill_state(services: &AppServices) -> SkillRouterState {
     let skill_data_dir = services.data_dir.clone();
-
-    let state_store = ExtensionStateStore::new(resolve_state_file_path(&skill_data_dir));
-    let registry = ExtensionRegistry::new(state_store, services.event_bus.clone(), services.app_version.clone());
-
-    let hub_dir = resolve_install_target_dir_for_data_dir(&skill_data_dir);
-    let index_manager = HubIndexManager::new(hub_dir, registry.clone());
-    let installer = HubInstaller::new(index_manager.clone(), registry.clone());
 
     let app_resource_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let skill_paths = nomifun_extension::resolve_skill_paths(&app_resource_dir, &skill_data_dir);
+    let skill_paths = nomifun_skill_library::resolve_skill_paths(&app_resource_dir, &skill_data_dir);
 
     let ext_paths_mgr = Arc::new(ExternalPathsManager::new(&skill_data_dir).await);
 
     let skill_tag_repo: Arc<dyn nomifun_db::ISkillTagRepository> =
         Arc::new(nomifun_db::SqliteSkillTagRepository::new(services.database.pool().clone()));
-    let builtin_skill_tags = Arc::new(nomifun_extension::skill_service::load_builtin_skill_tags());
+    let builtin_skill_tags = Arc::new(nomifun_skill_library::skill_service::load_builtin_skill_tags());
 
-    let ext_state = ExtensionRouterState {
-        registry: registry.clone(),
-    };
-
-    let hub_state = HubRouterState {
-        index_manager,
-        installer,
-    };
-
-    let skill_state = SkillRouterState {
+    SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        preset_dispatcher: None,
         skill_tag_repo,
         builtin_skill_tags,
-    };
-
-    (ext_state, hub_state, skill_state)
+    }
 }
 
 /// Build the default `WsHandlerState` from application services.
@@ -2246,7 +1947,18 @@ mod tests {
     use super::*;
 
     use crate::AppConfig;
-    use nomifun_extension::{ExtensionSource, ScanPath};
+
+    #[test]
+    fn product_agent_errors_keep_the_compiler_reason() {
+        let error = nomifun_agent_control_plane::ControlPlaneError::with_details(
+            "PRESET_REVISION_SAVE_FAILED", StatusCode::UNPROCESSABLE_ENTITY,
+            "template expansion did not pass compiler validation",
+            serde_json::json!({"diagnostics": [{"code": "AGENT_RUNTIME_ENGINE_UNAVAILABLE", "message": "MCP owner paths cannot be mixed"}]}),
+        );
+        let mapped = control_plane_error_to_app(error);
+        assert_eq!(mapped.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(mapped.to_string().contains("MCP owner paths cannot be mixed"));
+    }
 
     #[test]
     fn terminal_exit_notice_rejects_stale_relaunch_epochs() {
@@ -2265,347 +1977,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_production_conversation_service_uses_shared_private_event_and_execution_boundaries() {
-        let source = include_str!("state.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("state source must contain production assembly");
-        let constructors = production_source
-            .matches("ConversationService::new(")
-            .count();
-        let shared_boundary_injections = production_source
-            .matches("services.execution_conversation_boundary.clone()")
-            .count();
-
-        assert_eq!(constructors, 5, "audit every production ConversationService");
-        assert_eq!(shared_boundary_injections, constructors);
-        assert!(!production_source.contains("with_execution_conversation_boundary"));
-
-        let mut remaining = production_source;
-        for constructor_index in 0..constructors {
-            let start = remaining
-                .find("ConversationService::new(")
-                .expect("counted constructor must remain");
-            remaining = &remaining[start..];
-            let end = remaining
-                .find("services.execution_conversation_boundary.clone()")
-                .expect("constructor must inject the shared execution boundary");
-            let constructor = &remaining[..end];
-            assert!(
-                constructor.contains("services.event_bus.clone()"),
-                "ConversationService constructor {constructor_index} must use the shared scoped event bus"
-            );
-            assert!(
-                !constructor.contains("services.ws_manager.clone()"),
-                "ConversationService constructor {constructor_index} must not bypass internal scoped-event observers"
-            );
-            remaining = &remaining[end..];
-        }
-
-        // Every production ConversationService must also inject the shared
-        // KnowledgeService. A constructor without it makes
-        // `apply_knowledge_mounts` fall back to unbound workspace authority,
-        // whose lease signature conflicts with the bound lease held by a
-        // knowledge-wired runtime of the same conversation — surfaced to IM
-        // users as a permanent "still being processed" reply. 5
-        // ConversationService instances + the companion state builder + the
-        // terminal service all take the same injection.
-        let knowledge_injections = production_source
-            .matches(".with_knowledge_service(services.knowledge_service.clone())")
-            .count();
-        assert_eq!(
-            knowledge_injections, constructors + 2,
-            "audit every production knowledge-service injection"
-        );
-
-        let cron_executor_start = production_source
-            .find("nomifun_cron::executor::JobExecutor::new(")
-            .expect("production cron executor must be assembled");
-        let cron_executor = &production_source[cron_executor_start..];
-        let cron_executor_end = cron_executor
-            .find("services.agent_registry.clone()")
-            .expect("cron executor must inject the shared agent registry");
-        let cron_executor = &cron_executor[..cron_executor_end];
-        assert!(cron_executor.contains("services.authoritative_user_id.clone()"));
-        assert!(cron_executor.contains("services.event_bus.clone()"));
-        assert!(!cron_executor.contains("services.ws_manager.clone()"));
-        let cron_service_start = production_source
-            .find("nomifun_cron::service::CronService::new(")
-            .expect("production cron service must be assembled");
-        let cron_service = &production_source[cron_service_start..];
-        let cron_service_end = cron_service
-            .find("services.data_dir.clone()")
-            .expect("cron service must receive the application data directory");
-        assert!(
-            cron_service[..cron_service_end]
-                .contains("services.authoritative_user_id.clone()")
-        );
-        assert!(
-            production_source.contains("CronEventEmitter::new(services.event_bus.clone())")
-        );
-        assert!(
-            !production_source.contains("CronEventEmitter::new(services.ws_manager.clone())")
-        );
-    }
-
-    #[test]
-    fn boot_orphan_sweep_is_a_structural_barrier_before_every_work_producer() {
-        let source = include_str!("state.rs");
-        let build = source
-            .split_once("pub async fn build_module_states")
-            .expect("module-state builder must exist")
-            .1
-            .split_once("/// Build the process-wide preset catalog")
-            .expect("module-state builder must have a stable end marker")
-            .0;
-
-        let conversation = build
-            .find("build_conversation_state(")
-            .expect("ConversationService must be constructed for the sweep");
-        let sweep = build
-            .find("reconcile_unsettled_conversation_turns_before_background_work(")
-            .expect("boot orphan sweep must be awaited");
-        let cron = build
-            .find("cron.cron_service.init().await")
-            .expect("cron startup must remain explicit");
-        let channel = build
-            .find("build_channel_state(")
-            .expect("channel state startup must remain explicit");
-        let autowork = build
-            .find("build_requirement_state(")
-            .expect("AutoWork state startup must remain explicit");
-
-        assert!(conversation < sweep, "the sweep needs the route ConversationService");
-        assert!(sweep < cron, "cron must not initialize before orphan reconciliation");
-        assert!(sweep < channel, "channel/plugin assembly must not precede reconciliation");
-        assert!(sweep < autowork, "AutoWork persisted resume must not precede reconciliation");
-        assert!(
-            build[sweep..cron].contains(".await;"),
-            "the sweep must be a synchronous startup barrier, not a spawned task"
-        );
-
-        let routes = include_str!("routes.rs");
-        let module_build = routes
-            .find("build_module_states(services).await")
-            .expect("router must await module-state construction");
-        let channel_loop = routes
-            .find(".message_loop")
-            .expect("router must start the channel receive loop");
-        let plugin_restore = routes
-            .find("restore enabled channel")
-            .or_else(|| routes.find("Restore enabled channel"))
-            .expect("router must restore channel plugins");
-        assert!(module_build < channel_loop);
-        assert!(module_build < plugin_restore);
-
-        let requirement_builder = source
-            .split_once("pub fn build_requirement_state")
-            .expect("requirement builder must exist")
-            .1;
-        assert!(
-            requirement_builder.contains("auto_work_runner.resume_persisted_bindings();"),
-            "the structural barrier must continue to cover persisted AutoWork resume"
-        );
-    }
-
-    #[tokio::test]
-    async fn boot_orphan_sweep_paginates_past_quarantined_and_retained_rows() {
-        fn candidate(
-            conversation_id: &str,
-            agent_type: &str,
-        ) -> BootConversationReconciliationCandidate {
-            BootConversationReconciliationCandidate {
-                user_id: format!("owner-{conversation_id}"),
-                conversation_id: conversation_id.to_owned(),
-                agent_type: agent_type.to_owned(),
-                status: Some("running".to_owned()),
-                admission_epoch: 7,
-                operation_id: Some(format!("operation-{conversation_id}")),
-            }
-        }
-
-        let observed_pages =
-            Arc::new(std::sync::Mutex::new(Vec::<(Option<String>, u32)>::new()));
-        let observed_reconciliations =
-            Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let page_observer = observed_pages.clone();
-        let reconcile_observer = observed_reconciliations.clone();
-        let summary = reconcile_unsettled_conversation_turn_pages(
-            move |after, limit| {
-                let page_observer = page_observer.clone();
-                async move {
-                    page_observer.lock().unwrap().push((after.clone(), limit));
-                    let page = match after.as_deref() {
-                        None => vec![candidate("a", "nomi"), candidate("b", "remote")],
-                        Some("b") => {
-                            vec![candidate("c", "nomi"), candidate("d", "nomi")]
-                        }
-                        Some("d") => Vec::new(),
-                        unexpected => panic!("unexpected keyset cursor {unexpected:?}"),
-                    };
-                    Ok::<_, AppError>(page)
-                }
-            },
-            move |_user_id, conversation_id| {
-                let reconcile_observer = reconcile_observer.clone();
-                async move {
-                    reconcile_observer
-                        .lock()
-                        .unwrap()
-                        .push(conversation_id.clone());
-                    match conversation_id.as_str() {
-                        "a" => Err(AppError::Conflict(
-                            "local parent-death teardown is not queryable terminal proof"
-                                .to_owned(),
-                        )),
-                        "b" => Err(AppError::Conflict(
-                            "external terminal proof is unavailable".to_owned(),
-                        )),
-                        "c" => Ok(
-                            QuiescentOrphanReconciliation::RetainedExecutionSkipped,
-                        ),
-                        "d" => Ok(QuiescentOrphanReconciliation::AlreadyTerminal),
-                        unexpected => panic!(
-                            "unexpected reconciliation candidate {unexpected}"
-                        ),
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(
-            summary.reconciled, 0,
-            "no current backend has restart-safe process-tree termination proof"
-        );
-        assert_eq!(summary.quarantined, 2);
-        assert_eq!(summary.retained_execution_skipped, 1);
-        assert_eq!(summary.already_terminal, 1);
-        assert_eq!(
-            *observed_reconciliations.lock().unwrap(),
-            ["a", "b", "c", "d"]
-        );
-        assert_eq!(
-            *observed_pages.lock().unwrap(),
-            [
-                (None, MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE),
-                (
-                    Some("b".to_owned()),
-                    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE
-                ),
-                (
-                    Some("d".to_owned()),
-                    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn every_production_host_attaches_exact_server_lock_authority() {
-        for (host, source) in [
-            ("embedded", include_str!("../lib.rs")),
-            ("desktop", include_str!("../desktop.rs")),
-            ("web", include_str!("../../../../../apps/web/src/main.rs")),
-        ] {
-            let services = source
-                .find("AppServices::from_config")
-                .or_else(|| source.find("AppServices::try_from_config"))
-                .expect("production host must construct AppServices");
-            let authority = source[services..]
-                .find(".with_boot_reconciliation_authority(")
-                .or_else(|| {
-                    source[services..]
-                        .find(".try_with_boot_reconciliation_authority(")
-                })
-                .expect("production host must retain exact server-lock authority");
-            let router = source[services..]
-                .find("create_router")
-                .or_else(|| source[services..].find("run_server"))
-                .expect("production host must eventually publish/start the router");
-            assert!(
-                authority < router,
-                "{host} must attach boot authority before router/background startup"
-            );
-        }
-
-        // nomicore delegates to run_embedded_server, whose construction is
-        // covered by the "embedded" (lib.rs) row above.
-        assert!(
-            include_str!("../main.rs").contains("run_embedded_server"),
-            "nomicore must delegate to run_embedded_server so the embedded path's boot authority applies"
-        );
-
-        let service_source = include_str!("../services.rs");
-        assert!(
-            service_source.contains("_boot_reconciliation_authority: None"),
-            "ordinary tests/third-party AppServices must not infer server-lock ownership"
-        );
-        let production_source = include_str!("state.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(
-            production_source.contains("services.has_valid_boot_reconciliation_authority().await"),
-            "ordinary create_router must skip destructive orphan reconciliation without proof"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_extension_states_uses_host_app_version_for_engine_filtering() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let data_dir = tmp.path().join("data");
-        let ext_root = tmp.path().join("extensions");
-        let ext_dir = ext_root.join("demo-ext");
-
-        std::fs::create_dir_all(&ext_dir).unwrap();
-        std::fs::write(
-            ext_dir.join("nomi-extension.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "name": "demo-ext",
-                "version": "1.0.0",
-                "engine": {
-                    "nomifun": "^2.0.0"
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let config = AppConfig {
-            data_dir: data_dir.clone(),
-            work_dir: data_dir,
-            app_version: "2.1.0".to_string(),
-            ..Default::default()
-        };
-        let services = AppServices::from_config(db, &config).await.unwrap();
-
-        let (ext_state, _hub_state, _skill_state) = build_extension_states(&services).await;
-        ext_state
-            .registry
-            .initialize_with_scan_paths(vec![ScanPath {
-                path: ext_root,
-                source: ExtensionSource::Local,
-            }])
-            .await
-            .unwrap();
-
-        let loaded = ext_state.registry.get_loaded_extensions().await;
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "demo-ext");
-
-        services.database.close().await;
-    }
-
     /// The pill must report on the socket the agent is actually using. Two pools
     /// (which is what this codebase had before) means the routes describe links
     /// nobody talks to while the live ones stay invisible — so pin the identity,
     /// not just the behaviour.
     #[tokio::test]
-    async fn ssh_pool_is_shared_between_routes_and_the_agent_factory() {
+    async fn ssh_pool_is_shared_between_routes_and_the_domain_adapter() {
         let tmp = tempfile::TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         let db = nomifun_db::init_database_memory().await.unwrap();
@@ -2624,7 +2001,7 @@ mod tests {
             "build_ssh_host_state must reuse services.ssh_pool instead of building its own"
         );
 
-        // The handle the agent factory receives, erased to the seam. A link it
+        // The host-facing adapter uses the same pool. A link it
         // opens — including one that failed to dial, which is precisely what the
         // header pill has to show — must be visible through the routes' handle.
         let provider: Arc<dyn nomifun_ai_agent::SshBackendProvider> =
@@ -2648,17 +2025,7 @@ mod tests {
             "the routes must see the link the agent's provider just opened"
         );
 
-        // The factory's deps are sealed inside the factory closure, so the handover
-        // itself can only be pinned where it is written.
         let services_source = include_str!("../services.rs");
-        let deps_line = services_source
-            .lines()
-            .find(|line| line.trim_start().starts_with("ssh_provider:"))
-            .expect("the agent factory deps must wire an ssh provider");
-        assert!(
-            deps_line.contains("ssh_pool"),
-            "the agent factory must receive the one pool, not a provider of its own: {deps_line}"
-        );
         assert_eq!(
             services_source.matches("SshConnectionPool::new(").count(),
             1,

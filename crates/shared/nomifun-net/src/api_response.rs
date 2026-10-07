@@ -21,6 +21,7 @@ pub const NON_API_DIAGNOSTIC: &str = "the URL answered with a web page, not an A
 const MARKUP_CONTENT_TYPES: &[&str] = &[
     "text/html",
     "application/xhtml",
+    "application/xhtml+xml",
     "text/xml",
     "application/xml",
 ];
@@ -50,15 +51,12 @@ pub fn looks_like_markup(prefix: &[u8]) -> bool {
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
         .map_or(&[][..], |start| &without_bom[start..]);
-    let head = &trimmed[..trimmed.len().min(64)];
-    let Ok(text) = std::str::from_utf8(head) else {
-        // A partial multi-byte character at the cut is not markup evidence.
-        return false;
-    };
-    let lowered = text.to_ascii_lowercase();
+    // The evidence is the ASCII marker itself. Decoding a larger prefix can
+    // fail on an unrelated partial UTF-8 character after a valid HTML opening.
     ["<!doctype", "<html", "<?xml", "<head", "<body"]
         .iter()
-        .any(|marker| lowered.starts_with(marker))
+        .any(|marker| trimmed.get(..marker.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(marker.as_bytes())))
 }
 
 #[cfg(test)]
@@ -82,6 +80,21 @@ mod tests {
             is_non_api_content_type(&headers("TEXT/HTML")).as_deref(),
             Some("TEXT/HTML")
         );
+    }
+
+    #[test]
+    fn standard_xhtml_content_type_is_not_an_api_payload() {
+        assert_eq!(
+            is_non_api_content_type(&headers("Application/XHTML+XML; charset=utf-8")).as_deref(),
+            Some("Application/XHTML+XML; charset=utf-8"),
+        );
+    }
+
+    #[test]
+    fn ascii_markup_prefix_is_independent_of_later_utf8_boundaries() {
+        let html = format!("<html>{}", "中".repeat(30));
+        assert!(looks_like_markup(html.as_bytes()));
+        assert!(looks_like_markup(b"<!DOCTYPE html>\xff"));
     }
 
     #[test]

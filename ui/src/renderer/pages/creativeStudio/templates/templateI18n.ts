@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { TFunction } from 'i18next';
-
 import type { CreativeTemplateValidationError } from './domain';
 import type { CreativeTemplateRunRuntimeErrorCode } from './runtime';
 
@@ -346,5 +344,3 @@ export function templateFallbackError(
     'The template operation failed. Try again.'
   );
 }
-
-export type { TFunction };

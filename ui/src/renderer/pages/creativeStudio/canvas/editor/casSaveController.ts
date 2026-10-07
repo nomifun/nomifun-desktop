@@ -114,7 +114,10 @@ export class CanvasCasSaveController {
   queue(document: CreativeProjectDocument): void {
     if (this.snapshot.revision === null) return;
     this.pendingDocument = cloneDocument(document);
-    const hasPendingChanges = documentSignature(document) !== this.savedSignature;
+    // Even an undo to the saved baseline needs a compensating write if a
+    // different document is already on its way to the server.
+    const hasPendingChanges =
+      this.inFlight !== null || documentSignature(document) !== this.savedSignature;
 
     if (this.snapshot.status === 'conflict') {
       this.updateSnapshot({ ...this.snapshot, hasPendingChanges: true });

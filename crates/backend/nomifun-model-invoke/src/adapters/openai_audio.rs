@@ -13,7 +13,8 @@
 //! echoes the called model — this API reports neither back).
 //!
 //! Speech: `POST` the dispatch target (conventionally `{base}/v1/audio/speech`)
-//! as JSON `{model, input, voice (default "alloy"), response_format?}`; the
+//! as JSON `{model, input, voice, response_format?}`, with voice falling back to
+//! "alloy" only when unconfigured; the
 //! response is the RAW audio binary (capped at
 //! [`crate::transport::MAX_ARTIFACT_BYTES`]) → a single-element
 //! [`TaskResult::Assets`] whose MIME rides the requested format
@@ -134,20 +135,27 @@ impl ProtocolAdapter for OpenAiAudioSpeechAdapter {
         let mut body = serde_json::json!({
             "model": call.model,
             "input": req.text,
-            "voice": req.voice.as_deref().unwrap_or(DEFAULT_TTS_VOICE),
         });
+        if let Some(voice) = req.voice.as_deref() {
+            body["voice"] = Value::String(voice.to_owned());
+        }
         if let Some(format) = req.format.as_deref() {
             body["response_format"] = Value::String(format.to_owned());
         }
-        let body = json_request_body(&call.model_params, &req.extra, body)?;
+        let mut body = json_request_body(&call.model_params, &req.extra, body)?;
+        // A fallback must not replace a configured voice, including OpenAI's
+        // custom voice object. Explicit typed voice/format still win the merge.
+        if body.get("voice").is_none() {
+            body["voice"] = Value::String(DEFAULT_TTS_VOICE.to_owned());
+        }
 
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
-        // The requested format pins the MIME; without one, trust the
-        // response's audio/* Content-Type, else assume the API default (mp3).
-        let mime = match req.format.as_deref() {
+        // The effective format (typed, extra, or configured) pins the MIME.
+        // Without one, trust audio/* Content-Type, then assume mp3.
+        let mime = match body.get("response_format").and_then(Value::as_str) {
             Some(format) => mime_for_speech_format(format).to_owned(),
             None => resp
                 .headers()
@@ -454,10 +462,70 @@ mod tests {
             .mount(&server)
             .await;
 
-        let call = tts_call(&server.uri(), "tts-1", tts("hi", Some("nova"), Some("wav")));
+        let mut request = tts("hi", Some("nova"), Some("wav"));
+        let TaskRequest::SpeechSynthesis(req) = &mut request else { unreachable!() };
+        req.extra = json!({"voice": "shimmer", "response_format": "pcm"});
+        let mut call = tts_call(&server.uri(), "tts-1", request);
+        call.model_params["voice"] = json!({"id": "voice_saved"});
+        call.model_params["response_format"] = json!("mp3");
         let out = OpenAiAudioSpeechAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets[0].mime.as_deref(), Some("audio/wav"));
+    }
+
+    #[tokio::test]
+    async fn speech_preserves_configured_custom_voice_and_format_when_typed_fields_are_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({
+                "voice": {"id": "voice_saved"},
+                "response_format": "pcm",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"pcm-result".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut call = tts_call(&server.uri(), "gpt-4o-mini-tts", tts("hi", None, None));
+        call.model_params["voice"] = json!({"id": "voice_saved"});
+        call.model_params["response_format"] = json!("pcm");
+        let out = OpenAiAudioSpeechAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
+        assert_eq!(assets[0].mime.as_deref(), Some("audio/pcm"));
+    }
+
+    #[tokio::test]
+    async fn speech_extras_override_configured_voice_and_format_when_typed_fields_are_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({
+                "voice": {"id": "voice_request"},
+                "response_format": "flac",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"flac-result".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut request = tts("hi", None, None);
+        let TaskRequest::SpeechSynthesis(req) = &mut request else { unreachable!() };
+        req.extra = json!({"voice": {"id": "voice_request"}, "response_format": "flac"});
+        let mut call = tts_call(&server.uri(), "gpt-4o-mini-tts", request);
+        call.model_params["voice"] = json!("nova");
+        call.model_params["response_format"] = json!("wav");
+        let out = OpenAiAudioSpeechAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
+        assert_eq!(assets[0].mime.as_deref(), Some("audio/flac"));
     }
 
     #[tokio::test]

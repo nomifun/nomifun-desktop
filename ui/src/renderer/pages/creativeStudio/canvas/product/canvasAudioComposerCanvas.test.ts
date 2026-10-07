@@ -13,7 +13,8 @@ import type { CreativeAsset, CreativeAssetKind } from '../../assets';
 import { createEmptyCreativeProjectDocument } from '../../domain';
 import type { CreativeCanvasNode } from '../../domain';
 import type { CreativeTask } from '../../tasks';
-import type { CreativeWorkbenchReferences } from '../../workbenches/runtime';
+import type { GenerationReferences } from '../generation';
+
 import { createInitialCanvasState } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
 import {
@@ -100,7 +101,7 @@ const asset = (id: string, kind: CreativeAssetKind): CreativeAsset => ({
   updatedAt: 1,
 });
 
-const noReferences = (): CreativeWorkbenchReferences => ({
+const noReferences = (): GenerationReferences => ({
   assets: [],
   bindings: [],
 });
@@ -118,7 +119,7 @@ const prepareFixture = (overrides: {
   protocol?: string;
   source?: AudioNode;
   sourceAsset?: CreativeAsset | null;
-  references?: CreativeWorkbenchReferences;
+  references?: GenerationReferences;
   prompt?: string;
   voice?: string;
   format?: CanvasAudioComposeFormat;

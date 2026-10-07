@@ -19,16 +19,17 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('messages.toolDetailOutput')).toBe(true);
   });
 
-  test('renders thinking as neutral process content instead of legacy receipts', () => {
+  test('renders public narration and returned thinking as readable prose', () => {
     expect(source.includes('ThinkingStreamPanel')).toBe(false);
     expect(source.includes('useStreamingThinkingText')).toBe(false);
     expect(source.includes('shouldAutoCollapseThinkingStreamPanel')).toBe(false);
     expect(source.includes('turn-process-thinking-stream')).toBe(false);
     expect(source.includes("case 'thinking':")).toBe(true);
     expect(source.includes('<MessageThinking')).toBe(true);
-    expect(source.includes('message={item}')).toBe(true);
-    expect(source.includes("variant='process'")).toBe(true);
-    expect(source.includes('expanded={thinkingExpansion?.expanded}')).toBe(true);
+    expect(source.includes("data-testid='process-narration'")).toBe(true);
+    expect(source.includes('getPublicProcessNarration')).toBe(true);
+    expect(source.includes('<MarkdownView')).toBe(true);
+    expect(source.includes('Private reasoning omitted')).toBe(true);
     expect(source.includes('ThinkingTraceRow')).toBe(false);
     expect(source.includes('messages.processReceipt.thinkingCompletedDuration')).toBe(false);
     expect(source.includes('messages.processReceipt.thinkingRunning')).toBe(false);
@@ -50,7 +51,7 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes("row.notExecutedReason === 'invalid_arguments'")).toBe(true);
     expect(source.includes('messages.toolSummary.invalidArguments')).toBe(true);
     expect(source.includes('value={row.output}')).toBe(true);
-    expect(source.includes('stateOverride && !row.notExecutedReason')).toBe(true);
+    expect(source.includes("stateOverride && row.state === 'running' && !row.notExecutedReason")).toBe(true);
   });
 
   test('renders read and edit steps with expandable file lists', () => {
@@ -62,8 +63,9 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('shouldShowFileListDetail')).toBe(true);
     expect(source.includes('shouldShowToolRowDetail')).toBe(true);
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
-    expect(source.includes('messages.processReceipt.readTargets')).toBe(true);
+    expect(source.includes('messages.processReceipt.readFiles')).toBe(true);
     expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
+    expect(source.includes('turn-process-trace-file-list__button')).toBe(true);
   });
 
   test('gives system and tool process rows a consistent icon slot', () => {
@@ -80,6 +82,13 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('stateOverride?: TurnDisclosureProcessState')).toBe(true);
     expect(source.includes('const state = stateOverride ?? getProcessItemState(item);')).toBe(true);
     expect(source.includes('stateOverride={stateOverride}')).toBe(true);
-    expect(source.includes("completed={state === 'completed'}")).toBe(true);
+    expect(source.includes("`turn-process-trace__row--${visualState}`")).toBe(true);
+  });
+
+  test('downgrades recoverable tool failures to an amber inspectable receipt', () => {
+    expect(source.includes('recoverFailures?: boolean')).toBe(true);
+    expect(source.includes("turn-process-trace__row--recovered")).toBe(true);
+    expect(source.includes('messages.processReceipt.recoveredOperations')).toBe(true);
+    expect(source.includes("presentationState={recovered ? 'recovered' : undefined}")).toBe(true);
   });
 });

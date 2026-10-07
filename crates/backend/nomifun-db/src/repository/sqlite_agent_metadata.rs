@@ -73,11 +73,11 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                  backend, agent_type, agent_source, agent_source_info, \
                  source_key, \
                  enabled, command, args, env, native_skills_dirs, \
-                 behavior_policy, yolo_id, \
+                 behavior_policy, \
                  agent_capabilities, auth_methods, config_options, \
-                 available_modes, available_models, available_commands, \
+                 available_models, available_commands, \
                  sort_order, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(agent_id) DO UPDATE SET \
                 icon = excluded.icon, \
                 name = excluded.name, \
@@ -94,11 +94,9 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                 env = excluded.env, \
                 native_skills_dirs = excluded.native_skills_dirs, \
                 behavior_policy = excluded.behavior_policy, \
-                yolo_id = excluded.yolo_id, \
                 agent_capabilities = excluded.agent_capabilities, \
                 auth_methods = excluded.auth_methods, \
                 config_options = excluded.config_options, \
-                available_modes = excluded.available_modes, \
                 available_models = excluded.available_models, \
                 available_commands = excluded.available_commands, \
                 sort_order = excluded.sort_order, \
@@ -120,11 +118,9 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .bind(params.env)
         .bind(params.native_skills_dirs)
         .bind(params.behavior_policy)
-        .bind(params.yolo_id)
         .bind(params.agent_capabilities)
         .bind(params.auth_methods)
         .bind(params.config_options)
-        .bind(params.available_modes)
         .bind(params.available_models)
         .bind(params.available_commands)
         .bind(params.sort_order)
@@ -159,9 +155,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         let config_options = params
             .config_options
             .map_or(existing.config_options, |v| v.map(String::from));
-        let available_modes = params
-            .available_modes
-            .map_or(existing.available_modes, |v| v.map(String::from));
         let available_models = params
             .available_models
             .map_or(existing.available_models, |v| v.map(String::from));
@@ -174,7 +167,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                 agent_capabilities = ?, \
                 auth_methods = ?, \
                 config_options = ?, \
-                available_modes = ?, \
                 available_models = ?, \
                 available_commands = ?, \
                 updated_at = ? \
@@ -183,7 +175,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .bind(&agent_capabilities)
         .bind(&auth_methods)
         .bind(&config_options)
-        .bind(&available_modes)
         .bind(&available_models)
         .bind(&available_commands)
         .bind(now)
@@ -251,15 +242,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                 OR EXISTS(\
                     SELECT 1 FROM agent_execution_template_participants \
                     WHERE source_agent_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM preset_agent_preferences \
-                    WHERE agent_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM conversations \
-                    WHERE json_extract(extra, '$.agent_id') = ?1 \
-                       OR json_extract(extra, '$.custom_agent_id') = ?1\
                 )",
         )
         .bind(id)
@@ -267,18 +249,9 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .await?;
         if retained_reference_exists {
             return Err(DbError::Conflict(format!(
-                "Agent '{id}' is still referenced by execution, preset, or conversation state"
+                "Agent '{id}' is still referenced by execution state"
             )));
         }
-
-        sqlx::query(
-            "UPDATE preset_user_state \
-             SET preferred_agent_id = NULL \
-             WHERE preferred_agent_id = ?",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
 
         let result = sqlx::query("DELETE FROM agent_metadata WHERE agent_id = ?")
             .bind(id)
@@ -297,7 +270,6 @@ mod tests {
     const CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
     const OTHER_CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
-    const DELETE_FIXTURE_PRESET_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678923";
 
     async fn setup() -> (SqliteAgentMetadataRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -323,11 +295,9 @@ mod tests {
             env: Some("[]"),
             native_skills_dirs: Some(r#"[".nomi/skills"]"#),
             behavior_policy: Some(r#"{"supports_side_question":true}"#),
-            yolo_id: Some("yolo"),
             agent_capabilities: None,
             auth_methods: None,
             config_options: None,
-            available_modes: None,
             available_models: None,
             available_commands: None,
             sort_order: 1100,
@@ -508,70 +478,6 @@ mod tests {
         assert!(repo.delete(CUSTOM_AGENT_ID).await.unwrap());
         assert!(repo.get(CUSTOM_AGENT_ID).await.unwrap().is_none());
         assert!(!repo.delete(CUSTOM_AGENT_ID).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn delete_restricts_live_references_and_clears_preferred_agent() {
-        let (repo, db) = setup().await;
-        repo.upsert(&custom_params(CUSTOM_AGENT_ID, "referenced"))
-            .await
-            .unwrap();
-        let now = now_ms();
-        sqlx::query(
-            "INSERT INTO presets \
-                (preset_id, source_kind, name, instructions, created_at, updated_at) \
-             VALUES (?, 'user', 'fixture', '', ?, ?)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(now)
-        .bind(now)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_agent_preferences \
-                (preset_id, agent_id, rank, required) \
-             VALUES (?, ?, 0, 1)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(CUSTOM_AGENT_ID)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_user_state \
-                (preset_id, enabled, auto_selectable, preferred_agent_id, updated_at) \
-             VALUES (?, 1, 0, ?, ?)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(CUSTOM_AGENT_ID)
-        .bind(now)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let error = repo.delete(CUSTOM_AGENT_ID).await.unwrap_err();
-        assert!(matches!(error, DbError::Conflict(_)));
-
-        sqlx::query(
-            "DELETE FROM preset_agent_preferences \
-             WHERE preset_id = ?",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        assert!(repo.delete(CUSTOM_AGENT_ID).await.unwrap());
-
-        let preferred_agent_id: Option<String> = sqlx::query_scalar(
-            "SELECT preferred_agent_id FROM preset_user_state \
-             WHERE preset_id = ?",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert!(preferred_agent_id.is_none());
     }
 
     #[tokio::test]

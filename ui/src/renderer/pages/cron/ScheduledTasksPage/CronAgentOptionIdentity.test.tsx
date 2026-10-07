@@ -6,27 +6,23 @@
 
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { parseAgentId } from '@/common/types/ids';
-import { parsePresetReference, type Preset } from '@/common/types/agent/presetTypes';
+import { parseAgentId, parseAgentPresetId } from '@/common/types/ids';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import { CronAgentOptionIdentity, CronPresetOptionIdentity } from './CronAgentOptionIdentity';
 
-const cdnAvatar =
-  'https://cloudcache.tencent-cloud.com/qcloud/tea/app/skillhub/assets/source/ai-buddy-decouple/expert-profiles/tech-bug-troubleshooting.v20260625.avif';
-
-const preset = {
-  preset_id: parsePresetReference('0190f5fe-7c00-7a00-8000-000000000031'),
-  name: 'Bug troubleshooting',
-  name_i18n: { 'zh-CN': 'Bug 排查' },
-  avatar: cdnAvatar,
-} as unknown as Preset;
+const preset: AgentPresetSummary = {
+  preset_id: parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000031'),
+  source: 'user',
+  display_name: 'Bug troubleshooting',
+  bound_target_count: 0,
+};
 
 describe('scheduled task Agent option identity rendering', () => {
-  test('renders the reported CDN value only as an image source and keeps the configured name visible', () => {
-    const html = renderToStaticMarkup(<CronPresetOptionIdentity preset={preset} language='zh-CN' />);
-    expect(html.includes(`src="${cdnAvatar}"`)).toBe(true);
-    expect(html.includes('Bug 排查')).toBe(true);
-    expect(html.includes(`>${cdnAvatar}<`)).toBe(false);
+  test('renders the canonical saved Agent name without legacy avatar fields', () => {
+    const html = renderToStaticMarkup(<CronPresetOptionIdentity preset={preset} />);
+    expect(html.includes('Bug troubleshooting')).toBe(true);
+    expect(html.includes('src=')).toBe(false);
   });
 
   test('renders supported Emoji as decoration while the Agent name remains the label', () => {
@@ -45,25 +41,21 @@ describe('scheduled task Agent option identity rendering', () => {
     expect(html.includes('src="👋🏽"')).toBe(false);
   });
 
-  test('places an unavailable status on a second line so it cannot displace the configured name', () => {
+  test('places an unavailable status after the configured name', () => {
     const html = renderToStaticMarkup(
-      <CronPresetOptionIdentity preset={preset} language='zh-CN' statusLabel='未启用定时任务' />
+      <CronPresetOptionIdentity preset={preset} statusLabel='Unavailable' />
     );
-    expect(html.indexOf('Bug 排查')).toBeLessThan(html.indexOf('未启用定时任务'));
+    expect(html.indexOf('Bug troubleshooting')).toBeLessThan(html.indexOf('Unavailable'));
     expect(html.includes('flex-col')).toBe(true);
   });
 
   test('keeps the closed Select value compact while retaining status context', () => {
     const html = renderToStaticMarkup(
-      <CronPresetOptionIdentity
-        preset={preset}
-        language='zh-CN'
-        statusLabel='未启用定时任务'
-        compact
-      />
+      <CronPresetOptionIdentity preset={preset} statusLabel='Unavailable' compact />
     );
     expect(html.includes('flex-col')).toBe(false);
-    expect(html.includes('title="Bug 排查 · 未启用定时任务"')).toBe(true);
+    expect(html.includes('Bug troubleshooting')).toBe(true);
+    expect(html.includes('Unavailable')).toBe(true);
     expect(html.includes('position:absolute')).toBe(true);
     expect(html.includes('text-12px')).toBe(false);
   });

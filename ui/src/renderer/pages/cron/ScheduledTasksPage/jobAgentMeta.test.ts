@@ -6,8 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { ICronJob } from '@/common/adapter/ipcBridge';
-import { parsePresetReference } from '@/common/types/agent/presetTypes';
-import { parseAgentId } from '@/common/types/ids';
+import { parseAgentId, parseAgentPresetId } from '@/common/types/ids';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import { getJobAgentMeta } from './jobAgentMeta';
 
@@ -31,7 +30,7 @@ describe('scheduled task agent presentation', () => {
     const job = jobWithAgent('nomi', {
       backend: 'nomi',
       name: 'Bug 排查',
-      preset_id: parsePresetReference('0190f5fe-7c00-7a00-8000-000000000011'),
+      preset_id: parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000011'),
     });
 
     expect(getJobAgentMeta(job, [nomi]).name).toBe('Bug 排查');
@@ -72,7 +71,7 @@ describe('scheduled task agent presentation', () => {
   test('keeps a preset frozen name for a retired runtime discriminant too', () => {
     const job = jobWithAgent('remote', {
       name: 'Operations preset',
-      preset_id: parsePresetReference('0190f5fe-7c00-7a00-8000-000000000043'),
+      preset_id: parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000043'),
     });
     expect(getJobAgentMeta(job, []).name).toBe('Operations preset');
   });

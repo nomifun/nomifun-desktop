@@ -344,7 +344,6 @@ mod tests {
             GatewayCapabilityScope {
                 companion_id: None,
                 channel_platform: None,
-                session_mode: None,
                 profile: GatewayMcpConfig::PROFILE_FULL.into(),
                 excluded_tools: Vec::new(),
                 instance_owner: true,
@@ -452,10 +451,11 @@ mod tests {
         }
     }
 
-    /// External IM channels hard-deny destructive ops, so the channel surface is
-    /// a strict subset that hides e.g. conversation deletion.
+    /// Transport surface is context only after the C1 FullAuto cutover.
+    /// Authentication, ownership, Snapshot allowlists, and resource bindings
+    /// enforce access without a second effect-class permission filter.
     #[test]
-    fn channel_surface_hides_hard_denied_tools() {
+    fn channel_surface_does_not_reintroduce_permission_filtering() {
         let desktop: Vec<&str> = Registry::global()
             .tool_specs(Surface::Desktop)
             .iter()
@@ -466,15 +466,9 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        assert!(
-            channel.len() < desktop.len(),
-            "channel must hide at least the hard-denied destructive tools"
-        );
+        assert_eq!(channel, desktop);
         assert!(desktop.contains(&"nomi_delete_conversation"));
-        assert!(
-            !channel.contains(&"nomi_delete_conversation"),
-            "destructive conversation deletion must be hidden on external channels"
-        );
+        assert!(channel.contains(&"nomi_delete_conversation"));
     }
 
     #[test]
@@ -494,8 +488,8 @@ mod tests {
             .iter()
             .map(|spec| spec.name)
             .collect();
-        assert!(names.contains(&"nomi_cron_create"));
-        assert!(names.contains(&"nomi_requirement_create"));
+        assert!(!names.contains(&"nomi_cron_create"));
+        assert!(!names.contains(&"nomi_requirement_create"));
         assert!(names.contains(&"nomi_knowledge_list_bases"));
         // The desktop default (work) profile exposes the unified collaboration
         // surface so the lead Agent can delegate or create persistent executions.
@@ -583,7 +577,7 @@ mod tests {
         let mut claims = test_claims();
         claims.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
 
-        assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_cron_create").is_none());
+        assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_cron_create").is_some());
         let blocked = GatewayStdioServer::blocked_tool_message(
             &claims,
             "nomi_system_update_settings",
@@ -656,7 +650,7 @@ mod tests {
             .iter()
             .map(|spec| spec.name)
             .collect();
-        assert!(names.contains(&"nomi_cron_create"));
+        assert!(!names.contains(&"nomi_cron_create"));
         assert!(!names.contains(&"nomi_delegate"));
         assert!(!names.contains(&"nomi_execution_get"));
         assert!(!names.contains(&"nomi_execution_update"));

@@ -37,7 +37,7 @@ export function getWorkpathBatchSelectionScope(node: WorkpathNode, kind?: Sessio
   return idsForKind(node, kind);
 }
 
-export function isBatchSelectionScopeFullySelected(
+function isBatchSelectionScopeFullySelected(
   scope: BatchSelectableScope,
   selected: BatchSelectionState
 ) {

@@ -26,6 +26,21 @@ export function isAutoWorkEntry(autoWork: AutoWorkDraftValue): boolean {
   return autoWork.enabled && !!autoWork.tag;
 }
 
+/** Titles share the backend's 200 UTF-8 byte contract; input remains intact. */
+const conversationTitle = (input: string): string => {
+  const firstLine = input.trim().split(/[\r\n]/, 1)[0];
+  const encoder = new TextEncoder();
+  let title = '';
+  let bytes = 0;
+  for (const character of firstLine) {
+    const size = encoder.encode(character).length;
+    if (bytes + size > 200) break;
+    title += character;
+    bytes += size;
+  }
+  return title.trim();
+};
+
 /**
  * Decide how the Guid page should enter a conversation, given the typed input
  * and the AutoWork draft. Centralizes the rule that an AutoWork entry must not
@@ -36,7 +51,7 @@ export function planGuidEntry(input: string, autoWork: AutoWorkDraftValue): Guid
   return {
     autoWorkEntry,
     sendInitialMessage: !autoWorkEntry,
-    conversationName: autoWorkEntry ? input.trim() || (autoWork.tag ?? '') : input,
+    conversationName: conversationTitle(autoWorkEntry ? input.trim() || (autoWork.tag ?? '') : input),
   };
 }
 

@@ -163,12 +163,22 @@ export const useCompanion = (companionId: CompanionId | null) => {
 export const useCompanions = () => {
   const [companions, setCompanions] = useState<ICompanionWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
-      setCompanions(await ipcBridge.companion.listCompanions.invoke());
+      const next = await ipcBridge.companion.listCompanions.invoke();
+      if (sequence !== refreshSequence.current) return;
+      setCompanions(next);
+      setError(null);
+    } catch (cause) {
+      if (sequence === refreshSequence.current) {
+        setError(cause instanceof Error ? cause : new Error(String(cause)));
+      }
     } finally {
-      setLoading(false);
+      if (sequence === refreshSequence.current) setLoading(false);
     }
   }, []);
 
@@ -212,5 +222,16 @@ export const useCompanions = () => {
     return () => unsubs.forEach((u) => u());
   }, [refresh, refreshOne]);
 
-  return { companions, loading, refresh };
+  const setDesktopVisible = useCallback(async (companionId: CompanionId, companion_enabled: boolean) => {
+    const saved = await ipcBridge.companion.patchCompanion.invoke({
+      companion_id: companionId,
+      patch: { appearance: { companion_enabled } },
+    });
+    setCompanions((prev) => prev.map((item) =>
+      item.companion_id === companionId ? { ...item, ...saved } : item
+    ));
+    requestCompanionWindowSync();
+  }, []);
+
+  return { companions, loading, error, refresh, setDesktopVisible };
 };

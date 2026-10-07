@@ -19,9 +19,9 @@ import { useCallback, useState } from 'react';
 /**
  * Text types whose previews may be truncated when the file is huge.
  *
- * `miniapp` is deliberately NOT a member: a mini-app is executable HTML, and a
- * truncated app is a broken app (the iframe would render half a document). The
- * whole file is always read, whatever the size caps say.
+ * Plugin runtime surfaces are deliberately NOT members: executable HTML must
+ * never be inferred from an ordinary source preview. The whole file is always
+ * read, whatever the size caps say.
  */
 const LARGE_TEXT_PREVIEW_TYPES = new Set<PreviewContentType>(['code', 'markdown', 'html', 'diff']);
 
@@ -123,8 +123,8 @@ export const usePreviewLauncher = () => {
         language,
         truncated: false,
         // The preview panel is mounted outside ConversationProvider; stamp the
-        // owning conversation so viewers that need it (the mini-app publish
-        // action) can read it back off the tab metadata.
+        // owning conversation so viewers that need source provenance can read
+        // it back off the tab metadata.
         conversation_id: conversationContext?.conversation_id,
       };
 

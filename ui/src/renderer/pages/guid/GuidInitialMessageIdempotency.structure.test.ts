@@ -10,17 +10,19 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL): string => readFileSync(url, 'utf8');
 
 describe('Guid initial-message idempotency', () => {
-  test('persists one UUIDv7 key in every initial-message payload before navigation', () => {
+  test('persists a UUIDv7 key after an Agent Session resolves its conversation', () => {
     const source = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
-
+    const initialMessagePayload =
+      source.match(/JSON\.stringify\(\{([\s\S]*?)\}\)\s*\)/)?.[1] ?? '';
     expect(source.includes("import { uuidv7 } from '@/common/utils';")).toBe(true);
-    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(2);
-    expect(source.match(/conversation_id: conversation\.id,/g)).toHaveLength(2);
-    expect(source.match(/initial_admission_epoch: 0,/g)).toHaveLength(2);
-
-    // Both remaining creation paths (direct nomi and preset/custom-row) stage
-    // their initial message under the single nomi storage feature.
-    expect(source.match(/'initial-message-nomi'/g)).toHaveLength(2);
+    expect(source.includes('ipcBridge.conversation.create.invoke')).toBe(false);
+    expect(source.includes('agentPlatform.sessions.create.invoke')).toBe(true);
+    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(1);
+    expect(initialMessagePayload).not.toBe('');
+    expect(initialMessagePayload.includes('conversation_id: conversationId,')).toBe(true);
+    expect(initialMessagePayload.includes('initial_admission_epoch: 0,')).toBe(true);
+    expect(initialMessagePayload.includes('idempotency_key: uuidv7(),')).toBe(true);
+    expect(source.includes("'initial-message-nomi'")).toBe(true);
 
     const writesBeforeNavigation =
       source.lastIndexOf('sessionStorage.setItem') < source.lastIndexOf('await navigate(');

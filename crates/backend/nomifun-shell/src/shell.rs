@@ -25,10 +25,10 @@ impl ShellService {
     pub async fn show_item_in_folder(&self, file_path: &str) -> Result<(), ShellError> {
         let path = validate_path_exists(file_path)?;
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &["-R", &path.to_string_lossy()]).await
+            self.opener.run_command("open", &["-R", &path.to_string_lossy()], None).await
         } else if cfg!(target_os = "windows") {
             let parent = path.parent().unwrap_or(&path);
-            self.opener.run_command("explorer", &[&parent.to_string_lossy()]).await
+            self.opener.run_command("explorer", &[&parent.to_string_lossy()], None).await
         } else {
             let parent = path.parent().unwrap_or(&path);
             self.open_linux_path(parent).await
@@ -51,8 +51,8 @@ impl ShellService {
     ///
     /// Every production caller is an Agent surface (the `nomifun-open` MCP
     /// server), so web URLs fail closed here: an Agent-initiated `http/https`
-    /// open through the OS browser would bypass the managed Browser Hub's
-    /// approval, egress and lifecycle policies. Trusted user-clicked links use
+    /// open through the OS browser would bypass the explicitly selected
+    /// Browser capability and its run ownership. Trusted user-clicked links use
     /// [`Self::open_external`] instead.
     pub async fn launch(&self, target: &str, app: Option<&str>) -> Result<(), ShellError> {
         validate_launch_target(target)?;
@@ -69,7 +69,7 @@ impl ShellService {
     pub async fn check_tool_installed(&self, tool: ToolType) -> bool {
         match tool {
             ToolType::Terminal | ToolType::Explorer => true,
-            ToolType::Vscode => self.detect_vscode(),
+            ToolType::Vscode => self.detect_vscode().is_some(),
         }
     }
 
@@ -82,36 +82,32 @@ impl ShellService {
         }
     }
 
-    fn detect_vscode(&self) -> bool {
+    fn detect_vscode(&self) -> Option<&'static str> {
         if self.opener.is_tool_available("code") {
-            return true;
+            return Some("code");
         }
         if cfg!(target_os = "macos") {
             let app_path = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-            return Path::new(app_path).exists();
+            return self.opener.is_tool_available(app_path).then_some(app_path);
         }
-        false
+        None
     }
 
     async fn open_folder_vscode(&self, path: &Path) -> Result<(), ShellError> {
-        if !self.detect_vscode() {
-            return Err(ShellError::ToolNotInstalled("vscode".to_owned()));
-        }
-        self.opener.run_command("code", &[&path.to_string_lossy()]).await
+        let program = self.detect_vscode()
+            .ok_or_else(|| ShellError::ToolNotInstalled("vscode".to_owned()))?;
+        self.opener.run_command(program, &[&path.to_string_lossy()], None).await
     }
 
     async fn open_folder_terminal(&self, path: &Path) -> Result<(), ShellError> {
         let path_str = path.to_string_lossy();
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &["-a", "Terminal", &path_str]).await
+            self.opener.run_command("open", &["-a", "Terminal", &path_str], None).await
         } else if cfg!(target_os = "windows") {
-            // `start "" /D <dir> cmd`: the empty first argument is the window
-            // title — without it, `start` treats a quoted path (any path with
-            // spaces) as the title instead of the command. `/D` sets the
-            // startup directory as a discrete argument, so no `cd /d` string
-            // splicing is needed.
+            // Keep the directory out of cmd's command text: even a quoted
+            // argument undergoes percent expansion. Both shells disable AutoRun.
             self.opener
-                .run_command("cmd", &["/c", "start", "", "/D", &path_str, "cmd"])
+                .run_command("cmd", &["/d", "/c", "start", "", "cmd", "/d"], Some(path))
                 .await
         } else {
             self.try_linux_terminal(&path_str).await
@@ -121,9 +117,9 @@ impl ShellService {
     async fn open_folder_explorer(&self, path: &Path) -> Result<(), ShellError> {
         let path_str = path.to_string_lossy();
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &[&path_str]).await
+            self.opener.run_command("open", &[&path_str], None).await
         } else if cfg!(target_os = "windows") {
-            self.opener.run_command("explorer", &[&path_str]).await
+            self.opener.run_command("explorer", &[&path_str], None).await
         } else {
             self.open_linux_path(path).await
         }
@@ -136,7 +132,7 @@ impl ShellService {
         for (term, args) in candidates {
             if self.opener.is_tool_available(term) {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                match self.opener.run_command(term, &arg_refs).await {
+                match self.opener.run_command(term, &arg_refs, None).await {
                     Ok(()) => return Ok(()),
                     Err(error) => last_error = Some(error),
                 }
@@ -160,7 +156,7 @@ impl ShellService {
             }
 
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            match self.opener.run_command(program, &arg_refs).await {
+            match self.opener.run_command(program, &arg_refs, None).await {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = Some(error),
             }
@@ -322,9 +318,8 @@ fn validate_agent_launch_is_not_web(target: &str) -> Result<(), ShellError> {
     if lower.contains("http:") || lower.contains("https:") {
         return Err(ShellError::InvalidTarget(format!(
             "opening web URLs through the operating-system browser is not available to Agent \
-             tools ({target:?}). Use the managed Browser tool (browser navigate) to read or \
-             interact with web pages; the user can foreground a running Primary browser lane \
-             from the Browser management page when a visible window is needed."
+             tools ({target:?}). Use the bound Browser Module actions to read or interact \
+             with web pages."
         )));
     }
     Ok(())
@@ -385,6 +380,79 @@ mod tests {
     use super::*;
     use crate::opener::NoopSystemOpener;
     use std::fs;
+
+    struct RecordingOpener {
+        installed_program: Option<&'static str>,
+        commands: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::path::PathBuf>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ISystemOpener for RecordingOpener {
+        fn open_detached(&self, _: &str) -> Result<(), ShellError> {
+            panic!("VS Code must use the detected executable")
+        }
+
+        fn open_with_detached(&self, _: &str, _: &str) -> Result<(), ShellError> {
+            panic!("VS Code must use the detected executable")
+        }
+
+        async fn run_command(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), ShellError> {
+            self.commands.lock().unwrap().push((
+                program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect(), cwd.map(Path::to_path_buf),
+            ));
+            Ok(())
+        }
+
+        fn is_tool_available(&self, program: &str) -> bool {
+            self.installed_program == Some(program)
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn terminal_directory_is_native_data_not_cmd_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("folder & %PATH% ! ^ (test)");
+        std::fs::create_dir(&target).unwrap();
+        let opener = Arc::new(RecordingOpener {
+            installed_program: None,
+            commands: std::sync::Mutex::new(Vec::new()),
+        });
+        ShellService::new(opener.clone())
+            .open_folder_with(target.to_str().unwrap(), ToolType::Terminal).await.unwrap();
+        let commands = opener.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "cmd");
+        assert_eq!(commands[0].1, ["/d", "/c", "start", "", "cmd", "/d"]);
+        assert_eq!(commands[0].2, Some(target.canonicalize().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn vscode_launch_uses_the_detected_program_or_fails_without_spawning() {
+        let programs = [
+            Some("code"),
+            None,
+            #[cfg(target_os = "macos")]
+            Some("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+        ];
+        for program in programs {
+            let opener = Arc::new(RecordingOpener {
+                installed_program: program,
+                commands: std::sync::Mutex::new(Vec::new()),
+            });
+            let service = ShellService::new(opener.clone());
+            assert_eq!(service.check_tool_installed(ToolType::Vscode).await, program.is_some());
+            let result = service.open_folder_vscode(Path::new("folder with spaces")).await;
+            let commands = opener.commands.lock().unwrap();
+            if let Some(program) = program {
+                result.unwrap();
+                assert_eq!(*commands, [(program.to_owned(), vec!["folder with spaces".to_owned()], None)]);
+            } else {
+                assert!(matches!(result, Err(ShellError::ToolNotInstalled(_))));
+                assert!(commands.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn validate_file_exists_succeeds_for_real_file() {
@@ -539,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn launch_fails_closed_on_agent_web_targets() {
         // Agent-facing launch must not open web pages through the OS browser;
-        // that path belongs to the managed Browser Hub. Scheme-only forms and
+        // that path belongs to an explicitly selected Browser capability. Scheme-only forms and
         // wrapper protocols forwarding to a web URL are the same bypass.
         let svc = ShellService::new(Arc::new(NoopSystemOpener));
         for target in [

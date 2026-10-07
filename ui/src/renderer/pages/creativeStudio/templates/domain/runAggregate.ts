@@ -25,7 +25,7 @@ import {
 
 type UnknownRecord = Record<string, unknown>;
 
-export const TEMPLATE_RUN_KIND = 'nomifun.creative-studio.template-run' as const;
+const TEMPLATE_RUN_KIND = 'nomifun.creative-studio.template-run' as const;
 
 export const TEMPLATE_RUN_LIMITS = {
   references: 100,

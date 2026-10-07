@@ -309,7 +309,12 @@ describe('canvas image mask edit product model', () => {
       canvasImageMaskEditResultPosition([source, config, blocker], config)
     ).toEqual({
       x: 420,
-      y: 560,
+      y: 720,
     });
+    const rightBlocker = testNode('image', 3, { x: 800, y: 0, width: 340, height: 340 });
+    // A landscape result extends beyond the old square placement estimate.
+    expect(canvasImageMaskEditResultPosition(
+      [source, config, rightBlocker], config, { width: 680, height: 340 }
+    ).y).toBeGreaterThanOrEqual(340);
   });
 });
