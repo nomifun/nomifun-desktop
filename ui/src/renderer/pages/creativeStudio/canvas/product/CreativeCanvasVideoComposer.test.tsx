@@ -225,10 +225,11 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.includes('data-creative-media-preview="image"')).toBe(true);
   });
 
-  test('previews every linked image in keyframe order', () => {
+  test('previews every Agnes reference image without claiming keyframe control', () => {
     const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
       mode: 'i2v', initialPrompt: 'transition',
-      modelOptions: [{ ...model, protocol: 'agnes.video_jobs' }],
+      modelOptions: [{ ...model, model: 'agnes-video-2.5-flash', protocol: 'agnes.video_jobs' }],
+      settings: { ...props().settings, resolution: '720p', model: { providerId: model.providerId, model: 'agnes-video-2.5-flash' } },
       references: ['first', 'middle', 'last'].map((id, index) => ({
         assetId: id, nodeId: id, connectionId: id, base: false, ordinal: index + 1,
         label: id, originalUrl: `/${id}.png`,
@@ -238,7 +239,7 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.indexOf('/first.png')).toBeLessThan(html.indexOf('/middle.png'));
     expect(html.indexOf('/middle.png')).toBeLessThan(html.indexOf('/last.png'));
     expect(html.includes('aria-label="生成视频" disabled')).toBe(false);
-    expect(html.includes('关键帧 · 按连线顺序')).toBe(true);
+    expect(html.includes('参考图 · 按连线顺序')).toBe(true);
   });
 
   test('keeps single-image model limits visible without hiding the references', () => {
@@ -254,6 +255,40 @@ describe('CreativeCanvasVideoComposer', () => {
       expect(html.includes('aria-label="生成视频" disabled')).toBe(true);
       expect(html.match(/<img\b/g)?.length).toBe(2);
     }
+  });
+
+  test('blocks recalled Flash HD settings instead of silently lowering resolution', () => {
+    const componentProps = props({
+      initialPrompt: 'waves',
+      modelOptions: [{ ...model, model: 'agnes-video-2.5-flash', protocol: 'agnes.video_jobs' }],
+      settings: { ...props().settings, model: { providerId: model.providerId, model: 'agnes-video-2.5-flash' } },
+    });
+    const view = render(wrap(<CreativeCanvasVideoComposer {...componentProps} />));
+    expect(view.getByText('所选视频模型仅支持 720p，请调整分辨率。')).toBeTruthy();
+    expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
+      settings={{ ...componentProps.settings, resolution: '720p' }} />));
+    expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test.each([
+    ['agnes-video-2.5-flash', 5], ['agnes-video-2.5', 8],
+  ] as const)('keeps all references visible while enforcing the %s image limit', (name, limit) => {
+    const componentProps = props({
+      mode: 'i2v', initialPrompt: 'waves',
+      modelOptions: [{ ...model, model: name, protocol: 'agnes.video_jobs' }],
+      settings: { ...props().settings, resolution: '720p', model: { providerId: model.providerId, model: name } },
+      references: Array.from({ length: limit + 1 }, (_, index) => ({
+        assetId: `image-${index}`, nodeId: `node-${index}`, connectionId: `edge-${index}`,
+        base: false, ordinal: index + 1, label: `${index}`, originalUrl: `/${index}.png`,
+      })),
+    });
+    const view = render(wrap(<CreativeCanvasVideoComposer {...componentProps} />));
+    expect(view.getByText(`所选模型最多支持 ${limit} 张参考图，请减少连接。`)).toBeTruthy();
+    expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
+      references={componentProps.references?.slice(0, limit)} />));
+    expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   test('keeps generation disabled when no exact video model exists', () => {

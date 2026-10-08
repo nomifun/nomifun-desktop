@@ -126,6 +126,55 @@ fn post_request(uri: &str, body: serde_json::Value) -> Request<Body> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn fetch_models_agnes_suggests_current_official_tasks_without_reviving_retired_video() {
+    let server = MockServer::start().await;
+    let ids = ["agnes-image-2.0-flash", "agnes-image-2.1-flash", "agnes-image-2.5-flash",
+        "agnes-video-2.5", "agnes-video-2.5-flash", "agnes-3.0-flash", "agnes-video-v2.0"];
+    Mock::given(method("GET")).and(path("/v1/models"))
+        .and(header("authorization", "Bearer agnes-test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": ids.iter().map(|id| json!({"id":id})).collect::<Vec<_>>()
+        }))).expect(1).mount(&server).await;
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "agnes", &format!("{}/v1", server.uri()), "agnes-test-key").await;
+    let response = router.oneshot(post_request(&format!("/api/providers/{id}/models"), json!({}))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let models = body["data"]["models"].as_array().unwrap();
+    assert_eq!(models.len(), ids.len() - 1);
+    assert!(!models.iter().any(|model| model["id"] == "agnes-video-v2.0"));
+    for model in models {
+        assert_eq!(model["tasks_source"], "official_documentation");
+        let id = model["id"].as_str().unwrap();
+        if id.contains("image") { assert_eq!(model["tasks"], json!(["image_generation", "image_edit"])); }
+        else if id.contains("video") { assert_eq!(model["tasks"], json!(["video_generation"])); }
+        else { assert_eq!(model["tasks"], json!(["chat"])); assert_eq!(model["traits"], json!(["vision_input"])); }
+    }
+}
+
+#[tokio::test]
+async fn anonymous_catalog_hides_only_the_confirmed_agnes_retirement_and_preserves_future_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[
+            {"id":"agnes-video-v2.0"}, {"id":"agnes-video-2.5-flash"}, {"id":"agnes-video-future"}
+        ]}))).expect(2).mount(&server).await;
+    let (router, _) = setup().await;
+    for platform in ["agnes", "custom"] {
+        let response = router.clone().oneshot(post_request("/api/providers/fetch-models", json!({
+            "platform":platform, "base_url":format!("{}/v1", server.uri()),
+            "auth_scheme":"bearer", "credentials":{"api_keys":["fixture-key"]}, "try_fix":false
+        }))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = body_json(response).await;
+        let models = response["data"]["models"].as_array().unwrap();
+        assert!(models.iter().any(|model| model["id"] == "agnes-video-future"));
+        assert!(models.iter().any(|model| model["id"] == "agnes-video-2.5-flash"));
+        assert_eq!(models.iter().any(|model| model["id"] == "agnes-video-v2.0"), platform != "agnes");
+    }
+}
+
+#[tokio::test]
 async fn fetch_models_nonexistent_provider() {
     let (router, _db) = setup().await;
     let provider_id = ProviderId::new().into_string();

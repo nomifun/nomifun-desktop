@@ -245,10 +245,15 @@ describe('conversation creation admission and draft behavior', () => {
     const automatic = buildCreationRequest(draft, 'cat', presetId, [], { ...model, model: 'gpt-image-1', label: 'GPT Image', protocol: 'openai.images' });
     expect(automatic.params.size).toBeUndefined();
     expect(automatic.params.width).toBeUndefined();
-    const agnes = { providerId, model: 'agnes-video-v2.0', label: 'Agnes Video', protocol: 'agnes.video_jobs' };
-    expect(creationParameterPolicy(agnes).video.seconds).toEqual([5, 10, 15]);
+    const agnes = { providerId, model: 'agnes-video-2.5-flash', label: 'Agnes Video', protocol: 'agnes.video_jobs' };
+    expect(creationParameterPolicy(agnes).video.seconds).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12]);
     draft.mode = 'video'; draft.models.video = { providerId, model: agnes.model }; draft.parameters.video = { seconds: 15 };
-    expect(buildCreationRequest(draft, 'waves', presetId, [], agnes).params.seconds).toBe(15);
+    expect(buildCreationRequest(draft, 'waves', presetId, [], agnes).params.seconds).toBeUndefined();
+    draft.parameters.video = { seconds: 12, size: '1920x1080' };
+    const flash = buildCreationRequest(draft, 'waves', presetId, [], agnes);
+    expect(flash.params.seconds).toBe(12); expect(flash.params.size).toBeUndefined();
+    expect(creationParameterPolicy({ ...agnes, model: 'agnes-video-2.5' }).video.sizes).toContain('1920x1080');
+    expect(creationVideoInputRoles(agnes)).toContain('last_frame');
     draft.mode = 'music'; draft.models.music = { providerId, model: 'music-3.0' }; draft.parameters.music = { instrumental: true, seconds: 120 };
     const music = buildCreationRequest(draft, 'warm piano', presetId, [], { providerId, model: 'music-3.0', label: 'Music 3.0', protocol: 'minimax.music' });
     expect(music.params.seconds).toBe(120);

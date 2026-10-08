@@ -1,5 +1,6 @@
 import { imageGenerationSizePolicyForModel, type ImageGenerationAspectRatioOption, type ImageGenerationModelOption, type ImageGenerationSizePolicy } from './parameters/image';
 import type { CreationMode, CreationParameters, CreationInput } from './types';
+import { agnesVideoPolicy, agnesVideoSizeOptions, isCurrentAgnesVideo, normalizeAgnesVideoSize } from './parameters/agnes';
 
 type Model = Pick<ImageGenerationModelOption, 'model' | 'protocol' | 'platform'> | null | undefined;
 
@@ -11,7 +12,7 @@ export function creationMusicDuration(value: unknown): number | undefined {
 }
 
 export function creationVideoInputRoles(model: Model): CreationInput['role'][] {
-  if (model?.protocol === 'ark.video_jobs' || (model?.protocol === 'xai.video_jobs' && model.model === 'grok-imagine-video-1.5')) return ['reference', 'first_frame', 'last_frame'];
+  if (isCurrentAgnesVideo(model) || model?.protocol === 'ark.video_jobs' || (model?.protocol === 'xai.video_jobs' && model.model === 'grok-imagine-video-1.5')) return ['reference', 'first_frame', 'last_frame'];
   return ['reference', 'first_frame'];
 }
 const sizes = (values: string[]) => values.map(value => {
@@ -39,13 +40,14 @@ export function creationParameterPolicy(model: Model) {
     : protocol === 'zhipu.video_jobs' ? { seconds: [5, 10], sizes: ['1280x720', '1920x1080'] }
     : protocol === 'xai.video_jobs' ? { seconds: [5, 10], sizes: ['480p', '720p', '1080p'] }
     : protocol === 'siliconflow.video_jobs' ? { seconds: [], sizes: ['1280x720', '720x1280'] }
-    : protocol === 'agnes.video_jobs' ? { seconds: [5, 10, 15], sizes: ['1280x720', '720x1280', '720x720', '1920x1080', '1080x1920', '1080x1080'] }
+    : protocol === 'agnes.video_jobs' ? agnesVideoPolicy(model)
     : { seconds: [], sizes: [] };
   return { qualities, video };
 }
 
 /** Present ratio and resolution separately while submitting the native pixel size. */
 export function creationVideoSizeOptions(model: Model): ImageGenerationAspectRatioOption[] {
+  if (model?.protocol === 'agnes.video_jobs') return agnesVideoSizeOptions(model);
   const pixels = creationParameterPolicy(model).video.sizes.filter(value => /^\d+x\d+$/.test(value));
   if (!pixels.length) return [];
   return [
@@ -77,6 +79,7 @@ export function normalizeCreationParameters(mode: CreationMode, value: CreationP
     params.count = creationCount(mode, params.count, model);
   } else if (mode === 'video') {
     if (!policy.video.seconds.includes(Number(params.seconds))) delete params.seconds;
+    if (typeof params.size === 'string') params.size = normalizeAgnesVideoSize(model, params.size);
     if (!policy.video.sizes.includes(String(params.size))) delete params.size;
     params.count = creationCount(mode, params.count, model);
   } else if (mode === 'music' && creationMusicDuration(params.seconds) === undefined) {

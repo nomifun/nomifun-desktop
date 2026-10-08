@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     BedrockConfig, CreateProviderRequest, ProviderModelCapabilityInput, ProviderModelResponse,
-    ProviderResponse, UpdateProviderRequest,
+    ProviderResponse, UpdateProviderRequest, is_retired_provider_model,
 };
 use nomifun_common::{AppError, ProviderId, ProviderInUseDetails};
 use nomifun_db::{
@@ -449,8 +449,11 @@ impl ProviderService {
     pub(crate) fn row_to_response(
         &self,
         row: Provider,
-        models: Vec<ProviderModelResponse>,
+        mut models: Vec<ProviderModelResponse>,
     ) -> Result<ProviderResponse, AppError> {
+        // This is a read projection, not a database cleanup: old configuration
+        // remains intact, but no management page or selector advertises it.
+        models.retain(|model| !is_retired_provider_model(&row.platform, &model.model));
         Ok(ProviderResponse {
             provider_id: row.provider_id,
             platform: row.platform,
