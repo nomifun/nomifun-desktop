@@ -216,8 +216,9 @@ pub use skill::{
     NamedPathResponse, ReadBuiltinResourceRequest,
     ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SetSkillTagsRequest,
-    SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,
-    SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse,
+    SkillListItemResponse, SkillMarketInstallRequest, SkillMarketInstallResponse,
+    SkillMarketItemResponse, SkillMarketMcpConfigRequest, SkillMarketMcpConfigResponse,
+    SkillMarketSyncRequest, SkillMarketSyncResponse,
     SkillPathsResponse, SkillSourceResponse,
 };
 pub use system::{

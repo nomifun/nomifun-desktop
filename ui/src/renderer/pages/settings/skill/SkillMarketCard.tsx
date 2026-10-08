@@ -15,6 +15,7 @@ type SkillMarketCardProps = {
   addedStateLoading: boolean;
   addedActionEnabled?: boolean;
   addedActionLabel?: string;
+  showInstallCommand?: boolean;
   onAdd: (item: ISkillMarketItem) => void;
 };
 
@@ -50,6 +51,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   addedStateLoading,
   addedActionEnabled = false,
   addedActionLabel,
+  showInstallCommand = true,
   onAdd,
 }) => {
   const { t } = useTranslation();
@@ -150,20 +152,22 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
         </div>
       )}
 
-      <div className='mt-auto pt-10px flex min-w-0 items-center gap-4px'>
-        <span
-          className='min-w-0 flex-1 truncate text-11px text-[var(--color-text-3)] font-mono'
-          title={item.install_command}
-        >
-          {item.install_command}
-        </span>
-        <CopyIconButton
-          text={item.install_command}
-          tooltip={t('settings.skillsMarket.copyCommand', { defaultValue: '复制完整命令' })}
-          size={13}
-          className='size-22px shrink-0 -mr-4px'
-        />
-      </div>
+      {showInstallCommand && (
+        <div className='mt-auto pt-10px flex min-w-0 items-center gap-4px'>
+          <span
+            className='min-w-0 flex-1 truncate text-11px text-[var(--color-text-3)] font-mono'
+            title={item.install_command}
+          >
+            {item.install_command}
+          </span>
+          <CopyIconButton
+            text={item.install_command}
+            tooltip={t('settings.skillsMarket.copyCommand', { defaultValue: '复制完整命令' })}
+            size={13}
+            className='size-22px shrink-0 -mr-4px'
+          />
+        </div>
+      )}
     </div>
   );
 };

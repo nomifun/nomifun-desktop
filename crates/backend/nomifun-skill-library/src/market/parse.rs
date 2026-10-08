@@ -149,21 +149,17 @@ fn parse_clawhub_html_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// SkillHub skills (API + HTML fallback)
+// SkillHub skills (canonical API only)
 // ---------------------------------------------------------------------------
 
 pub(super) fn parse_skillhub_rankings(body: &str) -> Vec<SkillMarketItemResponse> {
-    if let Ok(root) = serde_json::from_str::<serde_json::Value>(body) {
-        let items = root.pointer("/data/skills").and_then(serde_json::Value::as_array);
-        if let Some(items) = items {
-            let parsed = ranked(items.iter().filter_map(parse_skillhub_api_item));
-            if !parsed.is_empty() {
-                return parsed;
-            }
-        }
-    }
-
-    parse_skillhub_html_rankings(body)
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(items) = root.pointer("/data/skills").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    ranked(items.iter().filter_map(parse_skillhub_api_item))
 }
 
 fn parse_skillhub_api_item(item: &serde_json::Value) -> Option<SkillMarketItemResponse> {
@@ -219,53 +215,6 @@ fn parse_skillhub_api_item(item: &serde_json::Value) -> Option<SkillMarketItemRe
         scenario_tags,
         stats,
     })
-}
-
-fn parse_skillhub_html_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
-    let mut seen = HashSet::new();
-    let mut parsed = Vec::new();
-
-    for (href, text) in market_anchors(html) {
-        let Some(url) = market_url(SKILLHUB_SOURCE, &href) else {
-            continue;
-        };
-        let Some((owner, slug)) = skillhub_owner_slug(&url) else {
-            continue;
-        };
-        let id = format!("{SKILLHUB_SOURCE}:{owner}/skills/{slug}");
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-
-        let name = extract_skillhub_name(&text, &owner, &slug);
-        let stats = extract_stats(&text);
-        let description = extract_skillhub_description(&text, &owner, &name, stats.as_deref());
-        let (tags, audience_tags, scenario_tags) = infer_market_tags(&format!("{name} {description}"));
-        let install_command = if owner.contains('.') {
-            format!("npx skills add https://www.skills.sh/{owner}/skills/{slug}")
-        } else {
-            format!("npx skills add https://github.com/{owner}/skills --skill {slug}")
-        };
-        let rank = parsed.len() + 1;
-        parsed.push(SkillMarketItemResponse {
-            id,
-            source: SKILLHUB_SOURCE.into(),
-            rank,
-            name,
-            description,
-            url: format!("https://www.skills.sh/{owner}/skills/{slug}"),
-            install_command,
-            tags,
-            audience_tags,
-            scenario_tags,
-            stats,
-        });
-        if parsed.len() >= MAX_MARKET_ITEMS_PER_SOURCE {
-            break;
-        }
-    }
-
-    parsed
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +485,6 @@ fn market_url(source: &str, href: &str) -> Option<String> {
     } else if href.starts_with('/') {
         match source {
             CLAWHUB_SOURCE | CLAWHUB_PLUGINS_SOURCE => format!("https://clawhub.ai{href}"),
-            SKILLHUB_SOURCE => format!("https://www.skills.sh{href}"),
             LOOPHUB_SOURCE => format!("https://hub.cocoloop.cn{href}"),
             SKILLHUB_MCP_SOURCE => format!("https://skillhub.cn{href}"),
             MCPWORLD_SOURCE => format!("https://www.mcpworld.com{href}"),
@@ -549,9 +497,6 @@ fn market_url(source: &str, href: &str) -> Option<String> {
     match source {
         CLAWHUB_SOURCE if url.starts_with("https://clawhub.ai/") => Some(url),
         CLAWHUB_PLUGINS_SOURCE if url.starts_with("https://clawhub.ai/") => Some(url),
-        SKILLHUB_SOURCE if url.starts_with("https://www.skills.sh/") || url.starts_with("https://skills.sh/") => {
-            Some(url.replacen("https://skills.sh/", "https://www.skills.sh/", 1))
-        }
         LOOPHUB_SOURCE if url.starts_with("https://hub.cocoloop.cn/") => Some(url),
         SKILLHUB_MCP_SOURCE if url.starts_with("https://skillhub.cn/") => Some(url),
         MCPWORLD_SOURCE if url.starts_with("https://www.mcpworld.com/") => Some(url),
@@ -567,14 +512,6 @@ fn clawhub_owner_slug(url: &str) -> Option<(String, String)> {
     }
     if segments.len() == 2 && !reserved.contains(&segments[0].as_str()) && !reserved.contains(&segments[1].as_str()) {
         return valid_owner_slug(&segments[0], &segments[1]);
-    }
-    None
-}
-
-fn skillhub_owner_slug(url: &str) -> Option<(String, String)> {
-    let segments = market_path_segments(url, "https://www.skills.sh")?;
-    if segments.len() >= 3 && segments.get(1).is_some_and(|s| s == "skills") {
-        return valid_owner_slug(&segments[0], &segments[2]);
     }
     None
 }
@@ -735,31 +672,6 @@ fn extract_clawhub_description(text: &str, owner: &str, name: &str) -> String {
         cleaned
     } else {
         "Trending ClawHub skill package.".into()
-    }
-}
-
-fn extract_skillhub_name(text: &str, owner: &str, slug: &str) -> String {
-    let repo_marker = format!("{owner}/skills");
-    let before_repo = text.split(&repo_marker).next().unwrap_or(text);
-    let candidate = clean_market_text(
-        before_repo.trim_matches(|c: char| c == '#' || c.is_ascii_digit() || c == '.'),
-        80,
-    );
-    if candidate.len() >= 2 && !candidate.eq_ignore_ascii_case("skill") {
-        candidate
-    } else {
-        title_from_slug(slug)
-    }
-}
-
-fn extract_skillhub_description(text: &str, owner: &str, name: &str, stats: Option<&str>) -> String {
-    let without_stats = stats.map_or_else(|| text.to_string(), |s| text.replace(s, ""));
-    let without_repo = without_stats.replace(&format!("{owner}/skills"), "");
-    let cleaned = clean_market_text(&without_repo.replace(name, ""), 180);
-    if cleaned.len() >= 18 {
-        cleaned
-    } else {
-        format!("Ranked SkillHub skill from {owner}/skills.")
     }
 }
 
@@ -939,24 +851,6 @@ mod tests {
         assert_eq!(items[0].url, "https://clawhub.ai/steipete/skills/github");
         assert_eq!(items[0].install_command, "openclaw skills install @steipete/github");
         assert_eq!(items[0].stats.as_deref(), Some("194199 downloads · 7620 installs · 659 stars"));
-    }
-
-    #[test]
-    fn parse_skillhub_rankings_extracts_skills_command() {
-        let html = r#"
-          <a href="/vercel-labs/skills/find-skills">
-            <span>find-skills</span>
-            <span>vercel-labs/skills</span>
-            <span>2.5M installs</span>
-          </a>
-        "#;
-        let items = parse_skillhub_rankings(html);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].source, SKILLHUB_SOURCE);
-        assert_eq!(
-            items[0].install_command,
-            "npx skills add https://github.com/vercel-labs/skills --skill find-skills"
-        );
     }
 
     #[test]

@@ -148,6 +148,8 @@ Sources:
 Skills can be tagged, imported, exported/symlinked, and scanned from external paths.
 Custom and bundled Skills use the same Session capture and native context reader.
 
+The Skill Market Add action is owned by the Skill Library service: the backend validates the market identity, downloads and safely extracts the archive, and imports it into the user skill directory. It neither creates an Agent Session nor executes a command supplied by the market; installation and later Session use are separate phases.
+
 ## Skill API
 
 | Operation | Endpoint |
@@ -159,7 +161,7 @@ Custom and bundled Skills use the same Session capture and native context reader
 | Import / export / delete | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | Scan / detect paths | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
 | External paths | `GET`, `POST`, `DELETE /api/skills/external-paths` |
-| Skills market | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
+| Skills market | `POST /api/skills/market/enable`, `POST /api/skills/market/disable`, `POST /api/skills/market/rankings/sync`, `POST /api/skills/market/install` |
 
 ## Related
 
