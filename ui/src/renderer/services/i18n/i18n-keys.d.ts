@@ -7663,6 +7663,7 @@ export type I18nKey =
   | 'update.errorTitle'
   | 'update.feedbackIssueLabel'
   | 'update.goToRelease'
+  | 'update.installFailedDesc'
   | 'update.installNow'
   | 'update.installWarning'
   | 'update.installingDesc'

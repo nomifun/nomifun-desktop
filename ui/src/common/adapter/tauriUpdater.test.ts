@@ -36,12 +36,13 @@ describe('desktop updater security boundary', () => {
   });
 
   test('install goes through the fail-closed preflight/fatal-exit contract', () => {
-    // installUpdateWithPreflight owns ordering (preflight → cleanup → install →
-    // relaunch) and guarantees a fatal exit once install has started; the raw
+    // installUpdateWithPreflight owns ordering (preflight → install → relaunch)
+    // and reports failures before a fatal exit once install has started; the raw
     // sequential call path must not come back.
     expect(updaterSource.includes('installUpdateWithPreflight({')).toBe(true);
     expect(updaterSource.includes('fatalExit')).toBe(true);
-    expect(updaterSource.includes('prepareShutdown')).toBe(true);
+    expect(updaterSource.includes('showFailure')).toBe(true);
+    expect(updaterSource.includes('prepareShutdown')).toBe(false);
     expect(updaterSource.includes('install: async () => {')).toBe(true);
   });
 
@@ -125,12 +126,13 @@ describe('desktop updater security boundary', () => {
     expect(desktopSource.includes('matches!(self, Self::AlreadyInstalling { .. })')).toBe(true);
 
     // A completed install must release the slot — and only AFTER the handoff
-    // succeeded, so a failure still restores the package instead of dropping it.
+    // succeeded. A failed replacement must never offer the same package again.
     expect(installCommand.includes('finish_install(')).toBe(true);
     expect(installCommand.indexOf('package.update.install(')).toBeLessThan(
       installCommand.indexOf('finish_install(')
     );
-    expect(installCommand.indexOf('restore_ready(')).toBeLessThan(installCommand.indexOf('finish_install('));
+    expect(desktopSource.includes('restore_ready(')).toBe(false);
+    expect(installCommand.includes('tracing::error!')).toBe(true);
   });
 
   test('progress is coalesced natively and carries the version it belongs to', () => {

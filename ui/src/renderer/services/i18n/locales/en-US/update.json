@@ -34,6 +34,7 @@
   "readyToInstall": "Ready to install",
   "readyToInstallDesc": "Update has been downloaded. Click the button below to restart and install the update.",
   "installNow": "Install and restart",
+  "installFailedDesc": "The update could not be installed or restarted. NomiFun will quit. Download the installer from Releases and reinstall; include the logs when reporting the issue.",
   "installWarning": "Do not reopen the app during installation. It will restart automatically.",
   "preparingInstallTitle": "Preparing installation...",
   "preparingInstallDesc": "Checking the install environment and preparing the downloaded package. Please wait.",

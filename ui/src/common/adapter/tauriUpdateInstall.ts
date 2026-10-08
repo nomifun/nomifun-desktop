@@ -54,34 +54,37 @@ export function isInstallNotAttempted(error: unknown): boolean {
   return message.startsWith(INSTALL_NOT_ATTEMPTED_ERROR);
 }
 
-type UpdaterPostCleanupFailurePhase = 'install' | 'relaunch';
+type UpdaterInstallFailurePhase = 'install' | 'relaunch';
 
-interface UpdaterPostCleanupFailure {
-  phase: UpdaterPostCleanupFailurePhase;
+interface UpdaterInstallFailure {
+  phase: UpdaterInstallFailurePhase;
   error: unknown;
 }
 
-type UpdaterFatalExit = (failure: UpdaterPostCleanupFailure) => Promise<never>;
+type UpdaterFatalExit = (failure: UpdaterInstallFailure) => Promise<never>;
 
 export interface InstallUpdateDependencies {
   getContext: () => Promise<UpdaterInstallContext>;
-  prepareShutdown: () => Promise<void>;
   install: () => Promise<void>;
   relaunch: () => Promise<void>;
+  showFailure: (failure: UpdaterInstallFailure) => Promise<void>;
   /** Must terminate the desktop process and never return to the renderer. */
   fatalExit: UpdaterFatalExit;
 }
 
-async function fatalAfterCleanupFailure(
-  fatalExit: UpdaterFatalExit,
-  failure: UpdaterPostCleanupFailure
+async function exitAfterInstallFailure(
+  deps: InstallUpdateDependencies,
+  failure: UpdaterInstallFailure
 ): Promise<never> {
-  await fatalExit(failure);
+  try {
+    await deps.showFailure(failure);
+  } catch (error) {
+    console.error('Could not show the update failure dialog:', error);
+  }
+  await deps.fatalExit(failure);
 
-  // Keep the terminal-state guarantee even if a future native exit adapter
-  // accidentally returns after requesting process termination. Once cleanup
-  // has succeeded, returning to the renderer can only produce an unusable
-  // backend-less shell.
+  // The bundle may be partially replaced. Never return to the renderer even
+  // if an exit adapter unexpectedly returns after requesting termination.
   return new Promise<never>(() => {});
 }
 
@@ -90,10 +93,6 @@ export async function installUpdateWithPreflight(deps: InstallUpdateDependencies
   if (!context.autoInstallSupported) {
     throw new Error(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:${context.reason ?? 'metadata_unavailable'}`);
   }
-
-  // Keep cleanup outside the fatal block: if cleanup fails, installation must
-  // never start and the still-functional app may report the recoverable error.
-  await deps.prepareShutdown();
 
   try {
     await deps.install();
@@ -104,12 +103,12 @@ export async function installUpdateWithPreflight(deps: InstallUpdateDependencies
     // the terminal path — returning to a renderer sitting on top of a
     // half-replaced bundle is the thing this guard exists to prevent.
     if (isInstallNotAttempted(error)) throw error;
-    return fatalAfterCleanupFailure(deps.fatalExit, { phase: 'install', error });
+    return exitAfterInstallFailure(deps, { phase: 'install', error });
   }
 
   try {
     await deps.relaunch();
   } catch (error) {
-    return fatalAfterCleanupFailure(deps.fatalExit, { phase: 'relaunch', error });
+    return exitAfterInstallFailure(deps, { phase: 'relaunch', error });
   }
 }
