@@ -78,7 +78,7 @@ pub use agent_execution_template::{
     CreateExecutionFromTemplateRequest, UpdateAgentExecutionTemplateRequest,
 };
 pub use agent_platform::*;
-pub use agnes_model::{AgnesModelContract, agnes_model_contract, is_retired_provider_model};
+pub use agnes_model::{AgnesModelContract, agnes_model_contract};
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,

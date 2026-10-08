@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     BedrockConfig, FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse,
     ModelCatalogSource, ModelInfo, ModelTaskSource, infer_catalog_tasks_and_traits,
-    is_retired_provider_model, verified_catalog_tasks_and_traits,
+    verified_catalog_tasks_and_traits,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::IProviderRepository;
@@ -193,10 +193,7 @@ impl ModelFetchService {
     }
 }
 
-fn prepare_catalog_models(platform: &str, models: &mut Vec<ModelInfo>) {
-    // Catalogs can lag an official shutdown. Apply the same lifecycle rule as
-    // saved provider/model projections; taskless retired rows are not choices.
-    models.retain(|model| !is_retired_provider_model(platform, &model.id));
+fn prepare_catalog_models(platform: &str, models: &mut [ModelInfo]) {
     for model in models {
         // Bedrock catalog rows are authoritative at the protocol-family
         // boundary: only Anthropic/Claude entries can use the implemented

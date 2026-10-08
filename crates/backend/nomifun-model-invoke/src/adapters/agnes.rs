@@ -2,8 +2,9 @@
 //!
 //! Agnes image generation looks superficially OpenAI-compatible, but its
 //! queue rejects OpenAI's top-level `quality` / `response_format` fields and
-//! image editing is JSON on the generations endpoint. Agnes Video 2.5 is a
-//! separate JSON async-job contract: submit returns a `video_id`, polling uses
+//! image editing is JSON on the generations endpoint. Agnes Video v2.0 and
+//! 2.5 have separate request contracts sharing the async-job lifecycle:
+//! submit returns a `video_id`, polling uses
 //! `/agnesapi?video_id=...&model_name=...`, and the completed status body
 //! carries the output URL directly.
 
@@ -281,9 +282,23 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
                 format!("agnes.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
-        let body = video::build_video_body(&call.model, &call.model_params, request)?;
+        let contract = video_model_contract(&call.model)?;
+        let body = match contract {
+            AgnesModelContract::VideoV20 => video_v20::build_video_body(&call.model, &call.model_params, request)?,
+            _ => video::build_video_body(&call.model, &call.model_params, request)?,
+        };
         let url = call.endpoint_url()?;
-        let response = video::submit(http, &url, &call.connection.auth, &body).await?;
+        let response = if contract == AgnesModelContract::VideoV20 {
+            // Preserve v2.0's single submission. The 2.5 queue retry policy is
+            // not evidence that an older model's job was never accepted.
+            let response = post_json(http, &url, VIDEO_SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
+            if !response.status().is_success() {
+                return Err(error_from_response(response).await);
+            }
+            response
+        } else {
+            video::submit(http, &url, &call.connection.auth, &body).await?
+        };
         let value: Value = read_json_capped(
             response,
             MAX_VIDEO_STATUS_BYTES,
@@ -312,7 +327,7 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        video::validate_video_model(&call.model)?;
+        video_model_contract(&call.model)?;
         let url = video_poll_url(call, &job.remote_id)?;
         let response = get_request(
             http,
@@ -351,6 +366,15 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
 }
 
 mod video;
+mod video_v20;
+
+fn video_model_contract(model: &str) -> Result<AgnesModelContract, InvokeError> {
+    match agnes_model_contract(model) {
+        Some(contract @ (AgnesModelContract::VideoV20 | AgnesModelContract::Video { .. })) => Ok(contract),
+        _ => Err(InvokeError::new(InvokeErrorKind::InvalidParams,
+            format!("agnes.video_jobs has no video contract for {model:?}"))),
+    }
+}
 
 fn video_poll_url(call: &ResolvedCall, remote_id: &str) -> Result<String, InvokeError> {
     let template = call
@@ -678,7 +702,7 @@ mod tests {
             if request.method.as_str() == "POST" {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
                 for key in ["width", "height", "num_frames", "frame_rate", "extra_body"] {
-                    assert!(body.get(key).is_none(), "retired field {key}");
+                    assert!(body.get(key).is_none(), "v2.0 field {key}");
                 }
             }
         }
@@ -702,6 +726,63 @@ mod tests {
         assert_eq!(body["aspect_ratio"], "16:9"); assert_eq!(body["seed"], 42);
         request.size=None; request.resolution=Some("720p".into());
         assert_eq!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap()["size"], "720P");
+    }
+
+    #[tokio::test]
+    async fn video_v20_submits_frames_and_polls_its_original_model_without_25_parameters() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/videos"))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(body_partial_json(json!({"model":"agnes-video-v2.0", "prompt":"ocean waves",
+                "width":1280, "height":720, "frame_rate":24, "num_frames":121})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"video_id":"v20_job"})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/agnesapi"))
+            .and(query_param("video_id", "v20_job"))
+            .and(query_param("model_name", "agnes-video-v2.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"completed",
+                "video_url":format!("{}/media.mp4", server.uri())})))
+            .expect(1).mount(&server).await;
+        let mp4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom";
+        Mock::given(method("GET")).and(path("/media.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(mp4.as_slice()))
+            .expect(1).mount(&server).await;
+        let mut call = video_call(&server, TaskRequest::VideoGeneration(video_request()));
+        call.model = "agnes-video-v2.0".into();
+        let TaskOutcome::Pending(job) = AgnesVideoJobsAdapter.submit(&http(), &call).await.unwrap()
+            else { panic!("v2.0 job expected") };
+        assert_eq!(job.adapter_id, VIDEO_ADAPTER_ID);
+        assert_eq!(job.config_revision, call.config_revision);
+        assert_eq!(job.remote_id, "v20_job");
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = AgnesVideoJobsAdapter.poll(&http(), &call, &job).await.unwrap()
+            else { panic!("v2.0 output expected") };
+        let ProducedData::Url(url) = &assets[0].data else { panic!("output URL expected") };
+        assert_eq!(http().get(url).send().await.unwrap().bytes().await.unwrap().as_ref(), mp4);
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        for field in ["seconds", "size", "aspect_ratio", "mode", "n", "images"] {
+            assert!(body.get(field).is_none(), "2.5 field {field} must not leak into v2.0");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_v20_does_not_inherit_25_queue_retries_or_resubmit_ambiguous_acceptance() {
+        for (status, body, kind) in [
+            (503, json!({"code":"video_queue_full", "message":"busy", "data":null}), InvokeErrorKind::ProviderError),
+            (429, json!({"error":{"code":"rate_limit_exceeded", "message":"limited"}}), InvokeErrorKind::RateLimited),
+            (200, json!({"id":"not-a-video-id", "status":"queued"}), InvokeErrorKind::ParseError),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/v1/videos"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let mut call = video_call(&server, TaskRequest::VideoGeneration(video_request()));
+            call.model = "agnes-video-v2.0".into();
+            let error = AgnesVideoJobsAdapter.submit(&http(), &call).await.unwrap_err();
+            assert_eq!(error.kind, kind);
+            if status != 200 { assert_eq!(error.http_status, Some(status)); }
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
     }
 
     #[test]
@@ -742,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn video_enforces_model_specific_limits_and_rejects_retired_contracts_before_http() {
+    fn video_25_enforces_model_specific_limits_without_accepting_other_version_fields() {
         let mut request=video_request();
         request.size=Some("1920x1080".into());
         assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
@@ -764,8 +845,8 @@ mod tests {
             request.extra=extra;
             assert!(video::build_video_body(VIDEO_MODEL,&json!({}),&request).is_err());
         }
-        let error=video::validate_video_model("agnes-video-v2.0").unwrap_err();
-        assert!(error.message.contains("taken offline"));
+        assert_eq!(video_model_contract("agnes-video-v2.0").unwrap(), AgnesModelContract::VideoV20);
+        assert!(video::validate_video_model("agnes-video-v2.0").is_err());
         assert!(video::validate_video_model("agnes-video-future").is_err());
     }
 

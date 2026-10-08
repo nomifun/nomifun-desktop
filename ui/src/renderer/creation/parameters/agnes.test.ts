@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { agnesImageSizePolicy, agnesVideoSizeOptions, agnesCanvasVideoParameters, agnesVideoPolicy } from './agnes';
+import { agnesImageSizePolicy, agnesVideoSizeOptions, agnesCanvasVideoParameters, agnesVideoPolicy, isAgnesVideo } from './agnes';
 import { prepareCanvasVideoRun } from '@renderer/pages/creativeStudio/canvas/generation/plans';
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
-import { normalizeCreationParameters } from '../parameterPolicy';
+import { creationVideoInputRoles, normalizeCreationParameters } from '../parameterPolicy';
 
 describe('Agnes provider parameter policies', () => {
   test('current image options preserve official ratios and native tier dimensions', () => {
@@ -19,7 +19,7 @@ describe('Agnes provider parameter policies', () => {
     expect(agnesImageSizePolicy({ model: 'gpt-image-1', protocol: 'openai.images' })).toBeNull();
   });
 
-  test('Flash cannot advertise HD sizes and retired video has no suggested parameters', () => {
+  test('Flash cannot advertise HD sizes and unknown models have no suggested parameters', () => {
     const flash = { model: 'agnes-video-2.5-flash', protocol: 'agnes.video_jobs' };
     expect(agnesVideoSizeOptions(flash).filter(value => value.resolution).every(value => value.resolution === '720P')).toBe(true);
     expect(agnesVideoSizeOptions(flash).find(value => value.aspectRatio === '1:1')).toMatchObject({ width: 720, height: 720 });
@@ -31,8 +31,37 @@ describe('Agnes provider parameter policies', () => {
     expect(standard.find(value => value.aspectRatio === '1:1' && value.resolution === '720P')).toMatchObject({ width: 960, height: 960 });
     expect(standard.some(value => value.requestSize === '1024x1024' && value.resolution === '1K')).toBe(true);
     expect(standard.some(value => value.requestSize === '2560x1440' && value.resolution === '2K')).toBe(true);
-    expect(agnesVideoPolicy({ ...flash, model: 'agnes-video-v2.0' })).toEqual({ seconds: [], sizes: [] });
+    expect(agnesVideoPolicy({ ...flash, model: 'agnes-video-future' })).toEqual({ seconds: [], sizes: [] });
     expect(agnesCanvasVideoParameters({ model: 'other', protocol: 'ark.video_jobs' }, '1080p', '9:16')).toEqual({});
+  });
+
+  test('v2.0 retains its own pixel sizes, durations and ordered image roles', () => {
+    const model = { model: 'agnes-video-v2.0', protocol: 'agnes.video_jobs' };
+    expect(isAgnesVideo(model)).toBe(true);
+    expect(agnesVideoPolicy(model)).toEqual({ seconds: [5, 10, 15],
+      sizes: ['1280x720', '720x1280', '720x720', '1920x1080', '1080x1920', '1080x1080'] });
+    expect(creationVideoInputRoles(model)).toEqual(['reference', 'first_frame', 'last_frame']);
+    expect(normalizeCreationParameters('video', { size: '1920x1080', seconds: 15 }, model))
+      .toMatchObject({ size: '1920x1080', seconds: 15 });
+    expect(agnesCanvasVideoParameters(model, '1080p', '9:16')).toEqual({});
+    expect(isAgnesVideo({ ...model, protocol: 'openai.videos' })).toBe(false);
+  });
+
+  test('canvas v2.0 admission keeps dimensions without injecting 2.5 tier fields', () => {
+    const providerId = '019b0000-0000-7000-8000-000000000009' as ProviderId;
+    const provider = { id: providerId, name: 'Agnes', platform: 'agnes', enabled: true, models: [{
+      model: 'agnes-video-v2.0', enabled: true, capabilities: [{ task: 'video_generation', protocol: 'agnes.video_jobs', traits: [] }],
+    }] } as unknown as IProvider;
+    const run = prepareCanvasVideoRun({
+      catalog: { status: 'ready', providers: [provider], error: null },
+      canvasId: '019b0000-0000-7000-8000-000000000001', nodeId: '019b0000-0000-7000-8000-000000000002',
+      model: { providerId, model: 'agnes-video-v2.0' }, references: { bindings: [], assets: [] },
+      operation: { task: 'video_generation', capability: 't2v' }, prompt: 'waves',
+      seconds: 10, resolution: '1080p', aspectRatio: '9:16', width: 1080, height: 1920, taskCount: 1,
+    });
+    expect(run.input.parameters).toMatchObject({ width: 1080, height: 1920, seconds: 10 });
+    expect(run.input.parameters).not.toHaveProperty('size');
+    expect(run.input.parameters).not.toHaveProperty('aspect_ratio');
   });
 
   test('canvas admission preserves Agnes native aspect ratio through the shared request vocabulary', () => {

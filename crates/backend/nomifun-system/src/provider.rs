@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     BedrockConfig, CreateProviderRequest, ProviderModelCapabilityInput, ProviderModelResponse,
-    ProviderResponse, UpdateProviderRequest, is_retired_provider_model,
+    ProviderResponse, UpdateProviderRequest,
 };
 use nomifun_common::{AppError, ProviderId, ProviderInUseDetails};
 use nomifun_db::{
@@ -21,7 +21,7 @@ use crate::provider_connection::{
 };
 use crate::provider_deletion::SharedProviderDeletionCoordinator;
 use crate::provider_model::{
-    capability_row_to_response, row_to_model_response, rows_to_model_responses,
+    capability_row_to_input, row_to_model_response, rows_to_model_responses,
     serialize_capabilities, validate_capability_auth_scheme, validate_capability_urls,
     validate_known_provider_model_task, validate_positive_token_limit, validate_protocol,
     validate_provider_params,
@@ -418,23 +418,7 @@ impl ProviderService {
             .collect::<HashMap<_, _>>();
         let capabilities = self.capability_repo.list_for_provider(provider_id).await?;
         for row in capabilities {
-            let response = capability_row_to_response(row)?;
-            let capability = ProviderModelCapabilityInput {
-                task: response.task,
-                traits: response.traits,
-                protocol: response.protocol,
-                connection_role: response.connection_role,
-                base_url_override: response.base_url_override,
-                endpoint: response.endpoint,
-                poll_endpoint: response.poll_endpoint,
-                content_endpoint: response.content_endpoint,
-                realtime_endpoint: response.realtime_endpoint,
-                allow_cross_origin_credentials: response.allow_cross_origin_credentials,
-                provider_params: response.provider_params,
-                context_limit: response.context_limit,
-                output_limit: response.output_limit,
-                compaction_threshold_pct: response.compaction_threshold_pct,
-            };
+            let capability = capability_row_to_input(&row)?;
             validate_capability(
                 platform,
                 default_base_url,
@@ -449,11 +433,8 @@ impl ProviderService {
     pub(crate) fn row_to_response(
         &self,
         row: Provider,
-        mut models: Vec<ProviderModelResponse>,
+        models: Vec<ProviderModelResponse>,
     ) -> Result<ProviderResponse, AppError> {
-        // This is a read projection, not a database cleanup: old configuration
-        // remains intact, but no management page or selector advertises it.
-        models.retain(|model| !is_retired_provider_model(&row.platform, &model.model));
         Ok(ProviderResponse {
             provider_id: row.provider_id,
             platform: row.platform,
