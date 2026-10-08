@@ -49,6 +49,8 @@ const NomiChat: React.FC<{
   creationEnabled?: boolean;
   /** Product-owned compact composer; configuration is exposed outside chat. */
   compactProductComposer?: boolean;
+  /** Keep a followed Turn's final reply visible on product chat surfaces. */
+  followTurnCompletion?: boolean;
 }> = ({
   conversation_id,
   workspace,
@@ -70,6 +72,7 @@ const NomiChat: React.FC<{
   creationTasksEnabled = false,
   creationEnabled = true,
   compactProductComposer = false,
+  followTurnCompletion = false,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
@@ -134,6 +137,7 @@ const NomiChat: React.FC<{
               onLoadOlder={historyPaging.loadOlder}
               hasMoreOlder={historyPaging.hasMore}
               loadingOlder={historyPaging.loadingOlder}
+              followTurnCompletion={followTurnCompletion}
             />
           </FlexFullContainer>
           {!readOnly && !hideSendBox && (

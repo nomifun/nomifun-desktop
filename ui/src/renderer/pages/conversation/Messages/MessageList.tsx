@@ -752,7 +752,9 @@ const MessageList: React.FC<{
   onLoadOlder?: () => void | boolean | Promise<void | boolean>;
   hasMoreOlder?: boolean;
   loadingOlder?: boolean;
-}> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder }) => {
+  /** Product opt-in; preserve the latest reply across automatic process collapse. */
+  followTurnCompletion?: boolean;
+}> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder, followTurnCompletion = false }) => {
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
@@ -1131,7 +1133,12 @@ const MessageList: React.FC<{
     [displayList]
   );
 
-  // Use auto-scroll hook
+  const followedTurn = followTurnCompletion
+    ? displayList.findLast((item): item is ITurnProcessDisclosureVO => item.type === 'turn_process_disclosure')
+    : undefined;
+
+  // The rendered Turn already resolves canonical lifecycle and history state.
+  // Reuse it for scrolling rather than keeping another completion listener.
   const {
     handleScrollerRef,
     handleContentRef,
@@ -1146,6 +1153,7 @@ const MessageList: React.FC<{
   } = useAutoScroll({
     messages: list,
     itemCount: displayList.length + (pauseError ? 1 : 0),
+    followTurn: followedTurn ? { id: followedTurn.msg_id, running: followedTurn.running } : undefined,
   });
   const handleColumnRef = useConversationColumnRef(handleContentRef);
 
