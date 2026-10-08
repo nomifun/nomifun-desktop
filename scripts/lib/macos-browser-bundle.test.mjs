@@ -5,9 +5,9 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
-  MACOS_BROWSER_RUNTIME, MACOS_CEF_HELPER_NAMES, compileBrowserEnvironment, createMacosUpdaterArchive,
+  MACOS_BROWSER_RUNTIME, MACOS_INTEL_BROWSER_RUNTIME, MACOS_CEF_HELPER_NAMES, compileBrowserEnvironment, createMacosUpdaterArchive,
   discoverCefRuntime, inspectMacosBrowserBundle, resolveMacosBuildSettings,
-  verifyMacosUpdaterArchive,
+  verifyMacosUpdaterArchive, macosBrowserRuntime,
 } from './macos-browser-bundle.mjs';
 import { desktopBuildCommand } from '../run-desktop-build.mjs';
 
@@ -19,12 +19,12 @@ function file(path, content, executable = false) {
   if (executable) chmodSync(path, 0o755);
 }
 
-function appFixture(root) {
+function appFixture(root, contract = MACOS_BROWSER_RUNTIME) {
   const app = join(root, 'NomiFun.app');
   file(join(app, 'Contents/MacOS/nomifun-desktop'), 'final host bytes', true);
   file(join(app, 'Contents/Info.plist'), '<plist/>');
   file(join(app, 'Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework'), 'framework bytes', true);
-  file(join(app, 'Contents/Resources/browser-cef/runtime.json'), JSON.stringify(MACOS_BROWSER_RUNTIME));
+  file(join(app, 'Contents/Resources/browser-cef/runtime.json'), JSON.stringify(contract));
   file(join(app, 'Contents/Resources/browser-cef/CREDITS.html'), 'runtime credits');
   for (const name of MACOS_BROWSER_RUNTIME.resources) file(join(app, 'Contents/Frameworks/Chromium Embedded Framework.framework/Resources', name), `${name} bytes`);
   for (const name of MACOS_CEF_HELPER_NAMES) {
@@ -59,20 +59,45 @@ describe('complete macOS Browser build routing', () => {
   test('Cargo runtime discovery keeps host and explicit target outputs separate and rejects altered archive identity', async () => {
     const root = mkdtempSync(join(tmpdir(), 'nomifun-cef-discovery-'));
     try {
-      const host = join(root, 'build.noindex/debug/build/cef-dll-sys-host/out/cef_macos_aarch64');
+      const hostContract = process.arch === 'arm64' ? MACOS_BROWSER_RUNTIME : MACOS_INTEL_BROWSER_RUNTIME;
+      const hostTarget = process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+      const hostDirectory = process.arch === 'arm64' ? 'cef_macos_aarch64' : 'cef_macos_x86_64';
+      const host = join(root, 'build.noindex/debug/build/cef-dll-sys-host/out', hostDirectory);
       const explicit = join(root, 'build.noindex/aarch64-apple-darwin/release/build/cef-dll-sys-explicit/out/cef_macos_aarch64');
-      for (const path of [host, explicit]) {
-        file(join(path, 'archive.json'), JSON.stringify({ name: MACOS_BROWSER_RUNTIME.archive, sha1: MACOS_BROWSER_RUNTIME.archive_sha1 }));
+      for (const [path, contract] of [[host, hostContract], [explicit, MACOS_BROWSER_RUNTIME]]) {
+        file(join(path, 'archive.json'), JSON.stringify({ name: contract.archive, sha1: contract.archive_sha1 }));
         file(join(path, 'Chromium Embedded Framework.framework/Chromium Embedded Framework'), 'native');
       }
       expect(await discoverCefRuntime({ root })).toBe(host);
-      const compiled = await compileBrowserEnvironment({ root, target: 'aarch64-apple-darwin', profile: 'debug', environment: { CEF_PATH: '/arbitrary', FLATPAK: '1', KEEP: 'normal' } });
+      const compiled = await compileBrowserEnvironment({ root, target: hostTarget, profile: 'debug', environment: { CEF_PATH: '/arbitrary', FLATPAK: '1', KEEP: 'normal' } });
       expect(compiled.runtimePath).toBe(host);
       expect(compiled.environment).toEqual({ CEF_PATH: host, KEEP: 'normal' });
       expect(await discoverCefRuntime({ root, target: 'aarch64-apple-darwin', profile: 'release' })).toBe(explicit);
       file(join(host, 'archive.json'), JSON.stringify({ name: MACOS_BROWSER_RUNTIME.archive, sha1: '0'.repeat(40) }));
       await expect(discoverCefRuntime({ root })).rejects.toThrow('pinned macOS');
-      await expect(discoverCefRuntime({ root, target: 'x86_64-apple-darwin' })).rejects.toThrow('only macOS arm64');
+      await expect(discoverCefRuntime({ root, target: 'x86_64-apple-darwin' })).rejects.toThrow('pinned macOS');
+      const missingIntel = await compileBrowserEnvironment({ root, target: 'x86_64-apple-darwin' });
+      expect(missingIntel.runtimePath).toBeNull();
+      const intel = join(root, 'build.noindex/x86_64-apple-darwin/release/build/cef-dll-sys-intel/out/cef_macos_x86_64');
+      file(join(intel, 'archive.json'), JSON.stringify({ name: MACOS_INTEL_BROWSER_RUNTIME.archive, sha1: MACOS_INTEL_BROWSER_RUNTIME.archive_sha1 }));
+      file(join(intel, 'Chromium Embedded Framework.framework/Chromium Embedded Framework'), 'intel native');
+      expect(await discoverCefRuntime({ root, target: 'x86_64-apple-darwin', profile: 'release' })).toBe(intel);
+      expect((await compileBrowserEnvironment({ root, target: 'x86_64-apple-darwin' })).runtimePath).toBe(intel);
+      file(join(intel, 'archive.json'), JSON.stringify({ name: MACOS_BROWSER_RUNTIME.archive, sha1: MACOS_BROWSER_RUNTIME.archive_sha1 }));
+      await expect(discoverCefRuntime({ root, target: 'x86_64-apple-darwin', profile: 'release' })).rejects.toThrow('pinned macOS');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('pins independent runtime identities and rejects mixed Intel metadata', async () => {
+    expect(macosBrowserRuntime('aarch64-apple-darwin')).toBe(MACOS_BROWSER_RUNTIME);
+    expect(macosBrowserRuntime('x86_64-apple-darwin')).toBe(MACOS_INTEL_BROWSER_RUNTIME);
+    expect(() => macosBrowserRuntime('universal-apple-darwin')).toThrow('unsupported');
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-cef-intel-bundle-'));
+    try {
+      const app = appFixture(root, MACOS_INTEL_BROWSER_RUNTIME);
+      expect((await inspectMacosBrowserBundle(app)).status).toBe('pass');
+      file(join(app, 'Contents/Resources/browser-cef/runtime.json'), JSON.stringify({ ...MACOS_INTEL_BROWSER_RUNTIME, archive_sha1: MACOS_BROWSER_RUNTIME.archive_sha1 }));
+      expect((await inspectMacosBrowserBundle(app)).missing[0].label).toBe('pinned CEF runtime identity');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -164,10 +189,10 @@ describe.skipIf(process.platform === 'win32')('final App updater archives', () =
     },
   );
 
-  test('archives all five helpers and current host bytes, then produces a signature with an isolated temporary key', async () => {
+  test.each(['arm64', 'x86_64'])('archives all five %s helpers and current host bytes, then produces a signature with an isolated temporary key', async architecture => {
     const root = mkdtempSync(join(tmpdir(), 'nomifun-cef-updater-'));
     try {
-      const app = appFixture(root);
+      const app = appFixture(root, architecture === 'arm64' ? MACOS_BROWSER_RUNTIME : MACOS_INTEL_BROWSER_RUNTIME);
       file(join(app, 'Contents/._Info.plist'), 'stale AppleDouble metadata');
       file(join(app, '__MACOSX/metadata'), 'stale archive metadata');
       symlinkSync('nomifun-desktop', join(app, 'Contents/MacOS/host-link'));

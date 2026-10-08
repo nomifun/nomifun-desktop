@@ -10,8 +10,17 @@ describe('macOS Desktop build contract', () => {
     for (const argument of ['--debug', '--no-bundle', '--target=x86_64-apple-darwin', '--profile=custom', '--bundles=dmg']) {
       const result = spawnSync('bash', [fileURLToPath(new URL('./desktop-build-mac.sh', import.meta.url)), '--', argument], { encoding: 'utf8', timeout: 10_000 });
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain('完整 arm64 release App/DMG');
+      expect(result.stderr).toContain('完整 macOS release App/DMG');
     }
+  });
+  test.skipIf(process.platform !== 'darwin')('accepts both macOS targets but rejects an incomplete Universal bundle', () => {
+    for (const target of ['arm', 'intel']) {
+      const result = spawnSync('bash', [fileURLToPath(new URL('./desktop-build-mac.sh', import.meta.url)), target, '--check'], { encoding: 'utf8', timeout: 10_000 });
+      expect(result.status).toBe(0);
+    }
+    const result = spawnSync('bash', [fileURLToPath(new URL('./desktop-build-mac.sh', import.meta.url)), 'universal', '--check'], { encoding: 'utf8', timeout: 10_000 });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('请分别构建 arm 和 intel');
   });
   test('keeps the context-only shutdown probe separate from navigation and soak', () => {
     const runner = readFileSync(new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8');

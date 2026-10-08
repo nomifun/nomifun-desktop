@@ -297,7 +297,7 @@ The one-click script auto-detects two scenarios:
 
 - **APPEND** — a Release for this version already exists (Windows may have gone
   first): add the macOS assets and merge the `darwin-aarch64` entry into
-  `latest.json` (macOS ships arm64-only).
+  `latest.json` (the one-click script builds Apple Silicon).
 - **CREATE** — no Release exists yet (macOS goes first): create the tag and the
   Release (with release notes) and upload the macOS assets; `-Version` can bump
   the version number as part of the same command.
@@ -345,6 +345,24 @@ stapling / codesign / Gatekeeper status, merges the darwin entries via
 `make:latest`, uploads (`--clobber` for APPEND, or `gh release create` for
 CREATE), commits `latest.json` (plus the bump for CREATE) as author `nomifun`,
 and verifies the updater endpoint. It aborts with a clear error on any failure.
+
+For a dual-architecture macOS release, use the signed build pipeline once per
+target and collect the updater manifest before building the next target:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --collect --notes-file notes.md
+bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --collect --notes-file notes.md
+```
+
+Both targets use independently pinned CEF archives and verify the host,
+framework, and helpers against the selected architecture. The Intel updater
+uses `NomiFun_<version>_x64.app.tar.gz`; the Apple Silicon updater retains
+`NomiFun.app.tar.gz`. Upload the collected `dist/desktop/` artifacts to both
+distribution services. Rosetta execution is not native Intel acceptance.
 
 ### Releasing Windows (append to an existing release, or Windows-first)
 

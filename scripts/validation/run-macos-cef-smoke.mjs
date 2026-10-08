@@ -6,11 +6,15 @@ import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compileBrowserEnvironment, MACOS_CEF_ARCHIVE, MACOS_CEF_ARCHIVE_SHA1 } from '../lib/macos-browser-bundle.mjs';
+import { compileBrowserEnvironment, macosBrowserRuntime } from '../lib/macos-browser-bundle.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
 const option = (key, fallback) => args.includes(key) ? args[args.indexOf(key) + 1] : fallback;
+const target = option('--target', null);
+const contract = macosBrowserRuntime(target ?? (process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'));
+const targetArgs = target ? ['--target', target] : [];
+const buildOutput = join(root, 'target', ...(target ? [target] : []), 'debug');
 const soakOnly = args.includes('--soak-only');
 const windowReopenOnly = args.includes('--window-reopen-only');
 const contextShutdownOnly = args.includes('--context-shutdown-only');
@@ -39,14 +43,14 @@ try {
   const output = resolve(option('--output', join(root, 'dist/browser-cef-native-smoke')));
   const identity = option('--identity', '-');
   await mkdir(output, { recursive: true });
-  const compiled = await compileBrowserEnvironment({ root, environment });
+  const compiled = await compileBrowserEnvironment({ root, target, environment });
   environment = compiled.environment;
-  await run('cargo', ['build', '-p', 'nomifun-desktop', '--example', 'browser_cef_smoke', '--no-default-features']);
-  await run('cargo', ['build', '-p', 'nomifun-browser-macos', '--bin', 'nomifun-browser-cef-helper']);
-  const helper = join(root, 'target/debug/nomifun-browser-cef-helper');
+  await run('cargo', ['build', '-p', 'nomifun-desktop', '--example', 'browser_cef_smoke', '--no-default-features', ...targetArgs]);
+  await run('cargo', ['build', '-p', 'nomifun-browser-macos', '--bin', 'nomifun-browser-cef-helper', ...targetArgs]);
+  const helper = join(buildOutput, 'nomifun-browser-cef-helper');
   const runtime = compiled.runtimePath ?? await run(helper, ['--print-runtime-path'], true);
   const archive = JSON.parse(await readFile(join(runtime, 'archive.json'), 'utf8'));
-  if (archive.name !== MACOS_CEF_ARCHIVE || archive.sha1 !== MACOS_CEF_ARCHIVE_SHA1) throw new Error('native fixture requires the pinned CEF archive');
+  if (archive.name !== contract.archive || archive.sha1 !== contract.archive_sha1) throw new Error('native fixture requires the pinned CEF archive');
   delete environment.CEF_PATH;
   delete environment.FLATPAK;
   const stage = await mkdtemp(join(output, 'run-'));
@@ -57,7 +61,7 @@ try {
   const executable = join(contents, 'MacOS/browser_cef_smoke');
   await mkdir(join(contents, 'MacOS'), { recursive: true });
   // Copy into a fresh bundle. Do not sign hard-linked build-cache executables.
-  await cp(join(root, 'target/debug/examples/browser_cef_smoke'), executable);
+  await cp(join(buildOutput, 'examples/browser_cef_smoke'), executable);
   await cp(join(runtime, 'Chromium Embedded Framework.framework'), framework, { recursive: true, dereference: false, verbatimSymlinks: true });
   const common = {
     CFBundlePackageType: 'APPL',
