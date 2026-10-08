@@ -58,6 +58,8 @@ type MarketSettingsPanelProps = {
   searchPlaceholder: string;
   emptyText: string;
   onAdd: (item: ISkillMarketItem) => void | Promise<void>;
+  /** Whether cards expose the market-provided command for manual copying. */
+  showInstallCommand?: boolean;
   /** True when this market entry already has a live installed resource. */
   isAdded?: (item: ISkillMarketItem) => boolean;
   /** Allow an explicit consumer-owned repair/update action for an installed entry. */
@@ -83,6 +85,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   searchPlaceholder,
   emptyText,
   onAdd,
+  showInstallCommand = true,
   isAdded,
   canRunAddedAction,
   addedActionLabel,
@@ -375,6 +378,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
                 addedActionEnabled={addedActionEnabled}
                 addedActionLabel={addedActionLabel}
                 addedStateLoading={addedStateLoading}
+                showInstallCommand={showInstallCommand}
                 onAdd={(marketItem) => void handleMarketAdd(marketItem)}
               />
             );

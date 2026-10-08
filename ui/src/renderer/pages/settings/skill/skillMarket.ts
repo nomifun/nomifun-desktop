@@ -32,8 +32,8 @@ const normalizeInstalledResourceName = (value: string): string =>
 
 /**
  * Market display names are not always the installed SKILL.md name. Use both
- * the display name and the canonical trailing slug so returning from the Nomi
- * install draft reliably turns the action into “Added”.
+ * the display name and the canonical trailing slug so a refreshed market can
+ * still recognize an item installed by the dedicated Skill Library flow.
  */
 export const isSkillMarketItemInstalled = (
   item: Pick<ISkillMarketItem, 'id' | 'name'>,
@@ -74,9 +74,7 @@ const isSafeMarketUrl = (source: SkillMarketSource, url: string): boolean => {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) return false;
     if (source === 'clawhub' || source === 'clawhub_plugins') return parsed.hostname === 'clawhub.ai';
-    if (source === 'skillhub') {
-      return parsed.hostname === 'skillhub.cn' || parsed.hostname === 'www.skills.sh' || parsed.hostname === 'skills.sh';
-    }
+    if (source === 'skillhub') return parsed.hostname === 'skillhub.cn';
     if (source === 'loophub') return parsed.hostname === 'hub.cocoloop.cn';
     if (source === 'skillhub_mcp') return parsed.hostname === 'skillhub.cn';
     if (source === 'mcpworld') return parsed.hostname === 'www.mcpworld.com';
@@ -226,40 +224,4 @@ export const filterSkillMarketItems = (
     }
     return true;
   });
-};
-
-export const buildSkillMarketConversationName = (item: ISkillMarketItem, localeKey = 'zh-CN'): string => {
-  const name = cleanMarketText(item.name, 48);
-  return localeKey.toLowerCase().startsWith('zh') ? `安装 ${name}` : `Install ${name}`;
-};
-
-export const buildSkillMarketInstallPrompt = (item: ISkillMarketItem, localeKey = 'zh-CN'): string => {
-  const name = cleanMarketText(item.name, MAX_NAME_LENGTH);
-  const source = marketSourceLabel(item.source);
-  const isZh = localeKey.toLowerCase().startsWith('zh');
-  const description = translateMarketDescription(item.description, item, localeKey);
-  const lines = isZh
-    ? [
-        '请帮我安装这个技能。先检查来源页面和安装命令是否可信，执行前向我确认。',
-        '',
-        `来源：${source}`,
-        `技能：${name}`,
-        description ? `说明：${description}` : null,
-        `页面：${item.url}`,
-        '',
-        '安装命令：',
-      ]
-    : [
-        'Help me install this skill. Verify the source page and command first, then ask for confirmation before executing it.',
-        '',
-        `Source: ${source}`,
-        `Skill: ${name}`,
-        description ? `Description: ${description}` : null,
-        `Page: ${item.url}`,
-        '',
-        'Install command:',
-      ];
-  return [...lines, '```bash', item.install_command, '```']
-    .filter(Boolean)
-    .join('\n');
 };

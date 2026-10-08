@@ -11,6 +11,9 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
 
 /// Ranking/readme/detail bodies larger than this are rejected.
 pub(crate) const MAX_MARKET_BODY_BYTES: u64 = 8 * 1024 * 1024;
+/// Compressed market skill archives larger than this are rejected before
+/// reaching the stricter cumulative-uncompressed ZIP extraction budget.
+pub(crate) const MAX_MARKET_SKILL_ZIP_BYTES: u64 = 32 * 1024 * 1024;
 /// Per-request timeout. The outer per-source budget
 /// ([`super::MARKET_SOURCE_TIMEOUT`]) covers a primary + fallback pair.
 const MARKET_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -24,11 +27,12 @@ const MARKET_ALLOWED_HOSTS: &[&str] = &[
     "clawhub.ai",
     "api.skillhub.cn",
     "skillhub.cn",
-    "www.skills.sh",
-    "skills.sh",
     "api.cocoloop.cn",
     "hub.cocoloop.cn",
     "dl.cocoloop.cn",
+    // SkillHub's official download endpoint redirects archives to this exact
+    // bucket. Keep the host exact rather than allowing arbitrary COS buckets.
+    "skillhub-1388575217.cos.accelerate.myqcloud.com",
     "wry-manatee-359.convex.cloud",
     "www.mcpworld.com",
 ];
@@ -37,6 +41,18 @@ const MARKET_ALLOWED_HOSTS: &[&str] = &[
 /// match for an allowlisted market host?
 fn is_allowed_market_host(host: &str) -> bool {
     MARKET_ALLOWED_HOSTS.iter().any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
+/// Redirect targets must retain the complete HTTPS transport boundary, not
+/// merely an allowlisted hostname. In particular, reject HTTP downgrades,
+/// credential-bearing URLs, and non-default ports on an otherwise trusted
+/// host.
+fn is_allowed_market_redirect_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(is_allowed_market_host)
 }
 
 /// Build the shared market HTTP client. Redirects are only followed when the
@@ -55,7 +71,7 @@ pub(crate) fn build_market_client() -> Result<reqwest::Client, AppError> {
         if attempt.previous().len() > MAX_MARKET_REDIRECT_HOPS {
             return attempt.error("too many market redirects");
         }
-        if attempt.url().host_str().is_some_and(is_allowed_market_host) {
+        if is_allowed_market_redirect_url(attempt.url()) {
             attempt.follow()
         } else {
             attempt.error("market redirect target host is not allowlisted")
@@ -110,6 +126,36 @@ async fn read_market_response(response: &mut reqwest::Response) -> Result<String
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Drain a binary market response up to `max_bytes`.
+///
+/// A real upstream 404 is retained as [`AppError::NotFound`] so a stale
+/// marketplace card is distinguishable from a transport/integration failure.
+pub(crate) async fn read_market_bytes(
+    response: &mut reqwest::Response,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, AppError> {
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(AppError::NotFound(format!("{label} not found")));
+    }
+    if !status.is_success() {
+        return Err(AppError::BadGateway(format!("{label} returned {status}")));
+    }
+    if response.content_length().unwrap_or(0) > max_bytes {
+        return Err(AppError::BadGateway(format!("{label} is too large")));
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(map_market_fetch_error)? {
+        if bytes.len().saturating_add(chunk.len()) as u64 > max_bytes {
+            return Err(AppError::BadGateway(format!("{label} is too large")));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn map_market_fetch_error(error: reqwest::Error) -> AppError {
     if error.is_timeout() {
         AppError::Timeout(format!("skill market fetch timed out: {error}"))
@@ -157,6 +203,30 @@ mod tests {
             "example.com",
         ] {
             assert!(!is_allowed_market_host(host), "{host} must be rejected");
+        }
+    }
+
+    #[test]
+    fn market_redirect_guard_requires_plain_https_on_the_default_port() {
+        for allowed in [
+            "https://clawhub.ai/api/v1/download?slug=demo",
+            "https://api.skillhub.cn/api/v1/download?slug=demo",
+            "https://dl.cocoloop.cn/bss/skills/demo.zip",
+        ] {
+            assert!(is_allowed_market_redirect_url(&reqwest::Url::parse(allowed).unwrap()));
+        }
+
+        for rejected in [
+            "http://clawhub.ai/api/v1/download?slug=demo",
+            "https://clawhub.ai:444/api/v1/download?slug=demo",
+            "https://user@clawhub.ai/api/v1/download?slug=demo",
+            "https://user:password@api.skillhub.cn/api/v1/download?slug=demo",
+            "https://clawhub.ai.evil.example/api/v1/download?slug=demo",
+        ] {
+            assert!(
+                !is_allowed_market_redirect_url(&reqwest::Url::parse(rejected).unwrap()),
+                "redirect target must be rejected: {rejected}"
+            );
         }
     }
 

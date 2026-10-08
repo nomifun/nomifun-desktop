@@ -128,6 +128,8 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 
 技能可打标签、导入、导出/符号链接和扫描外部目录。自定义技能与内置技能使用同一会话冻结和读取路径。
 
+技能市场的“添加”由技能库服务直接完成：服务端校验市场条目身份，下载并安全解压归档，再导入用户技能目录。该流程不会创建 Agent 会话，也不执行市场返回的命令；技能安装与之后在会话中使用技能是两个独立阶段。
+
 ## 技能 API
 
 | 操作 | Endpoint |
@@ -139,7 +141,7 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 | 导入 / 导出 / 删除 | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | 扫描 / 探测路径 | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
 | 外部路径 | `GET`, `POST`, `DELETE /api/skills/external-paths` |
-| 技能市场 | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
+| 技能市场 | `POST /api/skills/market/enable`, `POST /api/skills/market/disable`, `POST /api/skills/market/rankings/sync`, `POST /api/skills/market/install` |
 
 ## 相关
 
