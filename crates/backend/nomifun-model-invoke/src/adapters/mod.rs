@@ -11,8 +11,8 @@
 //!   and sync JSON→binary `/audio/speech` (`"openai.audio_speech"`).
 //!
 //! Platform-specific protocols:
-//! - [`agnes`] — Agnes Image 2.1 Flash JSON generation/editing
-//!   (`"agnes.images"`) and Agnes Video v2.0 async jobs
+//! - [`agnes`] — Agnes Image 2.0/2.1/2.5 Flash JSON generation/editing
+//!   (`"agnes.images"`) and Agnes Video 2.5 / 2.5 Flash async jobs
 //!   (`"agnes.video_jobs"`).
 //! - [`gemini`] — Google `:generateContent` images
 //!   (`"gemini.generate_content"`). Chat protocols execute through the agent

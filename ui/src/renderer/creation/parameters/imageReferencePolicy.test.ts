@@ -30,6 +30,10 @@ describe('imageReferenceInputPolicy', () => {
       kind: 'bounded',
       maxInputs: IMAGE_REFERENCE_PRODUCT_MAX_INPUTS,
     });
+    expect(imageReferenceInputPolicy('agnes.images', 'image_edit')).toEqual({
+      kind: 'bounded',
+      maxInputs: IMAGE_REFERENCE_PRODUCT_MAX_INPUTS,
+    });
   });
 
   test('keeps known multi-image transports distinct from an invented maximum', () => {

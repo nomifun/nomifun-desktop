@@ -5,6 +5,7 @@
  */
 
 import { getI18n } from 'react-i18next';
+import { agnesImageSizePolicy } from './agnes';
 
 export type ImageGenerationInterfaceMode = 'images' | 'responses';
 export type ImageGenerationQuality = 'auto' | 'high' | 'medium' | 'low';
@@ -368,6 +369,8 @@ export function imageGenerationSizePolicyForModel(
 
   const protocol = model.protocol?.trim().toLowerCase();
   const modelId = model.model.trim().toLowerCase();
+  const agnesPolicy = agnesImageSizePolicy(model);
+  if (agnesPolicy) return agnesPolicy;
   const isStepFunImages = protocol === 'stepfun.images';
   if (protocol === 'ark.images') {
     return {

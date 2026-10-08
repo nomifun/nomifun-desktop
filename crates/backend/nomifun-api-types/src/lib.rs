@@ -7,6 +7,7 @@ mod execution_constraints;
 pub use execution_constraints::*;
 mod agent_execution_template;
 mod agent_platform;
+mod agnes_model;
 mod auth;
 mod channel;
 mod connection_test;
@@ -77,6 +78,7 @@ pub use agent_execution_template::{
     CreateExecutionFromTemplateRequest, UpdateAgentExecutionTemplateRequest,
 };
 pub use agent_platform::*;
+pub use agnes_model::{AgnesModelContract, agnes_model_contract, is_retired_provider_model};
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,

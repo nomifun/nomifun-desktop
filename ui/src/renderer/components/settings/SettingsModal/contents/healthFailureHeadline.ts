@@ -70,6 +70,13 @@ export const healthFailureHeadline = (
   result: Pick<ProviderHealthCheckResponse, 'error_kind' | 'http_status'>
 ): string => {
   const kind = result.error_kind;
+  // A temporary 503 is not a bad URL/key or permanent model incompatibility.
+  // Keep the failure truthful; only refine the generic upstream-error title.
+  if (kind === 'api_error' && result.http_status === 503) {
+    return t('settings.health.temporarilyUnavailable', {
+      defaultValue: '供应商服务暂时不可用（503），请稍后重试',
+    });
+  }
   const entry = kind ? HEADLINE_KEYS[kind] : undefined;
   const headline = entry
     ? t(entry.key, { defaultValue: entry.fallback })

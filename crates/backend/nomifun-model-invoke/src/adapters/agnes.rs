@@ -2,7 +2,7 @@
 //!
 //! Agnes image generation looks superficially OpenAI-compatible, but its
 //! queue rejects OpenAI's top-level `quality` / `response_format` fields and
-//! image editing is JSON on the generations endpoint. Agnes Video v2.0 is a
+//! image editing is JSON on the generations endpoint. Agnes Video 2.5 is a
 //! separate JSON async-job contract: submit returns a `video_id`, polling uses
 //! `/agnesapi?video_id=...&model_name=...`, and the completed status body
 //! carries the output URL directly.
@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_api_types::ModelTask;
+use nomifun_api_types::{AgnesModelContract, ModelTask, agnes_model_contract};
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
@@ -23,7 +23,7 @@ use crate::transport::{
 };
 use crate::types::{
     ImageEditRequest, InputAsset, JobHandle, ProducedAsset, ProducedData, TaskOutcome,
-    TaskRequest, TaskResult, VideoGenRequest,
+    TaskRequest, TaskResult,
 };
 
 use super::json_request_body;
@@ -31,22 +31,17 @@ use super::openai_images::parse_images_response_limited;
 
 const IMAGE_ADAPTER_ID: &str = "agnes.images";
 const VIDEO_ADAPTER_ID: &str = "agnes.video_jobs";
+#[cfg(test)]
 const IMAGE_MODEL: &str = "agnes-image-2.1-flash";
-const VIDEO_MODEL: &str = "agnes-video-v2.0";
+#[cfg(test)]
+const VIDEO_MODEL: &str = "agnes-video-2.5-flash";
 const DEFAULT_IMAGE_SIZE: &str = "1024x1024";
-const DEFAULT_VIDEO_WIDTH: u32 = 1152;
-const DEFAULT_VIDEO_HEIGHT: u32 = 768;
-const DEFAULT_FRAME_RATE: u32 = 24;
-const DEFAULT_NUM_FRAMES: u32 = 121;
-const MAX_NUM_FRAMES: u32 = 441;
 const MAX_INPUT_IMAGES: usize = 8;
 const MAX_INPUT_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(360);
 const VIDEO_SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const VIDEO_POLL_TIMEOUT: Duration = Duration::from_secs(60);
-/// Agnes throttles video status lookups independently of job submission. Its
-/// public examples use a five-second cadence; use a more conservative floor
-/// so concurrent desktop work does not sit on the provider's boundary.
+/// A conservative floor avoids bursts when several desktop jobs poll together.
 const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_VIDEO_STATUS_BYTES: u64 = 1024 * 1024;
 
@@ -97,13 +92,13 @@ impl ProtocolAdapter for AgnesImagesAdapter {
 }
 
 fn validate_image_model(model: &str) -> Result<(), InvokeError> {
-    if model.trim() == IMAGE_MODEL {
+    if agnes_model_contract(model) == Some(AgnesModelContract::Image) {
         Ok(())
     } else {
         Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
             format!(
-                "agnes.images implements the {IMAGE_MODEL:?} contract; got {model:?}"
+                "agnes.images supports Agnes Image 2.0, 2.1 and 2.5 Flash; got {model:?}"
             ),
         ))
     }
@@ -225,7 +220,29 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
     // Agnes requires a size. Supply the local fallback only when neither the
     // capability nor this request selected one; configured 2K–4K tiers must
     // survive a caller that leaves its optional typed size unset.
-    object.entry("size").or_insert_with(|| Value::String(DEFAULT_IMAGE_SIZE.into()));
+    object
+        .entry("size")
+        .or_insert_with(|| Value::String(DEFAULT_IMAGE_SIZE.into()));
+    // Current image models publish exact pixel mappings for their resolution
+    // tiers. Normalize only those mappings; legacy 2.0 pixel sizes remain valid.
+    if !call.model.trim().eq_ignore_ascii_case("agnes-image-2.0-flash") {
+        let selected = object.get("size").and_then(Value::as_str).unwrap_or_default();
+        let ratios = [
+            ("1:1", 1024, 1024), ("3:4", 864, 1152), ("4:3", 1152, 864),
+            ("16:9", 1312, 736), ("9:16", 736, 1312), ("2:3", 832, 1248),
+            ("3:2", 1248, 832), ("21:9", 1568, 672),
+        ];
+        let mapped = (1..=4).find_map(|tier| {
+            ratios.iter().find_map(|(ratio, width, height)| {
+                (selected == format!("{}x{}", width * tier, height * tier))
+                    .then_some((tier, *ratio))
+            })
+        });
+        if let Some((tier, ratio)) = mapped {
+            object.insert("size".into(), json!(format!("{tier}K")));
+            object.insert("ratio".into(), json!(ratio));
+        }
+    }
     // These OpenAI-style top-level fields are specifically rejected by the
     // Agnes text-image queue. `response_format` is owned by `extra_body`.
     object.remove("quality");
@@ -264,35 +281,9 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
                 format!("agnes.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
-        validate_video_model(&call.model)?;
-        let mut body = json_request_body(
-            &call.model_params,
-            &request.extra,
-            build_video_body(&call.model, &call.model_params, request)?,
-        )?;
-        // Typed references own the mode and images. Stale provider defaults must
-        // not shadow them through the other (single-image/keyframe) wire form.
-        if !request.inputs.is_empty() {
-            body.as_object_mut().unwrap().remove("mode");
-            if request.inputs.len() > 1 {
-                body.as_object_mut().unwrap().remove("image");
-            } else if let Some(extra) = body.get_mut("extra_body").and_then(Value::as_object_mut) {
-                extra.remove("image");
-                extra.remove("mode");
-            }
-        }
+        let body = video::build_video_body(&call.model, &call.model_params, request)?;
         let url = call.endpoint_url()?;
-        let response = post_json(
-            http,
-            &url,
-            VIDEO_SUBMIT_TIMEOUT,
-            &call.connection.auth,
-            &body,
-        )
-        .await?;
-        if !response.status().is_success() {
-            return Err(error_from_response(response).await);
-        }
+        let response = video::submit(http, &url, &call.connection.auth, &body).await?;
         let value: Value = read_json_capped(
             response,
             MAX_VIDEO_STATUS_BYTES,
@@ -321,7 +312,7 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        validate_video_model(&call.model)?;
+        video::validate_video_model(&call.model)?;
         let url = video_poll_url(call, &job.remote_id)?;
         let response = get_request(
             http,
@@ -359,184 +350,7 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
     }
 }
 
-fn validate_video_model(model: &str) -> Result<(), InvokeError> {
-    if model.trim() == VIDEO_MODEL {
-        Ok(())
-    } else {
-        Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "agnes.video_jobs implements the {VIDEO_MODEL:?} contract; got {model:?}"
-            ),
-        ))
-    }
-}
-
-fn positive_u32_field(value: Option<&Value>, field: &str) -> Result<Option<u32>, InvokeError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let parsed = value
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            InvokeError::new(
-                InvokeErrorKind::InvalidParams,
-                format!("agnes.video_jobs {field} must be a positive integer"),
-            )
-        })?;
-    Ok(Some(parsed))
-}
-
-fn request_u32_field(
-    configured: &Value,
-    extra: &Value,
-    field: &str,
-) -> Result<Option<u32>, InvokeError> {
-    positive_u32_field(
-        extra.get(field).or_else(|| configured.get(field)),
-        field,
-    )
-}
-
-fn video_dimensions(size: Option<&str>) -> Result<(u32, u32), InvokeError> {
-    let Some(size) = size.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok((DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT));
-    };
-    let normalized = size.to_ascii_lowercase();
-    let Some((width, height)) = normalized.split_once('x') else {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!("Agnes video size {size:?} must be WIDTHxHEIGHT"),
-        ));
-    };
-    let parse = |value: &str, dimension: &str| {
-        value.trim().parse::<u32>().map_err(|_| {
-            InvokeError::new(
-                InvokeErrorKind::InvalidParams,
-                format!("Agnes video size {size:?} has an invalid {dimension}"),
-            )
-        })
-    };
-    let width = parse(width, "width")?;
-    let height = parse(height, "height")?;
-    if width == 0 || height == 0 || width % 8 != 0 || height % 8 != 0 {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "Agnes video dimensions must be positive multiples of 8, got {width}x{height}"
-            ),
-        ));
-    }
-    Ok((width, height))
-}
-
-fn frames_for_seconds(seconds: u32, frame_rate: u32) -> Result<u32, InvokeError> {
-    let raw = seconds.checked_mul(frame_rate).ok_or_else(|| {
-        InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            "Agnes video duration is too large",
-        )
-    })?;
-    let groups = raw.saturating_sub(1).saturating_add(4) / 8;
-    let frames = groups
-        .checked_mul(8)
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| {
-            InvokeError::new(
-                InvokeErrorKind::InvalidParams,
-                "Agnes video frame count is too large",
-            )
-        })?;
-    if frames > MAX_NUM_FRAMES {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "Agnes Video v2.0 supports at most {MAX_NUM_FRAMES} frames; {seconds}s at {frame_rate} fps requires {frames}"
-            ),
-        ));
-    }
-    Ok(frames)
-}
-
-fn validate_num_frames(frames: u32) -> Result<u32, InvokeError> {
-    if frames <= MAX_NUM_FRAMES && frames % 8 == 1 {
-        Ok(frames)
-    } else {
-        Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "agnes.video_jobs num_frames must be at most {MAX_NUM_FRAMES} and satisfy 8n+1, got {frames}"
-            ),
-        ))
-    }
-}
-
-fn build_video_body(
-    model: &str,
-    configured: &Value,
-    request: &VideoGenRequest,
-) -> Result<Value, InvokeError> {
-    validate_video_model(model)?;
-    let (width, height) = if request.size.as_deref().is_some_and(|size| !size.trim().is_empty()) {
-        video_dimensions(request.size.as_deref())?
-    } else {
-        // Missing typed dimensions must not replace saved/extra dimensions
-        // with the adapter fallback. Validate the same existing wire shape.
-        let width = request_u32_field(configured, &request.extra, "width")?.unwrap_or(DEFAULT_VIDEO_WIDTH);
-        let height = request_u32_field(configured, &request.extra, "height")?.unwrap_or(DEFAULT_VIDEO_HEIGHT);
-        video_dimensions(Some(&format!("{width}x{height}")))?
-    };
-    let frame_rate = request_u32_field(configured, &request.extra, "frame_rate")?
-        .unwrap_or(DEFAULT_FRAME_RATE);
-    if !(1..=60).contains(&frame_rate) {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!("agnes.video_jobs frame_rate must be from 1 to 60, got {frame_rate}"),
-        ));
-    }
-    let num_frames = match request.seconds {
-        Some(seconds) => frames_for_seconds(seconds, frame_rate)?,
-        None => validate_num_frames(
-            request_u32_field(configured, &request.extra, "num_frames")?
-                .unwrap_or(DEFAULT_NUM_FRAMES),
-        )?,
-    };
-
-    for (index, input) in request.inputs.iter().enumerate() {
-        let valid_role = match input.role.as_str() {
-            "reference" | "image" => true,
-            "first_frame" => index == 0,
-            "last_frame" => request.inputs.len() > 1 && index + 1 == request.inputs.len(),
-            _ => false,
-        };
-        if !valid_role {
-            return Err(InvokeError::new(
-                InvokeErrorKind::InvalidParams,
-                "Agnes keyframes require ordered images, with first_frame first and last_frame last",
-            ));
-        }
-    }
-    let mut body = json!({
-        "model": model,
-        "prompt": request.prompt,
-        "width": width,
-        "height": height,
-        "num_frames": num_frames,
-        "frame_rate": frame_rate,
-    });
-    let images = request.inputs.iter().enumerate()
-        .map(|(index, input)| image_data_uri(input, index + 1, VIDEO_ADAPTER_ID))
-        .collect::<Result<Vec<_>, _>>()?;
-    if images.len() > 1 {
-        // https://agnes-ai.com/en/docs/agnes-video-v20: ordered keyframe array.
-        body["extra_body"] = json!({"image": images, "mode": "keyframes"});
-    } else if let Some(image) = images.first() {
-        body["image"] = Value::String(image.clone());
-    }
-    Ok(body)
-}
+mod video;
 
 fn video_poll_url(call: &ResolvedCall, remote_id: &str) -> Result<String, InvokeError> {
     let template = call
@@ -627,7 +441,10 @@ fn parse_video_status(value: &Value) -> Result<AgnesVideoState, InvokeError> {
                 .unwrap_or("Agnes video generation failed");
             Ok(AgnesVideoState::Failed(message.to_owned()))
         }
-        _ => Ok(AgnesVideoState::Pending),
+        "queued" | "pending" | "in_progress" | "processing" | "running" | "generating" => {
+            Ok(AgnesVideoState::Pending)
+        }
+        _ => Err(InvokeError::parse("Agnes video response has no recognized status")),
     }
 }
 
@@ -638,6 +455,7 @@ mod tests {
 
     use super::*;
     use crate::adapters::test_support::call_with_endpoint;
+    use crate::types::VideoGenRequest;
 
     fn input(bytes: &'static [u8]) -> InputAsset {
         InputAsset {
@@ -683,7 +501,7 @@ mod tests {
     #[test]
     fn image_size_defaults_preserve_configured_and_request_tiers() {
         for (configured, extra, typed_size, expected) in [
-            (json!({}), json!({}), None, DEFAULT_IMAGE_SIZE),
+            (json!({}), json!({}), None, "1K"),
             (json!({"size": "4K"}), json!({}), None, "4K"),
             (json!({"size": "4K"}), json!({"size": "2K"}), None, "2K"),
             (json!({"size": "4K"}), json!({"size": "2K"}), Some("3K"), "3K"),
@@ -702,29 +520,18 @@ mod tests {
     }
 
     #[test]
-    fn video_dimensions_preserve_saved_extra_and_explicit_values_without_guessing_new_specs() {
-        let mut request = VideoGenRequest {
-            prompt: "scene".into(), seconds: None, size: None, resolution: None, inputs: Vec::new(), extra: json!({}),
-        };
-        for (configured, extra, size, expected) in [
-            (json!({}), json!({}), None, (DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)),
-            (json!({"width": 1920, "height": 1080}), json!({}), None, (1920, 1080)),
-            (json!({"width": 1920, "height": 1080}), json!({"width": 1280, "height": 720}), None, (1280, 720)),
-            (json!({"width": 1920, "height": 1080}), json!({"width": 1280, "height": 720}), Some("768x1024"), (768, 1024)),
-        ] {
-            request.extra = extra;
-            request.size = size.map(str::to_owned);
-            let body = build_video_body(VIDEO_MODEL, &configured, &request).unwrap();
-            assert_eq!(body["width"], expected.0);
-            assert_eq!(body["height"], expected.1);
-        }
-        request.extra = json!({});
-        request.size = None;
-        for configured in [json!({"width": 0}), json!({"height": "1080"}), json!({"width": 1919})] {
-            assert!(build_video_body(VIDEO_MODEL, &configured, &request).is_err(), "invalid dimensions must not be silently defaulted");
-        }
+    fn current_image_pixel_choices_become_native_tiers_without_stale_ratio_defaults() {
+        let request = TaskRequest::ImageGeneration(crate::types::ImageGenRequest {
+            prompt: "scene".into(), count: 1, size: Some("2624x1472".into()), quality: None,
+            extra: json!({"ratio": "1:1"}),
+        });
+        let mut call = call_with_endpoint("https://unused.invalid/v1", "agnes-image-2.5-flash",
+            IMAGE_ADAPTER_ID, "/images/generations", request);
+        call.model_params["ratio"] = json!("9:16");
+        let (body, _) = build_image_body(&call).unwrap();
+        assert_eq!(body["size"], "2K");
+        assert_eq!(body["ratio"], "16:9");
     }
-
     #[tokio::test]
     async fn text_to_image_requests_inline_base64_without_openai_only_fields() {
         let server = MockServer::start().await;
@@ -778,7 +585,7 @@ mod tests {
             .and(body_partial_json(json!({
                 "model": IMAGE_MODEL,
                 "prompt": "make it blue",
-                "size": DEFAULT_IMAGE_SIZE,
+                "size": "1K",
                 "extra_body": {
                     "image": ["data:image/png;base64,aGk="],
                     "response_format": "b64_json"
@@ -810,166 +617,156 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn video_submit_is_json_and_prefers_video_id() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/videos"))
-            .and(header("authorization", "Bearer sk-test"))
-            .and(body_partial_json(json!({
-                "model": VIDEO_MODEL,
-                "prompt": "ocean waves",
-                "width": 1280,
-                "height": 720,
-                "num_frames": 121,
-                "frame_rate": 24,
-                "image": "data:image/png;base64,aGk="
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "task_1",
-                "video_id": "video_1",
-                "status": "queued"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
 
-        let request = TaskRequest::VideoGeneration(VideoGenRequest {
-            prompt: "ocean waves".into(),
-            seconds: Some(5),
-            size: Some("1280x720".into()),
-            resolution: None,
-            inputs: vec![input(b"hi")],
-            extra: json!({}),
-        });
-        let outcome = AgnesVideoJobsAdapter
-            .submit(&http(), &video_call(&server, request))
-            .await
-            .unwrap();
-        let TaskOutcome::Pending(job) = outcome else {
-            panic!("expected pending Agnes video job")
-        };
-        assert_eq!(job.remote_id, "video_1");
-        assert_eq!(job.adapter_id, VIDEO_ADAPTER_ID);
+    fn video_request() -> VideoGenRequest {
+        VideoGenRequest { prompt: "ocean waves".into(), seconds: Some(5),
+            size: Some("1280x720".into()), resolution: None, inputs: vec![], extra: json!({}) }
     }
 
     #[tokio::test]
-    async fn video_keyframes_submit_every_image_in_order_and_override_stale_defaults() {
-        for count in [2, 3] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/videos"))
+    async fn every_documented_image_model_uses_the_same_generation_and_edit_contract() {
+        let server = MockServer::start().await;
+        for model in ["agnes-image-2.0-flash", "agnes-image-2.1-flash", "agnes-image-2.5-flash"] {
+            Mock::given(method("POST")).and(path("/v1/images/generations"))
+                .and(body_partial_json(json!({"model":model,
+                    "size":if model == "agnes-image-2.0-flash" { "1024x1024" } else { "1K" }})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"b64_json":"aGk="}]})))
+                .expect(2).mount(&server).await;
+            for request in [
+                TaskRequest::ImageGeneration(crate::types::ImageGenRequest {
+                    prompt:"fox".into(), count:1, size:None, quality:None, extra:json!({}) }),
+                TaskRequest::ImageEdit(ImageEditRequest {
+                    prompt:"blue fox".into(), count:1, size:None, quality:None,
+                    inputs:vec![input(b"hi")], extra:json!({}) }),
+            ] {
+                let mut call = image_call(&server, request);
+                call.model = model.into();
+                assert!(matches!(AgnesImagesAdapter.submit(&http(), &call).await.unwrap(), TaskOutcome::Done(_)));
+            }
+        }
+        assert!(validate_image_model("agnes-image-future").is_err());
+        assert!(validate_image_model("agnes-3.0-flash").is_err());
+    }
+
+    #[tokio::test]
+    async fn current_video_models_submit_native_json_and_poll_with_video_id_and_model_name() {
+        let server = MockServer::start().await;
+        for model in ["agnes-video-2.5", "agnes-video-2.5-flash"] {
+            Mock::given(method("POST")).and(path("/v1/videos"))
+                .and(header("authorization", "Bearer sk-test"))
+                .and(body_partial_json(json!({"model":model, "seconds":"5", "size":"720P",
+                    "aspect_ratio":"16:9", "mode":"text", "n":1})))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "video_id": "keyframes_1", "status": "queued"
-                })))
-                .expect(1)
-                .mount(&server).await;
-            let inputs = [input(b"first"), input(b"middle"), input(b"last")];
-            let expected: Vec<_> = inputs[..count].iter()
-                .map(|input| format!("data:image/png;base64,{}", encode_b64(&input.bytes)))
-                .collect();
-            let request = TaskRequest::VideoGeneration(VideoGenRequest {
-                prompt: "keyframe transition".into(), seconds: Some(5),
-                size: Some("1280x720".into()), resolution: None,
-                inputs: inputs[..count].to_vec(),
-                extra: json!({"image": "stale", "mode": "ti2vid", "extra_body": {"image": ["stale"], "mode": "ti2vid", "seed": 42}}),
-            });
-            let outcome = AgnesVideoJobsAdapter.submit(&http(), &video_call(&server, request)).await.unwrap();
-            assert!(matches!(outcome, TaskOutcome::Pending(_)));
-            let requests = server.received_requests().await.unwrap();
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-            assert_eq!(body["extra_body"]["image"], json!(expected));
-            assert_eq!(body["extra_body"]["mode"], "keyframes");
-            assert_eq!(body["extra_body"]["seed"], 42);
-            assert!(body.get("image").is_none());
-            assert!(body.get("mode").is_none());
+                    "id":"task_different", "video_id":"video_1", "status":"queued"})))
+                .expect(1).mount(&server).await;
+            Mock::given(method("GET")).and(path("/agnesapi"))
+                .and(query_param("video_id","video_1")).and(query_param("model_name",model))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "status":"completed", "internal_status":"pending", "progress":100,
+                    "url":"https://cdn.example/video.mp4"})))
+                .expect(1).mount(&server).await;
+            let mut call = video_call(&server, TaskRequest::VideoGeneration(video_request()));
+            call.model = model.into();
+            let TaskOutcome::Pending(job) = AgnesVideoJobsAdapter.submit(&http(), &call).await.unwrap()
+                else { panic!("pending job expected") };
+            assert_eq!(job.remote_id, "video_1");
+            assert!(matches!(AgnesVideoJobsAdapter.poll(&http(), &call, &job).await.unwrap(),
+                TaskOutcome::Done(TaskResult::Assets(ref assets))
+                    if matches!(&assets[0].data, ProducedData::Url(url) if url.ends_with("video.mp4"))));
+        }
+        for request in server.received_requests().await.unwrap() {
+            if request.method.as_str() == "POST" {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                for key in ["width", "height", "num_frames", "frame_rate", "extra_body"] {
+                    assert!(body.get(key).is_none(), "retired field {key}");
+                }
+            }
         }
     }
 
     #[test]
-    fn video_keyframes_validate_all_images_and_roles_before_submission() {
-        let mut request = VideoGenRequest {
-            prompt: "transition".into(), seconds: Some(5), size: None,
-            resolution: None, inputs: vec![input(b"first"), input(b"last")], extra: json!({}),
-        };
-        request.inputs[0].role = "first_frame".into();
-        request.inputs[1].role = "last_frame".into();
-        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_ok());
-        request.inputs.swap(0, 1);
-        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
-        request.inputs = vec![input(b"first"), input(b"")];
-        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
-        request.inputs[1] = input(b"video");
-        request.inputs[1].mime = "video/mp4".into();
-        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
-        request.inputs = vec![InputAsset { role: "last_frame".into(), ..input(b"last") }];
-        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+    fn video_preserves_native_defaults_and_typed_fields_take_precedence() {
+        let mut request = video_request();
+        request.seconds = None; request.size = None;
+        let body = video::build_video_body("agnes-video-2.5", &json!({
+            "size":"2K", "seconds":"8", "aspect_ratio":"9:16", "seed":1,
+            "extra_body":{"custom":true}, "endpoint":"/must-not-leak"
+        }), &request).unwrap();
+        assert_eq!(body["size"], "2K"); assert_eq!(body["seconds"], "8");
+        assert_eq!(body["aspect_ratio"], "9:16"); assert_eq!(body["custom"], true);
+        assert!(body.get("endpoint").is_none()); assert!(body.get("extra_body").is_none());
+        request.seconds=Some(4); request.size=Some("1920x1080".into());
+        request.extra=json!({"seed":42});
+        let body=video::build_video_body("agnes-video-2.5", &body, &request).unwrap();
+        assert_eq!(body["seconds"], "4"); assert_eq!(body["size"], "1080P");
+        assert_eq!(body["aspect_ratio"], "16:9"); assert_eq!(body["seed"], 42);
+        request.size=None; request.resolution=Some("720p".into());
+        assert_eq!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap()["size"], "720P");
     }
 
     #[test]
-    fn video_without_references_remains_text_to_video() {
-        let request = VideoGenRequest {
-            prompt: "ocean".into(), seconds: Some(5), size: None,
-            resolution: None, inputs: vec![], extra: json!({}),
-        };
-        let body = build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap();
-        assert!(body.get("image").is_none());
+    fn video_reference_and_keyframe_modes_have_distinct_media_fields() {
+        let mut request=video_request();
+        request.inputs=vec![input(b"first"),input(b"second"),input(b"third")];
+        request.extra=json!({"mode":"text", "first_frame":"stale", "extra_body":{"images":["stale"], "seed":42}});
+        let body=video::build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap();
+        assert_eq!(body["mode"], "reference"); assert_eq!(body["images"].as_array().unwrap().len(), 3);
+        assert_eq!(body["images"][0], "data:image/png;base64,Zmlyc3Q=");
+        assert_eq!(body["seed"], 42); assert!(body.get("first_frame").is_none());
+        request.inputs=vec![InputAsset{role:"last_frame".into(),..input(b"last")}];
+        let body=video::build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap();
+        assert_eq!(body["mode"], "keyframe"); assert!(body.get("images").is_none());
+        assert!(body.get("first_frame").is_none()); assert!(body.get("last_frame").is_some());
+        request.inputs.insert(0, InputAsset{role:"first_frame".into(),..input(b"first")});
+        assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap().get("first_frame").is_some());
+        request.inputs.push(input(b"mixed"));
+        assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+    }
+
+    #[test]
+    fn video_flattens_each_extra_layer_before_applying_request_precedence() {
+        let mut request = video_request();
+        request.extra = json!({"extra_body": {
+            "model": "cannot-shadow-model", "prompt": "cannot-shadow-prompt",
+            "seed": 42, "endpoint": "/cannot-leak", "custom": {"request": true}
+        }});
+        let body = video::build_video_body(VIDEO_MODEL, &json!({
+            "seed": 1, "extra_body": {"custom": {"configured": true}}
+        }), &request).unwrap();
+        assert_eq!(body["seed"], 42);
+        assert_eq!(body["model"], VIDEO_MODEL);
+        assert_eq!(body["prompt"], request.prompt);
+        assert_eq!(body["custom"], json!({"configured": true, "request": true}));
         assert!(body.get("extra_body").is_none());
-        assert_eq!(body["num_frames"], 121);
-    }
-
-    #[tokio::test]
-    async fn video_poll_adds_model_name_and_returns_completed_url() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/agnesapi"))
-            .and(query_param("video_id", "video_1"))
-            .and(query_param("model_name", VIDEO_MODEL))
-            .and(header("authorization", "Bearer sk-test"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "video_id": "video_1",
-                "status": "completed",
-                "progress": 100,
-                "url": "https://cdn.example/video.mp4"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let request = TaskRequest::VideoGeneration(VideoGenRequest {
-            prompt: "ocean waves".into(),
-            seconds: Some(5),
-            size: None,
-            resolution: None,
-            inputs: vec![],
-            extra: json!({}),
-        });
-        let call = video_call(&server, request);
-        let job = JobHandle {
-            adapter_id: VIDEO_ADAPTER_ID.into(),
-            config_revision: call.config_revision,
-            remote_id: "video_1".into(),
-            poll_state: json!({}),
-        };
-        let outcome = AgnesVideoJobsAdapter
-            .poll(&http(), &call, &job)
-            .await
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            TaskOutcome::Done(TaskResult::Assets(ref assets))
-                if matches!(&assets[0].data, ProducedData::Url(url) if url.ends_with("video.mp4"))
-        ));
+        assert!(body.get("endpoint").is_none());
     }
 
     #[test]
-    fn video_frame_contract_rounds_to_8n_plus_1_and_enforces_the_limit() {
-        assert_eq!(frames_for_seconds(5, 24).unwrap(), 121);
-        assert_eq!(frames_for_seconds(10, 24).unwrap(), 241);
-        assert_eq!(frames_for_seconds(15, 24).unwrap(), 361);
-        assert!(frames_for_seconds(20, 24).is_err());
-        assert!(validate_num_frames(120).is_err());
-        assert_eq!(validate_num_frames(441).unwrap(), 441);
+    fn video_enforces_model_specific_limits_and_rejects_retired_contracts_before_http() {
+        let mut request=video_request();
+        request.size=Some("1920x1080".into());
+        assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        assert!(video::build_video_body("agnes-video-2.5", &json!({}), &request).is_ok());
+        request.size=None;
+        for seconds in [0,3,13,15] {
+            request.seconds=Some(seconds);
+            assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        }
+        request.seconds=Some(5);
+        request.inputs=vec![input(b"image");6];
+        assert!(video::build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        assert!(video::build_video_body("agnes-video-2.5", &json!({}), &request).is_ok());
+        request.inputs.clear();
+        for extra in [json!({"mode":"reference"}), json!({"size":"auto"}), json!({"n":2}),
+            json!({"num_frames":121}), json!({"width":1280}), json!({"aspect_ratio":"2:3"}),
+            json!({"videos":[{"url":"https://cdn.example/input.mp4"}],"mode":"reference"}),
+            json!({"mode":"keyframe","first_frame":""})] {
+            request.extra=extra;
+            assert!(video::build_video_body(VIDEO_MODEL,&json!({}),&request).is_err());
+        }
+        let error=video::validate_video_model("agnes-video-v2.0").unwrap_err();
+        assert!(error.message.contains("taken offline"));
+        assert!(video::validate_video_model("agnes-video-future").is_err());
     }
 
     #[test]
@@ -999,5 +796,6 @@ mod tests {
             AgnesVideoState::Done("https://cdn/legacy.mp4".into())
         );
         assert!(parse_video_status(&json!({"status": "completed"})).is_err());
+        assert!(parse_video_status(&json!({"message": "not a job"})).is_err());
     }
 }

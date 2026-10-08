@@ -198,9 +198,13 @@ The video runtime owns only `video-node-compose`. It accepts an empty video
 node as exact `video_generation` / `t2v`, or the same empty node with directly
 connected real images as `i2v`. References are deduplicated and ordered by
 connection order, shown in that order and preserved through task recovery.
-Agnes sends multiple images as ordered `extra_body.image` keyframes; other
-adapters retain their own input limits. It maps 720p/1080p and the supported
-aspect ratios to concrete width/height, fixes repeat to one, keeps canvas owner
+Agnes Video 2.5 sends connected images as ordered top-level `images` in
+`reference` mode, not as implicit first/last keyframes. Its Flash variant
+allows at most five images and 720p; standard 2.5 allows eight images and
+720p/1080p in the canvas. Other adapters retain their own input limits.
+The canvas maps supported resolution/aspect ratios to concrete width/height;
+the Agnes boundary sends native `size`/`aspect_ratio` fields. It fixes repeat
+to one, keeps canvas owner
 identity in `config.data.operation`, and never forwards local metadata through
 provider parameters. V2V, explicit first/last-frame role controls, audio/video
 references, and provider-specific camera controls stay explicitly unavailable.

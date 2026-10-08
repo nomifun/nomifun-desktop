@@ -186,13 +186,16 @@ pub fn verified_catalog_tasks_and_traits(
     let base = model.trim().to_ascii_lowercase();
 
     match platform {
-        "agnes" => match base.as_str() {
-            "agnes-image-2.1-flash" => {
-                Some((vec![ImageGeneration, ImageEdit], vec![]))
+        "agnes" => crate::agnes_model_contract(&base).map(|contract| {
+            use crate::AgnesModelContract::*;
+            match contract {
+                Chat => (vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
+                Image => (vec![ImageGeneration, ImageEdit], vec![]),
+                Video { .. } => (vec![VideoGeneration], vec![]),
+                // Still returned by /models, but explicitly taken offline.
+                RetiredVideo => (vec![], vec![]),
             }
-            "agnes-video-v2.0" => Some((vec![VideoGeneration], vec![])),
-            _ => None,
-        },
+        }),
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             match base.as_str() {
                 "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
@@ -451,14 +454,20 @@ mod tests {
 
     #[test]
     fn agnes_media_models_use_their_native_tasks() {
-        assert_eq!(
-            tasks_of("agnes", "agnes-image-2.1-flash"),
-            vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
-        );
-        assert_eq!(
-            tasks_of("agnes", "agnes-video-v2.0"),
-            vec![ModelTask::VideoGeneration]
-        );
+        for model in ["agnes-image-2.0-flash", "agnes-image-2.1-flash", "agnes-image-2.5-flash"] {
+            assert_eq!(tasks_of("agnes", model), vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]);
+        }
+        for model in ["agnes-video-2.5", "agnes-video-2.5-flash"] {
+            assert_eq!(tasks_of("agnes", model), vec![ModelTask::VideoGeneration]);
+        }
+        assert!(tasks_of("agnes", "agnes-video-v2.0").is_empty());
+        for model in ["agnes-2.0-flash", "agnes-2.5-flash", "agnes-3.0-flash", "agnes-2.5-pro"] {
+            assert_eq!(verified_catalog_tasks_and_traits("agnes", model),
+                Some((vec![ModelTask::Chat], vec![ModelTrait::VisionInput])));
+        }
+        assert!(verified_catalog_tasks_and_traits("agnes", "agnes-image-future").is_none());
+        // A catalog entry alone does not verify undocumented preview traits.
+        assert!(verified_catalog_tasks_and_traits("agnes", "agnes-2.5-pro-beta").is_none());
     }
 
     #[test]
