@@ -146,3 +146,19 @@ impl VadEngine for SileroVad {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_model_inference_works_without_energy_fallback() {
+        let mut vad = SileroVad::new(VadTuning::default()).expect("bundled ONNX Runtime must load the Silero model");
+        for _ in 0..3 {
+            let probability = vad.speech_probability(&[0; CHUNK]).expect("Silero inference must succeed");
+            assert!(probability.is_finite() && (0.0..=1.0).contains(&probability));
+            assert!(probability < vad.threshold, "silence must not start speech");
+        }
+        vad.reset();
+        assert_eq!(vad.push_frame(&[0; CHUNK]), VadDecision::Silence);
+    }
+}

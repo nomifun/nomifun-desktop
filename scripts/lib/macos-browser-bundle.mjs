@@ -391,7 +391,7 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
       ...(jit ? ['--entitlements', entitlements] : []),
       path,
     ]);
-    await signMachO(framework, sign);
+    await signMachO(frameworks, sign);
     await sign(framework);
     for (const name of helperNames) await sign(join(frameworks, `${name}.app`), true);
     await sign(app);

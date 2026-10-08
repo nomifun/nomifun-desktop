@@ -43,6 +43,7 @@ DIST="$ROOT/dist/desktop"
 RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
 CEF_STAGE_TOOL="$ROOT/scripts/validation/stage-macos-cef-bundle.mjs"
 BROWSER_BUNDLE_TOOL="$ROOT/scripts/lib/macos-browser-bundle.mjs"
+ONNX_RUNTIME_TOOL="$ROOT/scripts/lib/macos-onnx-runtime.mjs"
 CHECK_ONLY=0
 
 # ── 解析参数:架构选择/开关归本脚本,未知 --xxx 起原样透传给 tauri build ─────
@@ -170,6 +171,13 @@ verify_macos_app() {
     echo "❌ app 缺少固定 CEF framework/runtime metadata: $app" >&2
     exit 1
   }
+  if [[ "$target" == "x86_64-apple-darwin" ]]; then
+    local ort_library="$app/Contents/Frameworks/$(bun -e 'console.log(require("./apps/desktop/onnx-runtime-intel.json").library)')"
+    [[ -f "$ort_library" && "$(lipo -archs "$ort_library")" == "x86_64" ]] || {
+      echo "❌ Intel App 缺少匹配的 ONNX Runtime: $ort_library" >&2
+      exit 1
+    }
+  fi
   local helper_name
   for helper_name in \
     "NomiFun Helper" \
@@ -293,6 +301,10 @@ write_release_lock() {
     --legal "$notice"
     --output "$output"
   )
+  if [[ "$target" == "x86_64-apple-darwin" ]]; then
+    args+=(--legal "$app/Contents/Resources/onnxruntime-LICENSE"
+      --legal "$app/Contents/Resources/onnxruntime-ThirdPartyNotices.txt")
+  fi
 
   echo "▶ 生成真实 release lock: $output"
   bun "${args[@]}" >/dev/null
@@ -333,6 +345,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 COLLECTED=()
 COLLECTED_LOCKS=()
+BASE_RUSTFLAGS="${RUSTFLAGS:-}"
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
@@ -342,10 +355,20 @@ for t in "${TRIPLES[@]}"; do
   cached_runtime="$(bun "$BROWSER_BUNDLE_TOOL" compile-runtime --root "$ROOT" --target "$t" --profile release)"
   unset CEF_PATH FLATPAK
   [[ -z "$cached_runtime" ]] || export CEF_PATH="$cached_runtime"
+  ONNX_CONFIG=()
+  unset ORT_LIB_PATH ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
+  export RUSTFLAGS="$BASE_RUSTFLAGS"
+  if [[ "$t" == "x86_64-apple-darwin" ]]; then
+    echo "▶ 准备校验过的 Intel ONNX Runtime/API 23"
+    export ORT_LIB_PATH="$(bun "$ONNX_RUNTIME_TOOL")"
+    export ORT_PREFER_DYNAMIC_LINK=1
+    export RUSTFLAGS="$BASE_RUSTFLAGS -C link-arg=-Wl,-rpath,@executable_path/../Frameworks"
+    ONNX_CONFIG=(--config "$(dirname "$ORT_LIB_PATH")/tauri.conf.json")
+  fi
   CI=true env -u APPLE_API_KEY -u APPLE_API_KEY_PATH -u APPLE_API_ISSUER \
     -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
     bun x tauri build --config "$CONF" --config "$MAC_CONF" \
-    --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"} --no-sign \
+    --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"} ${ONNX_CONFIG[@]+"${ONNX_CONFIG[@]}"} --no-sign \
     --config '{"bundle":{"active":true,"targets":["app"],"createUpdaterArtifacts":false}}'
 
   # tauri 把 DMG 放在 target/<triple>/release/bundle/dmg/*.dmg

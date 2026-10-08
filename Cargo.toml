@@ -280,13 +280,13 @@ symphonia = { version = "0.6.0", features = ["mp3", "wav", "isomp4", "aac", "vor
 # loaded at all, `nomifun-robot` degrades to its energy VAD. Defaults are
 # narrowed: `tls-rustls` keeps the build off system OpenSSL, and `ndarray` is
 # dropped because the VAD reads tensors as plain slices.
+# nomifun-robot selects API 23 for the pinned Intel runtime and API 27 elsewhere.
 ort = { version = "2.0.0-rc.13", default-features = false, features = [
     "std",
     "tracing",
     "download-binaries",
     "tls-rustls",
     "copy-dylibs",
-    "api-27",
 ] }
 
 # --- Testing ---

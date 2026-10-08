@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compileBrowserEnvironment, macosBrowserRuntime } from '../lib/macos-browser-bundle.mjs';
+import { prepareIntelOnnxRuntime, INTEL_ONNX_RUNTIME } from '../lib/macos-onnx-runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
@@ -43,6 +44,12 @@ try {
   const output = resolve(option('--output', join(root, 'dist/browser-cef-native-smoke')));
   const identity = option('--identity', '-');
   await mkdir(output, { recursive: true });
+  let intelOnnxLibraries;
+  if (contract.architecture === 'x86_64') {
+    intelOnnxLibraries = await prepareIntelOnnxRuntime();
+    environment.ORT_LIB_PATH = intelOnnxLibraries;
+    environment.ORT_PREFER_DYNAMIC_LINK = '1';
+  }
   const compiled = await compileBrowserEnvironment({ root, target, environment });
   environment = compiled.environment;
   await run('cargo', ['build', '-p', 'nomifun-desktop', '--example', 'browser_cef_smoke', '--no-default-features', ...targetArgs]);
@@ -62,6 +69,14 @@ try {
   await mkdir(join(contents, 'MacOS'), { recursive: true });
   // Copy into a fresh bundle. Do not sign hard-linked build-cache executables.
   await cp(join(buildOutput, 'examples/browser_cef_smoke'), executable);
+  if (intelOnnxLibraries) {
+    await mkdir(join(contents, 'Frameworks'), { recursive: true });
+    await cp(join(intelOnnxLibraries, INTEL_ONNX_RUNTIME.library), join(contents, 'Frameworks', INTEL_ONNX_RUNTIME.library));
+    const loadCommands = await run('otool', ['-l', executable], true);
+    if (!loadCommands.includes('path @executable_path/../Frameworks ')) {
+      await run('install_name_tool', ['-add_rpath', '@executable_path/../Frameworks', executable]);
+    }
+  }
   await cp(join(runtime, 'Chromium Embedded Framework.framework'), framework, { recursive: true, dereference: false, verbatimSymlinks: true });
   const common = {
     CFBundlePackageType: 'APPL',
@@ -121,7 +136,7 @@ try {
       }
     }
   }
-  await signMachO(framework);
+  await signMachO(join(contents, 'Frameworks'));
   await sign(framework);
   for (const name of helperNames) await sign(join(contents, 'Frameworks', `${name}.app`), true);
   await sign(app);
