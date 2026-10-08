@@ -5,6 +5,25 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.1 - 2026-10-09
+
+- **Upgrade warning: back up the NomiFun data directory before upgrading.**
+  Upgrades from older installations retain v0.8.0's one-time cleanup of a
+  fully recognized retired Agent generation. Prior Agent sessions, messages,
+  execution history, presets, and bindings are removed while non-Agent
+  configuration is preserved. Unknown, partial, or hand-edited lineage refuses
+  conversion and deletion. Installations already cleaned by v0.8.0 are not
+  cleaned again.
+- Fix macOS updater archive compatibility and report update installation
+  failures clearly.
+- Compact companion reply bubbles, unify Session updates and reply
+  presentation, retain completed replies, and dismiss action popovers on click.
+- Decouple skill-market installation from Agent sessions, refresh installed
+  skill metadata, and unify catalog presentation across renderer surfaces.
+- Restore Agnes video v2.0 and repair saved model-capability settings.
+- Remove retired runtime and plugin code, fix plugin delivery evidence, and
+  refresh desktop home screenshots and documentation.
+
 ## v0.8.0 - 2026-10-08
 
 - **Upgrade warning: back up the NomiFun data directory before upgrading.**
