@@ -22,6 +22,7 @@ import type {
   ImageGenerationQuality,
 } from "@renderer/creation/parameters/image";
 import { imageGenerationSizePolicyForModel } from "@renderer/creation/parameters/image";
+import { agnesCanvasVideoParameters } from "@renderer/creation/parameters/agnes";
 import { validateGenerationReferences } from "@renderer/creation/references";
 import { resolveExactGenerationModel } from "@renderer/creation/modelSelection";
 import type { GenerationModelSelection } from "@renderer/creation/modelSelection";
@@ -433,6 +434,8 @@ export function prepareCanvasVideoRun(
     input.extraParameters,
     ["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
   );
+
+  Object.assign(parameters, agnesCanvasVideoParameters(model, input.resolution, input.aspectRatio));
 
   return markPreparedRun({
     kind: "video",

@@ -12,6 +12,8 @@ use tower::ServiceExt;
 
 use nomifun_api_types::{ModelTask, ModelTrait};
 use nomifun_db::{
+    IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
+    NewProviderModel, NewProviderModelCapability,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
     SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
 };
@@ -100,6 +102,122 @@ async fn create_provider(db: &nomifun_db::Database, platform: &str, name: &str) 
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+async fn seed_saved_model(
+    db: &nomifun_db::Database,
+    provider_id: &str,
+    model: &str,
+    task: &str,
+    protocol: &str,
+) {
+    let provider = SqliteProviderRepository::new(db.pool().clone())
+        .find_by_id(provider_id).await.unwrap().unwrap();
+    let capabilities = [NewProviderModelCapability {
+        task, traits: "[]", protocol, connection_role: "default", provider_params: "{}",
+        ..Default::default()
+    }];
+    // Bypass current save validation to reproduce configuration from a release
+    // before the provider announced this model's retirement.
+    SqliteProviderModelRepository::new(db.pool().clone()).save(
+        provider_id, provider.config_revision, &NewProviderModel {
+            model, enabled: true, capabilities: &capabilities, ..Default::default()
+        },
+    ).await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_agnes_video_is_hidden_from_every_current_model_list_without_deleting_saved_configuration() {
+    let db = init_database_memory().await.unwrap();
+    let agnes = create_provider(&db, "agnes", "Agnes").await;
+    let custom = create_provider(&db, "custom", "Unrelated provider").await;
+    let retired = "agnes-video-v2.0";
+    // Also hide a legacy row incorrectly classified as image generation.
+    seed_saved_model(&db, &agnes, retired, "image_generation", "agnes.images").await;
+    seed_saved_model(&db, &custom, retired, "chat", "openai.chat_text").await;
+    for (model, task, protocol) in [
+        ("agnes-video-2.5", "video_generation", "agnes.video_jobs"),
+        ("agnes-video-2.5-flash", "video_generation", "agnes.video_jobs"),
+        ("agnes-image-2.0-flash", "image_generation", "agnes.images"),
+        ("agnes-2.0-flash", "chat", "openai.chat_text"),
+        ("agnes-video-future", "video_generation", "agnes.video_jobs"),
+    ] {
+        seed_saved_model(&db, &agnes, model, task, protocol).await;
+    }
+    let model_repo = SqliteProviderModelRepository::new(db.pool().clone());
+    let capability_repo = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let before_models = serde_json::to_value(model_repo.list().await.unwrap()).unwrap();
+    let before_capabilities = serde_json::to_value(capability_repo.list().await.unwrap()).unwrap();
+    let state = build_state(&db);
+    let model_service = state.provider_model_service.clone();
+    let app = system_routes(state);
+
+    let response = app.clone().oneshot(request("GET", "/api/providers", None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let providers = body_json(response).await;
+    let agnes_view = providers["data"].as_array().unwrap().iter().find(|provider| provider["provider_id"] == agnes).unwrap();
+    let custom_view = providers["data"].as_array().unwrap().iter().find(|provider| provider["provider_id"] == custom).unwrap();
+    assert_eq!(agnes_view["models"].as_array().unwrap().len(), 6);
+    assert!(!agnes_view["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    assert!(custom_view["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+
+    for uri in ["/api/provider-models".to_owned(), format!("/api/provider-models?provider_id={agnes}")] {
+        let response = app.clone().oneshot(request("GET", &uri, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let models = body_json(response).await;
+        let models = models["data"].as_array().unwrap();
+        assert!(!models.iter().any(|model| model["provider_id"] == agnes && model["model"] == retired));
+        assert!(models.iter().any(|model| model["provider_id"] == agnes && model["model"] == "agnes-video-2.5-flash"));
+        assert!(models.iter().any(|model| model["provider_id"] == agnes && model["model"] == "agnes-video-future"));
+        if uri == "/api/provider-models" {
+            assert!(models.iter().any(|model| model["provider_id"] == custom && model["model"] == retired));
+        }
+    }
+    assert!(model_service.get(&agnes, retired).await.unwrap().is_none());
+    assert!(model_service.get(&custom, retired).await.unwrap().is_some());
+    assert_eq!(serde_json::to_value(model_repo.list().await.unwrap()).unwrap(), before_models);
+    assert_eq!(serde_json::to_value(capability_repo.list().await.unwrap()).unwrap(), before_capabilities);
+
+    // Every aggregate response (including provider edits and clones) uses the
+    // same projection; a later mutation must not make the hidden row reappear.
+    let response = app.clone().oneshot(request("PUT", &format!("/api/providers/{agnes}"), Some(json!({"name":"Agnes renamed"})))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!body_json(response).await["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    let response = app.oneshot(request("POST", &format!("/api/providers/{agnes}/clone"), None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cloned = body_json(response).await;
+    assert!(!cloned["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    let cloned_id = cloned["data"]["provider_id"].as_str().unwrap();
+    assert!(model_repo.get(cloned_id, retired).await.unwrap().is_some());
+    assert!(model_repo.get(&agnes, retired).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn manual_configuration_cannot_reintroduce_the_retired_agnes_video_model() {
+    let db = init_database_memory().await.unwrap();
+    let agnes = create_provider(&db, "agnes", "Agnes").await;
+    let app = system_routes(build_state(&db));
+    for (task, protocol) in [("chat", "openai.chat_text"), ("image_generation", "agnes.images"), ("video_generation", "agnes.video_jobs")] {
+        let response = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id":agnes, "model":{"model":"agnes-video-v2.0", "capabilities":[{
+                "task":task, "protocol":protocol, "connection_role":"default", "provider_params":{}
+            }]}
+        })))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = body_json(response).await;
+        assert!(error.to_string().contains("taken offline"));
+        assert!(error.to_string().contains("agnes-video-2.5-flash"));
+    }
+    let response = app.oneshot(request("POST", "/api/providers", Some(json!({
+        "platform":"agnes", "name":"Retired model", "base_url":"https://api.example.test/v1",
+        "auth_scheme":"bearer", "credentials":{"api_keys":["sk-test"]}, "initial_model":{
+            "model":"agnes-video-v2.0", "capabilities":[chat_capability()]
+        }
+    })))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_json(response).await.to_string().contains("taken offline"));
+    assert!(SqliteProviderModelRepository::new(db.pool().clone()).get(&agnes, "agnes-video-v2.0").await.unwrap().is_none());
+    assert_eq!(SqliteProviderRepository::new(db.pool().clone()).list().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

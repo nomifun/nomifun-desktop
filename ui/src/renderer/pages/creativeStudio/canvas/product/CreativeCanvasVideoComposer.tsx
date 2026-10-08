@@ -8,6 +8,7 @@ import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { isCurrentAgnesVideo } from '@renderer/creation/parameters/agnes';
 
 import CreativeCanvasReferenceList, { type CreativeCanvasComposerReference } from './CreativeCanvasReferenceList';
 import CreativeCanvasReferencePromptInput, {
@@ -170,13 +171,21 @@ const CreativeCanvasVideoComposer: React.FC<
     ? modelOptions.find((option) => modelKey(option) === modelKey(settings.model!)) ??
       null
     : null;
-  const referenceIssue = imageCount > 1 &&
+  const agnesVideo = isCurrentAgnesVideo(selectedModel);
+  const agnesFlash = agnesVideo && selectedModel?.model === 'agnes-video-2.5-flash';
+  const resolutionOptions = agnesFlash ? RESOLUTION_OPTIONS.filter(value => value === '720p') : RESOLUTION_OPTIONS;
+  const referenceIssue = agnesVideo && imageCount > (agnesFlash ? 5 : 8)
+    ? t('creativeStudio.canvas.video.imageLimit', { count: agnesFlash ? 5 : 8,
+        defaultValue: '所选模型最多支持 {{count}} 张参考图，请减少连接。' })
+    : agnesFlash && settings.resolution !== '720p'
+    ? t('creativeStudio.canvas.video.flashResolution', { defaultValue: '所选视频模型仅支持 720p，请调整分辨率。' })
+    : imageCount > 1 &&
     (selectedModel?.protocol === 'openai.videos' || selectedModel?.protocol === 'siliconflow.video_jobs')
     ? t('creativeStudio.canvas.video.singleImageModel', {
         defaultValue: '所选模型仅支持一张参考图，请减少连接或切换支持多图的模型。',
       })
     : null;
-  const keyframes = imageCount > 1 && selectedModel?.protocol === 'agnes.video_jobs';
+  const referenceOrder = imageCount > 1 && agnesVideo;
   const busy = task.pendingCount > 0 || task.state === 'queued' || task.state === 'running';
   const canSubmit = retrySubmission
     ? !interactionDisabled && onRetrySubmission !== undefined
@@ -235,11 +244,11 @@ const CreativeCanvasVideoComposer: React.FC<
           onDisconnect={onReferenceDisconnect}
           onDisconnectMany={onReferencesDisconnect}
         />
-        {unsupportedModeLabel || keyframes ? (
+        {unsupportedModeLabel || referenceOrder ? (
           <div className={styles.contextRow}>
             <span className={styles.modePill}>
-              {unsupportedModeLabel ?? t('creativeStudio.canvas.video.keyframeOrder', {
-                defaultValue: '关键帧 · 按连线顺序',
+              {unsupportedModeLabel ?? t('creativeStudio.canvas.video.referenceOrder', {
+                defaultValue: '参考图 · 按连线顺序',
               })}
             </span>
           </div>
@@ -309,6 +318,9 @@ const CreativeCanvasVideoComposer: React.FC<
                     ? { providerId: option.providerId, model: option.model }
                     : null
                 );
+                if (isCurrentAgnesVideo(option) && option?.model === 'agnes-video-2.5-flash') {
+                  onResolutionChange('720p');
+                }
               }}
             >
               {modelOptions.map((option) => (
@@ -341,7 +353,8 @@ const CreativeCanvasVideoComposer: React.FC<
                         onResolutionChange(event.target.value as CanvasVideoResolution)
                       }
                     >
-                      {RESOLUTION_OPTIONS.map((option) => (
+                      {!resolutionOptions.some(option => option === settings.resolution) ? <option value={settings.resolution} disabled>{settings.resolution}</option> : null}
+                      {resolutionOptions.map((option) => (
                         <option key={option} value={option}>
                           {option}
                         </option>

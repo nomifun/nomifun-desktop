@@ -280,10 +280,6 @@ export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) 
   emit({ status: 'installing', installPhase: 'preparing' });
   await installUpdateWithPreflight({
     getContext: tauriGetUpdaterInstallContext,
-    // No renderer-held resource needs cleanup before the Rust-owned install
-    // today; the hook keeps the ordering contract (cleanup failure must
-    // prevent installation) wired for when one appears.
-    prepareShutdown: async () => {},
     install: async () => {
       emit({ status: 'installing', installPhase: 'installing' });
       await tauriInstallUpdate(version);
@@ -292,11 +288,21 @@ export async function tauriUpdateInstallAndRelaunch(emit: (s: AutoUpdateStatus) 
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
     },
-    fatalExit: async (failure) => {
+    showFailure: async (failure) => {
       console.error(
         `[tauriUpdater] fatal ${failure.phase} failure after install started; exiting`,
         failure.error
       );
+      const [{ message }, { default: i18n }] = await Promise.all([
+        import('@tauri-apps/plugin-dialog'),
+        import('i18next'),
+      ]);
+      await message(`${i18n.t('update.installFailedDesc')}\n\n${String(failure.error)}`, {
+        title: i18n.t('update.errorDialogTitle'),
+        kind: 'error',
+      });
+    },
+    fatalExit: async () => {
       const { exit } = await import('@tauri-apps/plugin-process');
       await exit(1);
       // Unreachable when exit() succeeds; installUpdateWithPreflight also

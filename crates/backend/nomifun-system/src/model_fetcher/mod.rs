@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     BedrockConfig, FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse,
     ModelCatalogSource, ModelInfo, ModelTaskSource, infer_catalog_tasks_and_traits,
-    verified_catalog_tasks_and_traits,
+    is_retired_provider_model, verified_catalog_tasks_and_traits,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::IProviderRepository;
@@ -147,7 +147,7 @@ impl ModelFetchService {
                 url_fixer::try_fix_url(&http_client, &config)
                     .await
                     .map(|mut response| {
-                        enrich_model_suggestions(catalog_platform, &mut response.models);
+                        prepare_catalog_models(catalog_platform, &mut response.models);
                         response
                     })
                     .map_err(|_| err)
@@ -193,7 +193,10 @@ impl ModelFetchService {
     }
 }
 
-fn enrich_model_suggestions(platform: &str, models: &mut [ModelInfo]) {
+fn prepare_catalog_models(platform: &str, models: &mut Vec<ModelInfo>) {
+    // Catalogs can lag an official shutdown. Apply the same lifecycle rule as
+    // saved provider/model projections; taskless retired rows are not choices.
+    models.retain(|model| !is_retired_provider_model(platform, &model.id));
     for model in models {
         // Bedrock catalog rows are authoritative at the protocol-family
         // boundary: only Anthropic/Claude entries can use the implemented
@@ -223,7 +226,7 @@ fn fetch_models_response(
     source: ModelCatalogSource,
     fixed_base_url: Option<String>,
 ) -> FetchModelsResponse {
-    enrich_model_suggestions(platform, &mut models);
+    prepare_catalog_models(platform, &mut models);
     FetchModelsResponse { models, catalog_source: Some(source), fixed_base_url }
 }
 
@@ -760,7 +763,7 @@ mod tests {
                 token_limit_sources: None,
             },
         ];
-        enrich_model_suggestions("bedrock", &mut models);
+        prepare_catalog_models("bedrock", &mut models);
         assert!(models[0].tasks.is_empty());
         assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::Chat]);
     }
@@ -779,7 +782,7 @@ mod tests {
             output_limit: Some(65_536),
             token_limit_sources: None,
         }];
-        enrich_model_suggestions("gemini", &mut models);
+        prepare_catalog_models("gemini", &mut models);
         assert_eq!(models[0].context_limit, Some(1_048_576));
         assert_eq!(models[0].output_limit, Some(65_536));
         assert!(!models[0].tasks.is_empty());
@@ -793,7 +796,7 @@ mod tests {
             {"id":"my-whisper-model"},
             {"id":"gpt-image-1"}
         ])).unwrap();
-        enrich_model_suggestions("openai", &mut models);
+        prepare_catalog_models("openai", &mut models);
         assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::Chat]);
         assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::SpeechRecognition]);
         for model in &models[..3] {
@@ -808,7 +811,7 @@ mod tests {
             {"id":"opaque-speech-id", "tasks":["speech_synthesis"], "tasks_source":"provider_declared"},
             {"id":"opaque-old-id", "tasks":["chat"]}
         ])).unwrap();
-        enrich_model_suggestions("openai", &mut models);
+        prepare_catalog_models("openai", &mut models);
         assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::SpeechSynthesis]);
         assert_eq!(models[0].tasks_source, Some(ModelTaskSource::ProviderDeclared));
         assert_eq!(models[1].tasks_source, None, "older task metadata remains unconfirmed");

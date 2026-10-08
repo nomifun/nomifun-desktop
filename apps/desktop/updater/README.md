@@ -40,6 +40,22 @@ App (running version, from workspace Cargo.toml)
   `updater:allow-check` and `process:default` (relaunch/exit). Raw updater
   download/install permissions are intentionally absent; the version-bound Rust
   commands own those operations.
+- **macOS archive contract:** generate the updater from the final signed and
+  notarized App with `COPYFILE_DISABLE=1` and no extended attributes or
+  AppleDouble (`._*` / `__MACOSX`) entries. Tauri strips one path component
+  during installation, so every entry must belong to the single `NomiFun.app/`
+  root. The packaging verifier lists raw entries with libarchive's `!mac-ext`
+  option, extracts with that same path layout, and reuses the App bundle
+  inspection for executable permissions, helpers, symlinks, and CEF identity.
+  Run `bun test ./scripts/lib/macos-browser-bundle.test.mjs` for this contract.
+- **Install failures:** after the installer accepts the package, failures keep
+  the native slot claimed and show recovery guidance before exiting. Native
+  installation errors are written to the app logs. A package that never reached
+  the installer remains recoverable.
+  An archive fix must be shipped as a newly signed updater artifact with matching
+  CrabNebula and GitHub signatures; changing only the new app cannot repair an
+  already-published incompatible package. Users must download the corrected
+  package again.
 
 ## Signing keys
 

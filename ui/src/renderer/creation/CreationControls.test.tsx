@@ -68,7 +68,7 @@ test('music duration stays on smart mode until the user enables the slider', () 
 
 test.each(['image', 'video'] as const)('%s quantity offers at most four and submits a capped count', async mode => {
   const protocol = mode === 'video' ? 'agnes.video_jobs' : 'openai.images';
-  const model = mode === 'video' ? 'agnes-video-v2.0' : 'gpt-image-1';
+  const model = mode === 'video' ? 'agnes-video-2.5' : 'gpt-image-1';
   const provider = { id: providerId, name: 'Test', platform: mode === 'video' ? 'agnes' : 'openai', enabled: true,
     models: [{ model, enabled: true, capabilities: [{ task: mode === 'video' ? 'video_generation' : 'image_generation', traits: [], protocol }] }],
   } as unknown as IProvider;
@@ -99,7 +99,7 @@ test.each(['image', 'video'] as const)('%s quantity offers at most four and subm
   if (mode === 'video') {
     const ratios = within(within(panel).getByRole('group', { name: '宽高比' }));
     fireEvent.click(ratios.getByRole('button', { name: '16:9' }));
-    fireEvent.click(within(within(panel).getByRole('group', { name: '分辨率' })).getByRole('button', { name: '1080p' }));
+    fireEvent.click(within(within(panel).getByRole('group', { name: '分辨率' })).getByRole('button', { name: '1080P' }));
     fireEvent.click(ratios.getByRole('button', { name: '9:16' }));
     expect(within(panel).getByText('1080 × 1920')).toBeTruthy();
     expect(buildCreationRequest(latest, '测试生成', presetId, [], option).params).toMatchObject({ size: '1080x1920', count: 4 });

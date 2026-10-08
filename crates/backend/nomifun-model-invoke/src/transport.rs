@@ -199,6 +199,27 @@ async fn error_from_response_with_body_deadline(
     timeout: Option<Duration>,
     protocol: Option<&str>,
 ) -> InvokeError {
+    read_error_response(resp, timeout, protocol).await.0
+}
+
+/// The JSON evidence is available only for a complete, bounded error body.
+/// Provider adapters may use their own explicit rejection contract to decide
+/// whether a submission can be repeated. Never use a truncated display
+/// message or the display-only diagnostic for that decision, and never log or
+/// persist this raw JSON (it may contain reflected credentials).
+pub(crate) async fn error_response_with_json(
+    resp: reqwest::Response,
+    timeout: Duration,
+    protocol: &str,
+) -> (InvokeError, Option<serde_json::Value>) {
+    read_error_response(resp, Some(timeout), Some(protocol)).await
+}
+
+async fn read_error_response(
+    resp: reqwest::Response,
+    timeout: Option<Duration>,
+    protocol: Option<&str>,
+) -> (InvokeError, Option<serde_json::Value>) {
     let redactor = response_secret_redactor(&resp);
     let fallback_diagnostic = crate::provider_diagnostic::response_context(&resp, protocol, None, &redactor);
     let status = resp.status();
@@ -211,13 +232,14 @@ async fn error_from_response_with_body_deadline(
     };
     // Read the header before the bounded body reader consumes the response.
     let retry_after_ms = parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
-    let (snippet, context_length_rejected, unsupported_technical_capability, gateway_business_error, diagnostic) = match timeout {
+    let (snippet, context_length_rejected, unsupported_technical_capability, gateway_business_error, diagnostic, json) = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp, protocol))
             .await
             .unwrap_or_else(|_| {
                 (
                     "<provider error body read timed out>".to_owned(),
                     false,
+                    None,
                     None,
                     None,
                     None,
@@ -248,7 +270,7 @@ async fn error_from_response_with_body_deadline(
     } else if matches!(code, 400 | 422) && unsupported_technical_capability.is_some() {
         diagnostic.reason = ModelFailureReason::UnsupportedFeature;
     }
-    InvokeError {
+    (InvokeError {
         kind,
         message: gateway_business_error.map(|business| business.action_message().to_owned())
             .unwrap_or_else(|| format!("provider returned {status}: {snippet}")),
@@ -261,7 +283,7 @@ async fn error_from_response_with_body_deadline(
             .flatten(),
         gateway_business_error,
         diagnostic: Some(diagnostic),
-    }
+    }, json)
 }
 
 /// Obtain the exact runtime credential redactor attached by the authenticated
@@ -277,7 +299,7 @@ pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedact
 async fn read_error_body_snippet(
     mut resp: reqwest::Response,
     protocol: Option<&str>,
-) -> (String, bool, Option<ModelTechnicalCapability>, Option<GatewayBusinessError>, Option<ModelFailureDiagnostic>) {
+) -> (String, bool, Option<ModelTechnicalCapability>, Option<GatewayBusinessError>, Option<ModelFailureDiagnostic>, Option<serde_json::Value>) {
     let redactor = response_secret_redactor(&resp);
     let context = crate::provider_diagnostic::response_context(&resp, protocol, None, &redactor);
     if let Some(declared) = resp.content_length()
@@ -289,6 +311,7 @@ async fn read_error_body_snippet(
                 MAX_ERROR_RESPONSE_BODY_BYTES
             ),
             false,
+            None,
             None,
             None,
             None,
@@ -327,6 +350,7 @@ async fn read_error_body_snippet(
                         None,
                         None,
                         None,
+                        None,
                     );
                 }
                 break;
@@ -350,8 +374,9 @@ async fn read_error_body_snippet(
             Some("bedrock.anthropic_messages") => false,
             _ => true,
         });
-    let diagnostic = complete.then(|| serde_json::from_slice::<serde_json::Value>(&body).ok())
-        .flatten().map(|value| crate::provider_diagnostic::refine_from_body(context, &value, protocol, &redactor));
+    let json = complete.then(|| serde_json::from_slice::<serde_json::Value>(&body).ok()).flatten();
+    let diagnostic = json.as_ref()
+        .map(|value| crate::provider_diagnostic::refine_from_body(context, value, protocol, &redactor));
     // Exact credentials must be removed before presentation truncation; a
     // credential crossing that boundary otherwise leaves an unmatchable
     // prefix. A capped/incomplete transport read needs the same tail guard.
@@ -374,6 +399,7 @@ async fn read_error_body_snippet(
         unsupported_technical_capability,
         gateway_business_error,
         diagnostic,
+        json,
     )
 }
 
@@ -1123,6 +1149,63 @@ mod tests {
             assert_eq!(err.retry_after_ms, None, "status {status}");
             assert!(err.message.contains("nope"), "status {status}: {}", err.message);
         }
+    }
+
+    #[tokio::test]
+    async fn raw_error_evidence_is_complete_json_not_the_redacted_display_snippet() {
+        let secret = "fixture-private-key";
+        let body = json!({"code":"video_queue_full", "message":format!("{} {secret}", "x".repeat(800)), "data":null});
+        let mut response = respond(ResponseTemplate::new(503).set_body_json(&body).insert_header("retry-after", "12")).await;
+        response.extensions_mut().insert(SecretRedactor::new([secret]));
+        let (error, evidence) = error_response_with_json(response, Duration::from_secs(1), "agnes.video_jobs").await;
+        assert_eq!(evidence, Some(body));
+        assert_eq!(error.http_status, Some(503));
+        assert_eq!(error.retry_after_ms, Some(12_000));
+        assert!(!error.to_string().contains(secret));
+        assert!(error.message.len() < 600);
+    }
+
+    #[tokio::test]
+    async fn capped_or_malformed_error_bodies_supply_no_retry_evidence() {
+        for body in ["{\"code\":\"video_queue_full\"".to_string(),
+            json!({"code":"video_queue_full", "message":"x".repeat(MAX_ERROR_RESPONSE_BODY_BYTES), "data":null}).to_string()] {
+            let response = respond(ResponseTemplate::new(503).set_body_string(body)).await;
+            let (error, evidence) = error_response_with_json(response, Duration::from_secs(1), "agnes.video_jobs").await;
+            assert_eq!(error.http_status, Some(503));
+            assert!(evidence.is_none());
+        }
+        let response = respond_chunked(503, vec![
+            br#"{"code":"video_queue_full","message":"busy","data":null}"#.to_vec(),
+            vec![b' '; MAX_ERROR_RESPONSE_BODY_BYTES],
+        ]).await;
+        let (error, evidence) = error_response_with_json(response, Duration::from_secs(1), "agnes.video_jobs").await;
+        assert_eq!(error.http_status, Some(503));
+        assert!(evidence.is_none());
+    }
+
+    #[tokio::test]
+    async fn valid_json_without_transport_eof_is_not_a_safe_retry_acknowledgement() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = br#"{"code":"video_queue_full","message":"busy","data":null}"#;
+            stream.write_all(format!("HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\n\r\n", body.len() + 1).as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            let _ = hold.await; // Missing the final transport byte, despite valid JSON.
+        });
+        let response = reqwest::Client::builder().no_proxy().build().unwrap()
+            .get(format!("http://{address}/")).send().await.unwrap();
+        let (error, evidence) = error_response_with_json(response, Duration::from_millis(20), "agnes.video_jobs").await;
+        assert_eq!(error.http_status, Some(503));
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("body read timed out"));
+        assert!(evidence.is_none());
+        let _ = release.send(());
+        server.await.unwrap();
     }
 
     #[tokio::test]
