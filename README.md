@@ -641,10 +641,15 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 | Developer ID signature + configured notarization | `bun run build:mac --signed` or `bun run build:signed` |
 | Complete signed updater archive | `bun run build:updater` |
 | Developer ID package and updater archive | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| Native Intel package and updater archive | `bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json` |
 | Complete development `.app` with embedded Browser | `bun run build:fast` |
 
-The pinned CEF runtime supports arm64; Intel and Universal builds are rejected.
-Arch aliases are `arm`/`aarch64`/`silicon`. All macOS product commands use the same
+Each architecture uses its own pinned CEF runtime. Arch aliases are
+`arm`/`aarch64`/`silicon` and `intel`/`x64`/`x86_64`; Universal builds are rejected.
+Intel packages include the verified ONNX Runtime 1.23.2 and its licenses.
+Use the native arm64 package on Apple Silicon: Chromium does not maintain
+Rosetta execution, and v0.8.1's translated CEF shutdown test did not pass.
+Native Intel hardware acceptance was not performed. All macOS product commands use the same
 CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
 are generated from the final App after its CEF components have been installed and
 signed; updater signing also requires the configured Tauri updater private key.
