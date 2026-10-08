@@ -4,7 +4,7 @@
  * skills; the market therefore belongs here rather than under Presets.
  */
 import { Tabs } from '@arco-design/web-react';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -22,6 +22,7 @@ const SkillsSettingsPage: React.FC = () => {
     const tab = searchParams.get('tab');
     return isSkillsTab(tab) ? tab : 'library';
   });
+  const [libraryRevision, setLibraryRevision] = useState(0);
 
   useEffect(() => {
     const tab = searchParams.get('tab');
@@ -37,6 +38,10 @@ const SkillsSettingsPage: React.FC = () => {
     else next.set('tab', key);
     setSearchParams(next, { replace: true });
   };
+
+  const handleMarketInstalled = useCallback(() => {
+    setLibraryRevision((revision) => revision + 1);
+  }, []);
 
   return (
     <HubPageShell
@@ -57,10 +62,16 @@ const SkillsSettingsPage: React.FC = () => {
           key='library'
           title={t('settings.skillsPage.libraryTab', { defaultValue: 'Installed Skills' })}
         >
-          <SkillsHubSettings />
+          <SkillsHubSettings
+            active={activeTab === 'library'}
+            refreshToken={libraryRevision}
+          />
         </Tabs.TabPane>
         <Tabs.TabPane key='market' title={t('settings.skillsPage.marketTab', { defaultValue: 'Skill Market' })}>
-          <SkillMarketSettings active={activeTab === 'market'} />
+          <SkillMarketSettings
+            active={activeTab === 'market'}
+            onInstalled={handleMarketInstalled}
+          />
         </Tabs.TabPane>
       </Tabs>
     </HubPageShell>

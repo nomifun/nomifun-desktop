@@ -9,58 +9,29 @@ import { parseError } from '@/common/utils';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import MarketSettingsPanel from './MarketSettingsPanel';
 import { ENHANCED_TOOLS_PAGE_STACK_CLASS } from './enhancedToolsLayout';
+import { SKILL_MARKET_SOURCES } from './skill/skillMarket';
 import {
-  isSkillMarketItemInstalled,
-  SKILL_MARKET_SOURCES,
-} from './skill/skillMarket';
+  type InstalledMarketState,
+  readInstalledMarketState,
+  reconcileInstalledMarketState,
+  recordInstalledMarketItem,
+  SKILL_MARKET_CACHE_KEY,
+  writeInstalledMarketState,
+} from './skill/skillMarketProvenance';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-const CACHE_KEY = 'nomifun.skillMarket.rankings.v4';
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
-const INSTALLED_MARKET_KEY = 'nomifun.skillMarket.installed.v1';
-
-type InstalledMarketIndex = Record<string, string[]>;
-
-const readInstalledMarketIndex = (): InstalledMarketIndex => {
-  try {
-    const value = JSON.parse(localStorage.getItem(INSTALLED_MARKET_KEY) ?? '{}') as unknown;
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([id, names]) => id.length <= 180 && Array.isArray(names))
-        .map(([id, names]) => [
-          id,
-          Array.from(
-            new Set(
-              names.filter((name: unknown): name is string => typeof name === 'string' && name.trim().length > 0)
-            )
-          ).slice(0, 32),
-        ])
-        .filter(([, names]) => names.length > 0)
-    );
-  } catch {
-    return {};
-  }
-};
-
-const writeInstalledMarketIndex = (index: InstalledMarketIndex): void => {
-  try {
-    localStorage.setItem(INSTALLED_MARKET_KEY, JSON.stringify(index));
-  } catch {
-    // Provenance is a UI optimization; the managed Skill Library is canonical.
-  }
-};
 
 type SkillMarketSettingsProps = {
   active?: boolean;
+  onInstalled?: () => void;
 };
 
-const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true }) => {
+const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true, onInstalled }) => {
   const { t } = useTranslation();
   const [message, messageHolder] = useArcoMessage();
-  const [installedSkillNames, setInstalledSkillNames] = useState<Set<string>>(new Set());
-  const [installedMarketItemIds, setInstalledMarketItemIds] = useState<Set<string>>(new Set());
+  const [installedMarketState, setInstalledMarketState] = useState<InstalledMarketState>({});
   const [installedStateLoading, setInstalledStateLoading] = useState(true);
 
   useEffect(() => {
@@ -74,15 +45,9 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
       .then((skills) => {
         if (disposed) return;
         const names = new Set(skills.map((skill) => skill.name));
-        const index = readInstalledMarketIndex();
-        const reconciled = Object.fromEntries(
-          Object.entries(index).filter(([, installedNames]) =>
-            installedNames.every((installedName) => names.has(installedName))
-          )
-        );
-        setInstalledSkillNames(names);
-        setInstalledMarketItemIds(new Set(Object.keys(reconciled)));
-        writeInstalledMarketIndex(reconciled);
+        const reconciled = reconcileInstalledMarketState(readInstalledMarketState(), names);
+        setInstalledMarketState(reconciled);
+        writeInstalledMarketState(reconciled);
       })
       .catch((error) => {
         // Keep Add available. The backend installer remains the authority and
@@ -98,9 +63,8 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
   }, [active]);
 
   const isAdded = useCallback(
-    (item: ISkillMarketItem) =>
-      installedMarketItemIds.has(item.id) || isSkillMarketItemInstalled(item, installedSkillNames),
-    [installedMarketItemIds, installedSkillNames]
+    (item: ISkillMarketItem) => Boolean(installedMarketState[item.id]),
+    [installedMarketState]
   );
 
   const handleAdd = useCallback(
@@ -111,15 +75,14 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           id: item.id,
           url: item.url,
         });
-        setInstalledSkillNames((current) => {
-          const next = new Set(current);
-          for (const skillName of installed.skill_names) next.add(skillName);
-          return next;
-        });
-        setInstalledMarketItemIds((current) => new Set(current).add(item.id));
-        const index = readInstalledMarketIndex();
-        index[item.id] = installed.skill_names;
-        writeInstalledMarketIndex(index);
+        const nextState = recordInstalledMarketItem(
+          readInstalledMarketState(),
+          item,
+          installed.skill_names
+        );
+        writeInstalledMarketState(nextState);
+        setInstalledMarketState(nextState);
+        onInstalled?.();
         message.success(
           t('settings.skillsMarket.installSuccess', {
             count: installed.skill_names.length,
@@ -142,7 +105,7 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
         throw error;
       }
     },
-    [message, t]
+    [message, onInstalled, t]
   );
 
   return (
@@ -155,7 +118,7 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
             defaultValue: '同步 ClawHub、LoopHub 与 SkillHub 最新榜单，并通过受控流程安装到 Nomi 技能库。',
           })}
           sources={SKILL_MARKET_SOURCES}
-          cacheKey={CACHE_KEY}
+          cacheKey={SKILL_MARKET_CACHE_KEY}
           autoSyncKey={AUTO_SYNC_KEY}
           defaultSource='clawhub'
           searchPlaceholder={t('settings.skillsMarket.searchPlaceholder', { defaultValue: '搜索当前市场技能...' })}

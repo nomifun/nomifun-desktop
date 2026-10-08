@@ -8,10 +8,13 @@ import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import * as arcoMessageHook from '@/renderer/utils/ui/useArcoMessage';
 import SkillMarketSettings from './SkillMarketSettings';
+import {
+  INSTALLED_MARKET_KEY,
+  SKILL_MARKET_CACHE_KEY,
+} from './skill/skillMarketProvenance';
 
-const CACHE_KEY = 'nomifun.skillMarket.rankings.v4';
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
-const INSTALLED_MARKET_KEY = 'nomifun.skillMarket.installed.v1';
+const LEGACY_INSTALLED_MARKET_KEY = 'nomifun.skillMarket.installed.v1';
 const marketItem = {
   id: 'clawhub:owner/demo',
   source: 'clawhub' as const,
@@ -20,6 +23,13 @@ const marketItem = {
   description: 'A fixture skill.',
   url: 'https://clawhub.ai/owner/skills/demo',
   install_command: 'openclaw skills install @owner/demo',
+};
+const sameSlugItem = {
+  ...marketItem,
+  id: 'clawhub:other-owner/demo',
+  name: 'demo',
+  url: 'https://clawhub.ai/other-owner/skills/demo',
+  install_command: 'openclaw skills install @other-owner/demo',
 };
 
 const locale = createInstance();
@@ -48,10 +58,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function prepareMarketCache() {
+function prepareMarketCache(items = [marketItem]) {
   for (const [storage, key, value] of [
-    [localStorage, CACHE_KEY, JSON.stringify({ fetched_at: 1, items: [marketItem], errors: [] })],
-    [localStorage, INSTALLED_MARKET_KEY, '{}'],
+    [localStorage, SKILL_MARKET_CACHE_KEY, JSON.stringify({ fetched_at: 1, items, errors: [] })],
+    [localStorage, INSTALLED_MARKET_KEY, JSON.stringify({ version: 2, items: {} })],
+    [localStorage, LEGACY_INSTALLED_MARKET_KEY, '{}'],
     [sessionStorage, AUTO_SYNC_KEY, '1'],
   ] as const) {
     const previous = storage.getItem(key);
@@ -60,7 +71,7 @@ function prepareMarketCache() {
   }
 }
 
-function mount() {
+function mount(onInstalled?: () => void) {
   const messageHook = spyOn(arcoMessageHook, 'useArcoMessage').mockReturnValue([
     {
       success: () => () => {},
@@ -70,7 +81,7 @@ function mount() {
     null,
   ] as unknown as ReturnType<typeof arcoMessageHook.useArcoMessage>);
   restore.push(() => messageHook.mockRestore());
-  return render(h(I18nextProvider, { i18n: locale }, h(SkillMarketSettings)));
+  return render(h(I18nextProvider, { i18n: locale }, h(SkillMarketSettings, { onInstalled })));
 }
 
 describe('SkillMarketSettings controlled installation', () => {
@@ -79,10 +90,13 @@ describe('SkillMarketSettings controlled installation', () => {
     const request = deferred<{ skill_names: string[] }>();
     const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
     const installing = spyOn(ipcBridge.fs.installSkillMarketItem, 'invoke').mockImplementation(() => request.promise);
+    let installedNotifications = 0;
     restore.push(() => listing.mockRestore());
     restore.push(() => installing.mockRestore());
 
-    const view = mount();
+    const view = mount(() => {
+      installedNotifications += 1;
+    });
     const add = await view.findByRole('button', { name: common.add });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
     expect(view.queryByText(marketItem.install_command)).toBeNull();
@@ -99,8 +113,22 @@ describe('SkillMarketSettings controlled installation', () => {
     await act(async () => request.resolve({ skill_names: ['different-manifest-name'] }));
     await waitFor(() => expect(view.getByRole('button', { name: common.added })).toBeTruthy());
     expect(JSON.parse(localStorage.getItem(INSTALLED_MARKET_KEY) ?? '{}')).toEqual({
-      [marketItem.id]: ['different-manifest-name'],
+      version: 2,
+      items: {
+        [marketItem.id]: {
+          source: marketItem.source,
+          skill_names: ['different-manifest-name'],
+          presentation: {
+            name: marketItem.name,
+            description: marketItem.description,
+            tags: [],
+            audience_tags: [],
+            scenario_tags: [],
+          },
+        },
+      },
     });
+    expect(installedNotifications).toBe(1);
   });
 
   test('a failed installed-state probe does not permanently disable Add', async () => {
@@ -123,7 +151,15 @@ describe('SkillMarketSettings controlled installation', () => {
     prepareMarketCache();
     localStorage.setItem(
       INSTALLED_MARKET_KEY,
-      JSON.stringify({ [marketItem.id]: ['different-manifest-name'] })
+      JSON.stringify({
+        version: 2,
+        items: {
+          [marketItem.id]: {
+            source: marketItem.source,
+            skill_names: ['different-manifest-name'],
+          },
+        },
+      })
     );
     const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([
       {
@@ -143,5 +179,41 @@ describe('SkillMarketSettings controlled installation', () => {
     expect((added as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(added);
     expect(installing).not.toHaveBeenCalled();
+  });
+
+  test('marks only the exact installed market identity when owners share a slug', async () => {
+    prepareMarketCache([marketItem, sameSlugItem]);
+    localStorage.setItem(
+      INSTALLED_MARKET_KEY,
+      JSON.stringify({
+        version: 2,
+        items: {
+          [marketItem.id]: {
+            source: marketItem.source,
+            skill_names: ['demo'],
+          },
+        },
+      })
+    );
+    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([
+      {
+        name: 'demo',
+        description: 'Fixture',
+        location: 'fixture',
+        is_custom: true,
+        source: 'custom',
+      },
+    ]);
+    restore.push(() => listing.mockRestore());
+
+    const view = mount();
+    const exact = await view.findByTestId('btn-add-market-skill-clawhub-owner-demo');
+    const collision = await view.findByTestId('btn-add-market-skill-clawhub-other-owner-demo');
+    await waitFor(() => {
+      expect(exact.textContent).toContain(common.added);
+      expect(collision.textContent).toContain(common.add);
+      expect((exact as HTMLButtonElement).disabled).toBe(true);
+      expect((collision as HTMLButtonElement).disabled).toBe(false);
+    });
   });
 });

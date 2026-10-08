@@ -17,6 +17,13 @@ import SkillCard from './skill/SkillCard';
 import SkillDetailDrawer from './skill/SkillDetailDrawer';
 import { resolveSkillDisplay } from './skill/skillDisplay';
 import {
+  type InstalledMarketState,
+  readInstalledMarketState,
+  reconcileInstalledMarketState,
+  resolveInstalledMarketPresentation,
+  writeInstalledMarketState,
+} from './skill/skillMarketProvenance';
+import {
   ENHANCED_TOOLS_EMPTY_STATE_CLASS,
   ENHANCED_TOOLS_GRID_CLASS,
   ENHANCED_TOOLS_HEADER_CLASS,
@@ -40,7 +47,12 @@ const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
 const IMPORT_ACTION_BUTTON_CLASS =
   '!rounded-[100px] !h-34px !px-14px !text-t-primary flex items-center gap-6px';
 
-const SkillsHubSettings: React.FC = () => {
+type SkillsHubSettingsProps = {
+  active?: boolean;
+  refreshToken?: number;
+};
+
+const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, refreshToken = 0 }) => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
@@ -49,16 +61,18 @@ const SkillsHubSettings: React.FC = () => {
   const highlightName = searchParams.get('highlight');
   const [highlightedSkill, setHighlightedSkill] = useState<string | null>(null);
   const skillRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const fetchRequestRef = useRef(0);
 
   const [loading, setLoading] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  const [installedMarketState, setInstalledMarketState] = useState<InstalledMarketState>({});
   const [skillPaths, setSkillPaths] = useState<{ user_skills_dir: string; builtin_skills_dir: string } | null>(null);
   const [builtinAutoSkills, setBuiltinAutoSkills] = useState<Array<{ name: string; description: string }>>([]);
 
   const [search_query, setSearchQuery] = useState('');
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [agentImportVisible, setAgentImportVisible] = useState(false);
-  const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null);
+  const [detailSkillName, setDetailSkillName] = useState<string | null>(null);
 
   // Name set of built-in auto-inject skills → drives the "Auto" badge.
   const autoInjectedNames = useMemo(
@@ -67,38 +81,91 @@ const SkillsHubSettings: React.FC = () => {
   );
 
   const fetchData = useCallback(async () => {
+    const requestId = ++fetchRequestRef.current;
     setLoading(true);
     try {
-      const [skills, paths, autoSkills] = await Promise.all([
+      const [skillsResult, pathsResult, autoSkillsResult] = await Promise.allSettled([
         ipcBridge.fs.listAvailableSkills.invoke(),
         ipcBridge.fs.getSkillPaths.invoke(),
         ipcBridge.fs.listBuiltinAutoSkills.invoke(),
       ]);
-      setAvailableSkills(skills as SkillInfo[]);
-      setSkillPaths(paths);
-      setBuiltinAutoSkills(autoSkills);
+      if (requestId !== fetchRequestRef.current) return;
+      if (skillsResult.status === 'rejected') throw skillsResult.reason;
+      const typedSkills = skillsResult.value as SkillInfo[];
+      const reconciledMarketState = reconcileInstalledMarketState(
+        readInstalledMarketState(),
+        typedSkills.map((skill) => skill.name)
+      );
+      writeInstalledMarketState(reconciledMarketState);
+      setInstalledMarketState(reconciledMarketState);
+      setAvailableSkills(typedSkills);
+      if (pathsResult.status === 'fulfilled') {
+        setSkillPaths(pathsResult.value);
+      } else {
+        console.error('Failed to fetch skill paths:', pathsResult.reason);
+      }
+      if (autoSkillsResult.status === 'fulfilled') {
+        setBuiltinAutoSkills(autoSkillsResult.value);
+      } else {
+        console.error('Failed to fetch built-in auto skills:', autoSkillsResult.reason);
+      }
     } catch (error) {
+      if (requestId !== fetchRequestRef.current) return;
       console.error('Failed to fetch skills:', error);
       message.error(t('settings.skillsHub.fetchError', { defaultValue: 'Failed to fetch skills' }));
     } finally {
-      setLoading(false);
+      if (requestId === fetchRequestRef.current) setLoading(false);
     }
   }, [t, message]);
 
   useEffect(() => {
+    if (!active) return;
     void fetchData();
-  }, [fetchData]);
+    return () => {
+      // A retained tab can have an older request finish after a market install.
+      // Invalidate it before it can reconcile fresh provenance against stale data.
+      fetchRequestRef.current += 1;
+    };
+  }, [active, fetchData, refreshToken]);
+
+  const marketPresentations = useMemo(() => {
+    const presentations = new Map<string, { name: string; description: string }>();
+    for (const skill of availableSkills) {
+      const presentation = resolveInstalledMarketPresentation(
+        installedMarketState,
+        skill.name,
+        localeKey
+      );
+      if (presentation) {
+        presentations.set(skill.name, {
+          name: presentation.name,
+          description: presentation.description,
+        });
+      }
+    }
+    return presentations;
+  }, [availableSkills, installedMarketState, localeKey]);
+
+  const resolveHubSkillDisplay = useCallback(
+    (skill: SkillInfo) => marketPresentations.get(skill.name) ?? resolveSkillDisplay(skill, localeKey),
+    [localeKey, marketPresentations]
+  );
 
   const filteredSkills = useMemo(() => {
     const query = search_query.trim().toLowerCase();
     if (!query) return availableSkills;
     return availableSkills.filter((skill) => {
-      const display = resolveSkillDisplay(skill, localeKey);
+      const display = resolveHubSkillDisplay(skill);
       return `${skill.name} ${skill.description} ${display.name} ${display.description}`
         .toLowerCase()
         .includes(query);
     });
-  }, [availableSkills, search_query, localeKey]);
+  }, [availableSkills, resolveHubSkillDisplay, search_query]);
+
+  const detailSkill = useMemo(
+    () => availableSkills.find((skill) => skill.name === detailSkillName) ?? null,
+    [availableSkills, detailSkillName]
+  );
 
   // Scroll to and highlight a skill when navigated with ?highlight=skillName.
   useEffect(() => {
@@ -172,7 +239,7 @@ const SkillsHubSettings: React.FC = () => {
   };
 
   const confirmDelete = (skill: SkillInfo) => {
-    const display = resolveSkillDisplay(skill, localeKey);
+    const display = resolveHubSkillDisplay(skill);
     Modal.confirm({
       title: t('settings.skillsHub.deleteConfirmTitle', { defaultValue: 'Delete Skill' }),
       content: t('settings.skillsHub.deleteConfirmContent', {
@@ -328,8 +395,9 @@ const SkillsHubSettings: React.FC = () => {
                   key={skill.name}
                   skill={skill}
                   localeKey={localeKey}
+                  display={marketPresentations.get(skill.name)}
                   isAutoInjected={autoInjectedNames.has(skill.name)}
-                  onOpenDetails={setDetailSkill}
+                  onOpenDetails={(selectedSkill) => setDetailSkillName(selectedSkill.name)}
                   onDelete={confirmDelete}
                   highlighted={highlightedSkill === skill.name}
                   cardRef={(el) => {
@@ -375,11 +443,12 @@ const SkillsHubSettings: React.FC = () => {
         visible={detailSkill !== null}
         skill={detailSkill}
         localeKey={localeKey}
+        display={detailSkill ? marketPresentations.get(detailSkill.name) : undefined}
         isAutoInjected={
           detailSkill !== null &&
           autoInjectedNames.has(detailSkill.name)
         }
-        onClose={() => setDetailSkill(null)}
+        onClose={() => setDetailSkillName(null)}
       />
 
       <AgentSkillImportDrawer
