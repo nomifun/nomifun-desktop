@@ -2097,13 +2097,13 @@ impl NomiCoreSessionOwner {
                 ));
             }
         };
-        if idmm_decision.is_some() {
-            // UI provenance is emitted from the accepted canonical input. It is
-            // never reconstructed from current settings or intervention logs.
-            if self.publish_canonical_idmm_input(owner_id, session_id, &root_message_id).await.is_err() {
-                tracing::warn!(agent_session_id=session_id.as_ref(),message_id=%root_message_id,
-                    "IDMM realtime input delivery unavailable; continuing the accepted canonical Turn");
-            }
+        // All windows observe the same committed accepted input before Runtime
+        // output starts, including input sent by another product surface.
+        if let Err(error) = self.publish_canonical_accepted_input(
+            owner_id, session_id, &operation_id, &root_message_id,
+        ).await {
+            tracing::warn!(agent_session_id=session_id.as_ref(),message_id=%root_message_id,%error,
+                "canonical realtime input delivery unavailable; continuing the accepted Turn");
         }
         let projection = self
             .canonical_conversation_projection(owner_id, session_id)
@@ -2614,30 +2614,61 @@ impl NomiCoreSessionOwner {
             idempotency_key, request, false, Some(decision)).await
     }
 
-    async fn publish_canonical_idmm_input(
+    async fn publish_canonical_accepted_input(
         &self,
         owner_id: &str,
         session_id: &AgentSessionId,
+        operation_id: &OperationId,
         message_id: &str,
     ) -> Result<(), AppError> {
-        let row: (i64, i64, String) = sqlx::query_as(
-            "SELECT session.created_at,event.seq,event.inline_json FROM agent_events event \
-             JOIN agent_sessions session ON session.agent_session_id=event.session_id \
-             WHERE event.session_id=? AND event.event_id=? AND event.kind='message/user-accepted'",
-        ).bind(session_id.as_ref()).bind(message_id).fetch_one(&self.pool).await
-            .map_err(|error| AppError::Internal(format!("read accepted IDMM source: {error}")))?;
-        let input: Value = serde_json::from_str(&row.2)
-            .map_err(|error| AppError::Internal(error.to_string()))?;
-        let decision: IdmmDecisionExplanation = serde_json::from_value(input["idmm_decision"].clone())
-            .map_err(|error| AppError::Conflict(format!("accepted IDMM source is invalid: {error}")))?;
-        decision.validate().map_err(|error| AppError::Conflict(error.into()))?;
-        self.user_events.send_to_user(owner_id, WebSocketMessage::new("message.userCreated", json!({
-            "conversation_id":session_id,"msg_id":message_id,
-            "content":input["content"],"idmm_decision":decision,
-            "position":"right","status":"finish","hidden":input["hidden"],
-            "origin":"idmm","created_at":row.0.saturating_add(row.1),
-        })));
+        // This exact Turn snapshot resolves both inline and stored Payloads.
+        // Before dispatch it contains only the committed input/start boundary;
+        // no Message projection or current configuration supplies its content.
+        let facts = self.canonical.store().native_recovery_facts(session_id, operation_id)
+            .await.map_err(agent_session_store_error)?;
+        let event = facts.events.iter().find(|event| event.event_id.as_ref() == message_id)
+            .ok_or_else(|| AppError::Conflict("accepted input has no canonical event".into()))?;
+        let input = facts.event_payloads.get(message_id)
+            .ok_or_else(|| AppError::Conflict("accepted input has no resolved canonical payload".into()))?;
+        let created_at = self.canonical.store().session_created_at(session_id)
+            .await.map_err(agent_session_store_error)?;
+        self.user_events.send_to_user(owner_id,
+            Self::canonical_accepted_input_wire_event(session_id, created_at, event, input)?);
         Ok(())
+    }
+
+    fn canonical_accepted_input_wire_event(
+        session_id: &AgentSessionId,
+        created_at: i64,
+        event: &nomifun_agent_contracts::SessionEventRecord,
+        input: &Value,
+    ) -> Result<WebSocketMessage<Value>, AppError> {
+        if event.agent_session_id != *session_id || event.kind.0 != "message/user-accepted"
+            || event.kind_version != 1 || event.correlation_id.as_ref() != event.event_id.as_ref()
+        {
+            return Err(AppError::Conflict("canonical input event identity is invalid".into()));
+        }
+        let message_uuid = Uuid::parse_str(event.event_id.as_ref())
+            .ok().filter(|message| message.get_version_num() == 7)
+            .ok_or_else(|| AppError::Conflict("accepted input identity must be UUIDv7".into()))?;
+        let display_at_ms = message_uuid.as_bytes()[..6].iter()
+            .fold(0_i64, |time, byte| (time << 8) | i64::from(*byte));
+        let content = input.get("content").and_then(Value::as_str)
+            .ok_or_else(|| AppError::Conflict("accepted input content is invalid".into()))?;
+        let decision: Option<IdmmDecisionExplanation> = input.get("idmm_decision")
+            .filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose()
+            .map_err(|error| AppError::Conflict(format!("accepted IDMM source is invalid: {error}")))?;
+        if let Some(decision) = &decision {
+            decision.validate().map_err(|error| AppError::Conflict(error.into()))?;
+        }
+        Ok(WebSocketMessage::new("message.userCreated", json!({
+            "conversation_id":session_id,"msg_id":event.event_id,
+            "content":content,"idmm_decision":decision,
+            "position":"right","status":"finish","hidden":input["hidden"],
+            "origin":input["origin"],"channel_platform":input["channel_platform"],
+            "created_at":created_at.saturating_add(i64::try_from(event.seq).unwrap_or(i64::MAX)),
+            "display_at_ms":display_at_ms,
+        })))
     }
 
     pub(crate) async fn append_session_idmm_notice(
@@ -2790,6 +2821,39 @@ impl NomiCoreSessionOwner {
         ).await?;
         self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
         Ok(receipt)
+    }
+
+    async fn cancel_accepted_input_turn(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        source_message_id: &str,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        let source = Uuid::parse_str(source_message_id)
+            .ok().filter(|source| source.get_version_num() == 7)
+            .ok_or_else(|| AppError::BadRequest("expected_turn_id must be a canonical UUIDv7".into()))?;
+        self.canonical.get(
+            &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
+            session_id,
+        ).await?;
+        // Source-to-operation identity is immutable. The existing exact Turn
+        // mutation rechecks active/closed state atomically, so a successor
+        // started between this lookup and cancellation cannot become a target.
+        let operation: Option<String> = sqlx::query_scalar(
+            "SELECT turn.operation_id FROM agent_turns turn \
+             JOIN agent_events started ON started.event_id=turn.started_event_id \
+               AND started.session_id=turn.session_id AND started.kind='turn/started' \
+               AND started.correlation_id=turn.operation_id \
+             JOIN agent_events input ON input.event_id=turn.source_message_id \
+               AND input.session_id=turn.session_id AND input.kind='message/user-accepted' \
+               AND started.causation_event_id=input.event_id \
+             WHERE turn.session_id=? AND turn.source_message_id=?",
+        ).bind(session_id.as_ref()).bind(source.to_string()).fetch_optional(&self.pool).await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        let operation = operation.ok_or_else(|| AppError::Conflict("expected Turn has no canonical accepted input".into()))?;
+        self.cancel_exact_turn(owner_id, session_id, idempotency_key, &OperationId::from(operation),
+            nomifun_common::AgentKillReason::UserCancelled).await
     }
 
     /// Voice opt-in adds proof, then delegates runtime cleanup to the existing owner.
@@ -14012,15 +14076,19 @@ async fn cancel_nomi_core_agent_session_turn(
     let session_id = parse_agent_session_id(&agent_session_id)?;
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let principal = authenticated_principal(&owner);
-    let receipt = state
-        .session_owner
-        .cancel_turn(
+    let receipt = if let Some(expected_turn_id) = request.expected_turn_id.as_deref() {
+        state.session_owner.cancel_accepted_input_turn(
+            &principal.principal_id, &session_id, &key, expected_turn_id,
+        ).await?
+    } else {
+        state.session_owner.cancel_turn(
             &principal.principal_id,
             &session_id,
             &key,
             nomifun_common::AgentKillReason::UserCancelled,
         )
-        .await?;
+        .await?
+    };
     Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         target_operation_id: receipt.target_operation_id.as_ref().to_owned(),

@@ -921,8 +921,6 @@ const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => 
   msg_id: parseMessageId(message.msg_id),
   turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),
   conversation_id: parseConversationId(message.conversation_id),
-  companion_id:
-    message.companion_id == null ? message.companion_id : parseCompanionId(message.companion_id),
 });
 
 const fromApiUserMessageCreatedEvent = (
@@ -932,8 +930,6 @@ const fromApiUserMessageCreatedEvent = (
   idmm_decision: normalizeIdmmDecisionExplanation(event.idmm_decision),
   conversation_id: parseConversationId(event.conversation_id),
   msg_id: parseMessageId(event.msg_id),
-  companion_id:
-    event.companion_id == null ? event.companion_id : parseCompanionId(event.companion_id),
 });
 
 export const fromApiTurnPausedEvent = (raw: unknown): { conversation_id: ConversationId; turn_id: MessageId } => {
@@ -1051,11 +1047,11 @@ export const conversation = {
   ),
   stop: {
     provider: () => {},
-    invoke: async (p: { conversation_id: ConversationId }): Promise<void> => {
+    invoke: async (p: { conversation_id: ConversationId; expected_turn_id?: MessageId }): Promise<void> => {
       await httpRequest(
         'POST',
         `/api/agent-sessions/${p.conversation_id}/turns/cancel`,
-        { idempotency_key: uuidv7() }
+        { idempotency_key: uuidv7(), ...(p.expected_turn_id ? { expected_turn_id: p.expected_turn_id } : {}) }
       );
     },
   },
@@ -1179,10 +1175,6 @@ export const conversation = {
           : { active_turn_id: parseMessageId(rawRuntime.active_turn_id) }),
         ...(Number.isFinite(processing_started_at) ? { processing_started_at } : {}),
       },
-      companion: r.companion as boolean | undefined,
-      companion_id: r.companion_id == null ? null : parseCompanionId(r.companion_id),
-      origin: (r.origin ?? null) as string | null | undefined,
-      channel_platform: r.channel_platform as string | null | undefined,
     };
   }),
   turnCompleted: wsMappedEmitter<IConversationTurnCompletedEvent, unknown>('turn.completed', fromApiTurnCompletedEvent),
@@ -3248,22 +3240,9 @@ export interface IResponseMessage {
    *  an active model turn. Consumers must render it without raising turn or
    *  conversation activity state. */
   stream_complete?: boolean;
-  /** Companion wire markers (backend StreamRelay stamps them on every
-   *  fragment): true + owning companion id when the conversation is a companion
-   *  owned session. */
-  companion?: boolean;
-  companion_id?: CompanionId | null;
-  /** IM platform ("telegram" | "lark" | ...) when the conversation is a
-   *  channel-originated turn; null/absent for local conversations. */
-  channel_platform?: string | null;
-  /** Originating subsystem of the turn's user message (companion/cron/autowork);
-   * null/absent = typed by a real person. */
-  origin?: string | null;
 }
 
-/** `message.userCreated` broadcast: a user message was persisted (covers IM
- *  channel inbound messages — the companion window renders those as incoming
- *  bubble headers). Same companion wire markers as IResponseMessage. */
+/** A newly accepted canonical input, shared by all windows and sending surfaces. */
 export interface IUserMessageCreatedEvent {
   idmm_decision?: IdmmDecisionExplanation;
   interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
@@ -3274,9 +3253,9 @@ export interface IUserMessageCreatedEvent {
   status: string;
   hidden?: boolean;
   origin?: string | null;
-  companion?: boolean;
-  companion_id?: CompanionId | null;
   channel_platform?: string | null;
+  /** Canonical message wall-clock time; created_at remains the ordering cursor. */
+  display_at_ms?: number;
   created_at: number;
 }
 
@@ -3304,10 +3283,6 @@ export interface IConversationTurnStartedEvent {
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };
-  companion?: boolean;
-  companion_id?: CompanionId | null;
-  origin?: string | null;
-  channel_platform?: string | null;
 }
 
 export interface IConversationTurnCompletedEvent {

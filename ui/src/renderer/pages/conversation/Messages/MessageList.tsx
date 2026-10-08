@@ -238,13 +238,20 @@ const getThinkingDurationMs = (item: IRenderableItem): number | undefined => {
   return duration;
 };
 
-const getProcessedItemProcessStartedAt = (item: IRenderableItem): number => getProcessedItemCreatedAt(item);
+const getProcessedItemProcessStartedAt = (item: IRenderableItem): number => {
+  // Canonical text created_at is a Session/keyset cursor, not elapsed time.
+  // Legacy messages without a separate wall clock already use created_at as one.
+  const displayAt = item.type === 'text' ? item.content.display_at_ms : undefined;
+  return typeof displayAt === 'number' && Number.isFinite(displayAt)
+    ? displayAt
+    : getProcessedItemCreatedAt(item);
+};
 
 const getProcessedItemProcessEndedAt = (item: IRenderableItem): number => {
-  const createdAt = getProcessedItemCreatedAt(item);
+  const startedAt = getProcessedItemProcessStartedAt(item);
   const duration = getThinkingDurationMs(item);
-  if (duration === undefined) return createdAt;
-  return createdAt + duration;
+  if (duration === undefined) return startedAt;
+  return startedAt + duration;
 };
 
 const getProcessedItemTurnStartedAt = (item: IRenderableItem): number | undefined => {

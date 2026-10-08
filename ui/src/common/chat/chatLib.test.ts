@@ -6,7 +6,6 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
-  parseCompanionId,
   parseConversationId,
   parseKnowledgeBaseId,
   parseMessageId,
@@ -45,7 +44,6 @@ describe('structured error diagnosis', () => {
 
 const MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000001');
 const SECOND_MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000002');
-const COMPANION_ID = parseCompanionId('019b0000-0000-7000-8000-000000000001');
 
 test('late user-message acknowledgements retain persisted camera observations and device provenance', () => {
   const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
@@ -596,9 +594,8 @@ describe('transformMessage runtime field normalization', () => {
         position: 'right',
         status: 'finish',
         channel_platform: 'telegram',
-        companion: true,
-        companion_id: COMPANION_ID,
         created_at: 1234,
+        display_at_ms: 1700000000000,
       },
       parseConversationId('0190f5fe-7c00-7a00-8000-000000000002')
     );
@@ -609,6 +606,8 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.msg_id).toBe(MESSAGE_ID);
     expect(message.position).toBe('right');
     expect(message.status).toBe('finish');
+    expect(message.created_at).toBe(1234);
+    expect(message.content.display_at_ms).toBe(1700000000000);
     expect(message.created_at).toBe(1234);
     expect(message.content.content).toBe('from IM');
   });

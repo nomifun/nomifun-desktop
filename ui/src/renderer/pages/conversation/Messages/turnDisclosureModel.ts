@@ -182,9 +182,12 @@ const getEffectiveProcessState = (
   return state;
 };
 
-const getProcessStartAt = (entry: TurnDisclosureInputItem): number => entry.processStartedAt ?? entry.createdAt;
+const getContentTime = (entry: TurnDisclosureInputItem): number =>
+  isTurnTimestamp(entry.displayAt) ? entry.displayAt : entry.createdAt;
 
-const getProcessEndAt = (entry: TurnDisclosureInputItem): number => entry.processEndedAt ?? entry.createdAt;
+const getProcessStartAt = (entry: TurnDisclosureInputItem): number => entry.processStartedAt ?? getContentTime(entry);
+
+const getProcessEndAt = (entry: TurnDisclosureInputItem): number => entry.processEndedAt ?? getContentTime(entry);
 
 const buildEmptyRunningDisclosure = (
   turnId: MessageId,
@@ -550,11 +553,14 @@ export function buildTurnDisclosureItems(
     if (item.turnId && item.role === 'user') {
       if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
       const currentStart = turnStartedAtByTurn.get(item.turnId);
+      const requestStartedAt = getProcessStartAt(item);
       if (
         !authoritativeStartedTurns.has(item.turnId) &&
-        (currentStart === undefined || item.createdAt < currentStart)
+        (currentStart === undefined || requestStartedAt < currentStart)
       ) {
-        turnStartedAtByTurn.set(item.turnId, item.createdAt);
+        // Before turn.started arrives, use the accepted request's wall clock,
+        // never its canonical history-order cursor. Exact Turn timing wins later.
+        turnStartedAtByTurn.set(item.turnId, requestStartedAt);
       }
     }
     if (item.turnId && item.role === 'assistant') {

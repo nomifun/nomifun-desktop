@@ -1147,6 +1147,8 @@ export const transformUserCreatedEvent = (
     created_at: event.created_at,
     content: {
       content: event.content,
+      ...(typeof event.display_at_ms === 'number' && Number.isFinite(event.display_at_ms) && event.display_at_ms > 0
+        ? { display_at_ms: event.display_at_ms } : {}),
       ...(event.interaction ? { interaction: event.interaction } : {}),
       ...(decision ? { idmm_decision: decision } : {}),
     },
