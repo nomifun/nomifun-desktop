@@ -22,8 +22,10 @@ import {
 } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
 import { projectDocumentWithPendingTaskIds } from '../editor/editorModel';
-import { canvasCommandPreservesPendingTaskOwners } from '../editor/pendingTaskGuard';
-import type { CanvasImageComposerEditorPort } from './canvasImageComposerRuntime';
+import { pendingTaskCommandGuard } from '../editor/pendingTaskGuard';
+import type {
+  CanvasImageComposerEditorPort,
+} from './canvasImageComposerRuntime';
 import {
   orphanCanvasImageComposeTask,
   persistCanvasImageComposePendingTask,
@@ -444,9 +446,7 @@ describe('canvas image composer runtime integration', () => {
       const deleteSource = canvasCommands.deleteSelection({ nodeIds: [source.id] });
 
       expect(
-        canvasCommandPreservesPendingTaskOwners(
-          harness.state(), harness.pending(), deleteSource
-        )
+        pendingTaskCommandGuard(harness.state(), deleteSource, harness.pending()).allowed
       ).toBe(false);
 
       await settleCanvasImageComposeTask({
@@ -477,9 +477,7 @@ describe('canvas image composer runtime integration', () => {
       });
       expect(harness.pending()).toEqual([]);
       expect(
-        canvasCommandPreservesPendingTaskOwners(
-          harness.state(), harness.pending(), deleteSource
-        )
+        pendingTaskCommandGuard(harness.state(), deleteSource, harness.pending()).allowed
       ).toBe(true);
 
       harness.editor.dispatch(deleteSource);

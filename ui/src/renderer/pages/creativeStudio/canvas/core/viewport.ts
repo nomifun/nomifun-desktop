@@ -57,15 +57,6 @@ export function zoomViewportAtPoint(
   };
 }
 
-export function scaleViewportAtPoint(
-  viewport: CanvasViewport,
-  factor: number,
-  clientAnchor: CanvasPoint
-): CanvasViewport {
-  const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
-  return zoomViewportAtPoint(viewport, viewport.zoom * safeFactor, clientAnchor);
-}
-
 /** Panning deltas are expressed in client pixels, independent of zoom. */
 export function panViewport(viewport: CanvasViewport, clientDelta: CanvasPoint): CanvasViewport {
   const current = normalizeCanvasViewport(viewport);

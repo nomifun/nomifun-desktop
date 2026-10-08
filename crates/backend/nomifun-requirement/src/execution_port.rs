@@ -7,7 +7,7 @@
 //! receipt, or Conversation turn mutation API. Waiting-for-user remains a
 //! live AgentExecution state rather than becoming a second queue receipt.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -68,10 +68,6 @@ impl FrozenAutoWorkWorkspace {
 
     pub fn as_str(&self) -> &str {
         &self.root
-    }
-
-    pub fn into_path_buf(self) -> PathBuf {
-        PathBuf::from(self.root)
     }
 }
 

@@ -1,7 +1,7 @@
 //! Exact, durable work interaction identities. Media has no execution authority.
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
-use crate::{AgentSessionId, EventId, OperationId, SessionEventCursor};
+use crate::{AgentSessionId, OperationId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -29,16 +29,6 @@ pub enum WorkInteractionStatus {
     Rejected,
     Deferred,
     Terminal,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WorkInteractionReceipt {
-    pub operation_id: EventId,
-    pub target: WorkTarget,
-    pub status: WorkInteractionStatus,
-    pub cursor: SessionEventCursor,
-    pub duplicate: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

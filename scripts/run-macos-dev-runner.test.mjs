@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdtemp, writeFile, mkdir, readFile, rm, chmod } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EventEmitter, once } from 'node:events';
 import { connect } from 'node:net';
@@ -43,7 +43,7 @@ describe('macOS cargo runner', () => {
     expect(() => fastBuildInvocation(['--', '--profile=release'], 'darwin', 'arm64')).toThrow('debug profile');
   });
 
-  test('uses Cargo executable reports and propagates compilation failure without launching', async () => {
+  test.skipIf(process.platform === 'win32')('uses POSIX Cargo executable reports and propagates compilation failure without launching', async () => {
     const root = await mkdtemp(join(tmpdir(), 'nomifun-cargo-report-'));
     try {
       const cargo = join(root, 'cargo');
@@ -59,6 +59,15 @@ describe('macOS cargo runner', () => {
       } catch (error) { expect(error.exitCode).toBe(101); }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+
+  test('a missing Cargo executable rejects without waiting for stdout EOF', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nomifun-missing-cargo-'));
+    try {
+      await expect(runCargoArtifact(['build'], 'nomifun-desktop', {
+        cwd: root, environment: { PATH: root },
+      })).rejects.toHaveProperty('code', 'ENOENT');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 1500);
 
   test('reuses only a validated pinned compile cache and never passes CEF_PATH to the app', async () => {
     const environment = { CEF_PATH: '/ambient-unverified', FLATPAK: '1', NOMIFUN_DATA_DIR: '/isolated', TAURI_CONFIG: '{"identifier":"fixture"}' };
@@ -152,7 +161,7 @@ describe('complete development app cache', () => {
       const first = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment }, hooks);
       const second = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment: { ...environment, NOMIFUN_DATA_DIR: '/second-data' } }, hooks);
       expect(first).not.toBe(second);
-      expect(first).toEndWith('.app/Contents/MacOS/nomifun-desktop');
+      expect(first).toEndWith(join('.app', 'Contents', 'MacOS', 'nomifun-desktop'));
       expect(await readFile(join(dirname(dirname(first)), 'Info.plist'), 'utf8')).toContain('com.nomifun.fixture');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
@@ -231,7 +240,7 @@ describe('complete development app cache', () => {
           expect(await readFile(join(appPath, 'Contents/Info.plist'), 'utf8')).toBe('this-fast-build-identity');
         },
       });
-      expect(appPath).toContain('/bundle/macos-fast/run-');
+      expect(appPath).toContain(`${sep}${join('bundle', 'macos-fast', 'run-')}`);
       expect(await readFile(join(dirname(appPath), 'build-identity.json'), 'utf8')).toContain('hostSha256');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
@@ -297,10 +306,14 @@ describe('macOS watch generation ownership', () => {
   });
 
   test('rejects arbitrary launch paths and keeps each control socket private', async () => {
-    const request = { program: '/workspace/target/macos-dev-browser/key/NomiFun Dev.app/Contents/MacOS/nomifun-desktop', args: ['中文'], environment: { NOMIFUN_DATA_DIR: '/isolated' }, cwd: '/workspace/apps/desktop' };
-    expect(validateDevelopmentLaunch(request, '/workspace').environment.NOMIFUN_DATA_DIR).toBe('/isolated');
-    expect(() => validateDevelopmentLaunch({ ...request, program: '/Applications/Other.app/Contents/MacOS/nomifun-desktop' }, '/workspace')).toThrow('owned');
-    expect(() => validateDevelopmentLaunch({ ...request, cwd: '/outside' }, '/workspace')).toThrow('workspace');
+    const root = join(tmpdir(), 'nomifun-owned-workspace');
+    const cache = join(root, 'target', 'macos-dev-browser');
+    const request = { program: join(cache, 'key', 'NomiFun Dev.app', 'Contents', 'MacOS', 'nomifun-desktop'), args: ['中文'], environment: { NOMIFUN_DATA_DIR: '/isolated' }, cwd: join(root, 'apps', 'desktop') };
+    expect(validateDevelopmentLaunch(request, root).environment.NOMIFUN_DATA_DIR).toBe('/isolated');
+    expect(() => validateDevelopmentLaunch({ ...request, program: join(tmpdir(), 'Applications', 'Other.app', 'Contents', 'MacOS', 'nomifun-desktop') }, root)).toThrow('owned');
+    expect(() => validateDevelopmentLaunch({ ...request, program: join(cache, 'key', 'NomiFun Dev.app', 'Contents', 'MacOS', 'other-binary') }, root)).toThrow('owned');
+    expect(() => validateDevelopmentLaunch({ ...request, program: join(root, 'target', 'macos-dev-browser-other', 'Other.app', 'Contents', 'MacOS', 'nomifun-desktop') }, root)).toThrow('owned');
+    expect(() => validateDevelopmentLaunch({ ...request, cwd: join(tmpdir(), 'outside') }, root)).toThrow('workspace');
   });
 
   test('unproven native cleanup closes admission and never force kills the app', async () => {

@@ -1,15 +1,12 @@
 //! Repository trait for the `agent_metadata` table.
 
 use crate::error::DbError;
-use crate::models::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
+use crate::models::{AgentMetadataRow, UpsertAgentMetadataParams};
 
 /// CRUD access for agent metadata rows.
 ///
 /// The table is the single source of truth for how each agent is spawned
-/// and what static capabilities it exposes. Handshake-derived fields
-/// (`agent_capabilities`, `auth_methods`, `config_options`,
-/// `available_modes`, `available_models`, `available_commands`) are
-/// refreshed separately via [`IAgentMetadataRepository::apply_handshake`].
+/// and what static metadata it exposes.
 #[async_trait::async_trait]
 pub trait IAgentMetadataRepository: Send + Sync {
     /// Return every row, in insertion order.
@@ -32,14 +29,6 @@ pub trait IAgentMetadataRepository: Send + Sync {
 
     /// Insert or replace a row. Returns the row as stored.
     async fn upsert(&self, params: &UpsertAgentMetadataParams<'_>) -> Result<AgentMetadataRow, DbError>;
-
-    /// Apply handshake-derived fields on top of an existing row.
-    /// Returns `Ok(None)` if no row matches `agent_id`.
-    async fn apply_handshake(
-        &self,
-        agent_id: &str,
-        params: &UpdateAgentHandshakeParams<'_>,
-    ) -> Result<Option<AgentMetadataRow>, DbError>;
 
     /// Toggle the `enabled` flag. Returns `true` if a row was updated.
     async fn set_enabled(&self, agent_id: &str, enabled: bool) -> Result<bool, DbError>;

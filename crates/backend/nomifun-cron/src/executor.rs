@@ -32,7 +32,6 @@ use crate::skill_file::{
 };
 use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
-pub const RETRY_INTERVAL_MS: u64 = 30_000;
 const DURABLE_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DURABLE_RECEIPT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_RECEIPT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);

@@ -25,7 +25,6 @@ pub mod stage_direction;
 pub mod text_search;
 mod timestamp;
 mod types;
-pub mod vision_registry;
 pub mod zip_safe;
 
 pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
@@ -87,7 +86,6 @@ pub use provider_lifecycle::{ProviderLifecycleBarrier, SharedProviderLifecycleBa
 pub use provider_usage::{ProviderInUseDetails, ProviderUsage, ProviderUsageFeature};
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, EnvVar, ProviderWithModel};
-pub use vision_registry::VisionUnsupportedRegistry;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn publish_new_file_noreplace(

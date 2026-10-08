@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BackendHttpError } from '@/common/adapter/httpBridge';
-
 import type { CreativeProjectDocument } from '../domain/schema';
 import type { CreativeTaskPort } from './port';
 import {
@@ -289,92 +287,4 @@ export function pendingCreativeTaskReferences(
       capability: data.capability,
     };
   });
-}
-
-export interface CreativeTaskRecovery {
-  tasks: CreativeTask[];
-  outputs: CreativeTaskOutput[];
-  issues: CreativeTaskRecoveryIssue[];
-}
-
-interface CreativeTaskRecoveryIssue {
-  reference: CreativeTaskReference;
-  kind: 'orphaned' | 'contract' | 'request';
-  error: Error;
-}
-
-/** Recover all persisted pending references; caller ownership is checked on every response. */
-export async function recoverPendingCreativeTasks(
-  port: CreativeTaskPort,
-  references: readonly CreativeTaskReference[],
-  options: CreativeTaskPollOptions = {}
-): Promise<CreativeTaskRecovery> {
-  const taskIds = references.map((reference) => reference.taskId);
-  if (new Set(taskIds).size !== taskIds.length) {
-    throw new CreativeTaskContractError(
-      'invalid_request',
-      'Pending creative task references contain duplicate task ids',
-      'references'
-    );
-  }
-
-  throwIfAborted(options.signal);
-  const settled = await Promise.all(
-    references.map(async (reference) => {
-      try {
-        const task = await pollCreativeTask(port, reference, options);
-        return { reference, task, error: null };
-      } catch (reason) {
-        return {
-          reference,
-          task: null,
-          error: reason instanceof Error ? reason : new Error(String(reason)),
-        };
-      }
-    })
-  );
-  throwIfAborted(options.signal);
-  const tasks = settled
-    .map((result) => result.task)
-    .filter((task): task is CreativeTask => task !== null);
-  const issues = settled.flatMap((result): CreativeTaskRecoveryIssue[] => {
-    if (!result.error) return [];
-    const kind = result.error instanceof BackendHttpError && result.error.status === 404
-      ? 'orphaned'
-      : result.error instanceof CreativeTaskContractError
-        ? 'contract'
-        : 'request';
-    return [{ reference: result.reference, kind, error: result.error }];
-  });
-  return {
-    tasks,
-    outputs: tasks
-      .map(projectCreativeTaskOutput)
-      .filter((output): output is CreativeTaskOutput => output !== null),
-    issues,
-  };
-}
-
-/** Monotonic response fence used by hooks to ignore late responses even when a port ignores abort. */
-export class CreativeTaskRequestFence {
-  private revision = 0;
-
-  begin(): number {
-    this.revision += 1;
-    return this.revision;
-  }
-
-  invalidate(): void {
-    this.revision += 1;
-  }
-
-  isCurrent(revision: number): boolean {
-    return revision === this.revision;
-  }
-
-  commit(revision: number, effect: () => void): boolean {
-    if (!this.isCurrent(revision)) return false;
-    effect();
-    return true;
-  }
 }

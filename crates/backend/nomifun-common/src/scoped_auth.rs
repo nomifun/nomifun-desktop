@@ -875,11 +875,6 @@ impl LoopbackCapabilityLeaseSet {
         self.leases.is_empty()
     }
 
-    pub fn revoke_all(&self) {
-        for lease in &self.leases {
-            lease.revoke();
-        }
-    }
 }
 
 impl std::fmt::Display for LoopbackCapabilityError {

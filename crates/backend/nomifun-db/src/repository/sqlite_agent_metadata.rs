@@ -4,7 +4,7 @@ use nomifun_common::now_ms;
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
+use crate::models::{AgentMetadataRow, UpsertAgentMetadataParams};
 use crate::repository::agent_metadata::IAgentMetadataRepository;
 
 #[derive(Clone, Debug)]
@@ -74,10 +74,8 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                  source_key, \
                  enabled, command, args, env, native_skills_dirs, \
                  behavior_policy, \
-                 agent_capabilities, auth_methods, config_options, \
-                 available_models, available_commands, \
                  sort_order, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(agent_id) DO UPDATE SET \
                 icon = excluded.icon, \
                 name = excluded.name, \
@@ -94,11 +92,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                 env = excluded.env, \
                 native_skills_dirs = excluded.native_skills_dirs, \
                 behavior_policy = excluded.behavior_policy, \
-                agent_capabilities = excluded.agent_capabilities, \
-                auth_methods = excluded.auth_methods, \
-                config_options = excluded.config_options, \
-                available_models = excluded.available_models, \
-                available_commands = excluded.available_commands, \
                 sort_order = excluded.sort_order, \
                 updated_at = excluded.updated_at",
         )
@@ -118,11 +111,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .bind(params.env)
         .bind(params.native_skills_dirs)
         .bind(params.behavior_policy)
-        .bind(params.agent_capabilities)
-        .bind(params.auth_methods)
-        .bind(params.config_options)
-        .bind(params.available_models)
-        .bind(params.available_commands)
         .bind(params.sort_order)
         .bind(now)
         .bind(now)
@@ -134,55 +122,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
             .await?
             .ok_or_else(|| DbError::Init(format!("upsert did not produce row for id '{}'", params.agent_id)))?;
         Ok(row)
-    }
-
-    async fn apply_handshake(
-        &self,
-        id: &str,
-        params: &UpdateAgentHandshakeParams<'_>,
-    ) -> Result<Option<AgentMetadataRow>, DbError> {
-        let Some(existing) = self.get(id).await? else {
-            return Ok(None);
-        };
-
-        let now = now_ms();
-        let agent_capabilities = params
-            .agent_capabilities
-            .map_or(existing.agent_capabilities, |v| v.map(String::from));
-        let auth_methods = params
-            .auth_methods
-            .map_or(existing.auth_methods, |v| v.map(String::from));
-        let config_options = params
-            .config_options
-            .map_or(existing.config_options, |v| v.map(String::from));
-        let available_models = params
-            .available_models
-            .map_or(existing.available_models, |v| v.map(String::from));
-        let available_commands = params
-            .available_commands
-            .map_or(existing.available_commands, |v| v.map(String::from));
-
-        sqlx::query(
-            "UPDATE agent_metadata SET \
-                agent_capabilities = ?, \
-                auth_methods = ?, \
-                config_options = ?, \
-                available_models = ?, \
-                available_commands = ?, \
-                updated_at = ? \
-             WHERE agent_id = ?",
-        )
-        .bind(&agent_capabilities)
-        .bind(&auth_methods)
-        .bind(&config_options)
-        .bind(&available_models)
-        .bind(&available_commands)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-
-        self.get(id).await
     }
 
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, DbError> {
@@ -295,11 +234,6 @@ mod tests {
             env: Some("[]"),
             native_skills_dirs: Some(r#"[".nomi/skills"]"#),
             behavior_policy: Some(r#"{"supports_side_question":true}"#),
-            agent_capabilities: None,
-            auth_methods: None,
-            config_options: None,
-            available_models: None,
-            available_commands: None,
             sort_order: 1100,
         }
     }
@@ -373,70 +307,6 @@ mod tests {
 
         assert_eq!(row.agent_id, NOMI_AGENT_ID);
         assert_eq!(row.source_key.as_deref(), Some("agent_builtin_nomi"));
-    }
-
-    #[tokio::test]
-    async fn apply_handshake_updates_only_specified_fields() {
-        let (repo, _db) = setup().await;
-        let updated = repo
-            .apply_handshake(
-                NOMI_AGENT_ID,
-                &UpdateAgentHandshakeParams {
-                    agent_capabilities: Some(Some(r#"{"loadSession":true}"#)),
-                    auth_methods: Some(Some(r#"[{"id":"oauth"}]"#)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap()
-            .expect("claude row exists");
-
-        assert_eq!(updated.agent_capabilities.as_deref(), Some(r#"{"loadSession":true}"#));
-        assert_eq!(updated.auth_methods.as_deref(), Some(r#"[{"id":"oauth"}]"#));
-        assert!(updated.config_options.is_none());
-    }
-
-    #[tokio::test]
-    async fn apply_handshake_can_clear_to_null() {
-        let (repo, _db) = setup().await;
-        repo.apply_handshake(
-            NOMI_AGENT_ID,
-            &UpdateAgentHandshakeParams {
-                agent_capabilities: Some(Some(r#"{"x":1}"#)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let cleared = repo
-            .apply_handshake(
-                NOMI_AGENT_ID,
-                &UpdateAgentHandshakeParams {
-                    agent_capabilities: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(cleared.agent_capabilities.is_none());
-    }
-
-    #[tokio::test]
-    async fn apply_handshake_missing_row_returns_none() {
-        let (repo, _db) = setup().await;
-        let res = repo
-            .apply_handshake(
-                "does-not-exist",
-                &UpdateAgentHandshakeParams {
-                    agent_capabilities: Some(Some("{}")),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert!(res.is_none());
     }
 
     #[tokio::test]

@@ -376,19 +376,6 @@ impl CompanionRegistry {
             .collect()
     }
 
-    /// 解析"代表全家发声"的伙伴 id（单一事实源，learner 与 evolution 引擎共用）。
-    /// 存活的显式默认体优先；否则首个注册伙伴；空 roster 返回 `None`。
-    /// liveness 检查同时修掉"默认体已删除却仍被当 owner"的潜伏问题。
-    pub async fn resolve_default(&self, default_companion_id: Option<&str>) -> Option<String> {
-        let ids = self.ids().await;
-        if let Some(default_companion_id) = default_companion_id
-            && ids.iter().any(|id| id == default_companion_id)
-        {
-            return Some(default_companion_id.to_owned());
-        }
-        ids.into_iter().next()
-    }
-
     /// 侧存储行归属的唯一解析器：共享记忆 / 共享技能都已删除，每条记忆、每个
     /// 技能都必须有主人，所以每个「没有明确伙伴」的写入方（以及启动时的两个
     /// 认领迁移）都用这里解析出来的 owner。顺序见 [`row_owner_of`]。
@@ -703,27 +690,6 @@ mod tests {
         assert_eq!(base["appearance"]["companion_y"], 42);
         assert_eq!(base["appearance"]["companion_enabled"], false);
         assert_eq!(base["learn"]["interval_minutes"], 60);
-    }
-
-    #[tokio::test]
-    async fn resolve_default_prefers_alive_explicit_then_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let reg = CompanionRegistry::scan(
-            dir.path().join("companions"),
-            dir.path().join("shared"),
-        )
-        .unwrap();
-        // 空 roster → 无默认伙伴
-        assert_eq!(reg.resolve_default(None).await, None);
-        let _a = reg.create("甲", "ink").await.unwrap();
-        let b = reg.create("乙", "ink").await.unwrap();
-        let first = reg.ids().await.into_iter().next().unwrap();
-        // 显式默认体且存活 → 用之
-        assert_eq!(reg.resolve_default(Some(&b.companion_id)).await.as_deref(), Some(b.companion_id.as_str()));
-        // 显式默认体已删（不在 roster）→ 回退首个注册
-        assert_eq!(reg.resolve_default(Some("malformed-companion-id")).await.as_deref(), Some(first.as_str()));
-        // 未配置默认体 → 首个注册
-        assert_eq!(reg.resolve_default(None).await.as_deref(), Some(first.as_str()));
     }
 
     /// 归属的解析顺序是一个产品契约（共享记忆 / 共享技能删除后，每条记忆、每个

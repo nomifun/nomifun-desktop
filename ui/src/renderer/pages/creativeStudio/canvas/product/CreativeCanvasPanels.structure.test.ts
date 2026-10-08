@@ -38,7 +38,6 @@ describe('Creative Canvas product panel boundaries', () => {
     }
     expect(source.includes("data-unavailable-kind={kind}")).toBe(true);
     expect(source.includes('creativeStudio.canvas.history')).toBe(false);
-    expect(source.includes('creativeStudio.canvas.unavailable.agentDescription')).toBe(true);
     expect(source.includes('creativeStudio.canvas.properties.editLabel')).toBe(true);
   });
 

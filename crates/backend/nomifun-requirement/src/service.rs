@@ -1358,39 +1358,6 @@ impl RequirementService {
     }
 
 
-    /// WITHOUT consuming an attempt (the turn never ran). Wakes loops to retry.
-    pub async fn unclaim_busy(
-        &self,
-        id: &str,
-        owner_id: &str,
-        kind: AutoWorkTargetKind,
-        expected_generation: i64,
-        expected_claim_token: &str,
-    ) -> Result<bool, AppError> {
-        let id = validate_requirement_id(id)?;
-        let expected_claim_token = validate_claim_token(expected_claim_token)?;
-        let owners = match kind {
-            AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
-            AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
-        };
-        let abandoned = self
-            .repo
-            .abandon_claim_before_admission_exact(
-                id,
-                owners.0,
-                owners.1,
-                expected_generation,
-                expected_claim_token,
-                now_ms(),
-            )
-            .await?;
-        if let Some(updated) = &abandoned {
-            self.emitter.emit_status_changed(&row_to_dto(updated));
-            self.wake_autowork();
-        }
-        Ok(abandoned.is_some())
-    }
-
     /// Reconcile every Requirement bound to a now-deleted session.
     ///
     /// The owner columns intentionally have no cross-table FK, so a deleted

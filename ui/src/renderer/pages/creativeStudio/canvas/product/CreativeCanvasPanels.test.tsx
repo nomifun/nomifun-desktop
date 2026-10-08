@@ -10,10 +10,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { CreativeCanvasNode } from '../../domain';
 import type { CanvasState } from '../core';
 import {
-  CreativeCanvasAssistantUnwiredPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
-  CreativeCanvasTemplateUnwiredPanel,
   creativeCanvasNodeDisplayName,
 } from './CreativeCanvasPanels';
 
@@ -186,21 +184,6 @@ describe('Creative Canvas product presentation panels', () => {
     const html = renderToStaticMarkup(<CreativeCanvasPropertiesPanel state={state()} />);
     expect(html.includes('未连接 canonical 更新命令')).toBe(true);
     expect(html.includes('aria-label="编辑节点属性"')).toBe(false);
-  });
-
-  test('keeps remaining unavailable agent and template adapters explicit', () => {
-    const html = renderToStaticMarkup(
-      <>
-        <CreativeCanvasAssistantUnwiredPanel />
-        <CreativeCanvasTemplateUnwiredPanel />
-      </>
-    );
-
-    expect(html.includes('data-unavailable-kind="assistant"')).toBe(true);
-    expect(html.includes('画布专属会话绑定')).toBe(true);
-    expect(html.includes('data-unavailable-kind="templates"')).toBe(true);
-    expect(html.includes('不会显示示例模板')).toBe(true);
-    expect(html.includes('<textarea')).toBe(false);
   });
 
   test('projects display names only from canonical node data', () => {

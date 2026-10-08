@@ -109,10 +109,8 @@ fn resolve_bedrock_config(
 }
 
 /// Image input follows the selected protocol serializer. Catalog traits are
-/// advisory; only an explicit upstream rejection can narrow runtime support.
+/// advisory; the exact protocol declares the supported input modalities.
 pub(crate) fn capability_supports_image(
-    provider_id: &str,
-    model: &str,
     protocol_id: &str,
 ) -> bool {
     nomifun_chat_model_broker::chat_protocol_for_id(protocol_id)
@@ -120,8 +118,6 @@ pub(crate) fn capability_supports_image(
             nomifun_chat_model_broker::protocol_features(protocol)
                 .contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput)
         })
-        && !nomifun_common::VisionUnsupportedRegistry::global()
-            .is_unsupported(provider_id, model)
 }
 
 /// Intermediate result of resolving a provider DB row before building a full
@@ -416,11 +412,7 @@ async fn resolve_provider_fields_at_revision(
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
         api_path: base_url.as_ref().map(|_| String::new()),
-        supports_image: Some(capability_supports_image(
-            provider_id,
-            model,
-            &task.protocol,
-        )),
+        supports_image: Some(capability_supports_image(&task.protocol)),
         max_tokens_field,
         require_reasoning_content,
         chain_rounds,
@@ -877,17 +869,13 @@ mod image_override_tests {
     use super::*;
 
     #[test]
-    fn image_input_uses_protocol_support_and_explicit_upstream_rejection() {
+    fn image_input_uses_exact_protocol_support() {
         for protocol in ["openai.chat_text", "openai.responses", "anthropic.messages",
             "gemini.generate_text", "bedrock.anthropic_messages", "vertex.anthropic_messages"] {
-            assert!(capability_supports_image("image-default-test", protocol, protocol));
+            assert!(capability_supports_image(protocol));
         }
-        assert!(!capability_supports_image("image-default-test", "image-only", "openai.images"));
+        assert!(!capability_supports_image("openai.images"));
 
-        nomifun_common::VisionUnsupportedRegistry::global()
-            .mark_unsupported("image-rejection-test", "rejected-model");
-        assert!(!capability_supports_image("image-rejection-test", "rejected-model", "openai.chat_text"));
-        assert!(capability_supports_image("other-image-provider", "rejected-model", "openai.chat_text"));
     }
 }
 

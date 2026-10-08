@@ -479,19 +479,6 @@ impl CompanionService {
         let _ = self.cleanup_hooks.set(hooks);
     }
 
-    /// Build the `CompanionMemorySink` the agent factory needs — gives every
-    /// companion_session conversation the recall/save/recent-events tools.
-    pub fn memory_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionMemorySink> {
-        Arc::new(crate::companion::CompanionStoreSink {
-            store: self.store.clone(),
-            config: self.config.clone(),
-            registry: self.registry.clone(),
-            emitter: self.emitter.clone(),
-            companion_dir: self.shared_dir.clone(),
-            event_store_lock: self.event_store_lock.clone(),
-        })
-    }
-
     /// Build the `CompanionSkillSink` the agent factory needs — gives companion_session
     /// conversations the `companion_skill` tool + the per-turn when_to_use injection
     /// over the owning companion's self-evolved skills (design §7).

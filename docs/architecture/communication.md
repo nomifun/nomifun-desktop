@@ -57,6 +57,12 @@ committed state, while `agentExecution.leadThinking` carries transient lead
 thinking. Clients deduplicate the first by sequence and refill detail/events
 over HTTP; no parallel execution-event family exists.
 
+The in-process Runtime records typed `AgentEngineEvent` through `engine_journal`
+into the canonical Session. `nomifun-ai-agent::protocol::events::AgentStreamEvent`
+projects realtime presentation into `WebSocketMessage`; shared tool categories
+come from `nomi-types::tool::ToolCategory`. Authority, pauses, and recovery remain
+with the canonical owner and native Runtime described in [Agent Session](agent-session.md).
+
 ## Tauri IPC
 
 Rust commands currently registered by the desktop shell include:

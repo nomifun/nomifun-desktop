@@ -5,8 +5,7 @@
  */
 
 import { findCanvasGraphNode } from './document';
-import type { CanvasDocument, CanvasEdge, CanvasIdFactory } from './types';
-import { createCanvasId } from './document';
+import type { CanvasDocument } from './types';
 
 export type CanvasConnectionErrorCode =
   | 'missing_source'
@@ -54,32 +53,4 @@ export function validateCanvasConnection(
     return { ok: false, code: 'config_to_config' };
   }
   return { ok: true };
-}
-
-export type ConnectCanvasNodesResult =
-  | { ok: true; edge: CanvasEdge }
-  | { ok: false; code: CanvasConnectionErrorCode };
-
-export function connectCanvasNodes(
-  document: CanvasDocument,
-  candidate: CanvasConnectionCandidate,
-  options: {
-    edgeId?: string;
-    sourceHandle?: string | null;
-    targetHandle?: string | null;
-    idFactory?: CanvasIdFactory;
-  } = {}
-): ConnectCanvasNodesResult {
-  const validation = validateCanvasConnection(document, candidate);
-  if (!validation.ok) return validation;
-  return {
-    ok: true,
-    edge: {
-      id: options.edgeId ?? (options.idFactory ?? createCanvasId)('edge'),
-      sourceNodeId: candidate.sourceNodeId,
-      targetNodeId: candidate.targetNodeId,
-      sourceHandle: options.sourceHandle ?? null,
-      targetHandle: options.targetHandle ?? null,
-    },
-  };
 }

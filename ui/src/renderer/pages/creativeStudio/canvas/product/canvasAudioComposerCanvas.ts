@@ -8,7 +8,6 @@ import type { CreativeAsset } from '../../assets';
 import type {
   CreativeCanvasConnection,
   CreativeCanvasNode,
-  CreativeGenerationStatus,
   CreativeProjectDocument,
   CreativeSize,
 } from '../../domain';
@@ -49,12 +48,6 @@ export interface CanvasAudioComposeSettings {
 export interface CanvasAudioComposeDraft {
   prompt: string;
   settings: CanvasAudioComposeSettings;
-}
-
-export interface CanvasAudioComposeTaskSummary {
-  state: CreativeGenerationStatus;
-  pendingCount: number;
-  message?: string;
 }
 
 export interface PreparedCanvasAudioCompose {
@@ -133,18 +126,6 @@ export function canvasAudioComposeProtocolProfile(
     fieldSupport: { ...selected.fieldSupport },
   };
 }
-
-export function canvasAudioComposeFieldSupport(
-  protocol: string
-): SpeechGenerationFieldSupport {
-  return canvasAudioComposeProtocolProfile(protocol).fieldSupport;
-}
-
-export const canvasAudioComposeVoiceRequired = (protocol: string): boolean =>
-  canvasAudioComposeProtocolProfile(protocol).voiceRequired;
-
-export const canvasAudioComposeMaxTextLength = (protocol: string): number =>
-  canvasAudioComposeProtocolProfile(protocol).maxTextLength;
 
 /** Voice IDs are protocol/provider scoped and must never cross that boundary. */
 export function canvasAudioComposeVoiceAfterModelChange(
@@ -236,19 +217,6 @@ export function withCanvasAudioComposeDraft(
         format: draft.settings.format,
       },
     },
-  };
-}
-
-export function canvasAudioComposeTaskSummary(
-  config: ConfigNode | null
-): CanvasAudioComposeTaskSummary {
-  if (!config) return { state: 'idle', pendingCount: 0 };
-  const pending =
-    config.data.status === 'queued' || config.data.status === 'running';
-  return {
-    state: config.data.status,
-    pendingCount: pending ? 1 : 0,
-    message: config.data.errorMessage ?? undefined,
   };
 }
 

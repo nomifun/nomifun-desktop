@@ -23,11 +23,6 @@ pub fn parse_secret_key(input: &str) -> Result<SecretKey, ChannelError> {
     }
 }
 
-/// Derive the x-only public key from a secret key.
-pub fn derive_pubkey(sk: &SecretKey) -> PublicKey {
-    Keys::new(sk.clone()).public_key()
-}
-
 /// Encode a public key as npub bech32.
 pub fn pubkey_to_npub(pk: &PublicKey) -> String {
     pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
@@ -129,24 +124,6 @@ pub fn has_p_tag(tags_json: &[serde_json::Value], target_pk_hex: &str) -> bool {
     })
 }
 
-/// Extract the sender pubkey hex from a raw event JSON value.
-pub fn extract_sender_pubkey(event: &serde_json::Value) -> Option<String> {
-    event.get("pubkey")?.as_str().map(|s| s.to_owned())
-}
-
-/// Extract the event id hex from a raw event JSON value.
-pub fn extract_event_id(event: &serde_json::Value) -> Option<String> {
-    event.get("id")?.as_str().map(|s| s.to_owned())
-}
-
-/// Verify an event's `id` field matches the NIP-01 hash of its contents.
-/// Returns true if valid (or if verification isn't critical for the flow).
-pub fn verify_event_id(event: &serde_json::Value) -> bool {
-    // Use the nostr crate's Event deserialization which validates id + sig.
-    // If parsing succeeds, the event is valid.
-    serde_json::from_value::<nostr::Event>(event.clone()).is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -165,7 +142,7 @@ mod tests {
     fn parse_hex_private_key() {
         let sk = parse_secret_key(SENDER_SK_HEX).unwrap();
         // Derive pubkey — should not panic.
-        let _pk = derive_pubkey(&sk);
+        let _pk = Keys::new(sk.clone()).public_key();
     }
 
     #[test]
@@ -186,17 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn pubkey_derivation_deterministic() {
-        let sk = parse_secret_key(SENDER_SK_HEX).unwrap();
-        let pk1 = derive_pubkey(&sk);
-        let pk2 = derive_pubkey(&sk);
-        assert_eq!(pk1, pk2);
-    }
-
-    #[test]
     fn npub_encoding() {
         let sk = parse_secret_key(SENDER_SK_HEX).unwrap();
-        let pk = derive_pubkey(&sk);
+        let pk = Keys::new(sk.clone()).public_key();
         let npub = pubkey_to_npub(&pk);
         assert!(npub.starts_with("npub1"));
     }
@@ -205,8 +174,8 @@ mod tests {
     fn nip04_roundtrip() {
         let sender_sk = parse_secret_key(SENDER_SK_HEX).unwrap();
         let receiver_sk = parse_secret_key(RECEIVER_SK_HEX).unwrap();
-        let sender_pk = derive_pubkey(&sender_sk);
-        let receiver_pk = derive_pubkey(&receiver_sk);
+        let sender_pk = Keys::new(sender_sk.clone()).public_key();
+        let receiver_pk = Keys::new(receiver_sk.clone()).public_key();
 
         let plaintext = "Hello, Nostr!";
         let ciphertext = nip04_encrypt(&sender_sk, &receiver_pk, plaintext).unwrap();
@@ -219,7 +188,7 @@ mod tests {
         // Known test vector from the nostr crate.
         let sender_sk = parse_secret_key(SENDER_SK_HEX).unwrap();
         let receiver_sk = parse_secret_key(RECEIVER_SK_HEX).unwrap();
-        let sender_pk = derive_pubkey(&sender_sk);
+        let sender_pk = Keys::new(sender_sk.clone()).public_key();
 
         let ciphertext = "dJc+WbBgaFCD2/kfg1XCWJParplBDxnZIdJGZ6FCTOg=?iv=M6VxRPkMZu7aIdD+10xPuw==";
         let plaintext = nip04_decrypt(&receiver_sk, &sender_pk, ciphertext).unwrap();
@@ -231,7 +200,7 @@ mod tests {
         let sender_sk = parse_secret_key(SENDER_SK_HEX).unwrap();
         let receiver_sk = parse_secret_key(RECEIVER_SK_HEX).unwrap();
         let sender_keys = Keys::new(sender_sk);
-        let receiver_pk = derive_pubkey(&receiver_sk);
+        let receiver_pk = Keys::new(receiver_sk.clone()).public_key();
 
         let (id, json) = build_dm_event(&sender_keys, &receiver_pk, "test message").unwrap();
         assert!(!id.is_empty());
@@ -284,33 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_sender_pubkey_works() {
-        let event = serde_json::json!({"pubkey": "abc123", "id": "def456"});
-        assert_eq!(extract_sender_pubkey(&event), Some("abc123".to_owned()));
-    }
-
-    #[test]
-    fn extract_event_id_works() {
-        let event = serde_json::json!({"pubkey": "abc123", "id": "def456"});
-        assert_eq!(extract_event_id(&event), Some("def456".to_owned()));
-    }
-
-    #[test]
-    fn self_loop_guard() {
-        // If sender pubkey == bot pubkey, the message should be skipped.
-        let sk = parse_secret_key(SENDER_SK_HEX).unwrap();
-        let pk = derive_pubkey(&sk);
-        let pk_hex = pk.to_hex();
-
-        let event = serde_json::json!({"pubkey": pk_hex});
-        let sender = extract_sender_pubkey(&event).unwrap();
-        assert_eq!(sender, pk_hex, "self-loop guard: sender == bot");
-    }
-
-    #[test]
     fn parse_pubkey_hex_valid() {
         let sk = parse_secret_key(SENDER_SK_HEX).unwrap();
-        let pk = derive_pubkey(&sk);
+        let pk = Keys::new(sk.clone()).public_key();
         let hex = pk.to_hex();
         let parsed = parse_pubkey_hex(&hex).unwrap();
         assert_eq!(parsed, pk);

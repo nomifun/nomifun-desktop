@@ -27,7 +27,6 @@ import {
   canvasVideoComposeSettings,
   canvasVideoComposeSourceAssetId,
   canvasVideoComposeSourceNodeId,
-  canvasVideoComposeTaskSummary,
   clearCanvasVideoComposeDraftModel,
   isCanvasVideoComposeConfig,
   latestCanvasVideoComposeConfig,
@@ -511,11 +510,6 @@ describe('canvas video composer product model', () => {
       resolution: '1080p',
       aspectRatio: '16:9',
       seconds: 5,
-    });
-    expect(canvasVideoComposeTaskSummary(prepared.configNode)).toEqual({
-      state: 'queued',
-      pendingCount: 1,
-      message: undefined,
     });
   });
 

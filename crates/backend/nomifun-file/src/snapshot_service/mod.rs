@@ -14,7 +14,7 @@ use nomifun_common::{AppError, FileChangeOperation};
 use crate::types::{CompareResult, SnapshotInfo, SnapshotMode};
 
 use helpers::{
-    SNAPSHOT_DIR_PREFIX, WorkspaceState, build_info, discard_single_file, init_snapshot_repo, open_repo,
+    WorkspaceState, build_info, discard_single_file, init_snapshot_repo, open_repo,
     parse_statuses, read_baseline, reset_single_file, resolve_workspace, snapshot_guard, stage_all_with_deletions,
     stage_single_file, temp_repo_path, unstage_all_files, unstage_single_file,
 };
@@ -90,42 +90,6 @@ impl SnapshotService {
         self.workspaces.get(&workspace_key(workspace)).map(|s| s.repo_path.clone())
     }
 
-    /// Remove leftover `nomifun-snapshot-*` directories from the system temp
-    /// dir. Call once at application startup.
-    pub fn cleanup_stale_snapshots() {
-        let temp_dir = std::env::temp_dir();
-        let entries = match std::fs::read_dir(&temp_dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to read temp dir for snapshot cleanup"
-                );
-                return;
-            }
-        };
-        for entry in entries.flatten() {
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if name.starts_with(SNAPSHOT_DIR_PREFIX) {
-                let path = entry.path();
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "Failed to clean up stale snapshot directory"
-                    );
-                } else {
-                    tracing::info!(
-                        path = %path.display(),
-                        "Cleaned up stale snapshot directory"
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

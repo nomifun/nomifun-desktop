@@ -131,13 +131,6 @@ impl VoiceSessionCore {
         VoiceControl::InterruptOutput { output_generation: self.state.output_generation,
             played }
     }
-    pub fn revoke_unplayed(&mut self, segment_id: &str, revision: u64) -> bool {
-        let Some(segment) = self.segments.get(segment_id) else { return false; };
-        if segment.revision > revision { return false; }
-        // Preserve consumed facts even when the remainder is revoked.
-        if let Some(receipt) = self.playback.get_mut(segment_id) { receipt.state = DeliveryState::Revoked; }
-        true
-    }
     pub fn close(&mut self, unavailable: bool) {
         self.clear_assistant_transcripts();
         self.state.connection = VoiceConnectionState::Closing;

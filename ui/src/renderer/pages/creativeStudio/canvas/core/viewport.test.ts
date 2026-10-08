@@ -13,7 +13,6 @@ import {
   MIN_CANVAS_ZOOM,
   normalizeCanvasViewport,
   panViewport,
-  scaleViewportAtPoint,
   zoomViewportAtPoint,
 } from './viewport';
 
@@ -40,12 +39,6 @@ describe('Creative Studio viewport', () => {
     expect(clientToCanvas(pointer, next).y).toBeCloseTo(worldBefore.y, 10);
     expect(canvasToClient(worldBefore, next).x).toBeCloseTo(pointer.x, 10);
     expect(canvasToClient(worldBefore, next).y).toBeCloseTo(pointer.y, 10);
-  });
-
-  test('scales at the pointer and ignores unsafe factors', () => {
-    const viewport = { x: 10, y: 20, zoom: 2 };
-    expect(scaleViewportAtPoint(viewport, 1.5, { x: 100, y: 80 }).zoom).toBe(3);
-    expect(scaleViewportAtPoint(viewport, -2, { x: 100, y: 80 }).zoom).toBe(2);
   });
 
   test('pans in client pixels independently of zoom', () => {

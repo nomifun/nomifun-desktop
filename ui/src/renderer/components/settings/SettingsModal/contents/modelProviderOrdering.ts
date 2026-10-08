@@ -1,4 +1,4 @@
-import type { IProvider } from '@/common/config/storage';
+
 
 const moveItem = <T>(items: T[], fromIndex: number, toIndex: number): T[] => {
   const next = items.slice();
@@ -20,9 +20,3 @@ export const reorderStrings = (items: string[], activeId: string, overId: string
   if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return items;
   return moveItem(items, oldIndex, newIndex);
 };
-
-export const withDenseSortOrder = (providers: IProvider[]): IProvider[] =>
-  providers.map((provider, index) => ({
-    ...provider,
-    sort_order: index,
-  }));

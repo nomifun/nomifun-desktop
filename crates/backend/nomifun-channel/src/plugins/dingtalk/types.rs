@@ -392,37 +392,6 @@ pub(crate) struct UpdateCardResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Send message via session webhook (fallback)
-// ---------------------------------------------------------------------------
-
-/// Request body for sending a message via session webhook.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub(crate) struct SessionWebhookRequest {
-    pub msgtype: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<WebhookText>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub markdown: Option<WebhookMarkdown>,
-}
-
-/// Text payload for session webhook messages.
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-pub(crate) struct WebhookText {
-    pub content: String,
-}
-
-/// Markdown payload for session webhook messages.
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-pub(crate) struct WebhookMarkdown {
-    pub title: String,
-    pub text: String,
-}
-
-// ---------------------------------------------------------------------------
 // Send message via Open API (fallback)
 // ---------------------------------------------------------------------------
 
@@ -884,18 +853,6 @@ mod tests {
         assert_eq!(json["isFinalize"], false);
         assert_eq!(json["isError"], false);
         assert_eq!(json["guid"], "123_abc");
-    }
-
-    #[test]
-    fn session_webhook_request_serializes() {
-        let req = SessionWebhookRequest {
-            msgtype: "text".into(),
-            text: Some(WebhookText { content: "Hi".into() }),
-            markdown: None,
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["msgtype"], "text");
-        assert_eq!(json["text"]["content"], "Hi");
     }
 
     #[test]

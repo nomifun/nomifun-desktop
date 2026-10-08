@@ -14,7 +14,7 @@ use nomifun_app::compatibility::{
 };
 use nomifun_db::init_database_memory;
 use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
 

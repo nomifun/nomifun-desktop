@@ -12,8 +12,7 @@
 mod capability;
 
 pub use capability::{
-    Capability, CapabilityMeta, EffectClass, OwnershipScope, ProgressSink, StreamingHandler,
-    Surface,
+    Capability, CapabilityMeta, EffectClass, OwnershipScope, Surface,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +24,7 @@ use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 
 /// Enforce the one gateway outcome protocol before a capability result reaches
 /// any transport adapter. Keeping this at the shared dispatch boundary means
-/// MCP, REST, stdio, and streaming calls cannot disagree about whether a
+/// MCP, REST and stdio calls cannot disagree about whether a
 /// malformed handler response succeeded.
 fn validate_dispatch_outcome(value: Value) -> Value {
     let Some(object) = value.as_object() else {
@@ -305,36 +304,6 @@ impl Registry {
             })));
         }
         let result = (cap.handler)(deps, ctx, args.clone()).await;
-        Some(validate_dispatch_outcome(result))
-    }
-
-    /// Streaming dispatch: like [`dispatch_opt`](Self::dispatch_opt) but a
-    /// streaming-capable tool emits intermediate progress through `progress`
-    /// while it runs, and the returned `Value` is the final result. A
-    /// non-streaming tool emits nothing on `progress` and returns its single
-    /// value (so the streaming endpoint works uniformly for every tool).
-    /// `None` means the tool name is unknown.
-    pub async fn dispatch_stream(
-        &self,
-        deps: Arc<CompatibilityCapabilityHost>,
-        ctx: CallerCtx,
-        name: &str,
-        args: &Value,
-        progress: ProgressSink,
-    ) -> Option<Value> {
-        let cap = self.by_name.get(name)?;
-        if cap.meta.ownership_scope == OwnershipScope::InstanceOwner
-            && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
-        {
-            return Some(validate_dispatch_outcome(json!({
-                "error": "installation_owner_required",
-                "tool": name,
-            })));
-        }
-        let result = match &cap.stream {
-            Some(stream) => stream(deps, ctx, args.clone(), progress).await,
-            None => (cap.handler)(deps, ctx, args.clone()).await,
-        };
         Some(validate_dispatch_outcome(result))
     }
 }

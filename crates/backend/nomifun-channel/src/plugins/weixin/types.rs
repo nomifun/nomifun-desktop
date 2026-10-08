@@ -323,29 +323,6 @@ pub(crate) struct SendFileItem {
 }
 
 // ---------------------------------------------------------------------------
-// SSE event payloads (frontend-facing — DO NOT CHANGE field names)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SseQrEvent {
-    pub qrcode_data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SseDoneEvent {
-    pub account_id: String,
-    pub bot_token: String,
-    pub base_url: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SseErrorEvent {
-    pub message: String,
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -528,37 +505,6 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("context_token"));
-    }
-
-    #[test]
-    fn serialize_sse_qr_event() {
-        let evt = SseQrEvent {
-            qrcode_data: "ticket_abc".into(),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""qrcodeData":"ticket_abc"#));
-    }
-
-    #[test]
-    fn serialize_sse_done_event() {
-        let evt = SseDoneEvent {
-            account_id: "acc_1".into(),
-            bot_token: "tok_1".into(),
-            base_url: "https://example.com".into(),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""accountId":"acc_1"#));
-        assert!(json.contains(r#""botToken":"tok_1"#));
-        assert!(json.contains(r#""baseUrl":"https://example.com"#));
-    }
-
-    #[test]
-    fn serialize_sse_error_event() {
-        let evt = SseErrorEvent {
-            message: "timeout".into(),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""message":"timeout"#));
     }
 
     #[test]

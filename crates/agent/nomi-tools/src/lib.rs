@@ -8,11 +8,7 @@ pub mod grep;
 pub mod lsp;
 pub mod output_truncation;
 pub mod path_guard;
-#[cfg(test)]
-pub mod persistent_shell;
 pub mod process_store;
-#[cfg(test)]
-pub mod pty;
 pub mod read;
 pub mod registry;
 pub mod tool_search;
@@ -64,7 +60,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;
 
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 /// Safety-net wall-clock budget for a tool invocation.

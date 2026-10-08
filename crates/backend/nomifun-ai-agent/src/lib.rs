@@ -13,7 +13,6 @@ pub mod context_contributor;
 pub mod runtime_model_middleware_contract;
 pub mod runtime_tool_middleware_contract;
 pub mod companion_tools;
-pub mod cron_tools;
 pub mod requirement_tools;
 pub mod runtime_output;
 pub mod session_control_tools;
@@ -43,8 +42,7 @@ pub mod web_search;
 pub mod local_web_search;
 // Host/domain adapters extracted from the retired standalone Nomi loop. They
 // carry no model loop, Session store, or alternate Runtime authority.
-pub use companion_tools::{CompanionMemorySink, CompanionSkillSink, SkillListing};
-pub use cron_tools::{CronJobSummary, CronSink};
+pub use companion_tools::{CompanionSkillSink, SkillListing};
 pub use ssh_backend::{
     RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider, SshLeaseRelease,
     SshSessionBinding, SshSessionLease,

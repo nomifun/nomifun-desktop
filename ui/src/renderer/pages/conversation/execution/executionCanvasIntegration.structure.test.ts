@@ -100,9 +100,6 @@ describe('conversation execution canvas integration', () => {
     const companionSource = readSource(
       new URL('../../nomi/companion/CompanionConversation.tsx', import.meta.url),
     );
-    const companionPanelSource = readSource(
-      new URL('../../nomi/companion/CompanionChatPanel.tsx', import.meta.url),
-    );
     const hookSource = readSource(new URL('./useConversationExecution.ts', import.meta.url));
     const readOnlySource = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
 
@@ -111,8 +108,6 @@ describe('conversation execution canvas integration', () => {
       (cohabitSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0);
     expect(executionProviderCount).toBeGreaterThanOrEqual(3);
     expect(companionSource.includes('<ExecutionConversationLayout')).toBe(false);
-    expect(companionPanelSource.includes('renderInExecutionShell')).toBe(true);
-    expect(companionPanelSource.includes('<ExecutionConversationLayout')).toBe(true);
     expect(hookSource.includes("conversation?.type === 'nomi'")).toBe(false);
     expect(hookSource.includes('agentExecution.events.changed.on')).toBe(true);
     expect(hookSource.includes('ipcBridge.conversation.reconnected.on')).toBe(true);

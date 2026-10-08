@@ -130,27 +130,6 @@ impl SessionManager {
         Ok(session)
     }
 
-    /// Updates the agent_type for an existing session.
-    pub async fn update_agent_type(&self, session_id: &str, agent_type: &str) -> Result<(), ChannelError> {
-        self.repo.update_session_agent_type(session_id, agent_type).await?;
-
-        debug!(
-            session_id = %session_id,
-            agent_type = %agent_type,
-            "session agent_type updated"
-        );
-        Ok(())
-    }
-
-    /// Removes all sessions belonging to a user.
-    ///
-    /// Called when a user is revoked to clean up their session state.
-    pub async fn cleanup_user_sessions(&self, channel_user_id: &str) -> Result<(), ChannelError> {
-        self.repo.delete_sessions_by_user(channel_user_id).await?;
-        info!(channel_user_id = %channel_user_id, "cleaned up user sessions");
-        Ok(())
-    }
-
     /// Removes all sessions across all users.
     ///
     /// Called after settings sync to force sessions to be recreated
@@ -257,7 +236,6 @@ mod tests {
 
     const USER_1: &str = "0190f5fe-7c00-7a00-8000-000000000011";
     const USER_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
-    const UNKNOWN_USER: &str = "0190f5fe-7c00-7a00-8000-000000000999";
     const PLUGIN_1: &str = "0190f5fe-7c00-7a00-8000-000000000021";
     const PLUGIN_2: &str = "0190f5fe-7c00-7a00-8000-000000000022";
 
@@ -705,40 +683,6 @@ mod tests {
         assert_eq!(sessions.len(), 2);
     }
 
-    // ── cleanup_user_sessions ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn cleanup_removes_user_sessions() {
-        let (mgr, repo) = make_manager();
-        mgr.get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
-            .await
-            .unwrap();
-        mgr.get_or_create_session_for_chat(USER_1, "c2", PLUGIN_1, "acp", ChatKind::Direct, None)
-            .await
-            .unwrap();
-        mgr.get_or_create_session_for_chat(USER_2, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
-            .await
-            .unwrap();
-
-        mgr.cleanup_user_sessions(USER_1).await.unwrap();
-
-        let sessions = repo.get_sessions();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].channel_user_id, USER_2);
-    }
-
-    #[tokio::test]
-    async fn cleanup_noop_for_unknown_user() {
-        let (mgr, repo) = make_manager();
-        mgr.get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
-            .await
-            .unwrap();
-
-        mgr.cleanup_user_sessions(UNKNOWN_USER).await.unwrap();
-
-        assert_eq!(repo.get_sessions().len(), 1);
-    }
-
     // ── bind_conversation ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -830,31 +774,4 @@ mod tests {
         assert_eq!(repo.get_sessions().len(), 1);
     }
 
-    // ── update_agent_type ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn update_agent_type_persists() {
-        let (mgr, repo) = make_manager();
-        let session = mgr
-            .get_or_create_session_for_chat(USER_1, "c1", PLUGIN_1, "acp", ChatKind::Direct, None)
-            .await
-            .unwrap();
-        assert_eq!(session.agent_type, "acp");
-
-        mgr.update_agent_type(&session.channel_session_id, "acp").await.unwrap();
-
-        let updated = repo
-            .get_sessions()
-            .into_iter()
-            .find(|s| s.channel_session_id == session.channel_session_id)
-            .unwrap();
-        assert_eq!(updated.agent_type, "acp");
-    }
-
-    #[tokio::test]
-    async fn update_agent_type_not_found() {
-        let (mgr, _repo) = make_manager();
-        let err = mgr.update_agent_type("nonexistent", "acp").await;
-        assert!(err.is_err());
-    }
 }

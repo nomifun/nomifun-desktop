@@ -72,9 +72,6 @@ impl BroadcastEventBus {
         self.tx.receiver_count()
     }
 
-    pub fn user_receiver_count(&self) -> usize {
-        self.user_tx.receiver_count()
-    }
 }
 
 impl EventBroadcaster for BroadcastEventBus {

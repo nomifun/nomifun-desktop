@@ -44,7 +44,7 @@ describe('SshSessionGroup structure', () => {
     expect(groupSource.includes("t('ssh.group.")).toBe(true);
     expect(groupSource.includes("import { Server } from '@icon-park/react';")).toBe(true);
     expect(groupSource.includes("import { Tooltip } from '@arco-design/web-react';")).toBe(true);
-    // Empty group renders nothing at all (mirrors CompanionSessionGroup).
+    // Empty group renders nothing at all.
     expect(groupSource.includes('return null')).toBe(true);
     // Theme contract: body text token, arco border token, no raw rgb literals.
     expect(groupSource.includes('text-t-tertiary')).toBe(true);

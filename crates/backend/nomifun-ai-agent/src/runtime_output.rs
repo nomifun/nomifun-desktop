@@ -1259,24 +1259,6 @@ impl OutputFormatter {
         }
     }
 
-    /// Print REPL prompt
-    pub fn repl_prompt(&self) {
-        if self.color_enabled {
-            let mut stdout = io::stdout();
-            let _ = execute!(
-                stdout,
-                SetForegroundColor(Color::Green),
-                SetAttribute(Attribute::Bold),
-                Print("\n> "),
-                ResetColor,
-            );
-            let _ = stdout.flush();
-        } else {
-            print!("\n> ");
-            let _ = io::stdout().flush();
-        }
-    }
-
     /// Print error
     pub fn error(&self, msg: &str) {
         if self.color_enabled {
@@ -1292,21 +1274,6 @@ impl OutputFormatter {
         }
     }
 
-    /// Print session info
-    pub fn session_info(&self, msg: &str) {
-        if self.color_enabled {
-            let mut stderr = io::stderr();
-            let _ = execute!(
-                stderr,
-                SetForegroundColor(Color::Blue),
-                SetAttribute(Attribute::Dim),
-                Print(format!("{}\n", msg)),
-                ResetColor,
-            );
-        } else {
-            eprintln!("{}", msg);
-        }
-    }
 }
 
 /// Char-boundary-safe display truncation shared across output formatting and

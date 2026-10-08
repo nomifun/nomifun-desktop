@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_tools::Tool;
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_common::RequirementId;

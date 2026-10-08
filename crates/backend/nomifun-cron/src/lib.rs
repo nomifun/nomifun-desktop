@@ -9,7 +9,6 @@ pub mod routes;
 pub mod scheduler;
 mod session_port;
 pub mod service;
-pub mod sink;
 pub mod skill_file;
 pub mod state;
 pub mod types;
@@ -27,7 +26,7 @@ pub use agent_schedule::{
 };
 pub use routes::cron_routes;
 pub use session_port::{
-    CronRuntimePreparationRequest, CronScheduledSession, CronScheduledSessionLookup,
+    CronRuntimePreparationRequest, CronScheduledSessionLookup,
     CronSessionAgentBinding,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronPreparedTurnDelivery, CronTurnDelivery, CronTurnDeliveryQuery,

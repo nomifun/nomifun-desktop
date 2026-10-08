@@ -34,11 +34,6 @@ export interface CreativeAssetEditDraft {
   tags: string[];
 }
 
-export interface CreativeCollectionRenameDraft {
-  from: string;
-  to: string;
-}
-
 type Translate = (key: string, options: { defaultValue: string }) => string;
 const fallbackTranslate: Translate = (_key, options) => options.defaultValue;
 
@@ -71,22 +66,6 @@ export function creativeAssetPageIsLoaded(
   const normalizedPageSize = Math.max(1, Math.trunc(Number.isFinite(pageSize) ? pageSize : 1));
   const required = Math.min(normalizedTotal, normalizedPage * normalizedPageSize);
   return normalizedLoaded >= required;
-}
-
-export function creativeAssetCacheIsComplete(loaded: number, total: number): boolean {
-  const normalizedLoaded = Math.max(0, Math.trunc(Number.isFinite(loaded) ? loaded : 0));
-  const normalizedTotal = Math.max(0, Math.trunc(Number.isFinite(total) ? total : 0));
-  return normalizedLoaded >= normalizedTotal;
-}
-
-export function creativeAssetPageSliceFromCompleteCache<T>(
-  items: readonly T[],
-  total: number,
-  page: number,
-  pageSize: number
-): T[] {
-  if (!creativeAssetCacheIsComplete(items.length, total)) return [];
-  return creativeAssetPageSlice(items, page, pageSize);
 }
 
 export const EMPTY_CREATIVE_TEXT_ASSET_FORM: CreativeTextAssetFormValue = {
@@ -183,26 +162,6 @@ export function normalizeCreativeTextAssetForm(
     collection: value.collection.trim(),
     tags: uniqueTrimmedTags(value.tags),
   };
-}
-
-export function validateCreativeCollectionRename(
-  draft: CreativeCollectionRenameDraft,
-  t?: TFunction
-): string | null {
-  const from = draft.from.trim();
-  const to = draft.to.trim();
-  const translate = (t ?? fallbackTranslate) as Translate;
-  if (!from) {
-    return translate('creativeStudio.assets.collection.currentNameRequired', {
-      defaultValue: '请输入当前合集名称。',
-    });
-  }
-  if (from === to) {
-    return translate('creativeStudio.assets.collection.newNameMustDiffer', {
-      defaultValue: '新合集名称需要与当前名称不同。',
-    });
-  }
-  return null;
 }
 
 export function creativeAssetDownloadName(asset: Pick<CreativeAsset, 'title' | 'mimeType' | 'kind'>): string {

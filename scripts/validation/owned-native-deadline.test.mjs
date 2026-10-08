@@ -15,7 +15,7 @@ test('a normal owned exit stays zero and clears the observer before the deadline
   assert.equal(states.at(-1).running, false);
 });
 
-test('an expired owned child is killed with a bounded grace and never claims success', async () => {
+test('an expired owned child reports native termination and never claims success', async () => {
   const states = [];
   const result = await superviseNativeChild(process.execPath,
     ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
@@ -23,14 +23,18 @@ test('an expired owned child is killed with a bounded grace and never claims suc
     });
   assert.equal(result.expired, true);
   assert.equal(result.terminateSent, true);
-  assert.equal(result.forceKillSent, true);
-  assert.equal(result.signal, 'SIGKILL');
+  // Windows termination cannot be ignored by a JavaScript SIGTERM handler.
+  // POSIX must escalate only after the child ignores the graceful signal.
+  assert.equal(result.forceKillSent, process.platform !== 'win32');
+  assert.equal(result.signal, process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL');
   assert.ok(states.some(state => state.expired && !state.running));
   assert.equal(states.at(-1).running, false);
   assert.ok(result.elapsedMs < 5000);
 });
 
-test('zero after deadline termination is still an expired observation', async () => {
+test('zero after deadline termination is still an expired observation', {
+  skip: process.platform === 'win32' && 'Windows termination does not invoke the POSIX SIGTERM handler',
+}, async () => {
   const result = await superviseNativeChild(process.execPath,
     ['-e', "process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000)"], {
       deadlineMs: 300, terminateGraceMs: 500, stdio: 'ignore',

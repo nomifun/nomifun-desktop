@@ -13,11 +13,6 @@ import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { mergeProcessStates } from '../turnProcessState';
 import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 
-export interface ToolSummaryDescriptor {
-  target: string;
-  count: number;
-}
-
 export type ToolReceiptAction =
   | 'read_files'
   | 'edit_files'
@@ -142,14 +137,6 @@ const toolReceiptIconByAction: Record<ToolReceiptAction, ToolReceiptIcon> = {
   list_files: 'file',
   load_tools: 'tool',
   generic: 'tool',
-};
-
-const stateMatchesTool = (state: TurnDisclosureProcessState, tool: NormalizedToolCall): boolean => {
-  if (state === 'running') return tool.status === 'running' || tool.status === 'pending';
-  if (state === 'failed') return tool.status === 'error' && !tool.nonFatalFailure;
-  if (state === 'canceled') return tool.status === 'canceled';
-  if (state === 'completed') return tool.status === 'completed' || tool.nonFatalFailure === true;
-  return tool.status === 'pending' || tool.status === 'running';
 };
 
 const compactToolText = (value?: unknown): string => {
@@ -536,20 +523,3 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language
         : {}),
     };
   });
-
-export const buildToolSummaryDescriptor = (
-  tools: NormalizedToolCall[],
-  state: TurnDisclosureProcessState,
-  language = 'en-US'
-): ToolSummaryDescriptor | null => {
-  const logicalTools = groupExplicitToolRetries(tools).map(({ latest }) => latest);
-  if (!logicalTools.length) return null;
-
-  const focusedTool = logicalTools.findLast((tool) => stateMatchesTool(state, tool)) ?? logicalTools.at(-1);
-  if (!focusedTool) return null;
-
-  return {
-    target: formatToolTarget(focusedTool, language),
-    count: logicalTools.length,
-  };
-};

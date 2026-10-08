@@ -11,7 +11,7 @@ use nomi_a11y::{
     A11yEngine, A11yError, ElementAction, ElementEntry, ObserveOpts, SnapshotGen, Source, Target,
 };
 use nomi_config::config::ComputerConfig;
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_tools::Tool;
 use nomi_types::tool::{JsonSchema, ToolResult};
 

@@ -14,29 +14,24 @@ import type {
   CreativeTemplateValidationError,
   CreativeTemplateValidationResult,
   CreativeTemplateVariable,
-  CreativeTemplateWorkspaceDocumentV1,
 } from './types';
 
 type UnknownRecord = Record<string, unknown>;
 
 export const TEMPLATE_LIMITS = {
-  jsonBytes: 8 * 1024 * 1024,
   definitions: 500,
   variables: 100,
   promptTemplates: 50,
   promptTemplateSegments: 500,
   steps: 200,
-  drafts: 10_000,
   runs: 10_000,
   text: 20_000,
   prompt: 200_000,
   tags: 30,
   seriesItems: 20,
-  taskReferences: 1_000,
 } as const;
 
 const KEY = /^[a-z][a-z0-9_]{0,63}$/;
-const CODE = /^[a-z][a-z0-9._-]{0,79}$/;
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
 
 function issue(
@@ -530,145 +525,8 @@ export function validateTemplateInputsForDefinition(template: CreativeTemplateDe
   return { ok: true };
 }
 
-function validateRunRequest(value: unknown, path: string) {
-  const record = asRecord(value, path, ['id', 'idempotencyKey', 'templateId', 'templateRevision', 'requestedAt', 'output', 'inputs', 'referenceAssetIds']);
-  if (isIssue(record)) return record;
-  const common = id(record.id, `${path}.id`) ?? id(record.idempotencyKey, `${path}.idempotencyKey`) ?? id(record.templateId, `${path}.templateId`) ?? (!Number.isSafeInteger(record.templateRevision) || (record.templateRevision as number) < 1 ? issue('invalid-value', `${path}.templateRevision`, 'expected a positive revision') : null) ?? timestamp(record.requestedAt, `${path}.requestedAt`) ?? validateTemplateOutput(record.output, `${path}.output`);
-  if (common) return common;
-  if (!Array.isArray(record.inputs) || record.inputs.length > TEMPLATE_LIMITS.variables) return issue('limit-exceeded', `${path}.inputs`, 'too many inputs');
-  const ids: string[] = [];
-  for (const [index, input] of record.inputs.entries()) {
-    const error = validateInput(input, `${path}.inputs[${index}]`);
-    if (error) return error;
-    ids.push((input as CreativeTemplateInputValue).variableId);
-  }
-  return uniqueIds(ids, `${path}.inputs`)
-    ?? stringList(record.referenceAssetIds, `${path}.referenceAssetIds`, 100, true)
-    ?? (record.idempotencyKey === record.id
-      ? null
-      : issue('invalid-value', `${path}.idempotencyKey`, 'idempotencyKey must equal the durable run id'));
-}
-
-function validateDraft(value: unknown, path: string) {
-  const record = asRecord(value, path, ['id', 'templateId', 'runRequestId', 'seriesIndex', 'title', 'prompt', 'status', 'createdAt', 'reviewedAt', 'reviewNote']);
-  if (isIssue(record)) return record;
-  const common = id(record.id, `${path}.id`) ?? id(record.templateId, `${path}.templateId`) ?? id(record.runRequestId, `${path}.runRequestId`) ?? (!Number.isSafeInteger(record.seriesIndex) || (record.seriesIndex as number) < 0 || (record.seriesIndex as number) >= TEMPLATE_LIMITS.seriesItems ? issue('invalid-value', `${path}.seriesIndex`, 'series index is invalid') : null) ?? text(record.title, `${path}.title`, 120) ?? text(record.prompt, `${path}.prompt`, TEMPLATE_LIMITS.prompt) ?? (!['pending-review', 'approved', 'rejected'].includes(record.status as string) ? issue('invalid-value', `${path}.status`, 'unsupported draft status') : null) ?? timestamp(record.createdAt, `${path}.createdAt`);
-  if (common) return common;
-  if (record.reviewedAt !== null) {
-    const error = timestamp(record.reviewedAt, `${path}.reviewedAt`);
-    if (error) return error;
-  }
-  if (record.reviewNote !== null) {
-    const error = text(record.reviewNote, `${path}.reviewNote`, 2_000, true);
-    if (error) return error;
-  }
-  if (record.status === 'pending-review' && (record.reviewedAt !== null || record.reviewNote !== null)) return issue('invalid-value', path, 'pending draft cannot contain review data');
-  if (record.status !== 'pending-review' && record.reviewedAt === null) return issue('invalid-value', `${path}.reviewedAt`, 'reviewed draft requires a timestamp');
-  if (record.reviewedAt !== null && (record.reviewedAt as number) < (record.createdAt as number)) return issue('invalid-value', `${path}.reviewedAt`, 'reviewedAt cannot precede createdAt');
-  return null;
-}
-
-function validateFailure(value: unknown, path: string) {
-  if (value === null) return null;
-  const record = asRecord(value, path, ['code', 'message']);
-  if (isIssue(record)) return record;
-  if (typeof record.code !== 'string' || !CODE.test(record.code)) return issue('invalid-value', `${path}.code`, 'invalid failure code');
-  return text(record.message, `${path}.message`, 2_000);
-}
-
-function validateRun(value: unknown, path: string) {
-  const record = asRecord(value, path, ['requestId', 'templateId', 'status', 'promptDraftIds', 'taskIds', 'resultAssetIds', 'historyReferenceIds', 'queuedAt', 'startedAt', 'completedAt', 'failure']);
-  if (isIssue(record)) return record;
-  const common = id(record.requestId, `${path}.requestId`) ?? id(record.templateId, `${path}.templateId`) ?? (!['requested', 'awaiting-review', 'queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(record.status as string) ? issue('invalid-value', `${path}.status`, 'unsupported run status') : null);
-  if (common) return common;
-  for (const key of ['promptDraftIds', 'taskIds', 'resultAssetIds', 'historyReferenceIds'] as const) {
-    const error = stringList(record[key], `${path}.${key}`, TEMPLATE_LIMITS.taskReferences, true);
-    if (error) return error;
-  }
-  for (const key of ['queuedAt', 'startedAt', 'completedAt'] as const) {
-    if (record[key] !== null) {
-      const error = timestamp(record[key], `${path}.${key}`);
-      if (error) return error;
-    }
-  }
-  const failureError = validateFailure(record.failure, `${path}.failure`);
-  if (failureError) return failureError;
-  const status = record.status as string;
-  const early = status === 'requested' || status === 'awaiting-review';
-  if (early && (record.queuedAt !== null || record.startedAt !== null || record.completedAt !== null || (record.taskIds as string[]).length || (record.resultAssetIds as string[]).length || (record.historyReferenceIds as string[]).length || record.failure !== null)) return issue('invalid-value', path, 'unstarted run contains execution data');
-  if (status === 'queued' && (record.queuedAt === null || record.startedAt !== null || record.completedAt !== null || record.failure !== null)) return issue('invalid-value', path, 'queued run timestamps are invalid');
-  if (status === 'running' && (record.queuedAt === null || record.startedAt === null || record.completedAt !== null || (record.taskIds as string[]).length === 0 || record.failure !== null)) return issue('invalid-value', path, 'running projection is incomplete');
-  if (status === 'succeeded' && (record.queuedAt === null || record.startedAt === null || record.completedAt === null || (record.resultAssetIds as string[]).length === 0 || record.failure !== null)) return issue('invalid-value', path, 'successful projection is incomplete');
-  if (status === 'failed' && (record.completedAt === null || record.failure === null)) return issue('invalid-value', path, 'failed projection requires failure data');
-  if (status === 'cancelled' && (record.completedAt === null || record.failure !== null)) return issue('invalid-value', path, 'cancelled projection is invalid');
-  if (record.queuedAt !== null && (record.queuedAt as number) < 0) return issue('invalid-value', path, 'run timestamps are invalid');
-  if (record.startedAt !== null && record.queuedAt !== null && (record.startedAt as number) < (record.queuedAt as number)) return issue('invalid-value', path, 'startedAt precedes queuedAt');
-  if (record.completedAt !== null && record.startedAt !== null && (record.completedAt as number) < (record.startedAt as number)) return issue('invalid-value', path, 'completedAt precedes startedAt');
-  return null;
-}
-
-export function validateTemplateWorkspaceDocument(value: unknown): CreativeTemplateValidationResult {
-  const record = asRecord(value, '$', ['kind', 'version', 'templates', 'promptDrafts', 'runRequests', 'runs']);
-  if (isIssue(record)) return { ok: false, error: record };
-  if (record.kind !== 'nomifun.creative-studio.templates') return { ok: false, error: issue('invalid-envelope', '$.kind', 'unexpected template document kind') };
-  if (record.version !== 1) return { ok: false, error: issue('unsupported-version', '$.version', 'only template v1 is supported') };
-  for (const [key, maximum, validator] of [
-    ['templates', TEMPLATE_LIMITS.definitions, (item: unknown, path: string) => { const result = validateTemplateDefinition(item, path); return result.ok ? null : result.error; }],
-    ['promptDrafts', TEMPLATE_LIMITS.drafts, validateDraft],
-    ['runRequests', TEMPLATE_LIMITS.runs, validateRunRequest],
-    ['runs', TEMPLATE_LIMITS.runs, validateRun],
-  ] as const) {
-    const list = record[key];
-    if (!Array.isArray(list) || list.length > maximum) return { ok: false, error: issue('limit-exceeded', `$.${key}`, `too many ${key}`) };
-    for (const [index, item] of list.entries()) {
-      const error = validator(item, `$.${key}[${index}]`);
-      if (error) return { ok: false, error };
-    }
-  }
-  const document = value as CreativeTemplateWorkspaceDocumentV1;
-  const identitySets: Array<[string, string[]]> = [
-    ['$.templates', document.templates.map((item) => item.id)],
-    ['$.promptDrafts', document.promptDrafts.map((item) => item.id)],
-    ['$.runRequests', document.runRequests.map((item) => item.id)],
-    ['$.runs', document.runs.map((item) => item.requestId)],
-    ['$.runRequests.idempotencyKey', document.runRequests.map((item) => item.idempotencyKey)],
-  ];
-  for (const [path, values] of identitySets) {
-    const error = uniqueIds(values, path);
-    if (error) return { ok: false, error };
-  }
-  if (document.runRequests.length !== document.runs.length) return { ok: false, error: issue('broken-reference', '$.runs', 'every run request needs exactly one status projection') };
-  for (const [index, request] of document.runRequests.entries()) {
-    const run = document.runs.find((item) => item.requestId === request.id);
-    if (!run || run.templateId !== request.templateId) return { ok: false, error: issue('broken-reference', `$.runRequests[${index}]`, 'run projection is missing or belongs to another template') };
-    const template = document.templates.find((item) => item.id === request.templateId);
-    const terminal = run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled';
-    if (!template && !terminal) return { ok: false, error: issue('broken-reference', `$.runRequests[${index}].templateId`, 'active run template does not exist') };
-    if (template && request.templateRevision > template.revision) return { ok: false, error: issue('broken-reference', `$.runRequests[${index}].templateRevision`, 'run references a future template revision') };
-    if (template && request.templateRevision === template.revision) {
-      const inputResult = validateTemplateInputsForDefinition(template, request.inputs, `$.runRequests[${index}].inputs`);
-      if (!inputResult.ok) return inputResult;
-      if (JSON.stringify(request.output) !== JSON.stringify(template.output)) return { ok: false, error: issue('invalid-value', `$.runRequests[${index}].output`, 'run output snapshot does not match its template revision') };
-    }
-    const drafts = document.promptDrafts.filter((draft) => draft.runRequestId === request.id);
-    if ((run.queuedAt !== null && run.queuedAt < request.requestedAt) || (run.completedAt !== null && run.completedAt < request.requestedAt)) return { ok: false, error: issue('invalid-value', `$.runs[${document.runs.indexOf(run)}]`, 'run timestamps cannot precede the request') };
-    if (drafts.some((draft) => draft.createdAt < request.requestedAt)) return { ok: false, error: issue('invalid-value', '$.promptDrafts', 'prompt draft cannot predate its request') };
-    if (drafts.some((draft) => draft.templateId !== request.templateId) || run.promptDraftIds.length !== drafts.length || run.promptDraftIds.some((draftId) => !drafts.some((draft) => draft.id === draftId))) return { ok: false, error: issue('broken-reference', `$.runs[${document.runs.indexOf(run)}].promptDraftIds`, 'prompt draft projection is inconsistent') };
-    if (new Set(drafts.map((draft) => draft.seriesIndex)).size !== drafts.length) return { ok: false, error: issue('duplicate-id', '$.promptDrafts', 'series indexes must be unique per run') };
-    if (request.output.kind === 'single-image' && drafts.length > 0) return { ok: false, error: issue('invalid-value', '$.promptDrafts', 'single-image run cannot contain series drafts') };
-    if ((run.status === 'queued' || run.status === 'running' || terminal) && request.output.kind === 'multi-image-series') {
-      if (drafts.length !== request.output.targetCount || (request.output.reviewRequired && drafts.some((draft) => draft.status !== 'approved'))) return { ok: false, error: issue('invalid-transition', `$.runs[${document.runs.indexOf(run)}].status`, 'series cannot execute before its prompt set is complete and approved') };
-    }
-  }
-  return { ok: true };
-}
-
 export function isTemplateBusinessId(value: unknown): value is string {
   return typeof value === 'string' && CANONICAL_UUID_V7.test(value);
-}
-
-export function isTemplateTerminalStatus(status: string): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
 export function cloneTemplateOutput(output: CreativeTemplateOutputPlan): CreativeTemplateOutputPlan {

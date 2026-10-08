@@ -204,19 +204,6 @@ mod tests {
     // --- ContentBlock::Text ---
 
     #[test]
-    fn test_content_block_text_construction() {
-        // arrange + act
-        let block = ContentBlock::Text {
-            text: "hello".to_string(),
-        };
-        // assert
-        match block {
-            ContentBlock::Text { text } => assert_eq!(text, "hello"),
-            _ => panic!("expected Text variant"),
-        }
-    }
-
-    #[test]
     fn test_content_block_text_serialization() {
         // arrange
         let block = ContentBlock::Text {
@@ -230,28 +217,6 @@ mod tests {
     }
 
     // --- ContentBlock::ToolUse ---
-
-    #[test]
-    fn test_content_block_tool_use_construction() {
-        // arrange + act
-        let block = ContentBlock::ToolUse {
-            id: "call_1".to_string(),
-            name: "bash".to_string(),
-            input: json!({"cmd": "ls"}),
-            extra: None,
-        };
-        // assert
-        match &block {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(name, "bash");
-                assert_eq!(input["cmd"], "ls");
-            }
-            _ => panic!("expected ToolUse variant"),
-        }
-    }
 
     #[test]
     fn test_content_block_tool_use_serialization_type_field() {
@@ -271,32 +236,6 @@ mod tests {
     }
 
     // --- ContentBlock::ToolResult ---
-
-    #[test]
-    fn test_content_block_tool_result_construction() {
-        // arrange + act
-        let block = ContentBlock::ToolResult {
-            tool_use_id: "call_1".to_string(),
-            content: "output text".to_string(),
-            is_error: false,
-            images: Vec::new(),
-        };
-        // assert
-        match &block {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                images,
-            } => {
-                assert_eq!(tool_use_id, "call_1");
-                assert_eq!(content, "output text");
-                assert!(!is_error);
-                assert!(images.is_empty());
-            }
-            _ => panic!("expected ToolResult variant"),
-        }
-    }
 
     #[test]
     fn test_content_block_tool_result_serialization() {
@@ -388,26 +327,6 @@ mod tests {
         assert_eq!(value["type"], "thinking");
         assert_eq!(value["thinking"], "reasoning");
         assert_eq!(value["signature"], "sig-123");
-    }
-
-    // --- StopReason variants ---
-
-    #[test]
-    fn test_stop_reason_end_turn_variant() {
-        let reason = StopReason::EndTurn;
-        assert_eq!(reason, StopReason::EndTurn);
-    }
-
-    #[test]
-    fn test_stop_reason_tool_use_variant() {
-        let reason = StopReason::ToolUse;
-        assert_eq!(reason, StopReason::ToolUse);
-    }
-
-    #[test]
-    fn test_stop_reason_max_tokens_variant() {
-        let reason = StopReason::MaxTokens;
-        assert_eq!(reason, StopReason::MaxTokens);
     }
 
     // --- TokenUsage default ---

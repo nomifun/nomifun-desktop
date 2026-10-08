@@ -11,7 +11,6 @@ import {
 } from '../../domain';
 import {
   copyCanvasFragment,
-  getCanvasGroups,
   groupCanvasNodes,
   materializeCanvasPaste,
   ungroupCanvasNodes,
@@ -49,7 +48,7 @@ describe('Creative Studio grouping', () => {
       locked: false,
       data: { title: 'Storyboard', color: null, collapsed: false },
     });
-    expect(getCanvasGroups(result.document)).toEqual([result.group]);
+    expect(result.document.nodes.filter((node) => node.type === 'group')).toEqual([result.group]);
     expect(
       result.document.nodes
         .filter((node) => node.type !== 'group')

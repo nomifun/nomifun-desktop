@@ -1191,51 +1191,6 @@ export const CreativeCanvasUnavailablePanel: React.FC<CreativeCanvasUnavailableP
   </section>
 );
 
-export const CreativeCanvasAssistantUnwiredPanel: React.FC<{ className?: string }> = ({
-  className,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <CreativeCanvasUnavailablePanel
-      kind='assistant'
-      className={className}
-      title={t('creativeStudio.canvas.unavailable.agentTitle', {
-        defaultValue: '创作 Agent 尚未连接',
-      })}
-      description={t('creativeStudio.canvas.unavailable.agentDescription', {
-        defaultValue:
-          '当前没有可验证的画布专属会话绑定，因此不会发送消息或复用主聊天会话。',
-      })}
-      detail={t('creativeStudio.canvas.unavailable.agentDetail', {
-        defaultValue:
-          '需要接入 canvas/session resolver、真实消息历史和独占会话所有权后才能启用。',
-      })}
-    />
-  );
-};
-
-export const CreativeCanvasTemplateUnwiredPanel: React.FC<{ className?: string }> = ({
-  className,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <CreativeCanvasUnavailablePanel
-      kind='templates'
-      className={className}
-      title={t('creativeStudio.canvas.unavailable.templatesTitle', {
-        defaultValue: '模板尚未连接',
-      })}
-      description={t(
-        'creativeStudio.canvas.unavailable.templatesDescription',
-        {
-          defaultValue:
-            '当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。',
-        }
-      )}
-    />
-  );
-};
-
 interface PanelEmptyProps {
   icon: React.ReactNode;
   title: string;

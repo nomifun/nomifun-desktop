@@ -436,18 +436,6 @@ impl EngineSessionHost {
         Ok(())
     }
 
-    pub async fn read_model_facts(
-        &self,
-        session: &AdmittedEngineSession,
-    ) -> Result<super::engine_model_facts::EngineRouteModelFacts, AppError> {
-        if !Arc::ptr_eq(&self.source, &session.source) {
-            return Err(AppError::Conflict(
-                "Session belongs to another engine host".into(),
-            ));
-        }
-        super::engine_model_facts::load(&self.pool, session).await
-    }
-
     /// Rebuild only the Plugin consumer view after its proven safe pause.
     pub(super) async fn retire_plugin_view_after_pause(&self, receipt:&EngineTurnReceipt) -> Result<(),AppError> {
         if !receipt.belongs_to(&self.source) { return Err(AppError::Conflict("plugin view belongs to another Host".into())); }
@@ -625,39 +613,6 @@ impl EngineSessionHost {
                     "historical Agent model binding validation failed: {error}"
                 ))
             })
-    }
-
-    /// Actual product Broker bound to this accepted turn's journal gate.
-    /// The engine must record each model operation before opening its stream.
-    /// Routes, credentials and retries stay behind the platform Broker.
-    pub async fn open_model_port(
-        &self,
-        receipt: &EngineTurnReceipt,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<
-        (
-            super::engine_journal::EngineTurnJournal,
-            Arc<dyn nomifun_chat_model_broker::EngineModelPort>,
-        ),
-        AppError,
-    > {
-        if receipt
-            .session()
-            .snapshot()
-            .content
-            .chat_route_identity
-            .is_none()
-        {
-            return Err(AppError::Conflict(
-                "Engine Session has no exact chat route".into(),
-            ));
-        }
-        let journal = self.open_journal(receipt, cancellation).await?;
-        let model = self.compose_model_port(Arc::new(journal.clone()))?;
-        let model = self
-            .open_kernel_session(receipt.session())?
-            .wrap_model_middleware(model)?;
-        Ok((journal, model))
     }
 
     /// Trusted application adapters can add their own live state fences over

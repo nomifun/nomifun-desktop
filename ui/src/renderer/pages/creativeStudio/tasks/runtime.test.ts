@@ -6,20 +6,18 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { BackendHttpError } from '@/common/adapter/httpBridge';
-
 import { createEmptyCreativeProjectDocument } from '../domain/schema';
 import type { CreativeTaskPort } from './port';
 import {
   CreativeTaskPollTimeoutError,
   CreativeTaskProgressGuard,
-  CreativeTaskRequestFence,
   pendingCreativeTaskReferences,
   pollCreativeTask,
   projectCreativeTaskOutput,
-  recoverPendingCreativeTasks,
 } from './runtime';
-import { CreativeTaskContractError } from './types';
+import {
+  CreativeTaskContractError,
+} from './types';
 import type {
   CreativeTask,
   CreativeTaskIdentity,
@@ -31,7 +29,6 @@ const PROJECT_ID = '0190f5fe-7c00-7a00-8000-000000000011';
 const NODE_ID = '0190f5fe-7c00-7a00-8000-000000000012';
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000013';
 const TASK_ID = '0190f5fe-7c00-7a00-8000-000000000014';
-const SECOND_TASK_ID = '0190f5fe-7c00-7a00-8000-000000000015';
 const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000016';
 
 const CANVAS_OWNER = {
@@ -270,64 +267,6 @@ describe('pending task recovery', () => {
     expect((missingError as CreativeTaskContractError).code).toBe('ownership_mismatch');
     expect((capabilityError as CreativeTaskContractError).code).toBe('invalid_request');
   });
-
-  test('recovers pending tasks in parallel and returns outputs only for succeeded tasks', async () => {
-    const secondReference: CreativeTaskReference = {
-      ...reference,
-      taskId: SECOND_TASK_ID,
-      owner: {
-        ...CANVAS_OWNER,
-        nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
-      },
-    };
-    const port = portWithGet(async (requested) =>
-      requested.taskId === TASK_ID
-        ? task('succeeded')
-        : task('failed', {
-            taskId: SECOND_TASK_ID,
-            owner: secondReference.owner,
-          })
-    );
-    const recovery = await recoverPendingCreativeTasks(port, [reference, secondReference]);
-
-    expect(recovery.tasks.map((entry) => entry.status)).toEqual(['succeeded', 'failed']);
-    expect(recovery.outputs).toEqual([
-      { taskId: TASK_ID, owner: CANVAS_OWNER, assetIds: [ASSET_ID] },
-    ]);
-    expect(recovery.issues).toEqual([]);
-  });
-
-  test('isolates a missing orphan without discarding another recoverable task', async () => {
-    const secondReference: CreativeTaskReference = {
-      ...reference,
-      taskId: SECOND_TASK_ID,
-      owner: {
-        ...CANVAS_OWNER,
-        nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
-      },
-    };
-    const port = portWithGet(async (requested) => {
-      if (requested.taskId === TASK_ID) {
-        throw new BackendHttpError({
-          method: 'GET',
-          path: `/api/creative-studio/tasks/${TASK_ID}`,
-          status: 404,
-          body: { error: 'missing' },
-        });
-      }
-      return task('succeeded', {
-        taskId: SECOND_TASK_ID,
-        owner: secondReference.owner,
-      });
-    });
-    const recovery = await recoverPendingCreativeTasks(port, [reference, secondReference]);
-
-    expect(recovery.tasks.map((entry) => entry.taskId)).toEqual([SECOND_TASK_ID]);
-    expect(recovery.outputs.map((entry) => entry.taskId)).toEqual([SECOND_TASK_ID]);
-    expect(recovery.issues).toHaveLength(1);
-    expect(recovery.issues[0]?.reference.taskId).toBe(TASK_ID);
-    expect(recovery.issues[0]?.kind).toBe('orphaned');
-  });
 });
 
 describe('CreativeTaskProgressGuard', () => {
@@ -351,20 +290,5 @@ describe('CreativeTaskProgressGuard', () => {
       mutationError = error;
     }
     expect(mutationError instanceof CreativeTaskContractError).toBe(true);
-  });
-});
-
-describe('CreativeTaskRequestFence', () => {
-  test('isolates late responses from superseded operations', () => {
-    const fence = new CreativeTaskRequestFence();
-    const stale = fence.begin();
-    const current = fence.begin();
-    const effects: string[] = [];
-
-    expect(fence.commit(stale, () => effects.push('stale'))).toBe(false);
-    expect(fence.commit(current, () => effects.push('current'))).toBe(true);
-    fence.invalidate();
-    expect(fence.commit(current, () => effects.push('late'))).toBe(false);
-    expect(effects).toEqual(['current']);
   });
 });

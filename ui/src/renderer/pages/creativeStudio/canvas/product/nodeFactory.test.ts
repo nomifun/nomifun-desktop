@@ -11,7 +11,6 @@ import type {
   CreativeCanvasNodeDataByKind,
   CreativeCanvasNodeKind,
 } from '../../domain';
-import type { PromptLibrarySelection } from '../../prompts';
 import { createInitialCanvasState } from '../core';
 import {
   CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES,
@@ -21,7 +20,6 @@ import {
   creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
   creativeNodeFromHistoricalAsset,
-  creativeTextNodeFromPrompt,
 } from './nodeFactory';
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -318,34 +316,5 @@ describe('real library insertion helpers', () => {
     expect((missingId as CreativeCanvasNodeFactoryError).code).toBe('asset-id-required');
     expect(missingText instanceof CreativeCanvasNodeFactoryError).toBe(true);
     expect((missingText as CreativeCanvasNodeFactoryError).code).toBe('asset-text-unavailable');
-  });
-
-  test('copies a validated prompt verbatim into a text node and no unsupported metadata', () => {
-    const prompt: PromptLibrarySelection = {
-      id: 'prompt-real-1',
-      source: 'catalog',
-      title: '电影感雨夜',
-      prompt: '保留真实材质。\n使用柔和侧光。',
-      category: '摄影',
-      tags: ['cinematic'],
-      knowledgeBaseIds: ['kb-1'],
-      coverUrl: null,
-      sourceUrl: null,
-      license: null,
-      licenseUrl: null,
-    };
-    const original = structuredClone(prompt);
-    const node = creativeTextNodeFromPrompt(
-      prompt,
-      createInitialCanvasState(),
-      VIEWPORT_SIZE,
-      { cascadeIndex: 0 }
-    );
-
-    expect(node.data.text).toBe(prompt.prompt);
-    expect(node.data.format).toBe('plain');
-    expect(JSON.stringify(node).includes(prompt.id)).toBe(false);
-    expect(JSON.stringify(node).includes('kb-1')).toBe(false);
-    expect(prompt).toEqual(original);
   });
 });

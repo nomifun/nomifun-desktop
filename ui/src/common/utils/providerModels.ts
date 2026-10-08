@@ -39,10 +39,6 @@ export const modelHealthOf = (
   task: ModelTask
 ): CapabilityHealth | undefined => capabilityOf(provider, model, task)?.health;
 
-/** All configured rows, including disabled rows needed by management screens. */
-export const modelNamesOf = (provider: Pick<IProvider, 'models'>): string[] =>
-  provider.models.map((row) => row.model);
-
 /**
  * Input/search representation supplied by the configured Chat adapter. Saved
  * catalog traits are descriptive metadata; an omitted trait never disables a

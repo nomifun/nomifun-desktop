@@ -182,18 +182,6 @@ export function clearCanvasImageComposeDraftModel(node: ImageNode): ImageNode {
   };
 }
 
-export function canvasImageComposeTaskSummary(
-  config: ConfigNode | null
-): CanvasImageComposeTaskSummary {
-  if (!config) return { state: 'idle', pendingCount: 0 };
-  const pending = config.data.status === 'queued' || config.data.status === 'running';
-  return {
-    state: config.data.status,
-    pendingCount: pending ? 1 : 0,
-    message: config.data.errorMessage ?? undefined,
-  };
-}
-
 export function isCanvasImageComposeConfig(
   node: CreativeCanvasNode | undefined
 ): node is ConfigNode {

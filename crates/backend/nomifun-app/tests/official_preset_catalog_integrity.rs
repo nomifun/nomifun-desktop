@@ -15,11 +15,12 @@ use axum::http::Request;
 use http_body_util::BodyExt;
 use nomifun_agent_contracts::{OfficialPresetKey, official_preset_seed_manifest_payload};
 use nomifun_api_types::{
-    AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
+    AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse, AgentPresetRevisionDto, ApiResponse,
+    CapabilitySelectionDto, ConversationResponse,
     CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CapabilityRefDto, CatalogMaterializationStateDto,
-    CreateAgentPresetFromTemplateRequest, InspectPluginImportRequest,
-    CreateAgentSessionResponseDto, InstallPluginImportRequest, InstallPluginImportResponseDto, PluginImportInspectionDto,
+    CreateAgentPresetFromTemplateRequest,
+    CreateAgentSessionResponseDto, InstallPluginImportRequest, InstallPluginImportResponseDto,
     PluginImportKindDto, PluginInstallOutcomeDto, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
@@ -127,7 +128,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
             ("requirements", &["requirements/claim", "requirements/read", "requirements/status", "requirements/write"]),
             ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/video"]),
-            ("agent.tool-discovery", &["tool.discovery.rank"]),
             ("plugin.development", nomifun_plugin_development::CREATE_ACTIONS),
         ])),
         (OfficialPresetKey::CodingCodex, actions(&[
@@ -138,7 +138,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("project.memory", &["project.memory/read", "project.memory/write"]),
             ("web.research", &["web.research/fetch", "web.research/search"]),
             ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
-            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CompanionDefault, actions(&[
             ("companion", &["companion/evolve", "companion/learn"]),
@@ -147,7 +146,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("channel.messaging", &["channel.messaging/reply"]),
             ("robot", &["robot/vision"]),
             ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"]),
-            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CustomerServiceDefault, actions(&[
             ("customer.service", &["customer.service/handoff", "customer.service/notes.read"]),
@@ -163,7 +161,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
             ("project.memory", &["project.memory/read", "project.memory/write"]),
             ("web.research", &["web.research/fetch", "web.research/search"]),
-            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
     ]);
     let manifest = official_preset_seed_manifest_payload();
@@ -223,26 +220,18 @@ async fn every_published_official_preset_stays_available_after_unified_plugin_in
         &services.encryption_key,
     )
     .await;
+    let corpus_version = nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
+    nomifun_skill_library::materialize_if_needed(
+        &services.data_dir, nomifun_skill_library::builtin_skills_corpus(), &corpus_version,
+    ).await.expect("materialize the production builtin skill corpus for the isolated release gate");
     let (states, _channel_components) = build_module_states(&services).await;
+    let skill_paths = states.skill.skill_paths.clone();
     let router = create_router_with_states(&services, states);
 
-    assert_official_preset_catalog_integrity(&router, "startup catalog", &exact_model).await;
+    assert_official_preset_catalog_integrity(&router, &services, &skill_paths, "startup catalog", &exact_model).await;
 
     let source = root.path().join("catalog-refresh-plugin");
     write_unified_plugin_package(&source);
-    let inspection: PluginImportInspectionDto = post_data(
-        &router,
-        "/api/plugins/import/inspect",
-        &InspectPluginImportRequest {
-            source_path: source.display().to_string(),
-            kind: PluginImportKindDto::Directory,
-        },
-    )
-    .await;
-    let confirmation = inspection
-        .permission_expansion
-        .as_ref()
-        .map(|value| value.confirmation_id.clone());
     let installed: InstallPluginImportResponseDto = post_data(
         &router,
         "/api/plugins/import",
@@ -251,7 +240,6 @@ async fn every_published_official_preset_stays_available_after_unified_plugin_in
             kind: PluginImportKindDto::Directory,
             expected_plugin_revision: None,
             create_copy: false,
-            permission_confirmation_id: confirmation,
             config: None,
             credential_bindings: None,
         },
@@ -261,6 +249,8 @@ async fn every_published_official_preset_stays_available_after_unified_plugin_in
 
     assert_official_preset_catalog_integrity(
         &router,
+        &services,
+        &skill_paths,
         "catalog after Unified Plugin Action registry install",
         &exact_model,
     )
@@ -330,9 +320,13 @@ async fn seed_search_and_vision_ready_chat_route(
 
 async fn assert_official_preset_catalog_integrity(
     router: &axum::Router,
+    services: &AppServices,
+    skill_paths: &nomifun_skill_library::SkillPaths,
     phase: &str,
     model: &AgentChatModelSelectionDto,
 ) {
+    let has_library_skills = !nomifun_skill_library::frozen::capture_inventory(skill_paths)
+        .await.expect("capture the host's actual library inventory").skills.is_empty();
     let library: AgentPresetLibraryResponse = get_data(
         router,
         "/api/agent-preset-templates?source=official",
@@ -522,11 +516,63 @@ async fn assert_official_preset_catalog_integrity(
         )
         .await;
         assert_eq!(session.state, "ready", "{phase}: {template_key} did not open a ready Session");
-        assert_eq!(
-            session.agent_binding.preset_revision_ref.preset_id,
-            editor.preset.preset_id,
-            "{phase}: {template_key} opened with a different Agent binding",
-        );
+        let binding = &session.agent_binding;
+        assert_eq!(binding.binding_version, 1);
+        let bound_revision: AgentPresetRevisionDto = get_data(router, &format!(
+            "/api/agent-presets/{}/revisions/{}", binding.preset_revision_ref.preset_id,
+            binding.preset_revision_ref.revision,
+        )).await;
+        assert_eq!(bound_revision.reference, binding.preset_revision_ref);
+        let mut expected_document = revision.document.clone();
+        if !expected_document.enabled_capabilities.is_empty()
+            || !expected_document.skill_bindings.is_empty() || has_library_skills {
+            expected_document.enabled_capabilities.push(CapabilitySelectionDto {
+                capability: CapabilityRefDto { id: "agent.tool-discovery".into() },
+                action_allowlist: BTreeSet::from(["tool.discovery.rank".into()]),
+            });
+        }
+        expected_document.enabled_capabilities.sort_by(|left, right| left.capability.id.cmp(&right.capability.id));
+        assert_eq!(bound_revision.document, expected_document,
+            "{phase}: {template_key} Session compilation must freeze the complete authored contract plus exact runtime discovery");
+        let projection: ConversationResponse = get_data(router,
+            &format!("/api/agent-sessions/{}/projection", session.agent_session_id)).await;
+        let snapshot = projection.agent_snapshot.expect("Session projection retains its frozen snapshot");
+        assert_eq!(snapshot.canonical_binding.as_ref(), Some(binding));
+        assert_eq!(snapshot.preset_id, binding.preset_revision_ref.preset_id);
+        assert_eq!(snapshot.preset_revision, i64::try_from(binding.preset_revision_ref.revision).unwrap());
+        assert_eq!(snapshot.resolved_model, Some(nomifun_api_types::ExecutionModelRef {
+            provider_id: model.provider_id.clone(), model: model.model.clone(),
+        }));
+        assert_eq!(snapshot.enabled_capability_actions, expected_document.enabled_capabilities.iter()
+            .map(|selection| (selection.capability.id.clone(), selection.action_allowlist.clone())).collect());
+        let expected_resources = official_session_resources(&template_key, companion_id, customer_id);
+        let expected_resources = expected_resources.as_array().unwrap().iter()
+            .map(|resource| (resource["resource_kind"].as_str().unwrap(), resource["resource_id"].as_str().unwrap())).collect::<BTreeSet<_>>();
+        let actual_resources = binding.typed_resource_bindings.iter()
+            .map(|resource| (resource.resource_kind.as_str(), resource.resource_id.as_str())).collect::<BTreeSet<_>>();
+        assert_eq!(actual_resources, expected_resources);
+        assert_eq!(binding.typed_resource_bindings.len(), expected_resources.len());
+        for resource in &binding.typed_resource_bindings {
+            assert_eq!(resource.owner_id, services.authoritative_user_id.as_ref());
+            assert!(resource.connection_config_ref.is_none());
+            let operations = match resource.resource_kind.as_str() {
+                "process_session" => ["execute"].as_slice(),
+                "computer" => ["observe"].as_slice(),
+                "scheduler" if template_key == "assistant.general" => ["read"].as_slice(),
+                "scheduler" => ["read", "write", "delete"].as_slice(),
+                "workspace" | "project_memory" | "companion" | "companion_memory" | "asset_library" | "customer" => ["read", "write"].as_slice(),
+                kind => panic!("unaccounted resource kind {kind}"),
+            };
+            assert_eq!(resource.operations, operations.iter().map(|operation| (*operation).to_owned()).collect());
+            let parameters = match resource.resource_kind.as_str() {
+                "workspace" | "process_session" => BTreeMap::from([("workspace_root".to_owned(), services.work_dir.to_string_lossy().into_owned())]),
+                "computer" => BTreeMap::from([("scope".to_owned(), "local_desktop".to_owned())]),
+                _ => BTreeMap::new(),
+            };
+            assert_eq!(resource.typed_parameters, parameters);
+            let canonical: nomifun_agent_contracts::TypedResourceBinding = serde_json::from_value(serde_json::to_value(resource).unwrap()).unwrap();
+            assert_eq!(resource.binding_id, nomifun_agent_contracts::resource_definition_id(&canonical).unwrap().as_ref());
+        }
     }
 }
 

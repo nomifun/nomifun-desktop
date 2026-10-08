@@ -42,7 +42,6 @@ pub use models::{
     KnowledgeTreeEventStatus, KnowledgeTreeOperationRow,
     KnowledgeTreeOperationState, SkillTagRow, TagSettingRow, TerminalSessionRow,
     TerminalTurnAdmissionRow,
-    UpdateAgentHandshakeParams,
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
     WorkshopAssetRow, ConversationExecutionLinkRow,

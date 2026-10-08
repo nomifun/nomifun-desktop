@@ -114,20 +114,6 @@ pub struct KnowledgeTreeOperationRow {
     pub updated_at: TimestampMs,
 }
 
-impl KnowledgeTreeOperationRow {
-    /// Every non-terminal row requires reconciliation after an unclean stop.
-    /// `prepared` is included because a crash can happen after the filesystem
-    /// rename but before the next journal marker reaches SQLite.
-    pub fn requires_recovery(&self) -> bool {
-        self.state != KnowledgeTreeOperationState::Committed
-    }
-
-    pub fn has_pending_event(&self) -> bool {
-        self.state == KnowledgeTreeOperationState::Committed
-            && self.event_status == KnowledgeTreeEventStatus::Pending
-    }
-}
-
 impl<'row> sqlx::FromRow<'row, SqliteRow> for KnowledgeTreeOperationRow {
     fn from_row(row: &'row SqliteRow) -> Result<Self, sqlx::Error> {
         fn decode<T>(value: String) -> Result<T, sqlx::Error>

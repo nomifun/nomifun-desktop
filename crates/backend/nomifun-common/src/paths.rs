@@ -139,12 +139,6 @@ pub fn stored_path_matches(stored: &str, canonical: &Path) -> bool {
     !stored.is_empty() && paths_equivalent(Path::new(stored), canonical)
 }
 
-/// The canonical string spelling used when persisting a path into a durable
-/// marker: simplified (never `\\?\`-prefixed) display form.
-pub fn marker_string(canonical: &Path) -> String {
-    simplified(canonical).display().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +253,7 @@ mod tests {
     #[test]
     fn marker_string_round_trips_through_stored_path_matches() {
         let dir = canonicalize_simplified(&std::env::temp_dir()).unwrap();
-        let stored = marker_string(&dir);
+        let stored = simplified(&dir).display().to_string();
         assert!(stored_path_matches(&stored, &dir));
     }
 }

@@ -30,14 +30,6 @@ impl EngineKernelSession {
                 .any(|binding| binding.resource_kind.as_ref() == "mcp_server")
     }
 
-    pub async fn join_resource_reads(&self) -> Result<(), AppError> {
-        self.resource_tasks.join().await?;
-        if self.resource_settlement_failed.load(Ordering::Acquire) {
-            return Err(failure("resource settlement journal is unproven"));
-        }
-        Ok(())
-    }
-
     pub fn start_mcp_resource(
         self: &Arc<Self>,
         journal: EngineTurnJournal,

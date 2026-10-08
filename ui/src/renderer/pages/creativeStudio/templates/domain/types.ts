@@ -263,15 +263,6 @@ export interface CreativeTemplateRunAggregateV1 {
   record: CreativeTemplateRunRecord;
 }
 
-export interface CreativeTemplateWorkspaceDocumentV1 {
-  kind: 'nomifun.creative-studio.templates';
-  version: 1;
-  templates: CreativeTemplateDefinitionV1[];
-  promptDrafts: CreativeTemplatePromptDraft[];
-  runRequests: CreativeTemplateRunRequest[];
-  runs: CreativeTemplateRunRecord[];
-}
-
 export type CreativeTemplateValidationErrorCode =
   | 'invalid-json'
   | 'invalid-envelope'
@@ -292,14 +283,6 @@ export interface CreativeTemplateValidationError {
 
 export type CreativeTemplateValidationResult =
   | { ok: true }
-  | { ok: false; error: CreativeTemplateValidationError };
-
-export type CreativeTemplateParseResult =
-  | { ok: true; document: CreativeTemplateWorkspaceDocumentV1 }
-  | { ok: false; error: CreativeTemplateValidationError };
-
-export type CreativeTemplateExportResult =
-  | { ok: true; json: string; document: CreativeTemplateWorkspaceDocumentV1 }
   | { ok: false; error: CreativeTemplateValidationError };
 
 export type CreativeTemplateValueResult<Value> =

@@ -7,14 +7,12 @@
 import type { ReactNode } from 'react';
 
 import type {
-  CreativeCanvasBackground,
   CreativeCanvasUserNodeKind,
 } from '../../domain';
 import type { CanvasInteractionTool } from '../components';
 import type { CanvasCasSaveStatus } from '../editor';
 
 export type CreativeCanvasChromeNodeKind = CreativeCanvasUserNodeKind;
-export type CreativeCanvasChromeBackground = CreativeCanvasBackground;
 export type CreativeCanvasChromeTool = CanvasInteractionTool;
 export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
 
@@ -37,8 +35,6 @@ export interface CreativeCanvasChromeProps {
   saveStatus: CreativeCanvasChromeSaveStatus;
   saveMessage?: string;
   tool: CreativeCanvasChromeTool;
-  /** @deprecated Background selection now lives in the zoom popover. */
-  background?: CreativeCanvasChromeBackground;
   canUndo: boolean;
   canRedo: boolean;
   leftOpen: boolean;
@@ -50,8 +46,6 @@ export interface CreativeCanvasChromeProps {
   rightView: CreativeCanvasRightView | null;
   /** Current persisted width of the right panel, in CSS pixels. */
   rightPanelWidth?: number;
-  /** @deprecated Background selection now lives in the zoom popover. */
-  backgroundMenuOpen?: boolean;
   compact?: boolean;
   disabled?: boolean;
   className?: string;
@@ -59,10 +53,6 @@ export interface CreativeCanvasChromeProps {
   onBackToCanvases(): void;
   onToolChange(tool: CreativeCanvasChromeTool): void;
   onAddNode(kind: CreativeCanvasChromeNodeKind): void;
-  /** @deprecated Background selection now lives in the zoom popover. */
-  onBackgroundChange?(background: CreativeCanvasChromeBackground): void;
-  /** @deprecated Background selection now lives in the zoom popover. */
-  onBackgroundMenuOpenChange?(open: boolean): void;
   onUndo(): void;
   onRedo(): void;
   onLeftPanelOpenChange(open: boolean): void;
@@ -89,12 +79,6 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'audio',
   'timeline',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
-
-export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [
-  'dots',
-  'lines',
-  'blank',
-] as const satisfies readonly CreativeCanvasChromeBackground[];
 
 export function toggleCreativeCanvasPanel<T extends string>(current: T | null, target: T): T | null {
   return current === target ? null : target;

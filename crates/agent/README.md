@@ -6,14 +6,12 @@ Current crates:
 
 | Crate | Role |
 | --- | --- |
-| `nomi-types` | Provider-neutral data types. |
-| `nomi-protocol` | Host/agent command and event protocol. |
+| `nomi-types` | Provider-neutral data types and native tool effect categories. |
 | `nomi-compact` | Conversation compaction and context shaping. |
 | `nomi-config` | Provider, auth, hook, and runtime configuration. |
 | `nomi-providers` | LLM provider clients and streaming logic. |
 | `nomi-tools` | Built-in tool registry. |
 | `nomi-mcp` | MCP client, config, transports, and tool proxying. |
-| `nomi-memory` | Long-term project/user memory. |
 | `nomi-computer` | Desktop computer-use tool implementation. |
 | `nomi-a11y` | Accessibility helpers used by computer-use flows. |
 | `nomi-browser-engine` | Self-hosted browser/CDP automation engine. |

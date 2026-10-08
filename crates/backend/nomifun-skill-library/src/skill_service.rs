@@ -262,19 +262,6 @@ pub async fn write_skill(
     Ok(())
 }
 
-/// Copy a skill's SKILL.md from one scope to another (skill transfer / 互教). Reads the active
-/// source SKILL.md and writes it into the target's active dir (validated by `write_skill`).
-pub async fn copy_skill(
-    paths: &SkillPaths,
-    from: &SkillScope,
-    to: &SkillScope,
-    name: &str,
-) -> Result<(), SkillError> {
-    let src = skill_dir_for(paths, from, name, false)?;
-    let content = tokio::fs::read_to_string(src.join(SKILL_MANIFEST_FILE)).await?;
-    write_skill(paths, to, false, name, &content).await
-}
-
 // ---------------------------------------------------------------------------
 // A. Built-in resource reading
 // ---------------------------------------------------------------------------

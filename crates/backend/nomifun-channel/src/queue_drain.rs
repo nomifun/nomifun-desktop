@@ -90,14 +90,6 @@ impl QueueDrain {
         self
     }
 
-    /// Test-only knob: shrink the spec 30s/120s backoff and the sweep period
-    /// so bounded-retry behaviour is observable in integration tests.
-    pub fn with_timing(mut self, retry_backoff: [Duration; 2], sweep_interval: Duration) -> Self {
-        self.retry_backoff = retry_backoff;
-        self.sweep_interval = sweep_interval;
-        self
-    }
-
     /// Runs until the event bus closes. Call via `tokio::spawn`.
     ///
     /// `events` is a `BroadcastEventBus::subscribe_user()` receiver; only

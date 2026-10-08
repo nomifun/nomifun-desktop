@@ -53,12 +53,6 @@ const isInsideWorkspace = (target: string, workspaceRoots: Array<string | null |
   });
 };
 
-export const splitToolReceiptTargets = (target?: string): string[] =>
-  target
-    ?.split(', ')
-    .map((value) => value.trim())
-    .filter(Boolean) ?? [];
-
 export const formatWorkspaceFileTarget = (
   target: string,
   options: FileTargetLabelOptions = {}

@@ -25,14 +25,12 @@ const baseProps = (
   canvasTitle: '交互测试画布',
   saveStatus: 'saved',
   tool: 'select',
-  background: 'lines',
   canUndo: false,
   canRedo: false,
   leftOpen: true,
   leftView: 'canvas',
   resourceView: null,
   rightView: null,
-  backgroundMenuOpen: false,
   slots: {
     canvas: <div>canvas</div>,
     left: {
@@ -43,8 +41,6 @@ const baseProps = (
   onBackToCanvases: noop,
   onToolChange: noop,
   onAddNode: noop,
-  onBackgroundChange: noop,
-  onBackgroundMenuOpenChange: noop,
   onUndo: noop,
   onRedo: noop,
   onLeftPanelOpenChange: noop,

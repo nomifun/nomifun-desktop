@@ -8,20 +8,16 @@ import { describe, expect, test } from 'bun:test';
 
 import { topologicallySortTemplateSteps } from './graph';
 import {
-  createTemplateDefaultInputs,
-  createTemplateWorkspaceDocumentV1,
   renderCreativePromptTemplate,
 } from './model';
-import { exportTemplateWorkspaceV1, parseTemplateWorkspaceV1 } from './serialization';
 import { IDS, createTemplateFixture } from './testFixtures';
 import {
   isTemplateBusinessId,
   validateTemplateDefinition,
   validateTemplateInputsForDefinition,
-  validateTemplateWorkspaceDocument,
 } from './validation';
 
-describe('template v1 validation and parser', () => {
+describe('template v1 validation', () => {
   test('accepts canonical single-image and multi-image DAGs', () => {
     expect(validateTemplateDefinition(createTemplateFixture()).ok).toBe(true);
     expect(validateTemplateDefinition(createTemplateFixture(true)).ok).toBe(true);
@@ -132,22 +128,11 @@ describe('template v1 validation and parser', () => {
       inputs
     );
     expect(rendered).toEqual({ ok: true, value: 'Create a poster for NomiFun' });
-    expect(createTemplateDefaultInputs(template)).toEqual([]);
   });
 
-  test('fails closed on malformed JSON, versions, and unknown nested fields', () => {
-    expect(parseTemplateWorkspaceV1('{')).toMatchObject({
-      ok: false,
-      error: { code: 'invalid-json' },
-    });
-    const empty = createTemplateWorkspaceDocumentV1();
-    expect(parseTemplateWorkspaceV1(JSON.stringify({ ...empty, version: 2 }))).toMatchObject({
-      ok: false,
-      error: { code: 'unsupported-version' },
-    });
+  test('fails closed on unknown nested definition fields', () => {
     const template = createTemplateFixture();
-    const document = { ...empty, templates: [{ ...template, unexpectedExtension: {} }] };
-    const parsed = parseTemplateWorkspaceV1(JSON.stringify(document));
+    const parsed = validateTemplateDefinition({ ...template, unexpectedExtension: {} });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) {
       expect(parsed.error.code).toBe('unknown-field');
@@ -155,16 +140,4 @@ describe('template v1 validation and parser', () => {
     }
   });
 
-  test('round trips only validated v1 JSON', () => {
-    const document = {
-      ...createTemplateWorkspaceDocumentV1(),
-      templates: [createTemplateFixture()],
-    };
-    expect(validateTemplateWorkspaceDocument(document).ok).toBe(true);
-    const exported = exportTemplateWorkspaceV1(document);
-    expect(exported.ok).toBe(true);
-    if (!exported.ok) return;
-    const parsed = parseTemplateWorkspaceV1(exported.json);
-    expect(parsed).toEqual({ ok: true, document });
-  });
 });

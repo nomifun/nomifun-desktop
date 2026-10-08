@@ -35,7 +35,7 @@ use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
 use crate::{
     AgentCapabilityActivationSnapshot, AgentRuntimeControl, OfficialAgentRuntime,
-    RuntimeBuildBinding, OfficialRuntimeFactory, RuntimeSteerDelivery, RuntimeTeardown,
+    RuntimeBuildBinding, RuntimeSteerDelivery, RuntimeTeardown,
 };
 
 /// Only nonterminal UI events are available to drivers. Persistence belongs to
@@ -606,20 +606,6 @@ pub type EngineDriverFactory = Arc<
         + Send
         + Sync,
 >;
-
-/// Register this factory with the existing catalog and an explicit admission
-/// policy during application assembly. No packaged upload/install API exists.
-pub fn hosted_engine_factory(factory: EngineDriverFactory) -> OfficialRuntimeFactory {
-    Arc::new(move |options, binding| {
-        let factory = factory.clone();
-        Box::pin(async move {
-            let runtime_options = options.clone();
-            let driver = factory(options, binding).await?;
-            Ok(Arc::new(HostedAgentRuntime::new(&runtime_options, driver)?)
-                as Arc<dyn OfficialAgentRuntime>)
-        })
-    })
-}
 
 #[cfg(test)]
 mod tests {

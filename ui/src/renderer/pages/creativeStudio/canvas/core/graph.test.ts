@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { createCanvasId } from './document';
-import { connectCanvasNodes, validateCanvasConnection } from './graph';
+import { validateCanvasConnection } from './graph';
 import { testDocument, testEdge, testNode, testUuid } from './testFixtures';
 
 describe('Creative Studio graph constraints', () => {
@@ -85,24 +85,5 @@ describe('Creative Studio graph constraints', () => {
         targetNodeId: secondConfig.id,
       })
     ).toEqual({ ok: false, code: 'config_to_config' });
-  });
-
-  test('creates canonical nullable handles after validation', () => {
-    expect(
-      connectCanvasNodes(
-        document,
-        { sourceNodeId: text.id, targetNodeId: image.id },
-        { edgeId: testUuid(30) }
-      )
-    ).toEqual({
-      ok: true,
-      edge: {
-        id: testUuid(30),
-        sourceNodeId: text.id,
-        targetNodeId: image.id,
-        sourceHandle: null,
-        targetHandle: null,
-      },
-    });
   });
 });

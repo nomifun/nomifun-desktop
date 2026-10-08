@@ -105,13 +105,13 @@ describe('CreativeAssetLibraryPage selection', () => {
     expect((first as HTMLInputElement).checked).toBe(true);
 
     fireEvent.click(selectionToolbar().getByRole('button', { name: '删除' }));
-    fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
-    await waitFor(() => {
-      expect(page.queryByText('Asset 1')).toBeNull();
-      expect(page.queryByText('Asset 3')).toBeNull();
-      expect(page.getByText('Asset 2')).toBeTruthy();
-      expect(selectionToolbar().queryByRole('button', { name: '删除' })).toBeNull();
+    await act(async () => {
+      fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
     });
+    expect(page.queryByText('Asset 1')).toBeNull();
+    expect(page.queryByText('Asset 3')).toBeNull();
+    expect(page.getByText('Asset 2')).toBeTruthy();
+    expect(selectionToolbar().queryByRole('button', { name: '删除' })).toBeNull();
     expect(removedIds).toEqual(['asset-1', 'asset-3']);
   }, 15000);
 
@@ -126,19 +126,21 @@ describe('CreativeAssetLibraryPage selection', () => {
     fireEvent.click(await page.findByRole('checkbox', { name: '选择素材: Asset 1' }));
     fireEvent.click(selectionToolbar().getByRole('checkbox', { name: '全选本页' }));
     fireEvent.click(selectionToolbar().getByRole('button', { name: '删除' }));
-    fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
-
-    await waitFor(() => {
-      expect(deleteDialog().getByRole('alert').textContent).toContain('已删除 2 项，1 项未能删除');
-      expect(deleteDialog().getByRole('alert').textContent).toContain('正在执行的生成任务');
-      expect((page.getByRole('checkbox', { name: '选择素材: Asset 2' }) as HTMLInputElement).checked).toBe(true);
-      expect((deleteDialog().getByRole('button', { name: '永久删除' }) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
     });
+
+    expect(deleteDialog().getByRole('alert').textContent).toContain('已删除 2 项，1 项未能删除');
+    expect(deleteDialog().getByRole('alert').textContent).toContain('正在执行的生成任务');
+    expect((page.getByRole('checkbox', { name: '选择素材: Asset 2' }) as HTMLInputElement).checked).toBe(true);
+    expect((deleteDialog().getByRole('button', { name: '永久删除' }) as HTMLButtonElement).disabled).toBe(false);
     expect(removedIds).toEqual(['asset-1', 'asset-2', 'asset-3']);
 
     blocked = false;
-    fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
-    await waitFor(() => expect(page.queryByRole('checkbox', { name: '选择素材: Asset 2' })).toBeNull());
+    await act(async () => {
+      fireEvent.click(deleteDialog().getByRole('button', { name: '永久删除' }));
+    });
+    expect(page.queryByRole('checkbox', { name: '选择素材: Asset 2' })).toBeNull();
     expect(removedIds).toEqual(['asset-1', 'asset-2', 'asset-3', 'asset-2']);
   }, 15000);
 

@@ -1,29 +1,5 @@
-/**
- * @license
- * Copyright 2025-2026 NomiFun (nomifun.com)
- * SPDX-License-Identifier: Apache-2.0
- */
 
-import { resolveLocaleKey } from '@/common/utils';
 import { resolveBackendAssetUrl } from '@/renderer/utils/platform';
-
-export type LocalizedAgentIdentity = {
-  id?: string;
-  name: string;
-  name_i18n?: Record<string, string>;
-};
-
-/** Resolve a human-readable Agent name without consulting a mutable catalog. */
-export const resolveAgentDisplayName = (agent: LocalizedAgentIdentity, language: string): string => {
-  const localeKey = resolveLocaleKey(language);
-  return (
-    agent.name_i18n?.[language]?.trim() ||
-    agent.name_i18n?.[localeKey]?.trim() ||
-    agent.name_i18n?.['en-US']?.trim() ||
-    agent.name.trim() ||
-    agent.id || 'Agent'
-  );
-};
 
 /** Strictly recognize emoji so arbitrary identifiers and URLs never become visible text. */
 export const isEmoji = (value: string): boolean => {

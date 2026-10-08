@@ -52,6 +52,15 @@ fn is_valid_size(len: u64) -> bool {
 /// downloads so N concurrent callers trigger exactly one fetch (double-checked
 /// against the disk both before and after acquiring the lock).
 pub async fn ensure_model(models_dir: &Path, lock: &Mutex<()>) -> Result<PathBuf, AppError> {
+    ensure_model_from_upstreams(models_dir, lock, UPSTREAMS, reqwest::Client::builder()).await
+}
+
+async fn ensure_model_from_upstreams(
+    models_dir: &Path,
+    lock: &Mutex<()>,
+    upstreams: &[&str],
+    client_builder: reqwest::ClientBuilder,
+) -> Result<PathBuf, AppError> {
     let path = models_dir.join(MODEL_FILENAME);
 
     // Fast path: already cached and plausibly intact — no lock, no network.
@@ -74,13 +83,13 @@ pub async fn ensure_model(models_dir: &Path, lock: &Mutex<()>) -> Result<PathBuf
         .await
         .map_err(|e| AppError::Internal(format!("create models dir: {e}")))?;
 
-    let client = reqwest::Client::builder()
+    let client = client_builder
         .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| AppError::Internal(format!("build http client: {e}")))?;
 
     let mut last_err = String::from("no upstream attempted");
-    for url in UPSTREAMS {
+    for url in upstreams {
         match download_one(&client, url).await {
             Ok(bytes) if is_valid_size(bytes.len() as u64) => {
                 write_atomic(&path, &bytes).await?;
@@ -167,20 +176,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_ignores_undersized_cache_and_then_fails_offline_cleanly() {
+    async fn ensure_rejects_undersized_cache_when_all_local_upstreams_fail() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
         let dir = tempfile::tempdir().unwrap();
         let models = dir.path().join("models");
         std::fs::create_dir_all(&models).unwrap();
-        // A truncated/garbage cache must NOT be served; with no network the
-        // call fails cleanly (it does not return the bad file).
-        std::fs::write(models.join(MODEL_FILENAME), b"not a model").unwrap();
+        let path = models.join(MODEL_FILENAME);
+        std::fs::write(&path, b"not a model").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mirror = format!("http://{address}/mirror");
+        let fallback = format!("http://{address}/fallback");
+        let server = tokio::spawn(async move {
+            for route in ["/mirror", "/fallback"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line.trim_end(), format!("GET {route} HTTP/1.1"));
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" { break; }
+                }
+                reader.get_mut().write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ).await.unwrap();
+                reader.get_mut().shutdown().await.unwrap();
+            }
+        });
         let lock = Mutex::new(());
-        // We can't guarantee offline in CI, so only assert the undersized file
-        // is never returned as-is: either it re-downloads a valid model, or it
-        // errors — but it never returns the 11-byte path content.
-        if let Ok(p) = ensure_model(&models, &lock).await {
-            let len = std::fs::metadata(&p).unwrap().len();
-            assert!(is_valid_size(len), "must not serve undersized cache");
-        }
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3),
+            ensure_model_from_upstreams(&models, &lock, &[&mirror, &fallback],
+                reqwest::Client::builder().no_proxy()),
+        ).await.expect("local failed upstreams must settle without external downloads").unwrap_err();
+        tokio::time::timeout(std::time::Duration::from_secs(3), server)
+            .await.expect("both local upstreams must be attempted").unwrap();
+        assert!(error.to_string().contains("HTTP 503"));
+        assert_eq!(std::fs::read(path).unwrap(), b"not a model");
     }
 }

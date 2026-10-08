@@ -414,8 +414,6 @@ struct SharedCompanionConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_nullable")]
     #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
     default_companion_id: Option<Option<CompanionId>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_nullable")]
-    bridge_to_memory_dir: Option<Option<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]

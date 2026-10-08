@@ -84,11 +84,6 @@ export const providerCompatibilityProtocolPreferences = (
   return EMPTY_PROTOCOL_BY_TASK;
 };
 
-export const providerCompatibilityProtocolForTask = (
-  mode: ProviderCompatibilityMode,
-  task: ModelTask
-): string | undefined => providerCompatibilityProtocolPreferences(mode)[task];
-
 const isVersionSegment = (segment: string): boolean => /^v\d[a-z0-9]*$/i.test(segment);
 
 /** Keep the provider root aligned with the selected wire format's URL shape. */

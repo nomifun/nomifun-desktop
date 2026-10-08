@@ -24,7 +24,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(component.includes("from '@icon-park/react'")).toBe(true);
     expect(component.includes("from '@arco-design/web-react'")).toBe(true);
     expect(types.includes('CreativeCanvasUserNodeKind')).toBe(true);
-    expect(types.includes('CreativeCanvasBackground')).toBe(true);
     expect(types.includes('CanvasInteractionTool')).toBe(true);
     expect(component.includes('props.slots?.canvas')).toBe(true);
     expect(component.includes('props.slots?.left')).toBe(true);
@@ -37,7 +36,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       'onBackToCanvases',
       'onToolChange',
       'onAddNode',
-      'onBackgroundChange',
       'onUndo',
       'onRedo',
       'onLeftViewChange',
@@ -61,13 +59,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('onToggleMiniMap')).toBe(false);
     expect(types.includes('isMiniMapOpen')).toBe(false);
     expect(types.includes('onBottomViewChange')).toBe(false);
-  });
-
-  test('keeps the canonical background vocabulary without a legacy fourth mode', () => {
-    expect(types.includes("'dots'" )).toBe(true);
-    expect(types.includes("'lines'" )).toBe(true);
-    expect(types.includes("'blank'" )).toBe(true);
-    expect(types.includes("'grid'" )).toBe(false);
   });
 
   test('keeps source-order node creation directly on the side rail', () => {

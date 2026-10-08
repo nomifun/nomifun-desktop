@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use crate::context_contributor::{ContextContributor, TurnContext};
 use nomi_tools::{
     Tool, ToolExecutionContext,

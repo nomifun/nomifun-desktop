@@ -3581,7 +3581,6 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         ("workspace.vcs", "workspace.vcs/commit"),
         ("agent.collaboration", "agent/delegate"),
         ("requirements", "requirements/read"),
-        ("agent.tool-discovery", "tool.discovery.rank"),
     ] {
         let selection = general_enabled
             .iter()
@@ -3594,6 +3593,8 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
             "{module_id} must retain exact Action {action_id}"
         );
     }
+    assert!(general_enabled.iter().all(|selection| selection["capability"]["id"] != "agent.tool-discovery"),
+        "tool discovery is automatic runtime infrastructure, not an authored grant");
     assert!(
         general["seed"]["required_resource_kinds"]
             .as_array()
@@ -3618,7 +3619,6 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         ("workspace.artifacts", "workspace.artifacts/publish"),
         ("project.memory", "project.memory/read"),
         ("agent.collaboration", "agent/delegate"),
-        ("agent.tool-discovery", "tool.discovery.rank"),
         ("web.research", "web.research/search"),
     ] {
         let selection = enabled.iter()
@@ -3881,7 +3881,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
 }
 
 #[tokio::test]
-async fn canonical_coding_session_has_no_in_place_agent_or_resource_override_routes() {
+async fn canonical_coding_session_rejects_retired_overrides_and_invalid_capability_selection() {
     const TRUST: &str = "next-turn-kernel-binding";
     async fn post(router: axum::Router, path: &str, body: Value) -> Value {
         let response = router.oneshot(Request::builder().method("POST").uri(path)
@@ -3924,7 +3924,6 @@ async fn canonical_coding_session_has_no_in_place_agent_or_resource_override_rou
         ("preset", json!({
             "preset_id":target["preset"]["preset_id"], "resource_selections":resources
         })),
-        ("capability-selection", json!({"capability_selection": {}})),
         ("mcp-selection", json!({"mcp_server_ids": []})),
     ] {
         let response = router.clone().oneshot(Request::builder().method("PUT")
@@ -3933,6 +3932,12 @@ async fn canonical_coding_session_has_no_in_place_agent_or_resource_override_rou
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "retired route remained: {suffix}");
     }
+    let invalid_selection = router.clone().oneshot(Request::builder().method("PUT")
+        .uri(format!("/api/agent-sessions/{id}/capability-selection"))
+        .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+        .body(Body::from(r#"{"capability_selection":{}}"#)).unwrap()).await.unwrap();
+    assert_eq!(invalid_selection.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "current capability selection requires the typed selection and binding-version CAS");
     let observed = router.clone().oneshot(Request::builder()
         .uri(format!("/api/agent-sessions/{id}"))
         .header("x-nomi-local-trust", TRUST).body(Body::empty()).unwrap()).await.unwrap();
@@ -4316,6 +4321,7 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     }
 
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    common::materialize_builtin_skills_for_fixture(&services).await;
     let upstream = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path_regex(".*/chat/completions$"))
@@ -4442,6 +4448,7 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    common::materialize_builtin_skills_for_fixture(&services).await;
     let upstream = wiremock::MockServer::start().await;
     const REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -4576,8 +4583,13 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
     })
     .await
     .expect("pre-model Companion failure did not reach a durable terminal");
-    assert!(failed_error.contains("requested Skill is not in the Agent's immutable selected Skill locks"), "{failed_error}");
-    assert!(!failed_error.contains("turn no longer admits progress"), "cleanup masked the preparation failure: {failed_error}");
+    let failed_error: Value = serde_json::from_str(&failed_error).expect("canonical pre-model failure diagnostics");
+    assert_eq!(failed_error["model_steps"], 0, "an unselected Skill must fail before the model starts");
+    assert_eq!(failed_error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
+    assert_eq!(failed_error["error"]["agentTemplateKey"], "companion.default");
+    let detail = failed_error["error"]["detail"].as_str().expect("native Skill admission diagnostic");
+    assert!(detail.contains("Agent Skills: requested Skill is not in this Agent Snapshot"), "{failed_error}");
+    assert!(!detail.contains("turn no longer admits progress"), "cleanup masked the preparation failure: {failed_error}");
     let (status, turn) = call(
         router.clone(),
         "POST",
@@ -4762,7 +4774,7 @@ async fn creative_agent_launches_without_enabled_chat_generation_provider_or_can
     );
     let capabilities = editor["revision"]["document"]["enabled_capabilities"].as_array().unwrap();
     for capability in [
-        "agent.tool-discovery", "creation.media", "creative.workshop", "office",
+        "creation.media", "creative.workshop", "office",
         "project.memory", "web.research", "workspace.artifacts", "workspace.files",
         "workspace.process",
     ] {
@@ -5037,7 +5049,15 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         assert_eq!(record["primary"]["provider_id"], selection["provider_id"]);
         assert_eq!(record["primary"]["model"], selection["model"]);
         assert_eq!(record["failovers"], json!([]));
-        for field in ["enabled_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
+        let mut expected_capabilities = original["revision"]["document"]["enabled_capabilities"].as_array().unwrap().clone();
+        expected_capabilities.push(json!({
+            "capability": {"id": "agent.tool-discovery"},
+            "action_allowlist": ["tool.discovery.rank"]
+        }));
+        expected_capabilities.sort_by(|left, right| left["capability"]["id"].as_str().cmp(&right["capability"]["id"].as_str()));
+        assert_eq!(editor["data"]["revision"]["document"]["enabled_capabilities"], json!(expected_capabilities),
+            "Session compilation may add only the exact automatic discovery grant");
+        for field in ["skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
             assert_eq!(editor["data"]["revision"]["document"][field], original["revision"]["document"][field], "must retain {field}");
         }
         sessions.push(binding);
@@ -5831,7 +5851,11 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
         )
         .await
         .expect("dispatch retired-Preset historical Session request");
-    assert_eq!(historical.status(), StatusCode::OK);
+    let historical_status = historical.status();
+    let historical: Value = serde_json::from_slice(&axum::body::to_bytes(
+        historical.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(historical_status, StatusCode::OK, "retiring an Agent must preserve existing Session history: {historical}");
+    assert_eq!(historical["data"]["session"]["agent_binding"]["resolved_snapshot_ref"], expected_snapshot);
 
     let new_session = router
         .clone()

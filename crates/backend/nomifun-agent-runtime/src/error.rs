@@ -106,14 +106,6 @@ impl AgentEngineError {
         }
     }
 
-    pub fn model_stream_interrupted(message: impl Into<String>) -> Self {
-        let error = ChatModelError::new(
-            ChatModelErrorCode::StreamInterrupted,
-            message,
-            nomifun_chat_model_broker::ChatRetryDirective::Never,
-        );
-        Self::from_model_error(error)
-    }
 }
 
 #[cfg(test)]

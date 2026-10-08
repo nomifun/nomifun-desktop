@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::tool::{JsonSchema, ToolResult};
 

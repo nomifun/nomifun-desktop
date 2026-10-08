@@ -1200,6 +1200,37 @@ impl AgentControlPlane {
         &self, owner: &UserId, id: &str,
     ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
         let mut stored = self.owned_preset(owner, id).await?;
+        let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
+        let key = self.official_template_for_revision(&stored, &revision)?;
+        if let Some(key) = key.as_ref() {
+            if stored.preset.display_name != key.as_str() {
+                stored.preset.display_name = key.as_str().to_owned();
+                self.store.update_preset_metadata(&stored).await?;
+            }
+        }
+        Ok(key)
+    }
+
+    /// Presentation only, after exact owner/Revision/Snapshot validation. Retired
+    /// authoring metadata cannot grant a new Session, capability or execution.
+    pub async fn saved_binding_presentation(
+        &self, owner: &UserId, binding: &AgentBindingValueDto,
+    ) -> Result<(String, Option<OfficialPresetKey>), ControlPlaneError> {
+        let binding: AgentBindingValue = wire_cast(binding)?;
+        let (revision, _) = self.load_binding_artifacts(owner, &binding).await?;
+        let stored = self.store.get_bound_preset(&binding.preset_revision_ref.preset_id).await?
+            .ok_or_else(|| not_found("AgentPreset"))?;
+        if stored.preset.owner_user_id.as_ref() != Some(owner) {
+            return Err(not_found("AgentPreset"));
+        }
+        let key = self.official_template_for_revision(&stored, &revision)?;
+        let name = key.as_ref().map_or_else(|| stored.preset.display_name.clone(), |key| key.as_str().to_owned());
+        Ok((name, key))
+    }
+
+    fn official_template_for_revision(
+        &self, stored: &StoredPreset, revision: &AgentPresetRevision,
+    ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
         if !stored.session_only || stored.preset.source != AgentPresetSource::User {
             return Ok(None);
         }
@@ -1216,7 +1247,6 @@ impl AgentControlPlane {
         });
         let Some(key) = key else { return Ok(None); };
         let Some(seed) = self.templates.seed(key) else { return Ok(None); };
-        let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
         let payload = &revision.payload;
         if !payload.persona.is_empty() || !payload.instructions.is_empty()
             || !payload.starter_prompts.is_empty() || !payload.system_role_provider_overrides.is_empty()
@@ -1244,10 +1274,6 @@ impl AgentControlPlane {
         if !skills_match || authored_capabilities != expected_capabilities
         {
             return Ok(None);
-        }
-        if stored.preset.display_name != key.as_str() {
-            stored.preset.display_name = key.as_str().to_owned();
-            self.store.update_preset_metadata(&stored).await?;
         }
         Ok(Some(key))
     }
@@ -1498,34 +1524,6 @@ impl AgentControlPlane {
             contributions: wire_cast(&diff.contributions)?,
             affected_consumers,
         })
-    }
-
-    /// Load the immutable Snapshot attached to one owner-scoped Preset
-    /// revision.  This is a read-only control-plane operation used by
-    /// Session/capability projections; it never resolves a newer catalog
-    /// revision or creates a second Snapshot.
-    pub async fn saved_snapshot(
-        &self,
-        owner: &UserId,
-        preset_id: &str,
-        revision_number: u64,
-    ) -> Result<nomifun_agent_contracts::ResolvedSnapshotEnvelope, ControlPlaneError> {
-        let stored = self.owned_preset(owner, preset_id).await?;
-        let revision = self
-            .store
-            .get_revision_number(&stored.preset.preset_id, revision_number)
-            .await?
-            .ok_or_else(|| not_found("AgentPresetRevision"))?;
-        self.store
-            .get_snapshot(&revision.reference)
-            .await?
-            .ok_or_else(|| {
-                ControlPlaneError::canonical(
-                    "CAPABILITY_NOT_MATERIALIZED",
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    "saved Agent Preset revision has no immutable Snapshot",
-                )
-            })
     }
 
     /// Load the immutable artifacts frozen into an existing target binding.
@@ -3742,6 +3740,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let saved_binding_dto: AgentBindingValueDto = wire_cast(&binding_value).unwrap();
         store
             .insert_remote_binding(RemoteBinding {
                 remote_binding_id: RemoteBindingId::from("remote-retirement"),
@@ -3822,6 +3821,10 @@ mod tests {
                 .is_some(),
             "immutable Snapshot history must survive product retirement"
         );
+        assert_eq!(control_plane.saved_binding_presentation(&owner, &saved_binding_dto).await.unwrap(),
+            ("Retire me".to_owned(), None));
+        assert!(control_plane.saved_binding_presentation(&other_owner, &saved_binding_dto).await.is_err(),
+            "retired metadata must not escape the exact bound owner");
         let repeated_error = control_plane
             .retire_preset(&owner, &created.preset.preset_id)
             .await

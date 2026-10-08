@@ -123,16 +123,3 @@ export function pendingTaskCommandGuard(
   );
   return { allowed: orphanedTaskIds.length === 0, orphanedTaskIds };
 }
-
-/**
- * A durable pending task must always retain exactly one config-node owner.
- * Simulating the pure reducer here covers every command source (keyboard,
- * context menus, toolbar actions, and imperative product integrations).
- */
-export function canvasCommandPreservesPendingTaskOwners(
-  state: CanvasState,
-  pendingTaskIds: readonly string[],
-  command: CanvasCommand,
-): boolean {
-  return pendingTaskCommandGuard(state, command, pendingTaskIds).allowed;
-}

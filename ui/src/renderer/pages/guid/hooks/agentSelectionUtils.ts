@@ -63,7 +63,3 @@ export async function saveNomiDefaultModel(
 export const isExecutableAgentPreset = (
   preset: AgentPresetSummary
 ): preset is ExecutableAgentPreset => Boolean(preset.current_stable_revision);
-
-export const getAgentPresetKey = (
-  preset: Pick<AgentPresetSummary, 'preset_id'>
-): string => preset.preset_id;

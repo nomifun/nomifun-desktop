@@ -201,13 +201,6 @@ impl ProductionBrokerDependencies {
         self
     }
 
-    pub fn with_capability_observer(
-        mut self,
-        capability_observer: Arc<dyn ChatCapabilityObserver>,
-    ) -> Self {
-        self.capability_observer = capability_observer;
-        self
-    }
 }
 
 /// Construction failures that are safe to expose to the application.
@@ -799,29 +792,6 @@ pub fn build_production_chat_model_broker(
     dependencies: ProductionBrokerDependencies,
 ) -> Result<Arc<dyn ChatBrokerPort>, ProductionBrokerError> {
     Ok(ProductionChatModelBroker::new(dependencies)?.into_port())
-}
-
-/// Convenience constructor with the three repository roles explicit.
-pub fn build_production_chat_model_broker_from_repositories(
-    provider_repository: Arc<dyn ProductionProviderRepository>,
-    connection_repository: Arc<dyn ProductionConnectionRepository>,
-    model_repository: Arc<dyn ProductionModelRepository>,
-    encryption_key: [u8; 32],
-    causality_gate: Arc<dyn ChatCausalityGate>,
-    model_invoke: Arc<dyn ChatModelInvokePort>,
-    retry_policy: BrokerRetryPolicy,
-) -> Result<Arc<dyn ChatBrokerPort>, ProductionBrokerError> {
-    build_production_chat_model_broker(
-        ProductionBrokerDependencies::new(
-            provider_repository,
-            connection_repository,
-            model_repository,
-            encryption_key,
-            causality_gate,
-            model_invoke,
-        )
-        .with_retry_policy(retry_policy),
-    )
 }
 
 #[cfg(test)]

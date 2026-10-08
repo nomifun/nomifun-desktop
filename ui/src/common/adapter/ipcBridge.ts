@@ -68,7 +68,9 @@ import type {
 } from '../config/storage';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
 import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
-import { parsePreviewSnapshotId } from '../types/ids';
+import {
+  parsePreviewSnapshotId,
+} from '../types/ids';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
@@ -1371,16 +1373,6 @@ export const autoUpdate = {
 };
 
 // ---------------------------------------------------------------------------
-// Star Office — routed to backend
-// ---------------------------------------------------------------------------
-
-export const starOffice = {
-  detectUrl: httpPost<{ url: string | null }, { preferredUrl?: string; force?: boolean; timeoutMs?: number }>(
-    '/api/star-office/detect'
-  ),
-};
-
-// ---------------------------------------------------------------------------
 // Dialog — stays IPC (native file picker)
 // ---------------------------------------------------------------------------
 
@@ -2492,34 +2484,6 @@ export const systemSettings = {
   })),
 };
 
-// ---------------------------------------------------------------------------
-// Computer-use OS permissions — macOS TCC (Accessibility / Screen Recording).
-// Routed to the in-process backend, which probes/triggers the HOST process's
-// OWN grants, so `get` is the authoritative answer to "did my grant take effect
-// for the running app?" — a visibly-on System Settings toggle bound to a stale
-// code identity reports `false` here. Off macOS the booleans are null.
-// ---------------------------------------------------------------------------
-
-export type ComputerPermissionKind = 'accessibility' | 'screen_recording';
-
-export interface ComputerPermissionStatus {
-  accessibility: boolean | null;
-  screen_recording: boolean | null;
-  platform: 'macos' | 'windows' | 'linux' | 'other';
-  app_label: string;
-}
-
-export const computerPermissions = {
-  /** Live grant state for the running host process (safe to poll). */
-  get: httpGet<ComputerPermissionStatus, void>('/api/computer/permissions'),
-  /** Trigger the macOS prompt + register the app in the list; returns post-call status. */
-  request: httpPost<ComputerPermissionStatus, { kind: ComputerPermissionKind }>(
-    '/api/computer/permissions/request'
-  ),
-  /** Deep-link to the exact System Settings privacy pane for `kind`. */
-  openSettings: httpPost<void, { kind: ComputerPermissionKind }>('/api/computer/permissions/open-settings'),
-};
-
 export type SystemPermissionKind =
   | 'microphone'
   | 'accessibility'
@@ -2604,18 +2568,6 @@ export const notification = {
   // DEGRADE_STUB: click→navigate needs a Rust notification-action listener that
   // emits a Tauri event (see electron-removal-plan C2); inert until then.
   clicked: noopEmitter<{ conversation_id?: ConversationId }>(),
-};
-
-// ---------------------------------------------------------------------------
-// Task management — stubbed (internal process management)
-// ---------------------------------------------------------------------------
-
-export const task = {
-  stopAll: stubProvider<{ success: boolean; count: number }, void>('task.stopAll', { success: true, count: 0 }),
-  getRunningCount: stubProvider<{ success: boolean; count: number }, void>('task.getRunningCount', {
-    success: true,
-    count: 0,
-  }),
 };
 
 // ---------------------------------------------------------------------------
@@ -4785,7 +4737,6 @@ export interface ICompanionSharedConfig {
    * memories are ALSO mirrored into the nomi agent's file-memory there, so the
    * agent recalls companion-learned facts.
    */
-  bridge_to_memory_dir: string | null;
 }
 
 export type ICompanionWithStatus = ICompanionProfile & {
@@ -4818,7 +4769,6 @@ export type ICompanionSharedConfigPatch = {
   collect?: Partial<ICompanionCollectConfig>;
   archive?: Partial<ICompanionArchiveConfig>;
   smart_collaboration?: boolean;
-  bridge_to_memory_dir?: string | null;
 };
 
 /** Export endpoint result — backend echoes the resolved destination path

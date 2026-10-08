@@ -275,5 +275,3 @@ export const getProviderLogo = ({
   const normalizedName = name.trim().toLowerCase();
   return MODEL_PLATFORMS.find((item) => item.name.toLowerCase() === normalizedName && item.logo)?.logo ?? null;
 };
-
-export const isCustomOption = (value: string): boolean => value === 'custom';

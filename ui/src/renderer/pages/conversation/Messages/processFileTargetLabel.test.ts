@@ -8,7 +8,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   formatFileTargetPreview,
   formatWorkspaceFileTarget,
-  splitToolReceiptTargets,
 } from './processFileTargetLabel';
 
 const workspaceRoot = '/Users/developer/Library/Application Support/NomiFun/Nomi-dev/conversations/nomi-temp-39';
@@ -42,8 +41,8 @@ describe('process file target labels', () => {
     ).toBe('MessageList.tsx');
   });
 
-  test('builds a compact preview from joined receipt targets', () => {
-    const targets = splitToolReceiptTargets(`${workspaceRoot}/snake.html, ${workspaceRoot}/game.py`);
+  test('builds a compact preview from receipt targets', () => {
+    const targets = [`${workspaceRoot}/snake.html`, `${workspaceRoot}/game.py`];
 
     expect(formatFileTargetPreview(targets, { workspaceRoots: [workspaceRoot] })).toBe('snake.html, game.py');
   });

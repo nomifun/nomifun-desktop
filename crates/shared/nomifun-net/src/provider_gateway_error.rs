@@ -34,14 +34,6 @@ impl GatewayBusinessError {
         }
     }
 
-    /// Exact recognition of the locally authored presentation value only;
-    /// callers still verify its typed model classification before retaining it.
-    pub fn from_action_message(message: &str) -> Option<Self> {
-        [Self::InsufficientBalance, Self::SubscriptionExpired, Self::ModelNotInPlan,
-            Self::KeyExpired, Self::RateLimited]
-            .into_iter().find(|business| business.action_message() == message)
-    }
-
     pub fn http_status(self) -> u16 {
         match self {
             Self::InsufficientBalance => 402,

@@ -7,9 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildAgentSkillRows,
-  customSkillNamesForImportedAgentSkills,
   defaultSelectedAgentSkillKeys,
-  mergeImportedSkillNames,
   summarizeAgentSkillImport,
   type ExternalAgentSkillSource,
 } from './agentSkillImportUtils';
@@ -57,13 +55,6 @@ describe('agent skill import utilities', () => {
     ]);
   });
 
-  test('merges imported names into current preset selection without duplicates', () => {
-    expect(mergeImportedSkillNames(['publish'], ['research', 'publish', 'research'])).toEqual([
-      'publish',
-      'research',
-    ]);
-  });
-
   test('summarizes migration progress for library and preset flows', () => {
     const rows = buildAgentSkillRows(sources, new Set(['publish']));
 
@@ -72,27 +63,5 @@ describe('agent skill import utilities', () => {
       alreadyImportedCount: 1,
       importableCount: 1,
     });
-  });
-
-  test('adds newly imported and existing custom skills to preset custom list only', () => {
-    expect(
-      customSkillNamesForImportedAgentSkills(
-        [
-          {
-            name: 'planning-with-files',
-            alreadyImported: true,
-          },
-          {
-            name: 'publish',
-            alreadyImported: true,
-          },
-          {
-            name: 'research',
-            alreadyImported: false,
-          },
-        ],
-        new Set(['publish'])
-      )
-    ).toEqual(['publish', 'research']);
   });
 });

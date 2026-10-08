@@ -233,18 +233,6 @@ export function clearCanvasVideoComposeDraftModel(node: VideoNode): VideoNode {
   };
 }
 
-export function canvasVideoComposeTaskSummary(
-  config: ConfigNode | null
-): CanvasVideoComposeTaskSummary {
-  if (!config) return { state: 'idle', pendingCount: 0 };
-  const pending = config.data.status === 'queued' || config.data.status === 'running';
-  return {
-    state: config.data.status,
-    pendingCount: pending ? 1 : 0,
-    message: config.data.errorMessage ?? undefined,
-  };
-}
-
 /** Derive the only honest first-slice mode from the selected empty video and
  * direct incoming real media nodes. Text/config edges do not invent inputs. */
 export function canvasVideoComposeMode(

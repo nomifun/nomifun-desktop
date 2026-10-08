@@ -72,9 +72,6 @@ pub const CLOSE_SESSION_TIMEOUT: u16 = 4009;
 /// Interaction type for a button (message component) click.
 pub const INTERACTION_TYPE_BUTTON: u32 = 11;
 
-/// Interaction callback type: acknowledge (just ACK, no response body).
-pub const INTERACTION_CALLBACK_ACK: u32 = 12;
-
 // ---------------------------------------------------------------------------
 // Inbound gateway envelope
 // ---------------------------------------------------------------------------

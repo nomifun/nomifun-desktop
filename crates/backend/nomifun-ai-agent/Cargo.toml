@@ -38,10 +38,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tempfile.workspace = true
 nomi-tools.workspace = true
 nomi-types.workspace = true
-nomi-protocol.workspace = true
 nomi-config.workspace = true
 nomi-mcp.workspace = true
 nomi-providers.workspace = true
@@ -77,6 +75,7 @@ computer-use = []
 browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
 
 [dev-dependencies]
+tempfile.workspace = true
 nomifun-agent-domain-wave1.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber.workspace = true

@@ -137,7 +137,7 @@ describe('development launch arguments', () => {
     const args = developmentTauriArguments(['--no-watch', '--config', '{"build":{"devUrl":"http://localhost:5184"}}', '--', '--', '--fixture'], 'darwin', '/workspace');
     expect(args).toEqual([
       'dev', '--config', 'apps/desktop/tauri.conf.json', '--config', 'apps/desktop/tauri.dev.conf.json',
-      '--runner', '/workspace/scripts/run-macos-dev-runner.mjs',
+      '--runner', join('/workspace', 'scripts', 'run-macos-dev-runner.mjs'),
       '--no-watch', '--config', '{"build":{"devUrl":"http://localhost:5184"}}', '--', '--', '--fixture',
     ]);
     expect(() => developmentTauriArguments(['--runner', 'cargo'], 'darwin')).toThrow('bypass');

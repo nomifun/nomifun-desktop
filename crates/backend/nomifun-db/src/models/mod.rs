@@ -29,7 +29,7 @@ mod webhook;
 mod workshop;
 mod remote_binding;
 
-pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
+pub use agent_metadata::{AgentMetadataRow, UpsertAgentMetadataParams};
 pub use agent_execution::*;
 pub use agent_execution_effect::*;
 pub use agent_execution_template::*;

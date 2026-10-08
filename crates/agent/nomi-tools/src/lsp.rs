@@ -365,7 +365,7 @@ pub mod tool {
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
 
-    use nomi_protocol::events::ToolCategory;
+    use nomi_types::tool::ToolCategory;
     use nomi_types::tool::{JsonSchema, ToolResult};
 
     use super::client::{LspClient, path_to_uri};

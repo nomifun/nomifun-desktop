@@ -13,7 +13,6 @@ import {
   type CreativePoint,
   type CreativeSize,
 } from '../../domain';
-import type { PromptLibrarySelection } from '../../prompts';
 import {
   clientToCanvas,
   canvasMediaNodeSize,
@@ -412,25 +411,4 @@ export function creativeNodeFromHistoricalAsset(
         overrides
       );
   }
-}
-
-/** Insert the validated prompt verbatim as a canonical text node. */
-export function creativeTextNodeFromPrompt(
-  prompt: PromptLibrarySelection,
-  state: CreativeCanvasProductState,
-  viewportSize: CreativeSize,
-  overrides: CreativeCanvasProductNodeOverrides = {}
-): Extract<CreativeCanvasNode, { type: 'text' }> {
-  return createNodeWithData(
-    'text',
-    {
-      text: prompt.prompt,
-      format: 'plain',
-      fontSize: 14,
-      textAlign: 'left',
-    },
-    state,
-    viewportSize,
-    overrides
-  );
 }

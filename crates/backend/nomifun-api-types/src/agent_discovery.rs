@@ -5,11 +5,7 @@
 //! stored in the `agent_metadata` table, cached in the process, and
 //! returned over HTTP. The DB row feeds everything.
 //!
-//! Handshake-derived fields (`agent_capabilities` / `auth_methods` /
-//! `config_options` / `available_models` / `available_commands`) stay as
-//! opaque JSON so this crate carries no
-//! protocol-decoding dependency — the ai-agent crate typed-decodes
-//! them when it needs to.
+
 
 use nomifun_common::AgentType;
 use serde::{Deserialize, Serialize};
@@ -78,26 +74,6 @@ pub struct BehaviorPolicy {
     pub session_load_via_meta_field: bool,
 }
 
-/// Handshake-derived fields captured from an agent's init/session response.
-///
-/// All fields are opaque JSON at this layer: they are passed through to
-/// the frontend verbatim, and typed-decoded inside `nomifun-ai-agent`
-/// when the adapter needs them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentHandshake {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_capabilities: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_methods: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_options: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_models: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub available_commands: Option<serde_json::Value>,
-}
-
 /// The unified, decoded view of an `agent_metadata` row.
 ///
 /// Also the API response shape: `/api/agents` returns a list of these
@@ -159,8 +135,6 @@ pub struct AgentMetadata {
     /// scheme is documented in `007_agent_metadata_sort_order.sql`.
     pub sort_order: i64,
 
-    #[serde(default)]
-    pub handshake: AgentHandshake,
 }
 
 #[cfg(test)]
@@ -205,7 +179,6 @@ mod tests {
             native_skills_dirs: None,
             behavior_policy: BehaviorPolicy::default(),
             sort_order: 3100,
-            handshake: AgentHandshake::default(),
         };
         let v = serde_json::to_value(&meta).unwrap();
         assert_eq!(v["agent_id"], AGENT_ID);
@@ -221,12 +194,6 @@ mod tests {
         let mut legacy = v;
         legacy["yolo_id"] = json!("yolo");
         assert!(serde_json::from_value::<AgentMetadata>(legacy).is_err());
-        assert!(
-            serde_json::from_value::<AgentHandshake>(json!({
-                "available_modes": []
-            }))
-            .is_err()
-        );
     }
 
     #[test]
@@ -238,8 +205,7 @@ mod tests {
             "agent_source": "builtin",
             "enabled": true,
             "available": true,
-            "sort_order": 3100,
-            "handshake": {}
+            "sort_order": 3100
         });
         assert!(serde_json::from_value::<AgentMetadata>(value).is_err());
     }
@@ -261,7 +227,6 @@ mod tests {
         assert!(nomifun_common::AgentId::parse(meta.agent_id).is_ok());
         assert!(!meta.available);
         assert!(!meta.behavior_policy.supports_side_question);
-        assert!(meta.handshake.agent_capabilities.is_none());
     }
 
     #[test]

@@ -19,7 +19,7 @@ describe('message error retry entry', () => {
   test('uses a new immutable Turn for every retry, including truncation recovery', () => {
     expect(tipsSource.includes("data-testid='message-error-continue-truncated'")).toBe(false);
     expect(tipsSource.includes('ipcBridge.conversation.continueTruncated.invoke')).toBe(false);
-    expect(tipsSource.includes('if (message.content.recovery) return null')).toBe(true);
+    expect(tipsSource.includes('if (message.content.recovery || message.content.execution_pause || conversationContext?.executionPause) return null')).toBe(true);
     expect(tipsSource.includes("if (message.content.type !== 'error') return null")).toBe(true);
     expect(tipsSource.includes("emitter.emit('sendbox.edit'")).toBe(true);
   });

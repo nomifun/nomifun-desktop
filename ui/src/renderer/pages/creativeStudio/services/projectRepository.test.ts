@@ -15,7 +15,6 @@ import {
 import {
   preloadCreativeProject,
   sortCreativeProjectSummaries,
-  upsertCreativeProjectSummary,
 } from './useCreativeProjects';
 
 const PROJECT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f112';
@@ -172,14 +171,11 @@ describe('legacy hook cache helpers', () => {
     expect(loads).toBe(1);
   });
 
-  test('sorts newest first and upserts by authoritative project id', () => {
+  test('sorts newest first', () => {
     const older = { ...project, projectId: '0198f8bb-8424-7b3d-8f17-bc6a1676f113', updatedAt: 100 };
     expect(sortCreativeProjectSummaries([older, project]).map((item) => item.projectId)).toEqual([
       PROJECT_ID,
       older.projectId,
     ]);
-    expect(
-      upsertCreativeProjectSummary([older, project], { ...project, title: 'Renamed', updatedAt: 300 })
-    ).toEqual([{ ...project, title: 'Renamed', updatedAt: 300 }, older]);
   });
 });

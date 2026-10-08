@@ -29,6 +29,9 @@ const retiredFiles = new Set([
   'crates/backend/nomifun-agent-contracts/contracts/inventory/service-key-target-map.json',
   'docs/specs/2026-09-25-agent-reliability/DEVELOPMENT-HANDOFF.zh.md',
   'docs/reviews/2026-09-23-agent-session-reliability.zh.md',
+  'docs/specs/2026-08-23-creative-studio-canvas-domain-redesign.zh.md',
+  'docs/specs/2026-09-14-companion-unified-conversation.zh.md',
+  'docs/specs/2026-09-14-desktop-conversation-creation-redesign.zh.md',
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.payload.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-fixture-envelope-reference.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json',
@@ -75,8 +78,20 @@ for (const path of paths) {
 const migrations = paths.filter((path) => path.startsWith('crates/backend/nomifun-db/migrations/') && path.endsWith('.sql'));
 const baseline = 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql';
 const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplify_plugin_library.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration].includes(path))) {
+const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remove_agent_handshake_cache.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
+}
+if (migrations.includes(metadataForwardMigration)) {
+  const source = readFileSync(resolve(ROOT, metadataForwardMigration), 'utf8');
+  const statements = source.replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.trim()).filter(Boolean);
+  const expected = [
+    'yolo_id', 'agent_capabilities', 'auth_methods', 'config_options',
+    'available_modes', 'available_models', 'available_commands',
+  ].map((column) => `ALTER TABLE agent_metadata DROP COLUMN ${column}`);
+  if (JSON.stringify(statements) !== JSON.stringify(expected)) {
+    failures.push(`${metadataForwardMigration}: only the exact retired configuration cache columns may be dropped; canonical Agent facts and lineage receipts cannot change`);
+  }
 }
 if (migrations.includes(pluginForwardMigration)) {
   const source = readFileSync(resolve(ROOT, pluginForwardMigration), 'utf8');

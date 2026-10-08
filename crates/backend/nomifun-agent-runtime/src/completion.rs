@@ -1202,19 +1202,6 @@ impl CompletionTracker {
         self.scopes.get(call_id).cloned().map(omit_absent_metadata)
     }
 
-    pub(crate) async fn submit(
-        &mut self,
-        call: &ChatToolCall,
-        plan: &mut AgentPlan,
-        work: &AgentWorkStatus,
-        inputs: &[ChatMessage],
-        unresolved_patch: bool,
-        unresolved_before_input: Option<usize>,
-        sink: &dyn AgentEventSink,
-    ) -> Result<AgentToolResult, AgentEngineError> {
-        self.submit_with_history(call,plan,work,inputs,unresolved_patch,unresolved_before_input,sink,None).await
-    }
-
     pub(crate) async fn submit_with_history(
         &mut self,call:&ChatToolCall,plan:&mut AgentPlan,work:&AgentWorkStatus,inputs:&[ChatMessage],
         unresolved_patch:bool,unresolved_before_input:Option<usize>,sink:&dyn AgentEventSink,
@@ -1836,18 +1823,18 @@ mod tests {
         assert!(tracker.resolve_historical_results(&mut result,None,0).is_err());
         assert!(result[0].data.is_none());
         let raw="{\"future_field\":\"exact_actions\",\"text\":\"你好\\n\"}";
-        let rendered=historical_public_result(&serde_json::json!({"text_parts":[{"text":raw}],"original_is_error":true}),true);
+        let rendered=historical_public_result_versioned(&serde_json::json!({"text_parts":[{"text":raw}],"original_is_error":true}),true,true,true);
         assert!(rendered.contains("原始诊断"));assert!(rendered.contains(raw),"unknown diagnostics remain exact, not scrubbed to pass language checks");
     }
     #[test]
     fn historical_publication_preserves_submitted_file_bytes_and_literal_invocation_context() {
         let content="第一行 MAC-B\n第二行 before\n";
-        let file=historical_public_result(&serde_json::json!({"tool":"write_file","result_order":10,
-            "original_arguments":{"path":"临时 结果.txt","content":content},"text_parts":[]}),true);
+        let file=historical_public_result_versioned(&serde_json::json!({"tool":"write_file","result_order":10,
+            "original_arguments":{"path":"临时 结果.txt","content":content},"text_parts":[]}),true,true,true);
         assert!(file.contains(content)&&file.contains("临时 结果.txt")&&file.contains("记录顺序：11"));
         assert!(file.contains("是否实际写入以随后结果为准"));
-        let command=historical_public_result(&serde_json::json!({"tool":"exec_command","result_order":12,
-            "original_arguments":{"command":"cp","args":["--","临时 结果.txt","副本 结果.txt"],"cwd":"/work"},"text_parts":[]}),true);
+        let command=historical_public_result_versioned(&serde_json::json!({"tool":"exec_command","result_order":12,
+            "original_arguments":{"command":"cp","args":["--","临时 结果.txt","副本 结果.txt"],"cwd":"/work"},"text_parts":[]}),true,true,true);
         assert!(command.contains("cp")&&command.contains("临时 结果.txt")&&command.contains("副本 结果.txt")&&command.contains("/work"));
         assert!(command.contains("不代表成功"));
         let after="第一行 MAC-B\n第二行 after\n";
@@ -3003,8 +2990,8 @@ mod tests {
                 arguments:StrictJsonValue(report), provider_metadata:None};
             let inputs = vec![crate::context_lifecycle::text_message(
                 nomifun_chat_model_broker::ChatRole::User, "Report readiness and the settled diagnostic.".into())];
-            let result = tracker.submit(&call, &mut AgentPlan::default(), &work, &inputs,
-                false, None, &crate::NoopAgentEventSink).await.unwrap();
+            let result = tracker.submit_with_history(&call, &mut AgentPlan::default(), &work, &inputs,
+                false, None, &crate::NoopAgentEventSink,None).await.unwrap();
             assert!(!result.is_error, "{}", result.output_text());
         }
     }
@@ -3047,7 +3034,7 @@ mod tests {
             let inputs = vec![crate::context_lifecycle::text_message(
                 nomifun_chat_model_broker::ChatRole::User, "Report the diagnostic terminal and later command.".into())];
             let mut plan = AgentPlan::default();
-            let result = tracker.submit(&call, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink)
+            let result = tracker.submit_with_history(&call, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink,None)
                 .await.unwrap();
             assert!(!result.is_error, "{}", result.output_text());
             let accepted = tracker.current(&plan, &work, 1).unwrap();
@@ -3229,15 +3216,14 @@ mod tests {
             provider_metadata: None,
         };
         let result = tracker
-            .submit(
+            .submit_with_history(
                 &report,
                 &mut plan,
                 &work,
                 &inputs,
                 false,
                 None,
-                &crate::NoopAgentEventSink,
-            )
+                &crate::NoopAgentEventSink,None)
             .await
             .unwrap();
         assert!(!result.is_error, "{}", result.output_text());
@@ -3314,15 +3300,14 @@ mod tests {
             provider_metadata: None,
         };
         let result = tracker
-            .submit(
+            .submit_with_history(
                 &report,
                 &mut plan,
                 &work,
                 &inputs,
                 false,
                 None,
-                &crate::NoopAgentEventSink,
-            )
+                &crate::NoopAgentEventSink,None)
             .await
             .unwrap();
         assert!(!result.is_error, "{}", result.output_text());
@@ -3599,13 +3584,13 @@ mod tests {
         let call = |id: &str, count: u32| ChatToolCall { call_id: id.into(), name: TOOL_NAME.into(), provider_metadata: None,
             arguments: StrictJsonValue(serde_json::json!({"summary":"Earlier failures are disclosed without another operation.",
                 "observed_tool_error_count":count,"criteria":[{"disposition":"unverified","rationale":"No current observation supports a broader claim."}]})) };
-        let rejected = tracker.submit(&call("wrong", 6), &mut plan, &work, &inputs,
-            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        let rejected = tracker.submit_with_history(&call("wrong", 6), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink,None).await.unwrap();
         assert!(rejected.is_error);
         assert!(rejected.output_text().contains("NEXT report must use observed_tool_error_count=8"));
         work.observe_deferred();
-        let accepted = tracker.submit(&call("correct", 8), &mut plan, &work, &inputs,
-            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        let accepted = tracker.submit_with_history(&call("correct", 8), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink,None).await.unwrap();
         assert!(!accepted.is_error, "{}", accepted.output_text());
         assert_eq!(tracker.current(&plan, &work, 1).unwrap().observed_tool_error_count, 8);
     }
@@ -3632,15 +3617,15 @@ mod tests {
         };
 
         for (id, count) in [("missing", None), ("wrong", Some(0))] {
-            let result = tracker.submit(&call(id, count), &mut plan, &work, &inputs,
-                false, None, &crate::NoopAgentEventSink).await.unwrap();
+            let result = tracker.submit_with_history(&call(id, count), &mut plan, &work, &inputs,
+                false, None, &crate::NoopAgentEventSink,None).await.unwrap();
             assert!(result.is_error);
             assert!(result.output_text().contains("NEXT report must use observed_tool_error_count=3"));
             assert!(tracker.current(&plan, &work, 1).is_none());
         }
 
-        let result = tracker.submit(&call("correct", Some(2)), &mut plan, &work, &inputs,
-            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        let result = tracker.submit_with_history(&call("correct", Some(2)), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink,None).await.unwrap();
         assert!(!result.is_error, "{}", result.output_text());
         let report = tracker.current(&plan, &work, 1).unwrap();
         assert_eq!(report.observed_tool_error_count, 2);
@@ -3683,15 +3668,14 @@ mod tests {
 
         for (id, count) in [("missing", None), ("wrong", Some(0))] {
             let result = tracker
-                .submit(
+                .submit_with_history(
                     &call(id, count),
                     &mut plan,
                     &work,
                     &inputs,
                     false,
                     None,
-                    &crate::NoopAgentEventSink,
-                )
+                    &crate::NoopAgentEventSink,None)
                 .await
                 .unwrap();
             assert!(result.is_error);
@@ -3704,15 +3688,14 @@ mod tests {
         }
 
         let result = tracker
-            .submit(
+            .submit_with_history(
                 &call("correct", Some(2)),
                 &mut plan,
                 &work,
                 &inputs,
                 false,
                 None,
-                &crate::NoopAgentEventSink,
-            )
+                &crate::NoopAgentEventSink,None)
             .await
             .unwrap();
         assert!(!result.is_error, "{}", result.output_text());
@@ -3908,7 +3891,7 @@ mod tests {
         false_current["criteria"][0]["evidence_call_ids"]=serde_json::json!(["old-read"]);
         assert!(!validator.is_valid(&false_current),"historical reporting cannot make an old call eligible for current support");
         let call=ChatToolCall {call_id:"report".into(),name:TOOL_NAME.into(),arguments:StrictJsonValue(args),provider_metadata:None};
-        let result=tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap();
+        let result=tracker.submit_with_history(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink,None).await.unwrap();
         assert!(!result.is_error,"{}",result.output_text());
         let report=tracker.current(&plan,&work,1).unwrap();
         assert_eq!(report.summary,summary);
@@ -3948,7 +3931,7 @@ mod tests {
                 {"step":"Styles","disposition":"supported","evidence_paths":["./style.css"],"rationale":"Fresh file read"},
                 {"step":"Gameplay","disposition":"unverified","rationale":"No interactive test was run"}
             ]})) };
-        let result = tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap();
+        let result = tracker.submit_with_history(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink,None).await.unwrap();
         assert!(!result.is_error,"{}",result.output_text());
         let report = tracker.current(&plan,&work,1).unwrap();
         assert_eq!(report.criteria[0].evidence_call_ids,["html-new"]);
@@ -3974,7 +3957,7 @@ mod tests {
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Done","criteria":[
                     {"step":"Game","disposition":"supported","evidence_paths":[path],"rationale":"Claimed verification"}
                 ]})) };
-            assert!(tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert!(tracker.submit_with_history(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink,None).await.unwrap().is_error);
             assert_eq!(plan,original);
             assert!(tracker.current(&plan,&work,1).is_none());
         }
@@ -3993,7 +3976,7 @@ mod tests {
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result", "criteria":[{
                     "disposition":disposition,"evidence_call_ids":["read-a"],"rationale":"The remaining target is unobserved"
                 }]})) };
-            let result = tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap();
+            let result = tracker.submit_with_history(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink,None).await.unwrap();
             assert_eq!(result.is_error,disposition != "blocked");
             if result.is_error {
                 assert_eq!(plan,before,"rejected success or unverified completion cannot close the plan");
@@ -4022,7 +4005,7 @@ mod tests {
                 {"disposition":"supported","requirement_ids":["input_1"],"evidence_call_ids":["fresh-a"],
                     "rationale":"Fresh owner read supports the retained first-file result"}
             ]}))};
-        let result=tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap();
+        let result=tracker.submit_with_history(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink,None).await.unwrap();
         assert!(!result.is_error,"{}",result.output_text());
         let report=tracker.current(&plan,&work,2).unwrap();
         assert!(report.scopes_out_requirements_before(1));
@@ -4044,7 +4027,7 @@ mod tests {
             }]})) };
         let mut tracker = CompletionTracker::default();
         let work = AgentWorkStatus::default();
-        assert!(!tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!tracker.submit_with_history(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink,None).await.unwrap().is_error);
         assert_eq!(plan.steps[0].status,AgentPlanStatus::Blocked);
         assert!(!plan.needs_replan);
         let report = tracker.current(&plan,&work,2).unwrap();
@@ -4067,7 +4050,7 @@ mod tests {
             if !running { criteria.push(serde_json::json!({"disposition":"supported","evidence_call_ids":["old-a"],"rationale":"Stale claim"})); }
             let call = ChatToolCall {call_id:"bad".into(),name:TOOL_NAME.into(),provider_metadata:None,
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result","criteria":criteria}))};
-            assert!(tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert!(tracker.submit_with_history(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink,None).await.unwrap().is_error);
             assert_eq!(plan,before);
             assert!(tracker.current(&plan,&work,1).is_none());
         }
@@ -4115,14 +4098,14 @@ mod tests {
             arguments: StrictJsonValue(serde_json::json!({"summary":"Verified the receipt","criteria":[
                 {"disposition":"supported","evidence_paths":["验收/回执.txt"],"rationale":"Read the file"}
             ]})) };
-        assert!(tracker.submit(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(tracker.submit_with_history(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink,None).await.unwrap().is_error);
         let read = ChatToolCall { call_id: "receipt-current".into(), name: "read_file".into(),
             arguments: StrictJsonValue(serde_json::json!({"path":"验收/回执.txt"})), provider_metadata: None };
         let mut binding = file_binding("workspace.files/read");
         binding.effect_class = crate::AgentEffectClass::ReadOnly;
         tracker.observe(&work, &binding, &read, &AgentToolResult::text(read.call_id.clone(), "receipt", false), true);
         assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!([]));
-        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!tracker.submit_with_history(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink,None).await.unwrap().is_error);
         assert_eq!(tracker.observations[0].workspace_epoch, 1, "history is not relabeled");
         assert_eq!(tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids, ["receipt-current"]);
     }
@@ -4230,10 +4213,6 @@ fn public_structured_result(data:&serde_json::Value,chinese:bool)->Option<String
     // counters, false/empty and unknown statuses retain their actual values.
     let encoded=escape_public_json(serde_json::to_string_pretty(&display).unwrap_or_default(),true);
     Some(format!("\n```json\n{encoded}\n```\n"))
-}
-
-fn historical_public_result(data:&serde_json::Value,chinese:bool)->String {
-    historical_public_result_versioned(data,chinese,true,true)
 }
 
 fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,include_invocation:bool,version4:bool)->String {

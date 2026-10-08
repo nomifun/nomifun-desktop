@@ -30,11 +30,6 @@ pub mod wiring;
 use std::sync::{Arc, Mutex};
 use futures_util::FutureExt;
 
-/// Domain name used in log fields and event prefixes.
-pub fn robot_domain_name() -> &'static str {
-    "robot"
-}
-
 /// Owns source, session and session-child task completion, not only ingress.
 pub struct RobotGateway {
     deps: session::SessionDeps,
@@ -288,8 +283,4 @@ mod tests {
         assert!(gateway.shutdown_and_wait().await.is_err());
     }
 
-    #[test]
-    fn domain_name_is_robot() {
-        assert_eq!(robot_domain_name(), "robot");
-    }
 }

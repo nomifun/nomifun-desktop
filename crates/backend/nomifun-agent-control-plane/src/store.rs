@@ -36,6 +36,9 @@ pub trait ControlPlaneStore: Send + Sync {
         &self,
         preset_id: &AgentPresetId,
     ) -> Result<Option<StoredPreset>, ControlPlaneError>;
+    /// Presentation metadata for an already-validated immutable binding.
+    /// Retired authoring entries remain readable here; this is not admission.
+    async fn get_bound_preset(&self, preset_id: &AgentPresetId) -> Result<Option<StoredPreset>, ControlPlaneError>;
     async fn insert_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError>;
     async fn insert_preset_with_revision(
         &self,
@@ -175,6 +178,10 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
             return Ok(None);
         }
         Ok(state.presets.get(preset_id).cloned())
+    }
+
+    async fn get_bound_preset(&self, preset_id: &AgentPresetId) -> Result<Option<StoredPreset>, ControlPlaneError> {
+        Ok(self.state.read().await.presets.get(preset_id).cloned())
     }
 
     async fn insert_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {

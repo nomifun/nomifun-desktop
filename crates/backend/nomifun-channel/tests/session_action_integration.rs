@@ -317,7 +317,7 @@ async fn pc3_same_user_same_chat_reuses() {
 
 #[tokio::test]
 async fn ru3_revoke_clears_sessions() {
-    let (session_mgr, _, _, repo, channel_plugin_id) = setup().await;
+    let (session_mgr, _, pairing, repo, channel_plugin_id) = setup().await;
 
     let uid1 = create_user(&repo, &channel_plugin_id, "p1", "telegram").await;
     let uid2 = create_user(&repo, &channel_plugin_id, "p2", "telegram").await;
@@ -335,8 +335,8 @@ async fn ru3_revoke_clears_sessions() {
         .await
         .unwrap();
 
-    // Cleanup user1 sessions
-    session_mgr.cleanup_user_sessions(&uid1).await.unwrap();
+    // Exercise the same atomic revocation used by the production route.
+    pairing.revoke_user(&uid1).await.unwrap();
 
     let sessions = repo.get_all_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);

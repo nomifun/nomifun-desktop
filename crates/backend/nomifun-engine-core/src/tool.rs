@@ -209,17 +209,6 @@ impl EngineToolPlan {
         }
     }
 
-    /// Projection only; the platform invoker independently checks the live generation.
-    pub fn for_active_capabilities(&self, active: &BTreeSet<CapabilityId>) -> Self {
-        Self {
-            bindings: self
-                .bindings
-                .iter()
-                .filter(|(_, binding)| active.contains(&binding.capability_id))
-                .map(|(name, binding)| (name.clone(), binding.clone()))
-                .collect(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

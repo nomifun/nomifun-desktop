@@ -126,20 +126,12 @@ impl JwtService {
     ///
     /// Stores the token's SHA-256 hash with its expiry time for automatic cleanup.
     pub fn blacklist_token(&self, token: &str) {
+        self.cleanup_blacklist();
         let hash = token_hash(token);
         let exp = self
             .extract_expiry(token)
             .unwrap_or_else(|| now_secs().unwrap_or(0) + TOKEN_EXPIRY.as_secs());
         self.blacklist.insert(hash, exp);
-    }
-
-    /// Rotate the JWT secret, invalidating all previously issued tokens.
-    ///
-    /// Returns the new secret string for database persistence.
-    pub fn rotate_secret(&self) -> Result<String, AuthError> {
-        let new_secret = self.generate_secret();
-        self.install_secret(new_secret.clone())?;
-        Ok(new_secret)
     }
 
     /// Generate a candidate JWT secret without changing the current service state.
@@ -168,7 +160,7 @@ impl JwtService {
     }
 
     /// Remove expired entries from the blacklist.
-    pub fn cleanup_blacklist(&self) {
+    fn cleanup_blacklist(&self) {
         let now = now_secs().unwrap_or(0);
         // Verification accepts tokens through exp + leeway (inclusive).
         // Removing a revocation at exp would make it usable again during
@@ -391,37 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_secret_invalidates_old_tokens() {
-        let service = test_service();
-        let token = service.sign(TEST_USER_ID, "admin").unwrap();
-        assert!(service.verify(&token).is_ok());
-
-        service.rotate_secret().unwrap();
-        assert!(service.verify(&token).is_err());
-    }
-
-    #[test]
-    fn rotate_secret_clears_blacklist() {
-        let service = test_service();
-        let token = service.sign(TEST_USER_ID, "admin").unwrap();
-        service.blacklist_token(&token);
-        assert_eq!(service.blacklist_size(), 1);
-
-        service.rotate_secret().unwrap();
-        assert_eq!(service.blacklist_size(), 0);
-    }
-
-    #[test]
-    fn rotate_secret_allows_new_tokens() {
-        let service = test_service();
-        service.rotate_secret().unwrap();
-
-        let token = service.sign(TEST_USER_ID, "admin").unwrap();
-        let payload = service.verify(&token).unwrap();
-        assert_eq!(payload.user_id.as_str(), TEST_USER_ID);
-    }
-
-    #[test]
     fn generate_secret_does_not_change_current_state() {
         let service = test_service();
         let token = service.sign(TEST_USER_ID, "admin").unwrap();
@@ -448,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_expired_entries() {
+    fn blacklisting_prunes_expired_revocations() {
         let service = test_service();
         let secret = service.secret.read().unwrap();
 
@@ -472,8 +433,11 @@ mod tests {
         service.blacklist_token(&token);
         assert_eq!(service.blacklist_size(), 1);
 
-        service.cleanup_blacklist();
-        assert_eq!(service.blacklist_size(), 0);
+        let current_token = service.sign(TEST_USER_ID_2, "user").unwrap();
+        service.blacklist_token(&current_token);
+        assert_eq!(service.blacklist_size(), 1);
+        assert!(matches!(service.verify(&current_token), Err(AuthError::TokenBlacklisted)));
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
     }
 
     #[test]

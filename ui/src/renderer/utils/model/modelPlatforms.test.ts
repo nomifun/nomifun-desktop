@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { getPlatformByValue, getProviderLogo, isCustomOption, MODEL_PLATFORMS } from './modelPlatforms';
+import { getPlatformByValue, getProviderLogo, MODEL_PLATFORMS } from './modelPlatforms';
 
 const preset = (value: string) => {
   const found = getPlatformByValue(value);
@@ -42,11 +42,5 @@ describe('model platform display presets', () => {
     expect(getProviderLogo({ name: 'OpenAI' })).toBe(preset('OpenAI').logo);
     expect(getProviderLogo({ name: 'openai' })).toBe(preset('OpenAI').logo);
     expect(getProviderLogo({ name: 'Unknown provider' })).toBeNull();
-  });
-
-  test('recognizes only the explicit custom preset', () => {
-    expect(isCustomOption('custom')).toBe(true);
-    expect(isCustomOption('new-api')).toBe(false);
-    expect(isCustomOption('OpenAI')).toBe(false);
   });
 });

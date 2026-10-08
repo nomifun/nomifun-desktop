@@ -75,11 +75,6 @@ pub const COMPANION_SHARED_REL_DIR: &str = "companion/shared";
 /// `{COMPANION_COMPANIONS_REL_DIR}/{companion_id}/config.json` per companion.
 pub const COMPANION_COMPANIONS_REL_DIR: &str = "companion/companions";
 
-/// 伙伴工作区树根（`{data_dir}/companion/workspaces`）：与 home 目录解耦的、
-/// 见名知意的每伙伴工作目录所在（`{seq}_{净化名}`）。home 目录因注册表扫描约束
-/// （目录名==id）不可改名，故工作区另放此树，由 `extra.workspace` 指向。
-pub const COMPANION_WORKSPACES_REL_DIR: &str = "companion/workspaces";
-
 /// Cached ML assets shared across companions (under the backend data dir): the
 /// MODNet matting model is proxied here once and served from `127.0.0.1`
 /// (see [`matting_model`]) so the webview never hits a remote origin or the

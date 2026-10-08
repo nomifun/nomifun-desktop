@@ -7,8 +7,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 import {
-  deduplicateProcessText,
-  collapseProcessNarration,
   isProcessTextEchoOfFinal,
   selectJournalProcessItems,
   shouldShowFileListDetail,
@@ -60,32 +58,6 @@ describe('process trace display model', () => {
 
   test('keeps command rows expandable for command input and output', () => {
     expect(shouldShowToolRowDetail(row({ action: 'run_commands', target: 'bun run check' }))).toBe(true);
-  });
-
-  test('shows repeated progress once while retaining intervening tool details', () => {
-    const items = [
-      { kind: 'text', content: 'I will create the file.' },
-      { kind: 'tool', content: 'write_file' },
-      { kind: 'text', content: 'I will  create the file.' },
-      { kind: 'text', content: 'The file is ready.' },
-    ];
-    expect(deduplicateProcessText(items, (item) => item.kind === 'text' ? item.content : undefined))
-      .toEqual([items[0], items[1], items[3]]);
-  });
-
-  test('keeps only the latest narration status while preserving every tool receipt', () => {
-    const items = [
-      { kind: 'thinking', content: 'first private snapshot' },
-      { kind: 'tool', content: 'read_file' },
-      { kind: 'thinking', content: 'latest private snapshot' },
-      { kind: 'text', content: 'first public narration' },
-      { kind: 'tool', content: 'write_file' },
-      { kind: 'text', content: 'latest public narration' },
-    ];
-
-    expect(collapseProcessNarration(items, (item) =>
-      item.kind === 'text' || item.kind === 'thinking' ? item.kind : undefined
-    )).toEqual([items[1], items[2], items[4], items[5]]);
   });
 
   test('hides completed private activity without losing public progress or tool order', () => {

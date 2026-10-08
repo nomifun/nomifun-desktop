@@ -10,24 +10,12 @@ CreativeTemplateDefinitionV1,
 CreativeTemplateInputValue,
 CreativeTemplateValidationError,
 CreativeTemplateValueResult,
-CreativeTemplateWorkspaceDocumentV1,
 } from './types';
 import {
 cloneTemplateOutput,
 cloneTemplateVariable,
 validateTemplateInputsForDefinition
 } from './validation';
-
-export function createTemplateWorkspaceDocumentV1(): CreativeTemplateWorkspaceDocumentV1 {
-  return {
-    kind: 'nomifun.creative-studio.templates',
-    version: 1,
-    templates: [],
-    promptDrafts: [],
-    runRequests: [],
-    runs: [],
-  };
-}
 
 export function cloneTemplateDefinition(template: CreativeTemplateDefinitionV1): CreativeTemplateDefinitionV1 {
   return {
@@ -69,38 +57,6 @@ export function cloneTemplateDefinition(template: CreativeTemplateDefinitionV1):
       return { ...step, dependsOn: [...step.dependsOn] };
     }),
   };
-}
-
-export function createTemplateDefaultInputs(template: CreativeTemplateDefinitionV1): CreativeTemplateInputValue[] {
-  const inputs: CreativeTemplateInputValue[] = [];
-  for (const variable of template.variables) {
-    if (variable.type === 'text' || variable.type === 'multiline-text') {
-      if (variable.defaultValue !== null) {
-        inputs.push({ variableId: variable.id, type: variable.type, value: variable.defaultValue });
-      }
-    } else if (variable.type === 'number') {
-      if (variable.defaultValue !== null) {
-        inputs.push({ variableId: variable.id, type: 'number', value: variable.defaultValue });
-      }
-    } else if (variable.type === 'boolean') {
-      inputs.push({ variableId: variable.id, type: 'boolean', value: variable.defaultValue });
-    } else if (variable.type === 'choice') {
-      if (variable.defaultValue !== null) {
-        inputs.push({ variableId: variable.id, type: 'choice', value: variable.defaultValue });
-      }
-    } else if (variable.type === 'image') {
-      if (variable.defaultAssetId !== null) {
-        inputs.push({ variableId: variable.id, type: 'image', assetId: variable.defaultAssetId });
-      }
-    } else if (variable.type === 'image-series' && variable.defaultAssetIds.length > 0) {
-      inputs.push({
-        variableId: variable.id,
-        type: 'image-series',
-        assetIds: [...variable.defaultAssetIds],
-      });
-    }
-  }
-  return inputs;
 }
 
 function valueText(input: CreativeTemplateInputValue): string | null {

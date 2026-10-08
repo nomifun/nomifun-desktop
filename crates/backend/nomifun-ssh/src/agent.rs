@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::sink::SshActionDispatchError;
-use crate::{SshConnectionPool, SshLinkKey, SshLinkPhase};
+use crate::SshConnectionPool;
 
 pub const SSH_MODULE_ID: &str = "ssh";
 pub const SSH_FS_READ_ACTION_ID: &str = "ssh/fs.read";
@@ -364,45 +364,6 @@ pub struct SshCommandOutput {
     pub timed_out: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SshResourceSelection {
-    Unbound,
-    Bound {
-        binding_id: String,
-        ssh_host_id: String,
-        remote_cwd: String,
-        operations: Vec<String>,
-        connection_status: SshConnectionStatus,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SshConnectionStatus {
-    Idle,
-    Connecting,
-    Connected,
-    Degraded,
-    Reconnecting,
-    Dropped,
-    Closed,
-}
-
-impl From<SshLinkPhase> for SshConnectionStatus {
-    fn from(value: SshLinkPhase) -> Self {
-        match value {
-            SshLinkPhase::Idle => Self::Idle,
-            SshLinkPhase::Connecting => Self::Connecting,
-            SshLinkPhase::Connected => Self::Connected,
-            SshLinkPhase::Degraded => Self::Degraded,
-            SshLinkPhase::Reconnecting => Self::Reconnecting,
-            SshLinkPhase::Dropped => Self::Dropped,
-            SshLinkPhase::Closed => Self::Closed,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum SshActionError {
     #[error("ssh Module has no bound ssh_host resource")]
@@ -434,39 +395,6 @@ pub struct SshActionOwner {
 impl SshActionOwner {
     pub fn new(pool: SshConnectionPool) -> Self {
         Self { pool }
-    }
-
-    pub fn resource_selection(
-        &self,
-        authority: &AgentSshAuthority,
-        agent_session_id: &str,
-    ) -> Result<SshResourceSelection, SshActionError> {
-        ConversationId::try_from(agent_session_id).map_err(|error| {
-            SshActionError::InvalidContext(format!("invalid AgentSession identity: {error}"))
-        })?;
-        let Some(resource) = authority.resource.as_ref() else {
-            return Ok(SshResourceSelection::Unbound);
-        };
-        if resource.owner_id != authority.principal_id {
-            return Err(SshActionError::ResourceOwnerMismatch);
-        }
-        let key = SshLinkKey::new(agent_session_id, resource.ssh_host_id.clone());
-        let connection_status = self
-            .pool
-            .subscribe(&key)
-            .map(|receiver| receiver.borrow().phase().into())
-            .unwrap_or(SshConnectionStatus::Idle);
-        Ok(SshResourceSelection::Bound {
-            binding_id: resource.binding_id.clone(),
-            ssh_host_id: resource.ssh_host_id.as_str().to_owned(),
-            remote_cwd: resource.remote_cwd.clone(),
-            operations: resource
-                .operation_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            connection_status,
-        })
     }
 
     pub async fn fs_read(

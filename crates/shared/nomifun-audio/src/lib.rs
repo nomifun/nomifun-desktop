@@ -1,16 +1,5 @@
 //! Explicit-format PCM operations shared by media endpoints and adapters.
-use nomifun_voice_contracts::voice::{AudioEncoding, AudioFormat, AudioSampleFormat};
-
-pub fn decode_pcm16(bytes: &[u8], format: &AudioFormat) -> Result<Vec<i16>, String> {
-    format.validate()?;
-    if format.encoding != AudioEncoding::Pcm || format.sample_format != AudioSampleFormat::Signed16Le
-        || !bytes.len().is_multiple_of(usize::from(format.channels) * 2) { return Err("expected complete interleaved PCM16LE frames".into()); }
-    Ok(bytes.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect())
-}
-pub fn downmix_mono(pcm: &[i16], channels: u16) -> Result<Vec<i16>, String> {
-    if channels == 0 || channels > 8 || !pcm.len().is_multiple_of(usize::from(channels)) { return Err("invalid interleaved channel count".into()); }
-    Ok(pcm.chunks_exact(usize::from(channels)).map(|c| (c.iter().map(|s| i32::from(*s)).sum::<i32>() / i32::from(channels)) as i16).collect())
-}
+use nomifun_voice_contracts::voice::AudioFormat;
 pub fn resample_linear(pcm: &[i16], from: u32, to: u32) -> Vec<i16> {
     if pcm.is_empty() || from == 0 || to == 0 { return Vec::new(); }
     if from == to { return pcm.to_vec(); }
@@ -41,7 +30,7 @@ pub fn pcm16_to_wav(pcm: &[i16], sample_rate: u32, channels: u16) -> Result<Vec<
     use super::*;
     #[test] fn stereo_48k_and_mono_16k_keep_duration() {
         let stereo = vec![1000i16; 4800 * 2];
-        let mono = downmix_mono(&stereo, 2).unwrap();
+        let mono = vec![1000i16; 4800];
         let converted = resample_linear(&mono, 48_000, 16_000);
         assert_eq!(converted.len(), 1600); assert!(converted.iter().all(|s| *s == 1000));
         let wav = pcm16_to_wav(&stereo, 48_000, 2).unwrap();

@@ -24,11 +24,6 @@ export const optionalDisplayText = (value: unknown): string | undefined => {
   return toDisplayText(value);
 };
 
-export const compactDisplayText = (value: unknown, fallback = ''): string => {
-  const compacted = toDisplayText(value, fallback).replace(/\s+/g, ' ').trim();
-  return compacted || fallback;
-};
-
 export const extractResponseTextChunk = (data: unknown): string => {
   if (typeof data === 'string') return data;
   if (data && typeof data === 'object' && 'content' in data) {

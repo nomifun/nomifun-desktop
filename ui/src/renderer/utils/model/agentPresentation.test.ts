@@ -8,23 +8,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   isEmoji,
   resolveAgentAvatarImageSrc,
-  resolveAgentDisplayName,
 } from './agentPresentation';
 
-const preset = {
-  id: 'agent-1',
-  name: 'Bug troubleshooting',
-  name_i18n: { 'zh-CN': 'Bug 排查', 'en-US': 'Bug troubleshooting' },
-};
-
 describe('agent presentation', () => {
-  test('uses the configured localized name with canonical fallbacks', () => {
-    expect(resolveAgentDisplayName(preset, 'zh-Hans')).toBe('Bug 排查');
-    expect(resolveAgentDisplayName(preset, 'fr-FR')).toBe('Bug troubleshooting');
-    expect(resolveAgentDisplayName({ ...preset, name_i18n: {}, name: '  Custom name  ' }, 'zh-CN')).toBe(
-      'Custom name'
-    );
-  });
 
   test('classifies the reported CDN AVIF avatar as an image, never emoji text', () => {
     const avatar =

@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::compact::CompactConfig;
 use crate::compat::ProviderCompat;
 use crate::file_cache::FileCacheConfig;
-use crate::hooks::HooksConfig;
 use crate::logging::LoggingConfig;
 use crate::plan::PlanConfig;
 use nomi_types::llm::ThinkingConfig;
@@ -142,8 +141,6 @@ pub struct ConfigFile {
     #[serde(default)]
     pub tools: ToolsConfig,
 
-    #[serde(default)]
-    pub session: SessionConfig,
 
     #[serde(default)]
     pub compact: CompactConfig,
@@ -154,8 +151,6 @@ pub struct ConfigFile {
     #[serde(default)]
     pub file_cache: FileCacheConfig,
 
-    #[serde(default)]
-    pub hooks: HooksConfig,
 
     pub bedrock: Option<BedrockConfig>,
     pub vertex: Option<VertexConfig>,
@@ -316,26 +311,6 @@ impl Default for ComputerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SessionConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_session_dir")]
-    pub directory: String,
-    #[serde(default = "default_max_sessions")]
-    pub max_sessions: usize,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
-            directory: default_session_dir(),
-            max_sessions: default_max_sessions(),
-        }
-    }
-}
-
 // --- Default value functions ---
 
 fn default_provider() -> String {
@@ -347,16 +322,6 @@ fn default_max_recent_images() -> usize {
 fn default_max_screenshot_edge() -> u32 {
     1568
 }
-fn default_true() -> bool {
-    true
-}
-fn default_session_dir() -> String {
-    ".nomi/sessions".to_string()
-}
-fn default_max_sessions() -> usize {
-    20
-}
-
 // --- Resolved runtime config ---
 
 #[derive(Debug, Clone)]
@@ -375,11 +340,9 @@ pub struct Config {
     pub prompt_caching: bool,
     pub compat: ProviderCompat,
     pub tools: ToolsConfig,
-    pub session: SessionConfig,
     pub compact: CompactConfig,
     pub plan: PlanConfig,
     pub file_cache: FileCacheConfig,
-    pub hooks: HooksConfig,
     pub bedrock: Option<BedrockConfig>,
     pub vertex: Option<VertexConfig>,
     pub mcp: McpConfig,
@@ -550,11 +513,9 @@ let mut merged = merge_config_files(global, project)?;
             prompt_caching,
             compat,
             tools,
-            session: merged.session,
             compact: merged.compact,
             plan: merged.plan,
             file_cache: merged.file_cache,
-            hooks: merged.hooks,
             bedrock: merged.bedrock,
             vertex: merged.vertex,
             mcp: merged.mcp,
@@ -938,14 +899,10 @@ fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&
             (["bedrock" | "vertex"] | ["providers", _, "compat", "extra_body"], _, incoming) => {
                 global.insert(key, incoming);
             }
-            (["tools", "lsp_servers"]
-                | ["hooks", "pre_tool_use" | "post_tool_use" | "stop"],
+            (["tools", "lsp_servers"],
                 Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
             (["tools", "bash_sandbox"] | ["tools", "computer", "enabled"],
                 Some(Value::Boolean(base)), Value::Boolean(overlay)) => *base |= overlay,
-            (["session", "enabled"], Some(Value::Boolean(base)), Value::Boolean(overlay)) => {
-                *base &= overlay;
-            }
             (["tools", "write_root"], Some(_), Value::String(overlay)) if overlay.is_empty() => {}
             (["tools", "builtin_allowlist"], Some(_), Value::Array(overlay)) if overlay.is_empty() => {}
             (_, Some(Value::Table(base)), Value::Table(overlay)) => {
@@ -1044,173 +1001,6 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
 
     Ok(config)
 }
-
-// --- Init config command ---
-
-pub fn init_config() -> anyhow::Result<()> {
-    init_config_at(&global_config_path())
-}
-
-fn init_config_at(path: &Path) -> anyhow::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(DEFAULT_CONFIG_TEMPLATE.as_bytes())?;
-    temporary.as_file().sync_all()?;
-    match temporary.persist_noclobber(path) {
-        Ok(_) => tracing::info!(target: "nomi_config", path = %path.display(), "config file created"),
-        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-            tracing::info!(target: "nomi_config", path = %path.display(), "config file already exists");
-        }
-        Err(error) => return Err(error.error.into()),
-    }
-    Ok(())
-}
-
-const DEFAULT_CONFIG_TEMPLATE: &str = r#"# nomi configuration
-
-# Default provider settings
-[default]
-provider = "anthropic"            # built-in provider or custom alias from [providers.<name>]
-# model = "claude-sonnet-4-20250514"
-# max_tokens = 8192               # required by anthropic/bedrock/vertex; optional otherwise
-# max_turns = 30                  # optional: omit for unlimited turns
-# system_prompt = "..."          # optional custom system prompt
-
-# Provider-specific API settings
-[providers.anthropic]
-# api_key = "sk-ant-xxx"         # can also use env: API_KEY or ANTHROPIC_API_KEY
-# base_url = "https://api.anthropic.com"
-
-[providers.openai]
-# api_key = "sk-xxx"             # can also use env: OPENAI_API_KEY
-# base_url = "https://api.openai.com"
-
-[providers.gemini]
-# api_key = "AI..."              # can also use env: GEMINI_API_KEY or GOOGLE_API_KEY
-# base_url = "https://generativelanguage.googleapis.com/v1beta"
-
-# Custom provider alias (maps to a built-in provider type)
-# [providers.my-service]
-# provider = "openai"
-# model = "custom-model-v1"
-# api_key = "sk-xxx"
-# base_url = "https://my-service.example.com/api/openai"
-
-# Provider compatibility overrides (usually not needed — defaults work)
-# [providers.openai.compat]
-# max_tokens_field = "max_completion_tokens"  # for OpenAI official models
-# merge_assistant_messages = true
-# clean_orphan_tool_calls = true
-# dedup_tool_results = true
-# strip_patterns = ["__OPENROUTER_REASONING_DETAILS__"]
-
-# AWS Bedrock configuration (uses AWS SigV4 auth, no API key needed)
-# [bedrock]
-# region = "us-east-1"
-# access_key_id = "AKIA..."
-# secret_access_key = "..."
-# session_token = "..."
-# profile = "my-profile"        # or use AWS profile
-
-# Google Vertex AI configuration (uses GCP OAuth2 auth, no API key needed)
-# [vertex]
-# project_id = "my-gcp-project"
-# region = "us-central1"
-# credentials_file = "/path/to/service-account.json"  # or use ADC
-
-# Named profiles for quick switching (--profile <name>)
-# [profiles.deepseek]
-# provider = "openai"
-# model = "deepseek-chat"
-# api_key = "sk-xxx"
-# base_url = "https://api.deepseek.com"
-
-# [profiles.ollama]
-# provider = "openai"
-# model = "qwen2.5:32b"
-# api_key = "ollama"
-# base_url = "http://localhost:11434"
-
-# [profiles.my-service]
-# provider = "my-service"
-
-# [profiles.bedrock-claude]
-# provider = "bedrock"
-# model = "anthropic.claude-sonnet-4-20250514-v1:0"
-
-# [profiles.vertex-claude]
-# provider = "vertex"
-# model = "claude-sonnet-4@20250514"
-
-# Context compaction settings
-# [compact]
-# context_window = 200000        # context window size in tokens
-# output_reserve = 20000         # tokens reserved for output
-# autocompact_buffer = 13000     # buffer below effective window for autocompact trigger
-# emergency_buffer = 3000        # tokens from limit for emergency block
-# max_failures = 3               # consecutive failures before circuit-breaker trips
-# micro_keep_recent = 5          # keep N most recent tool results
-# micro_gap_seconds = 3600       # gap threshold for time-based microcompact
-# compactable_tools = ["Read", "Bash", "Grep", "Glob", "Write", "Edit"]
-# enabled = true
-
-# File state cache (dedup repeated reads, staleness detection)
-# [file_cache]
-# max_entries = 100            # max cached file entries
-# max_size_bytes = 26214400    # 25 MB total cache size
-# enabled = true
-
-# Session settings
-[session]
-enabled = true
-directory = ".nomi/sessions"  # relative to project root
-max_sessions = 20                # auto-cleanup oldest
-
-# Hook system: run shell commands at tool lifecycle events
-# [[hooks.post_tool_use]]
-# name = "rustfmt"
-# tool_match = ["Write", "Edit"]
-# file_match = ["*.rs"]
-# command = 'rustfmt "${TOOL_INPUT_FILE_PATH}"'
-
-# [[hooks.post_tool_use]]
-# name = "prettier"
-# tool_match = ["Write", "Edit"]
-# file_match = ["*.ts", "*.tsx"]
-# command = 'npx prettier --write "${TOOL_INPUT_FILE_PATH}"'
-
-# [[hooks.stop]]
-# name = "final-lint"
-# command = "cargo clippy --quiet 2>&1 | tail -5"
-
-# Logging configuration
-# [logging]
-# enabled = true                   # enable file logging (default: false)
-# level = "info"                   # log level filter (default: "info")
-# dir = "/path/to/logs"        # log directory (default: platform-specific)
-
-# MCP (Model Context Protocol) servers
-# [mcp.servers.filesystem]
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/project"]
-
-# [mcp.servers.github]
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# env = { GITHUB_TOKEN = "ghp_xxx" }
-
-# [mcp.servers.remote]
-# transport = "sse"
-# url = "http://localhost:3001/sse"
-
-# [mcp.servers.api]
-# transport = "streamable-http"
-# url = "https://tools.example.com/mcp"
-# headers = { Authorization = "Bearer xxx" }
-"#;
 
 #[cfg(test)]
 #[path = "config_audit_tests.rs"]

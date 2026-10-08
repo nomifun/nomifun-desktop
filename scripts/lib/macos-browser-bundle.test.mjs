@@ -76,7 +76,7 @@ describe('complete macOS Browser build routing', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test('bundle inspection catches missing secondary helpers and changed pinned runtime metadata', async () => {
+  test.skipIf(process.platform === 'win32')('POSIX bundle inspection catches missing secondary helpers and changed pinned runtime metadata', async () => {
     const root = mkdtempSync(join(tmpdir(), 'nomifun-cef-bundle-'));
     try {
       const app = appFixture(root);
@@ -90,6 +90,18 @@ describe('complete macOS Browser build routing', () => {
       file(resource, 'restored ICU data');
       rmSync(join(app, 'Contents/Frameworks/NomiFun Helper (GPU).app'), { recursive: true });
       expect((await inspectMacosBrowserBundle(app)).missing.map(item => item.label)).toContain('NomiFun Helper (GPU)');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test.skipIf(process.platform !== 'win32')('bundle inspection fails closed when Windows cannot provide POSIX executable bits', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-cef-bundle-'));
+    try {
+      const inspection = await inspectMacosBrowserBundle(appFixture(root));
+      expect(inspection.status).toBe('fail');
+      const missing = inspection.missing.map(item => item.label);
+      expect(missing).toContain('host');
+      expect(missing).toContain('CEF framework');
+      for (const name of MACOS_CEF_HELPER_NAMES) expect(missing).toContain(name);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

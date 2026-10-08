@@ -108,14 +108,12 @@ from silently tying themselves to engine internals.
 
 | Crate | One-line role |
 | --- | --- |
-| [`nomi-types`](../../crates/agent/nomi-types) | Pure, provider-neutral data types shared across all `nomi-*` crates. No dependencies on other agent crates. |
-| [`nomi-protocol`](../../crates/agent/nomi-protocol) | JSON stream protocol for host ↔ agent communication: events (agent → host), commands (host → agent), approval manager. |
+| [`nomi-types`](../../crates/agent/nomi-types) | Pure, provider-neutral data types and shared tool categories used across the `nomi-*` crates. No dependencies on other agent crates. |
 | [`nomi-compact`](../../crates/agent/nomi-compact) | Conversation-window compaction: fold / json / level / sanitize / TOON formatting. |
-| [`nomi-config`](../../crates/agent/nomi-config) | Runtime configuration layer — `Config`, `ProviderCompat`, auth, hooks, provider-specific configs, file-cache. |
+| [`nomi-config`](../../crates/agent/nomi-config) | Runtime configuration layer — `Config`, `ProviderCompat`, auth, provider-specific configs, file-cache. |
 | [`nomi-providers`](../../crates/agent/nomi-providers) | LLM provider clients: Anthropic, Bedrock, OpenAI, Vertex; shared retry / streaming. |
 | [`nomi-tools`](../../crates/agent/nomi-tools) | Built-in tools registry: bash, edit, glob, grep, read, tool-search, file-cache. |
 | [`nomi-mcp`](../../crates/agent/nomi-mcp) | MCP client used by the agent: config, manager, protocol, tool-proxy, transports. |
-| [`nomi-memory`](../../crates/agent/nomi-memory) | Long-term cross-session memory — preferences, feedback, project context, external references. |
 | [`nomi-computer`](../../crates/agent/nomi-computer) | Desktop computer-use tool implementation. |
 | [`nomi-a11y`](../../crates/agent/nomi-a11y) | Accessibility helpers used by computer-use flows. |
 | [`nomi-browser-engine`](../../crates/agent/nomi-browser-engine) | Self-hosted browser/CDP automation engine. |
