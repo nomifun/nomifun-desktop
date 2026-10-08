@@ -4,7 +4,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     CapabilityHealth, ModelContextLimitKind, ModelTask, ProviderModelCapabilityInput,
     ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
-    MODEL_CONTEXT_LIMIT_KIND_PARAM,
+    MODEL_CONTEXT_LIMIT_KIND_PARAM, is_retired_provider_model,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
@@ -52,17 +52,21 @@ impl ProviderModelService {
         &self,
         provider_id: Option<&str>,
     ) -> Result<Vec<ProviderModelResponse>, AppError> {
-        if let Some(provider_id) = provider_id {
-            validate_provider_id(provider_id)?;
-            if self
-                .provider_repo
-                .find_by_id(provider_id)
-                .await?
-                .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
-            {
-                return Ok(Vec::new());
+        let providers = match provider_id {
+            Some(provider_id) => {
+                validate_provider_id(provider_id)?;
+                self.provider_repo.find_by_id(provider_id).await?.into_iter().collect()
             }
-        }
+            None => self.provider_repo.list().await?,
+        };
+        let platforms = providers.iter().map(|provider| {
+            (provider.provider_id.as_str(), provider.platform.as_str())
+        }).collect::<HashMap<_, _>>();
+        let visible = |provider_id: &str, model: &str| {
+            platforms.get(provider_id).is_none_or(|platform| {
+                !is_retired_provider_platform(platform) && !is_retired_provider_model(platform, model)
+            })
+        };
         let (mut models, mut capabilities) = match provider_id {
             Some(provider_id) => (
                 self.model_repo.list_for_provider(provider_id).await?,
@@ -70,20 +74,8 @@ impl ProviderModelService {
             ),
             None => (self.model_repo.list().await?, self.capability_repo.list().await?),
         };
-        if provider_id.is_none() {
-            let retired_provider_ids = self
-                .provider_repo
-                .list()
-                .await?
-                .into_iter()
-                .filter(|provider| is_retired_provider_platform(&provider.platform))
-                .map(|provider| provider.provider_id)
-                .collect::<HashSet<_>>();
-            models.retain(|model| !retired_provider_ids.contains(&model.provider_id));
-            capabilities.retain(|capability| {
-                !retired_provider_ids.contains(&capability.provider_id)
-            });
-        }
+        models.retain(|model| visible(&model.provider_id, &model.model));
+        capabilities.retain(|capability| visible(&capability.provider_id, &capability.model));
         rows_to_model_responses(models, capabilities)
     }
 
@@ -97,7 +89,8 @@ impl ProviderModelService {
             .provider_repo
             .find_by_id(provider_id)
             .await?
-            .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
+            .is_some_and(|provider| is_retired_provider_platform(&provider.platform)
+                || is_retired_provider_model(&provider.platform, model))
         {
             return Ok(None);
         }
@@ -324,6 +317,11 @@ pub(crate) fn validate_known_provider_model_task(
     model: &str,
     task: ModelTask,
 ) -> Result<(), AppError> {
+    if is_retired_provider_model(platform, model) {
+        return Err(AppError::BadRequest(
+            "Agnes Video v2.0 has been taken offline; select agnes-video-2.5-flash or agnes-video-2.5".into(),
+        ));
+    }
     if (platform.eq_ignore_ascii_case("ark") || platform.eq_ignore_ascii_case("volcengine"))
         && task == ModelTask::VideoGeneration
     {

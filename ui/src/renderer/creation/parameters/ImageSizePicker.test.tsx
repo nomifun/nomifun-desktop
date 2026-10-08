@@ -82,6 +82,13 @@ describe('ImageSizePicker interactions', () => {
       expect(view.getByRole('group', { name: 'Aspect ratio' })).not.toBeNull();
       expect(view.getByRole('group', { name: 'Resolution' })).not.toBeNull();
       expect(view.getAllByRole('button', { name: 'Auto', pressed: true })).toHaveLength(2);
+      for (const model of ['agnes-image-2.0-flash', 'agnes-image-2.5-flash']) {
+        const policy = imageGenerationSizePolicyForModel({ model, protocol: 'agnes.images' });
+        view.rerender(<I18nextProvider i18n={i18n}>
+          <ImageSizePicker options={policy.options} value='auto' onChange={() => undefined} />
+        </I18nextProvider>);
+        expect(view.getAllByRole('button', { name: 'Auto', pressed: true })).toHaveLength(2);
+      }
     } finally {
       await act(async () => { await i18n.changeLanguage('zh-CN'); });
     }

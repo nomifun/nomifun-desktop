@@ -1759,6 +1759,7 @@
     "awsCredentials": "AWS credentials are missing or invalid",
     "invalidRequest": "The provider rejected the request as invalid",
     "apiError": "The provider returned an error",
+    "temporarilyUnavailable": "The provider is temporarily unavailable (503). Please retry later",
     "unknown": "The failure could not be classified"
   },
   "modelCatalogEmpty": "No model list is available. Enter a model ID, or refresh to try again.",

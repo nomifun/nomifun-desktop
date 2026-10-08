@@ -761,7 +761,7 @@ mod tests {
         for (protocol, roles, valid) in [
             ("siliconflow.video_jobs", vec!["first_frame"], true),
             ("siliconflow.video_jobs", vec!["first_frame", "last_frame"], false),
-            // Agnes validates ordered keyframe roles in its adapter.
+            // Agnes validates distinct reference/keyframe modes in its adapter.
             ("agnes.video_jobs", vec!["reference", "reference", "reference"], true),
             ("agnes.video_jobs", vec!["first_frame", "last_frame"], true),
             ("zhipu.video_jobs", vec!["first_frame"], false),

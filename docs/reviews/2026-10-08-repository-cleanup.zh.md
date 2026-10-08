@@ -6,7 +6,7 @@
 
 ## 差异统计
 
-相对基线，本轮涉及 305 个文件，净减少 13,457 行：代码、测试和配置净减少 12,854 行，文档净减少 373 行，锁文件净减少 230 行。统计包含本报告，排除生成构建产物和本机日志。
+清理提交 `a7ed69e29` 相对基线涉及 305 个文件，净减少 13,457 行：代码、测试和配置净减少 12,854 行，文档净减少 373 行，锁文件净减少 230 行。统计包含该提交中的报告，排除生成构建产物和本机日志。
 
 两个失效 crate 完整退休，各业务与共享 crate 的 13 项无用直接依赖及退休机制的消费者引用删除，两项只用于测试的依赖移到 dev-dependencies。测试统计按最终 crate/runner 汇总，同一用例的修复重跑与中间定向测试不重复相加。
 
@@ -122,3 +122,18 @@
 - Node 文件须使用 `node --test`：agent-reliability-collect、agent-reliability-report、idmm-demo-evidence、owned-native-deadline、probe-stepfun-tool-schema、run-agent-voice-smoke 六个 `.test.mjs`；其余脚本测试用 Bun。不要把 Node 嵌套用例交给 Bun 后将兼容性错误认作产品失败。
 
 本机 `.tmp-review/` 保存完整命令输出与扫描库存，未作为新的生产代码或发布输入提交。原始失败和最终重跑日志分别保留；本记录的通过数采用最终结果。
+
+## 提交前远端合并验证
+
+清理提交完成后，合并远端 main 的六个新增提交，远端头为 `8e3a0c0ea`。保留 v0.8.0 发布、更新器修复和 Agnes 模型合同变更；仅 Cargo.lock 发生冲突，处理为保持两个退休 crate 的删除及所有现役包的远端版本。合并后的锁文件由 `--locked` 检查确认，三个 Agent 生成合同摘要重新生成并校验通过，API/schema 语义未变化。
+
+以下是合并后的定向重跑，不与前面的全仓测试数量重复相加：
+
+- `bun run check` 全项通过。
+- Windows `cargo check --locked --workspace --all-targets` 通过，仅已有未使用警告。
+- API 类型、模型调用和 System 三个库共 1,176 项通过（523、488、165），无失败或忽略。
+- model_fetch_routes 与 provider_model_routes 共 53 项通过（40、13）。
+- 创建参数、视频画布、更新器及错误展示的 10 个 UI 文件共 83 项通过，无失败或跳过。
+- macOS bundle 脚本 4 项通过，10 项在 Windows 按平台条件跳过。
+
+日志保存于 `.tmp-review/merge-*.log`。前述独立 Mobile 生成文件和原生平台验收限制仍适用。

@@ -1759,6 +1759,7 @@
     "awsCredentials": "AWS 凭据无效或缺失",
     "invalidRequest": "请求被供应商判定为非法",
     "apiError": "供应商返回了错误",
+    "temporarilyUnavailable": "供应商服务暂时不可用（503），请稍后重试",
     "unknown": "失败原因未能归类"
   },
   "modelCatalogEmpty": "暂无模型列表，请直接输入模型 ID，或刷新重试。",

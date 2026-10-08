@@ -138,22 +138,23 @@ export async function inspectMacosBrowserBundle(appPath) {
   return { status: missing.length ? 'fail' : 'pass', appPath: resolve(appPath), missing };
 }
 
-const run = (command, argv, capture = false) => new Promise((accept, reject) => {
+const run = (command, argv, capture = false, environment = process.env) => new Promise((accept, reject) => {
   const child = spawn(command, argv, {
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     env: Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'DEVELOPER_DIR', 'COPYFILE_DISABLE']
-      .filter(key => process.env[key])
-      .map(key => [key, process.env[key]])),
+      .filter(key => environment[key])
+      .map(key => [key, environment[key]])),
   });
   let output = '';
+  let diagnostics = '';
   if (capture) {
     child.stdout.on('data', chunk => { output += chunk; });
-    child.stderr.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { diagnostics += chunk; });
   }
   child.once('error', reject);
-  child.once('exit', code => code === 0
+  child.once('close', code => code === 0
     ? accept(output.trim())
-    : reject(new Error(`${command} exited ${code}${capture ? `: ${output}` : ''}`)));
+    : reject(new Error(`${command} exited ${code}${capture ? `: ${diagnostics || output}` : ''}`)));
 });
 
 export async function resolveMacosBuildSettings(args, { root }) {
@@ -188,23 +189,33 @@ export async function resolveMacosBuildSettings(args, { root }) {
 }
 
 export async function verifyMacosUpdaterArchive(archivePath, appPath) {
-  const entries = new Set((await run('/usr/bin/tar', ['-tzf', archivePath], true)).split('\n'));
+  // libarchive normally hides AppleDouble entries when listing a macOS archive.
+  // Tauri's Rust tar reader sees them and strips one path component from EVERY
+  // entry, turning a top-level ._NomiFun.app file into the extraction directory.
+  const entries = (await run('/usr/bin/tar', ['-tzf', archivePath,
+    ...(process.platform === 'darwin' ? ['--options=!mac-ext'] : [])], true)).split('\n');
   const prefix = basename(appPath);
-  const required = [
-    'Contents/MacOS/nomifun-desktop', 'Contents/Info.plist',
-    'Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework',
-    'Contents/Resources/browser-cef/runtime.json', 'Contents/Resources/browser-cef/CREDITS.html',
-    ...MACOS_CEF_REQUIRED_RESOURCES.map(name => `Contents/Frameworks/Chromium Embedded Framework.framework/Resources/${name}`),
-    ...MACOS_CEF_HELPER_NAMES.flatMap(name => [
-      `Contents/Frameworks/${name}.app/Contents/MacOS/${name}`,
-      `Contents/Frameworks/${name}.app/Contents/Info.plist`,
-    ]),
-  ];
-  const missing = required.filter(path => !entries.has(`${prefix}/${path}`));
-  if (missing.length) throw new Error(`updater archive is missing Browser runtime files: ${missing.join(', ')}`);
-  const metadata = JSON.parse(await run('/usr/bin/tar', ['-xOf', archivePath, `${prefix}/Contents/Resources/browser-cef/runtime.json`], true));
-  for (const field of ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1']) {
-    if (metadata[field] !== MACOS_BROWSER_RUNTIME[field]) throw new Error(`updater archive CEF identity mismatch: ${field}`);
+  for (const entry of entries) {
+    const parts = entry.replace(/\/$/, '').split('/');
+    if (parts[0] !== prefix || (parts.length === 1 && !entry.endsWith('/')) ||
+        parts.some(part => !part || part === '.' || part === '..' || part.startsWith('._') || part === '__MACOSX')) {
+      throw new Error(`updater archive entry is incompatible with Tauri macOS installation: ${entry}`);
+    }
+  }
+
+  const temporary = await mkdtemp(join(tmpdir(), 'nomifun-updater-verify-'));
+  try {
+    const extracted = join(temporary, prefix);
+    await mkdir(extracted);
+    await run('/usr/bin/tar', ['-xzf', archivePath, '-C', extracted, '--strip-components=1'], true);
+    // Reuse the App contract after extraction instead of maintaining a second
+    // list of required runtime files that only checks archive names.
+    const inspected = await inspectMacosBrowserBundle(extracted);
+    if (inspected.status !== 'pass') {
+      throw new Error(`updater archive contains an incomplete macOS Browser bundle: ${inspected.missing.map(item => item.label).join(', ')}`);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
 }
 
@@ -218,7 +229,9 @@ export async function createMacosUpdaterArchive({ appPath, projectRoot, environm
   const archive = `${resolve(appPath)}.tar.gz`;
   const staged = join(temporary, `${basename(appPath)}.tar.gz`);
   try {
-    await run('/usr/bin/tar', ['-czf', staged, '-C', dirname(resolve(appPath)), basename(appPath)], true);
+    await run('/usr/bin/tar', ['-czf', staged, '--format=pax', '--no-xattrs',
+      '--exclude=._*', '--exclude=__MACOSX', '-C', dirname(resolve(appPath)), basename(appPath)],
+    true, { ...environment, COPYFILE_DISABLE: '1' });
     await verifyMacosUpdaterArchive(staged, appPath);
     await new Promise((accept, reject) => {
       const child = spawn('bun', ['x', 'tauri', 'signer', 'sign', staged], {
