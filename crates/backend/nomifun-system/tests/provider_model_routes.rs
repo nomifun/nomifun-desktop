@@ -117,8 +117,7 @@ async fn seed_saved_model(
         task, traits: "[]", protocol, connection_role: "default", provider_params: "{}",
         ..Default::default()
     }];
-    // Bypass current save validation to reproduce configuration from a release
-    // before the provider announced this model's retirement.
+    // Reproduce existing configuration independently of the current save route.
     SqliteProviderModelRepository::new(db.pool().clone()).save(
         provider_id, provider.config_revision, &NewProviderModel {
             model, enabled: true, capabilities: &capabilities, ..Default::default()
@@ -126,15 +125,179 @@ async fn seed_saved_model(
     ).await.unwrap();
 }
 
+async fn repair_known_models(db: &nomifun_db::Database) -> usize {
+    nomifun_system::repair_known_provider_model_configurations(
+        &SqliteProviderRepository::new(db.pool().clone()),
+        &SqliteProviderModelRepository::new(db.pool().clone()),
+        &SqliteProviderModelCapabilityRepository::new(db.pool().clone()),
+        &SqliteProviderConnectionRepository::new(db.pool().clone()),
+    ).await.unwrap()
+}
+
 #[tokio::test]
-async fn retired_agnes_video_is_hidden_from_every_current_model_list_without_deleting_saved_configuration() {
+async fn misclassified_v20_repair_persists_the_video_graph_and_invalidates_only_old_health() {
+    let db = init_database_memory().await.unwrap();
+    let agnes = create_provider(&db, "agnes", "Agnes").await;
+    let custom = create_provider(&db, "custom", "Unrelated").await;
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let v20 = "agnes-video-v2.0";
+    seed_saved_model(&db, &custom, v20, "image_generation", "agnes.images").await;
+    let already_correct = create_provider(&db, "agnes", "Already configured video").await;
+    seed_saved_model(&db, &already_correct, v20, "video_generation", "agnes.video_jobs").await;
+    let correct_revision = providers.find_by_id(&already_correct).await.unwrap().unwrap().config_revision;
+    assert!(capabilities.set_health(&already_correct, correct_revision, v20, "video_generation",
+        Some(r#"{"status":"healthy"}"#)).await.unwrap());
+    for (model, task, protocol) in [
+        ("agnes-image-2.0-flash", "image_generation", "agnes.images"),
+        ("agnes-video-2.5-flash", "video_generation", "agnes.video_jobs"),
+        ("agnes-3.0-flash", "chat", "openai.chat_text"),
+    ] {
+        seed_saved_model(&db, &agnes, model, task, protocol).await;
+    }
+    let revision = providers.find_by_id(&agnes).await.unwrap().unwrap().config_revision;
+    let params = json!({"width":1920,"height":1080,"frame_rate":16,"num_frames":161,
+        "seed":42,"extra_body":{"watermark":false},"n":1,"size":"1024x1024",
+        "quality":"standard","response_format":"b64_json"}).to_string();
+    let legacy = [NewProviderModelCapability {
+        task:"image_generation", protocol:"agnes.images", traits:"[]", connection_role:"default",
+        endpoint:Some("/images/generations"), provider_params:&params, ..Default::default()
+    }];
+    let original = models.save(&agnes, revision, &NewProviderModel {
+        model:v20, enabled:false, sort_order:17, description:Some("Keep this description"),
+        capabilities:&legacy,
+    }).await.unwrap();
+    models.set_display_name(&agnes, v20, Some("My Video 2.0")).await.unwrap();
+    let before_provider = providers.find_by_id(&agnes).await.unwrap().unwrap();
+    // Even an obsolete observation shape must not become a dependency of
+    // configuration repair. The replaced protocol's health is discarded.
+    assert!(capabilities.set_health(&agnes, before_provider.config_revision, v20, "image_generation",
+        Some(r#"{"status":"old_image_probe_status","error":"wrong image protocol"}"#)).await.unwrap());
+    let unrelated = capabilities.list().await.unwrap().into_iter()
+        .filter(|row| !(row.provider_id == agnes && row.model == v20)).collect::<Vec<_>>();
+
+    assert_eq!(repair_known_models(&db).await, 1);
+    assert_eq!(providers.find_by_id(&already_correct).await.unwrap().unwrap().config_revision, correct_revision);
+    let repaired_provider = providers.find_by_id(&agnes).await.unwrap().unwrap();
+    assert_eq!(repaired_provider.config_revision, before_provider.config_revision + 1);
+    assert_eq!(repaired_provider.credentials_encrypted, before_provider.credentials_encrypted);
+    assert_eq!(repaired_provider.base_url, before_provider.base_url);
+    assert!(capabilities.get(&agnes, v20, "image_generation").await.unwrap().is_none());
+    let repaired = capabilities.get(&agnes, v20, "video_generation").await.unwrap().unwrap();
+    assert_eq!(repaired.protocol, "agnes.video_jobs");
+    assert_eq!(repaired.connection_role, "default");
+    assert_eq!(repaired.endpoint.as_deref(), Some("/videos"));
+    assert_eq!(repaired.poll_endpoint.as_deref(), Some("https://api.example.test/agnesapi?video_id={id}"));
+    assert!(!repaired.allow_cross_origin_credentials);
+    assert!(repaired.health.is_none());
+    assert!(repaired.health_checked_at.is_none());
+    assert_eq!(serde_json::from_str::<Value>(&repaired.provider_params).unwrap(),
+        json!({"width":1920,"height":1080,"frame_rate":16,"num_frames":161,
+            "seed":42,"extra_body":{"watermark":false}}));
+    let model = models.get(&agnes, v20).await.unwrap().unwrap();
+    assert_eq!(model.id, original.id);
+    assert_eq!(model.created_at, original.created_at);
+    assert_eq!(model.display_name.as_deref(), Some("My Video 2.0"));
+    assert_eq!(model.description, original.description);
+    assert_eq!(model.sort_order, 17);
+    assert!(!model.enabled);
+    assert!(!capabilities.set_health(&agnes, before_provider.config_revision, v20, "image_generation",
+        Some(r#"{"status":"healthy"}"#)).await.unwrap(), "late old probes must be fenced out");
+    assert_eq!(serde_json::to_value(capabilities.list().await.unwrap().into_iter()
+        .filter(|row| !(row.provider_id == agnes && row.model == v20)).collect::<Vec<_>>()).unwrap(),
+        serde_json::to_value(unrelated).unwrap());
+    let saved_graph = serde_json::to_value(capabilities.list().await.unwrap()).unwrap();
+    assert_eq!(repair_known_models(&db).await, 0, "startup repair must be idempotent");
+    assert_eq!(providers.find_by_id(&agnes).await.unwrap().unwrap().config_revision,
+        repaired_provider.config_revision);
+    assert_eq!(serde_json::to_value(capabilities.list().await.unwrap()).unwrap(), saved_graph);
+    // Both API projections must read the same repaired persisted task graph.
+    let state = build_state(&db);
+    let view = state.provider_model_service.get(&agnes, v20).await.unwrap().unwrap();
+    assert_eq!(view.capabilities.len(), 1);
+    assert_eq!(view.capabilities[0].task, ModelTask::VideoGeneration);
+    let provider_view = state.provider_service.list().await.unwrap().into_iter()
+        .find(|row| row.provider_id == agnes).unwrap();
+    assert_eq!(serde_json::to_value(provider_view.models.iter().find(|row| row.model == v20).unwrap()).unwrap(),
+        serde_json::to_value(view).unwrap());
+}
+
+#[tokio::test]
+async fn misclassified_v20_repair_keeps_named_connections_overrides_and_credentials_unchanged() {
+    use nomifun_db::{IProviderConnectionRepository, UpsertProviderConnectionParams};
+
+    let db = init_database_memory().await.unwrap();
+    let id = create_provider(&db, "agnes", "Agnes").await;
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let connections = SqliteProviderConnectionRepository::new(db.pool().clone());
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let provider = providers.find_by_id(&id).await.unwrap().unwrap();
+    connections.upsert(&id, provider.config_revision, &UpsertProviderConnectionParams {
+        role:"video", label:Some("Private video gateway"), base_url:"https://proxy.test:9443/v1",
+        auth_scheme:"bearer", credentials_encrypted:&provider.credentials_encrypted,
+        extra:r#"{"region":"keep-this-setting"}"#,
+    }).await.unwrap();
+    let before_connection = connections.get(&id, "video").await.unwrap().unwrap();
+    let revision = providers.find_by_id(&id).await.unwrap().unwrap().config_revision;
+    let legacy = [NewProviderModelCapability { task:"image_generation", traits:"[]",
+        protocol:"agnes.images", connection_role:"video", provider_params:r#"{"seed":99}"#,
+        base_url_override:Some("https://proxy.test:9443/custom/v1"),
+        endpoint:Some("https://proxy.test:9443/v1/images/generations"),
+        ..Default::default() }];
+    models.save(&id, revision, &NewProviderModel { model:"agnes-video-v2.0", enabled:true,
+        capabilities:&legacy, ..Default::default() }).await.unwrap();
+    assert_eq!(repair_known_models(&db).await, 1);
+    let video = capabilities.get(&id, "agnes-video-v2.0", "video_generation").await.unwrap().unwrap();
+    assert_eq!(video.connection_role, "video");
+    assert_eq!(video.base_url_override.as_deref(), Some("https://proxy.test:9443/custom/v1"));
+    assert_eq!(video.endpoint.as_deref(), Some("https://proxy.test:9443/v1/videos"));
+    assert_eq!(video.poll_endpoint.as_deref(), Some("https://proxy.test:9443/agnesapi?video_id={id}"));
+    assert!(!video.allow_cross_origin_credentials);
+    assert_eq!(serde_json::to_value(connections.get(&id, "video").await.unwrap().unwrap()).unwrap(),
+        serde_json::to_value(before_connection).unwrap());
+}
+
+#[tokio::test]
+async fn misclassified_v20_repair_does_not_override_custom_graphs_or_credential_boundaries() {
+    let db = init_database_memory().await.unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    for (name, endpoint, has_video, allow_cross) in [
+        ("Custom endpoint", Some("/my-video-proxy"), false, false),
+        ("Both tasks", None, true, false),
+        ("Unsafe different origin", Some("https://other.test/v1/images/generations"), false, false),
+    ] {
+        let id = create_provider(&db, "agnes", name).await;
+        let mut graph = vec![NewProviderModelCapability { task:"image_generation", traits:"[]",
+            protocol:"agnes.images", connection_role:"default", provider_params:"{}", endpoint,
+            allow_cross_origin_credentials:allow_cross, ..Default::default() }];
+        if has_video {
+            graph.push(NewProviderModelCapability { task:"video_generation", traits:"[]",
+                protocol:"agnes.video_jobs", connection_role:"default", provider_params:"{}",
+                ..Default::default() });
+        }
+        let revision = providers.find_by_id(&id).await.unwrap().unwrap().config_revision;
+        models.save(&id, revision, &NewProviderModel { model:"agnes-video-v2.0", enabled:true,
+            capabilities:&graph, ..Default::default() }).await.unwrap();
+    }
+    let before = serde_json::to_value(capabilities.list().await.unwrap()).unwrap();
+    let before_providers = serde_json::to_value(providers.list().await.unwrap()).unwrap();
+    assert_eq!(repair_known_models(&db).await, 0);
+    assert_eq!(serde_json::to_value(capabilities.list().await.unwrap()).unwrap(), before);
+    assert_eq!(serde_json::to_value(providers.list().await.unwrap()).unwrap(), before_providers);
+}
+
+#[tokio::test]
+async fn configured_agnes_v20_is_visible_in_lists_edits_and_clones_without_rewriting_configuration() {
     let db = init_database_memory().await.unwrap();
     let agnes = create_provider(&db, "agnes", "Agnes").await;
     let custom = create_provider(&db, "custom", "Unrelated provider").await;
-    let retired = "agnes-video-v2.0";
-    // Also hide a legacy row incorrectly classified as image generation.
-    seed_saved_model(&db, &agnes, retired, "image_generation", "agnes.images").await;
-    seed_saved_model(&db, &custom, retired, "chat", "openai.chat_text").await;
+    let v20 = "agnes-video-v2.0";
+    seed_saved_model(&db, &agnes, v20, "video_generation", "agnes.video_jobs").await;
+    seed_saved_model(&db, &custom, v20, "chat", "openai.chat_text").await;
     for (model, task, protocol) in [
         ("agnes-video-2.5", "video_generation", "agnes.video_jobs"),
         ("agnes-video-2.5-flash", "video_generation", "agnes.video_jobs"),
@@ -157,47 +320,46 @@ async fn retired_agnes_video_is_hidden_from_every_current_model_list_without_del
     let providers = body_json(response).await;
     let agnes_view = providers["data"].as_array().unwrap().iter().find(|provider| provider["provider_id"] == agnes).unwrap();
     let custom_view = providers["data"].as_array().unwrap().iter().find(|provider| provider["provider_id"] == custom).unwrap();
-    assert_eq!(agnes_view["models"].as_array().unwrap().len(), 6);
-    assert!(!agnes_view["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
-    assert!(custom_view["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    assert_eq!(agnes_view["models"].as_array().unwrap().len(), 7);
+    assert!(agnes_view["models"].as_array().unwrap().iter().any(|model| model["model"] == v20));
+    assert!(custom_view["models"].as_array().unwrap().iter().any(|model| model["model"] == v20));
 
     for uri in ["/api/provider-models".to_owned(), format!("/api/provider-models?provider_id={agnes}")] {
         let response = app.clone().oneshot(request("GET", &uri, None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let models = body_json(response).await;
         let models = models["data"].as_array().unwrap();
-        assert!(!models.iter().any(|model| model["provider_id"] == agnes && model["model"] == retired));
+        assert!(models.iter().any(|model| model["provider_id"] == agnes && model["model"] == v20));
         assert!(models.iter().any(|model| model["provider_id"] == agnes && model["model"] == "agnes-video-2.5-flash"));
         assert!(models.iter().any(|model| model["provider_id"] == agnes && model["model"] == "agnes-video-future"));
         if uri == "/api/provider-models" {
-            assert!(models.iter().any(|model| model["provider_id"] == custom && model["model"] == retired));
+            assert!(models.iter().any(|model| model["provider_id"] == custom && model["model"] == v20));
         }
     }
-    assert!(model_service.get(&agnes, retired).await.unwrap().is_none());
-    assert!(model_service.get(&custom, retired).await.unwrap().is_some());
+    assert!(model_service.get(&agnes, v20).await.unwrap().is_some());
+    assert!(model_service.get(&custom, v20).await.unwrap().is_some());
     assert_eq!(serde_json::to_value(model_repo.list().await.unwrap()).unwrap(), before_models);
     assert_eq!(serde_json::to_value(capability_repo.list().await.unwrap()).unwrap(), before_capabilities);
 
-    // Every aggregate response (including provider edits and clones) uses the
-    // same projection; a later mutation must not make the hidden row reappear.
+    // Edits and clones preserve the configured v2.0 model and its task graph.
     let response = app.clone().oneshot(request("PUT", &format!("/api/providers/{agnes}"), Some(json!({"name":"Agnes renamed"})))).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!body_json(response).await["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    assert!(body_json(response).await["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == v20));
     let response = app.oneshot(request("POST", &format!("/api/providers/{agnes}/clone"), None)).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let cloned = body_json(response).await;
-    assert!(!cloned["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == retired));
+    assert!(cloned["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == v20));
     let cloned_id = cloned["data"]["provider_id"].as_str().unwrap();
-    assert!(model_repo.get(cloned_id, retired).await.unwrap().is_some());
-    assert!(model_repo.get(&agnes, retired).await.unwrap().is_some());
+    assert!(model_repo.get(cloned_id, v20).await.unwrap().is_some());
+    assert!(model_repo.get(&agnes, v20).await.unwrap().is_some());
 }
 
 #[tokio::test]
-async fn manual_configuration_cannot_reintroduce_the_retired_agnes_video_model() {
+async fn v20_can_be_saved_and_used_as_a_provider_initial_model_with_video_capability() {
     let db = init_database_memory().await.unwrap();
     let agnes = create_provider(&db, "agnes", "Agnes").await;
     let app = system_routes(build_state(&db));
-    for (task, protocol) in [("chat", "openai.chat_text"), ("image_generation", "agnes.images"), ("video_generation", "agnes.video_jobs")] {
+    for (task, protocol) in [("chat", "openai.chat_text"), ("image_generation", "agnes.images")] {
         let response = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
             "provider_id":agnes, "model":{"model":"agnes-video-v2.0", "capabilities":[{
                 "task":task, "protocol":protocol, "connection_role":"default", "provider_params":{}
@@ -205,19 +367,27 @@ async fn manual_configuration_cannot_reintroduce_the_retired_agnes_video_model()
         })))).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let error = body_json(response).await;
-        assert!(error.to_string().contains("taken offline"));
-        assert!(error.to_string().contains("agnes-video-2.5-flash"));
+        assert!(error.to_string().contains("requires the video_generation task"));
     }
+    let video_capability = json!({"task":"video_generation", "protocol":"agnes.video_jobs",
+        "connection_role":"default", "provider_params":{"width":1920, "height":1080, "frame_rate":24}});
+    let response = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+        "provider_id":agnes, "model":{"model":"agnes-video-v2.0", "capabilities":[video_capability.clone()]}
+    })))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = body_json(response).await;
+    assert_eq!(saved["data"]["capabilities"][0]["task"], "video_generation");
+    assert_eq!(saved["data"]["capabilities"][0]["provider_params"]["width"], 1920);
     let response = app.oneshot(request("POST", "/api/providers", Some(json!({
-        "platform":"agnes", "name":"Retired model", "base_url":"https://api.example.test/v1",
+        "platform":"agnes", "name":"Video v2.0", "base_url":"https://api.example.test/v1",
         "auth_scheme":"bearer", "credentials":{"api_keys":["sk-test"]}, "initial_model":{
-            "model":"agnes-video-v2.0", "capabilities":[chat_capability()]
+            "model":"agnes-video-v2.0", "capabilities":[video_capability]
         }
     })))).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(body_json(response).await.to_string().contains("taken offline"));
-    assert!(SqliteProviderModelRepository::new(db.pool().clone()).get(&agnes, "agnes-video-v2.0").await.unwrap().is_none());
-    assert_eq!(SqliteProviderRepository::new(db.pool().clone()).list().await.unwrap().len(), 1);
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(body_json(response).await["data"]["models"].as_array().unwrap().iter().any(|model| model["model"] == "agnes-video-v2.0"));
+    assert!(SqliteProviderModelRepository::new(db.pool().clone()).get(&agnes, "agnes-video-v2.0").await.unwrap().is_some());
+    assert_eq!(SqliteProviderRepository::new(db.pool().clone()).list().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -274,6 +444,44 @@ async fn task_protocol_mismatches_cannot_create_or_replace_saved_model_configura
         ModelTask::Chat,
     ).await.unwrap();
     assert_eq!(resolved.protocol, "openai.chat_text");
+}
+
+#[tokio::test]
+async fn saved_v20_health_probe_resolves_its_native_capability_and_preserves_frame_defaults() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/v1/videos"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_partial_json(json!({"model":"agnes-video-v2.0", "width":1920, "height":1080,
+            "frame_rate":16, "num_frames":161})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"video_id":"v20-probe"})))
+        .expect(1).mount(&server).await;
+    let db = init_database_memory().await.unwrap();
+    let response = system_routes(build_state(&db)).oneshot(request("POST", "/api/providers", Some(json!({
+        "platform":"agnes", "name":"Video v2.0", "base_url":format!("{}/v1", server.uri()),
+        "auth_scheme":"bearer", "credentials":{"api_keys":["sk-test"]}, "initial_model":{
+            "model":"agnes-video-v2.0", "capabilities":[{
+                "task":"video_generation", "protocol":"agnes.video_jobs", "connection_role":"default",
+                "poll_endpoint":format!("{}/agnesapi?video_id={{id}}", server.uri()),
+                "provider_params":{"width":1920, "height":1080, "frame_rate":16, "num_frames":161}
+            }]
+        }
+    })))).await.unwrap();
+    let status = response.status();
+    let provider = body_json(response).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let report = build_invoke(&db).probe(&ModelRef {
+        provider_id: provider["data"]["provider_id"].as_str().unwrap().to_owned(),
+        model: "agnes-video-v2.0".into(),
+    }, ModelTask::VideoGeneration).await.unwrap();
+    assert!(report.healthy, "{:?}", report.message);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("size").is_none());
+    assert!(body.get("seconds").is_none());
 }
 
 #[tokio::test]

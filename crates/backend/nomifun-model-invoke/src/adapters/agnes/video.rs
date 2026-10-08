@@ -139,9 +139,6 @@ fn invalid(message: impl Into<String>) -> InvokeError {
 pub(super) fn validate_video_model(model: &str) -> Result<bool, InvokeError> {
     match agnes_model_contract(model) {
         Some(AgnesModelContract::Video { flash }) => Ok(flash),
-        Some(AgnesModelContract::RetiredVideo) => Err(invalid(
-            "Agnes Video v2.0 has been taken offline; select agnes-video-2.5-flash or agnes-video-2.5",
-        )),
         _ => Err(invalid(format!(
             "agnes.video_jobs has no documented video contract for {model:?}"
         ))),

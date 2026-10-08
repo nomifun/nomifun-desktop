@@ -1734,6 +1734,20 @@ impl AppServices {
             Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(
                 database.pool().clone(),
             ));
+        let repaired_model_count = nomifun_system::repair_known_provider_model_configurations(
+            provider_repo.as_ref(),
+            provider_model_repo.as_ref(),
+            provider_model_capability_repo.as_ref(),
+            provider_connection_repo.as_ref(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to repair known model configurations: {error}"))?;
+        if repaired_model_count > 0 {
+            tracing::info!(
+                repaired_model_count,
+                "Repaired misclassified provider model capabilities"
+            );
+        }
         let model_invoke_http = nomifun_net::http_client();
         let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
             provider_repo.clone(),

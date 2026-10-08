@@ -191,9 +191,7 @@ pub fn verified_catalog_tasks_and_traits(
             match contract {
                 Chat => (vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
                 Image => (vec![ImageGeneration, ImageEdit], vec![]),
-                Video { .. } => (vec![VideoGeneration], vec![]),
-                // Still returned by /models, but explicitly taken offline.
-                RetiredVideo => (vec![], vec![]),
+                VideoV20 | Video { .. } => (vec![VideoGeneration], vec![]),
             }
         }),
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
@@ -457,10 +455,9 @@ mod tests {
         for model in ["agnes-image-2.0-flash", "agnes-image-2.1-flash", "agnes-image-2.5-flash"] {
             assert_eq!(tasks_of("agnes", model), vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]);
         }
-        for model in ["agnes-video-2.5", "agnes-video-2.5-flash"] {
+        for model in ["agnes-video-v2.0", "agnes-video-2.5", "agnes-video-2.5-flash"] {
             assert_eq!(tasks_of("agnes", model), vec![ModelTask::VideoGeneration]);
         }
-        assert!(tasks_of("agnes", "agnes-video-v2.0").is_empty());
         for model in ["agnes-2.0-flash", "agnes-2.5-flash", "agnes-3.0-flash", "agnes-2.5-pro"] {
             assert_eq!(verified_catalog_tasks_and_traits("agnes", model),
                 Some((vec![ModelTask::Chat], vec![ModelTrait::VisionInput])));

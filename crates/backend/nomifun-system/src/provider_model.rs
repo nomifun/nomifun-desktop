@@ -4,7 +4,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     CapabilityHealth, ModelContextLimitKind, ModelTask, ProviderModelCapabilityInput,
     ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
-    MODEL_CONTEXT_LIMIT_KIND_PARAM, is_retired_provider_model,
+    MODEL_CONTEXT_LIMIT_KIND_PARAM, AgnesModelContract, agnes_model_contract,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
@@ -62,10 +62,8 @@ impl ProviderModelService {
         let platforms = providers.iter().map(|provider| {
             (provider.provider_id.as_str(), provider.platform.as_str())
         }).collect::<HashMap<_, _>>();
-        let visible = |provider_id: &str, model: &str| {
-            platforms.get(provider_id).is_none_or(|platform| {
-                !is_retired_provider_platform(platform) && !is_retired_provider_model(platform, model)
-            })
+        let visible = |provider_id: &str| {
+            platforms.get(provider_id).is_none_or(|platform| !is_retired_provider_platform(platform))
         };
         let (mut models, mut capabilities) = match provider_id {
             Some(provider_id) => (
@@ -74,8 +72,8 @@ impl ProviderModelService {
             ),
             None => (self.model_repo.list().await?, self.capability_repo.list().await?),
         };
-        models.retain(|model| visible(&model.provider_id, &model.model));
-        capabilities.retain(|capability| visible(&capability.provider_id, &capability.model));
+        models.retain(|model| visible(&model.provider_id));
+        capabilities.retain(|capability| visible(&capability.provider_id));
         rows_to_model_responses(models, capabilities)
     }
 
@@ -89,8 +87,7 @@ impl ProviderModelService {
             .provider_repo
             .find_by_id(provider_id)
             .await?
-            .is_some_and(|provider| is_retired_provider_platform(&provider.platform)
-                || is_retired_provider_model(&provider.platform, model))
+            .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
         {
             return Ok(None);
         }
@@ -317,9 +314,12 @@ pub(crate) fn validate_known_provider_model_task(
     model: &str,
     task: ModelTask,
 ) -> Result<(), AppError> {
-    if is_retired_provider_model(platform, model) {
+    if platform.eq_ignore_ascii_case("agnes")
+        && agnes_model_contract(model) == Some(AgnesModelContract::VideoV20)
+        && task != ModelTask::VideoGeneration
+    {
         return Err(AppError::BadRequest(
-            "Agnes Video v2.0 has been taken offline; select agnes-video-2.5-flash or agnes-video-2.5".into(),
+            "Agnes Video v2.0 requires the video_generation task".into(),
         ));
     }
     if (platform.eq_ignore_ascii_case("ark") || platform.eq_ignore_ascii_case("volcengine"))
@@ -896,9 +896,12 @@ fn model_task_order(task: ModelTask) -> u8 {
     }
 }
 
-pub(crate) fn capability_row_to_response(
-    row: ProviderModelCapabilityRow,
-) -> Result<ProviderModelCapabilityResponse, AppError> {
+/// Decode invocation configuration independently of its last probe observation.
+/// Configuration validation/repair must not depend on a UI response or stale
+/// health JSON from an endpoint that is being replaced.
+pub(crate) fn capability_row_to_input(
+    row: &ProviderModelCapabilityRow,
+) -> Result<ProviderModelCapabilityInput, AppError> {
     let task = serde_json::from_value(serde_json::Value::String(row.task.clone())).map_err(
         |error| {
             AppError::Internal(format!(
@@ -919,6 +922,29 @@ pub(crate) fn capability_row_to_response(
             row.provider_id, row.model
         ))
     })?;
+    Ok(ProviderModelCapabilityInput {
+        task,
+        traits,
+        protocol: row.protocol.clone(),
+        connection_role: row.connection_role.clone(),
+        base_url_override: row.base_url_override.clone(),
+        endpoint: row.endpoint.clone(),
+        poll_endpoint: row.poll_endpoint.clone(),
+        content_endpoint: row.content_endpoint.clone(),
+        realtime_endpoint: row.realtime_endpoint.clone(),
+        allow_cross_origin_credentials: row.allow_cross_origin_credentials,
+        provider_params,
+        context_limit: row.context_limit,
+        output_limit: row.output_limit,
+        compaction_threshold_pct: row.compaction_threshold_pct.map(|pct| u8::try_from(pct))
+            .transpose().map_err(|_| AppError::Internal("invalid saved compaction threshold".into()))?,
+    })
+}
+
+pub(crate) fn capability_row_to_response(
+    row: ProviderModelCapabilityRow,
+) -> Result<ProviderModelCapabilityResponse, AppError> {
+    let input = capability_row_to_input(&row)?;
     let health = row
         .health
         .as_deref()
@@ -931,20 +957,20 @@ pub(crate) fn capability_row_to_response(
             ))
         })?;
     Ok(ProviderModelCapabilityResponse {
-        task,
-        traits,
-        protocol: row.protocol,
-        connection_role: row.connection_role,
-        base_url_override: row.base_url_override,
-        endpoint: row.endpoint,
-        poll_endpoint: row.poll_endpoint,
-        content_endpoint: row.content_endpoint,
-        realtime_endpoint: row.realtime_endpoint,
-        allow_cross_origin_credentials: row.allow_cross_origin_credentials,
-        provider_params,
-        context_limit: row.context_limit,
-        output_limit: row.output_limit,
-        compaction_threshold_pct: row.compaction_threshold_pct.map(|pct| u8::try_from(pct)).transpose().map_err(|_| AppError::Internal("invalid saved compaction threshold".into()))?,
+        task: input.task,
+        traits: input.traits,
+        protocol: input.protocol,
+        connection_role: input.connection_role,
+        base_url_override: input.base_url_override,
+        endpoint: input.endpoint,
+        poll_endpoint: input.poll_endpoint,
+        content_endpoint: input.content_endpoint,
+        realtime_endpoint: input.realtime_endpoint,
+        allow_cross_origin_credentials: input.allow_cross_origin_credentials,
+        provider_params: input.provider_params,
+        context_limit: input.context_limit,
+        output_limit: input.output_limit,
+        compaction_threshold_pct: input.compaction_threshold_pct,
         health,
         health_checked_at: row.health_checked_at,
         created_at: row.created_at,

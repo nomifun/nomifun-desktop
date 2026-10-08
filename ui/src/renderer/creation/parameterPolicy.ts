@@ -1,6 +1,6 @@
 import { imageGenerationSizePolicyForModel, type ImageGenerationAspectRatioOption, type ImageGenerationModelOption, type ImageGenerationSizePolicy } from './parameters/image';
 import type { CreationMode, CreationParameters, CreationInput } from './types';
-import { agnesVideoPolicy, agnesVideoSizeOptions, isCurrentAgnesVideo, normalizeAgnesVideoSize } from './parameters/agnes';
+import { agnesVideoPolicy, agnesVideoSizeOptions, isAgnesVideo, normalizeAgnesVideoSize } from './parameters/agnes';
 
 type Model = Pick<ImageGenerationModelOption, 'model' | 'protocol' | 'platform'> | null | undefined;
 
@@ -12,7 +12,7 @@ export function creationMusicDuration(value: unknown): number | undefined {
 }
 
 export function creationVideoInputRoles(model: Model): CreationInput['role'][] {
-  if (isCurrentAgnesVideo(model) || model?.protocol === 'ark.video_jobs' || (model?.protocol === 'xai.video_jobs' && model.model === 'grok-imagine-video-1.5')) return ['reference', 'first_frame', 'last_frame'];
+  if (isAgnesVideo(model) || model?.protocol === 'ark.video_jobs' || (model?.protocol === 'xai.video_jobs' && model.model === 'grok-imagine-video-1.5')) return ['reference', 'first_frame', 'last_frame'];
   return ['reference', 'first_frame'];
 }
 const sizes = (values: string[]) => values.map(value => {

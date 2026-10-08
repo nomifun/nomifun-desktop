@@ -126,7 +126,7 @@ fn post_request(uri: &str, body: serde_json::Value) -> Request<Body> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fetch_models_agnes_suggests_current_official_tasks_without_reviving_retired_video() {
+async fn fetch_models_agnes_suggests_native_tasks_for_both_video_versions() {
     let server = MockServer::start().await;
     let ids = ["agnes-image-2.0-flash", "agnes-image-2.1-flash", "agnes-image-2.5-flash",
         "agnes-video-2.5", "agnes-video-2.5-flash", "agnes-3.0-flash", "agnes-video-v2.0"];
@@ -141,8 +141,8 @@ async fn fetch_models_agnes_suggests_current_official_tasks_without_reviving_ret
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
     let models = body["data"]["models"].as_array().unwrap();
-    assert_eq!(models.len(), ids.len() - 1);
-    assert!(!models.iter().any(|model| model["id"] == "agnes-video-v2.0"));
+    assert_eq!(models.len(), ids.len());
+    assert!(models.iter().any(|model| model["id"] == "agnes-video-v2.0"));
     for model in models {
         assert_eq!(model["tasks_source"], "official_documentation");
         let id = model["id"].as_str().unwrap();
@@ -153,7 +153,7 @@ async fn fetch_models_agnes_suggests_current_official_tasks_without_reviving_ret
 }
 
 #[tokio::test]
-async fn anonymous_catalog_hides_only_the_confirmed_agnes_retirement_and_preserves_future_models() {
+async fn anonymous_catalog_preserves_v20_and_future_models_without_provider_name_collisions() {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[
@@ -170,7 +170,7 @@ async fn anonymous_catalog_hides_only_the_confirmed_agnes_retirement_and_preserv
         let models = response["data"]["models"].as_array().unwrap();
         assert!(models.iter().any(|model| model["id"] == "agnes-video-future"));
         assert!(models.iter().any(|model| model["id"] == "agnes-video-2.5-flash"));
-        assert_eq!(models.iter().any(|model| model["id"] == "agnes-video-v2.0"), platform != "agnes");
+        assert!(models.iter().any(|model| model["id"] == "agnes-video-v2.0"));
     }
 }
 

@@ -8,7 +8,7 @@ import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { isCurrentAgnesVideo } from '@renderer/creation/parameters/agnes';
+import { isAgnesVideo, isCurrentAgnesVideo } from '@renderer/creation/parameters/agnes';
 
 import CreativeCanvasReferenceList, { type CreativeCanvasComposerReference } from './CreativeCanvasReferenceList';
 import CreativeCanvasReferencePromptInput, {
@@ -171,7 +171,7 @@ const CreativeCanvasVideoComposer: React.FC<
     ? modelOptions.find((option) => modelKey(option) === modelKey(settings.model!)) ??
       null
     : null;
-  const agnesVideo = isCurrentAgnesVideo(selectedModel);
+  const agnesVideo = isAgnesVideo(selectedModel);
   const agnesFlash = agnesVideo && selectedModel?.model === 'agnes-video-2.5-flash';
   const resolutionOptions = agnesFlash ? RESOLUTION_OPTIONS.filter(value => value === '720p') : RESOLUTION_OPTIONS;
   const referenceIssue = agnesVideo && imageCount > (agnesFlash ? 5 : 8)
