@@ -11,8 +11,9 @@ use nomifun_api_types::{
     AddExternalPathRequest, ApiResponse, BuiltinAutoSkillResponse, ExportSkillRequest, ExternalSkillSourceResponse,
     ImportSkillRequest, ImportSkillResponse, NamedPathResponse, ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse,
-    ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillMarketMcpConfigRequest,
-    SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse,
+    ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillMarketInstallRequest,
+    SkillMarketInstallResponse, SkillMarketMcpConfigRequest, SkillMarketMcpConfigResponse,
+    SkillMarketSyncRequest, SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse,
 };
 use nomifun_common::AppError;
 use nomifun_db::ISkillTagRepository;
@@ -83,6 +84,7 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
             "/api/skills/market/rankings/sync",
             post(sync_skill_market_rankings),
         )
+        .route("/api/skills/market/install", post(install_skill_market_item))
         .route(
             "/api/skills/market/mcp/config",
             post(resolve_skill_market_mcp_config),
@@ -420,6 +422,17 @@ async fn sync_skill_market_rankings(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let resp = crate::market::fetch_skill_market_rankings(req.sources).await?;
     Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// `POST /api/skills/market/install` — install a validated market skill into
+/// the managed skill library. No market-provided command is accepted or run.
+async fn install_skill_market_item(
+    State(state): State<SkillRouterState>,
+    body: Result<Json<SkillMarketInstallRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillMarketInstallResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let response = crate::market::install_market_skill(&state.skill_paths, req).await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 /// `POST /api/skills/market/mcp/config` — resolve a market MCP entry into

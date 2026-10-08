@@ -242,6 +242,25 @@ pub struct SkillMarketSyncResponse {
     pub errors: Vec<String>,
 }
 
+/// Request body for `POST /api/skills/market/install`.
+///
+/// The backend treats these fields as a market identity, not as an install
+/// command. It validates the three values against the selected market's
+/// canonical URL shape and derives the download endpoint itself.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillMarketInstallRequest {
+    pub source: String,
+    pub id: String,
+    pub url: String,
+}
+
+/// Response for a completed controlled market-skill install.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillMarketInstallResponse {
+    pub skill_names: Vec<String>,
+}
+
 /// Request body for resolving a market MCP entry into importable MCP JSON.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -569,6 +588,32 @@ mod tests {
     fn test_skill_market_sync_request_defaults_sources() {
         let req: SkillMarketSyncRequest = serde_json::from_value(json!({})).unwrap();
         assert!(req.sources.is_empty());
+    }
+
+    #[test]
+    fn test_skill_market_install_contract_is_structured_and_strict() {
+        let req: SkillMarketInstallRequest = serde_json::from_value(json!({
+            "source": "skillhub",
+            "id": "skillhub:owner/skills/demo",
+            "url": "https://skillhub.cn/skills/owner/demo"
+        }))
+        .unwrap();
+        assert_eq!(req.source, "skillhub");
+        assert!(
+            serde_json::from_value::<SkillMarketInstallRequest>(json!({
+                "source": "skillhub",
+                "id": "skillhub:owner/skills/demo",
+                "url": "https://skillhub.cn/skills/owner/demo",
+                "install_command": "do-not-run-me"
+            }))
+            .is_err(),
+            "the controlled install API must not accept an executable command"
+        );
+
+        let response = SkillMarketInstallResponse {
+            skill_names: vec!["demo".into()],
+        };
+        assert_eq!(serde_json::to_value(response).unwrap()["skill_names"][0], "demo");
     }
 
     #[test]

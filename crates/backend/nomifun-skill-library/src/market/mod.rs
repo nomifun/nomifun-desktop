@@ -1,17 +1,21 @@
 //! Skill market integration: live ranking sync across six public
-//! marketplaces and MCP config resolution.
+//! marketplaces, controlled skill installation, and MCP config resolution.
 //!
 //! Route handlers in [`crate::skill_routes`] stay thin and delegate here.
 //! Submodules:
 //! - [`client`] — allowlist-guarded HTTP client (custom redirect policy) and
 //!   size-capped body readers.
+//! - [`install`] — validated, CLI-free archive installation into the managed
+//!   skill library.
 //! - [`parse`] — per-source ranking parsers and shared text/JSON helpers.
 //! - [`mcp`] — market MCP entry → importable `mcpServers` JSON.
 
 mod client;
+mod install;
 mod mcp;
 mod parse;
 
+pub use install::install_market_skill;
 pub use mcp::resolve_market_mcp_config;
 
 use std::collections::HashSet;
@@ -41,7 +45,6 @@ const CLAWHUB_PLUGINS_SOURCE: &str = "clawhub_plugins";
 const CLAWHUB_RANKING_URL: &str = "https://clawhub.ai/skills?tab=new";
 const CLAWHUB_CONVEX_QUERY_URL: &str = "https://wry-manatee-359.convex.cloud/api/query";
 const SKILLHUB_RANKING_URL: &str = "https://api.skillhub.cn/api/skills?page=1&pageSize=100&sortBy=score&order=desc";
-const SKILLHUB_HTML_FALLBACK_URL: &str = "https://www.skills.sh/trending/";
 const LOOPHUB_RANKING_URL: &str =
     "https://api.cocoloop.cn/api/v1/store/skills?page=1&page_size=100&sort=downloads&tab=overall";
 const SKILLHUB_MCP_RANKING_URL: &str =
@@ -216,15 +219,23 @@ async fn fetch_clawhub_rankings(client: &reqwest::Client) -> Result<Vec<SkillMar
 }
 
 async fn fetch_skillhub_rankings(client: &reqwest::Client) -> Result<Vec<SkillMarketItemResponse>, AppError> {
-    fetch_with_fallback(
-        async { Ok(parse_skillhub_rankings(&read_market_body(client, SKILLHUB_RANKING_URL).await?)) },
-        async {
-            Ok(parse_skillhub_rankings(
-                &read_market_body(client, SKILLHUB_HTML_FALLBACK_URL).await?,
-            ))
-        },
-    )
-    .await
+    // skills.sh entries are GitHub-backed and are not downloadable through
+    // SkillHub's archive API. Do not surface them as installable SkillHub
+    // results when the canonical API is unavailable; propagate the API error
+    // so the renderer can retain its last known-good cache.
+    let body = read_market_body(client, SKILLHUB_RANKING_URL).await?;
+    parse_skillhub_rankings_response(&body)
+}
+
+fn parse_skillhub_rankings_response(body: &str) -> Result<Vec<SkillMarketItemResponse>, AppError> {
+    let root = serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|error| AppError::BadGateway(format!("SkillHub returned invalid JSON: {error}")))?;
+    if root.pointer("/data/skills").and_then(serde_json::Value::as_array).is_none() {
+        return Err(AppError::BadGateway(
+            "SkillHub response did not contain data.skills".into(),
+        ));
+    }
+    Ok(parse_skillhub_rankings(&body))
 }
 
 async fn fetch_clawhub_plugins(client: &reqwest::Client) -> Result<Vec<SkillMarketItemResponse>, AppError> {
@@ -285,6 +296,16 @@ mod tests {
     #[test]
     fn clawhub_market_uses_skills_ranking_page() {
         assert!(CLAWHUB_RANKING_URL.ends_with("/skills?tab=new"));
+    }
+
+    #[test]
+    fn skillhub_rankings_fail_closed_on_invalid_or_changed_responses() {
+        for body in ["not json", r#"{"data": {}}"#, r#"{"data": {"skills": {}}}"#] {
+            let error = parse_skillhub_rankings_response(body).unwrap_err();
+            assert!(matches!(error, AppError::BadGateway(_)), "{body}: {error}");
+        }
+
+        assert!(parse_skillhub_rankings_response(r#"{"data": {"skills": []}}"#).is_ok());
     }
 
     fn item(name: &str) -> SkillMarketItemResponse {

@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  buildSkillMarketInstallPrompt,
   filterSkillMarketItems,
   isSkillMarketItemInstalled,
   normalizeSkillMarketErrors,
@@ -48,6 +47,13 @@ describe('skill market helpers', () => {
   });
 
   test('accepts supported external market sources only with safe add commands', () => {
+    const skillHubItem = {
+      ...item,
+      id: 'skillhub:owner/skills/demo',
+      source: 'skillhub' as const,
+      url: 'https://skillhub.cn/skills/owner/demo',
+      install_command: 'npx skills add @owner/demo',
+    };
     const loopHubItem = {
       ...item,
       id: 'loophub:12277',
@@ -76,7 +82,8 @@ describe('skill market helpers', () => {
       url: 'https://clawhub.ai/openclaw/plugins/whatsapp',
       install_command: 'openclaw plugins install clawhub:@openclaw/whatsapp',
     };
-    expect(normalizeSkillMarketItems([loopHubItem, mcpItem, mcpWorldItem, pluginItem])).toHaveLength(4);
+    expect(normalizeSkillMarketItems([skillHubItem, loopHubItem, mcpItem, mcpWorldItem, pluginItem])).toHaveLength(5);
+    expect(normalizeSkillMarketItem({ ...skillHubItem, url: 'https://www.skills.sh/owner/skills/demo' })).toBeNull();
     expect(normalizeSkillMarketItem({ ...pluginItem, install_command: 'openclaw plugins install @x; rm -rf ~' })).toBeNull();
     expect(normalizeSkillMarketItem({ ...mcpWorldItem, url: 'https://evil.example/zh/detail/demo' })).toBeNull();
   });
@@ -104,17 +111,6 @@ describe('skill market helpers', () => {
     expect(selectMarketSourceWithItems('clawhub', ['clawhub', 'loophub', 'skillhub'], [loopHubItem])).toBe('loophub');
     expect(selectMarketSourceWithItems('loophub', ['clawhub', 'loophub', 'skillhub'], [loopHubItem])).toBe('loophub');
     expect(selectMarketSourceWithItems('clawhub', ['clawhub', 'loophub', 'skillhub'], [])).toBe('clawhub');
-  });
-
-  test('builds a draft prompt containing the install command', () => {
-    const prompt = buildSkillMarketInstallPrompt(item);
-    expect(prompt.includes('请帮我安装这个技能')).toBe(true);
-    expect(prompt.includes('openclaw skills install @owner/demo')).toBe(true);
-    expect(prompt.includes('https://clawhub.ai/owner/skills/demo')).toBe(true);
-
-    const englishPrompt = buildSkillMarketInstallPrompt(item, 'en-US');
-    expect(englishPrompt.includes('ask for confirmation')).toBe(true);
-    expect(englishPrompt.includes('Install command:')).toBe(true);
   });
 
   test('translates common market descriptions for zh display', () => {

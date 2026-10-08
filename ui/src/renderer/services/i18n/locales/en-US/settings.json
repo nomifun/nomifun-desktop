@@ -79,7 +79,10 @@
   },
   "skillsMarket": {
     "title": "Skill Market",
-    "description": "Browse current ClawHub, LoopHub and SkillHub rankings, then hand a reviewed installation draft to Nomi.",
+    "description": "Browse current ClawHub, LoopHub and SkillHub rankings, then install through a controlled flow into Nomi's skill library.",
+    "installSuccess": "The skill was installed into Nomi's skill library.",
+    "installFailed": "Skill installation failed. Please try again.",
+    "installFailedWithReason": "Skill installation failed: {{reason}}",
     "syncSuccess": "Skill Market updated",
     "syncKeptCache": "No new ranking data was fetched. Kept the cached list.",
     "syncEmpty": "No ranking data was found.",
