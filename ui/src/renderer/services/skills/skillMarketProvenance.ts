@@ -2,7 +2,6 @@ import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBr
 import {
   cleanMarketText,
   normalizeSkillMarketItems,
-  translateMarketDescription,
 } from './skillMarket';
 
 /**
@@ -18,9 +17,6 @@ type MarketSkillSource = Extract<SkillMarketSource, 'clawhub' | 'loophub' | 'ski
 export type MarketSkillPresentationSnapshot = {
   name: string;
   description: string;
-  tags: string[];
-  audience_tags: string[];
-  scenario_tags: string[];
 };
 
 export type InstalledMarketRecord = {
@@ -31,11 +27,61 @@ export type InstalledMarketRecord = {
 
 export type InstalledMarketState = Record<string, InstalledMarketRecord>;
 
-export type ResolvedInstalledMarketPresentation = {
-  marketItemId: string;
-  source: MarketSkillSource;
-  name: string;
-  description: string;
+const listeners = new Set<() => void>();
+let snapshot: InstalledMarketState = {};
+let snapshotInputs: (string | null)[] | undefined;
+let unpersistedState: InstalledMarketState | undefined;
+
+/** Stable snapshots let all skill surfaces react to presentation changes only. */
+export const getInstalledMarketSnapshot = (): InstalledMarketState => {
+  if (unpersistedState) return unpersistedState;
+  try {
+    const inputs = [INSTALLED_MARKET_KEY, LEGACY_INSTALLED_MARKET_KEY, SKILL_MARKET_CACHE_KEY]
+      .map((key) => localStorage.getItem(key));
+    if (!snapshotInputs || inputs.some((value, index) => value !== snapshotInputs?.[index])) {
+      snapshotInputs = inputs;
+      snapshot = readInstalledMarketState();
+    }
+  } catch {
+    // Unavailable browser storage must not prevent using the canonical catalog.
+  }
+  return snapshot;
+};
+
+const emitChange = (): void => {
+  for (const listener of listeners) listener();
+};
+
+const handleStorageChange = (event: StorageEvent): void => {
+  if (event.storageArea) {
+    try {
+      if (event.storageArea !== localStorage) return;
+    } catch {
+      return;
+    }
+  }
+  if (
+    event.key !== null &&
+    ![INSTALLED_MARKET_KEY, LEGACY_INSTALLED_MARKET_KEY, SKILL_MARKET_CACHE_KEY].includes(event.key)
+  ) return;
+  unpersistedState = undefined;
+  emitChange();
+};
+
+export const subscribeInstalledMarketState = (listener: () => void): (() => void) => {
+  if (listeners.size === 0) window.addEventListener('storage', handleStorageChange);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) window.removeEventListener('storage', handleStorageChange);
+  };
+};
+
+/** Same-window cache writes do not dispatch the browser's storage event. */
+export const notifySkillMarketCacheChanged = (cacheKey: string): void => {
+  if (cacheKey !== SKILL_MARKET_CACHE_KEY) return;
+  if (unpersistedState) unpersistedState = hydrateFromCurrentCache(unpersistedState);
+  emitChange();
 };
 
 const isMarketSkillSource = (value: unknown): value is MarketSkillSource =>
@@ -58,24 +104,9 @@ const cleanSkillNames = (value: unknown): string[] => {
   ).slice(0, 32);
 };
 
-const cleanTags = (value: unknown): string[] => {
-  if (!Array.isArray(value)) return [];
-  return Array.from(
-    new Set(
-      value
-        .filter((tag): tag is string => typeof tag === 'string')
-        .map((tag) => cleanMarketText(tag, 40).toLowerCase())
-        .filter((tag) => /^[a-z0-9_-]+$/.test(tag))
-    )
-  ).slice(0, 12);
-};
-
 const presentationFromItem = (item: ISkillMarketItem): MarketSkillPresentationSnapshot => ({
   name: cleanMarketText(item.name, 96),
   description: cleanMarketText(item.description, 220),
-  tags: cleanTags(item.tags),
-  audience_tags: cleanTags(item.audience_tags),
-  scenario_tags: cleanTags(item.scenario_tags),
 });
 
 const parsePresentation = (value: unknown): MarketSkillPresentationSnapshot | undefined => {
@@ -86,9 +117,6 @@ const parsePresentation = (value: unknown): MarketSkillPresentationSnapshot | un
   return {
     name,
     description: cleanMarketText(raw.description, 220),
-    tags: cleanTags(raw.tags),
-    audience_tags: cleanTags(raw.audience_tags),
-    scenario_tags: cleanTags(raw.scenario_tags),
   };
 };
 
@@ -176,6 +204,7 @@ const migrateLegacyState = (): InstalledMarketState => {
 };
 
 export const readInstalledMarketState = (): InstalledMarketState => {
+  if (unpersistedState) return unpersistedState;
   try {
     const persisted = localStorage.getItem(INSTALLED_MARKET_KEY);
     if (persisted !== null) {
@@ -192,9 +221,12 @@ export const writeInstalledMarketState = (state: InstalledMarketState): void => 
   try {
     localStorage.setItem(INSTALLED_MARKET_KEY, JSON.stringify({ version: 2, items: state }));
     localStorage.removeItem(LEGACY_INSTALLED_MARKET_KEY);
+    unpersistedState = undefined;
   } catch {
     // Presentation provenance is best-effort; the managed Skill Library is canonical.
+    unpersistedState = state;
   }
+  emitChange();
 };
 
 export const recordInstalledMarketItem = (
@@ -226,33 +258,4 @@ export const reconcileInstalledMarketState = (
   return Object.fromEntries(
     Object.entries(state).filter(([, record]) => record.skill_names.every((name) => installed.has(name)))
   );
-};
-
-export const resolveInstalledMarketPresentation = (
-  state: InstalledMarketState,
-  skillName: string,
-  localeKey: string
-): ResolvedInstalledMarketPresentation | undefined => {
-  const matches = Object.entries(state).filter(
-    ([, record]) =>
-      record.skill_names.length === 1 && record.skill_names[0] === skillName && Boolean(record.presentation)
-  );
-  if (matches.length !== 1) return undefined;
-  const [marketItemId, record] = matches[0];
-  const presentation = record.presentation!;
-  return {
-    marketItemId,
-    source: record.source,
-    name: presentation.name,
-    description: translateMarketDescription(
-      presentation.description,
-      {
-        name: presentation.name,
-        source: record.source,
-        audience_tags: presentation.audience_tags,
-        scenario_tags: presentation.scenario_tags,
-      },
-      localeKey
-    ),
-  };
 };

@@ -40,7 +40,7 @@ const CatalogSkillDetail: React.FC<CatalogSkillDetailProps> = ({ entry, busy, di
   return (
     <div className='flex flex-col gap-16px'>
       <div className='text-13px leading-20px text-t-secondary break-words'>
-        {entry.description?.trim() || t('nomi.skills.noDescription', { defaultValue: '这个技能还没有描述' })}
+        {entry.description || t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' })}
       </div>
 
       <MetaRow label={t('nomi.skills.metaGrant', { defaultValue: '授予方式' })}>

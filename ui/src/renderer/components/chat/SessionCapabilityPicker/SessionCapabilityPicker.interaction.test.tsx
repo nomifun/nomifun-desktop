@@ -66,7 +66,8 @@ test.each([false, true])('an unavailable Skill shows its reason and can only be 
   fireEvent.click(view.getByRole('button', { name: `Skills · ${selected ? 1 : 0}` }));
   const checkbox = await view.findByRole('checkbox', { name: 'my-skill' });
   expect((checkbox as HTMLInputElement).disabled).toBe(!selected);
-  expect(view.getByText('Resource is a symlink outside this package')).toBeTruthy();
+  expect(view.getByText('My instructions')).toBeTruthy();
+  expect(view.getByTitle('Resource is a symlink outside this package')).toBeTruthy();
   expect(view.getByText('Unavailable')).toBeTruthy();
   fireEvent.click(checkbox);
   expect(view.getByRole('status').textContent).toBe('{"skillNames":[],"mcpServerIds":[]}');

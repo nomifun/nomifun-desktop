@@ -12,7 +12,7 @@ import * as arcoMessageHook from '@/renderer/utils/ui/useArcoMessage';
 import {
   INSTALLED_MARKET_KEY,
   SKILL_MARKET_CACHE_KEY,
-} from './skill/skillMarketProvenance';
+} from '@/renderer/services/skills/skillMarketProvenance';
 import SkillsHubSettings from './SkillsHubSettings';
 
 const locale = createInstance();
@@ -173,9 +173,6 @@ describe('SkillsHubSettings active refresh', () => {
           presentation: {
             name: 'New Market Skill',
             description: 'New market description.',
-            tags: [],
-            audience_tags: [],
-            scenario_tags: [],
           },
         },
       },
@@ -204,9 +201,6 @@ describe('SkillsHubSettings active refresh', () => {
             presentation: {
               name: 'Market Display Name',
               description: 'Market display description.',
-              tags: [],
-              audience_tags: [],
-              scenario_tags: [],
             },
           },
         },

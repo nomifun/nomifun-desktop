@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Empty, Input, Modal, Switch } from '@arco-design/web-react';
 import type { ICompanionSkillConfig } from '@/common/adapter/ipcBridge';
 import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
-import { resolveSkillDisplay } from '@/renderer/pages/settings/skill/skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { SkillMissingBadge } from './SkillBadges';
 import { isSkillGranted, type CatalogSkillInfo } from './unify';
 
@@ -44,6 +44,7 @@ const CatalogPickerModal: React.FC<CatalogPickerModalProps> = ({
   onToggle,
 }) => {
   const { t } = useTranslation();
+  const getSkillDisplay = useSkillDisplay(localeKey);
   const [query, setQuery] = useState('');
 
   const rows = useMemo(() => {
@@ -55,7 +56,7 @@ const CatalogPickerModal: React.FC<CatalogPickerModalProps> = ({
       .map((name) => ({ name, description: '', location: '', source: 'custom' }));
     const all = [...catalog, ...missing].map((skill) => ({
       skill,
-      display: resolveSkillDisplay(skill, localeKey),
+      display: getSkillDisplay(skill),
     }));
     const needle = query.trim().toLocaleLowerCase();
     const matched = needle
@@ -67,7 +68,7 @@ const CatalogPickerModal: React.FC<CatalogPickerModalProps> = ({
         )
       : all;
     return matched.sort((a, b) => a.display.name.localeCompare(b.display.name));
-  }, [catalog, config.disabled_auto, config.enabled, localeKey, query]);
+  }, [catalog, config.disabled_auto, config.enabled, getSkillDisplay, query]);
 
   return (
     <Modal
@@ -107,7 +108,7 @@ const CatalogPickerModal: React.FC<CatalogPickerModalProps> = ({
                   descriptionClassName='line-clamp-2'
                   description={
                     display.description ||
-                    t('nomi.skills.noDescription', { defaultValue: '这个技能还没有描述' })
+                    t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' })
                   }
                   controls={
                     <Switch

@@ -24,7 +24,7 @@ import {
   parseProviderId,
 } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
-import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { agentPlatform, fs as skillFs } from '@/common/adapter/ipcBridge';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
   CreativeStudioAgentChatPort,
@@ -715,6 +715,7 @@ const run = async (): Promise<void> => {
   // query local while this fixture exercises transcript/turn reconciliation.
   const bindingOptions = spyOn(agentPlatform.productBindingOptions, 'invoke')
     .mockRejectedValue(new Error('Agent options are unavailable in this transcript fixture'));
+  const skillCatalog = spyOn(skillFs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
     if (
@@ -739,6 +740,7 @@ const run = async (): Promise<void> => {
     await flushReact();
   } finally {
     bindingOptions.mockRestore();
+    skillCatalog.mockRestore();
     console.error = originalConsoleError;
   }
 };

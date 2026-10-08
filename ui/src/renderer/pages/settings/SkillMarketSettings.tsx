@@ -9,19 +9,21 @@ import { parseError } from '@/common/utils';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import MarketSettingsPanel from './MarketSettingsPanel';
 import { ENHANCED_TOOLS_PAGE_STACK_CLASS } from './enhancedToolsLayout';
-import { SKILL_MARKET_SOURCES } from './skill/skillMarket';
+import { SKILL_MARKET_SOURCES } from '@/renderer/services/skills/skillMarket';
+import { useInstalledMarketState } from '@/renderer/services/skills/useSkillDisplay';
 import {
-  type InstalledMarketState,
+  notifySkillMarketCacheChanged,
   readInstalledMarketState,
   reconcileInstalledMarketState,
   recordInstalledMarketItem,
   SKILL_MARKET_CACHE_KEY,
   writeInstalledMarketState,
-} from './skill/skillMarketProvenance';
+} from '@/renderer/services/skills/skillMarketProvenance';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
+const notifyMarketCacheUpdated = () => notifySkillMarketCacheChanged(SKILL_MARKET_CACHE_KEY);
 
 type SkillMarketSettingsProps = {
   active?: boolean;
@@ -31,7 +33,7 @@ type SkillMarketSettingsProps = {
 const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true, onInstalled }) => {
   const { t } = useTranslation();
   const [message, messageHolder] = useArcoMessage();
-  const [installedMarketState, setInstalledMarketState] = useState<InstalledMarketState>({});
+  const installedMarketState = useInstalledMarketState();
   const [installedStateLoading, setInstalledStateLoading] = useState(true);
 
   useEffect(() => {
@@ -46,7 +48,6 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
         if (disposed) return;
         const names = new Set(skills.map((skill) => skill.name));
         const reconciled = reconcileInstalledMarketState(readInstalledMarketState(), names);
-        setInstalledMarketState(reconciled);
         writeInstalledMarketState(reconciled);
       })
       .catch((error) => {
@@ -81,7 +82,6 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           installed.skill_names
         );
         writeInstalledMarketState(nextState);
-        setInstalledMarketState(nextState);
         onInstalled?.();
         message.success(
           t('settings.skillsMarket.installSuccess', {
@@ -119,6 +119,7 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           })}
           sources={SKILL_MARKET_SOURCES}
           cacheKey={SKILL_MARKET_CACHE_KEY}
+          onCacheUpdated={notifyMarketCacheUpdated}
           autoSyncKey={AUTO_SYNC_KEY}
           defaultSource='clawhub'
           searchPlaceholder={t('settings.skillsMarket.searchPlaceholder', { defaultValue: '搜索当前市场技能...' })}
