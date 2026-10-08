@@ -34,12 +34,11 @@
 .popover { z-index: 1300; width: 300px; max-width: calc(100vw - 24px); overflow-y: auto; border: 1px solid var(--color-border-2); border-radius: 14px; background: var(--bg-base); color: var(--text-primary); box-shadow: 0 8px 28px rgb(0 0 0 / 12%); font-family: inherit; padding: 8px; box-sizing: border-box; }
 .pointedPopover { display: flex; flex-direction: column; overflow: visible; }
 .popoverContent { display: flex; flex-direction: column; gap: inherit; min-height: 0; overflow-y: auto; }
-.actionPanel { display: flex; flex-direction: column; gap: 2px; width: max-content; min-width: 144px; padding: 4px; border-radius: 10px; }
-.actionButton { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 30px; padding: 5px 8px; box-sizing: border-box; border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; white-space: nowrap; cursor: pointer; transition: background-color 140ms ease; }
+.actionPanel { display: flex; flex-direction: column; gap: 2px; width: max-content; padding: 4px; border-radius: 10px; }
+.actionButton { display: block; width: 100%; min-height: 30px; padding: 5px 8px; box-sizing: border-box; border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; white-space: nowrap; cursor: pointer; transition: background-color 140ms ease; }
 .actionButton:hover:not(:disabled), .actionButton:focus-visible { background: var(--color-fill-2); }
 .actionButton:disabled { opacity: .55; cursor: wait; }
 .popover .actionButton:focus-visible { outline-offset: -2px; }
-.actionIndicator { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 14px; width: 14px; height: 14px; color: rgb(var(--primary-6)); }
 .primaryButton { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 999px; padding: 8px 14px; background: rgb(var(--primary-6)); color: var(--button-primary-text, #fff); font: inherit; font-size: 13px; line-height: 20px; cursor: pointer; }
 .primaryButton:hover { background: rgb(var(--primary-7)); }
 .primaryButton:disabled { opacity: .55; cursor: wait; }
