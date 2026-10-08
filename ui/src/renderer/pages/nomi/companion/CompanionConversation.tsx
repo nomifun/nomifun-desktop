@@ -104,6 +104,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       creationEnabled={false}
       creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       compactProductComposer={compact}
+      followTurnCompletion
     />
   );
 };

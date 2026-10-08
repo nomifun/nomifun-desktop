@@ -1677,7 +1677,7 @@ const CompanionPage: React.FC = () => {
                   <i />
                 </span>
               ) : (
-                <MarkdownView hiddenCodeCopyButton>{bubble}</MarkdownView>
+                <MarkdownView hiddenCodeCopyButton variant='bubble'>{bubble}</MarkdownView>
               )}
             </div>
           </div>

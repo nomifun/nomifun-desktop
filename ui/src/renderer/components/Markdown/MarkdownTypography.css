@@ -90,6 +90,33 @@
   --markdown-code-margin: 6px;
 }
 
+/* Desktop companion reply bubbles use smaller prose and restrained headings. */
+.markdown-article--bubble {
+  --markdown-body-font-size: 13px;
+  --markdown-body-line-height: 20px;
+  --markdown-paragraph-margin: 6px;
+  --markdown-list-margin: 6px;
+  --markdown-list-padding: 18px;
+  --markdown-list-item-margin: 2px;
+  --markdown-h1-font-size: 16px;
+  --markdown-h1-line-height: 24px;
+  --markdown-h1-margin: 0 0 8px;
+  --markdown-h2-font-size: 14px;
+  --markdown-h2-line-height: 22px;
+  --markdown-h2-margin: 10px 0 4px;
+  --markdown-h3-font-size: 13px;
+  --markdown-h3-line-height: 20px;
+  --markdown-h3-margin: 8px 0 4px;
+  --markdown-minor-heading-font-size: 13px;
+  --markdown-minor-heading-line-height: 20px;
+  --markdown-minor-heading-margin: 8px 0 4px;
+  --markdown-rule-margin: 10px 0;
+  --markdown-quote-margin: 6px 0;
+  --markdown-quote-padding: 8px;
+  --markdown-quote-border-width: 2px;
+  --markdown-code-margin: 6px;
+}
+
 /* Progress and thinking keep message-sized headings and a shared journal rhythm.
  * This runs inside Shadow DOM; outer message selectors cannot style its blocks. */
 .markdown-article--process {

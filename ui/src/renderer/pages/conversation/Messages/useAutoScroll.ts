@@ -13,7 +13,7 @@
  *   only while auto-follow mode is active.
  * - Use DOM-native scrollIntoView for explicit message jumps.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { TMessage } from '@/common/chat/chatLib';
 
 const USER_LAYOUT_CHANGE_GUARD_MS = 600;
@@ -27,6 +27,8 @@ const FOLLOW_BOTTOM_THRESHOLD_PX = 12;
 interface UseAutoScrollOptions {
   messages: TMessage[];
   itemCount: number;
+  /** Opt in to following the final reply after this rendered Turn closes. */
+  followTurn?: { id: string; running: boolean };
 }
 
 interface ScrollElementIntoViewOptions {
@@ -51,7 +53,21 @@ const getBottomGap = (element: HTMLElement): number => {
   return element.scrollHeight - element.clientHeight - element.scrollTop;
 };
 
-export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): UseAutoScrollReturn {
+const nestedScrollerConsumesWheel = (event: React.WheelEvent<HTMLDivElement>): boolean => {
+  for (const node of event.nativeEvent.composedPath()) {
+    if (node === event.currentTarget) break;
+    if (!(node instanceof HTMLElement) || node.scrollHeight <= node.clientHeight) continue;
+    const style = getComputedStyle(node);
+    if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
+    const canScroll = event.deltaY < 0
+      ? node.scrollTop > 0
+      : node.scrollTop < node.scrollHeight - node.clientHeight;
+    if (canScroll || style.overscrollBehaviorY === 'contain' || style.overscrollBehaviorY === 'none') return true;
+  }
+  return false;
+};
+
+export function useAutoScroll({ messages, itemCount, followTurn }: UseAutoScrollOptions): UseAutoScrollReturn {
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -64,6 +80,8 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const userInputActiveRef = useRef(false);
   const resizeAutoFollowBlockedUntilRef = useRef(0);
+  const previousFollowTurnRef = useRef(followTurn);
+  const followsTurnCompletion = followTurn !== undefined;
 
   const updateBottomState = useCallback((element: HTMLDivElement) => {
     const bottomGap = getBottomGap(element);
@@ -88,20 +106,26 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
         behavior,
       });
       userScrolledRef.current = false;
+      if (followsTurnCompletion) {
+        userInputActiveRef.current = false;
+        resizeAutoFollowBlockedUntilRef.current = 0;
+      }
       setShowScrollButton(false);
     },
-    [itemCount, scrollerEl]
+    [followsTurnCompletion, itemCount, scrollerEl]
   );
 
-  const scheduleAutoFollow = useCallback(() => {
+  const scheduleAutoFollow = useCallback((turnCompleted = false) => {
     if (!scrollerEl || userScrolledRef.current) return;
-    if (Date.now() < resizeAutoFollowBlockedUntilRef.current) return;
+    if (!turnCompleted) {
+      if (Date.now() < resizeAutoFollowBlockedUntilRef.current) return;
+    }
 
     if (pendingAutoFollowFrameRef.current !== null) {
       cancelAnimationFrame(pendingAutoFollowFrameRef.current);
     }
 
-    pendingAutoFollowFrameRef.current = requestAnimationFrame(() => {
+    const follow = () => {
       pendingAutoFollowFrameRef.current = null;
       if (!scrollerEl || userScrolledRef.current) return;
 
@@ -109,8 +133,25 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
       if (gap > 2) {
         scrollToBottom('auto');
       }
-    });
+    };
+    // Process disclosure and Shadow DOM Markdown settle in separate commits.
+    // Wait for both before locating the reply bottom, without a smooth jump.
+    pendingAutoFollowFrameRef.current = requestAnimationFrame(turnCompleted ? () => {
+      pendingAutoFollowFrameRef.current = requestAnimationFrame(follow);
+    } : follow);
   }, [scrollerEl, scrollToBottom]);
+
+  useLayoutEffect(() => {
+    const previous = previousFollowTurnRef.current;
+    previousFollowTurnRef.current = followTurn;
+    if (!followTurn || !previous?.running || followTurn.running || previous.id !== followTurn.id) return;
+    if (userScrolledRef.current) return;
+    // A layout scroll after automatic collapse must not inherit a stale click
+    // or a wheel event from the thinking body's independent scroll container.
+    userInputActiveRef.current = false;
+    resizeAutoFollowBlockedUntilRef.current = 0;
+    scheduleAutoFollow(true);
+  }, [followTurn?.id, followTurn?.running, scheduleAutoFollow]);
 
   const handleScrollerRef = useCallback((ref: HTMLDivElement | null) => {
     setScrollerEl(ref);
@@ -124,7 +165,8 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
     (element: HTMLElement | null, options?: ScrollElementIntoViewOptions) => {
       if (!element) return;
 
-      userScrolledRef.current = false;
+      // Explicit navigation is reading history until the user returns to latest.
+      userScrolledRef.current = followsTurnCompletion;
       setShowScrollButton(false);
       element.scrollIntoView({
         behavior: options?.behavior ?? 'smooth',
@@ -132,7 +174,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
         inline: 'nearest',
       });
     },
-    []
+    [followsTurnCompletion]
   );
 
   const handleScroll = useCallback(
@@ -164,10 +206,16 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
   );
 
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (followsTurnCompletion) {
+      if (e.deltaY === 0 || nestedScrollerConsumesWheel(e)) return;
+      // Pause before the browser delivers its scroll event so a queued finish
+      // frame cannot race an upward gesture and pull the user back down.
+      if (e.deltaY < 0) userScrolledRef.current = true;
+    }
     if (Math.abs(e.deltaY) > 0 || Math.abs(e.deltaX) > 0) {
       userInputActiveRef.current = true;
     }
-  }, []);
+  }, [followsTurnCompletion]);
 
   const handlePointerDown = useCallback(() => {
     userInputActiveRef.current = true;
