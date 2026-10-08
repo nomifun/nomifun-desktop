@@ -11,8 +11,7 @@ import { parseCompanionId, type CompanionId, type ConversationId } from '@/commo
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
-import type { ICompanionProfile, ICompanionWithStatus, IResponseMessage } from '@/common/adapter/ipcBridge';
-import { extractResponseTextChunk } from '@/common/chat/displayText';
+import type { ICompanionProfile, ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import MarkdownView from '@/renderer/components/Markdown';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
 import { usePasteService } from '@/renderer/hooks/file/usePasteService';
@@ -21,7 +20,7 @@ import { useUploadState } from '@/renderer/hooks/file/useUploadState';
 import { buildDisplayMessage } from '@/renderer/utils/file/messageFiles';
 import { emitter } from '@/renderer/utils/emitter';
 import { THEME_SYNC_EVENT, type ThemeSyncPayload } from '@/renderer/utils/theme/themeBroadcast';
-import { companionErrorKey, streamErrorCode } from './companionError';
+import { companionErrorKey } from './companionError';
 import { isForCompanion } from './eventScope';
 import { injectCompanionCustomCss } from '@/renderer/utils/theme/applyCustomCss';
 import { configService } from '@/common/config/configService';
@@ -34,7 +33,7 @@ import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
 import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
 import CompanionAvatar from './CompanionAvatar';
 import CompanionSwitcher from './CompanionSwitcher';
-import { browserNarrationFor } from './browserNarration';
+import { useCompanionSessionBubble } from './useCompanionSessionBubble';
 import { getDeskSpecFor } from './characters';
 import { customFigureMetaOf } from './characters/customMeta';
 import type { CompanionActivity as RabbitActivity, CompanionMood as RabbitMood } from './characters';
@@ -60,16 +59,12 @@ import {
   releaseCompanionTurnDelivery,
   type PersistedCompanionTurnDelivery,
 } from './companionTurnDelivery';
-import { classifyPublicMessageDelivery } from '../conversation/platforms/publicMessageDelivery';
-import { reconcileConversationTurnAfterAcceptedReplay } from '../conversation/platforms/reconcileConversationTurnAfterStreamTerminal';
 import { getConversationOrNull } from '../conversation/utils/conversationCache';
 import { toHistoryEntry, type HistoryEntry } from '../nomi/workspace/tabs/HistoryTab/historyFormat';
 import { BookOpen, Down, Drag, MessageOne, More, Plus, Right, Send, SettingTwo } from '@icon-park/react';
 import './companion.css';
 
 const BUBBLE_MS = 12_000;
-/** Safety net: a streaming bubble auto-dismisses even if chat-done is lost. */
-const STREAM_STALL_MS = 45_000;
 const INIT_RETRY_MS = 5_000;
 const INIT_MAX_RETRIES = 6;
 const BAR_REVEAL_HIDE_DELAY_MS = 280;
@@ -166,8 +161,23 @@ const CompanionPage: React.FC = () => {
   const [profile, setProfile] = useState<ICompanionProfile | null>(null);
   const [mood, setMood] = useState<RabbitMood>('content');
   const [activity, setActivity] = useState<RabbitActivity>('idle');
-  const [bubble, setBubble] = useState<string>('');
-  const [bubbleLoading, setBubbleLoading] = useState(false);
+  const sessionBubble = useCompanionSessionBubble(companionId, profile?.name);
+  const {
+    reconcile: reconcileSessionBubble,
+    dismiss: dismissSessionBubble,
+    interrupt: interruptSessionBubble,
+    setHovered: setSessionBubbleHovered,
+    clearCompleted: clearCompletedSessionBubble,
+  } = sessionBubble;
+  const [noticeBubble, setBubble] = useState<string>('');
+  const remoteHeader = sessionBubble.remoteHeader;
+  const remoteSuppressed = Boolean(remoteHeader && profile && inQuietHours(profile.appearance.quiet_start, profile.appearance.quiet_end));
+  const sessionBubbleVisible = !remoteSuppressed && Boolean(sessionBubble.bubble);
+  const bubble = sessionBubbleVisible ? sessionBubble.bubble : noticeBubble;
+  const bubbleLoading = sessionBubbleVisible && sessionBubble.loading;
+  const bubbleRunning = sessionBubble.running;
+  const sessionRunningRef = useRef(bubbleRunning);
+  sessionRunningRef.current = bubbleRunning;
   const [input, setInput] = useState('');
   const deliveryPendingRef = useRef(false);
   /** 光标是否停在伙伴交互区（由 useCompanionClickThrough 上报）：驱动「悬停才出现」的
@@ -198,25 +208,12 @@ const CompanionPage: React.FC = () => {
   const figureHitRef = useRef<HTMLDivElement | null>(null);
   /** 'sendbox' 上传进度：粘贴/选择图片落盘期间用于 loading 态与暂禁发送。 */
   const sendboxUpload = useUploadState('sendbox');
-  /** 本地回合是否正在流式生成（驱动气泡上的「打断 □」按钮显隐）。镜像 turnActiveRef。 */
-  const [bubbleRunning, setBubbleRunning] = useState(false);
   const bubbleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const profileRef = useRef<ICompanionProfile | null>(null);
   profileRef.current = profile;
   /** Set while the user is dragging / just dragged, so a config-updated echo
    *  doesn't snap the window back to a stale position. */
   const lastLocalMoveAt = useRef(0);
-  /** Active companion thread (a real nomi conversation id). */
-  const activeThreadRef = useRef<ConversationId | null>(null);
-  /** True from send until finish/error/stall. NO LONGER gates rendering
-   *  (that gate dropped badcase-3 replies); it now only drives the stall vs.
-   *  dismiss timer choice in the stream handler. */
-  const turnActiveRef = useRef(false);
-  const turnDeliveryReconcileGenerationRef = useRef(0);
-  /** Per-segment text buffers for the in-flight turn (a nomi turn can span
-   *  several assistant msg_ids; rendered joined in arrival order). */
-  const segmentsRef = useRef(new Map<string, string>());
-  const segmentOrderRef = useRef<string[]>([]);
   /** One native-window expansion session shared by replies, the composer, and
    *  the memory panel. `anchor` remains the exact desk rectangle until every
    *  expanded surface closes, so internal resizes never become saved position. */
@@ -233,35 +230,9 @@ const CompanionPage: React.FC = () => {
   const bubbleStickRef = useRef(true);
   /** 上一帧气泡文本长度：变短=换轮/中间件 replace 终稿覆盖 → 重新钉底。 */
   const bubblePrevLenRef = useRef(0);
-  /** 用户「× 忽略」后置真：压制本轮后续所有流式渲染（防 stop 异步期间残片回闪重现气泡）。
-   *  每次新的本地发送（submitTurn）重置为 false。 */
-  const bubbleDismissedRef = useRef(false);
-  /** Remote IM turn bubble header (platform + the visitor's message);
-   *  null = the bubble shows local content. */
-  const [remoteHeader, setRemoteHeader] = useState<{ platform: string; inbound: string } | null>(null);
-  /** Single-slot buffer for the in-flight remote IM turn (channel master
-   *  conversations bound to this companion; a newer turn replaces the slot). Kept
-   *  separate from the local turn's segments so the two never clobber. */
-  const remoteTurnRef = useRef<{
-    conversationId: ConversationId;
-    platform: string;
-    inbound: string;
-    segments: Map<string, string>;
-    order: string[];
-    /** Set on finish/error; a later fragment with a new msg_id then means a
-     *  new turn in the same IM chat (its userCreated was missed) — reset. */
-    finished: boolean;
-  } | null>(null);
-
-  /** 远程 IM 自动回复回合是否正在生成 —— 让「打断 □」也能对远程会话生效（点 6）。
-   *  state 驱动按钮显隐；ref 供事件闭包内的 interrupt/dismiss 即时读取。 */
-  const [remoteRunning, setRemoteRunning] = useState(false);
-  const remoteRunningRef = useRef(false);
-  const markRemoteRunning = useCallback((v: boolean) => {
-    if (remoteRunningRef.current === v) return;
-    remoteRunningRef.current = v;
-    setRemoteRunning(v);
-  }, []);
+  useEffect(() => {
+    if (sessionBubble.turnId) setBubble('');
+  }, [sessionBubble.turnId]);
 
   useEffect(() => {
     const controller = createCompanionBarRevealController({
@@ -329,13 +300,14 @@ const CompanionPage: React.FC = () => {
 
   const popBubble = useCallback(
     (text: string) => {
+      if (sessionRunningRef.current) return;
       const cfg = profileRef.current;
       if (cfg && inQuietHours(cfg.appearance.quiet_start, cfg.appearance.quiet_end)) return;
-      setRemoteHeader(null);
+      clearCompletedSessionBubble();
       setBubble(text);
       armBubbleDismiss(BUBBLE_MS, () => setBubble(''));
     },
-    [armBubbleDismiss]
+    [armBubbleDismiss, clearCompletedSessionBubble]
   );
 
   // Apply native window visibility/position from the companion's profile (desktop shell only).
@@ -797,233 +769,9 @@ const CompanionPage: React.FC = () => {
     const unsubMemoryCreated = ipcBridge.companion.onMemoryCreated.on((m) => {
       if (!companionId || m.companion_id !== companionId) return;
       if (m.source !== 'chat') return;
-      if (turnActiveRef.current) return;
+      if (sessionRunningRef.current) return;
       const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;
       popBubble(t('nomi.companion.memorySavedToast', { brief }));
-    });
-    // Streamed companion reply → live bubble updates. The companion thread is
-    // a real nomi conversation; message.stream is a global broadcast, so we
-    // filter to the active thread ONLY (no turn-ownership gate — see the
-    // responseStream handler below: that gate dropped badcase-3 replies).
-    const endTurn = (finalText?: string) => {
-      turnActiveRef.current = false;
-      setBubbleRunning(false);
-      segmentsRef.current.clear();
-      segmentOrderRef.current = [];
-      setBubbleLoading(false);
-      setRemoteHeader(null);
-      if (finalText !== undefined) setBubble(finalText);
-      armBubbleDismiss(BUBBLE_MS * 2, () => setBubble(''));
-    };
-    const joinedSegments = () =>
-      segmentOrderRef.current
-        .map((id) => segmentsRef.current.get(id) ?? '')
-        .join('\n\n')
-        .trim();
-    // Remote IM turns: channel master conversations bound to this companion ride
-    // the same message.stream broadcast with a `channel_platform` marker.
-    // Render them into the bubble too — with an incoming-message header — so
-    // an IM chat plays out on the companion instead of only in the sidebar
-    // history. The local turn keeps priority: while the owner is chatting
-    // here, remote turns only buffer (the conversation record is complete
-    // either way); a newer remote turn replaces the slot (latest wins).
-    const inQuiet = () => {
-      const cfg = profileRef.current;
-      return Boolean(cfg && inQuietHours(cfg.appearance.quiet_start, cfg.appearance.quiet_end));
-    };
-    const joinedRemote = (slot: NonNullable<typeof remoteTurnRef.current>) =>
-      slot.order
-        .map((id) => slot.segments.get(id) ?? '')
-        .join('\n\n')
-        .trim();
-    /** Show the remote slot in the bubble; false when the local turn (or
-     *  quiet hours) owns it. */
-    const renderRemote = (): boolean => {
-      const slot = remoteTurnRef.current;
-      if (!slot || turnActiveRef.current || inQuiet()) {
-        markRemoteRunning(false);
-        return false;
-      }
-      setRemoteHeader({ platform: slot.platform, inbound: slot.inbound });
-      const text = joinedRemote(slot);
-      setBubbleLoading(false);
-      setBubble(text || '…');
-      markRemoteRunning(!slot.finished);
-      return true;
-    };
-    const dismissRemoteLater = (ms: number) => {
-      armBubbleDismiss(ms, () => {
-        setBubble('');
-        setRemoteHeader(null);
-        setBubbleLoading(false);
-        markRemoteRunning(false);
-      });
-    };
-    const handleRemoteStream = (message: IResponseMessage, platform: string) => {
-      let slot = remoteTurnRef.current;
-      if (
-        !slot ||
-        slot.conversationId !== message.conversation_id ||
-        (slot.finished && Boolean(message.msg_id) && !slot.segments.has(message.msg_id))
-      ) {
-        // Stream from a turn whose userCreated we never saw (window opened
-        // mid-turn, a second IM chat took over, or a follow-up turn in the
-        // same chat): open a fresh slot without the inbound text.
-        slot = {
-          conversationId: message.conversation_id,
-          platform,
-          inbound: '',
-          segments: new Map(),
-          order: [],
-          finished: false,
-        };
-        remoteTurnRef.current = slot;
-      }
-      switch (message.type) {
-        case 'content':
-        case 'text': {
-          const chunk = extractResponseTextChunk(message.data);
-          if (!chunk || !message.msg_id) return;
-          if (!slot.segments.has(message.msg_id)) slot.order.push(message.msg_id);
-          slot.segments.set(
-            message.msg_id,
-            message.replace ? chunk : (slot.segments.get(message.msg_id) ?? '') + chunk
-          );
-          // A post-finish replace override only refreshes the visible text;
-          // keep the (shorter) post-turn dismiss window.
-          if (renderRemote()) dismissRemoteLater(slot.finished ? BUBBLE_MS * 2 : STREAM_STALL_MS);
-          break;
-        }
-        case 'tool_group':
-        case 'tool_call':
-          if (renderRemote()) dismissRemoteLater(STREAM_STALL_MS);
-          break;
-        case 'finish':
-        case 'error': {
-          slot.finished = true;
-          markRemoteRunning(false);
-          if (turnActiveRef.current || inQuiet()) return;
-          const text = joinedRemote(slot);
-          setRemoteHeader({ platform: slot.platform, inbound: slot.inbound });
-          setBubbleLoading(false);
-          setBubble(
-            text ||
-              (message.type === 'error'
-                ? t(companionErrorKey(streamErrorCode(message.data)))
-                : t('nomi.companion.done'))
-          );
-          dismissRemoteLater(BUBBLE_MS * 2);
-          break;
-        }
-        default:
-          break;
-      }
-    };
-    // The visitor's inbound IM message opens the remote turn: show it in the
-    // bubble header right away with a waiting indicator for the reply.
-    const unsubUserCreated = ipcBridge.conversation.userCreated.on((evt) => {
-      if (evt.hidden) return;
-      if (!evt.companion || evt.companion_id !== companionId || !evt.channel_platform) return;
-      remoteTurnRef.current = {
-        conversationId: evt.conversation_id,
-        platform: evt.channel_platform,
-        inbound: evt.content,
-        segments: new Map(),
-        order: [],
-        finished: false,
-      };
-      if (renderRemote()) dismissRemoteLater(STREAM_STALL_MS);
-    });
-    const unsubStream = ipcBridge.conversation.responseStream.on((message) => {
-      if (message.hidden) return;
-      // Remote IM turn fragments carry the channel_platform wire marker;
-      // local companion threads never do.
-      if (message.companion && message.companion_id === companionId && message.channel_platform) {
-        handleRemoteStream(message, message.channel_platform);
-        return;
-      }
-      // 本地伙伴回合（本宠的专属会话）。**按 companion_id marker 识别**，而非旧的
-      // `message.conversation_id === activeThreadRef.current` 数字相等闸：后端在每条
-      // 分片上都打了 companion / companion_id 标记（stream_relay.broadcast_stream_payload），
-      // 与上面远程路径按 channel_platform 识别同理。旧的数字比较是这个 bug 反复发作的真凶——
-      // companion_threads.conversation_id 是 TEXT，活动流 id 是 i64，两种表示一旦分叉就把每条
-      // 分片静默丢弃 → 气泡只剩「…」不回显（即便 ipcBridge 边界已强转 number，这个跨表示
-      // 比较仍是唯一脆弱点）。marker 与会话不带任何字符串/数字陷阱。activeThreadRef 退化为
-      // 兜底匹配（应对极少数无 marker 的分片），并从 marker 反向同步，保证后续 stall/消散逻辑照常。
-      const isOwnLocalTurn =
-        message.companion === true && message.companion_id === companionId && !message.channel_platform;
-      const matchesActiveThread =
-        activeThreadRef.current != null && message.conversation_id === activeThreadRef.current;
-      if (!isOwnLocalTurn && !matchesActiveThread) return;
-      if (isOwnLocalTurn && message.conversation_id != null) activeThreadRef.current = message.conversation_id;
-      // 用户已「× 忽略」本轮：压制后续所有分片（含 stop 异步生效前的残片），不再回闪气泡。
-      if (bubbleDismissedRef.current) return;
-      // badcase 3 修复：去掉原 `if (!turnActiveRef.current && !isFinalOverride) return;` 渲染闸。
-      // turnActiveRef 仅用于驱动占位/消散定时器：内容到达=重置 stall；finish/error=收尾+消散。
-      switch (message.type) {
-        case 'content':
-        case 'text': {
-          const chunk = extractResponseTextChunk(message.data);
-          if (!chunk || !message.msg_id) return;
-          if (!segmentsRef.current.has(message.msg_id)) segmentOrderRef.current.push(message.msg_id);
-          segmentsRef.current.set(
-            message.msg_id,
-            message.replace ? chunk : (segmentsRef.current.get(message.msg_id) ?? '') + chunk
-          );
-          const text = joinedSegments();
-          setBubbleLoading(false);
-          setBubble(text || '…');
-          if (!turnActiveRef.current) {
-            // 本轮已 finish/error 收尾，这是 middleware 改写后的 replace 终稿覆盖：
-            // 只刷新可见文本 + 保持较短的消散窗口，不要再拉起 45s stall。
-            armBubbleDismiss(BUBBLE_MS * 2, () => setBubble(''));
-            return;
-          }
-          // 仍在流式中：内容到达即（重）拉 stall 安全网——finish 丢失时也会最终消散。
-          armBubbleDismiss(STREAM_STALL_MS, () => endTurn(''));
-          break;
-        }
-        case 'tool_group':
-        case 'tool_call': {
-          // Tool activity: keep the bubble alive with a hint if no text yet.
-          // P3-N1: the Browser tool gets a *specific* narration (navigate to
-          // example.com / clicking / observing…) parsed from the event args
-          // (decision ⑧, mirrors `BrowserTool::describe`); every other tool keeps
-          // the generic `usingTools` placeholder. The stall/dismiss safety net
-          // below is identical for both paths — narration only swaps the text.
-          setBubbleLoading(false);
-          const browser = browserNarrationFor(message.data);
-          const hint = browser
-            ? t(browser.key, { name: profileRef.current?.name || 'Nomi', ...browser.params })
-            : t('nomi.companion.usingTools', { name: profileRef.current?.name || 'Nomi' });
-          setBubble((prev) => (prev && prev !== '…' ? prev : hint));
-          armBubbleDismiss(STREAM_STALL_MS, () => endTurn(''));
-          break;
-        }
-        case 'finish': {
-          // The engine emits exactly one finish per turn; close even when the
-          // turn produced no prose (tool-only turn → friendly fallback). Keep
-          // the segment buffers: a replace:true override may follow finish.
-          const text = joinedSegments();
-          const keepSegments = segmentsRef.current;
-          const keepOrder = segmentOrderRef.current;
-          endTurn(text || t('nomi.companion.done'));
-          segmentsRef.current = keepSegments;
-          segmentOrderRef.current = keepOrder;
-          break;
-        }
-        case 'error': {
-          // Keep any streamed text (mid-turn errors can be non-fatal noise);
-          // only fall back when there's nothing to show — and make that fallback
-          // actionable by mapping the provider error code (auth/network/rate/…)
-          // instead of the generic "走神".
-          const text = joinedSegments();
-          endTurn(text || t(companionErrorKey(streamErrorCode(message.data))));
-          break;
-        }
-        default:
-          break;
-      }
     });
     return () => {
       disposed = true;
@@ -1036,8 +784,6 @@ const CompanionPage: React.FC = () => {
       unsubConfig();
       unsubDeleted();
       unsubMemoryCreated();
-      unsubUserCreated();
-      unsubStream();
       if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
     };
   }, [applyDeskSize, applyWindowState, companionId, popBubble, t]);
@@ -1307,12 +1053,10 @@ const CompanionPage: React.FC = () => {
     if (!companionId) throw new Error('companion id not resolved yet');
     const active = await ipcBridge.companion.getCompanionSession.invoke({ companion_id: companionId });
     if (active.conversation_id != null) {
-      activeThreadRef.current = active.conversation_id;
       return active.conversation_id;
     }
     // 无会话：幂等 ensure（未配置对话模型则后端 400，错误冒泡给 sendChat）。
     const created = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: companionId });
-    activeThreadRef.current = created.conversation_id;
     return created.conversation_id;
   }, [companionId]);
 
@@ -1394,16 +1138,7 @@ const CompanionPage: React.FC = () => {
     ) => {
       if (!alreadyClaimed && !claimCompanionTurnDelivery(storageKey)) return;
       deliveryPendingRef.current = true;
-      const deliveryGeneration = turnDeliveryReconcileGenerationRef.current + 1;
-      turnDeliveryReconcileGenerationRef.current = deliveryGeneration;
-
       const { conversation_id, input: text, files, idempotency_key } = delivery;
-      // Keep remount/retry stream frames fenced until the receipt proves this
-      // renderer owns a fresh delivery (or an authoritative GET proves the
-      // accepted original is still running).
-      bubbleDismissedRef.current = true;
-      segmentsRef.current.clear();
-      segmentOrderRef.current = [];
       try {
         // 把图片路径以 NOMIFUN_FILES_MARKER 形式嵌进 input（与 NomiSendBox 一致），
         // 这样 agent 才能看到附件；空 workspace 下绝对路径原样保留。
@@ -1422,59 +1157,11 @@ const CompanionPage: React.FC = () => {
           idempotency_key
         );
         emitter.emit('chat.history.refresh');
-        const disposition = classifyPublicMessageDelivery(sendResult);
-        if (disposition !== 'fresh') {
-          turnActiveRef.current = false;
-          setBubbleRunning(false);
-          setBubbleLoading(false);
-          setBubble('');
-          if (disposition === 'replayed_in_flight') {
-            void reconcileConversationTurnAfterAcceptedReplay(
-              conversation_id,
-              () =>
-                turnDeliveryReconcileGenerationRef.current === deliveryGeneration &&
-                activeThreadRef.current === conversation_id,
-              () => {
-                bubbleDismissedRef.current = false;
-                turnActiveRef.current = true;
-                setBubbleRunning(true);
-                setBubbleLoading(segmentsRef.current.size === 0);
-              },
-              () => {
-                bubbleDismissedRef.current = true;
-                turnActiveRef.current = false;
-                setBubbleRunning(false);
-                setBubbleLoading(false);
-              }
-            );
-          }
-          return;
-        }
-        // This persisted delivery is now proven fresh. Only at this point may
-        // the companion surface declare a new local task/busy state.
-        bubbleDismissedRef.current = false;
-        turnActiveRef.current = true;
-        setBubbleRunning(true);
-        setBubbleLoading(segmentsRef.current.size === 0);
-        setRemoteHeader(null);
-        markRemoteRunning(false);
-        if (segmentsRef.current.size === 0) setBubble('…');
-        // A pending dismiss timer (an earlier bubble or a pre-response stream
-        // frame) no longer owns the newly admitted turn.
-        if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
-        if (turnActiveRef.current) {
-          armBubbleDismiss(STREAM_STALL_MS, () => {
-            if (!turnActiveRef.current) return;
-            turnActiveRef.current = false;
-            setBubbleRunning(false);
-            setBubbleLoading(false);
-            setBubble('');
-          });
-        }
+        // The HTTP receipt triggers a canonical read; it cannot restart a Turn
+        // whose stream/terminal already arrived in either window.
+        reconcileSessionBubble(sendResult.msg_id);
       } catch (e) {
-        turnActiveRef.current = false;
-        setBubbleRunning(false);
-        setBubbleLoading(false);
+        reconcileSessionBubble();
         // 未配置对话模型时 ensureCompanionSession 返回 400 → 引导配置；其余后端错误按
         // error code 给可执行文案(鉴权/网络/限流/…),只有真正未知错误才退回通用兜底。
         if (isBackendHttpError(e) && e.status === 400) {
@@ -1502,7 +1189,7 @@ const CompanionPage: React.FC = () => {
         deliveryPendingRef.current = false;
       }
     },
-    [t, armBubbleDismiss, markRemoteRunning]
+    [t, armBubbleDismiss, reconcileSessionBubble]
   );
 
   /** 本地伙伴回合统一提交（迷你/展开共用）：先落盘，再启动网络投递。 */
@@ -1589,7 +1276,6 @@ const CompanionPage: React.FC = () => {
           }
         }
 
-        activeThreadRef.current = delivery.conversation_id;
         // Every remount recovery is replay-or-initial-only. Even a Running GET
         // may belong to another turn that completes before this POST; sending
         // without the atomic fence could fresh-start the stale key from
@@ -1614,7 +1300,6 @@ const CompanionPage: React.FC = () => {
   useEffect(
     () => () => {
       if (companionId) {
-        turnDeliveryReconcileGenerationRef.current += 1;
         releaseCompanionTurnDelivery(getCompanionTurnStorageKey(companionId));
       }
     },
@@ -1785,54 +1470,14 @@ const CompanionPage: React.FC = () => {
     [applyWindowState, companionId, openMainAt, popBubble, refreshRoster, roster, t]
   );
 
-  /** 气泡「× 忽略」：立即隐藏气泡；若仍在生成（本地或远程 IM 回合）则一并停掉后端，
-   *  避免无谓生成与残片回闪。 */
+  /** Hide this Turn's bubble and request cancellation of that exact Turn. */
   const dismissBubble = useCallback(() => {
-    // 远程 IM 自动回复进行中：× 一并停掉远程会话生成。
-    if (remoteRunningRef.current && remoteTurnRef.current) {
-      void ipcBridge.conversation.stop
-        .invoke({ conversation_id: remoteTurnRef.current.conversationId })
-        .catch(() => {});
-      remoteTurnRef.current.finished = true;
-      markRemoteRunning(false);
-    }
-    const cid = activeThreadRef.current;
-    if (turnActiveRef.current && cid != null) {
-      void ipcBridge.conversation.stop.invoke({ conversation_id: cid }).catch(() => {});
-    }
-    bubbleDismissedRef.current = true; // 压制本轮后续残片，防回闪
-    turnActiveRef.current = false;
-    setBubbleRunning(false);
-    setBubbleLoading(false);
+    dismissSessionBubble();
     clearBubbleTimer();
-    setRemoteHeader(null);
     setBubble('');
-  }, [clearBubbleTimer, markRemoteRunning]);
+  }, [clearBubbleTimer, dismissSessionBubble]);
 
-  /** 气泡「□ 打断」：停掉后端生成（本地或远程 IM 回合），保留已显示的部分文本，按常规计时淡出。 */
-  const interruptReply = useCallback(() => {
-    // 远程 IM 自动回复优先：打断作用于远程会话（点 6）。
-    if (remoteRunningRef.current && remoteTurnRef.current) {
-      void ipcBridge.conversation.stop
-        .invoke({ conversation_id: remoteTurnRef.current.conversationId })
-        .catch(() => {});
-      remoteTurnRef.current.finished = true;
-      markRemoteRunning(false);
-      armBubbleDismiss(BUBBLE_MS, () => {
-        setBubble('');
-        setRemoteHeader(null);
-      });
-      return;
-    }
-    const cid = activeThreadRef.current;
-    if (cid != null) {
-      void ipcBridge.conversation.stop.invoke({ conversation_id: cid }).catch(() => {});
-    }
-    turnActiveRef.current = false;
-    setBubbleRunning(false);
-    setBubbleLoading(false);
-    armBubbleDismiss(BUBBLE_MS, () => setBubble(''));
-  }, [armBubbleDismiss, markRemoteRunning]);
+  const interruptReply = interruptSessionBubble;
 
   const hideCompanion = useCallback(async () => {
     if (!companionId) return;
@@ -1842,8 +1487,6 @@ const CompanionPage: React.FC = () => {
     if (next) {
       setProfile(next);
       await applyWindowState(next);
-      // No-op while disabling (companion_enabled guard) — re-show resizing flows
-      // through the config-updated path; kept for call-site symmetry.
       await applyDeskSize(next);
     }
   }, [applyDeskSize, applyWindowState, companionId]);
@@ -1923,11 +1566,11 @@ const CompanionPage: React.FC = () => {
           },
         ];
 
-  // 反应控件：□ 打断（本地或远程 IM 回合生成中）+ × 忽略（有气泡时）。从气泡上移到输入条
+  // 反应控件：□ 打断（伙伴回合生成中）+ × 忽略（有气泡时）。从气泡上移到输入条
   // 发送按钮右侧的固定位置——气泡随内容伸缩、原位置动态难点中，固定常驻更易选中（点 5）。
   const reactionControls = (
     <>
-      {(bubbleRunning || remoteRunning) && (
+      {bubbleRunning && (
         <button
           type='button'
           className='nomi-companion-reaction'
@@ -2002,21 +1645,22 @@ const CompanionPage: React.FC = () => {
           data-companion-hit
           onMouseEnter={() => {
             // 悬停即暂停消散——长回复不会没读完就消失（点 1）。
+            setSessionBubbleHovered(true);
             bubbleHoveredRef.current = true;
             clearBubbleTimer();
           }}
           onMouseLeave={() => {
+            setSessionBubbleHovered(false);
             bubbleHoveredRef.current = false;
-            // 移开后重新计时；仍在生成时交回流式逻辑（下一片会重排 stall），不强行收尾。
-            if (bubble && !bubbleRunning && !remoteRunningRef.current) {
+            // Session reply expiry is owned by the canonical bubble hook.
+            if (noticeBubble && !sessionBubble.bubble) {
               armBubbleDismiss(BUBBLE_MS, () => {
                 setBubble('');
-                setRemoteHeader(null);
               });
             }
           }}
         >
-          {remoteHeader && (
+          {remoteHeader && sessionBubbleVisible && (
             <div className='nomi-companion-bubble__remote'>
               {CHANNEL_LOGOS[remoteHeader.platform] && (
                 <img src={CHANNEL_LOGOS[remoteHeader.platform]} alt={remoteHeader.platform} title={remoteHeader.platform} />

@@ -57,6 +57,12 @@ Creation prompt、Cron notice、AgentExecution summary 使用正式消息事件�
 
 可执行恢复必须满足 native checkpoint 的精确 build 和 binding 条件；只读的已关闭事件历史允许经过明确验证的模型或 Agent transition 边界。不能为了恢复而扩大权限或补造缺失日志。
 
+已关闭回合的模型正文在历史上下文中是明确的 User-role DATA：来源及降权元数据与原始文本分为不同内容块，
+不能把内部包装 JSON 当作 Assistant 回答示例，诱导后继回复照搬包装或转义正文。历史内容不成为当前指令、
+效果回执或交付模板；真实 Assistant 工具调用及 Tool 结果仍保持原协议角色、顺序和配对。
+压缩恢复无法证明来源时保留 unknown，不从正文或看似合法的标签补造来源，也不剥壳改写历史原文。
+此规则只作用于模型历史呈现，不改 canonical 事件、Message 正文、实时回复或精确 checkpoint 恢复。
+
 完成账本的 prior_task 候选只来自最新已关闭 Turn，并要求与当前 Session、runtime binding 和 Snapshot 完全一致。模型或 Agent 切换后的旧 Snapshot 仍作为已验证的普通历史保留，但不导入它的执行账本；不向更早的 Turn 搜索一个匹配的旧账本。
 
 Agent 或资源切换不能删除已结算效果引用的资源定义，也不能修改同一 binding ID 的定义。所有持久资源定义使用合同层 `resource_definition_id`：摘要覆盖 kind、resource、owner、operations、connection 和完整参数，排除 ID 自身；相同定义复用 ID，权限或参数改变生成新 ID。调用方在最终工作目录和策略参数确定后生成 ID，不以物理资源 ID 替代定义身份。执行期权限收窄继续引用原 canonical 定义，不写入第二份资源定义。
@@ -119,6 +125,17 @@ IDMM 自动输入在正式 `message/user-accepted` 内容中保存服务端作�
 追加过期提示。首版不持久化或显示模型自报的置信度。
 
 UI 直接消费当前 stream 与 Message projection，不保留缺少旧协议 marker 时启动的本地终态加工状态机。错误使用明确的当前 error code；不以旧错误文字猜测其含义。
+
+所有新准入输入在 Runtime 派发前，从同一 Turn 已提交的 typed accepted event 与已解析 Payload 发布
+`message.userCreated`，普通文字、桌面伙伴、消息渠道与 IDMM 共用这条通知；幂等重放不重复发布。
+会话窗口以服务端消息身份即时合并输入，不等待任务终态或发起窗口的本地历史刷新。
+桌面伙伴先读取其唯一 canonical Session 绑定，再按精确 Session/Turn 消费流与生命周期，
+不依赖旧 companion stream marker 或本窗口是否发送。活动回合不能由本地气泡消散超时结束；
+断流与重连通过权威运行态和同 Turn 的消息投影恢复。关闭气泡仅抑制当前回合，终态后的
+消散计时也绑定当前回合，后继回合不继承旧隐藏状态或迟到响应。
+渠道私聊沿用同一伙伴 Session，渠道标题从准入输入的 `channel_platform` 派生，不再维护
+独立远程气泡回合。气泡取消提交所观察的 `expected_turn_id`，owner 从不可变 accepted root
+解析 Operation 后调用精确取消；迟到的旧回合取消不影响后继回合。
 
 错误终态的诊断信息从本 Turn 已准入的 Agent、模型和工作区捕获，随同原始 detail 保存在既有 canonical 终态 payload 中。任务未完成的具体原因由后端生成 typed `taskIncompleteReason`，renderer 不从 detail 文字猜测原因。实时错误与历史投影读取同一终态信息；缺少历史诊断字段时不借用会话当前选择补造上下文。面向用户的原因和建议与折叠的技术细节分层展示。
 

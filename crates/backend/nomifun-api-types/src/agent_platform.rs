@@ -1158,6 +1158,10 @@ pub struct AgentSessionTurnMutationResponseDto {
 #[serde(deny_unknown_fields)]
 pub struct CancelAgentSessionTurnRequestDto {
     pub idempotency_key: String,
+    /// Optional accepted input UUIDv7 from `turn.started`. When present,
+    /// cancellation stays attached to that Turn even after it has closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1641,5 +1645,14 @@ mod snapshot_tests {
             "idempotency_key": "cancel-1",
             "conversation_id": "legacy"
         })).is_err());
+        let ordinary: CancelAgentSessionTurnRequestDto = serde_json::from_value(json!({
+            "idempotency_key": "cancel-1"
+        })).unwrap();
+        assert_eq!(ordinary.expected_turn_id, None);
+        let exact: CancelAgentSessionTurnRequestDto = serde_json::from_value(json!({
+            "idempotency_key": "cancel-1",
+            "expected_turn_id": "0190f5fe-7c00-7a00-8abc-012345678901"
+        })).unwrap();
+        assert_eq!(exact.expected_turn_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678901"));
     }
 }
