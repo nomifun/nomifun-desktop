@@ -561,7 +561,10 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 
 ### macOS 构建与发行
 
-内置浏览器使用固定的 Apple Silicon arm64 CEF 运行库，当前明确拒绝 Intel 与 Universal 包。
+内置浏览器为 Apple Silicon 与 Intel 分别固定 CEF 运行库，明确拒绝混合架构 Universal 包。
+架构参数支持 `arm`/`aarch64`/`silicon` 与 `intel`/`x64`/`x86_64`；Intel 包还包含校验过的
+ONNX Runtime 1.23.2 及其许可证。Apple Silicon 请使用原生 arm64 包：Chromium 不维护
+Rosetta 运行方式，v0.8.1 的翻译环境 CEF 关闭测试未通过；本次未执行 Intel 实机验收。
 `build`、`build:mac`、`build:signed` 和 `build:updater` 在 macOS 上使用同一套完整装配流程：
 先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
 更新包还需要独立的 Tauri updater 签名密钥。
@@ -572,6 +575,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | Developer ID 签名与已配置的公证 | `bun run build:signed` 或 `bun run build:mac --signed` |
 | 完整 updater 包与 `.sig` | `bun run build:updater` |
 | Developer ID 安装包与 updater 包 | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| 原生 Intel 安装包与 updater 包 | `bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json` |
 | 可直接运行、包含内置浏览器的开发 App | `bun run build:fast` |
 
 `bun run dev` 从完整开发 `.app` 启动，并在 Rust 热重载前等待原生浏览器完成退出清理；
@@ -585,7 +589,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 能力授权分别管理；固定签名身份和 Bundle ID 可让系统识别后续更新，但不能替代用户首次授权。
 SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md)。
 
-生产入口固定 release profile、arm64 target 和完整 App/DMG，不接受绕过装配的 `--debug`、`--no-bundle` 等参数。
+生产入口固定 release profile、所选原生架构和完整 App/DMG，不接受绕过装配的 `--debug`、`--no-bundle` 等参数。
 签名读取 gitignored 的 `apps/desktop/signing/.env.signing`，要求已安装的 `APPLE_SIGNING_IDENTITY`；
 最终 App 和 DMG 才进行已配置的公证。`release:mac` 发布 arm64 产物，并仅扫描本次 arm64 target 生成更新条目。
 
