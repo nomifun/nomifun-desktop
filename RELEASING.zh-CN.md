@@ -204,21 +204,25 @@ bun run make:latest
 ```
 
 `bun run make:latest` 会把当前目标的 macOS 条目写入 `apps/desktop/updater/latest.json`。
-双架构发布时，分别构建并在下一架构构建前收集清单：
+双架构发布时，先提交版本和源码改动，让 release lock 对应干净的源码提交；
+分别构建，并将清单收集到不被 Git 跟踪的产物目录：
 
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --collect --notes-file notes.md
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --collect --notes-file notes.md
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 ```
 
 两种架构使用分别固定的 CEF 归档，并验证主程序、framework 和所有 helper 的架构。
 Intel 更新包命名为 `NomiFun_<version>_x64.app.tar.gz`，Apple Silicon 保留
 `NomiFun.app.tar.gz`。将 `dist/desktop/` 收集的同一批产物上传到两处分发服务。
 Rosetta 运行不等同于 Intel 实机验收。
+两套构建结束后，再将合并清单写回 `apps/desktop/updater/latest.json`，提交、打 tag
+并发布。Intel 打包会自动下载 SHA-256 固定的官方 ONNX Runtime 1.23.2，使用匹配的
+API 23，并在 App 内签名其 x86_64 运行库；其他目标保持 API 27。
 
 ## Windows 发版
 

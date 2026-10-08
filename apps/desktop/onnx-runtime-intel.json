@@ -1,0 +1,8 @@
+{
+  "version": "1.23.2",
+  "api_version": 23,
+  "archive": "onnxruntime-osx-universal2-1.23.2.tgz",
+  "archive_sha256": "49ae8e3a66ccb18d98ad3fe7f5906b6d7887df8a5edd40f49eb2b14e20885809",
+  "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-universal2-1.23.2.tgz",
+  "library": "libonnxruntime.1.23.2.dylib"
+}

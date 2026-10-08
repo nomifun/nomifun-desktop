@@ -346,16 +346,17 @@ stapling / codesign / Gatekeeper status, merges the darwin entries via
 CREATE), commits `latest.json` (plus the bump for CREATE) as author `nomifun`,
 and verifies the updater endpoint. It aborts with a clear error on any failure.
 
-For a dual-architecture macOS release, use the signed build pipeline once per
-target and collect the updater manifest before building the next target:
+For a dual-architecture macOS release, commit the version and source changes
+first so the release locks can attest a clean source commit. Build once per
+target and collect the updater manifest outside the tracked source tree:
 
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --collect --notes-file notes.md
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
-bun run make:latest --collect --notes-file notes.md
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 ```
 
 Both targets use independently pinned CEF archives and verify the host,
@@ -363,6 +364,10 @@ framework, and helpers against the selected architecture. The Intel updater
 uses `NomiFun_<version>_x64.app.tar.gz`; the Apple Silicon updater retains
 `NomiFun.app.tar.gz`. Upload the collected `dist/desktop/` artifacts to both
 distribution services. Rosetta execution is not native Intel acceptance.
+Copy the merged manifest to `apps/desktop/updater/latest.json` only after both
+builds, then commit, tag, and publish. Intel packaging also downloads the
+SHA-256-pinned official ONNX Runtime 1.23.2, selects its API 23 bindings, and
+signs its x86_64 library inside the App. Other targets retain API 27.
 
 ### Releasing Windows (append to an existing release, or Windows-first)
 
