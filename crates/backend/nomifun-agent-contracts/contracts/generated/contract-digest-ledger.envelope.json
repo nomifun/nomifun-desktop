@@ -6,7 +6,7 @@
       "canonical_api_inventory": "6cec82b61998d1f7fda54e3c448def72bb2721175116e0c4144e4b95f999df8f",
       "canonical_schema_manifest": "7f422367f83d039511b765de857643d09fdcf209784f64fa7aff18b1f17b13a0",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
-      "cargo_lock": "b217edbef6026df3f6d191f55a89d6b30e28681a1a110ca781d05e16e4ff72a9",
+      "cargo_lock": "05adb08974b7a13f535bb2d7d4697dc96d06e360fbae497e6244fd9dc40c2769",
       "coding_codex_native_contract": "a0d2527993a9a1c987c0f024faa7883872fd7e0b3a807fa92dba5baf9f9e569b",
       "confirmed_decision_contract": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
       "database_schema": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
@@ -14,7 +14,7 @@
       "official_preset_seed_manifest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb",
       "package_schema": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
       "platform_validation_contract": "2ad5072bfff0fb80034265b1e6a93f7eb036fceeec4a4515c13075bbb828c97a",
-      "platform_validation_fixture": "0c77cff738c4d3e623dcd934656dcfdc39fdcc5d1b4f7bbd174667a773bf0a7e",
+      "platform_validation_fixture": "896243a4beb6a6733053b258e666724e551d743e1e6992facf492d5bb1bf558e",
       "plugin_contract": "aed271dcd6570f0352d3657c657ecfbc21c4d53569c16d4a8e13443b050b3c25",
       "plugin_schema": "5d69c74023d5ad1dfdce99d8b81b3253eb86c4fda1f085de3d7a97c02744d609",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
@@ -24,5 +24,5 @@
       "target_first_party_inventory": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
     }
   },
-  "payload_digest": "9d14a4f088e16f251de729f2dfc86c394312d9a2414c848a6e12c0696dafbfe5"
+  "payload_digest": "9eea7141405a06f0c94a18a2e29cd4b8cb5bfa5102e0625b7d13dca6e6c684ce"
 }

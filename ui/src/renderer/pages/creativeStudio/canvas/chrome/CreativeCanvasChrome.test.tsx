@@ -9,11 +9,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasChrome, {
-  CreativeCanvasBackgroundMenu,
   CreativeCanvasNodeMenu,
 } from './CreativeCanvasChrome';
 import {
-  CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
   toggleCreativeCanvasPanel,
@@ -29,14 +27,12 @@ const baseProps = (
   canvasTitle: '品牌概念画布',
   saveStatus: 'saved',
   tool: 'select',
-  background: 'dots',
   canUndo: false,
   canRedo: true,
   leftOpen: true,
   leftView: 'canvas',
   resourceView: null,
   rightView: 'assistant',
-  backgroundMenuOpen: false,
   compact: false,
   slots: {
     canvas: <div data-test-slot='canvas'>CANVAS SLOT</div>,
@@ -48,8 +44,6 @@ const baseProps = (
   onBackToCanvases: noop,
   onToolChange: noop,
   onAddNode: noop,
-  onBackgroundChange: noop,
-  onBackgroundMenuOpenChange: noop,
   onUndo: noop,
   onRedo: noop,
   onLeftPanelOpenChange: noop,
@@ -202,21 +196,6 @@ describe('CreativeCanvasChrome controlled menus', () => {
       expect(html.includes(`data-node-kind="${kind}"`)).toBe(true);
     }
     expect(html.includes('data-node-kind="config"')).toBe(false);
-  });
-
-  test('offers only dots, lines, and blank background modes', () => {
-    const html = renderToStaticMarkup(
-      withCanvasTestI18n(
-        <CreativeCanvasBackgroundMenu value='lines' onChange={noop} />
-      )
-    );
-
-    expect(CREATIVE_CANVAS_CHROME_BACKGROUNDS).toEqual(['dots', 'lines', 'blank']);
-    expect((html.match(/data-background=/g) ?? []).length).toBe(3);
-    expect(html.includes('data-background="dots"')).toBe(true);
-    expect(html.includes('data-background="lines"')).toBe(true);
-    expect(html.includes('data-background="blank"')).toBe(true);
-    expect(html.includes('aria-checked="true"')).toBe(true);
   });
 
   test('toggles the pan tool and right panels without keeping product state', () => {

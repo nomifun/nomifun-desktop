@@ -47,7 +47,7 @@ async fn forward_migration_removes_versions_preserves_library_and_accepts_restar
         let pool = database.pool();
         validate_current_migration_lineage(pool).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
-            .fetch_one(pool).await.unwrap(), 2);
+            .fetch_one(pool).await.unwrap(), MIGRATOR.iter().count() as i64);
         for table in ["plugins", "plugin_mutations"] {
             let columns: Vec<String> = sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
                 .fetch_all(pool).await.unwrap();

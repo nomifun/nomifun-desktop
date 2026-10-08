@@ -11,7 +11,7 @@ use nomi_process_runtime::{
     ProcessOwner, ProcessPolicy, OutputCursor, OutputSnapshot, OutputStream, PollResult,
     ProcessSupervisor, ShellKind, normalize_request,
 };
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;

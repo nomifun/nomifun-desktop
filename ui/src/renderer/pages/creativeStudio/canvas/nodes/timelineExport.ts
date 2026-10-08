@@ -183,13 +183,6 @@ export function buildTimelineExportPlan(
   };
 }
 
-export function selectTimelineExportMimeType(
-  isTypeSupported: (mimeType: string) => boolean,
-  includeAudio = false
-): string | null {
-  return selectTimelineExportFormat(isTypeSupported, includeAudio)?.mimeType ?? null;
-}
-
 export function selectTimelineExportFormat(
   isTypeSupported: (mimeType: string) => boolean,
   includeAudio = false

@@ -258,16 +258,6 @@ impl ChannelAgentCapabilityOwner {
         })
     }
 
-    pub async fn release_scene_binding(
-        &self,
-        agent_session_id: &str,
-    ) -> Result<usize, Wave4HostPortError> {
-        match &self.ingress {
-            Some(ingress) => ingress.release_scene(agent_session_id).await,
-            None => Ok(0),
-        }
-    }
-
     /// Re-derive group policy immediately before a turn. No authorable policy
     /// capability or model-provided selector participates in this path.
     pub async fn apply_scene_policy(

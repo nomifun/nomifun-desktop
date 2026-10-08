@@ -111,9 +111,8 @@ const Main = () => {
     setConfigReady(false);
     setConfigError(null);
     // Prefetch `/api/agents` in parallel with configService.initialize() and
-    // seed the shared SWR cache so the Guid page's model selector can
-    // read `handshake.available_models` on the very first render — without
-    // waiting for a session to be created.
+    // seed the shared SWR cache so the Guid page can read the current Agent
+    // registry on its first render, without waiting for a session to be created.
     void Promise.all([
       application.systemInfo
         .invoke()

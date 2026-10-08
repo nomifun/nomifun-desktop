@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { IProvider } from '@/common/config/storage';
 import { parseProviderId, type ProviderId } from '@/common/types/ids';
-import { reorderById, reorderStrings, withDenseSortOrder } from './modelProviderOrdering';
+import { reorderById, reorderStrings } from './modelProviderOrdering';
 
 const A = parseProviderId('0190f5fe-7c00-7a00-8000-000000000001');
 const B = parseProviderId('0190f5fe-7c00-7a00-8000-000000000002');
@@ -36,13 +36,5 @@ describe('modelProviderOrdering', () => {
 
   test('reorderStrings moves model ids', () => {
     expect(reorderStrings(['m1', 'm2', 'm3'], 'm1', 'm3')).toEqual(['m2', 'm3', 'm1']);
-  });
-
-  test('withDenseSortOrder rewrites provider priority by visual position', () => {
-    const result = withDenseSortOrder([provider(B, 10), provider(A, 3)]);
-    expect(result.map((item) => [item.id, item.sort_order])).toEqual([
-      [B, 0],
-      [A, 1],
-    ]);
   });
 });

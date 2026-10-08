@@ -7,7 +7,7 @@ import { constants, createReadStream } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, writeFile, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
+import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   MACOS_BROWSER_RUNTIME, compileBrowserEnvironment, inspectMacosBrowserBundle, stageMacosBrowserBundle,
@@ -93,14 +93,22 @@ export async function runCargoArtifact(args, binary, { cwd = ROOT, environment =
   // Subscribe before reading: an early cargo spawn error must stay observed.
   completion.catch(() => {});
   let executable;
-  for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
-    let result;
-    try { result = JSON.parse(line); }
-    catch { process.stdout.write(`${line}\n`); continue; }
-    if (result.reason === 'compiler-message' && result.message?.rendered) process.stderr.write(result.message.rendered);
-    if (result.reason === 'compiler-artifact' && result.target?.name === binary && result.executable) executable = result.executable;
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const readReports = async () => {
+    for await (const line of lines) {
+      let result;
+      try { result = JSON.parse(line); }
+      catch { process.stdout.write(`${line}\n`); continue; }
+      if (result.reason === 'compiler-message' && result.message?.rendered) process.stderr.write(result.message.rendered);
+      if (result.reason === 'compiler-artifact' && result.target?.name === binary && result.executable) executable = result.executable;
+    }
+  };
+  try {
+    await Promise.all([readReports(), completion]);
+  } finally {
+    lines.close();
+    child.stdout.destroy();
   }
-  await completion;
   if (!executable) throw new Error(`Cargo did not report the ${binary} executable`);
   return resolve(cwd, executable);
 }
@@ -159,7 +167,7 @@ export async function ensureMacosDevelopmentBundle({
   const cachedPath = typeof cached?.appPath === 'string' ? relative(cache, resolve(cached.appPath)) : '';
   if (cached?.components === components && cachedPath.startsWith('generation-')
     && !cachedPath.startsWith('..') && !isAbsolute(cachedPath)
-    && cachedPath.endsWith('/NomiFun Dev.app')) {
+    && cachedPath.endsWith(`${sep}NomiFun Dev.app`)) {
     try {
       const inspected = await inspect(cached.appPath);
       if (inspected.status === 'pass') {

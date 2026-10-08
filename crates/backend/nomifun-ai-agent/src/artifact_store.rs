@@ -994,31 +994,6 @@ impl ArtifactStore {
         self.persist_validated_batch(prepared)
     }
 
-    /// Persist inline payloads and tool-created workspace files as one atomic
-    /// delivery. This is used when a single terminal tool result mixes both
-    /// transport forms: validation of every member and source-stability checks
-    /// finish before the first immutable receipt is committed.
-    pub fn persist_inline_and_existing_batch<I, M, D, E, P>(
-        &self,
-        inline: I,
-        existing_paths: E,
-    ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError>
-    where
-        I: IntoIterator<Item = (ArtifactKind, M, D)>,
-        M: AsRef<str>,
-        D: AsRef<str>,
-        E: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        let mut existing = self.prepare_existing_batch(existing_paths)?;
-        let mut validated_inline = validate_inline_batch(inline)?;
-        existing.append(&mut validated_inline);
-        if existing.is_empty() {
-            return Err(ArtifactStoreError::Empty);
-        }
-        self.persist_validated_batch(existing)
-    }
-
     /// Persist a batch whose ownership has not yet transferred to conversation
     /// history. A crash-durable `Unprepared` recovery record is committed
     /// before each artifact rename, so an emitted receipt can never become an

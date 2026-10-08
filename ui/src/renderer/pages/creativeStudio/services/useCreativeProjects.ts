@@ -49,16 +49,6 @@ export function sortCreativeProjectSummaries(
   );
 }
 
-export function upsertCreativeProjectSummary(
-  projects: readonly CreativeProjectSummary[] | undefined,
-  project: CreativeProjectSummary
-): CreativeProjectSummary[] {
-  return sortCreativeProjectSummaries([
-    ...(projects ?? []).filter((candidate) => candidate.projectId !== project.projectId),
-    project,
-  ]);
-}
-
 export interface CreativeProjectState {
   detail: CreativeProjectDetail | undefined;
   isLoading: boolean;

@@ -1692,7 +1692,7 @@ mod tests {
     use super::*;
     use crate::Tool;
     use async_trait::async_trait;
-    use nomi_protocol::events::ToolCategory;
+    use nomi_types::tool::ToolCategory;
     use nomi_types::tool::ToolResult;
 
     /// A minimal Tool implementation used only in tests

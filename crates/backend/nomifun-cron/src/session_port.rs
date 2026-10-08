@@ -100,8 +100,6 @@ pub struct CronSessionProjection {
     pub agent_snapshot: Option<AgentResolvedSnapshot>,
 }
 
-pub type CronScheduledSession = CronSessionProjection;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronScheduledSessionLookup {
     pub owner_id: String,

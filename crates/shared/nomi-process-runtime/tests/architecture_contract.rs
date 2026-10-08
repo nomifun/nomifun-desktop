@@ -568,39 +568,28 @@ fn mcp_routing_uses_origin_stable_reserved_names_without_a_collision_snapshot() 
 }
 
 #[test]
-fn retired_pty_modules_and_portable_pty_are_test_only() {
+fn retired_pty_modules_and_dependency_are_absent() {
     let lib_path = "crates/agent/nomi-tools/src/lib.rs";
     let complete_lib = without_whitespace(&rust_code_mask(&read_workspace(lib_path)));
-    let production_lib = without_whitespace(&production_source(lib_path));
     for module in ["pty", "persistent_shell"] {
         let declaration = format!("pubmod{module};");
         assert!(
-            complete_lib.contains(&declaration),
-            "expected retired module {module}"
+            !complete_lib.contains(&declaration),
+            "retired {module} must not be exported, including in test builds"
         );
         assert!(
-            !production_lib.contains(&declaration),
-            "{module} must not be exported in production"
-        );
-        assert!(
-            workspace_root()
+            !workspace_root()
                 .join(format!("crates/agent/nomi-tools/src/{module}.rs"))
                 .is_file(),
-            "expected retired test-only source {module}.rs"
+            "retired source {module}.rs must not be retained"
         );
     }
 
     let manifest = read_workspace("crates/agent/nomi-tools/Cargo.toml");
     let sections = dependency_sections(&manifest, "portable-pty");
     assert!(
-        !sections.is_empty(),
-        "test-only retired modules require portable-pty"
-    );
-    assert!(
-        sections
-            .iter()
-            .all(|section| section == "dev-dependencies" || section.ends_with(".dev-dependencies")),
-        "portable-pty must appear only in nomi-tools dev-dependencies, found {sections:?}"
+        sections.is_empty(),
+        "retired portable-pty dependency must not be retained, found {sections:?}"
     );
 }
 

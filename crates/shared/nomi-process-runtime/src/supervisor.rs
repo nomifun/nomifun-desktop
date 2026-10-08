@@ -4394,9 +4394,15 @@ mod tests {
             .await.expect("quiesce must include an admitted start in its bounded cleanup");
         let handle = tokio::time::timeout(Duration::from_secs(6), start.as_mut())
             .await.expect("original start delivery must remain bounded").unwrap();
-        let pid = wait_native_start_marker(&marker).await;
-        assert_eq!(pid, handle.pid);
-        let process = NativeStartProbe::new(pid);
+        // Keep the first-poll admission race: quiesce can reap the real child
+        // before its user code writes the marker, especially while Windows
+        // PowerShell initializes. Windows retains the native kernel identity;
+        // Unix observes the late PID read-only, leaving cleanup exclusively to
+        // the original supervisor owner. Do not wait for a user-code effect
+        // that the fence was permitted to prevent.
+        let pid = handle.pid;
+        assert_ne!(pid, 0, "the real platform start must return its native PID");
+        let process = NativeStartProbe::new_read_only(pid);
         let gone_when_delivered = process.is_gone();
         let matching = report.sessions.iter().find(|session| {
             session.session_id == handle.session_id && session.owner == handle.owner
@@ -4406,17 +4412,22 @@ mod tests {
         // first failure is reported, while retaining the earlier empty fence.
         let cleanup = supervisor.cancel(&handle.owner, &handle.session_id).await.unwrap();
         let final_gone = process.is_gone();
+        let marker_pid = std::fs::read_to_string(&marker).ok()
+            .and_then(|contents| contents.trim().parse::<u32>().ok());
+        if let Some(marker_pid) = marker_pid {
+            assert_eq!(marker_pid, pid, "any executed marker must belong to the exact child");
+        }
         if let Some(root) = &evidence {
             std::fs::write(root.join("assertions.json"), serde_json::json!({
                 "pid": pid,
-                "marker_pid": std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap(),
+                "marker_pid": marker_pid,
                 "quiesce_report_exact": report.is_exact(),
                 "quiesce_report_sessions": report.sessions.len(),
                 "exact_owner_cleanup_reported": owned_cleanup_reported,
                 "process_gone_when_start_delivered_after_quiesce": gone_when_delivered,
                 "formal_followup_reaped": outcome_reaped(&cleanup),
                 "formal_followup_process_gone": final_gone,
-                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap_or_default().lines().count(),
             }).to_string()).unwrap();
         }
         assert!(outcome_reaped(&cleanup) && final_gone, "formal followup must clean before FAIL");
@@ -4565,6 +4576,8 @@ mod tests {
         handle: windows_sys::Win32::Foundation::HANDLE,
         #[cfg(unix)]
         pid: libc::pid_t,
+        #[cfg(unix)]
+        allow_force_kill: bool,
     }
 
     #[cfg(any(unix, windows))]
@@ -4579,7 +4592,16 @@ mod tests {
                 Self { handle }
             }
             #[cfg(unix)]
-            { Self { pid: pid as libc::pid_t } }
+            { Self { pid: pid as libc::pid_t, allow_force_kill: true } }
+        }
+
+        fn new_read_only(pid: u32) -> Self {
+            #[cfg(windows)]
+            { Self::new(pid) }
+            #[cfg(unix)]
+            // A reaped PID is observation only: it may have been reused, so
+            // neither explicit fallback nor Drop may signal it.
+            { Self { pid: pid as libc::pid_t, allow_force_kill: false } }
         }
 
         fn is_gone(&self) -> bool {
@@ -4602,15 +4624,21 @@ mod tests {
             // SAFETY: the retained exact handle has terminate access only to this test's child.
             unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.handle, 1); }
             #[cfg(unix)]
-            // SAFETY: this PID came from this fixture's direct real platform spawn.
-            unsafe { libc::kill(self.pid, libc::SIGKILL); }
+            if self.allow_force_kill {
+                // SAFETY: only probes opened while this fixture's child is live
+                // retain fallback authority; late observations cannot reach here.
+                unsafe { libc::kill(self.pid, libc::SIGKILL); }
+            }
         }
     }
 
     #[cfg(any(unix, windows))]
     impl Drop for NativeStartProbe {
         fn drop(&mut self) {
+            #[cfg(windows)]
             if !self.is_gone() { self.force_kill(); }
+            #[cfg(unix)]
+            if self.allow_force_kill && !self.is_gone() { self.force_kill(); }
             #[cfg(windows)]
             // SAFETY: this test closes its retained non-inherited process handle exactly once.
             unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle); }

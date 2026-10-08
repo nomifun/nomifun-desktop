@@ -17,9 +17,6 @@ use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 
 pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
 pub type Handler = Arc<dyn Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, Value) -> BoxFut + Send + Sync>;
-pub type ProgressSink = tokio::sync::mpsc::Sender<Value>;
-pub type StreamingHandler =
-    Arc<dyn Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, Value, ProgressSink) -> BoxFut + Send + Sync>;
 
 fn invalid_arguments_error(error: serde_json::Error) -> Value {
     json!({
@@ -95,7 +92,6 @@ pub struct Capability {
     pub input_schema: Map<String, Value>,
     pub handler: Handler,
     argument_validator: Arc<dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync>,
-    pub stream: Option<StreamingHandler>,
 }
 
 impl Capability {
@@ -124,54 +120,6 @@ impl Capability {
             input_schema,
             handler,
             argument_validator,
-            stream: None,
-        }
-    }
-
-    pub fn new_streaming<P, F, Fut>(meta: CapabilityMeta, f: F) -> Self
-    where
-        P: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P, ProgressSink) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Value> + Send + 'static,
-    {
-        let input_schema = schema_for_params::<P>();
-        let f = Arc::new(f);
-        let argument_validator: Arc<
-            dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync,
-        > = Arc::new(|args| serde_json::from_value::<P>(args).map(|_| ()));
-
-        let streaming = f.clone();
-        let stream: StreamingHandler = Arc::new(move |deps, ctx, args, sink| {
-            let f = streaming.clone();
-            Box::pin(async move {
-                match serde_json::from_value::<P>(args) {
-                    Ok(params) => f(deps, ctx, params, sink).await,
-                    Err(error) => invalid_arguments_error(error),
-                }
-            })
-        });
-
-        let handler: Handler = Arc::new(move |deps, ctx, args| {
-            let f = f.clone();
-            Box::pin(async move {
-                let params = match serde_json::from_value::<P>(args) {
-                    Ok(params) => params,
-                    Err(error) => return invalid_arguments_error(error),
-                };
-                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-                let result = f(deps, ctx, params, tx).await;
-                drain.abort();
-                result
-            })
-        });
-
-        Self {
-            meta,
-            input_schema,
-            handler,
-            argument_validator,
-            stream: Some(stream),
         }
     }
 

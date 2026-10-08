@@ -10,17 +10,14 @@ import type { CreativeAsset } from '../types';
 import {
   CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES,
   buildGlobalCreativeAssetQuery,
-  creativeAssetCacheIsComplete,
   creativeAssetDownloadName,
   creativeAssetPageCount,
   creativeAssetPageIsLoaded,
   creativeAssetPageSlice,
-  creativeAssetPageSliceFromCompleteCache,
   creativeAssetQuerySearch,
   normalizeCreativeAssetEditDraft,
   normalizeCreativeTextAssetForm,
   validateCreativeAssetManualUpload,
-  validateCreativeCollectionRename,
 } from './model';
 import { creativeAssetUploadQueueReducer } from './uploadQueue';
 
@@ -60,29 +57,6 @@ describe('creative asset library route model', () => {
     expect(creativeAssetPageIsLoaded(0, 0, 1, 10)).toBe(true);
   });
 
-  test('never exposes a stale second page while reload has only restored backend page one', () => {
-    const firstBackendPage = Array.from({ length: 10 }, (_, index) => index + 1);
-    const fullySynchronized = Array.from({ length: 20 }, (_, index) => index + 1);
-
-    expect(creativeAssetCacheIsComplete(firstBackendPage.length, 20)).toBe(false);
-    expect(creativeAssetPageSliceFromCompleteCache(firstBackendPage, 20, 2, 10)).toEqual([]);
-    expect(creativeAssetCacheIsComplete(fullySynchronized.length, 20)).toBe(true);
-    expect(creativeAssetPageSliceFromCompleteCache(fullySynchronized, 20, 2, 10)).toEqual([
-      11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    ]);
-  });
-
-  test('reflows a complete cache across the deletion boundary without losing the next item', () => {
-    const fullySynchronized = Array.from({ length: 12 }, (_, index) => `asset-${index + 1}`);
-    const afterDeletingFirst = fullySynchronized.slice(1);
-
-    expect(creativeAssetPageSliceFromCompleteCache(afterDeletingFirst, 11, 1, 10)).toEqual([
-      'asset-2', 'asset-3', 'asset-4', 'asset-5', 'asset-6',
-      'asset-7', 'asset-8', 'asset-9', 'asset-10', 'asset-11',
-    ]);
-    expect(creativeAssetPageSliceFromCompleteCache(afterDeletingFirst, 11, 2, 10)).toEqual(['asset-12']);
-  });
-
   test('enforces the visible manual-upload capability contract before calling the backend', () => {
     expect(validateCreativeAssetManualUpload({ name: 'image.png', type: 'image/png', size: 1024 })).toEqual({
       accepted: true,
@@ -115,12 +89,6 @@ describe('creative asset library route model', () => {
       collection: 'Notes',
       tags: ['draft'],
     });
-  });
-
-  test('validates collection rename and permits the backend-supported ungroup operation', () => {
-    expect(validateCreativeCollectionRename({ from: '', to: 'new' })).toBe('请输入当前合集名称。');
-    expect(validateCreativeCollectionRename({ from: 'same', to: ' same ' })).toBe('新合集名称需要与当前名称不同。');
-    expect(validateCreativeCollectionRename({ from: 'old', to: '' })).toBeNull();
   });
 
   test('derives a safe download name while retaining the real original URL elsewhere', () => {

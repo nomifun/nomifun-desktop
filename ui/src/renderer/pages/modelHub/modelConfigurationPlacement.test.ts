@@ -65,10 +65,10 @@ describe('model-owned tool configuration placement', () => {
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
   });
 
-  test('MCP diagnostics link to the dedicated MCP page', () => {
-    const source = readSource('../../components/media/FileAttachButton.tsx');
+  test('session capability management links to the dedicated Skills and MCP pages', () => {
+    const source = readSource('../../components/chat/SessionCapabilityPicker/index.tsx');
 
-    expect(source.includes("navigate('/mcp')")).toBe(true);
+    expect(source.includes("navigate(isSkills ? '/skills' : '/mcp')")).toBe(true);
     expect(source.includes('/settings/capabilities?tab=tools')).toBe(false);
   });
 

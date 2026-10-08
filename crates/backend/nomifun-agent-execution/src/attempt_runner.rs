@@ -963,6 +963,7 @@ mod tests {
     fn recording_session(receipt: Option<AgentExecutionDelivery>) -> Arc<RecordingSessionPort> {
         let conversation = ConversationResponse {
             conversation_id: CONVERSATION_ID.to_owned(),
+            session_purpose: nomifun_agent_contracts::SessionPurpose::Conversation,
             name: "main Agent".to_owned(),
             r#type: AgentType::Nomi,
             model: None,

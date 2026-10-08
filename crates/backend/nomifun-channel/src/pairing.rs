@@ -316,24 +316,6 @@ impl PairingService {
         }))
     }
 
-    /// Looks up the internal user ID for a platform user on this bot channel.
-    ///
-    /// Returns `None` if the user is not authorized.
-    pub async fn get_internal_user_id(
-        &self,
-        platform_user_id: &str,
-        platform_type: &str,
-        channel_plugin_id: &str,
-    ) -> Result<Option<String>, ChannelError> {
-        let user = self
-            .repo
-            .get_user_by_platform(platform_user_id, platform_type, channel_plugin_id)
-            .await?;
-        Ok(user
-            .filter(|user| user.authorization_kind == CHANNEL_USER_AUTHORIZATION_APPROVED)
-            .map(|user| user.channel_user_id))
-    }
-
     /// Returns the complete platform identity row, including its authorization
     /// kind. Admission owns the decision about which kinds are valid for a
     /// direct, allowlisted-group, or open-group message.
@@ -373,44 +355,6 @@ impl PairingService {
             })
             .await?;
         Ok(user)
-    }
-
-    /// Get or create a stable guest identity for an automatic-admission path.
-    ///
-    /// This compatibility wrapper never grants pairing approval. The repository
-    /// preserves an existing approved identity and otherwise creates/reuses an
-    /// `auto_group` guest; new callers should prefer
-    /// [`Self::ensure_auto_group_user`] so that distinction is explicit.
-    pub async fn ensure_channel_user(
-        &self,
-        platform_user_id: &str,
-        platform_type: &str,
-        channel_plugin_id: &str,
-        display_name: &str,
-    ) -> Result<String, ChannelError> {
-        let user = self
-            .ensure_auto_group_user(
-                platform_user_id,
-                platform_type,
-                channel_plugin_id,
-                display_name,
-            )
-            .await?;
-        info!(
-            channel_user_id = %user.channel_user_id,
-            platform_user_id = %platform_user_id,
-            channel_plugin_id,
-            authorization_kind = %user.authorization_kind,
-            "automatic-admission channel identity ensured without pairing approval"
-        );
-        Ok(user.channel_user_id)
-    }
-
-    /// Compatibility constructor for callers that own the returned task.
-    /// Application hosts should use [`Self::start_cleanup_timer_with_shutdown`]
-    /// and retain its handle until repository access has quiesced.
-    pub fn start_cleanup_timer(repo: Arc<dyn IChannelRepository>) -> JoinHandle<()> {
-        Self::start_cleanup_timer_with_shutdown(repo, CancellationToken::new())
     }
 
     /// Stop admitting sweeps on shutdown, then finish any already-started
@@ -1422,34 +1366,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            svc.get_internal_user_id("tg_42", "telegram", TEST_CHANNEL_PLUGIN_ID)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn compatibility_auto_admission_wrapper_never_approves_a_stranger() {
-        let (svc, repo, _bc) = make_service();
-        let channel_user_id = svc
-            .ensure_channel_user("cs_visitor", "lark", TEST_CHANNEL_PLUGIN_ID, "Visitor")
-            .await
-            .unwrap();
-
-        let users = repo.get_users();
-        assert_eq!(users.len(), 1);
-        assert_eq!(users[0].channel_user_id, channel_user_id);
-        assert_eq!(
-            users[0].authorization_kind,
-            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
-        );
-        assert!(
-            !svc.is_user_authorized("cs_visitor", "lark", TEST_CHANNEL_PLUGIN_ID)
-                .await
-                .unwrap()
-        );
     }
 
     #[tokio::test]
@@ -1543,16 +1459,14 @@ mod tests {
         }
     }
 
-    /// Regression: `start_cleanup_timer` existed but had no caller, so the
-    /// sweep never ran. This pins the timer behaviour itself — it must keep
-    /// invoking `cleanup_expired_pairings` once per `PAIRING_CLEANUP_INTERVAL`
-    /// (the assembly in nomifun-app now starts it at boot).
+    /// The production timer sweeps every interval and quiesces on shutdown.
     #[tokio::test(start_paused = true)]
     async fn cleanup_timer_periodically_purges_expired_codes() {
         let repo = Arc::new(MockRepo::new());
         repo.pairings.lock().unwrap().push(make_expired_row("222222"));
 
-        let handle = PairingService::start_cleanup_timer(repo.clone());
+        let shutdown = CancellationToken::new();
+        let handle = PairingService::start_cleanup_timer_with_shutdown(repo.clone(), shutdown.clone());
 
         // The paused clock auto-advances while the test sleeps, driving the
         // spawned interval deterministically. The first tick fires
@@ -1568,7 +1482,8 @@ mod tests {
         let second = pairings.iter().find(|p| p.code == "333333").unwrap();
         assert_eq!(second.status, "expired");
 
-        handle.abort();
+        shutdown.cancel();
+        handle.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

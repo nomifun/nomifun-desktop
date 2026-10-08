@@ -58,7 +58,11 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     files.sort();
-    assert_eq!(files, ["001_canonical_baseline.sql"]);
+    assert_eq!(files, [
+        "001_canonical_baseline.sql",
+        "002_simplify_plugin_library.sql",
+        "003_remove_agent_handshake_cache.sql",
+    ]);
 }
 
 #[tokio::test]

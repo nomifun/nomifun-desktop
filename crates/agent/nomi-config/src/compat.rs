@@ -71,7 +71,7 @@ pub struct ProviderCompat {
 
     /// 该模型是否支持图片输入(多模态)。None = 默认支持(true)。
     /// 为 Some(false) 时 OpenAI provider 的 build_messages 会剔除图片、改文字占位。
-    /// 由 VisionUnsupportedRegistry 在工厂构建时按 provider+model 注入,不持久化。
+    /// 由工厂按已选择协议的输入能力注入，不持久化。
     pub supports_image: Option<bool>,
 
     /// Require a non-empty `reasoning_content` field on assistant history

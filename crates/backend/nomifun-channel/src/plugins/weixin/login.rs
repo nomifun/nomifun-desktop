@@ -4,7 +4,6 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use super::api::WeixinApi;
-use super::types::{SseDoneEvent, SseErrorEvent, SseQrEvent};
 
 /// Default base URL for the iLink Bot login API.
 const LOGIN_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
@@ -15,7 +14,7 @@ const QR_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Maximum time to wait for QR code scan before timeout.
 const QR_LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// SSE event emitted during the WeChat QR code login flow.
+/// Progress emitted during the WeChat QR code login flow.
 #[derive(Debug, Clone)]
 pub enum WeixinLoginEvent {
     /// QR code ticket data — frontend renders this as a QR image.
@@ -33,16 +32,6 @@ pub enum WeixinLoginEvent {
 }
 
 impl WeixinLoginEvent {
-    /// SSE event name string.
-    pub fn event_name(&self) -> &'static str {
-        match self {
-            Self::Qr(_) => "qr",
-            Self::Scanned => "scanned",
-            Self::Done { .. } => "done",
-            Self::Error(_) => "error",
-        }
-    }
-
     /// Serialize as a single `channel.weixin-login` WS payload, using a `phase`
     /// field as the discriminator (the SSE event-name dimension is folded in).
     ///
@@ -66,41 +55,16 @@ impl WeixinLoginEvent {
             Self::Error(message) => serde_json::json!({ "phase": "error", "message": message }),
         }
     }
-
-    /// Serialize the event payload as JSON.
-    pub fn to_json_data(&self) -> String {
-        match self {
-            Self::Qr(ticket) => serde_json::to_string(&SseQrEvent {
-                qrcode_data: ticket.clone(),
-            })
-            .unwrap_or_default(),
-            Self::Scanned => "{}".into(),
-            Self::Done {
-                account_id,
-                bot_token,
-                base_url,
-            } => serde_json::to_string(&SseDoneEvent {
-                account_id: account_id.clone(),
-                bot_token: bot_token.clone(),
-                base_url: base_url.clone(),
-            })
-            .unwrap_or_default(),
-            Self::Error(message) => serde_json::to_string(&SseErrorEvent {
-                message: message.clone(),
-            })
-            .unwrap_or_default(),
-        }
-    }
 }
 
-/// Start the WeChat QR code login flow, returning a channel of SSE events.
+/// Start the WeChat QR code login flow, returning its progress channel.
 pub fn weixin_login_stream() -> mpsc::Receiver<WeixinLoginEvent> {
     let (tx, rx) = mpsc::channel(16);
     tokio::spawn(login_flow(tx));
     rx
 }
 
-/// Internal login flow that drives the SSE event sequence.
+/// Internal login flow that drives the login progress sequence.
 async fn login_flow(tx: mpsc::Sender<WeixinLoginEvent>) {
     let api = match WeixinApi::new(LOGIN_BASE_URL, "", Duration::from_secs(40)) {
         Ok(api) => api,
@@ -225,58 +189,6 @@ async fn login_flow(tx: mpsc::Sender<WeixinLoginEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn login_event_names() {
-        assert_eq!(WeixinLoginEvent::Qr("t".into()).event_name(), "qr");
-        assert_eq!(WeixinLoginEvent::Scanned.event_name(), "scanned");
-        assert_eq!(
-            WeixinLoginEvent::Done {
-                account_id: "a".into(),
-                bot_token: "b".into(),
-                base_url: "c".into(),
-            }
-            .event_name(),
-            "done"
-        );
-        assert_eq!(WeixinLoginEvent::Error("err".into()).event_name(), "error");
-    }
-
-    #[test]
-    fn login_event_qr_json() {
-        let evt = WeixinLoginEvent::Qr("ticket_123".into());
-        let json = evt.to_json_data();
-        assert!(json.contains("qrcodeData"));
-        assert!(json.contains("ticket_123"));
-    }
-
-    #[test]
-    fn login_event_scanned_json() {
-        let evt = WeixinLoginEvent::Scanned;
-        assert_eq!(evt.to_json_data(), "{}");
-    }
-
-    #[test]
-    fn login_event_done_json() {
-        let evt = WeixinLoginEvent::Done {
-            account_id: "acc_1".into(),
-            bot_token: "tok_1".into(),
-            base_url: "https://ilinkai.weixin.qq.com".into(),
-        };
-        let json = evt.to_json_data();
-        assert!(json.contains("accountId"));
-        assert!(json.contains("acc_1"));
-        assert!(json.contains("botToken"));
-        assert!(json.contains("tok_1"));
-        assert!(json.contains("baseUrl"));
-    }
-
-    #[test]
-    fn login_event_error_json() {
-        let evt = WeixinLoginEvent::Error("timeout".into());
-        let json = evt.to_json_data();
-        assert!(json.contains(r#""message":"timeout"#));
-    }
 
     #[test]
     fn to_ws_payload_phases() {

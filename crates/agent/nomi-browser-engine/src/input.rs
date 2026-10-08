@@ -352,34 +352,6 @@ async fn dispatch_mouse(
     Ok(())
 }
 
-/// 在 `point`（CSS 像素，**零 DPR**）左键单击：`mousePressed` + `mouseReleased`（button=left,
-/// clickCount=1）。`point` 来自 [`get_content_quads`] → [`pick_click_point`]，原样下发。
-pub async fn dispatch_click(
-    conn: &Connection,
-    session: &str,
-    point: Point,
-) -> Result<(), BrowserError> {
-    dispatch_mouse(
-        conn,
-        session,
-        DispatchMouseEventType::MousePressed,
-        point,
-        Some(MouseButton::Left),
-        Some(1),
-    )
-    .await?;
-    dispatch_mouse(
-        conn,
-        session,
-        DispatchMouseEventType::MouseReleased,
-        point,
-        Some(MouseButton::Left),
-        Some(1),
-    )
-    .await?;
-    Ok(())
-}
-
 /// 把鼠标移到 `point`（CSS 像素，**零 DPR**）：`mouseMoved`（hover 用，无按键）。
 pub async fn dispatch_mouse_move(
     conn: &Connection,

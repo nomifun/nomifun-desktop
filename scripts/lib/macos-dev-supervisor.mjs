@@ -36,7 +36,7 @@ export function validateDevelopmentLaunch(request, root) {
   const program = resolve(request.program ?? '');
   const within = relative(cache, program);
   if (!within || within.startsWith('..') || isAbsolute(within)
-    || !program.endsWith('.app/Contents/MacOS/nomifun-desktop')) {
+    || !program.endsWith(join('.app', 'Contents', 'MacOS', 'nomifun-desktop'))) {
     throw new Error('macOS development launch must use the owned complete app bundle');
   }
   if (!Array.isArray(request.args) || !request.args.every(arg => typeof arg === 'string')

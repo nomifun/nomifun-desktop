@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_tools::{
     Tool, ToolExecutionContext,
     registry::ToolRegistry,

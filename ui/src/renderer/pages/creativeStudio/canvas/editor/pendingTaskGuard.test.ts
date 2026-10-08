@@ -9,7 +9,6 @@ import { describe, expect, test } from 'bun:test';
 import { canvasCommands, createInitialCanvasState } from '../core';
 import { testDocument, testEdge, testNode, testUuid } from '../core/testFixtures';
 import {
-  canvasCommandPreservesPendingTaskOwners,
   pendingTaskCommandGuard,
 } from './pendingTaskGuard';
 
@@ -60,28 +59,16 @@ describe('canvas pending task owner guard', () => {
     state.history.past = [testDocument()];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        [owner.data.taskId as string],
-        canvasCommands.deleteSelection({ nodeIds: [owner.id] }),
-      ),
+      pendingTaskCommandGuard(state, canvasCommands.deleteSelection({ nodeIds: [owner.id] }), [owner.data.taskId as string]).allowed,
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        [owner.data.taskId as string],
-        canvasCommands.updateNode({
+      pendingTaskCommandGuard(state, canvasCommands.updateNode({
           ...owner,
           data: { ...owner.data, taskId: null },
-        }),
-      ),
+        }), [owner.data.taskId as string]).allowed,
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        [owner.data.taskId as string],
-        canvasCommands.undo(),
-      ),
+      pendingTaskCommandGuard(state, canvasCommands.undo(), [owner.data.taskId as string]).allowed,
     ).toBe(false);
   });
 
@@ -94,21 +81,13 @@ describe('canvas pending task owner guard', () => {
     const taskIds = [owner.data.taskId as string];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.moveNodes({ x: 10, y: 4 }, { nodeIds: [text.id] }),
-      ),
+      pendingTaskCommandGuard(state, canvasCommands.moveNodes({ x: 10, y: 4 }, { nodeIds: [text.id] }), taskIds).allowed,
     ).toBe(true);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.reconcileRuntimeNode({
+      pendingTaskCommandGuard(state, canvasCommands.reconcileRuntimeNode({
           ...owner,
           data: { ...owner.data, status: 'succeeded' },
-        }),
-      ),
+        }), taskIds).allowed,
     ).toBe(true);
   });
 
@@ -136,38 +115,22 @@ describe('canvas pending task owner guard', () => {
     const taskIds = [owner.data.taskId as string];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.deleteSelection({ nodeIds: [source.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.deleteSelection({ nodeIds: [source.id] }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.updateNode({
+      pendingTaskCommandGuard(state, canvasCommands.updateNode({
           ...source,
           data: { ...source.data, assetId: testUuid(40) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.moveNodes({ x: 10, y: 4 }, { nodeIds: [source.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.moveNodes({ x: 10, y: 4 }, { nodeIds: [source.id] }), taskIds).allowed
     ).toBe(true);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.reconcileRuntimeNode({
+      pendingTaskCommandGuard(state, canvasCommands.reconcileRuntimeNode({
           ...source,
           data: { ...source.data, assetId: testUuid(40) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(true);
   });
 
@@ -191,25 +154,13 @@ describe('canvas pending task owner guard', () => {
     const taskIds = [owner.data.taskId as string];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.deleteSelection({ nodeIds: [reference.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.deleteSelection({ nodeIds: [reference.id] }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.deleteEdges([edge.id])
-      )
+      pendingTaskCommandGuard(state, canvasCommands.deleteEdges([edge.id]), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.moveNodes({ x: 8, y: 4 }, { nodeIds: [reference.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.moveNodes({ x: 8, y: 4 }, { nodeIds: [reference.id] }), taskIds).allowed
     ).toBe(true);
   });
 
@@ -233,41 +184,25 @@ describe('canvas pending task owner guard', () => {
     const taskIds = [owner.data.taskId as string];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.deleteSelection({ nodeIds: [source.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.deleteSelection({ nodeIds: [source.id] }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.updateNode({
+      pendingTaskCommandGuard(state, canvasCommands.updateNode({
           ...owner,
           data: { ...owner.data, operation: null },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.updateNode({
+      pendingTaskCommandGuard(state, canvasCommands.updateNode({
           ...source,
           data: { ...source.data, assetId: testUuid(41) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.reconcileRuntimeNode({
+      pendingTaskCommandGuard(state, canvasCommands.reconcileRuntimeNode({
           ...source,
           data: { ...source.data, assetId: testUuid(41) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(true);
   });
 
@@ -293,31 +228,19 @@ describe('canvas pending task owner guard', () => {
     const taskIds = [owner.data.taskId as string];
 
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.deleteSelection({ nodeIds: [source.id] })
-      )
+      pendingTaskCommandGuard(state, canvasCommands.deleteSelection({ nodeIds: [source.id] }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.updateNode({
+      pendingTaskCommandGuard(state, canvasCommands.updateNode({
           ...source,
           data: { ...source.data, assetId: testUuid(42) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(false);
     expect(
-      canvasCommandPreservesPendingTaskOwners(
-        state,
-        taskIds,
-        canvasCommands.reconcileRuntimeNode({
+      pendingTaskCommandGuard(state, canvasCommands.reconcileRuntimeNode({
           ...source,
           data: { ...source.data, assetId: testUuid(42) },
-        })
-      )
+        }), taskIds).allowed
     ).toBe(true);
   });
 });

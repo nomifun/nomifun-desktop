@@ -35,25 +35,9 @@ export type AgentEnvEntry = {
  * the struct on the backend — the frontend should read them defensively
  * because older rows may not have every field populated.
  *
- * Whether the agent supports session/load is NOT in this bag — read
- * `handshake.agent_capabilities.load_session` instead, since the runtime
- * advertises that during init.
  */
 export type BehaviorPolicy = {
   supports_side_question?: boolean;
-};
-
-/**
- * Handshake-derived fields captured from the agent's session response.
- * Each field is opaque JSON the backend passes through verbatim; typing
- * happens in whatever call site actually consumes it.
- */
-export type AgentHandshake = {
-  agent_capabilities?: unknown;
-  auth_methods?: unknown;
-  config_options?: unknown;
-  available_models?: unknown;
-  available_commands?: unknown;
 };
 
 /**
@@ -94,7 +78,6 @@ export type AgentMetadata = {
 
   behavior_policy?: BehaviorPolicy;
 
-  handshake?: AgentHandshake;
 };
 
 /** Shared fetcher for DETECTED_AGENTS_SWR_KEY — single source of truth. */

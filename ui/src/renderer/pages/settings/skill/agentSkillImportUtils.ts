@@ -32,11 +32,6 @@ export type AgentSkillImportSummary = {
   importableCount: number;
 };
 
-type ImportedSkillForCustomList = {
-  name: string;
-  alreadyImported: boolean;
-};
-
 const rowKey = (source: string, skill: ExternalAgentSkill) => `${source}::${skill.name}::${skill.path}`;
 
 export const buildAgentSkillRows = (
@@ -56,17 +51,6 @@ export const buildAgentSkillRows = (
 
 export const defaultSelectedAgentSkillKeys = (rows: AgentSkillImportRow[]): string[] =>
   rows.filter((row) => !row.alreadyImported).map((row) => row.key);
-
-export const mergeImportedSkillNames = (current: string[], imported: string[]): string[] =>
-  Array.from(new Set([...current, ...imported.filter((name) => name.trim().length > 0)]));
-
-export const customSkillNamesForImportedAgentSkills = (
-  imported: ImportedSkillForCustomList[],
-  existingCustomSkillNames: Set<string>
-): string[] =>
-  imported
-    .filter((skill) => !skill.alreadyImported || existingCustomSkillNames.has(skill.name))
-    .map((skill) => skill.name);
 
 export const summarizeAgentSkillImport = (
   _rows: AgentSkillImportRow[],

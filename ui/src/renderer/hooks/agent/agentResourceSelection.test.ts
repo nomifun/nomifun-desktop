@@ -3,7 +3,6 @@ import {
   requiredAgentResourcePickerKinds,
   resolveAgentResourceSelections,
   selectedKnowledgeResourceIds,
-  selectedCapabilityIds,
   allowsMultipleMcpServers,
 } from './agentResourceSelection';
 
@@ -20,9 +19,7 @@ describe('Agent resource selection contract', () => {
   });
 
   test('uses the enabled capability model for frozen multi-server MCP resources', () => {
-    const capabilities = selectedCapabilityIds([
-      { capability: { id: `nomi.mcp.v1.${'a'.repeat(64)}` } },
-    ]);
+    const capabilities = new Set([`nomi.mcp.v1.${'a'.repeat(64)}`]);
     expect(allowsMultipleMcpServers(capabilities)).toBe(true);
     expect(allowsMultipleMcpServers([])).toBe(false);
     expect(allowsMultipleMcpServers(['knowledge'])).toBe(false);

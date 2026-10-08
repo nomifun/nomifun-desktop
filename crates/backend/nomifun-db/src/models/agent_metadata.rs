@@ -1,8 +1,7 @@
 //! Row models and parameter structs for the `agent_metadata` table.
 //!
 //! JSON-encoded columns (`agent_source_info`, `args`, `env`,
-//! `native_skills_dirs`, `behavior_policy`, plus the ACP handshake
-//! snapshots) stay as opaque strings at this layer. The ai-agent crate
+//! `native_skills_dirs`, `behavior_policy`) stay as opaque strings at this layer. The ai-agent crate
 //! owns the schema of these payloads and decodes them on read.
 
 use nomifun_common::TimestampMs;
@@ -39,12 +38,6 @@ pub struct AgentMetadataRow {
 
     pub behavior_policy: Option<String>,
 
-    pub agent_capabilities: Option<String>,
-    pub auth_methods: Option<String>,
-    pub config_options: Option<String>,
-    pub available_models: Option<String>,
-    pub available_commands: Option<String>,
-
     /// Display ordering key — smaller values appear first.
     pub sort_order: i64,
 
@@ -75,23 +68,5 @@ pub struct UpsertAgentMetadataParams<'a> {
     pub env: Option<&'a str>,
     pub native_skills_dirs: Option<&'a str>,
     pub behavior_policy: Option<&'a str>,
-    pub agent_capabilities: Option<&'a str>,
-    pub auth_methods: Option<&'a str>,
-    pub config_options: Option<&'a str>,
-    pub available_models: Option<&'a str>,
-    pub available_commands: Option<&'a str>,
     pub sort_order: i64,
-}
-
-/// Partial update applied after an ACP initialize/authenticate handshake.
-///
-/// Every field is `Option<Option<&str>>` so the caller can distinguish
-/// "leave untouched" (outer `None`) from "clear to NULL" (inner `None`).
-#[derive(Debug, Clone, Default)]
-pub struct UpdateAgentHandshakeParams<'a> {
-    pub agent_capabilities: Option<Option<&'a str>>,
-    pub auth_methods: Option<Option<&'a str>>,
-    pub config_options: Option<Option<&'a str>>,
-    pub available_models: Option<Option<&'a str>>,
-    pub available_commands: Option<Option<&'a str>>,
 }

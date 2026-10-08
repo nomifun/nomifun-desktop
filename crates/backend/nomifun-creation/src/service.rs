@@ -1072,17 +1072,6 @@ impl CreationService {
         Ok(self.repo.conversation_message_creation_references(conversation_id, message_id).await?)
     }
 
-    /// Called under the conversation's existing deletion/reset admission fence.
-    /// Keep terminal task provenance so saved materials survive transcript deletion.
-    pub async fn cancel_conversation_tasks(&self, conversation_id: &str) -> Result<(), AppError> {
-        for task in self.repo.list_conversation_tasks(conversation_id).await? {
-            if matches!(task.status.as_str(), "queued" | "running") {
-                self.cancel_task(&task.creation_task_id).await?;
-            }
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     async fn create_test_task(
         self: &Arc<Self>,

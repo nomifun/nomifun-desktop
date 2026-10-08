@@ -25,14 +25,6 @@ export type SessionAgeBucket =
       count: number;
     };
 
-export function getSessionAgeDays(createdAt: number | undefined | null, now = Date.now()): number | null {
-  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) {
-    return null;
-  }
-
-  return Math.max(0, Math.floor((now - createdAt) / DAY_MS));
-}
-
 const dayStartOf = (timestamp: number): number => {
   const date = new Date(timestamp);
   date.setHours(0, 0, 0, 0);

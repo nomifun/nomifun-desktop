@@ -124,7 +124,7 @@ SPA ──HTTP/WS──▶ nomifun-conversation ──▶ nomifun-ai-agent::Agen
                               broadcast through nomifun-realtime to /ws
 ```
 
-`nomi-protocol` crate 定义了宿主/agent 的命令、事件与工具审批状态机；`nomifun-ai-agent::protocol::events::AgentStreamEvent` 把这些事件翻译成 SPA 能理解的 `WebSocketMessage`。
+Runtime 使用 typed `AgentEngineEvent`，由 `engine_journal` 写入同一 canonical Session。`nomifun-ai-agent::protocol::events::AgentStreamEvent` 提供 renderer 的实时展示投影，经 `WebSocketMessage` 送到 SPA；工具分类来自共享的 `nomi-types::tool::ToolCategory`。具体权限、暂停和恢复由 canonical owner 与原生 Runtime 管理，见 [Agent Session 架构](agent-session.zh.md)。
 
 第三方 agent CLI（Claude Code、Codex、Gemini CLI）不走这条通道：它们作为普通子进程运行在 `nomifun-terminal` 的 PTY session 里，后端持有伪终端而不解析它们的协议。见 [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
 

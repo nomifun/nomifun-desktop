@@ -124,14 +124,10 @@ export type TChatConversation = IChatConversation<
     maxTurns?: number;
     /** Last token usage stats */
     last_token_usage?: TokenUsageData;
-    /** Marks this nomi conversation as a desktop-companion's single per-companion
-     * session (单会话契约). Written by the backend at companion-session creation.
-     * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
-     * (CompanionChatPanel), and the work-conversation list filter. */
+    /** Marks the companion's single session. Written by the backend at creation
+     * and used to keep it out of the ordinary work-conversation list. */
     companion_session?: boolean;
-    /** The companion (桌面伙伴) this session belongs to, when `companion_session` is
-     * set. Resolves the companion profile for the constrained chat panel + the
-     * session-list group's active-row highlight. */
+    /** The companion this session belongs to when `companion_session` is set. */
     companion_id?: CompanionId;
     /** IM-channel platform when a companion turn originated from an external
      * channel (telegram/lark/…). Present on channel-sourced companion turns. */

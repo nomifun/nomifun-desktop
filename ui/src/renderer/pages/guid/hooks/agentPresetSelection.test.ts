@@ -9,7 +9,6 @@ import { describe, expect, test } from 'bun:test';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import {
   DEFAULT_GUID_AGENT_SELECTION,
-  getAgentPresetKey,
   isExecutableAgentPreset,
   normalizeGuidAgentSelection,
 } from './agentSelectionUtils';
@@ -39,10 +38,6 @@ describe('Guid Agent selection contract', () => {
 
     expect(isExecutableAgentPreset(stablePreset)).toBe(true);
     expect(isExecutableAgentPreset(draftOnly)).toBe(false);
-  });
-
-  test('uses preset_id as the selection key', () => {
-    expect(getAgentPresetKey(stablePreset)).toBe(stablePreset.preset_id);
   });
 
   test('normalizes legacy or invalid selections to the general Agent', () => {

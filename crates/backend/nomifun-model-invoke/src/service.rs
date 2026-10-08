@@ -188,13 +188,6 @@ impl ModelInvokeService {
         }
     }
 
-    /// Replace the realtime registry, primarily for deterministic session
-    /// adapter contract tests and embedders adding their own provider plugin.
-    pub fn with_realtime_registry(mut self, registry: RealtimeAdapterRegistry) -> Self {
-        self.realtime_registry = registry;
-        self
-    }
-
     /// The provider repository this service resolves against. Shared with
     /// callers (e.g. the creation engine) that pre-check provider existence
     /// before enqueueing work, so they don't need a second repo handle.

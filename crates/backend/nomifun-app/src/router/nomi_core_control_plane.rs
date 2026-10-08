@@ -190,12 +190,19 @@ async fn load_preset(
     pool: &SqlitePool,
     preset_id: &AgentPresetId,
 ) -> Result<Option<StoredPreset>, ControlPlaneError> {
+    load_preset_metadata(pool, preset_id, false).await
+}
+
+async fn load_preset_metadata(
+    pool: &SqlitePool, preset_id: &AgentPresetId, include_retired: bool,
+) -> Result<Option<StoredPreset>, ControlPlaneError> {
     let row: Option<(String, String, String, String, Option<i64>)> = sqlx::query_as(
         "SELECT preset_id, owner_ref_json, source_json, display_json, current_stable_revision \
          FROM agent_presets \
-         WHERE preset_id = ? AND retired_at_ms IS NULL",
+         WHERE preset_id = ? AND (? OR retired_at_ms IS NULL)",
     )
     .bind(preset_id.as_ref())
+    .bind(include_retired)
     .fetch_optional(pool)
     .await
     .map_err(sql)?;
@@ -533,6 +540,10 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         preset_id: &AgentPresetId,
     ) -> Result<Option<StoredPreset>, ControlPlaneError> {
         load_preset(&self.pool, preset_id).await
+    }
+
+    async fn get_bound_preset(&self, preset_id: &AgentPresetId) -> Result<Option<StoredPreset>, ControlPlaneError> {
+        load_preset_metadata(&self.pool, preset_id, true).await
     }
 
     async fn insert_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {

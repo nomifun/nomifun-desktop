@@ -15,7 +15,7 @@ const COMMAND_TOOL_FILES = new Set([
   'crates/agent/nomi-tools/src/exec_command.rs',
   'crates/agent/nomi-tools/src/write_stdin.rs',
 ]);
-const RETIRED_TEST_ONLY_FILES = [
+const RETIRED_TOOL_FILES = [
   'crates/agent/nomi-tools/src/pty.rs',
   'crates/agent/nomi-tools/src/persistent_shell.rs',
 ];
@@ -332,20 +332,6 @@ function findMatches(source, pattern) {
   }));
 }
 
-function manifestSections(source) {
-  const sections = [];
-  let current = '';
-  for (const [lineIndex, line] of source.split(/\r?\n/).entries()) {
-    const header = line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/);
-    if (header) {
-      current = header[1].trim();
-      continue;
-    }
-    sections.push({ section: current, line, lineIndex });
-  }
-  return sections;
-}
-
 function stringLiterals(source) {
   const literals = [];
   let index = 0;
@@ -453,10 +439,6 @@ function callPattern(names, prefix, suffix) {
   return new RegExp(`${prefix}(?:${alternatives})${suffix}`, 'g');
 }
 
-function isDevDependencySection(section) {
-  return section === 'dev-dependencies' || section.endsWith('.dev-dependencies');
-}
-
 function scanEntries(entries) {
   const normalizedEntries = entries.map(({ path, source }) => ({
     path: normalizePath(path),
@@ -478,10 +460,7 @@ function scanEntries(entries) {
 
   for (const { path, source } of normalizedEntries) {
     if (!path.endsWith('.rs')) continue;
-    if (
-      RETIRED_TEST_ONLY_FILES.includes(path) ||
-      path.split('/').includes('tests')
-    ) {
+    if (path.split('/').includes('tests')) {
       continue;
     }
     const production = productionMask(source);
@@ -636,28 +615,24 @@ function scanEntries(entries) {
   const toolsLibPath = 'crates/agent/nomi-tools/src/lib.rs';
   const toolsLib = byPath.get(toolsLibPath) ?? '';
   for (const module of ['pty', 'persistent_shell']) {
-    const gate = new RegExp(
-      String.raw`#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*pub\s+mod\s+${module}\s*;`,
-      'm',
-    );
-    if (!gate.test(lexicalMask(toolsLib))) {
+    if (new RegExp(String.raw`\bmod\s+${module}\s*;`).test(lexicalMask(toolsLib))) {
       report(
         toolsLibPath,
         toolsLib,
         toolsLib,
         Math.max(0, toolsLib.indexOf(`pub mod ${module};`)),
-        'retired-test-only-gate',
-        `${module}.rs must be compiled only under cfg(test)`,
+        'retired-tool-module',
+        `${module}.rs is retired; tests must use the current ProcessSupervisor`,
       );
     }
   }
-  for (const path of RETIRED_TEST_ONLY_FILES) {
-    if (!byPath.has(path)) {
+  for (const path of RETIRED_TOOL_FILES) {
+    if (byPath.has(path)) {
       violations.push({
         path,
         line: 1,
-        rule: 'retired-test-only-source',
-        detail: 'expected test-only compatibility source is missing',
+        rule: 'retired-tool-source',
+        detail: 'retired PTY implementations and their private tests must be deleted',
         snippet: '',
       });
     }
@@ -698,34 +673,19 @@ function scanEntries(entries) {
   }
 
   const toolsManifest = byPath.get(TOOLS_MANIFEST) ?? '';
-  let portablePtyDev = false;
-  for (const { section, line, lineIndex } of manifestSections(toolsManifest)) {
+  for (const [lineIndex, line] of toolsManifest.split(/\r?\n/).entries()) {
     if (!/^\s*portable-pty(?:\.workspace)?\s*=/.test(line)) continue;
-    if (isDevDependencySection(section)) {
-      portablePtyDev = true;
-    } else {
-      const index = toolsManifest
-        .split(/\r?\n/)
-        .slice(0, lineIndex)
-        .reduce((sum, item) => sum + item.length + 1, 0);
-      report(
-        TOOLS_MANIFEST,
-        toolsManifest,
-        toolsManifest,
-        index,
-        'portable-pty-production-dependency',
-        'nomi-tools may depend on portable-pty only through dev-dependencies',
-      );
-    }
-  }
-  if (!portablePtyDev) {
+    const index = toolsManifest
+      .split(/\r?\n/)
+      .slice(0, lineIndex)
+      .reduce((sum, item) => sum + item.length + 1, 0);
     report(
       TOOLS_MANIFEST,
       toolsManifest,
       toolsManifest,
-      0,
-      'portable-pty-test-dependency',
-      'test-only retired PTY modules require portable-pty under dev-dependencies',
+      index,
+      'portable-pty-production-dependency',
+      'nomi-tools delegates PTY ownership to ProcessSupervisor and cannot retain a private portable-pty dependency',
     );
   }
 
@@ -781,8 +741,7 @@ function selfTest() {
   const base = [
     {
       path: 'crates/agent/nomi-tools/src/lib.rs',
-      source:
-        '#[cfg(test)]\npub mod persistent_shell;\n#[cfg(test)]\npub mod pty;\n',
+      source: '',
     },
     ...COMMAND_TOOL_FILES.values().map((path) => ({
       path,
@@ -793,13 +752,9 @@ function selfTest() {
       source:
         'use nomi_process_runtime::{ProcessOwner, SessionId, OutputCursor, Transport};\n',
     },
-    ...RETIRED_TEST_ONLY_FILES.map((path) => ({
-      path,
-      source: 'fn compatibility_test_helper() {}\n',
-    })),
     {
       path: TOOLS_MANIFEST,
-      source: '[dependencies]\ntokio = "1"\n[dev-dependencies]\nportable-pty = "0.8"\n',
+      source: '[dependencies]\ntokio = "1"\n[dev-dependencies]\ntempfile = "3"\n',
     },
     {
       path: 'crates/shared/nomi-process-runtime/Cargo.toml',
@@ -807,6 +762,15 @@ function selfTest() {
     },
   ];
   assertNoViolation(base, 'baseline unexpectedly violates the boundary');
+
+  assertViolation(base.concat({ path: RETIRED_TOOL_FILES[0], source: 'fn obsolete_helper() {}' }),
+    'retired-tool-source', 'failed to reject a restored retired PTY source');
+  assertViolation(base.map((entry) => entry.path === 'crates/agent/nomi-tools/src/lib.rs'
+    ? { ...entry, source: '#[cfg(test)]\npub mod pty;\n' } : entry),
+    'retired-tool-module', 'failed to reject test-only restoration of the retired PTY module');
+  assertViolation(base.map((entry) => entry.path === TOOLS_MANIFEST
+    ? { ...entry, source: '[dev-dependencies]\nportable-pty = "0.8"\n' } : entry),
+    'portable-pty-production-dependency', 'failed to reject the retired test-only PTY dependency');
 
   assertViolation(
     base.concat({

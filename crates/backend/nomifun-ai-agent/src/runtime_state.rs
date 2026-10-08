@@ -116,38 +116,10 @@ impl AgentRuntimeState {
         }
     }
 
-    /// Wait for an actual terminal lifecycle transition without imposing a
-    /// business timeout.
-    ///
-    /// Teardown callers use this after closing process admission. Returning
-    /// merely because the runtime is `Pending` would create an authority gap:
-    /// an idle kill defers `Finished` until its process-tree fence completes.
-    pub async fn wait_until_finished_unbounded(&self) {
-        loop {
-            let notified = self.finished_notify.notified();
-            if matches!(self.status(), Some(ConversationStatus::Finished)) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
     // State transitions and event emission are centralized here.
 
     pub fn bump_activity(&self) {
         self.last_activity.store(now_ms(), Ordering::Relaxed);
-    }
-
-    /// Transition to `status`. Finished is absorbing — subsequent
-    /// transitions from Finished to anything else are no-ops (including
-    /// Finished → Finished, which is idempotent).
-    pub fn transition_to(&self, status: ConversationStatus) {
-        let mut guard = self.lifecycle.write().unwrap_or_else(|e| e.into_inner());
-        if matches!(guard.status, Some(ConversationStatus::Finished)) {
-            // Finished is the absorbing state; ignore further writes.
-            return;
-        }
-        guard.status = Some(status);
     }
 
     /// Force-reset the status so a new turn can emit Finish again.

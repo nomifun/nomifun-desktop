@@ -674,12 +674,6 @@ pub struct SharedCompanionConfig {
     /// Which companion new/unattributed activity defaults to.
     #[serde(deserialize_with = "deserialize_optional_companion_id")]
     pub default_companion_id: Option<String>,
-    /// Opt-in (default None = off): when set to a directory path, companion
-    /// `save` memories are ALSO mirrored into the nomi agent's file-memory there
-    /// (the §3.4 "消两库割裂" bridge), so the agent recalls companion-learned
-    /// facts. Enabling it intentionally surfaces companion memories in agent
-    /// sessions — that is the feature; default-off keeps the libraries separate.
-    pub bridge_to_memory_dir: Option<String>,
 }
 
 fn deserialize_optional_companion_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -788,6 +782,10 @@ impl SharedCompanionConfig {
             .get_mut("evolve")
             .and_then(serde_json::Value::as_object_mut)
             .and_then(|evolve| evolve.remove("reflect_enabled"))
+            .is_some();
+        removed_legacy_settings |= value
+            .as_object_mut()
+            .and_then(|object| object.remove("bridge_to_memory_dir"))
             .is_some();
         if let Some(collect) = value
             .get_mut("collect")
@@ -1035,7 +1033,6 @@ mod tests {
         let mut cfg = SharedCompanionConfig::default();
         cfg.collect.chat_user_messages = true;
         cfg.archive.enabled = true;
-        cfg.bridge_to_memory_dir = Some("/tmp/bridge".into());
         cfg.default_companion_id = Some(nomifun_common::CompanionId::new().into_string());
         cfg.save(dir.path()).unwrap();
 
@@ -1208,6 +1205,26 @@ mod tests {
         assert!(migrated["collect"].get("chat_assistant_replies").is_none());
         assert!(migrated["collect"].get("cron_runs").is_none());
         assert!(migrated["collect"].get("conversation_lifecycle").is_none());
+    }
+
+    #[test]
+    fn retired_memory_bridge_does_not_break_existing_config() {
+        for bridge in [serde_json::Value::Null, serde_json::json!("unused-memory-directory")] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut expected = SharedCompanionConfig::default();
+            expected.collect.chat_user_messages = true;
+            expected.default_companion_id = Some(CompanionId::new().into_string());
+            let mut value = serde_json::to_value(&expected).unwrap();
+            value["bridge_to_memory_dir"] = bridge;
+            let path = SharedCompanionConfig::config_path(dir.path());
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+            assert_eq!(SharedCompanionConfig::load(dir.path()).unwrap(), expected);
+            let rewritten: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(rewritten.get("bridge_to_memory_dir").is_none());
+            assert_eq!(rewritten, serde_json::to_value(expected).unwrap());
+        }
     }
 
     /// `evolve.reflect_enabled` was retired long before the whole `evolve` block

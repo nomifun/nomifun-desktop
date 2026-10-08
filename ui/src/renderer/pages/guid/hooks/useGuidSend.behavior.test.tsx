@@ -80,8 +80,13 @@ type FetchCall = {
 
 const realFetch = globalThis.fetch;
 let workspaceMetadata: ReturnType<typeof spyOn> | undefined;
+let sidebarConversations: ReturnType<typeof spyOn> | undefined;
 
 beforeEach(() => {
+  // The process-wide sidebar store listens to the launch refresh event. Its
+  // independent history fetch must not enter this hook's HTTP admission log.
+  sidebarConversations = spyOn(ipcBridge.database.getUserConversations, 'invoke')
+    .mockResolvedValue({ items: [], total: 0, has_more: false });
   workspaceMetadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({
     name: 'workspace',
     path: WORKSPACE,
@@ -457,6 +462,8 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   workspaceMetadata?.mockRestore();
   workspaceMetadata = undefined;
+  sidebarConversations?.mockRestore();
+  sidebarConversations = undefined;
 });
 
 describe('useGuidSend HTTP behavior', () => {

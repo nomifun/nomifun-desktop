@@ -8,121 +8,33 @@
 //! - probes each row's spawn command via `which()` so the `available`
 //!   field reflects PATH state right now (not a persisted column);
 //! - exposes lookups the factory and routes use (`get`,
-//!   `find_by_backend`, `list_by_agent_type`, etc.);
-//! - writes handshake payloads back to the row through
-//!   [`AgentRegistry::catalog_sender`] (serialised through a single
-//!   consumer task, see [`CatalogSender`]).
+//!   `find_builtin_by_backend`, `list_by_agent_type`, etc.).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nomifun_api_types::{AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy};
+use nomifun_api_types::{AgentEnvEntry, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy};
 use nomifun_common::{AgentType, AppError};
-use nomifun_db::{AgentMetadataRow, IAgentMetadataRepository, UpdateAgentHandshakeParams};
+use nomifun_db::{AgentMetadataRow, IAgentMetadataRepository};
 use nomifun_runtime::resolve_command_path;
 use serde_json::Value;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-
-/// Capacity of the catalog-sync MPSC channel. A single writer thread
-/// drains it serially, so the bound just sizes the burst we can absorb
-/// before producers start to back off.
-const CATALOG_SYNC_CHANNEL_CAPACITY: usize = 256;
-
-/// One unit of work submitted to the catalog sync consumer task.
-#[derive(Debug)]
-struct CatalogSyncMessage {
-    agent_metadata_id: String,
-    handshake: AgentHandshake,
-}
 
 pub struct AgentRegistry {
     repo: Arc<dyn IAgentMetadataRepository>,
     by_id: RwLock<HashMap<String, AgentMetadata>>,
-    /// MPSC sender shared with every catalog forwarder. Draining happens in a
-    /// single background task owned by this registry, so DB writes for the same
-    /// (id, field) serialize.
-    catalog_tx: mpsc::Sender<CatalogSyncMessage>,
 }
 
 impl AgentRegistry {
     pub fn new(repo: Arc<dyn IAgentMetadataRepository>) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel::<CatalogSyncMessage>(CATALOG_SYNC_CHANNEL_CAPACITY);
-        let this = Arc::new(Self {
+        Arc::new(Self {
             repo,
             by_id: RwLock::new(HashMap::new()),
-            catalog_tx: tx,
-        });
-
-        this.clone().spawn_catalog_consumer(rx);
-        this
+        })
     }
 
-    /// Drive the single consumer task. Runs until every sender (including
-    /// the one held by the registry itself) has been dropped — which only
-    /// happens at process shutdown because the registry lives as long as
-    /// `AppServices`.
-    fn spawn_catalog_consumer(self: Arc<Self>, mut rx: mpsc::Receiver<CatalogSyncMessage>) {
-        tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let Err(err) = self.apply_handshake_inner(&msg.agent_metadata_id, &msg.handshake).await {
-                    warn!(
-                        agent_metadata_id = %msg.agent_metadata_id,
-                        error = %err,
-                        "Catalog sync: apply_handshake failed"
-                    );
-                }
-            }
-            debug!("Catalog sync consumer task exiting — all senders dropped");
-        });
-    }
-
-    /// Persist handshake snapshot fields onto the row and refresh the
-    /// cached copy. Internal — production code writes through
-    /// [`AgentRegistry::catalog_sender`] so every write is serialized
-    /// through the single consumer task. Direct calls exist only for
-    /// tests and the consumer itself.
-    ///
-    /// `None` fields are left untouched (partial update).
-    async fn apply_handshake_inner(&self, id: &str, snapshot: &AgentHandshake) -> Result<(), AppError> {
-        let agent_capabilities = encode_optional(&snapshot.agent_capabilities, "agent_capabilities")?;
-        let auth_methods = encode_optional(&snapshot.auth_methods, "auth_methods")?;
-        let config_options = encode_optional(&snapshot.config_options, "config_options")?;
-        let available_models = encode_optional(&snapshot.available_models, "available_models")?;
-        let available_commands = encode_optional(&snapshot.available_commands, "available_commands")?;
-
-        let params = UpdateAgentHandshakeParams {
-            agent_capabilities: agent_capabilities.as_deref().map(Some),
-            auth_methods: auth_methods.as_deref().map(Some),
-            config_options: config_options.as_deref().map(Some),
-            available_models: available_models.as_deref().map(Some),
-            available_commands: available_commands.as_deref().map(Some),
-        };
-
-        let Some(row) = self
-            .repo
-            .apply_handshake(id, &params)
-            .await
-            .map_err(|e| AppError::Internal(format!("apply_handshake: {e}")))?
-        else {
-            return Ok(());
-        };
-
-        if let Some((meta, _)) = decode_row(row) {
-            self.by_id.write().await.insert(meta.agent_id.clone(), meta);
-        }
-        Ok(())
-    }
-}
-
-impl AgentRegistry {
-    /// Sender end of the catalog-sync MPSC, cloned by each catalog forwarder.
-    pub fn catalog_sender(&self) -> CatalogSender {
-        CatalogSender {
-            tx: self.catalog_tx.clone(),
-        }
-    }
     /// Reload every enabled row from the database and re-probe their
     /// spawn commands on `$PATH`.
     pub async fn hydrate(&self) -> Result<(), AppError> {
@@ -160,19 +72,6 @@ impl AgentRegistry {
             log_probe_result(meta, &reason);
         }
         log_availability_summary(guard.values(), "AgentRegistry refresh_availability complete");
-    }
-
-    /// Refetch every row from the repository, then re-resolve PATH.
-    ///
-    /// Called after any mutation that changed the set of rows on disk
-    /// (create/delete) or the spawn command of an existing row
-    /// (update). Pure refresh with no DB writes — just rebuilds the
-    /// in-memory snapshot so `list_all()` and `get()` return the latest
-    /// catalog state without waiting for the next process restart.
-    pub async fn invalidate_and_rehydrate(&self) -> Result<(), AppError> {
-        self.hydrate().await?;
-        self.refresh_availability().await;
-        Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Option<AgentMetadata> {
@@ -263,13 +162,6 @@ impl AgentRegistry {
         rows
     }
 
-    /// Clone-cheap handle to the underlying repo, for service-layer
-    /// helpers that need direct CRUD access without going through the
-    /// registry cache.
-    pub fn repo_handle(&self) -> &Arc<dyn IAgentMetadataRepository> {
-        &self.repo
-    }
-
 }
 
 /// A catalog row is visible to callers when the user has it enabled
@@ -296,14 +188,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
     let behavior_policy =
         decode_json_field(row.behavior_policy.as_deref(), "behavior_policy").unwrap_or_else(BehaviorPolicy::default);
 
-    let handshake = AgentHandshake {
-        agent_capabilities: parse_json(row.agent_capabilities.as_deref(), "agent_capabilities"),
-        auth_methods: parse_json(row.auth_methods.as_deref(), "auth_methods"),
-        config_options: parse_json(row.config_options.as_deref(), "config_options"),
-        available_models: parse_json(row.available_models.as_deref(), "available_models"),
-        available_commands: parse_json(row.available_commands.as_deref(), "available_commands"),
-    };
-
     let mut meta = AgentMetadata {
         agent_id: row.agent_id,
         icon: row.icon,
@@ -324,7 +208,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
         native_skills_dirs,
         behavior_policy,
         sort_order: row.sort_order,
-        handshake,
     };
 
     let (path, reason) = probe_with_reason(&meta);
@@ -456,47 +339,6 @@ fn parse_json(raw: Option<&str>, field: &str) -> Option<Value> {
     })
 }
 
-fn encode_optional(value: &Option<Value>, field: &str) -> Result<Option<String>, AppError> {
-    match value {
-        Some(v) => serde_json::to_string(v)
-            .map(Some)
-            .map_err(|e| AppError::Internal(format!("encode {field}: {e}"))),
-        None => Ok(None),
-    }
-}
-
-/// Cloneable handle for forwarding catalog-sync events into the registry's
-/// background consumer task. Dropping it is cheap
-/// and does not affect the consumer — the registry itself keeps one
-/// sender alive for the life of the process.
-#[derive(Clone)]
-pub struct CatalogSender {
-    tx: mpsc::Sender<CatalogSyncMessage>,
-}
-
-impl CatalogSender {
-    /// Submit a partial handshake update. Returns without error when the
-    /// channel is closed (only happens at shutdown) or full — callers do
-    /// not need to care because the consumer is best-effort.
-    pub fn send_partial(&self, agent_metadata_id: String, handshake: AgentHandshake) {
-        let msg = CatalogSyncMessage {
-            agent_metadata_id,
-            handshake,
-        };
-        if let Err(err) = self.tx.try_send(msg) {
-            use mpsc::error::TrySendError;
-            match err {
-                TrySendError::Full(_) => {
-                    warn!("Catalog sync channel full; dropping handshake update");
-                }
-                TrySendError::Closed(_) => {
-                    debug!("Catalog sync channel closed; consumer already shut down");
-                }
-            }
-        }
-    }
-}
-
 /// Why a row's spawn command failed to resolve at hydrate/refresh time.
 /// Carried alongside the resolved path so callers (logging, the
 /// `doctor` command) can explain availability without re-running the
@@ -584,7 +426,6 @@ mod tests {
 
     /// The internal `nomi` seed row — the only `agent_metadata` row that still
     /// decodes into an `AgentType`.
-    const NOMI_SEED_ROW_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
 
     async fn registry() -> Arc<AgentRegistry> {
         let db = init_database_memory().await.unwrap();
@@ -658,86 +499,6 @@ mod tests {
         assert!(nomi.available);
     }
 
-    #[tokio::test]
-    async fn apply_handshake_persists_json_payload() {
-        let reg = registry().await;
-        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
-
-        let snapshot = AgentHandshake {
-            auth_methods: Some(serde_json::json!([
-                {"type":"agent","id":"oauth","name":"OAuth"}
-            ])),
-            ..Default::default()
-        };
-        reg.apply_handshake_inner(&row.agent_id, &snapshot).await.unwrap();
-
-        let refreshed = reg.get(&row.agent_id).await.unwrap();
-        let methods = refreshed.handshake.auth_methods.unwrap();
-        assert_eq!(methods.as_array().unwrap().len(), 1);
-    }
-
-    /// Partial updates must leave unrelated columns untouched.
-    ///
-    /// Three consecutive writes target three different columns — each
-    /// later write only carries one `Some(..)` field, the rest are
-    /// `None`. After all three land, every earlier value must still be
-    /// readable. This locks the contract that `None` means "don't
-    /// touch" (as opposed to "clear to null"), which is what every
-    /// incremental catalog write site relies on.
-    #[tokio::test]
-    async fn apply_handshake_is_partial_does_not_clobber_siblings() {
-        let reg = registry().await;
-        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
-
-        // Write #1: agent_capabilities only.
-        reg.apply_handshake_inner(
-            &row.agent_id,
-            &AgentHandshake {
-                agent_capabilities: Some(serde_json::json!({"load_session": true})),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        // Write #2: auth_methods only. Capabilities must survive.
-        reg.apply_handshake_inner(
-            &row.agent_id,
-            &AgentHandshake {
-                auth_methods: Some(serde_json::json!([{"type": "agent", "id": "oauth"}])),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        // Write #3: available_models only. Capabilities + auth_methods must survive.
-        reg.apply_handshake_inner(
-            &row.agent_id,
-            &AgentHandshake {
-                available_models: Some(serde_json::json!([{"id": "model", "name": "Model"}])),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let refreshed = reg.get(&row.agent_id).await.unwrap();
-        assert_eq!(
-            refreshed.handshake.agent_capabilities,
-            Some(serde_json::json!({"load_session": true})),
-            "agent_capabilities must survive later partial writes"
-        );
-        assert!(
-            refreshed.handshake.auth_methods.is_some(),
-            "auth_methods must survive the later available_models write"
-        );
-        assert!(refreshed.handshake.available_models.is_some());
-        // The untouched fields stay untouched (still None from seed).
-        assert!(refreshed.handshake.config_options.is_none());
-        assert!(refreshed.handshake.available_commands.is_none());
-    }
-
     /// `diagnostic_snapshot` returns one entry per row, populates a
     /// reason for every unavailable row, and leaves available rows
     /// without one.
@@ -776,61 +537,4 @@ mod tests {
         assert!(nomi.1.is_none());
     }
 
-    /// The `apply_handshake` path still backfills NULL `agent_capabilities`
-    /// on first handshake after the old Team metadata was removed from the
-    /// published agent shape.
-    #[tokio::test]
-    async fn handshake_backfills_capabilities() {
-        let reg = registry().await;
-        let id = NOMI_SEED_ROW_ID;
-
-        let before = reg.get(id).await.unwrap();
-        assert!(before.handshake.agent_capabilities.is_none());
-
-        // First successful handshake delivers MCP capabilities.
-        reg.apply_handshake_inner(
-            id,
-            &AgentHandshake {
-                agent_capabilities: Some(serde_json::json!({
-                    "mcp_capabilities": { "stdio": true }
-                })),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let after = reg.get(id).await.unwrap();
-        assert!(
-            after.handshake.agent_capabilities.is_some(),
-            "agent_capabilities must be backfilled from the handshake"
-        );
-    }
-
-    /// An empty snapshot is a no-op — no column gets overwritten.
-    #[tokio::test]
-    async fn apply_handshake_with_empty_snapshot_is_noop() {
-        let reg = registry().await;
-        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
-
-        reg.apply_handshake_inner(
-            &row.agent_id,
-            &AgentHandshake {
-                agent_capabilities: Some(serde_json::json!({"x": 1})),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        reg.apply_handshake_inner(&row.agent_id, &AgentHandshake::default())
-            .await
-            .unwrap();
-
-        let refreshed = reg.get(&row.agent_id).await.unwrap();
-        assert_eq!(
-            refreshed.handshake.agent_capabilities,
-            Some(serde_json::json!({"x": 1}))
-        );
-    }
 }

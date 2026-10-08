@@ -10,7 +10,6 @@ import {
   capabilityOf,
   capabilitySupportsTrait,
   modelHealthOf,
-  modelNamesOf,
   modelSupportsTask,
   toProviderModelInput,
 } from './providerModels';
@@ -44,9 +43,8 @@ const row = (model: string, extra?: Partial<ProviderModelResponse>): ProviderMod
 });
 
 describe('nested provider models', () => {
-  test('reads names and task-scoped capability health from the same model row', () => {
+  test('reads task-scoped capability health from the same model row', () => {
     const provider = { models: [row('gpt-4o'), row('o4-mini')] };
-    expect(modelNamesOf(provider)).toEqual(['gpt-4o', 'o4-mini']);
     expect(capabilityOf(provider, 'gpt-4o', 'chat')?.protocol).toBe('openai.chat_text');
     expect(modelHealthOf(provider, 'gpt-4o', 'chat')).toEqual({ status: 'healthy', latency: 120 });
     expect(modelHealthOf(provider, 'gpt-4o', 'embedding')).toBeUndefined();

@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 nomi-types.workspace    = true
-nomi-protocol.workspace = true
 nomi-tools.workspace    = true
 nomi-config.workspace   = true
 nomi-process-runtime.workspace = true

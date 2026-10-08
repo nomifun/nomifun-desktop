@@ -56,18 +56,6 @@ pub enum NotificationDeliveryStatus {
     },
 }
 
-impl NotificationDeliveryStatus {
-    pub fn is_terminal_success(&self) -> bool {
-        matches!(
-            self,
-            Self::Delivered { .. }
-                | Self::SkippedUnbound
-                | Self::SkippedDisabled { .. }
-                | Self::SkippedFiltered { .. }
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,32 +66,6 @@ mod tests {
         assert_eq!(
             NOTIFICATION_PLATFORM_SERVICE_ID,
             "notification.configuration"
-        );
-    }
-
-    #[test]
-    fn delivery_status_distinguishes_skips_failures_and_success() {
-        assert!(NotificationDeliveryStatus::SkippedUnbound.is_terminal_success());
-        assert!(
-            NotificationDeliveryStatus::Delivered {
-                webhook_id: "hook-a".into()
-            }
-            .is_terminal_success()
-        );
-        assert!(
-            !NotificationDeliveryStatus::Failed {
-                webhook_id: Some("hook-a".into()),
-                code: "NOTIFICATION_DELIVERY_FAILED",
-            }
-            .is_terminal_success()
-        );
-        assert!(
-            !NotificationDeliveryStatus::OutcomeUnknown {
-                webhook_id: "hook-a".into(),
-                code: "NOTIFICATION_DELIVERY_OUTCOME_UNKNOWN",
-                recovery: "do not retry automatically",
-            }
-            .is_terminal_success()
         );
     }
 }

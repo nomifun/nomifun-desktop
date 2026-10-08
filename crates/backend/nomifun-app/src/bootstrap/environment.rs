@@ -790,7 +790,7 @@ mod tests {
         let database = nomifun_db::init_database(&path).await.unwrap();
         // Keep the current schema valid so rejection comes from the unknown
         // receipt lineage rather than bypassing its generation CHECK.
-        sqlx::query("UPDATE _sqlx_migrations SET version = 6")
+        sqlx::query("UPDATE _sqlx_migrations SET version = version + 1 WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
             .execute(database.pool())
             .await
             .unwrap();

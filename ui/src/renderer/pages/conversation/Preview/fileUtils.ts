@@ -80,15 +80,3 @@ export const getContentTypeByExtension = (file_path: string): PreviewContentType
   // 未找到匹配的扩展名，默认为 code / No matching extension found, default to code
   return 'code';
 };
-
-/**
- * 检查文件是否为文本类型（可编辑）
- * Check if file is a text type (editable)
- *
- * @param file_path - 文件路径 / File path
- * @returns 是否为文本类型 / Whether it's a text type
- */
-export const isTextFile = (file_path: string): boolean => {
-  const contentType = getContentTypeByExtension(file_path);
-  return ['markdown', 'html', 'code'].includes(contentType);
-};

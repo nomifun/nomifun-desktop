@@ -15,8 +15,6 @@ pub struct AgentInteraction {
     pub voice: Option<AgentVoiceInteraction>,
 }
 impl AgentInteraction { pub fn is_empty(&self) -> bool { self.voice.is_none() } }
-pub type AgentInteractionConfig = AgentInteraction;
-pub type AgentVoiceConfig = AgentVoiceInteraction;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

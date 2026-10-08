@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { getContentTypeByExtension, isTextFile } from './fileUtils';
+import { getContentTypeByExtension } from './fileUtils';
 
 describe('HTML preview classification', () => {
   test('classifies HTML by extension regardless of basename or path separator', () => {
@@ -14,9 +14,5 @@ describe('HTML preview classification', () => {
     expect(getContentTypeByExtension('/workspace/plugin.html')).toBe('html');
     expect(getContentTypeByExtension(String.raw`C:\workspace\PLUGIN.HTML`)).toBe('html');
     expect(getContentTypeByExtension('document.htm')).toBe('html');
-  });
-
-  test('keeps ordinary HTML files editable as text previews', () => {
-    expect(isTextFile('/workspace/page.html')).toBe(true);
   });
 });

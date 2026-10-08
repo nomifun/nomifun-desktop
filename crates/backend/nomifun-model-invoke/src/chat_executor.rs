@@ -319,24 +319,6 @@ impl SingleAttemptHttpExecutor {
         }
     }
 
-    pub fn with_authenticator(
-        mut self,
-        authenticator: Arc<dyn SingleAttemptAuthenticator>,
-    ) -> Self {
-        self.authenticator = authenticator;
-        self
-    }
-
-    pub fn with_max_line_bytes(mut self, max_line_bytes: usize) -> Result<Self, InvokeError> {
-        if max_line_bytes == 0 || max_line_bytes > sse::MAX_FRAME_BYTES {
-            return Err(InvokeError::config(
-                "single-attempt stream line limit must be between 1 byte and 16 MiB",
-            ));
-        }
-        self.max_line_bytes = max_line_bytes;
-        Ok(self)
-    }
-
     /// Execute one request.  This method intentionally has no retry loop,
     /// backoff, key rotation, or alternate credential lookup.
     pub async fn open_stream(

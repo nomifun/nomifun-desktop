@@ -21,15 +21,11 @@ import {
   canvasAudioComposeConfigForReference,
   canvasAudioComposeConfigFromTask,
   canvasAudioComposeDraftFromState,
-  canvasAudioComposeFieldSupport,
-  canvasAudioComposeMaxTextLength,
   canvasAudioComposeProtocolProfile,
   canvasAudioComposeResumeRequests,
   canvasAudioComposeSettings,
   canvasAudioComposeSourceAssetId,
   canvasAudioComposeSourceNodeId,
-  canvasAudioComposeTaskSummary,
-  canvasAudioComposeVoiceRequired,
   canvasAudioComposeVoiceAfterModelChange,
   isCanvasAudioComposeConfig,
   latestCanvasAudioComposeConfig,
@@ -252,7 +248,7 @@ describe('canvas audio composer product model', () => {
   });
 
   test('uses exact protocol profiles and minimizes unknown protocols', () => {
-    expect(canvasAudioComposeFieldSupport('openai.audio_speech')).toEqual({
+    expect(canvasAudioComposeProtocolProfile('openai.audio_speech').fieldSupport).toEqual({
       voice: true,
       format: true,
       speed: false,
@@ -270,12 +266,12 @@ describe('canvas audio composer product model', () => {
       voiceRequired: false,
       maxTextLength: 2_000,
     });
-    expect(canvasAudioComposeVoiceRequired('stepfun.audio_speech')).toBe(true);
-    expect(canvasAudioComposeVoiceRequired('siliconflow.audio_speech')).toBe(
+    expect(canvasAudioComposeProtocolProfile('stepfun.audio_speech').voiceRequired).toBe(true);
+    expect(canvasAudioComposeProtocolProfile('siliconflow.audio_speech').voiceRequired).toBe(
       true
     );
-    expect(canvasAudioComposeVoiceRequired('minimax.t2a')).toBe(false);
-    expect(canvasAudioComposeMaxTextLength('future.audio')).toBe(4_096);
+    expect(canvasAudioComposeProtocolProfile('minimax.t2a').voiceRequired).toBe(false);
+    expect(canvasAudioComposeProtocolProfile('future.audio').maxTextLength).toBe(4_096);
 
     const deepgram = prepareFixture({
       protocol: 'deepgram.speak_rest',
@@ -469,11 +465,6 @@ describe('canvas audio composer product model', () => {
       model: { providerId: PROVIDER_ID, model: 'audio-v1' },
       voice: 'nova',
       format: 'wav',
-    });
-    expect(canvasAudioComposeTaskSummary(prepared.configNode)).toEqual({
-      state: 'queued',
-      pendingCount: 1,
-      message: undefined,
     });
 
     const running = taskFor(prepared);

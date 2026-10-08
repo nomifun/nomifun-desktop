@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_types::file_state::FileState;
 use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
 

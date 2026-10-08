@@ -12,7 +12,6 @@ import {
   Dot,
   Error,
   FolderOpen,
-  GridFour,
   Group,
   HandDrag,
   Loading,
@@ -22,7 +21,6 @@ import {
   Redo,
   Robot,
   Setting,
-  Square,
   Text,
   Timeline,
   Undo,
@@ -44,12 +42,10 @@ import CreativeResourceDialog from '../../components/CreativeResourceDialog';
 import styles from './CreativeCanvasChrome.module.css';
 import CreativeCanvasTitle from './CreativeCanvasTitle';
 import {
-  CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
   toggleCreativeCanvasPanel,
   toggleCreativeCanvasTool,
-  type CreativeCanvasChromeBackground,
   type CreativeCanvasChromeNodeKind,
   type CreativeCanvasChromeProps,
   type CreativeCanvasChromeSaveStatus,
@@ -65,12 +61,6 @@ const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   audio: 'creativeStudio.canvas.nodeKinds.audio',
   timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
-};
-
-const BACKGROUND_LABEL_KEYS: Record<CreativeCanvasChromeBackground, string> = {
-  dots: 'creativeStudio.canvas.backgrounds.dots',
-  lines: 'creativeStudio.canvas.backgrounds.lines',
-  blank: 'creativeStudio.canvas.backgrounds.blank',
 };
 
 const LEFT_LABEL_KEYS: Record<CreativeCanvasLeftView, string> = {
@@ -169,12 +159,6 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
   }
 }
 
-function backgroundIcon(background: CreativeCanvasChromeBackground): React.ReactNode {
-  if (background === 'dots') return <Dot {...iconProps} />;
-  if (background === 'lines') return <GridFour {...iconProps} />;
-  return <Square {...iconProps} />;
-}
-
 function leftIcon(view: CreativeCanvasLeftView): React.ReactNode {
   if (view === 'canvas') return <Platte {...iconProps} />;
   if (view === 'assets') return <FolderOpen {...iconProps} />;
@@ -256,48 +240,6 @@ export const CreativeCanvasNodeMenu: React.FC<CreativeCanvasNodeMenuProps> = ({
           </button>
         ))}
       </div>
-    </div>
-  );
-};
-
-export interface CreativeCanvasBackgroundMenuProps {
-  value: CreativeCanvasChromeBackground;
-  disabled?: boolean;
-  onChange(background: CreativeCanvasChromeBackground): void;
-}
-
-export const CreativeCanvasBackgroundMenu: React.FC<CreativeCanvasBackgroundMenuProps> = ({
-  value,
-  disabled,
-  onChange,
-}) => {
-  const { t } = useTranslation();
-  const label = t('creativeStudio.canvas.chrome.canvasBackground');
-
-  return (
-    <div
-      className={styles.backgroundMenu}
-      role='menu'
-      aria-label={label}
-      data-canvas-background-menu
-    >
-      <div className={styles.menuHeading}>{label}</div>
-      {CREATIVE_CANVAS_CHROME_BACKGROUNDS.map((background) => (
-        <button
-          key={background}
-          type='button'
-          role='menuitemradio'
-          aria-checked={background === value}
-          data-background={background}
-          data-active={background === value || undefined}
-          disabled={disabled}
-          onClick={() => onChange(background)}
-        >
-          {backgroundIcon(background)}
-          <span>{t(BACKGROUND_LABEL_KEYS[background])}</span>
-          {background === value ? <CheckOne {...iconProps} /> : null}
-        </button>
-      ))}
     </div>
   );
 };

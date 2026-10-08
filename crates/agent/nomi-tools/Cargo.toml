@@ -15,7 +15,6 @@ path = "src/bin/pty_test_helper.rs"
 
 [dependencies]
 nomi-types.workspace    = true
-nomi-protocol.workspace = true
 nomi-config.workspace   = true
 nomi-process-runtime.workspace = true
 
@@ -36,9 +35,6 @@ which.workspace       = true
 tempfile.workspace    = true
 git2.workspace        = true
 
-
-[dev-dependencies]
-portable-pty.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

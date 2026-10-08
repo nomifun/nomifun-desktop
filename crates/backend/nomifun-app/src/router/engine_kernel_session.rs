@@ -1206,14 +1206,6 @@ impl EngineKernelSession {
         Ok(())
     }
 
-    /// Observation only; callers must also join tool tasks and account for
-    /// unread outcomes before capability transitions or terminal publication.
-    pub async fn processes_quiescent(&self) -> Result<bool, AppError> {
-        self.wave2
-            .runtime_processes_quiescent(&self.principal.principal_id, self.session_id.as_ref())
-            .await
-    }
-
     pub(super) fn execution_window_near_limit(&self) -> Result<bool, AppError> {
         let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
         Ok(state.turn.as_ref().is_some_and(|turn| turn.resource_operations.len() >= 56)

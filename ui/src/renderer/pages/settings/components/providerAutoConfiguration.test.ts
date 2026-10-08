@@ -13,7 +13,6 @@ import {
   isAutoConfigurationPlatform,
   normalizeProviderBaseUrlForCompatibilityMode,
   providerCompatibilityAuthScheme,
-  providerCompatibilityProtocolForTask,
   providerCompatibilityProtocolPreferences,
   selectProbeAuthScheme,
   selectProviderAutoConfiguration,
@@ -138,17 +137,17 @@ describe('provider auto configuration', () => {
     expect(providerCompatibilityAuthScheme('auto')).toBeUndefined();
     expect(providerCompatibilityAuthScheme('openai')).toBe('bearer');
     expect(providerCompatibilityAuthScheme('anthropic')).toBe('header_key:x-api-key');
-    expect(providerCompatibilityProtocolForTask('openai', 'chat')).toBe(
+    expect(providerCompatibilityProtocolPreferences('openai')['chat']).toBe(
       'openai.chat_text'
     );
-    expect(providerCompatibilityProtocolForTask('openai', 'image_generation')).toBe(
+    expect(providerCompatibilityProtocolPreferences('openai')['image_generation']).toBe(
       'openai.images'
     );
-    expect(providerCompatibilityProtocolForTask('anthropic', 'chat')).toBe(
+    expect(providerCompatibilityProtocolPreferences('anthropic')['chat']).toBe(
       'anthropic.messages'
     );
     expect(
-      providerCompatibilityProtocolForTask('anthropic', 'image_generation')
+      providerCompatibilityProtocolPreferences('anthropic')['image_generation']
     ).toBeUndefined();
   });
 

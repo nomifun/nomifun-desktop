@@ -51,7 +51,7 @@ pub struct ActiveVoice {
     foreground_lease:StdMutex<(Instant,Option<u64>)>,
     speech_sources:StdMutex<SpeechSourceLedger>,
     last_work_receipt:Arc<Mutex<Option<VoiceWorkReceipt>>>,approvals:StdMutex<Vec<nomifun_voice_contracts::VoiceApprovalPresentation>>,
-    provider_id:String,profile_id:String,profile_revision:u64,
+    profile_id:String,profile_revision:u64,
     work_steering_policy:nomifun_voice_contracts::WorkSteeringPolicy,
     lease_record:VoiceRouteRecord,lease_revision:String,
     endpoint:Arc<ProductVoiceEndpoint>,
@@ -198,7 +198,7 @@ impl VoiceSessionService {
         let bridge=Arc::new(Mutex::new(VoiceWorkBridge::new(self.work.clone(),journal.clone(),owner.to_owned(),request.agent_session_id.clone(),request.binding_version,id.clone(),epoch,context).with_work_steering_policy(plan.work_steering_policy)));
         let (trigger_tx,mut trigger_rx)=mpsc::channel::<WorkTrigger>(16);
         let active=Arc::new(ActiveVoice{owner:owner.to_owned(),endpoint_id:request.endpoint_id.clone(),attachment_token,attachment_expires:Instant::now()+Duration::from_secs(60),
-            core:StdMutex::new(core),negotiation:negotiation.clone(),input:model_session.input.clone(),cancel:cancel.clone(),events,media_rx:Mutex::new(Some(media_rx)),supervisor:Mutex::new(None),media_attached:AtomicBool::new(false),foreground_lease:StdMutex::new((Instant::now()+Duration::from_secs(3),None)),speech_sources:StdMutex::new(initial_sources),last_work_receipt:work_projection,approvals:StdMutex::new(initial_presentations),provider_id:plan.record.provider_id.clone(),profile_id:plan.profile_id.clone(),profile_revision:plan.profile_revision,work_steering_policy:plan.work_steering_policy,lease_record:plan.record.clone(),lease_revision:plan.lease_revision.clone(),endpoint,access,input_control_gate:Mutex::new(()),bridge:bridge.clone(),work_kinds:StdMutex::new(BTreeMap::new()),trigger_tx:trigger_tx.clone()});
+            core:StdMutex::new(core),negotiation:negotiation.clone(),input:model_session.input.clone(),cancel:cancel.clone(),events,media_rx:Mutex::new(Some(media_rx)),supervisor:Mutex::new(None),media_attached:AtomicBool::new(false),foreground_lease:StdMutex::new((Instant::now()+Duration::from_secs(3),None)),speech_sources:StdMutex::new(initial_sources),last_work_receipt:work_projection,approvals:StdMutex::new(initial_presentations),profile_id:plan.profile_id.clone(),profile_revision:plan.profile_revision,work_steering_policy:plan.work_steering_policy,lease_record:plan.record.clone(),lease_revision:plan.lease_revision.clone(),endpoint,access,input_control_gate:Mutex::new(()),bridge:bridge.clone(),work_kinds:StdMutex::new(BTreeMap::new()),trigger_tx:trigger_tx.clone()});
         let (media_intent_tx,mut media_intent_rx)=mpsc::channel::<(WorkTrigger,crate::VoiceBridgeMediaIntent)>(16);
         let media_active=active.clone();let media_journal=journal.clone();let media_service=Arc::downgrade(self);
         let media_worker=AbortOnDropHandle::new(tokio::spawn(async move{
@@ -462,8 +462,6 @@ impl VoiceSessionService {
         self.sessions.lock().await.values().find(|s|s.owner==owner&&s.state().agent_session_id==session&&!matches!(s.state().connection,VoiceConnectionState::Closed|VoiceConnectionState::Failed|VoiceConnectionState::Closing))
             .map(|s|{let state=s.state();serde_json::json!({"voice_session_id":state.voice_session_id,"activation_epoch":state.activation_epoch,"state":state})})
     }
-    pub async fn provider_usages(&self,provider:&str)->Vec<String>{self.sessions.lock().await.values().filter(|s|s.provider_id==provider&&!matches!(s.state().connection,VoiceConnectionState::Closed|VoiceConnectionState::Failed))
-        .map(|s|s.state().agent_session_id).collect()}
     pub async fn projection(&self,owner:&str,id:&str,epoch:u64)->Result<VoiceSessionProjection,VoiceError>{
         let active=self.get(owner,id,epoch).await?;let state=active.state();
         let (transcripts,playback_receipts)={let core=active.core.lock().unwrap_or_else(|p|p.into_inner());(core.transcripts(),core.playback_receipts())};

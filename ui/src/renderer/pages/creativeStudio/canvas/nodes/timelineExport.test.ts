@@ -10,7 +10,6 @@ import type { CreativeTimelineNodeData } from '../../domain';
 import {
   buildTimelineExportPlan,
   selectTimelineExportFormat,
-  selectTimelineExportMimeType,
   timelineExportSize,
   TimelineExportError,
   type CreativeTimelineAssetPresentation,
@@ -97,17 +96,14 @@ describe('timeline composition export model', () => {
       'video/webm;codecs=vp9',
       'video/webm;codecs=vp8,opus',
     ]);
-    expect(selectTimelineExportMimeType((value) => supported.has(value))).toBe(
+    expect((selectTimelineExportFormat((value) => supported.has(value))?.mimeType ?? null)).toBe(
       'video/webm;codecs=vp8,opus'
     );
     expect(
-      selectTimelineExportMimeType((value) => supported.has(value), true)
+      (selectTimelineExportFormat((value) => supported.has(value), true)?.mimeType ?? null)
     ).toBe('video/webm;codecs=vp8,opus');
     expect(
-      selectTimelineExportMimeType(
-        (value) => value === 'video/webm;codecs=vp9',
-        true
-      )
+      (selectTimelineExportFormat((value) => value === 'video/webm;codecs=vp9', true)?.mimeType ?? null)
     ).toBeNull();
   });
 

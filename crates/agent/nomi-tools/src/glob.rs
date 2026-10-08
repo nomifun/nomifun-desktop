@@ -11,7 +11,7 @@ use tokio::sync::{
     Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, oneshot,
 };
 
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;

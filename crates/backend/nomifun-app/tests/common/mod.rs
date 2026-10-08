@@ -78,6 +78,15 @@ pub async fn build_local_trust_app(secret: &str) -> (axum::Router, AppServices) 
     (router, services)
 }
 
+pub async fn materialize_builtin_skills_for_fixture(services: &AppServices) {
+    // This fixture skips BootstrapContext, so perform the same real builtin
+    // corpus materialization before frozen Session skills are resolved.
+    let corpus_version = nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
+    nomifun_skill_library::materialize_if_needed(
+        &services.data_dir, nomifun_skill_library::builtin_skills_corpus(), &corpus_version,
+    ).await.expect("materialize the production builtin skill corpus for the isolated fixture");
+}
+
 /// Produce real encrypted-at-rest fixture credentials whose plaintext follows
 /// the canonical typed credential-object contract.
 pub fn encrypted_bearer_credentials() -> String {

@@ -59,14 +59,6 @@ export function shellProvider<Data, Params = void>(
   };
 }
 
-/** DEGRADE_STUB provider: returns a constant value in every runtime (no Tauri equivalent). */
-export function stubShellProvider<Data, Params = void>(value: Data | (() => Data)): ShellProvider<Data, Params> {
-  return {
-    provider: () => {},
-    invoke: async (): Promise<Data> => (typeof value === 'function' ? (value as () => Data)() : value),
-  };
-}
-
 /** An emitter backed by a Tauri event subscription, inert in the browser. */
 export function shellEmitter<Params = void>(
   subscribe: (callback: (params: Params) => void) => Promise<() => void>

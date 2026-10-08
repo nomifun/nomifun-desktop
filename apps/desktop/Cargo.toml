@@ -112,7 +112,6 @@ tempfile.workspace = true
 tauri = { version = "2", features = ["test"] }
 nomi-tools.workspace = true
 nomi-types.workspace = true
-nomi-protocol.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-ai-agent.workspace = true

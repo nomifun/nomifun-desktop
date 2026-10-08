@@ -28,9 +28,9 @@ pub use agent::{
     SSH_HOST_EXECUTE_OPERATION, SSH_HOST_READ_OPERATION, SSH_HOST_RESOURCE_KIND,
     SSH_HOST_RESOURCE_OPERATIONS, SSH_HOST_SUDO_OPERATION, SSH_HOST_WRITE_OPERATION,
     SSH_MODULE_ID, SSH_SUDO_ACTION_ID, SshAction, SshActionContext, SshActionError,
-    SshActionOwner, SshCommandOutput, SshConnectionStatus, SshExecInput,
+    SshActionOwner, SshCommandOutput, SshExecInput,
     SshExternalActionStatus, SshFsReadInput, SshFsReadOutput, SshFsWriteInput,
-    SshFsWriteOutput, SshResourceOperation, SshResourceSelection, SshSudoInput,
+    SshFsWriteOutput, SshResourceOperation, SshSudoInput,
 };
 pub use events::SshEventEmitter;
 pub use pool::{

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use nomi_process_runtime::{
     ProcessError, ProcessOutcome, PollResult, ProcessSupervisor,
 };
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 use serde_json::{Value, json};
 

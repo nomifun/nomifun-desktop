@@ -5,16 +5,12 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { compactDisplayText, extractResponseTextChunk, optionalDisplayText, toDisplayText } from './displayText';
+import { extractResponseTextChunk, optionalDisplayText, toDisplayText } from './displayText';
 
 describe('display text normalization', () => {
   test('keeps strings unchanged and serializes structured runtime values', () => {
     expect(toDisplayText('plain')).toBe('plain');
     expect(toDisplayText({ command: 'codex --version' })).toBe('{\n  "command": "codex --version"\n}');
-  });
-
-  test('compacts structured values for receipt labels', () => {
-    expect(compactDisplayText({ command: 'codex --version' })).toBe('{ "command": "codex --version" }');
   });
 
   test('omits nullish optional values but keeps serializable values', () => {

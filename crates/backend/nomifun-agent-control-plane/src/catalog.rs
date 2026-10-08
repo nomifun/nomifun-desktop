@@ -4,8 +4,8 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     CanonicalErrorCode, CapabilityCatalogEntry,
     CapabilityConsumer, CapabilityId, CapabilityOwner, CapabilityRef,
-    CatalogAvailability, ContributionSourceKind, McpBindingId, McpServerId,
-    McpToolKey, OfficialPresetKey, OfficialPresetSeedManifestPayload,
+    CatalogAvailability, ContributionSourceKind, McpBindingId,
+    OfficialPresetKey, OfficialPresetSeedManifestPayload,
     PluginSourceKind, SkillRef, digest_payload,
     official_preset_seed_manifest_payload,
 };
@@ -247,17 +247,6 @@ impl CatalogSnapshot {
     ) -> Option<&nomifun_agent_contracts::SkillDefinition> {
         self.materialized_skill(reference)
             .map(|skill| &skill.definition)
-    }
-
-    pub fn materialized_mcp_tool(
-        &self,
-        server_id: &McpServerId,
-        tool_key: &McpToolKey,
-    ) -> Option<&MaterializedMcpTool> {
-        self.mcp_tools.iter().find(|mcp| {
-            &mcp.mapping.server_id == server_id
-                && &mcp.mapping.canonical_tool_key == tool_key
-        })
     }
 
     pub fn as_api(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {

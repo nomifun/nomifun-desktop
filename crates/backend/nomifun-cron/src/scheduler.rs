@@ -415,8 +415,8 @@ impl CronScheduler {
         current.then(commit)
     }
 
-    /// Resolve the current installation token for the Cron owner after it has
-    /// loaded the authoritative persisted occurrence.
+    /// Inspect the exact installed timer token in generation-fence tests.
+    #[cfg(test)]
     pub(crate) fn current_generation_for(
         &self,
         job_id: &str,

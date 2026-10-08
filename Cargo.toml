@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
-exclude = ["crates/backend/nomifun-preset", "vendor/wry"]
+exclude = ["vendor/wry"]
 
 [patch.crates-io]
 # Child-WebView shutdown belongs to the native browser owner, not a JS callback.
@@ -78,13 +78,11 @@ nomifun-ssh = { path = "crates/backend/nomifun-ssh" }
 
 # --- Internal crates: agent (from nomifun-agent-rs, now local) ---
 nomi-types = { path = "crates/agent/nomi-types" }
-nomi-protocol = { path = "crates/agent/nomi-protocol" }
 nomi-compact = { path = "crates/agent/nomi-compact" }
 nomi-config = { path = "crates/agent/nomi-config" }
 nomi-providers = { path = "crates/agent/nomi-providers" }
 nomi-tools = { path = "crates/agent/nomi-tools" }
 nomi-mcp = { path = "crates/agent/nomi-mcp" }
-nomi-memory = { path = "crates/agent/nomi-memory" }
 nomi-computer = { path = "crates/agent/nomi-computer" }
 nomi-a11y = { path = "crates/agent/nomi-a11y" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }

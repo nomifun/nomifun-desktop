@@ -30,4 +30,3 @@ tower = { workspace = true }
 http-body-util.workspace = true
 reqwest.workspace = true
 wiremock = "0.6"
-tempfile.workspace = true

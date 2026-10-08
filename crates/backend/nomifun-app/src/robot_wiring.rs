@@ -334,8 +334,6 @@ impl AppCompanionSlots {
                         nomifun_chat_model_broker::protocol_features(protocol)
                             .contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput)
                     })
-                    && !nomifun_common::VisionUnsupportedRegistry::global()
-                        .is_unsupported(provider_id, model)
             })
     }
 }

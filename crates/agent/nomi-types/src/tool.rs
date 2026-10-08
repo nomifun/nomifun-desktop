@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Tool effect category shared by native tools and host adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategory {
+    Info,
+    Edit,
+    Exec,
+    Mcp,
+    /// Irreversible action such as submit, payment, delete, or send.
+    Irreversible,
+}
+
+impl std::fmt::Display for ToolCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "info"),
+            Self::Edit => write!(f, "edit"),
+            Self::Exec => write!(f, "exec"),
+            Self::Mcp => write!(f, "mcp"),
+            Self::Irreversible => write!(f, "irreversible"),
+        }
+    }
+}
+
 /// Schema for a tool parameter, in JSON Schema format
 pub type JsonSchema = Value;
 
@@ -100,44 +124,17 @@ impl ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    // --- ToolDef construction and field validation ---
 
     #[test]
-    fn test_tool_def_construction_fields() {
-        // arrange
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "cmd": { "type": "string" }
-            },
-            "required": ["cmd"]
-        });
-        // act
-        let tool = ToolDef {
-            name: "bash".to_string(),
-            description: "Run a shell command".to_string(),
-            input_schema: schema.clone(),
-            deferred: false,
-        };
-        // assert
-        assert_eq!(tool.name, "bash");
-        assert_eq!(tool.description, "Run a shell command");
-        assert_eq!(tool.input_schema, schema);
-    }
-
-    #[test]
-    fn test_tool_def_empty_schema_is_valid() {
-        // arrange + act
-        let tool = ToolDef {
-            name: "noop".to_string(),
-            description: "Does nothing".to_string(),
-            input_schema: json!({}),
-            deferred: false,
-        };
-        // assert
-        assert_eq!(tool.input_schema, json!({}));
+    fn tool_categories_use_the_same_wire_and_display_names() {
+        for (category, name) in [
+            (ToolCategory::Info, "info"), (ToolCategory::Edit, "edit"),
+            (ToolCategory::Exec, "exec"), (ToolCategory::Mcp, "mcp"),
+            (ToolCategory::Irreversible, "irreversible"),
+        ] {
+            assert_eq!(category.to_string(), name);
+            assert_eq!(serde_json::to_value(category).unwrap(), name);
+        }
     }
 
     // --- ToolResult success scenario ---
@@ -169,28 +166,6 @@ mod tests {
         // assert
         assert!(result.content.is_empty());
         assert!(result.is_error);
-    }
-
-    #[test]
-    fn test_tool_def_deferred_defaults_to_false() {
-        let tool = ToolDef {
-            name: "test".to_string(),
-            description: "desc".to_string(),
-            input_schema: json!({}),
-            deferred: false,
-        };
-        assert!(!tool.deferred);
-    }
-
-    #[test]
-    fn test_tool_def_deferred_true() {
-        let tool = ToolDef {
-            name: "spawn".to_string(),
-            description: "desc".to_string(),
-            input_schema: json!({}),
-            deferred: true,
-        };
-        assert!(tool.deferred);
     }
 
     // --- truncate_deferred_description tests ---

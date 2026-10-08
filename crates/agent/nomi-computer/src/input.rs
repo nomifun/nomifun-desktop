@@ -495,12 +495,6 @@ pub async fn cursor_position() -> Result<(i32, i32), String> {
     with_enigo(|enigo| enigo.location().map_err(input_err)).await
 }
 
-/// Size (width, height) of the main display in enigo's coordinate system.
-/// Blocking variant for use inside other spawn_blocking sections.
-pub fn main_display_size_blocking() -> Result<(i32, i32), String> {
-    run_enigo_operation_blocking(|enigo| enigo.main_display().map_err(input_err))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

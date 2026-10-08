@@ -137,8 +137,8 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | `ISettingsRepository` | `SqliteSettingsRepository` | Misc app settings |
 | `IWebhookRepository` | `SqliteWebhookRepository` | Outbound webhook destinations (Lark) |
 
-A few row-update params types travel alongside (`UpdateAgentHandshakeParams`,
-`ConversationFilters`, `ConversationRowUpdate`, `MessageRowUpdate`,
+A few row-update params types travel alongside (`ConversationFilters`,
+`ConversationRowUpdate`, `MessageRowUpdate`,
 `MessageSearchRow`, `UpdateCronJobParams`, `UpsertOAuthTokenParams`,
 `CreateProviderParams`,
 `CreateAgentExecutionParams`, `ReconcileAgentExecutionPlanParams`,

@@ -9,7 +9,7 @@ use super::config::McpServerConfig;
 use super::manager::{McpCallOutput, McpManager};
 use super::protocol::ToolAnnotations;
 use super::transport::McpError;
-use nomi_protocol::events::ToolCategory;
+use nomi_types::tool::ToolCategory;
 use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::tool::{JsonSchema, ToolArtifact, ToolImage, ToolResult};
 

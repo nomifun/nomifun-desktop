@@ -52,7 +52,7 @@ pub use agent_build_extra::{
     SlashCommandItem,
 };
 pub use agent_discovery::{
-    AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
+    AgentEnvEntry, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
 };
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,

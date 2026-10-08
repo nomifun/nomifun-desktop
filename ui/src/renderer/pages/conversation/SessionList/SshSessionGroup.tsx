@@ -91,7 +91,7 @@ const SshSessionGroup: React.FC<Props> = ({
   const hostLabelOf = (sshHostId: SshHostId): string =>
     hostNames.get(sshHostId) ?? (hosts == null ? t('ssh.group.hostUnknown') : t('ssh.group.hostMissing'));
 
-  // No host-bound session → no group at all (mirrors CompanionSessionGroup).
+  // No host-bound session → no group at all.
   if (hostGroups.length === 0) return null;
 
   if (collapsed) {

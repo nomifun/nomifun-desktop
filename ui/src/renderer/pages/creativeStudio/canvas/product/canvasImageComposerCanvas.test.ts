@@ -17,7 +17,6 @@ import {
   canvasImageComposeDraftFromState,
   canvasImageComposeResumeRequests,
   canvasImageComposeSettings,
-  canvasImageComposeTaskSummary,
   clearCanvasImageComposeDraftModel,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
@@ -351,11 +350,6 @@ describe('canvas image composer product model', () => {
       height: 1024,
       aspectRatio: '3:2',
       count: 2,
-    });
-    expect(canvasImageComposeTaskSummary(prepared.configNode)).toEqual({
-      state: 'queued',
-      pendingCount: 1,
-      message: undefined,
     });
   });
 

@@ -757,6 +757,7 @@ impl NomiCoreSessionOwner {
         &self.pool
     }
 
+    #[cfg(feature = "browser-use")]
     pub(crate) fn session_operation_locks(&self) -> Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>> {
         self.session_operation_locks.clone()
     }
@@ -2502,11 +2503,8 @@ impl NomiCoreSessionOwner {
                     .to_owned(),
             ));
         }
-        let official_template = control_plane
-            .internal_official_template(
-                &owner,
-                binding.preset_revision_ref.preset_id.as_ref(),
-            )
+        let (agent_name, official_template) = control_plane
+            .saved_binding_presentation(&owner, &binding_dto)
             .await
             .map_err(control_plane_error_to_app)?;
         let companion_id = if official_template
@@ -2520,16 +2518,6 @@ impl NomiCoreSessionOwner {
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
             AppError::Forbidden(format!("invalid canonical AgentSession owner: {error}"))
         })?;
-        let agent_name = control_plane
-            .editor(
-                &owner,
-                binding.preset_revision_ref.preset_id.as_ref(),
-                Some(binding.preset_revision_ref.revision),
-            )
-            .await
-            .map_err(control_plane_error_to_app)?
-            .preset
-            .display_name;
         let mut projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner,
             binding,

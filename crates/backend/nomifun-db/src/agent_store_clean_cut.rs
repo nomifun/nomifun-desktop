@@ -264,18 +264,19 @@ mod tests {
         for tampering in [
             "UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=2",
             "DELETE FROM _sqlx_migrations WHERE version=1",
-            "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (3,'unknown',1,X'00',0)",
+            "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) SELECT COALESCE(MAX(version),0)+1,'unknown',1,X'00',0 FROM _sqlx_migrations",
         ] {
             let database = crate::init_database_memory().await.unwrap();
             let pool = database.pool();
             sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,archived,pinned,agent_binding_json,next_seq,created_at) VALUES (?,'{}','live',0,0,'{}',1,1)")
                 .bind(SESSION).execute(pool).await.unwrap();
             sqlx::query(tampering).execute(pool).await.unwrap();
+            assert!(!requires_agent_store_clean_cut(pool).await.unwrap(), "{tampering}");
             let mut conn = pool.acquire().await.unwrap();
             assert!(clean_cut_agent_store(&mut conn, &MIGRATOR).await.is_err(), "{tampering}");
             drop(conn);
-            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_sessions")
-                .fetch_one(pool).await.unwrap(), 1);
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_sessions WHERE agent_session_id=?")
+                .bind(SESSION).fetch_one(pool).await.unwrap(), 1);
         }
     }
 

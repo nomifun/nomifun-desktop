@@ -120,7 +120,3 @@ export const resolveAgentResourceSelections = (
   }
   return { selections, missingKinds };
 };
-
-export const selectedCapabilityIds = (
-  enabled: readonly { capability: { id: string } }[]
-): Set<string> => new Set(enabled.map((entry) => entry.capability.id));

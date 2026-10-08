@@ -38,19 +38,11 @@ export function cloneCanvasDocument(document: CanvasDocument): CanvasDocument {
   };
 }
 
-export function getCanvasGroups(document: CanvasDocument): CanvasGroup[] {
-  return document.nodes.filter(isCanvasGroup);
-}
-
 export function findCanvasGraphNode(
   document: CanvasDocument,
   id: string
 ): CanvasGraphNode | undefined {
   return document.nodes.find((node) => node.id === id);
-}
-
-function isCanvasGroup(node: CanvasGraphNode): node is CanvasGroup {
-  return node.type === 'group';
 }
 
 export interface MakeCanvasNodeOptions<K extends CanvasNodeType> {

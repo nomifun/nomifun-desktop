@@ -1042,37 +1042,6 @@ impl CronService {
             .map_err(CronError::from)
     }
 
-    pub async fn lookup_scheduled_sessions(
-        &self,
-        user_id: &str,
-        job_id: &str,
-    ) -> Result<Vec<crate::CronScheduledSession>, CronError> {
-        let user_id = validate_cron_user_id(user_id)?;
-        let job_id = validate_cron_job_id(job_id)?;
-        let job = self.get_job(user_id, &job_id).await?;
-        let Some(agent_session_id) = job.conversation_id.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let mut session = self
-            .executor
-            .get_session_projection(user_id, agent_session_id)
-            .await
-            .map_err(CronError::from)?;
-        if session.owner_id != user_id
-            || session.agent_session_id.as_ref() != agent_session_id
-        {
-            return Err(CronError::App(AppError::Conflict(format!(
-                "AgentSession {agent_session_id} authority does not match Cron job {job_id}"
-            ))));
-        }
-        // `cron_jobs.conversation_id` is the relation authority for canonical
-        // Store-only sessions. Legacy Conversation projections may carry the
-        // same value as a retained back-reference, but callers never need to
-        // infer the relation from that compatibility field.
-        session.cron_job_id = Some(job_id);
-        Ok(vec![session])
-    }
-
     /// Submit an embedded create mutation to a process-owned task.
     ///
     /// The returned waiter is cancellation-safe: caller timeout only abandons
@@ -1816,44 +1785,6 @@ impl CronService {
         if removed > 0 {
             info!(removed, "Removed unauthorized or orphan cron skill directories");
         }
-    }
-
-    /// Admit and execute one exact installed-schedule occurrence.
-    ///
-    /// The durable reservation is inserted before Conversation creation,
-    /// runtime/knowledge preparation, message admission, or event emission.
-    /// Only the INSERT winner may execute. An existing `reserved` row is
-    /// absorbing: it may represent effects that escaped before a crash and is
-    /// therefore never automatically redriven.
-    pub async fn tick_occurrence(
-        &self,
-        expected_user_id: &str,
-        job_id: &str,
-        expected_schedule_revision: i64,
-        planned_at_ms: i64,
-    ) {
-        let Some(generation) = self.scheduler.current_generation_for(
-            job_id,
-            expected_user_id,
-            expected_schedule_revision,
-            planned_at_ms,
-        ) else {
-            info!(
-                job_id,
-                expected_schedule_revision,
-                planned_at_ms,
-                "Tick: callback no longer belongs to an installed timer"
-            );
-            return;
-        };
-        self.tick_occurrence_with_generation(
-            expected_user_id,
-            job_id,
-            expected_schedule_revision,
-            planned_at_ms,
-            generation,
-        )
-        .await;
     }
 
     /// Production timer entry point. The process-local installation generation

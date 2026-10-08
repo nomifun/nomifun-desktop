@@ -42,7 +42,7 @@ fn secret_rotation_invalidates_all_tokens() {
     assert!(service.verify(&token2).is_ok());
 
     // Rotate the secret
-    service.rotate_secret().unwrap();
+    service.install_secret(service.generate_secret()).unwrap();
 
     // Both old tokens are now invalid
     assert!(service.verify(&token1).is_err());

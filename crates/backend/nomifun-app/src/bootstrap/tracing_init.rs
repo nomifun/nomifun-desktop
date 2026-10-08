@@ -19,9 +19,7 @@ const NOMI_TARGETS: &[&str] = &[
     "nomi_compact",
     "nomi_mcp",
     "nomi_providers",
-    "nomi_protocol",
     "nomi_tools",
-    "nomi_memory",
 ];
 
 fn build_env_filter(log_level: Option<&str>) -> EnvFilter {

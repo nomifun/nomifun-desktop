@@ -22,35 +22,6 @@ fn long_profile_chains_resolve_without_recursive_stack_growth() {
 }
 
 #[test]
-fn config_initialization_never_overwrites_existing_content() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("config.toml");
-    std::fs::write(&path, "# user config").unwrap();
-    init_config_at(&path).unwrap();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# user config");
-}
-
-#[test]
-fn concurrent_config_initialization_publishes_one_complete_template() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("config.toml");
-    let barrier = std::sync::Barrier::new(8);
-    std::thread::scope(|scope| {
-        for _ in 0..8 {
-            scope.spawn(|| {
-                barrier.wait();
-                init_config_at(&path).unwrap();
-                assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
-                    DEFAULT_CONFIG_TEMPLATE
-                );
-            });
-        }
-    });
-    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
-}
-
-#[test]
 fn provider_extra_body_remains_a_whole_value_override() {
     let merged = merge_sources(
         "[providers.openai.compat]\napi_path = \"/custom\"\nextra_body = {keep = true, nested = {old = 1}}",
@@ -129,12 +100,9 @@ fn compact_partial_overrides_keep_other_global_fields() {
 #[test]
 fn partial_section_overrides_do_not_reset_omitted_fields() {
     let merged = merge_sources(
-        "[session]\nenabled = false\nmax_sessions = 70\n[plan]\nenabled = false\n[file_cache]\nenabled = false\nmax_size_bytes = 1234",
-        "[session]\ndirectory = \"sessions\"\n[plan]\nplan_directory = \"plans\"\n[file_cache]\nmax_entries = 50",
+        "[plan]\nenabled = false\n[file_cache]\nenabled = false\nmax_size_bytes = 1234",
+        "[plan]\nplan_directory = \"plans\"\n[file_cache]\nmax_entries = 50",
     );
-    assert!(!merged.session.enabled);
-    assert_eq!(merged.session.max_sessions, 70);
-    assert_eq!(merged.session.directory, "sessions");
     assert!(!merged.plan.enabled);
     assert_eq!(merged.plan.plan_directory, "plans");
     assert!(!merged.file_cache.enabled);
@@ -156,14 +124,13 @@ fn explicit_true_can_restore_default_feature_settings() {
 #[test]
 fn merge_retains_documented_additive_tool_policies() {
     let merged = merge_sources(
-        "[tools]\nbash_sandbox = true\nwrite_root = \"guarded\"\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true\n[session]\nenabled = false",
-        "[tools]\nbash_sandbox = false\nwrite_root = \"\"\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false\n[session]\nenabled = true",
+        "[tools]\nbash_sandbox = true\nwrite_root = \"guarded\"\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true",
+        "[tools]\nbash_sandbox = false\nwrite_root = \"\"\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false",
     );
     assert!(merged.tools.bash_sandbox);
     assert!(merged.tools.computer.enabled);
     assert_eq!(merged.tools.write_root, "guarded");
     assert_eq!(merged.tools.builtin_allowlist, ["Read"]);
-    assert!(!merged.session.enabled);
 }
 
 #[test]

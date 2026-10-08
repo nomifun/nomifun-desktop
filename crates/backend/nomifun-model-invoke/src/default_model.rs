@@ -126,15 +126,6 @@ impl ModelInvokeService {
         self.resolve_task_config(&selected, task).await
     }
 
-    /// Retained for callers using the previous method name. Missing defaults
-    /// now follow the same ranked automatic route as `resolve_automatic_task_model`.
-    pub async fn resolve_default_task_model(
-        &self,
-        task: ModelTask,
-        preferences: &dyn IClientPreferenceRepository,
-    ) -> Result<ResolvedTaskConfig, InvokeError> {
-        self.resolve_automatic_task_model(task, preferences).await
-    }
 }
 
 #[cfg(test)]
