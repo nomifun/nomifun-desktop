@@ -13,7 +13,8 @@
 #
 # 架构别名:
 #   arm / aarch64 / silicon  -> aarch64-apple-darwin   (Apple Silicon 原生)
-#   当前 CEF 运行库仅支持 Apple Silicon arm64；Intel/Universal 明确拒绝。
+#   intel / x64 / x86_64    -> x86_64-apple-darwin    (Intel)
+#   每个架构使用单独固定的 CEF runtime；不生成混合架构 Universal 包。
 #
 # 缺失的 Rust 编译目标会自动 `rustup target add`。
 #
@@ -52,7 +53,7 @@ seen_dashdash=0
 for arg in "$@"; do
   # Reject retired options even after --; never forward them to Tauri.
   if [[ "$arg" == "--debug" || "$arg" == "-d" || "$arg" == "--no-bundle" || "$arg" == "--no-sign" || "$arg" == "--target" || "$arg" == --target=* || "$arg" == "-t" || "$arg" == "--profile" || "$arg" == --profile=* || "$arg" == "--bundles" || "$arg" == --bundles=* || "$arg" == "-b" ]]; then
-    echo "❌ build:mac 固定生成完整 arm64 release App/DMG；不能透传 ${arg}。开发包请使用 build:fast。" >&2
+    echo "❌ build:mac 固定生成完整 macOS release App/DMG；不能透传 ${arg}。开发包请使用 build:fast。" >&2
     exit 1
   elif [[ "$arg" == "--signed" ]]; then
     SIGNED=1
@@ -107,8 +108,7 @@ resolve_triple() {
 
 TRIPLES=()
 if [[ "${#SELECT[@]}" -eq 0 ]]; then
-  # Managed Browser 使用固定的 macOS arm64 CEF runtime；不得生成缺少
-  # Browser framework/helper 的伪 Universal/Intel 包。
+  # 默认 Apple Silicon；Intel 使用独立固定的 CEF framework/helper。
   TRIPLES=(aarch64-apple-darwin)
 else
   for s in "${SELECT[@]}"; do
@@ -117,8 +117,8 @@ else
 fi
 
 for t in "${TRIPLES[@]}"; do
-  if [[ "$t" != "aarch64-apple-darwin" ]]; then
-    echo "❌ 当前固定 CEF runtime 仅支持 Apple Silicon arm64；不能生成不完整的 $t 包。" >&2
+  if [[ "$t" != "aarch64-apple-darwin" && "$t" != "x86_64-apple-darwin" ]]; then
+    echo "❌ 每个 CEF runtime 固定到一个架构；请分别构建 arm 和 intel，不能生成 $t 包。" >&2
     exit 1
   fi
 done
@@ -231,7 +231,7 @@ stage_macos_cef() {
   local runtime
   runtime="${cached_runtime:-$(find_cef_runtime "$target")}"
   echo "▶ 装配并签名固定 CEF runtime/helper"
-  bun "$CEF_STAGE_TOOL" --app "$app" --helper "$helper" --runtime "$runtime" --identity "$identity"
+  bun "$CEF_STAGE_TOOL" --app "$app" --helper "$helper" --runtime "$runtime" --identity "$identity" --target "$target"
 }
 
 create_dmg_from_staged_app() {
@@ -240,9 +240,11 @@ create_dmg_from_staged_app() {
   local dmg_dir="$3"
   local version
   version="$(bun -e 'console.log(require("./package.json").version)')"
-  local output="$dmg_dir/NomiFun_${version}_aarch64.dmg"
+  local suffix="aarch64"
+  [[ "$target" != "x86_64-apple-darwin" ]] || suffix="x64"
+  local output="$dmg_dir/NomiFun_${version}_${suffix}.dmg"
   local temporary
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/nomifun-arm64-dmg.XXXXXX")"
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/nomifun-macos-dmg.XXXXXX")"
   local staging="$temporary/root"
   mkdir -p "$staging" "$dmg_dir"
   if ! ditto --noqtn "$app" "$staging/NomiFun.app"; then
@@ -362,6 +364,17 @@ for t in "${TRIPLES[@]}"; do
   if [[ "$updater" == "true" ]]; then
     echo "▶ 从同一最终 CEF App 生成并签名 updater"
     bun "$BROWSER_BUNDLE_TOOL" updater --root "$ROOT" --app "$app"
+    archive_name="NomiFun.app.tar.gz"
+    [[ "$t" != "x86_64-apple-darwin" ]] || archive_name="NomiFun_$(bun -e 'console.log(require("./package.json").version)')_x64.app.tar.gz"
+    archive="$app.tar.gz"
+    if [[ "$t" == "x86_64-apple-darwin" ]]; then
+      archive="$(dirname "$app")/$archive_name"
+      mv -f "$app.tar.gz" "$archive"
+      mv -f "$app.tar.gz.sig" "$archive.sig"
+    fi
+    # 下一架构的 pre-build 会清除 target bundle，先保存已验证的 updater。
+    cp -f "$archive" "$DIST/$archive_name"
+    cp -f "$archive.sig" "$DIST/$archive_name.sig"
   else
     # A prior updater is not valid evidence for this new build.
     rm -f "$app.tar.gz" "$app.tar.gz.sig"
@@ -377,7 +390,7 @@ for t in "${TRIPLES[@]}"; do
     write_release_lock "$app" "$t" "$package" "$lock"
     COLLECTED+=("$package")
     COLLECTED_LOCKS+=("$lock")
-  done < <(find "$dmg_dir" -maxdepth 1 -type f -name "NomiFun_$(bun -e 'console.log(require("./package.json").version)')_aarch64.dmg" -print0 2>/dev/null)
+  done < <(find "$dmg_dir" -maxdepth 1 -type f -name "NomiFun_$(bun -e 'console.log(require("./package.json").version)')_*.dmg" -print0 2>/dev/null)
 done
 
 # COLLECTED 为空 = 这一轮没产出任何 DMG(多半 bundle.targets 不含 dmg)。

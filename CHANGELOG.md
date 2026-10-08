@@ -16,6 +16,8 @@ notes at a high level rather than a complete historical log.
   cleaned again.
 - Fix macOS updater archive compatibility and report update installation
   failures clearly.
+- Restore macOS Intel packaging with its own pinned CEF runtime and matching
+  host, framework, and helper architecture checks.
 - Compact companion reply bubbles, unify Session updates and reply
   presentation, retain completed replies, and dismiss action popovers on click.
 - Decouple skill-market installation from Agent sessions, refresh installed

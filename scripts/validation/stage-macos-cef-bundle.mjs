@@ -11,6 +11,7 @@ try {
   const result = await stageMacosBrowserBundle({
     appPath: option('--app'), helperPath: option('--helper'), runtimePath: option('--runtime'),
     identity: args.includes('--identity') ? option('--identity') : '-',
+    ...(args.includes('--target') ? { target: option('--target') } : {}),
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 } catch (error) {

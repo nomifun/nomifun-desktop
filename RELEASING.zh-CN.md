@@ -130,7 +130,7 @@ make dist VERSION="$VERSION" COMMIT="$COMMIT"
 必须在 Mac 上执行。一键脚本会自动判定两种场景：
 
 - **追加(APPEND)**：该版本的 GitHub Release 已存在（可能 Windows 侧先发过）——只补 macOS
-  产物、把 `darwin-aarch64` 条目并进 `latest.json`（macOS 仅发 arm64）。
+  产物、把 `darwin-aarch64` 条目并进 `latest.json`（一键脚本默认构建 Apple Silicon）。
 - **首发(CREATE)**：该版本还没有 Release（macOS 先发）——建 tag、建 Release（带 release
   note）、上传 macOS 产物；可用 `-Version` 顺带打版本号。
 
@@ -203,7 +203,22 @@ bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
-`bun run make:latest` 会把 macOS 的 `darwin-aarch64` 条目写入 `apps/desktop/updater/latest.json`（macOS 仅发 arm64）。
+`bun run make:latest` 会把当前目标的 macOS 条目写入 `apps/desktop/updater/latest.json`。
+双架构发布时，分别构建并在下一架构构建前收集清单：
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --collect --notes-file notes.md
+bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --collect --notes-file notes.md
+```
+
+两种架构使用分别固定的 CEF 归档，并验证主程序、framework 和所有 helper 的架构。
+Intel 更新包命名为 `NomiFun_<version>_x64.app.tar.gz`，Apple Silicon 保留
+`NomiFun.app.tar.gz`。将 `dist/desktop/` 收集的同一批产物上传到两处分发服务。
+Rosetta 运行不等同于 Intel 实机验收。
 
 ## Windows 发版
 

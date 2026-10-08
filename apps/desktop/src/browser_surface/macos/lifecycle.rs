@@ -14,6 +14,15 @@ use nomifun_browser_macos::engine::{Engine, Paths};
 const FRAMEWORK_NAME: &str = "Chromium Embedded Framework.framework";
 const HELPER_NAME: &str = "NomiFun Helper";
 
+#[cfg(target_arch = "aarch64")]
+const BROWSER_RUNTIME: &str = include_str!("../../../browser-runtime.json");
+#[cfg(target_arch = "x86_64")]
+const BROWSER_RUNTIME: &str = include_str!("../../../browser-runtime-intel.json");
+#[cfg(target_arch = "aarch64")]
+const BROWSER_CPU_TYPE: u32 = 0x0100_000c;
+#[cfg(target_arch = "x86_64")]
+const BROWSER_CPU_TYPE: u32 = 0x0100_0007;
+
 pub(crate) fn prepare(data_dir: &Path) -> Result<Arc<DeferredEngine>, String> {
     let executable = std::env::current_exe()
         .map_err(|_| "macOS CEF executable path is unavailable".to_owned())?;
@@ -27,8 +36,8 @@ fn prepare_executable(executable: &Path, data_dir: &Path) -> Result<Arc<Deferred
     paths.main_bundle = paths.main_bundle.canonicalize().map_err(|_| "CEF main bundle is missing")?;
     paths.framework = owned_component(&paths.main_bundle, &paths.framework, "CEF framework")?;
     let library = owned_component(&paths.main_bundle, &paths.framework.join("Chromium Embedded Framework"), "CEF library")?;
-    require_arm64_binary(&library, "CEF library")?;
-    let expected: serde_json::Value = serde_json::from_str(include_str!("../../../browser-runtime.json"))
+    require_target_binary(&library, "CEF library")?;
+    let expected: serde_json::Value = serde_json::from_str(BROWSER_RUNTIME)
         .expect("the compiled browser runtime contract is valid JSON");
     let metadata_path = owned_component(&paths.main_bundle, &paths.main_bundle.join("Contents/Resources/browser-cef/runtime.json"), "CEF runtime metadata")?;
     let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(&metadata_path)
@@ -43,7 +52,7 @@ fn prepare_executable(executable: &Path, data_dir: &Path) -> Result<Arc<Deferred
         let helper = helper.as_str().expect("compiled CEF helper name");
         let binary = owned_component(&paths.main_bundle,
             &paths.main_bundle.join("Contents/Frameworks").join(format!("{helper}.app/Contents/MacOS/{helper}")), helper)?;
-        require_arm64_binary(&binary, helper)?;
+        require_target_binary(&binary, helper)?;
         if std::fs::metadata(&binary).map_err(|_| format!("CEF helper cannot be inspected: {helper}"))?
             .permissions().mode() & 0o111 == 0 {
             return Err(format!("CEF helper is not executable: {helper}"));
@@ -66,15 +75,15 @@ fn owned_component(bundle: &Path, component: &Path, label: &str) -> Result<PathB
     Ok(resolved)
 }
 
-fn require_arm64_binary(path: &Path, label: &str) -> Result<(), String> {
+fn require_target_binary(path: &Path, label: &str) -> Result<(), String> {
     let mut header = [0u8; 8];
     std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut header))
         .map_err(|_| format!("macOS built-in browser binary cannot be read: {label}"))?;
-    // The product ships one pinned arm64 runtime. Reject incomplete files and
+    // Each target ships its own pinned runtime. Reject incomplete files and
     // mixed-architecture helpers before advertising a usable native host.
     if header[..4] != [0xcf, 0xfa, 0xed, 0xfe]
-        || u32::from_le_bytes(header[4..].try_into().unwrap()) != 0x0100_000c {
-        return Err(format!("macOS built-in browser binary must be arm64: {label}"));
+        || u32::from_le_bytes(header[4..].try_into().unwrap()) != BROWSER_CPU_TYPE {
+        return Err(format!("macOS built-in browser binary must match {}: {label}", std::env::consts::ARCH));
     }
     Ok(())
 }
@@ -211,20 +220,26 @@ fn packaged_paths(executable: &Path, data_dir: &Path) -> Result<Paths, String> {
 mod tests {
     use super::*;
 
+    fn binary_header(cpu_type: u32) -> [u8; 8] {
+        let mut header = [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0];
+        header[4..].copy_from_slice(&cpu_type.to_le_bytes());
+        header
+    }
+
     fn complete_bundle(root: &Path) -> PathBuf {
         let executable = root.join("NomiFun.app/Contents/MacOS/nomifun-desktop");
         let bundle = executable.parent().unwrap().parent().unwrap().parent().unwrap();
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         let framework = bundle.join("Contents/Frameworks/Chromium Embedded Framework.framework");
         std::fs::create_dir_all(framework.join("Resources")).unwrap();
-        let arm64 = [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
-        std::fs::write(framework.join("Chromium Embedded Framework"), arm64).unwrap();
-        let expected: serde_json::Value = serde_json::from_str(include_str!("../../../browser-runtime.json")).unwrap();
+        let header = binary_header(BROWSER_CPU_TYPE);
+        std::fs::write(framework.join("Chromium Embedded Framework"), header).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(BROWSER_RUNTIME).unwrap();
         for helper in expected["helpers"].as_array().unwrap() {
             let name = helper.as_str().unwrap();
             let path = bundle.join("Contents/Frameworks").join(format!("{name}.app/Contents/MacOS/{name}"));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, arm64).unwrap();
+            std::fs::write(&path, header).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         for resource in expected["resources"].as_array().unwrap() {
@@ -245,9 +260,10 @@ mod tests {
         let helper = root.path().join("NomiFun.app/Contents/Frameworks/NomiFun Helper (Renderer).app/Contents/MacOS/NomiFun Helper (Renderer)");
         std::fs::remove_file(&helper).unwrap();
         assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("Renderer"));
-        std::fs::write(&helper, [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]).unwrap();
-        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("arm64"));
-        std::fs::write(&helper, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]).unwrap();
+        let other_cpu = if BROWSER_CPU_TYPE == 0x0100_000c { 0x0100_0007 } else { 0x0100_000c };
+        std::fs::write(&helper, binary_header(other_cpu)).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains(std::env::consts::ARCH));
+        std::fs::write(&helper, binary_header(BROWSER_CPU_TYPE)).unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("not executable"));
     }
@@ -264,6 +280,20 @@ mod tests {
         complete_bundle(root.path());
         std::fs::remove_file(root.path().join("NomiFun.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources/icudtl.dat")).unwrap();
         assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("icudtl.dat"));
+    }
+
+    #[test]
+    fn other_architecture_metadata_cannot_advertise_a_usable_browser() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = complete_bundle(root.path());
+        let metadata = root.path().join("NomiFun.app/Contents/Resources/browser-cef/runtime.json");
+        let other_runtime = if cfg!(target_arch = "aarch64") {
+            include_str!("../../../browser-runtime-intel.json")
+        } else {
+            include_str!("../../../browser-runtime.json")
+        };
+        std::fs::write(metadata, other_runtime).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("architecture"));
     }
 
     #[test]

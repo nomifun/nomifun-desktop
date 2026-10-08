@@ -24,6 +24,15 @@ import { readFileSync } from 'node:fs';
 export const MACOS_BROWSER_RUNTIME = Object.freeze(JSON.parse(readFileSync(
   new URL('../../apps/desktop/browser-runtime.json', import.meta.url), 'utf8',
 )));
+export const MACOS_INTEL_BROWSER_RUNTIME = Object.freeze(JSON.parse(readFileSync(
+  new URL('../../apps/desktop/browser-runtime-intel.json', import.meta.url), 'utf8',
+)));
+const hostTarget = () => process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+export function macosBrowserRuntime(target = hostTarget()) {
+  if (target === 'aarch64-apple-darwin') return MACOS_BROWSER_RUNTIME;
+  if (target === 'x86_64-apple-darwin') return MACOS_INTEL_BROWSER_RUNTIME;
+  throw new Error(`unsupported macOS CEF target: ${target}`);
+}
 export const MACOS_CEF_ARCHIVE = MACOS_BROWSER_RUNTIME.archive;
 export const MACOS_CEF_ARCHIVE_SHA1 = MACOS_BROWSER_RUNTIME.archive_sha1;
 export const MACOS_CEF_HELPER_NAMES = Object.freeze([...MACOS_BROWSER_RUNTIME.helpers]);
@@ -33,7 +42,8 @@ export const MACOS_CEF_REQUIRED_RESOURCES = Object.freeze([...MACOS_BROWSER_RUNT
 // Host builds omit a target component; explicit --target builds include it.
 export async function discoverCefRuntime({ root, target = null, profile = 'debug' }) {
   if (!['debug', 'release'].includes(profile)) throw new Error('CEF runtime discovery requires debug or release profile');
-  if (target && target !== 'aarch64-apple-darwin') throw new Error('CEF runtime supports only macOS arm64');
+  const contract = macosBrowserRuntime(target ?? hostTarget());
+  const runtimeDirectory = contract.architecture === 'arm64' ? 'cef_macos_aarch64' : 'cef_macos_x86_64';
   const candidates = [];
   for (const directory of ['build.noindex', 'target']) {
     const build = join(resolve(root), directory, ...(target ? [target] : []), profile, 'build');
@@ -42,11 +52,11 @@ export async function discoverCefRuntime({ root, target = null, profile = 'debug
       throw error;
     })) {
       if (!entry.isDirectory() || !entry.name.startsWith('cef-dll-sys-')) continue;
-      const runtime = join(build, entry.name, 'out', 'cef_macos_aarch64');
+      const runtime = join(build, entry.name, 'out', runtimeDirectory);
       const metadata = join(runtime, 'archive.json');
       try {
         const archive = JSON.parse(await readFile(metadata, 'utf8'));
-        if (archive.name !== MACOS_CEF_ARCHIVE || archive.sha1 !== MACOS_CEF_ARCHIVE_SHA1) continue;
+        if (archive.name !== contract.archive || archive.sha1 !== contract.archive_sha1) continue;
         const framework = await stat(join(runtime, 'Chromium Embedded Framework.framework', 'Chromium Embedded Framework')).catch(error => {
           if (error.code === 'ENOENT') return null;
           throw error;
@@ -60,7 +70,7 @@ export async function discoverCefRuntime({ root, target = null, profile = 'debug
     }
   }
   candidates.sort((left, right) => right.modified - left.modified || left.runtime.localeCompare(right.runtime));
-  if (!candidates.length) throw new Error('Cargo did not produce the pinned macOS arm64 CEF runtime');
+  if (!candidates.length) throw new Error('Cargo did not produce the pinned macOS CEF runtime');
   return candidates[0].runtime;
 }
 
@@ -70,13 +80,13 @@ export async function compileBrowserEnvironment({ root, target = null, profile =
   // These overrides are for compilation; native launch always uses its bundle.
   delete compiled.CEF_PATH;
   delete compiled.FLATPAK;
-  const searches = [
-    { target, profile }, { target: null, profile },
-    { target, profile: profile === 'release' ? 'debug' : 'release' },
-    { target: null, profile: profile === 'release' ? 'debug' : 'release' },
-    { target: 'aarch64-apple-darwin', profile },
-    { target: 'aarch64-apple-darwin', profile: profile === 'release' ? 'debug' : 'release' },
-  ];
+  const requestedTarget = target ?? hostTarget();
+  macosBrowserRuntime(requestedTarget);
+  const profiles = [profile, profile === 'release' ? 'debug' : 'release'];
+  const searches = profiles.flatMap(profile => [
+    { target: requestedTarget, profile },
+    ...(requestedTarget === hostTarget() ? [{ target: null, profile }] : []),
+  ]);
   const visited = new Set();
   let runtimePath = null;
   for (const search of searches) {
@@ -85,7 +95,7 @@ export async function compileBrowserEnvironment({ root, target = null, profile =
     visited.add(key);
     try { runtimePath = await discoverCefRuntime({ root, ...search }); break; }
     catch (error) {
-      if (error.message !== 'Cargo did not produce the pinned macOS arm64 CEF runtime') throw error;
+      if (error.message !== 'Cargo did not produce the pinned macOS CEF runtime') throw error;
     }
   }
   if (runtimePath) compiled.CEF_PATH = runtimePath;
@@ -131,7 +141,9 @@ export async function inspectMacosBrowserBundle(appPath) {
       if (error instanceof SyntaxError) return null;
       throw error;
     });
-    if (['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1'].some(field => metadata?.[field] !== MACOS_BROWSER_RUNTIME[field])) {
+    const contract = metadata?.architecture === 'arm64' ? MACOS_BROWSER_RUNTIME
+      : metadata?.architecture === 'x86_64' ? MACOS_INTEL_BROWSER_RUNTIME : null;
+    if (!contract || ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1'].some(field => metadata?.[field] !== contract[field])) {
       missing.push({ label: 'pinned CEF runtime identity', path: files[3][1] });
     }
   }
@@ -286,7 +298,8 @@ async function signMachO(directory, sign) {
   }
 }
 
-export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath, identity = '-' }) {
+export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath, identity = '-', target = hostTarget() }) {
+  const contract = macosBrowserRuntime(target);
   const app = resolve(appPath);
   const helper = resolve(helperPath);
   const runtime = resolve(runtimePath);
@@ -297,23 +310,24 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
   const helperNames = MACOS_CEF_HELPER_NAMES;
   let temporary;
   try {
-    if (process.platform !== 'darwin' || process.arch !== 'arm64') {
-      throw new Error('CEF product staging requires an Apple Silicon macOS host');
+    if (process.platform !== 'darwin') {
+      throw new Error('CEF product staging requires a macOS host');
     }
     await requireFile(join(contents, 'MacOS', 'nomifun-desktop'), 'NomiFun host');
     await requireFile(helper, 'CEF helper');
     await requireFile(join(frameworkSource, 'Chromium Embedded Framework'), 'CEF framework');
     for (const name of MACOS_CEF_REQUIRED_RESOURCES) await requireFile(join(frameworkSource, 'Resources', name), name);
     const archive = JSON.parse(await readFile(join(runtime, 'archive.json'), 'utf8'));
-    if (archive.name !== MACOS_CEF_ARCHIVE || archive.sha1 !== MACOS_CEF_ARCHIVE_SHA1) {
+    if (archive.name !== contract.archive || archive.sha1 !== contract.archive_sha1) {
       throw new Error(`unexpected CEF archive: ${archive.name || 'unknown'}`);
     }
     const helperArch = await run('lipo', ['-archs', helper], true);
+    const hostArch = await run('lipo', ['-archs', join(contents, 'MacOS', 'nomifun-desktop')], true);
     const frameworkArch = await run(
       'lipo', ['-archs', join(frameworkSource, 'Chromium Embedded Framework')], true,
     );
-    if (helperArch !== 'arm64' || frameworkArch !== 'arm64') {
-      throw new Error(`CEF arm64 staging received helper=${helperArch}, framework=${frameworkArch}`);
+    if ([hostArch, helperArch, frameworkArch].some(arch => arch !== contract.architecture)) {
+      throw new Error(`CEF ${contract.architecture} staging received host=${hostArch}, helper=${helperArch}, framework=${frameworkArch}`);
     }
 
     await mkdir(frameworks, { recursive: true });
@@ -359,12 +373,12 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
     await mkdir(legal, { recursive: true });
     await cp(join(runtime, 'CREDITS.html'), join(legal, 'CREDITS.html'));
     await writeFile(join(legal, 'runtime.json'), `${JSON.stringify({
-      cef: MACOS_BROWSER_RUNTIME.cef,
-      chromium: MACOS_BROWSER_RUNTIME.chromium,
-      crate: MACOS_BROWSER_RUNTIME.crate,
+      cef: contract.cef,
+      chromium: contract.chromium,
+      crate: contract.crate,
       archive: archive.name,
       archive_sha1: archive.sha1,
-      architecture: MACOS_BROWSER_RUNTIME.architecture,
+      architecture: contract.architecture,
     }, null, 2)}\n`);
 
     temporary = await mkdtemp(join(tmpdir(), 'nomifun-cef-sign-'));
@@ -389,9 +403,9 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
       status: 'pass',
       app,
       identity: identity === '-' ? 'adhoc' : 'provided',
-      cef: MACOS_BROWSER_RUNTIME.cef,
-      chromium: MACOS_BROWSER_RUNTIME.chromium,
-      architecture: MACOS_BROWSER_RUNTIME.architecture,
+      cef: contract.cef,
+      chromium: contract.chromium,
+      architecture: contract.architecture,
       framework: `Contents/Frameworks/${basename(framework)}`,
       helpers: helperNames.map(name => `Contents/Frameworks/${name}.app`),
       credits: 'Contents/Resources/browser-cef/CREDITS.html',
