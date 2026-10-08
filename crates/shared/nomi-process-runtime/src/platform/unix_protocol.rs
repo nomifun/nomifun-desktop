@@ -191,7 +191,7 @@ impl ProtocolError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Deadline {
     absolute: libc::timespec,
 }
