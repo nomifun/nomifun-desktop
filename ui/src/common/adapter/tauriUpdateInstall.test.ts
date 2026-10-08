@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   AUTO_INSTALL_UNSUPPORTED_ERROR,
   INSTALL_NOT_ATTEMPTED_ERROR,
@@ -24,7 +24,7 @@ const safe: UpdaterInstallContext = {
 };
 
 describe('installUpdateWithPreflight', () => {
-  test('safe context prepares shutdown, installs, and then relaunches in order', async () => {
+  test('safe context installs and then relaunches in order', async () => {
     const calls: string[] = [];
 
     await installUpdateWithPreflight({
@@ -32,7 +32,7 @@ describe('installUpdateWithPreflight', () => {
         calls.push('getContext');
         return safe;
       },
-      prepareShutdown: async () => void calls.push('prepareShutdown'),
+      showFailure: async () => void calls.push('showFailure'),
       install: async () => void calls.push('install'),
       relaunch: async () => void calls.push('relaunch'),
       fatalExit: async () => {
@@ -40,17 +40,17 @@ describe('installUpdateWithPreflight', () => {
       },
     });
 
-    expect(calls).toEqual(['getContext', 'prepareShutdown', 'install', 'relaunch']);
+    expect(calls).toEqual(['getContext', 'install', 'relaunch']);
   });
 
-  test('unsafe context never prepares shutdown, installs, or relaunches', async () => {
+  test('unsafe context never installs, reports a fatal failure, or relaunches', async () => {
     const calls: string[] = [];
     const result = installUpdateWithPreflight({
       getContext: async () => {
         calls.push('getContext');
         return { ...safe, autoInstallSupported: false, reason: 'mounted_volume' };
       },
-      prepareShutdown: async () => void calls.push('prepareShutdown'),
+      showFailure: async () => void calls.push('showFailure'),
       install: async () => void calls.push('install'),
       relaunch: async () => void calls.push('relaunch'),
       fatalExit: async () => {
@@ -69,36 +69,7 @@ describe('installUpdateWithPreflight', () => {
     expect(calls).toEqual(['getContext']);
   });
 
-  test('prepare shutdown failure prevents install and relaunch', async () => {
-    const calls: string[] = [];
-    const result = installUpdateWithPreflight({
-      getContext: async () => {
-        calls.push('getContext');
-        return safe;
-      },
-      prepareShutdown: async () => {
-        calls.push('prepareShutdown');
-        throw new Error('cleanup failed');
-      },
-      install: async () => void calls.push('install'),
-      relaunch: async () => void calls.push('relaunch'),
-      fatalExit: async () => {
-        throw new Error('fatalExit must not be called');
-      },
-    });
-
-    let errorMessage = '';
-    try {
-      await result;
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error);
-    }
-
-    expect(errorMessage).toBe('cleanup failed');
-    expect(calls).toEqual(['getContext', 'prepareShutdown']);
-  });
-
-  test('install failure after cleanup takes the fatal exit path and never relaunches', async () => {
+  test('install failure is reported before fatal exit and never relaunches', async () => {
     const calls: string[] = [];
     const installError = new Error('install failed');
     const fatalExitSentinel = new Error('fatal exit invoked');
@@ -110,7 +81,7 @@ describe('installUpdateWithPreflight', () => {
           calls.push('getContext');
           return safe;
         },
-        prepareShutdown: async () => void calls.push('prepareShutdown'),
+        showFailure: async () => void calls.push('showFailure'),
         install: async () => {
           calls.push('install');
           throw installError;
@@ -127,10 +98,10 @@ describe('installUpdateWithPreflight', () => {
     }
 
     expect(thrown).toBe(fatalExitSentinel);
-    expect(calls).toEqual(['getContext', 'prepareShutdown', 'install', 'fatalExit:install']);
+    expect(calls).toEqual(['getContext', 'install', 'showFailure', 'fatalExit:install']);
   });
 
-  test('relaunch failure after cleanup takes the fatal exit path', async () => {
+  test('relaunch failure is reported before fatal exit', async () => {
     const calls: string[] = [];
     const relaunchError = new Error('relaunch failed');
     const fatalExitSentinel = new Error('fatal exit invoked');
@@ -142,7 +113,7 @@ describe('installUpdateWithPreflight', () => {
           calls.push('getContext');
           return safe;
         },
-        prepareShutdown: async () => void calls.push('prepareShutdown'),
+        showFailure: async () => void calls.push('showFailure'),
         install: async () => void calls.push('install'),
         relaunch: async () => {
           calls.push('relaunch');
@@ -159,14 +130,14 @@ describe('installUpdateWithPreflight', () => {
     }
 
     expect(thrown).toBe(fatalExitSentinel);
-    expect(calls).toEqual(['getContext', 'prepareShutdown', 'install', 'relaunch', 'fatalExit:relaunch']);
+    expect(calls).toEqual(['getContext', 'install', 'relaunch', 'showFailure', 'fatalExit:relaunch']);
   });
 
   test('does not return to the renderer if the fatal exit adapter unexpectedly returns', async () => {
     const calls: string[] = [];
     const result = installUpdateWithPreflight({
       getContext: async () => safe,
-      prepareShutdown: async () => void calls.push('prepareShutdown'),
+      showFailure: async () => void calls.push('showFailure'),
       install: async () => {
         calls.push('install');
         throw new Error('install failed');
@@ -184,7 +155,34 @@ describe('installUpdateWithPreflight', () => {
     ]);
 
     expect(outcome).toBe('still-terminal');
-    expect(calls).toEqual(['prepareShutdown', 'install', 'fatalExit']);
+    expect(calls).toEqual(['install', 'showFailure', 'fatalExit']);
+  });
+
+  test('a failed error dialog cannot prevent the terminal exit', async () => {
+    const calls: string[] = [];
+    const exit = new Error('fatal exit invoked');
+    const logger = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(installUpdateWithPreflight({
+        getContext: async () => safe,
+        install: async () => {
+          calls.push('install');
+          throw new Error('replacement failed');
+        },
+        relaunch: async () => void calls.push('relaunch'),
+        showFailure: async (failure) => {
+          calls.push(`showFailure:${failure.phase}`);
+          throw new Error('dialog unavailable');
+        },
+        fatalExit: async (failure) => {
+          calls.push(`fatalExit:${failure.phase}`);
+          throw exit;
+        },
+      })).rejects.toBe(exit);
+      expect(calls).toEqual(['install', 'showFailure:install', 'fatalExit:install']);
+    } finally {
+      logger.mockRestore();
+    }
   });
 
   // The native side refuses an install it never started — no retained package for
@@ -202,7 +200,7 @@ describe('installUpdateWithPreflight', () => {
     try {
       await installUpdateWithPreflight({
         getContext: async () => safe,
-        prepareShutdown: async () => void calls.push('prepareShutdown'),
+        showFailure: async () => void calls.push('showFailure'),
         install: async () => {
           calls.push('install');
           throw refusal;
@@ -219,7 +217,7 @@ describe('installUpdateWithPreflight', () => {
 
     expect(thrown).toBe(refusal);
     // Never relaunches, and crucially never exits: the app is intact.
-    expect(calls).toEqual(['prepareShutdown', 'install']);
+    expect(calls).toEqual(['install']);
   });
 
   test('an install already in flight keeps the fail-closed exit', async () => {
@@ -231,7 +229,7 @@ describe('installUpdateWithPreflight', () => {
 
     const result = installUpdateWithPreflight({
       getContext: async () => safe,
-      prepareShutdown: async () => void calls.push('prepareShutdown'),
+      showFailure: async () => void calls.push('showFailure'),
       install: async () => {
         calls.push('install');
         throw inFlight;
@@ -249,7 +247,7 @@ describe('installUpdateWithPreflight', () => {
     ]);
 
     expect(outcome).toBe('still-terminal');
-    expect(calls).toEqual(['prepareShutdown', 'install', 'fatalExit']);
+    expect(calls).toEqual(['install', 'showFailure', 'fatalExit']);
   });
 });
 

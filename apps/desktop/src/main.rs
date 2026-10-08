@@ -642,14 +642,6 @@ impl<T> DownloadedUpdateCache<T> {
         }
     }
 
-    fn restore_ready(&self, version: String, payload: T) {
-        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
-        if matches!(&*slot, DownloadedUpdateSlot::Installing { version: active } if active == &version)
-        {
-            *slot = DownloadedUpdateSlot::Ready { version, payload };
-        }
-    }
-
     /// Release the claim taken by [`Self::take_ready`] after the installer has
     /// accepted the package. Without this, `Installing` was a terminal state:
     /// on macOS/Linux `Update::install` RETURNS on success, so a completed
@@ -974,7 +966,9 @@ async fn install_update(
     // failure can leave the app bundle half replaced. An Err here is NOT
     // recoverable in the renderer.
     if let Err(error) = package.update.install(&package.bytes) {
-        downloaded.restore_ready(requested_version, package);
+        // Keep the slot claimed: a failed replacement is not an installable
+        // package. The renderer reports the failure before its terminal exit.
+        tracing::error!(version = %requested_version, %error, "desktop update installation failed");
         return Err(error.to_string());
     }
     downloaded.finish_install(&requested_version);
@@ -3556,12 +3550,8 @@ mod tests {
 
     #[test]
     fn completed_install_releases_the_slot_for_the_next_update() {
-        // `Installing` used to be a terminal sink: the only way out was an install
-        // ERROR (restore_ready). On macOS/Linux `install()` returns Ok, so a
-        // successful install parked the slot in Installing for the rest of the
-        // process — after which EVERY later download was rejected with
-        // "already being processed" and the user could not update again without
-        // restarting the app.
+        // macOS/Linux installation returns on success, so only a successful
+        // handoff may release the slot for another update.
         let cache = DownloadedUpdateCache::default();
         cache.begin_download("0.4.2", |_| 0).unwrap();
         cache.finish_download("0.4.2", "verified bytes").unwrap();
@@ -3791,8 +3781,6 @@ mod tests {
         cache.finish_download("0.3.8", vec![1, 2, 3]).unwrap();
 
         assert!(cache.take_ready("0.3.9").is_err());
-        let payload = cache.take_ready("0.3.8").unwrap();
-        cache.restore_ready("0.3.8".to_owned(), payload);
         assert_eq!(cache.take_ready("0.3.8").unwrap(), vec![1, 2, 3]);
     }
 

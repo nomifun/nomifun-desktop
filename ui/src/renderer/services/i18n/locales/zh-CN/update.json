@@ -34,6 +34,7 @@
   "readyToInstall": "准备安装",
   "readyToInstallDesc": "更新已下载完成，点击下方按钮重启应用并安装更新。",
   "installNow": "立即安装",
+  "installFailedDesc": "更新安装或重启失败。NomiFun 将退出，请从版本发布页面手动下载并重新安装；如需反馈，请附上日志。",
   "installWarning": "安装期间请勿手动打开应用，应用将自动重启。",
   "preparingInstallTitle": "正在准备安装...",
   "preparingInstallDesc": "正在检查安装环境并准备启动已下载的安装包，请稍候。",
