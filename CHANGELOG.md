@@ -5,6 +5,15 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.0 - 2026-10-08
+
+- **Upgrade warning: back up the NomiFun data directory before upgrading.**
+  This release performs a one-time clean cut for a complete recognized retired
+  Agent generation. It removes prior Agent sessions, messages, execution
+  history, Agent presets, and Agent bindings while preserving non-Agent
+  configuration. Unknown, partial, or hand-edited database lineage fails closed
+  without conversion or deletion.
+
 - **Long-running coding Agent recovery is more resilient.** Windows native
   process tools resolve executable names from PATH, failed commands enter
   explicit replanning, and completion feedback identifies stale evidence.
