@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/zh/workspace.jpg" alt="当前 NomiFun Desktop 工作台" width="100%">
+  <img src="docs/images/readme/zh/home.png" alt="NomiFun Desktop 首页与两位自定义伙伴" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
