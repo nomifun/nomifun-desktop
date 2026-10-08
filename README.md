@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/en/workspace.jpg" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
+  <img src="docs/images/readme/en/home.png" alt="NomiFun Desktop home with two custom companions" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
