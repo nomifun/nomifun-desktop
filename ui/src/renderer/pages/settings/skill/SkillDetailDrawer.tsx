@@ -10,13 +10,15 @@ import { Button, Drawer, Spin } from '@arco-design/web-react';
 import { Code, FileText, FolderOpen, Lightning, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { resolveSkillDisplay } from './skillDisplay';
+import { resolveSkillDisplay, type SkillDisplay } from './skillDisplay';
 import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
 
 type SkillDetailDrawerProps = {
   visible: boolean;
   skill: SkillInfo | null;
   localeKey: string;
+  /** Settings-only presentation metadata; file reads continue to use canonical `skill`. */
+  display?: SkillDisplay;
   isAutoInjected: boolean;
   onClose: () => void;
 };
@@ -27,6 +29,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
   visible,
   skill,
   localeKey,
+  display: displayOverride,
   isAutoInjected,
   onClose,
 }) => {
@@ -67,7 +70,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     void loadContent();
   }, [loadContent, skill, visible]);
 
-  const display = skill ? resolveSkillDisplay(skill, localeKey) : null;
+  const display = skill ? displayOverride ?? resolveSkillDisplay(skill, localeKey) : null;
   const previewContent = useMemo(() => stripSkillFrontmatter(content).trim(), [content]);
 
   const sourceLabel = isAutoInjected
