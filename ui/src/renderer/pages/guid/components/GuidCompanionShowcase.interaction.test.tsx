@@ -47,6 +47,7 @@ describe('home companion showcase', () => {
     expect(opened).toEqual([]);
     fireEvent.click(within(document.body).getByRole('button', { name: 'Open chat' }));
     expect(opened).toEqual([id(1)]);
+    expect(within(document.body).queryByRole('dialog', { name: 'Companion 1' })).toBeNull();
     expect((view.getByRole('textbox', { name: 'Draft' }) as HTMLTextAreaElement).value).toBe('Keep my unsent work');
   });
   test('search discovers partners outside the first pane and promotes the chosen partner', async () => {
@@ -65,12 +66,12 @@ describe('home companion showcase', () => {
     expect(view.getByRole('region', { name: 'My companions' }).getAttribute('data-collapsed')).toBe('false');
     fireEvent.click(view.getByRole('button', { name: 'Collapse' }));
     expect(view.getByRole('button', { name: 'Expand' }).getAttribute('aria-expanded')).toBe('false');
-    expect(view.queryByText('Float on desktop')).toBeNull();
+    expect(view.queryByText('Show on desktop')).toBeNull();
     expect((view.getByRole('textbox', { name: 'Draft' }) as HTMLTextAreaElement).value).toBe('Keep my unsent work');
     view.unmount();
     expect(mount({ companions: [companion(1)] }).getByRole('button', { name: 'Expand' })).toBeTruthy();
   });
-  test('desktop floating lives in companion popovers for expanded, roster and collapsed views', async () => {
+  test('desktop visibility actions follow each companion state in expanded, roster and collapsed popovers', async () => {
     const toggled: Array<[string, boolean]> = [];
     const opened: string[] = [];
     const view = mount({
@@ -78,49 +79,51 @@ describe('home companion showcase', () => {
       onToggleFloating: (item, enabled) => toggled.push([item.companion_id, enabled]),
       onOpenChat: (item) => opened.push(item.companion_id),
     });
-    expect(view.queryByRole('button', { name: 'Float Companion 1 on desktop' })).toBeNull();
+    expect(view.queryByRole('button', { name: 'Show Companion 1 on desktop' })).toBeNull();
     expect(view.queryByRole('switch')).toBeNull();
     fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
     await settle();
     const detail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
-    const first = within(detail).getByRole('button', { name: 'Float Companion 1 on desktop' });
-    expect(first.getAttribute('aria-pressed')).toBe('false');
+    const first = within(detail).getByRole('button', { name: 'Show Companion 1 on desktop' });
+    expect(first.textContent).toBe('Show on desktop');
+    expect(first.hasAttribute('aria-pressed')).toBe(false);
     fireEvent.click(first);
     expect(toggled).toEqual([[id(1), true]]);
     expect(opened).toEqual([]);
-    expect(within(document.body).getByRole('dialog', { name: 'Companion 1' })).toBeTruthy();
+    expect(within(document.body).queryByRole('dialog', { name: 'Companion 1' })).toBeNull();
 
     fireEvent.click(view.getByRole('button', { name: 'All companions · 2' }));
     await settle();
     const roster = within(document.body).getByRole('dialog', { name: 'All companions · 2' });
-    expect(within(roster).queryByRole('button', { name: 'Float Companion 2 on desktop' })).toBeNull();
+    expect(within(roster).queryByRole('button', { name: 'Hide Companion 2 from desktop' })).toBeNull();
     fireEvent.click(within(roster).getByRole('button', { name: 'More actions for Companion 2' }));
     await settle();
     const menu = within(roster).getByRole('dialog', { name: 'More actions for Companion 2' });
-    const second = within(menu).getByRole('button', { name: 'Float Companion 2 on desktop' });
-    expect(second.getAttribute('aria-pressed')).toBe('true');
+    const second = within(menu).getByRole('button', { name: 'Hide Companion 2 from desktop' });
+    expect(second.textContent).toBe('Hide from desktop');
+    expect(second.querySelector('svg')).toBeNull();
     fireEvent.click(second);
     expect(toggled).toEqual([[id(1), true], [id(2), false]]);
-    expect(within(document.body).getByRole('dialog', { name: 'All companions · 2' })).toBeTruthy();
-    expect(within(menu).getByRole('button', { name: 'Float Companion 2 on desktop' })).toBeTruthy();
+    expect(within(document.body).queryByRole('dialog', { name: 'All companions · 2' })).toBeNull();
+    expect(within(document.body).queryByRole('dialog', { name: 'More actions for Companion 2' })).toBeNull();
 
-    fireEvent.click(within(roster).getByRole('button', { name: 'Close companion list' }));
     fireEvent.click(view.getByRole('button', { name: 'Collapse' }));
-    expect(view.queryByRole('button', { name: 'Float Companion 1 on desktop' })).toBeNull();
+    expect(view.queryByRole('button', { name: 'Show Companion 1 on desktop' })).toBeNull();
     fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
     await settle();
     const compactDetail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
-    fireEvent.click(within(compactDetail).getByRole('button', { name: 'Float Companion 1 on desktop' }));
+    fireEvent.click(within(compactDetail).getByRole('button', { name: 'Show Companion 1 on desktop' }));
     expect(toggled).toEqual([[id(1), true], [id(2), false], [id(1), true]]);
+    expect(within(document.body).queryByRole('dialog', { name: 'Companion 1' })).toBeNull();
   });
-  test('a pending desktop visibility change shows its target state and prevents a second click', async () => {
+  test.each([true, false])('a pending desktop visibility change to %s shows its next action and prevents a second click', async (enabled) => {
     const toggled: boolean[] = [];
-    const view = mount({ companions: [companion(1)], pendingFloating: { [id(1)]: true }, onToggleFloating: (_item, enabled) => toggled.push(enabled) });
+    const view = mount({ companions: [companion(1, !enabled)], pendingFloating: { [id(1)]: enabled }, onToggleFloating: (_item, enabled) => toggled.push(enabled) });
     fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
     await settle();
     const detail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
-    const toggle = within(detail).getByRole('button', { name: 'Float Companion 1 on desktop' });
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    const toggle = within(detail).getByRole('button', { name: enabled ? 'Hide Companion 1 from desktop' : 'Show Companion 1 on desktop' });
+    expect(toggle.textContent).toBe(enabled ? 'Hide from desktop' : 'Show on desktop');
     expect(toggle.getAttribute('aria-busy')).toBe('true');
     expect(toggle.hasAttribute('disabled')).toBe(true);
     fireEvent.click(toggle);

@@ -5,7 +5,7 @@ import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
 import { Message } from '@arco-design/web-react';
-import { Add, Check, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
+import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -102,11 +102,10 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
         {openingId === companion.companion_id ? t('guid.showcase.opening') : t('guid.showcase.openChat')}
       </button>
       <button type='button' className={styles.actionButton}
-        aria-label={t('guid.showcase.floatingFor', { name: companion.name })}
-        aria-pressed={enabled} aria-busy={pending !== undefined} disabled={pending !== undefined}
-        onClick={() => onToggleFloating(companion, !enabled)}>
-        <span>{t('guid.showcase.floating')}</span>
-        <span className={styles.actionIndicator} aria-hidden='true'>{enabled && <Check size={14} fill='currentColor' />}</span>
+        aria-label={t(enabled ? 'guid.showcase.hideDesktopFor' : 'guid.showcase.showDesktopFor', { name: companion.name })}
+        aria-busy={pending !== undefined} disabled={pending !== undefined}
+        onClick={() => { dismissActions(); onToggleFloating(companion, !enabled); }}>
+        {t(enabled ? 'guid.showcase.hideDesktop' : 'guid.showcase.showDesktop')}
       </button>
       <button type='button' className={styles.actionButton}
         onClick={() => { dismissActions(); onManage(companion.companion_id); }}>{t('guid.showcase.manage')}</button>
