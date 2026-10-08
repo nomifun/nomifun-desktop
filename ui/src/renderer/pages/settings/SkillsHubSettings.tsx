@@ -15,14 +15,12 @@ import AgentSkillImportDrawer from './skill/AgentSkillImportDrawer';
 import type { ExternalAgentSkillSource } from './skill/agentSkillImportUtils';
 import SkillCard from './skill/SkillCard';
 import SkillDetailDrawer from './skill/SkillDetailDrawer';
-import { resolveSkillDisplay } from './skill/skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import {
-  type InstalledMarketState,
   readInstalledMarketState,
   reconcileInstalledMarketState,
-  resolveInstalledMarketPresentation,
   writeInstalledMarketState,
-} from './skill/skillMarketProvenance';
+} from '@/renderer/services/skills/skillMarketProvenance';
 import {
   ENHANCED_TOOLS_EMPTY_STATE_CLASS,
   ENHANCED_TOOLS_GRID_CLASS,
@@ -55,6 +53,7 @@ type SkillsHubSettingsProps = {
 const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, refreshToken = 0 }) => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
+  const getSkillDisplay = useSkillDisplay(localeKey);
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -65,7 +64,6 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
 
   const [loading, setLoading] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
-  const [installedMarketState, setInstalledMarketState] = useState<InstalledMarketState>({});
   const [skillPaths, setSkillPaths] = useState<{ user_skills_dir: string; builtin_skills_dir: string } | null>(null);
   const [builtinAutoSkills, setBuiltinAutoSkills] = useState<Array<{ name: string; description: string }>>([]);
 
@@ -97,7 +95,6 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
         typedSkills.map((skill) => skill.name)
       );
       writeInstalledMarketState(reconciledMarketState);
-      setInstalledMarketState(reconciledMarketState);
       setAvailableSkills(typedSkills);
       if (pathsResult.status === 'fulfilled') {
         setSkillPaths(pathsResult.value);
@@ -128,39 +125,16 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
     };
   }, [active, fetchData, refreshToken]);
 
-  const marketPresentations = useMemo(() => {
-    const presentations = new Map<string, { name: string; description: string }>();
-    for (const skill of availableSkills) {
-      const presentation = resolveInstalledMarketPresentation(
-        installedMarketState,
-        skill.name,
-        localeKey
-      );
-      if (presentation) {
-        presentations.set(skill.name, {
-          name: presentation.name,
-          description: presentation.description,
-        });
-      }
-    }
-    return presentations;
-  }, [availableSkills, installedMarketState, localeKey]);
-
-  const resolveHubSkillDisplay = useCallback(
-    (skill: SkillInfo) => marketPresentations.get(skill.name) ?? resolveSkillDisplay(skill, localeKey),
-    [localeKey, marketPresentations]
-  );
-
   const filteredSkills = useMemo(() => {
     const query = search_query.trim().toLowerCase();
     if (!query) return availableSkills;
     return availableSkills.filter((skill) => {
-      const display = resolveHubSkillDisplay(skill);
+      const display = getSkillDisplay(skill);
       return `${skill.name} ${skill.description} ${display.name} ${display.description}`
         .toLowerCase()
         .includes(query);
     });
-  }, [availableSkills, resolveHubSkillDisplay, search_query]);
+  }, [availableSkills, getSkillDisplay, search_query]);
 
   const detailSkill = useMemo(
     () => availableSkills.find((skill) => skill.name === detailSkillName) ?? null,
@@ -239,7 +213,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
   };
 
   const confirmDelete = (skill: SkillInfo) => {
-    const display = resolveHubSkillDisplay(skill);
+    const display = getSkillDisplay(skill);
     Modal.confirm({
       title: t('settings.skillsHub.deleteConfirmTitle', { defaultValue: 'Delete Skill' }),
       content: t('settings.skillsHub.deleteConfirmContent', {
@@ -395,7 +369,6 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
                   key={skill.name}
                   skill={skill}
                   localeKey={localeKey}
-                  display={marketPresentations.get(skill.name)}
                   isAutoInjected={autoInjectedNames.has(skill.name)}
                   onOpenDetails={(selectedSkill) => setDetailSkillName(selectedSkill.name)}
                   onDelete={confirmDelete}
@@ -443,7 +416,6 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ active = true, re
         visible={detailSkill !== null}
         skill={detailSkill}
         localeKey={localeKey}
-        display={detailSkill ? marketPresentations.get(detailSkill.name) : undefined}
         isAutoInjected={
           detailSkill !== null &&
           autoInjectedNames.has(detailSkill.name)

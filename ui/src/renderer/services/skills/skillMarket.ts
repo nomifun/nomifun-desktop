@@ -141,43 +141,6 @@ export const selectMarketSourceWithItems = (
   return sources.find((source) => itemSources.has(source)) ?? activeSource;
 };
 
-export const translateMarketDescription = (
-  description: string,
-  item?: Pick<ISkillMarketItem, 'name' | 'source' | 'audience_tags' | 'scenario_tags'>,
-  localeKey = 'zh-CN'
-): string => {
-  const text = cleanMarketText(description, MAX_DESCRIPTION_LENGTH);
-  if (!localeKey.toLowerCase().startsWith('zh')) return text;
-  if (!text || /[\u4e00-\u9fff]/.test(text)) return text;
-
-  const skillHub = text.match(/^Ranked SkillHub skill from ([\w.-]+)\/skills\.$/i);
-  if (skillHub) return `来自 ${skillHub[1]}/skills 的 SkillHub 榜单技能。`;
-
-  const lower = text.toLowerCase();
-  if (lower.includes('security') && lower.includes('skill')) {
-    return '用于安装前审查技能安全性，帮助识别风险和不可信内容。';
-  }
-  if (lower.includes('github')) return '用于 GitHub、代码仓库和开发协作流程的技能。';
-  if (lower.includes('pdf')) return '用于 PDF 文档读取、分析和处理的技能。';
-  if (lower.includes('weather')) return '用于查询天气、预报和相关环境信息的技能。';
-  if (lower.includes('search')) return '用于联网搜索、资料检索和信息整理的技能。';
-  if (lower.includes('self') && lower.includes('improv')) return '用于记录经验、错误和修正，帮助 Agent 持续改进。';
-
-  const tags = new Set([...(item?.audience_tags ?? []), ...(item?.scenario_tags ?? [])]);
-  const name = cleanMarketText(item?.name, 40) || '该技能';
-  if (tags.has('coding')) return `${name} 用于代码、CLI 或开发自动化工作流。`;
-  if (tags.has('document')) return `${name} 用于文档、写作或办公文件处理。`;
-  if (tags.has('spreadsheet')) return `${name} 用于表格、数据整理或办公分析。`;
-  if (tags.has('presentation')) return `${name} 用于演示文稿制作或幻灯片处理。`;
-  if (tags.has('design')) return `${name} 用于设计、图片或创意生产工作流。`;
-  if (tags.has('research')) return `${name} 用于学术研究、资料检索和内容归纳。`;
-  if (tags.has('planning')) return `${name} 用于任务规划、项目推进和流程管理。`;
-  if (tags.has('social')) return `${name} 用于社交媒体、内容发布或营销工作流。`;
-  if (tags.has('setup')) return `${name} 用于工具配置、安装或初始化流程。`;
-
-  return `${name} 的市场榜单技能，可扩展 Nomi 的自动化能力。`;
-};
-
 export const filterSkillMarketItems = (
   items: ISkillMarketItem[],
   source: SkillMarketSource,
@@ -190,7 +153,6 @@ export const filterSkillMarketItems = (
       const haystack = [
         item.name,
         item.description,
-        translateMarketDescription(item.description, item, 'zh-CN'),
         item.tags?.join(' '),
         item.stats,
       ]

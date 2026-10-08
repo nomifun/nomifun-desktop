@@ -1,5 +1,5 @@
 import type { IMcpServer } from '@/common/config/storage';
-import { resolveSkillDisplay } from '@/renderer/pages/settings/skill/skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { Button, Checkbox, Spin, Tooltip } from '@arco-design/web-react';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
 import { CheckOne, CloseSmall, Lightning, Puzzle, Right } from '@icon-park/react';
@@ -89,6 +89,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   children,
 }) => {
   const { t, i18n } = useTranslation();
+  const getSkillDisplay = useSkillDisplay(i18n.language);
   const navigate = useNavigate();
   const toolsContext = useContext(SessionComposerToolsContext);
   const [localOpen, setLocalOpen] = useState<PickerKind>();
@@ -193,13 +194,14 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             </div>
           ) : isSkills ? (
             catalog.skills.map((skill) => {
-              const display = resolveSkillDisplay(skill, i18n.language);
+              const display = getSkillDisplay(skill);
               const checked = selectedSkills.has(skill.name);
               const unavailable = skill.session_available === false;
               const rowDisabled = disabled || readOnlyKinds.includes('skills') || (unavailable && !checked);
-              const description = unavailable
+              const description = display.description || t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' });
+              const unavailableReason = unavailable
                 ? skill.session_error?.trim() || t('conversation.capabilityPicker.unavailable')
-                : display.description || skill.name;
+                : undefined;
               return (
                 <div
                   key={skill.name}
@@ -213,11 +215,13 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                     <strong>{display.name}</strong>
                     <CapabilityDescription>{description}</CapabilityDescription>
                   </span>
-                  <span className={`${styles.status} ${unavailable ? styles.error : ''}`}>{unavailable
-                    ? t('conversation.capabilityPicker.error', { defaultValue: '异常' })
-                    : skill.source === 'builtin'
-                    ? t('conversation.capabilityPicker.builtin', { defaultValue: '内置' })
-                    : t('conversation.capabilityPicker.installed', { defaultValue: '已安装' })}</span>
+                  <Tooltip content={unavailableReason} disabled={!unavailable} trigger={['hover', 'focus']} position='left' className={styles.descriptionTooltip}>
+                    <span title={unavailableReason} tabIndex={unavailable ? 0 : undefined} className={`${styles.status} ${unavailable ? styles.error : ''}`}>{unavailable
+                      ? t('conversation.capabilityPicker.error', { defaultValue: '异常' })
+                      : skill.source === 'builtin'
+                      ? t('conversation.capabilityPicker.builtin', { defaultValue: '内置' })
+                      : t('conversation.capabilityPicker.installed', { defaultValue: '已安装' })}</span>
+                  </Tooltip>
                 </div>
               );
             })

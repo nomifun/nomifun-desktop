@@ -92,7 +92,6 @@
     "empty": "Ranking data is not available yet. Refresh to try again.",
     "noSearchMatch": "No {{source}} skills matched “{{query}}”.",
     "noMatch": "No skills match the current filters.",
-    "noDescription": "No description available.",
     "copyCommand": "Copy full command",
     "lastUpdated": "Last updated: {{time}}",
     "openInBrowser": "Open market in browser"

@@ -92,7 +92,6 @@
     "empty": "暂未获取到榜单数据，请点击刷新重试。",
     "noSearchMatch": "{{source}} 中未找到与“{{query}}”相关的技能。",
     "noMatch": "没有符合当前筛选条件的技能。",
-    "noDescription": "暂无描述。",
     "copyCommand": "复制完整命令",
     "lastUpdated": "上次更新：{{time}}",
     "openInBrowser": "在浏览器中打开市场"

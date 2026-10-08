@@ -52,10 +52,10 @@ import {
   type CreativeCanvasAgentContextSnapshot,
 } from './context';
 import {
-  CREATIVE_STUDIO_PLANNING_SKILLS,
   DEFAULT_CREATIVE_STUDIO_PLANNING_SKILL_IDS,
   isCreativeStudioPlanningSkillId,
 } from './planningSkills';
+import { usePlanningSkillOptions } from './usePlanningSkillOptions';
 import type { CreativeCanvasAgentOp } from './artifacts';
 import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
 import {
@@ -249,29 +249,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     );
   }, [appliedProposalMessageIds, messages, proposalOverrides, t]);
 
-  const translatedSkillOptions = useMemo(
-    () =>
-      CREATIVE_STUDIO_PLANNING_SKILLS.map((skill) => ({
-        id: skill.id,
-        label: t(skill.labelKey, {
-          defaultValue:
-            skill.id === 'creative-studio-canvas'
-              ? '画布规划'
-              : skill.id === 'creative-studio-organize'
-                ? '整理布局'
-                : '模板设计',
-        }),
-        description: t(skill.descriptionKey, {
-          defaultValue:
-            skill.id === 'creative-studio-canvas'
-              ? '理解当前选择并提出安全的文本与结构操作。'
-              : skill.id === 'creative-studio-organize'
-                ? '调整现有节点的位置、尺寸与连接关系。'
-                : '把创作目标整理成可人工确认的模板草案。',
-        }),
-      })),
-    [t]
-  );
+  const skillOptions = usePlanningSkillOptions(i18n.language);
 
   useEffect(() => {
     setExcludedContextNodeIds([]);
@@ -936,7 +914,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       draft={draft}
       model={model}
       contextItems={contextItems}
-      skillOptions={translatedSkillOptions}
+      skillOptions={skillOptions}
       selectedSkillIds={selectedSkillIds}
       modelLocked={lockedModel !== null}
       isRunning={isRunning}

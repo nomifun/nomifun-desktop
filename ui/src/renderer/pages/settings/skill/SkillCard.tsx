@@ -12,7 +12,7 @@
  * `<div onClick>` for clickables (no <button>, to dodge the WebView2 black box).
  */
 import type { SkillInfo } from '@/common/types/skill';
-import { resolveSkillDisplay, type SkillDisplay } from './skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { getAvatarColorClass, normalizeTestId } from './skillPresentation';
 import { Tag } from '@arco-design/web-react';
 import { Delete, Lightning } from '@icon-park/react';
@@ -22,8 +22,6 @@ import { useTranslation } from 'react-i18next';
 type SkillCardProps = {
   skill: SkillInfo;
   localeKey: string;
-  /** Settings-only presentation metadata; canonical `skill.name` remains the identity. */
-  display?: SkillDisplay;
   /** True when the skill name is in the built-in auto-inject set (parent-supplied). */
   isAutoInjected: boolean;
   onOpenDetails: (skill: SkillInfo) => void;
@@ -72,7 +70,6 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
 const SkillCard: React.FC<SkillCardProps> = ({
   skill,
   localeKey,
-  display: displayOverride,
   isAutoInjected,
   onOpenDetails,
   onDelete,
@@ -81,7 +78,8 @@ const SkillCard: React.FC<SkillCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const testId = normalizeTestId(skill.name);
-  const display = displayOverride ?? resolveSkillDisplay(skill, localeKey);
+  const getSkillDisplay = useSkillDisplay(localeKey);
+  const display = getSkillDisplay(skill);
 
   const canDelete = skill.source === 'custom';
 
@@ -116,7 +114,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
           <div
             className={`flex-shrink-0 w-36px h-36px rounded-10px flex items-center justify-center font-bold text-15px shadow-sm uppercase ${getAvatarColorClass(skill.name)}`}
           >
-            {skill.name.charAt(0).toUpperCase()}
+            {display.name.charAt(0).toUpperCase()}
           </div>
         )}
         <div className='flex h-36px min-w-0 flex-1 flex-col justify-between'>

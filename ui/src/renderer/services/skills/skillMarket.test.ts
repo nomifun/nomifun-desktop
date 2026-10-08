@@ -6,7 +6,6 @@ import {
   normalizeSkillMarketItems,
   resolveMarketSyncItems,
   selectMarketSourceWithItems,
-  translateMarketDescription,
 } from './skillMarket';
 
 const item = {
@@ -29,7 +28,7 @@ describe('skill market helpers', () => {
     expect(result).toEqual([item]);
     expect(filterSkillMarketItems([item], 'skillhub', '')).toHaveLength(0);
     expect(filterSkillMarketItems([item], 'clawhub', 'missing')).toHaveLength(0);
-    expect(filterSkillMarketItems([item], 'clawhub', '开发')).toEqual([item]);
+    expect(filterSkillMarketItems([item], 'clawhub', '开发')).toEqual([]);
   });
 
   test('rejects unsafe cached commands and URLs', () => {
@@ -106,10 +105,4 @@ describe('skill market helpers', () => {
     expect(selectMarketSourceWithItems('clawhub', ['clawhub', 'loophub', 'skillhub'], [])).toBe('clawhub');
   });
 
-  test('translates common market descriptions for zh display', () => {
-    expect(translateMarketDescription('Ranked SkillHub skill from vercel-labs/skills.', item)).toBe(
-      '来自 vercel-labs/skills 的 SkillHub 榜单技能。'
-    );
-    expect(translateMarketDescription('GitHub coding helper', item).includes('开发')).toBe(true);
-  });
 });

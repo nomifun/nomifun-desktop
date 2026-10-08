@@ -35,6 +35,8 @@ export interface GeneratedSkillEntry {
 export interface CatalogSkillEntry {
   kind: 'catalog';
   key: string;
+  /** Canonical catalog identity for grants; `name` below is presentation only. */
+  skillName: string;
   name: string;
   description: string;
   /** Auto-injected default capability: granted unless explicitly opted out. */
@@ -79,7 +81,7 @@ export interface BuildSkillEntriesInput {
   config: ICompanionSkillConfig;
   /** Description used for a granted-but-uninstalled catalog entry. */
   missingDescription: string;
-  /** Localized display resolution (name/description i18n maps). */
+  /** Shared catalog/market presentation resolution. */
   display?: (skill: CatalogSkillInfo) => { name: string; description: string };
 }
 
@@ -131,8 +133,9 @@ export const buildSkillEntries = ({
     entries.push({
       kind: 'catalog',
       key: `catalog:${name}`,
+      skillName: name,
       name: resolved?.name || name,
-      description: info ? resolved?.description || info.description : missingDescription,
+      description: info ? resolved?.description ?? info.description : missingDescription,
       isAuto: autoNames.has(name),
       installed: Boolean(info?.location),
       location: info?.location ?? '',

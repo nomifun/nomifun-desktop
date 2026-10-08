@@ -139,7 +139,9 @@ const SkillListRow: React.FC<SkillListRowProps> = ({
           </div>
         }
         description={
-          entry.description?.trim() || t('nomi.skills.noDescription', { defaultValue: '这个技能还没有描述' })
+          entry.kind === 'catalog'
+            ? entry.description || t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' })
+            : entry.description?.trim() || t('nomi.skills.noDescription', { defaultValue: '这个技能还没有描述' })
         }
         descriptionClassName='line-clamp-2'
         controls={controls}

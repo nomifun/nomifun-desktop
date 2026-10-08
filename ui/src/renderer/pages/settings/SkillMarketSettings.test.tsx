@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { createElement as h } from 'react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { createElement as h, Fragment, type ReactNode } from 'react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { ipcBridge } from '@/common';
@@ -8,10 +8,13 @@ import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import * as arcoMessageHook from '@/renderer/utils/ui/useArcoMessage';
 import SkillMarketSettings from './SkillMarketSettings';
+import SkillCard from './skill/SkillCard';
 import {
   INSTALLED_MARKET_KEY,
   SKILL_MARKET_CACHE_KEY,
-} from './skill/skillMarketProvenance';
+  recordInstalledMarketItem,
+  writeInstalledMarketState,
+} from '@/renderer/services/skills/skillMarketProvenance';
 
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
 const LEGACY_INSTALLED_MARKET_KEY = 'nomifun.skillMarket.installed.v1';
@@ -71,7 +74,7 @@ function prepareMarketCache(items = [marketItem]) {
   }
 }
 
-function mount(onInstalled?: () => void) {
+function mount(onInstalled?: () => void, children?: ReactNode) {
   const messageHook = spyOn(arcoMessageHook, 'useArcoMessage').mockReturnValue([
     {
       success: () => () => {},
@@ -81,10 +84,32 @@ function mount(onInstalled?: () => void) {
     null,
   ] as unknown as ReturnType<typeof arcoMessageHook.useArcoMessage>);
   restore.push(() => messageHook.mockRestore());
-  return render(h(I18nextProvider, { i18n: locale }, h(SkillMarketSettings, { onInstalled })));
+  return render(h(I18nextProvider, { i18n: locale }, h(Fragment, null, h(SkillMarketSettings, { onInstalled }), children)));
 }
 
 describe('SkillMarketSettings controlled installation', () => {
+  test('publishes an actual ranking refresh to already-mounted installed skill consumers', async () => {
+    prepareMarketCache();
+    const skill = { name: 'different-manifest-name', description: 'Canonical summary', location: 'C:/skills/demo/SKILL.md', source: 'custom' as const, is_custom: true };
+    writeInstalledMarketState(recordInstalledMarketItem({}, marketItem, [skill.name]));
+    const refreshed = { ...marketItem, name: 'Refreshed official title', description: 'Refreshed official summary' };
+    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([skill]);
+    const syncing = spyOn(ipcBridge.fs.syncSkillMarketRankings, 'invoke').mockResolvedValue({ items: [refreshed], fetched_at: 2, errors: [] });
+    restore.push(() => listing.mockRestore(), () => syncing.mockRestore());
+    const view = mount(undefined, h(SkillCard, { skill, localeKey: 'en-US', isAutoInjected: false, onOpenDetails: () => {}, onDelete: () => {} }));
+    await view.findByRole('button', { name: common.added });
+    const card = view.getByTestId('skill-card-different-manifest-name');
+    expect(within(card).getByText(marketItem.name)).toBeTruthy();
+
+    fireEvent.click(view.getByTestId('btn-sync-skill-market'));
+    await waitFor(() => expect(within(card).getByText(refreshed.name)).toBeTruthy());
+    expect(within(card).getByText(refreshed.description)).toBeTruthy();
+    const market = view.getByTestId('skill-market-surface');
+    expect(within(market).getByText(refreshed.name)).toBeTruthy();
+    expect(within(market).getByText(refreshed.description)).toBeTruthy();
+    expect(syncing).toHaveBeenCalledTimes(1);
+  });
+
   test('sends only market identity, deduplicates pending clicks, and marks the exact item added', async () => {
     prepareMarketCache();
     const request = deferred<{ skill_names: string[] }>();
@@ -121,9 +146,6 @@ describe('SkillMarketSettings controlled installation', () => {
           presentation: {
             name: marketItem.name,
             description: marketItem.description,
-            tags: [],
-            audience_tags: [],
-            scenario_tags: [],
           },
         },
       },

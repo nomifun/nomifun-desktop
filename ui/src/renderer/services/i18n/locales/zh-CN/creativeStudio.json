@@ -76,20 +76,6 @@
     "selectModel": "选择模型",
     "send": "发送给 Agent",
     "skillSelectionRequired": "请明确选择 1–3 个创作技能。",
-    "skills": {
-      "canvas": {
-        "description": "理解当前选择并提出安全的文本与结构操作。",
-        "label": "画布规划"
-      },
-      "organize": {
-        "description": "调整现有节点的位置、尺寸与连接关系。",
-        "label": "整理布局"
-      },
-      "template": {
-        "description": "把创作目标整理成可人工确认的模板草案。",
-        "label": "模板设计"
-      }
-    },
     "skillsLabel": "创作技能",
     "stop": "停止 Agent",
     "stopped": "已停止",

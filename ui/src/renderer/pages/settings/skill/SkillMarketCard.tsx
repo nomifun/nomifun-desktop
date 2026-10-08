@@ -1,7 +1,8 @@
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { normalizeTestId } from './skillPresentation';
-import { marketSourceLabel, translateMarketDescription } from './skillMarket';
+import { marketSourceLabel } from '@/renderer/services/skills/skillMarket';
+import { resolveMarketSkillDisplay } from '@/renderer/services/skills/skillDisplay';
 import { Button, Tag } from '@arco-design/web-react';
 import { Plus, Refresh } from '@icon-park/react';
 import React from 'react';
@@ -9,7 +10,6 @@ import { useTranslation } from 'react-i18next';
 
 type SkillMarketCardProps = {
   item: ISkillMarketItem;
-  localeKey: string;
   adding: boolean;
   added: boolean;
   addedStateLoading: boolean;
@@ -45,7 +45,6 @@ const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ s
 
 const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   item,
-  localeKey,
   adding,
   added,
   addedStateLoading,
@@ -61,7 +60,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   const rawTags = (item.tags ?? []).filter((tag) => tag !== 'requires_api_key' && tag !== 'no_api_key');
   const visibleRawTags = rawTags.slice(0, MAX_VISIBLE_TAGS);
   const overflowCount = Math.max(0, rawTags.length - MAX_VISIBLE_TAGS);
-  const description = translateMarketDescription(item.description, item, localeKey);
+  const display = resolveMarketSkillDisplay(item);
   const actionEnabled = !added || addedActionEnabled;
 
   return (
@@ -76,9 +75,9 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
       <div className='flex min-w-0 items-center justify-between gap-8px'>
         <span
           className='min-w-0 flex-1 truncate text-14px font-medium leading-20px text-[var(--color-text-1)]'
-          title={item.name}
+          title={display.name}
         >
-          {item.name}
+          {display.name}
         </span>
         <Button
           size='mini'
@@ -123,7 +122,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
 
       <div
         className='mt-10px text-12px leading-18px text-[var(--color-text-3)] min-h-[36px]'
-        title={item.description || undefined}
+        title={display.description || undefined}
         style={{
           display: '-webkit-box',
           WebkitLineClamp: 2,
@@ -131,7 +130,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
           overflow: 'hidden',
         }}
       >
-        {description || t('settings.skillsMarket.noDescription', { defaultValue: '暂无描述。' })}
+        {display.description || t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' })}
       </div>
 
       {visibleRawTags.length > 0 && (
