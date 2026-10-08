@@ -137,3 +137,13 @@
 - macOS bundle 脚本 4 项通过，10 项在 Windows 按平台条件跳过。
 
 日志保存于 `.tmp-review/merge-*.log`。前述独立 Mobile 生成文件和原生平台验收限制仍适用。
+
+首轮合并提交为 `5c7f1afd8`。验证期间远端又新增 `2a2af416b`，将技能市场安装从 Agent Session 移到 Skill Library 的专用流程；再次无冲突合并，并完成以下定向验证：
+
+- API 类型与 Skill Library 的 `--locked --all-targets` 编译通过，Cargo.lock 未变。
+- API 类型库 524 项、Skill Library 库 129 项通过；3 个公开市场 live 用例按原声明忽略。
+- Skill 管理集成测试 23 项通过，安装来源校验、冲突保留及 staging 清理得到覆盖。
+- 类型、Desktop UI 边界和 i18n 检查通过。
+- 技能市场设置、安装行为、辅助模型和卡片的 4 个 UI 测试文件共 18 项通过，无失败或跳过。
+
+这次补测的日志位于 `.tmp-review/merge-skills-*.log`，同样不与前面的测试数量重复相加。

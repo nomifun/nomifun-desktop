@@ -1419,6 +1419,10 @@ export interface ISkillMarketMcpConfigResponse {
   config_json: unknown;
 }
 
+export interface ISkillMarketInstallResponse {
+  skill_names: string[];
+}
+
 type RawFileMetadata = Omit<IFileMetadata, 'lastModified' | 'isDirectory'> & {
   last_modified?: number;
   lastModified?: number;
@@ -1526,6 +1530,10 @@ export const fs = {
   syncSkillMarketRankings: httpPost<ISkillMarketSyncResponse, { sources?: SkillMarketSource[] }>(
     '/api/skills/market/rankings/sync'
   ),
+  installSkillMarketItem: httpPost<
+    ISkillMarketInstallResponse,
+    { source: SkillMarketSource; id: string; url: string }
+  >('/api/skills/market/install'),
   resolveSkillMarketMcpConfig: httpPost<
     ISkillMarketMcpConfigResponse,
     { source: SkillMarketSource; id: string; url: string }

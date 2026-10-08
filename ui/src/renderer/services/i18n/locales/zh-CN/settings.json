@@ -79,7 +79,10 @@
   },
   "skillsMarket": {
     "title": "技能市场",
-    "description": "浏览 ClawHub、LoopHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
+    "description": "浏览 ClawHub、LoopHub 与 SkillHub 当前榜单，并通过受控流程安装到 Nomi 技能库。",
+    "installSuccess": "技能已安装到 Nomi 技能库。",
+    "installFailed": "技能安装失败，请稍后重试。",
+    "installFailedWithReason": "技能安装失败：{{reason}}",
     "syncSuccess": "技能市场已更新",
     "syncKeptCache": "未获取到新榜单，已保留本地缓存。",
     "syncEmpty": "未采集到榜单数据。",
