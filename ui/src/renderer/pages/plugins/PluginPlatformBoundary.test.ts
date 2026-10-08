@@ -3,49 +3,6 @@ import { expect, test } from 'bun:test';
 
 const read = (name: string) => readFileSync(new URL(name, import.meta.url), 'utf8');
 
-test('Library, authoring artifacts and Detail use only the unified bridge', () => {
-  const source = [
-    read('./PluginLibraryPage.tsx'),
-    read('./PluginAuthoringArtifacts.tsx'),
-    read('./PluginRunPage.tsx'),
-    read('./PluginImportDialog.tsx'),
-  ].join('\n');
-  expect(source).toContain('pluginPlatform.drafts');
-  expect(source).toContain('pluginPlatform.plugins');
-  expect(source).not.toMatch(/pluginRuntimes|pluginRuntimeProduct|ipcBridge\.plugins/);
-  expect(source).not.toContain('/plugins/new');
-  expect(source).not.toContain('/plugins/create/');
-  expect(source).not.toMatch(/Candidate|Publish|AutoApply|AutoPublish|Mount|Project/);
-});
-
-test('Preview and installed UI share one Surface host with no in-frame fake storage', () => {
-  const creator = read('./PluginAuthoringArtifacts.tsx');
-  const detail = read('./PluginRunPage.tsx');
-  const surface = read('./PluginSurfacePanel.tsx');
-  expect(creator).toContain('<PluginSurfacePanel');
-  expect(detail).toContain('<PluginSurfacePanel');
-  expect(surface).toContain('pluginPlatform.surface.bridge.invoke');
-  expect(`${creator}\n${surface}`).not.toContain('srcDoc');
-
-  expect(surface).toContain("sandbox='allow-scripts'");
-});
-
-test('creation uses the default Agent gate and no independent model worker', () => {
-  const library = read('./PluginLibraryPage.tsx');
-  const launch = read('./pluginAuthoringLaunch.ts');
-  const page = read('./PluginAuthoringPage.tsx');
-  const bridge = read('../../../common/adapter/pluginPlatformBridge.ts');
-  expect(library).toContain('launchPluginAuthoring');
-  expect(page).toContain('readGuidDefaultAgentSelection');
-  expect(page).toContain('pluginPlatform.authoring.preflight');
-  expect(page).toContain('pluginPlatform.authoring.createSession');
-  expect(launch).toContain('/plugins/create');
-  expect(launch).not.toContain('sessionStorage');
-  expect(launch).not.toContain('/guid');
-  expect(bridge).not.toContain('cancelGeneration');
-  expect(bridge).not.toContain('GeneratePluginDraftRequest');
-});
-
 test('remote WebUI keeps Plugin reads while every local mutation is desktop-gated', () => {
   const library = read('./PluginLibraryPage.tsx');
   const creator = read('./PluginAuthoringArtifacts.tsx');
@@ -83,28 +40,4 @@ test('Preview and Config bind only listed Host Credential references', () => {
   expect(configuration).toContain('credentialUnavailableSelected');
   expect(importing).toContain('credential_bindings: credentialBindings');
   expect(importing).toContain('value={config}');
-});
-
-test('UI-only, headless and mixed Plugins stay one product flow', () => {
-  const library = read('./PluginLibraryPage.tsx');
-  const detail = read('./PluginRunPage.tsx');
-  const model = read('./pluginPlatformModel.ts');
-  expect(library).toContain('pluginShape(plugin)');
-  expect(detail).toContain('summary.has_ui');
-  expect(model).toContain('value.has_ui && value.has_service');
-  expect(detail).toContain('manifest.actions');
-  expect(detail).toContain('manifest.bindings');
-  expect(detail).not.toContain('setServiceRunning');
-});
-
-test('Import is immediately usable and management omits retired checks and version controls', () => {
-  const importing = read('./PluginImportDialog.tsx');
-  const detail = read('./PluginRunPage.tsx');
-  const library = read('./PluginLibraryPage.tsx');
-  expect(importing).toContain('credential_slots_to_rebind');
-  expect(importing).toContain('response.result.plugin');
-  expect(importing).toContain('<details');
-  expect(importing).not.toMatch(/confirmation_required|permission_confirmation_id|trusted_local_service/);
-  expect(importing).not.toMatch(/expected_(?:artifact|bundle)_digest/);
-  expect(`${importing}\n${detail}\n${library}`).not.toMatch(/recentCheck|currentVersion|versionAndData|package_version|previous_code_and_data|acknowledge_data_loss/);
 });

@@ -35,7 +35,7 @@ flowchart LR
 
 `engine_history.rs` 从 canonical events 及已解析 payload 构建 typed history，不读取 `agent_messages` 来决定模型消息角色。Runtime 回合通过有序的 native journal 重建；缺失结构化日志不能降级成聊天文本继续执行。
 
-插件创作继承用户所选 Agent 的现有能力、Skill、MCP 和 typed resources，不增加插件工具专属能力上限，也不设置三次失败或 64 步的插件专属暂停计数。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。自动结构检查、预览和交互用例作为创作工具保留，结算读取真实 typed 工具与产物事实，不持久化第二份进度账本或插件专用 checkpoint。恢复使用原生 Session 的执行预算与安全机制，不增加预算。
+插件创作继承用户所选 Agent 的现有能力、Skill、MCP 和 typed resources，不增加插件工具专属能力上限，也不设置三次失败或 64 步的插件专属暂停计数。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。自动结构检查、预览和交互用例作为创作工具保留，结算读取真实 typed 工具与产物事实，不持久化第二份进度账本或插件专用 checkpoint。当前会话工具使用证明复用精确 Turn 的 `turn_output_facts`，在同一读取事务中解析 inline 与 stored Payload，并核对实际 Runtime 调用、Host dispatch 和同 call 的 settlement；缺失或非法事实拒绝证明。恢复使用原生 Session 的执行预算与安全机制，不增加预算。
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 

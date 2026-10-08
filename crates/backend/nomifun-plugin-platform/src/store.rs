@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -9,9 +9,7 @@ use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes,
 };
 use nomifun_common::zip_safe::{self, ZipColonPolicy};
-use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
-use serde_json::{Map, Number, Value};
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
@@ -372,58 +370,6 @@ impl PluginArtifactStore {
         validate_digest_segment(artifact_digest.as_ref())?;
         let artifact_root = self.artifacts_root.join(artifact_digest.as_ref());
         self.verify_published(&artifact_root, Some(artifact_digest))
-    }
-
-    /// Exact declared content only. Validate before allocating, reject path
-    /// aliases and symlinks, and verify bytes after reading (not just inventory).
-    pub fn read_declared_files(
-        &self,
-        artifact_digest: &DigestHex,
-        references: &[nomifun_agent_contracts::LogicalArtifactRef],
-        max_file_bytes: u64,
-        max_total_bytes: u64,
-        max_files: usize,
-    ) -> Result<BTreeMap<String, Vec<u8>>, PluginArtifactStoreError> {
-        if references.len() > max_files || max_file_bytes == u64::MAX {
-            return Err(PluginArtifactStoreError::InvalidLimits);
-        }
-        let stored = self.load(artifact_digest)?;
-        let mut output = BTreeMap::new();
-        let mut keys = HashSet::new();
-        let mut total = 0u64;
-        for reference in references {
-            let relative = &reference.normalized_relative_path;
-            let normalized = normalize_relative_path(Path::new(relative))?;
-            if normalized != *relative || !keys.insert(windows_collision_key(relative)?) {
-                return Err(PluginArtifactStoreError::DuplicateEntry { path: relative.clone() });
-            }
-            let entry = stored.artifact.files.iter().find(|file| file.normalized_relative_path == *relative)
-                .ok_or_else(|| PluginArtifactStoreError::UnsupportedEntry { path: relative.clone() })?;
-            if entry.digest != reference.digest {
-                return Err(PluginArtifactStoreError::PublishedArtifactMismatch { digest: artifact_digest.as_ref().to_owned() });
-            }
-            checked_size(relative, 0, entry.size_bytes, max_file_bytes)?;
-            total = checked_total_size(total, entry.size_bytes, max_total_bytes)?;
-            let mut path = stored.package_root.clone();
-            for component in relative.split('/') {
-                path.push(component);
-                let metadata = fs::symlink_metadata(&path).map_err(|e| io_error(&path, e))?;
-                if metadata.file_type().is_symlink() {
-                    return Err(PluginArtifactStoreError::UnsafeManagedPath { path });
-                }
-            }
-            let canonical = fs::canonicalize(&path).map_err(|e| io_error(&path, e))?;
-            let root = fs::canonicalize(&stored.package_root).map_err(|e| io_error(&stored.package_root, e))?;
-            if !canonical.starts_with(&root) {
-                return Err(PluginArtifactStoreError::UnsafeManagedPath { path });
-            }
-            let bytes = read_regular_bounded(&path, entry.size_bytes.min(max_file_bytes))?;
-            if bytes.len() as u64 != entry.size_bytes || hex::encode(Sha256::digest(&bytes)) != reference.digest.as_ref() {
-                return Err(PluginArtifactStoreError::PublishedArtifactMismatch { digest: artifact_digest.as_ref().to_owned() });
-            }
-            output.insert(relative.clone(), bytes);
-        }
-        Ok(output)
     }
 
     fn create_staging(&self) -> Result<StagingGuard, PluginArtifactStoreError> {
@@ -1463,115 +1409,8 @@ fn io_error(path: &Path, source: io::Error) -> PluginArtifactStoreError {
     }
 }
 
-fn strict_json_from_slice<T>(bytes: &[u8]) -> Result<T, PluginArtifactStoreError>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = StrictJsonValueSeed
-        .deserialize(&mut deserializer)
-        .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?;
-    deserializer
-        .end()
-        .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?;
-    serde_path_to_error::deserialize::<_, T>(value)
-        .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))
-}
-
-struct StrictJsonValueSeed;
-
-impl<'de> DeserializeSeed<'de> for StrictJsonValueSeed {
-    type Value = Value;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonValueVisitor)
-    }
-}
-
-struct StrictJsonValueVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonValueVisitor {
-    type Value = Value;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("strict JSON without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(Value::Bool(value))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(Value::Number(Number::from(value)))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(Value::Number(Number::from(value)))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| E::custom("non-finite JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(Value::String(value.to_owned()))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(Value::String(value))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictJsonValueSeed.deserialize(deserializer)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(StrictJsonValueSeed)? {
-            values.push(value);
-        }
-        Ok(Value::Array(values))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = Map::new();
-        let mut keys = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate decoded JSON object key: {key}"
-                )));
-            }
-            let value = map.next_value_seed(StrictJsonValueSeed)?;
-            values.insert(key, value);
-        }
-        Ok(Value::Object(values))
-    }
+fn strict_json_from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, PluginArtifactStoreError> {
+    crate::strict_json::from_slice(bytes).map_err(PluginArtifactStoreError::InvalidManifest)
 }
 
 #[cfg(test)]

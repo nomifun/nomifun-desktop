@@ -272,7 +272,7 @@ Credential references, Host capabilities, and cross-Plugin Actions. Preview
 uses the same Bridge and storage adapters against a temporary DataRoot. Package
 export excludes user data; Backup includes current data and non-secret config
 but never Credential plaintext. See the
-[Unified Plugin Core contract](docs/specs/2026-09-22-unified-plugin-core/README.zh.md).
+[Plugin Platform architecture](docs/architecture/plugin-platform.zh.md).
 
 ### 🎨 Creative Studio — focused creation on an infinite canvas
 

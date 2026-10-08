@@ -2161,9 +2161,7 @@ impl AppServices {
         let plugin_drafts = Arc::new(nomifun_plugin_platform::PluginDraftStore::new(
             data_dir.join("plugin-drafts"),
         )?);
-        let plugin_transfers = Arc::new(nomifun_plugin_platform::PluginBackupFilesystem::new(
-            data_dir.join("plugin-transfers"),
-        )?);
+        let plugin_transfers = Arc::new(nomifun_plugin_platform::PluginBackupFilesystem::new());
         let plugin_service_runtime = Arc::new(std::sync::OnceLock::new());
 
         // SSH remote sessions: ONE process-level connection pool, built here

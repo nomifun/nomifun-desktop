@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use nomifun_agent_contracts::PluginId;
 use nomifun_js_runtime::{
-    CommittedRuntimeProvider, JavaScriptRuntimeError, JavaScriptWorkKind, ResolvedNodeRuntime,
+    CommittedRuntimeProvider, JavaScriptRuntimeError,
     RuntimeAuthority, RuntimeUseLease,
 };
 use nomifun_plugin_platform::{
@@ -513,20 +513,11 @@ impl BlockingRuntimeProvider {
 
 #[async_trait]
 impl CommittedRuntimeProvider for BlockingRuntimeProvider {
-    async fn acquire_use(
-        &self,
-        kind: JavaScriptWorkKind,
-    ) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
+    async fn acquire_use(&self) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
         self.acquisitions.fetch_add(1, Ordering::AcqRel);
         self.entered.notify_one();
         self.release.notified().await;
-        self.inner.acquire_use(kind).await
-    }
-
-    async fn committed_runtime(
-        &self,
-    ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError> {
-        self.inner.committed_runtime().await
+        self.inner.acquire_use().await
     }
 }
 
@@ -673,18 +664,9 @@ struct CountingUnavailableRuntime {
 
 #[async_trait]
 impl CommittedRuntimeProvider for CountingUnavailableRuntime {
-    async fn acquire_use(
-        &self,
-        _kind: JavaScriptWorkKind,
-    ) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
+    async fn acquire_use(&self) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
         self.acquisitions.fetch_add(1, Ordering::AcqRel);
         Err(JavaScriptRuntimeError::Unavailable)
-    }
-
-    async fn committed_runtime(
-        &self,
-    ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError> {
-        Ok(None)
     }
 }
 

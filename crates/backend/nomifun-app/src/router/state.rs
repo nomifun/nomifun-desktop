@@ -221,7 +221,6 @@ pub(crate) async fn try_build_module_states(
         services.database.pool().clone(),
         services.encryption_key,
         plugin_action_dispatcher.clone(),
-        Arc::new(super::plugin_ports::UnavailablePluginDesktopOwner),
     );
     let plugin_surface_host = plugin_ports.host.clone();
     let plugin_service_runtime = Arc::new(nomifun_plugin_platform::PluginServiceRuntime::new(

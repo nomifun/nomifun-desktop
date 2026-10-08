@@ -10700,7 +10700,7 @@ pub(super) async fn create_plugin_authoring_session(
     ).await?;
     let authenticated = AuthenticatedOwner(owner.clone());
     let projection = resolve_saved_binding_projection(state, &authenticated, &binding, Some("Plugin authoring")).await?;
-    super::plugin_authoring_sessions::validate_scope(&binding, &projection.snapshot)?;
+    super::plugin_authoring_sessions::validate_scope(&projection.snapshot)?;
     if let Some(effort) = reasoning_effort {
         if !saved_binding_supports_reasoning_effort(state, &authenticated, &binding, contract_reasoning_effort(effort)).await? {
             return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,

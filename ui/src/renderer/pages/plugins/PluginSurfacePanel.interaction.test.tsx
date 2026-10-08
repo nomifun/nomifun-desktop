@@ -97,6 +97,8 @@ async function reopenHarness() {
 
 test('reopen waits for the new SDK connection and ready response before continuing assertions', async () => {
   const state = await reopenHarness();
+  expect(state.frame.getAttribute('sandbox')).toBe('allow-scripts');
+  expect(state.frame.hasAttribute('srcdoc')).toBe(false);
   expect(state.probes).toEqual([]);
   fireEvent.load(state.frame);
   await waitFor(() => expect(state.probes.map(probe => probe.operation)).toEqual(['ready']));

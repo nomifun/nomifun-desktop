@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use nomifun_agent_contracts::{
     PluginArtifact, PluginId, PluginMigrationManifest, PluginServiceMode,
 };
-use nomifun_js_runtime::{CommittedRuntimeProvider, JavaScriptWorkKind, RuntimeUseLease};
+use nomifun_js_runtime::{CommittedRuntimeProvider, RuntimeUseLease};
 use serde_json::Value;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
@@ -196,7 +196,7 @@ impl PluginServiceRuntime {
     ) -> Result<RunningService, PluginServiceError> {
         let lease = self
             .runtime
-            .acquire_use(JavaScriptWorkKind::PluginServiceHost)
+            .acquire_use()
             .await
             .map_err(|error| PluginServiceError::Spawn(error.to_string()))?;
         let stored = self
@@ -326,7 +326,7 @@ impl PluginServiceRuntime {
         let execution: Result<(), String> = async {
             let lease = self
                 .runtime
-                .acquire_use(JavaScriptWorkKind::PluginServiceHost)
+                .acquire_use()
                 .await
                 .map_err(|error| error.to_string())?;
             let factory =

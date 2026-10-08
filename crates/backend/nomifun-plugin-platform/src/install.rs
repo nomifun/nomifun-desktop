@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     PluginActionPublication, PluginArtifact, PluginArtifactRef, PluginId,
-    PluginMigrationManifest, PluginMutationId, StrictJsonValue,
+    PluginMigrationManifest, PluginMutationId,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -1546,11 +1546,6 @@ fn runtime_context(
 
 fn positive_now_ms() -> i64 {
     nomifun_common::now_ms().max(1)
-}
-
-#[allow(dead_code)]
-fn _schema(value: Value) -> StrictJsonValue {
-    StrictJsonValue(value)
 }
 
 #[cfg(test)]

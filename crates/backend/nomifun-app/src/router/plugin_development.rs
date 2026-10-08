@@ -39,16 +39,6 @@ struct ContinuationInput { content:String, #[serde(default)] files:Vec<String> }
 #[serde(deny_unknown_fields)]
 struct ContinuationRequest { request:nomifun_agent_session::NativeResumeRequest, input:ContinuationInput }
 
-/// The plugin.development module itself is enabled as a contribution on this
-/// conversation's Agent. Continuation only appends owner input and resumes;
-/// it does not need every create Action allowlisted.
-fn plugin_development_enabled(
-    capabilities: &[nomifun_agent_contracts::ResolvedCapability],
-) -> bool {
-    capabilities.iter().any(|capability|
-        capability.consumption.is_contribution() && capability.capability.id.as_ref() == MODULE_ID)
-}
-
 async fn continue_with_input(
     State(state):State<super::nomi_core_session::NomiCoreAgentApiState>,
     Extension(user):Extension<CurrentUser>,axum::extract::Path(id):axum::extract::Path<String>,
@@ -69,10 +59,7 @@ async fn continue_with_input(
     }
     let binding:AgentBindingValueDto=serde_json::from_value(serde_json::to_value(&live.agent_binding)?)?;
     let (_,_,snapshot)=state.control_plane.saved_binding_artifacts(&user.id.to_string().into(),&binding).await?;
-    super::plugin_authoring_sessions::validate_scope(&binding, &snapshot)?;
-    if !plugin_development_enabled(&snapshot.content.enabled_capabilities) {
-        return Err(AppError::UnprocessableEntity("Plugin development is not enabled for this conversation".into()).into());
-    }
+    super::plugin_authoring_sessions::validate_scope(&snapshot)?;
     let input=super::nomi_core_session::bounded_turn_input(json!({"content":body.input.content,"files":body.input.files}))?;
     store.append_paused_native_input(&principal,&session,&body.request,
         StrictJsonValue(super::nomi_core_session::canonical_turn_input(&input)),
@@ -89,32 +76,27 @@ async fn preflight(
 )->Result<Json<ApiResponse<Value>>,super::nomi_core_session::NomiCoreApiError>{
     let owner=nomifun_agent_contracts::UserId::from(user.id.to_string());
     let catalog=state.control_plane.catalog()?;
-    let catalog_value=serde_json::to_value(&catalog).expect("catalog");
-    let registered=catalog_value["modules"].as_array().is_some_and(|modules|
-        modules.iter().any(|module|module["module"]["id"].as_str()==Some(MODULE_ID)));
-    let document=match &request.selection {
+    let registered=catalog.modules.iter().any(|module|module.module.id==MODULE_ID);
+    let capabilities=match &request.selection {
         AgentSelection::Preset{preset_id}=>{
             match state.control_plane.editor(&owner,preset_id,None).await {
-                Ok(editor) if editor.revision.is_some()=>serde_json::to_value(editor.revision.expect("checked").document).expect("document"),
+                Ok(editor) if editor.revision.is_some()=>editor.revision.expect("checked").document.enabled_capabilities,
                 Err(error) if error.status() != axum::http::StatusCode::NOT_FOUND => return Err(error.into()),
                 _=>return Ok(Json(ApiResponse::ok(json!({"status":"configure_agent","reason":"AGENT_DEFAULT_UNAVAILABLE","selection":request.selection,"owner_user_id":owner.as_ref()})))),
             }
         },
         AgentSelection::Template{template_key}=>{
             let library=state.control_plane.library(&owner).await?;
-            let value=serde_json::to_value(library).expect("library");
-            match value["official_templates"].as_array().and_then(|templates|
-                templates.iter().find(|template|template["template_key"].as_str()==Some(template_key.as_str()))) {
-                Some(template)=>template["seed"].clone(),
+            let key=serde_json::from_value::<OfficialPresetKeyDto>(json!(template_key)).ok();
+            match library.official_templates.into_iter().find(|template|Some(template.template_key)==key) {
+                Some(template)=>template.seed.enabled_capabilities,
                 None=>return Ok(Json(ApiResponse::ok(json!({"status":"configure_agent","reason":"AGENT_DEFAULT_UNAVAILABLE","selection":request.selection,"owner_user_id":owner.as_ref()})))),
             }
         },
     };
-    let selected=document["enabled_capabilities"].as_array().and_then(|capabilities|
-        capabilities.iter().find(|selection|selection["capability"]["id"].as_str()==Some(MODULE_ID)));
-    let granted=selected.and_then(|selection|selection["action_allowlist"].as_array());
+    let selected=capabilities.iter().find(|selection|selection.capability.id==MODULE_ID);
     let missing=nomifun_plugin_development::CREATE_ACTIONS.iter().filter(|action|
-        !granted.is_some_and(|actions|actions.iter().any(|granted|granted.as_str()==Some(**action))))
+        !selected.is_some_and(|selection|selection.action_allowlist.contains(**action)))
         .copied().collect::<Vec<_>>();
     Ok(Json(ApiResponse::ok(json!({
         "status":if !registered{"unavailable"}else if !missing.is_empty(){"configure_agent"}else{"ready"},
@@ -756,53 +738,7 @@ const GUIDE:&str="Each deliverable is one standard nomifun.plugin/v1 package: no
 
 #[cfg(test)]
 mod tests {
-    use nomifun_agent_contracts::ResolvedCapability;
-
     use super::*;
-
-    const DIGEST: &str =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    fn resolved_module(consumption: Option<&str>, action_allowlist: &[&str]) -> ResolvedCapability {
-        let mut value = json!({
-            "capability": {"id": MODULE_ID},
-            "source_package": {"id": "test.package", "version": "1.0.0"},
-            "contribution_id": "capability:test",
-            "contribution_lock": {
-                "source_kind": "platform_builtin",
-                "source_identity": "test.package",
-                "contribution_id": "capability:test",
-                "contract_digest": DIGEST,
-            },
-            "resolved_source": {"source_kind": "bundled", "source_identity": "test.package"},
-            "target_artifact_digest": DIGEST,
-            "schema_digest": DIGEST,
-            "dependency_path": [MODULE_ID],
-            "required_runtime_features": [],
-            "action_allowlist": action_allowlist,
-        });
-        if let Some(consumption) = consumption {
-            value["consumption"] = json!(consumption);
-        }
-        serde_json::from_value(value).unwrap()
-    }
-
-    /// Continuation needs only the module, not every create Action: a partial
-    /// allowlist still resumes, an absent or dependency-only module fails
-    /// closed, and the check never consults budget or cleanup authority.
-    #[test]
-    fn continuation_requires_only_the_plugin_development_module() {
-        assert!(plugin_development_enabled(&[resolved_module(None, &[])]));
-        assert!(plugin_development_enabled(&[resolved_module(
-            None,
-            &["plugin.development/open"],
-        )]), "an incomplete create-action allowlist is still enabled");
-        assert!(!plugin_development_enabled(&[]));
-        assert!(!plugin_development_enabled(&[resolved_module(
-            Some("dependency"),
-            nomifun_plugin_development::CREATE_ACTIONS,
-        )]), "a dependency contribution is not the enabled module");
-    }
 
     /// Encoded JSON strings decode only where the oracle stays exact: a
     /// planned case must match the planned value, a supplementary case must

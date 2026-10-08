@@ -6,7 +6,7 @@
 
 import type * as Contract from '../types/pluginPlatform';
 import { httpGet, httpPost, httpPut, httpRequest, wsEmitter } from './httpBridge';
-import type { PluginDevelopmentPreflight, PluginUiStep } from '../types/pluginDevelopment';
+import type { PluginDevelopmentPreflight, PluginUiCommand } from '../types/pluginDevelopment';
 
 type DraftIdentity = { draft_id: Contract.PluginDraftId };
 type PluginIdentity = { plugin_id: Contract.PluginId };
@@ -71,7 +71,7 @@ export const pluginPlatform = {
     details: httpGet<{
       draft: Contract.PluginDraftDetail;
       verification: Record<string, unknown>;
-      commands: Array<{ test_token: string; draft_id: string; descriptor: Contract.PluginSurfaceDescriptor; steps: PluginUiStep[]; case_name: string }>;
+      commands: PluginUiCommand[];
     }, DraftIdentity>(({ draft_id }) => `${draftPath(draft_id)}/authoring`),
     uiResults: httpPost<boolean, DraftCommand<{
       test_token: string; descriptor: Contract.PluginSurfaceDescriptor; observations: unknown[]; error?: string;
@@ -80,22 +80,9 @@ export const pluginPlatform = {
   },
   drafts: {
     list: httpGet<Contract.PluginDraftListResponse, void>('/api/plugin-drafts'),
-    create: httpPost<Contract.PluginDraftDetail, Contract.CreatePluginDraftRequest>(
-      '/api/plugin-drafts',
-    ),
-    get: httpGet<Contract.PluginDraftDetail, DraftIdentity>(({ draft_id }) =>
-      draftPath(draft_id),
-    ),
     replaceFile: httpPut<
       Contract.PluginDraftDetail,
       DraftCommand<Contract.ReplacePluginDraftFileRequest>
-    >(
-      ({ draft_id }) => `${draftPath(draft_id)}/files`,
-      requestBody,
-    ),
-    deleteFile: deleteWithBody<
-      Contract.PluginDraftDetail,
-      DraftCommand<Contract.DeletePluginDraftFileRequest>
     >(
       ({ draft_id }) => `${draftPath(draft_id)}/files`,
       requestBody,
@@ -112,13 +99,6 @@ export const pluginPlatform = {
       DraftCommand<Contract.SavePluginDraftRequest>
     >(
       ({ draft_id }) => `${draftPath(draft_id)}/save`,
-      requestBody,
-    ),
-    delete: deleteWithBody<
-      boolean,
-      DraftCommand<Contract.DeletePluginDraftRequest>
-    >(
-      ({ draft_id }) => draftPath(draft_id),
       requestBody,
     ),
   },
@@ -208,14 +188,8 @@ export const pluginPlatform = {
   },
 
   desktop: {
-    commands: httpGet<Contract.PluginDesktopCommand[], void>(
-      '/api/plugins/desktop/commands',
-    ),
     invoke: httpPost<unknown, Contract.InvokePluginDesktopCommandRequest>(
       '/api/plugins/desktop/commands/invoke',
-    ),
-    emit: httpPost<Contract.PluginDesktopEventReport, Contract.DispatchPluginDesktopEventRequest>(
-      '/api/plugins/desktop/events',
     ),
   },
 

@@ -836,38 +836,6 @@ impl DesktopPluginBindings {
 }
 
 #[derive(Clone)]
-pub struct AutomationPluginBindings {
-    registry: InMemoryPluginBindingRegistry,
-}
-
-impl AutomationPluginBindings {
-    pub fn new(registry: InMemoryPluginBindingRegistry) -> Self {
-        Self { registry }
-    }
-
-    pub fn actions(&self) -> PluginBindingResult<Vec<BoundPluginAction>> {
-        self.registry
-            .list_binding(PluginBindingPoint::AutomationAction)
-    }
-
-    pub async fn trigger(
-        &self,
-        stable_action_id: &str,
-        input: StrictJsonValue,
-        options: PluginDispatchOptions,
-    ) -> PluginBindingResult<StrictJsonValue> {
-        self.registry
-            .dispatch_binding(
-                PluginBindingPoint::AutomationAction,
-                stable_action_id,
-                input,
-                options,
-            )
-            .await
-    }
-}
-
-#[derive(Clone)]
 pub struct AgentPluginBindings {
     registry: InMemoryPluginBindingRegistry,
 }
@@ -907,20 +875,6 @@ impl AgentPluginBindings {
             before_model: list(PluginBindingPoint::AgentBeforeModel)?,
             before_tool: list(PluginBindingPoint::AgentBeforeTool)?,
         })
-    }
-
-    pub fn contexts(&self) -> PluginBindingResult<Vec<BoundPluginAction>> {
-        self.registry.list_binding(PluginBindingPoint::AgentContext)
-    }
-
-    pub fn before_model(&self) -> PluginBindingResult<Vec<BoundPluginAction>> {
-        self.registry
-            .list_binding(PluginBindingPoint::AgentBeforeModel)
-    }
-
-    pub fn before_tool(&self) -> PluginBindingResult<Vec<BoundPluginAction>> {
-        self.registry
-            .list_binding(PluginBindingPoint::AgentBeforeTool)
     }
 
     pub async fn invoke_tool(
@@ -984,36 +938,6 @@ impl AgentPluginBindings {
                 input,
                 options,
             )
-            .await
-    }
-
-    pub async fn contribute_context(
-        &self,
-        input: StrictJsonValue,
-        options: PluginDispatchOptions,
-    ) -> PluginBindingResult<BindingSequenceReport> {
-        self.registry
-            .dispatch_sequence(PluginBindingPoint::AgentContext, input, options)
-            .await
-    }
-
-    pub async fn run_before_model(
-        &self,
-        input: StrictJsonValue,
-        options: PluginDispatchOptions,
-    ) -> PluginBindingResult<BindingSequenceReport> {
-        self.registry
-            .dispatch_sequence(PluginBindingPoint::AgentBeforeModel, input, options)
-            .await
-    }
-
-    pub async fn run_before_tool(
-        &self,
-        input: StrictJsonValue,
-        options: PluginDispatchOptions,
-    ) -> PluginBindingResult<BindingSequenceReport> {
-        self.registry
-            .dispatch_sequence(PluginBindingPoint::AgentBeforeTool, input, options)
             .await
     }
 }

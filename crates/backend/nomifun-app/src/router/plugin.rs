@@ -555,15 +555,11 @@ async fn inspect_import(
 ) -> Result<Json<ApiResponse<PluginImportInspectionDto>>, PluginHttpError> {
     if request.kind == PluginImportKindDto::Backup {
         let backup = import_backup_bundle(&state, &request.source_path)?;
-        let owner = user.id.to_string();
         let mut inspection = inspection_dto(
-            &state,
-            &owner,
             PluginImportKindDto::Backup,
             backup.package.artifact.clone(),
             None,
-        )
-        .await?;
+        );
         inspection.backup = Some(PluginBackupDataSummaryDto {
             includes_data: true,
             data_version: backup.package.artifact.manifest.data_version,
@@ -585,7 +581,7 @@ async fn inspect_import(
     };
     let owner = user.id.to_string();
     let existing = existing_for_package(&state, &owner, &artifact.manifest.id).await?;
-    let inspection = inspection_dto(&state, &owner, request.kind, artifact, existing.as_ref()).await?;
+    let inspection = inspection_dto(request.kind, artifact, existing.as_ref());
     Ok(Json(ApiResponse::ok(inspection)))
 }
 
@@ -2512,21 +2508,19 @@ async fn package_identity_in_use(
         .any(|plugin| plugin.package_id == package_id))
 }
 
-async fn inspection_dto(
-    _state: &PluginRouterState,
-    _owner: &str,
+fn inspection_dto(
     kind: PluginImportKindDto,
     artifact: PluginArtifact,
     existing: Option<&PluginRecord>,
-) -> Result<PluginImportInspectionDto, PluginHttpError> {
-    Ok(PluginImportInspectionDto {
+) -> PluginImportInspectionDto {
+    PluginImportInspectionDto {
         kind,
         artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
         manifest: manifest_dto(&artifact.manifest, existing.map(|plugin| &plugin.plugin_id)),
         target_plugin_id: existing.map(|plugin| plugin.plugin_id.as_ref().to_owned()),
         target_plugin_revision: existing.map(|plugin| plugin.revision),
         backup: None,
-    })
+    }
 }
 
 async fn copy_artifact_into_draft(

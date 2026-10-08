@@ -47,7 +47,6 @@ fn principal(user: &CurrentUser) -> PrincipalRef {
 /// Purpose selects the product surface. The selected Agent retains its existing
 /// capabilities and resources; plugin creation requires its own module actions.
 pub(super) fn validate_scope(
-    _binding: &nomifun_api_types::AgentBindingValueDto,
     snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
 ) -> Result<(), AppError> {
     if !snapshot.content.contributions().any(|module|
@@ -147,7 +146,7 @@ async fn create(State(state): State<NomiCoreAgentApiState>, Extension(user): Ext
             .resolve_plugin_authoring_template_binding(&owner, &template_key, body.model.as_ref()).await?,
     };
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
-    validate_scope(&binding, &snapshot)?;
+    validate_scope(&snapshot)?;
     let id = super::nomi_core_session::create_plugin_authoring_session(&state, &owner, binding,
         body.reasoning_effort, &format!("plugin-authoring:{}", body.idempotency_key)).await?;
     if let Some((draft, source, revision)) = detach_source {

@@ -1,12 +1,9 @@
-#[path = "../src/backup.rs"]
-mod backup;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use backup::{
+use nomifun_plugin_platform::{
     PluginBackupExport, PluginBackupFilesystem, PluginGrantMetadata, PluginPackageExport,
     PluginTransferError,
 };
@@ -114,7 +111,7 @@ fn fixture() -> Fixture {
     drop(connection);
     fs::write(generation_root.join("files/notes/todo.txt"), b"persisted file").unwrap();
 
-    let transfer = PluginBackupFilesystem::new(temp.path().join("transfer-staging")).unwrap();
+    let transfer = PluginBackupFilesystem::new();
     let output_root = temp.path().join("outputs");
     fs::create_dir(&output_root).unwrap();
     Fixture {
@@ -449,6 +446,28 @@ fn tamper_traversal_and_zip_symlinks_are_rejected() {
 }
 
 #[test]
+fn zip_rejects_files_that_are_also_parent_directories() {
+    let fixture = fixture();
+    for parent in ["ui/widget", "ui/Widget"] {
+        let archive = fixture.output_root.join(format!("{}.zip", parent.rsplit('/').next().unwrap()));
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        let options = SimpleFileOptions::default().unix_permissions(0o100600);
+        for (path, bytes) in package_files().into_iter().chain([
+            (parent.into(), b"file".to_vec()),
+            ("ui/widget/config.json".into(), b"{}".to_vec()),
+        ]) {
+            writer.start_file(path, options).unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        assert!(matches!(
+            fixture.transfer.import_package_zip(archive),
+            Err(PluginTransferError::DuplicateEntry(_)),
+        ));
+    }
+}
+
+#[test]
 fn exports_atomically_reject_existing_destinations_without_overwrite() {
     let fixture = fixture();
     let existing_directory = fixture.output_root.join("existing-package");
@@ -481,5 +500,4 @@ fn exports_atomically_reject_existing_destinations_without_overwrite() {
         .unwrap()
         .map(Result::unwrap)
         .all(|entry| !entry.file_name().to_string_lossy().starts_with(".nomifun-plugin-transfer-")));
-    assert_eq!(fs::read_dir(fixture.transfer.staging_root()).unwrap().count(), 0);
 }

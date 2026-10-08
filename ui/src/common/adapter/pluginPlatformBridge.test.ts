@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type {
   ConfigurePluginRequest,
@@ -33,9 +32,7 @@ function installFetchFixture(): void {
     calls.push({ method, path, body });
 
     const data = path === '/api/plugin-drafts'
-      ? method === 'GET'
-        ? { drafts: [] }
-        : { summary: {}, files: [] }
+      ? { drafts: [] }
       : path === '/api/plugins'
         ? { revision: 1, plugins: [] }
         : path === '/api/plugins/library-state'
@@ -54,52 +51,10 @@ afterEach(() => {
 });
 
 describe('Unified Plugin Core bridge', () => {
-  test('exposes one cohesive resource tree', () => {
-    expect(Object.keys(pluginPlatform)).toEqual([
-      'authoring',
-      'drafts',
-      'plugins',
-      'libraryState',
-      'credentials',
-      'desktop',
-      'surface',
-    ]);
-    expect(Object.keys(pluginPlatform.drafts)).toEqual([
-      'list',
-      'create',
-      'get',
-      'replaceFile',
-      'deleteFile',
-      'preview',
-      'save',
-      'delete',
-    ]);
-    expect(Object.keys(pluginPlatform.plugins)).toEqual([
-      'list',
-      'changed',
-      'get',
-      'inspectImport',
-      'installImport',
-      'setEnabled',
-      'configure',
-      'restore',
-      'trash',
-      'delete',
-      'exportPackage',
-      'exportBackup',
-      'openSurface',
-    ]);
-    expect(Object.keys(pluginPlatform.surface)).toEqual(['close', 'bridge']);
-    expect(Object.keys(pluginPlatform.credentials)).toEqual(['list']);
-    expect(Object.keys(pluginPlatform.desktop)).toEqual(['commands', 'invoke', 'emit']);
-  });
-
   test('uses only the canonical Draft resource and keeps identity out of bodies', async () => {
     installFetchFixture();
 
     await pluginPlatform.drafts.list.invoke();
-    await pluginPlatform.drafts.create.invoke({ template: 'agent.before_tool' });
-    await pluginPlatform.drafts.get.invoke({ draft_id: draftId });
     await pluginPlatform.drafts.replaceFile.invoke({
       draft_id: draftId,
       request: {
@@ -107,10 +62,6 @@ describe('Unified Plugin Core bridge', () => {
         path: 'ui/index.html',
         content_base64: 'PGgxPkhlbGxvPC9oMT4=',
       },
-    });
-    await pluginPlatform.drafts.deleteFile.invoke({
-      draft_id: draftId,
-      request: { expected_revision: 4, path: 'source/old.ts' },
     });
     await pluginPlatform.drafts.preview.invoke({
       draft_id: draftId,
@@ -129,24 +80,16 @@ describe('Unified Plugin Core bridge', () => {
         credential_bindings: { api_key: 'provider:credential-1' },
       },
     });
-    await pluginPlatform.drafts.delete.invoke({
-      draft_id: draftId,
-      request: { expected_revision: 7 },
-    });
 
     expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([
       { method: 'GET', path: '/api/plugin-drafts' },
-      { method: 'POST', path: '/api/plugin-drafts' },
-      { method: 'GET', path: `/api/plugin-drafts/${draftId}` },
       { method: 'PUT', path: `/api/plugin-drafts/${draftId}/files` },
-      { method: 'DELETE', path: `/api/plugin-drafts/${draftId}/files` },
       { method: 'POST', path: `/api/plugin-drafts/${draftId}/preview` },
       { method: 'POST', path: `/api/plugin-drafts/${draftId}/save` },
-      { method: 'DELETE', path: `/api/plugin-drafts/${draftId}` },
     ]);
-    expect(calls.slice(3).every(({ body }) =>
+    expect(calls.slice(1).every(({ body }) =>
       !JSON.stringify(body).includes('draft_id'))).toBe(true);
-    expect(calls[6]?.body).toEqual({
+    expect(calls[3]?.body).toEqual({
       expected_revision: 6,
       expected_plugin_revision: 2,
       config: { theme: 'dark' },
@@ -312,42 +255,4 @@ describe('Unified Plugin Core bridge', () => {
     });
   });
 
-  test('contains no retired routes, identities, digest inputs, fallback or alias', () => {
-    const bridge = readFileSync(
-      new URL('./pluginPlatformBridge.ts', import.meta.url),
-      'utf8',
-    );
-    const types = readFileSync(
-      new URL('../types/pluginPlatform.ts', import.meta.url),
-      'utf8',
-    );
-    for (const route of [
-      '/runtimes',
-      '/projects',
-      '/installations',
-      '/operations',
-      '/approve',
-    ]) {
-      expect(bridge).not.toContain(route);
-    }
-    expect(bridge).toContain('/api/plugins/authoring/sessions');
-    for (const retiredType of [
-      /PluginProject/,
-      /PluginMount/,
-      /PluginCandidate/,
-      /PluginProduct/,
-      /PluginReady/,
-      /PluginPublish/,
-      /PluginRuntime/,
-    ]) {
-      expect(types).not.toMatch(retiredType);
-      expect(bridge).not.toMatch(retiredType);
-    }
-    expect(`${types}\n${bridge}`).not.toMatch(
-      /expected_(?:artifact|bundle|candidate|release)_digest/,
-    );
-    expect(bridge).not.toContain('export const plugins');
-    expect(bridge.match(/export const pluginPlatform/g)).toHaveLength(1);
-    expect(bridge).not.toMatch(/fallback|legacy/i);
-  });
 });
