@@ -1,84 +1,78 @@
 # Screenshot Manifest
 
-This manifest records the repository-local screenshots used by the Desktop
-README and technical guides. The current set was captured on **August 25, 2026**
-from the 0.7.2 codebase with an isolated data root.
-
-The Creation set covers Canvas Library, the retired Image and Video
-Workbenches (kept as historical captures), Prompt Center, My Assets, Template
-Studio, Template Editor, and a visible native desktop companion.
-Do not restore retired screenshots or introduce temporary aliases into the
-numbered gallery.
+The Desktop README screenshots were captured on **October 8, 2026** from
+**NomiFun Desktop 0.8.0**, using the current source and an isolated temporary
+data root. English and Simplified Chinese each have 12 captures.
 
 ## Ownership and storage
 
-- Product-use guides and their screenshots are self-contained in this
-  repository (`docs/guides/` + `docs/images/`).
-- Repository-local images are intentional so README pages remain readable
-  offline. Do not replace them with external image URLs.
+- README screenshots stay in this repository so the pages remain readable offline.
+- The shared renderer was captured from the running Vite + Rust WebUI development
+  environment at a desktop viewport of **1440×900**.
+- The native companion captures come from the Tauri development
+  app using the same isolated example data.
+- Browser captures are JPEG. Native captures trim transparent whitespace around the actual figure and reply,
+  and are encoded as JPEG for storage.
+  Replaced PNGs, unused companion exports, and retired Image/Video Workbench
+  captures are deleted; no historical copies or aliases are retained here.
+- Technical-guide screenshots outside these two galleries remain where the
+  guides still reference them.
 
 ## README showcase
 
-| File | Current surface |
+| File under `readme/en/` and `readme/zh/` | Surface and example |
 | --- | --- |
-| `readme/en/workspace.png` / `readme/zh/workspace.png` | Current Desktop workspace and session hub |
-| `readme/en/models.png` / `readme/zh/models.png` | Model Management and provider model configuration |
-| `readme/en/companions.png` / `readme/zh/companions.png` | Current workspace with the live desktop companion visible |
-| `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creation skills |
+| `workspace.jpg` | Current session workspace with a completed coffee-brand visual brief and color table |
+| `models.jpg` | Providers & keys, with StepFun Step Plan and Agnes models expanded; credentials remain hidden |
+| `companions.jpg` | Companion cohabit workspace with a completed creative conversation |
+| `skills.jpg` | Skills Hub with current built-in Creative Studio and Office packages |
 
-## Creation gallery
+## Creative Studio gallery
 
 English captures live under `creative-studio/en-US/`; Chinese captures live
-under `creative-studio/zh-CN/`. Both locale sets use the same route order:
+under `creative-studio/zh-CN/`.
 
 | File | Route / subject |
 | --- | --- |
-| `01-canvas-library.png` | `#/nomi/canvases` · Canvas Library |
-| `03-image-workbench.png` | retired standalone Image Workbench (historical capture; the route no longer exists) |
-| `04-video-workbench.png` | retired standalone Video Workbench (historical capture; the route no longer exists) |
-| `05-prompt-center.png` | `#/asset-library/prompts` · searchable Prompt Center |
-| `06-asset-library.png` | `#/asset-library/materials` · My Assets and reusable inputs |
-| `07-template-studio.png` | `#/asset-library/templates` · private Template Studio, including multi-image series setup |
-| `08-template-editor.png` | Template Editor and bounded AI Create review flow |
-| `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
-| `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
+| `01-canvas-library.jpg` | `#/nomi/canvases` · three populated example canvases |
+| `02-canvas-workspace.jpg` | `#/nomi/canvases/{canvas_id}` · Autumn Atelier brand brief and three generated images |
+| `05-prompt-center.jpg` | `#/asset-library/prompts` · product-photography examples from the synchronized prompt catalog |
+| `06-asset-library.jpg` | `#/asset-library/materials` · generated images, reusable prompts, and a brand brief |
+| `07-template-studio.jpg` | `#/asset-library/templates` · four private templates, including a three-image campaign |
+| `08-template-editor.jpg` | Template Editor · subject variable, reusable prompt, model, aspect ratio, and resolution |
+| `11-companion-settings.jpg` | `#/nomi?mode=manage&tab=overview` · figure, persona, model, and desktop visibility |
+| `12-native-companion.jpg` | Native desktop companion window with a real generated brand tagline |
 
-The Creation captures use a 1440×900 viewport. The companion images were
-captured from the running companion-enabled product surface and the native
-transparent companion window. The numbered
-`11-companion-settings.png` and `12-companion-workspace.png` captures are the
-gallery references. Neither is a
-management-page thumbnail substituted for the native companion experience.
+## Examples and provenance
 
-The companion settings capture shows the desktop-visibility toggle, while the
-companion workspace capture shows the companion surface alongside the product.
-The separate top-level
-`readme/en/skills.png` and `readme/zh/skills.png` captures document the
-reusable Skills Hub packages; there is no numbered `11-creative-skills.png`
-gallery asset.
+- **Autumn Atelier** is a fictional boutique coffee brand used only for these
+  captures. Its brief, preferences, assets, templates, and canvases are example data.
+- The ordinary session and companion replies were generated by `step-3.7-flash`.
+  The three images were generated through the product's current creation-task API
+  using `step-image-edit-2` on StepFun Step Plan, then saved into the Canvas and
+  asset library through current APIs.
+- `agnes-image-2.1-flash` was configured for the model-management example. Its
+  image requests encountered a TLS connection failure, so the pictured outputs
+  were generated by StepFun.
+- Prompt-library covers and text come from the product's synchronized catalog;
+  their source attribution stays available in the running product.
+- No mock renderer, fabricated model replies, database injection, or production
+  user data was used. API keys, temporary scripts, raw media, and runtime data
+  are excluded from the repository.
 
 ## Capture recipe
 
-1. Build the current UI with `bun run build:ui` or run the Desktop dev host.
-2. Use only the isolated data root `%TEMP%\nomifun-doc-desktop` (or the
-   equivalent path under the current user profile). Never use production data
-   or real credentials.
-3. Seed synthetic Canvas, asset, template, and companion records through the
-   current UI/API, then capture visible product routes with Puppeteer/Chrome or
-   the running Tauri app.
-4. For a desktop companion, confirm
-   `appearance.companion_enabled=true`, find the native
-   `companion-<companion_id>` window, and capture its own transparent window
-   rectangle. For the numbered gallery, also capture the companion workspace
-   state at `12-companion-workspace.png`. Do not use a management-page
-   thumbnail as a substitute.
-5. Verify every expected PNG is non-empty, resolve every Markdown reference,
-   and run `git diff --check` before committing.
-
-## Older guide captures
-
-The existing `autowork-*`, `channels-*`, `cron-*`, `gs-*`, `mcp-*`, `terminal-*`,
-and `webui-*` files remain only where a technical guide still references them.
-They are not part of the Creation gallery. When a guide stops needing one,
-remove the old file and update its references instead of keeping duplicate
-aliases.
+1. Create an empty temporary data directory and set `NOMIFUN_DATA_DIR` to it.
+   Run the current Rust backend and Vite `dev:web` frontend on free localhost
+   ports; set `NOMIFUN_WEB_PORT` to the chosen API port.
+2. Configure the intended models in that isolated environment. Create examples
+   through current UI/API surfaces; send real model requests for the conversations
+   and images. Keep credentials closed during capture.
+3. Capture both interface languages at 1440×900. Wait for content, images, saved
+   state, and completed replies; dismiss language menus and transient notices.
+4. Stop the Web host before starting the Tauri dev host on the same data root.
+   Enable the example companion's desktop visibility, send a short example
+   request, and capture its native figure and reply. Trim only empty transparency.
+5. Resolve every README image reference, inspect the final images, confirm old
+   files are gone, and run `git diff --check`. Stop the capture hosts and remove
+   the temporary credential and runtime files afterward.
