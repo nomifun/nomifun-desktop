@@ -1,12 +1,3 @@
-#[allow(dead_code)]
-#[path = "../src/data_root.rs"]
-mod data_root;
-pub use data_root::*;
-
-#[allow(dead_code)]
-#[path = "../src/service_process.rs"]
-mod service_process;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +8,8 @@ use async_trait::async_trait;
 use nomi_process_runtime::probe_process_identity;
 use nomifun_agent_contracts::{DigestHex, PluginId};
 use serde_json::{Value as JsonValue, json};
-use service_process::{
+use nomifun_plugin_platform::{
+    DataGeneration, PluginDataRootHandle, PluginDataRootManager,
     NodePluginServiceProcess, NodePluginServiceProcessFactory, PluginSecret,
     PluginServiceActionsPort, PluginServiceCancellation, PluginServiceError, PluginServiceFence,
     PluginServiceGrants, PluginServiceHostPort, PluginServiceInvocation, PluginServiceLaunch,

@@ -14,9 +14,9 @@ use nomifun_agent_contracts::{
     DigestHex, PLUGIN_MANIFEST_PATH, PluginArtifact, PluginArtifactFile, PluginId,
     PluginManifest, canonical_json_bytes, digest_bytes, digest_payload,
 };
-use serde::de::{DeserializeOwned, DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Number, Value};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
@@ -164,33 +164,19 @@ pub enum PluginTransferError {
     Json(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PluginBackupFilesystem {
-    staging_root: PathBuf,
     limits: PluginTransferLimits,
 }
 
 impl PluginBackupFilesystem {
-    pub fn new(staging_root: impl AsRef<Path>) -> PluginTransferResult<Self> {
-        Self::with_limits(staging_root, PluginTransferLimits::default())
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn with_limits(
-        staging_root: impl AsRef<Path>,
-        limits: PluginTransferLimits,
-    ) -> PluginTransferResult<Self> {
+    pub fn with_limits(limits: PluginTransferLimits) -> PluginTransferResult<Self> {
         let limits = limits.validate()?;
-        ensure_real_directory(staging_root.as_ref())?;
-        let staging_root = fs::canonicalize(staging_root.as_ref())
-            .map_err(|source| io_error(staging_root.as_ref(), source))?;
-        Ok(Self {
-            staging_root,
-            limits,
-        })
-    }
-
-    pub fn staging_root(&self) -> &Path {
-        &self.staging_root
+        Ok(Self { limits })
     }
 
     pub fn export_package_directory(
@@ -201,7 +187,7 @@ impl PluginBackupFilesystem {
         let package = self.prepare_package_export(request)?;
         atomic_write_directory(
             destination.as_ref(),
-            &TreeSnapshot::from_files(package.files.clone()),
+            &TreeSnapshot::from_files(package.files),
         )?;
         Ok(package.artifact)
     }
@@ -214,7 +200,7 @@ impl PluginBackupFilesystem {
         let package = self.prepare_package_export(request)?;
         atomic_write_zip(
             destination.as_ref(),
-            &TreeSnapshot::from_files(package.files.clone()),
+            &TreeSnapshot::from_files(package.files),
         )?;
         Ok(package.artifact)
     }
@@ -224,9 +210,7 @@ impl PluginBackupFilesystem {
         source: impl AsRef<Path>,
     ) -> PluginTransferResult<ImportedPluginPackage> {
         let snapshot = scan_directory(source.as_ref(), self.limits)?;
-        validate_package_tree(&snapshot)?;
-        let staged = self.stage_snapshot(&snapshot)?;
-        package_from_snapshot(staged.snapshot())
+        package_from_snapshot(snapshot)
     }
 
     pub fn import_package_zip(
@@ -234,9 +218,7 @@ impl PluginBackupFilesystem {
         source: impl AsRef<Path>,
     ) -> PluginTransferResult<ImportedPluginPackage> {
         let snapshot = scan_zip(source.as_ref(), self.limits)?;
-        validate_package_tree(&snapshot)?;
-        let staged = self.stage_snapshot(&snapshot)?;
-        package_from_snapshot(staged.snapshot())
+        package_from_snapshot(snapshot)
     }
 
     pub fn export_backup_directory(
@@ -264,9 +246,7 @@ impl PluginBackupFilesystem {
         source: impl AsRef<Path>,
     ) -> PluginTransferResult<ImportedPluginBackup> {
         let snapshot = scan_directory(source.as_ref(), self.limits)?;
-        validate_backup_tree(&snapshot)?;
-        let staged = self.stage_snapshot(&snapshot)?;
-        backup_from_snapshot(staged.snapshot(), self.limits)
+        backup_from_snapshot(snapshot, self.limits)
     }
 
     pub fn import_backup_zip(
@@ -274,9 +254,7 @@ impl PluginBackupFilesystem {
         source: impl AsRef<Path>,
     ) -> PluginTransferResult<ImportedPluginBackup> {
         let snapshot = scan_zip(source.as_ref(), self.limits)?;
-        validate_backup_tree(&snapshot)?;
-        let staged = self.stage_snapshot(&snapshot)?;
-        backup_from_snapshot(staged.snapshot(), self.limits)
+        backup_from_snapshot(snapshot, self.limits)
     }
 
     fn prepare_package_export(
@@ -285,8 +263,7 @@ impl PluginBackupFilesystem {
     ) -> PluginTransferResult<ImportedPluginPackage> {
         validate_digest(request.artifact_digest)?;
         let snapshot = scan_directory(request.package_root, self.limits)?;
-        validate_package_tree(&snapshot)?;
-        let current = package_from_snapshot(&snapshot)?;
+        let current = package_from_snapshot(snapshot)?;
         if &current.artifact.artifact_digest != request.artifact_digest {
             return Err(PluginTransferError::Tampered(
                 "package tree does not match active artifact_digest".into(),
@@ -302,7 +279,7 @@ impl PluginBackupFilesystem {
                 .filter(|(path, _)| !path.starts_with("source/"))
                 .collect(),
         );
-        package_from_snapshot(&filtered)
+        package_from_snapshot(filtered)
     }
 
     fn prepare_backup_export(
@@ -314,21 +291,20 @@ impl PluginBackupFilesystem {
         validate_generation(request.generation)?;
 
         let package_snapshot = scan_directory(request.package_root, self.limits)?;
-        validate_package_tree(&package_snapshot)?;
-        let package = package_from_snapshot(&package_snapshot)?;
+        let package = package_from_snapshot(package_snapshot)?;
         if &package.artifact.artifact_digest != request.artifact_digest {
             return Err(PluginTransferError::Tampered(
                 "backup package does not match active artifact_digest".into(),
             ));
         }
 
-        let data = scan_directory(request.generation_root, self.limits)?;
+        let mut data = scan_directory(request.generation_root, self.limits)?;
         validate_generation_tree(&data)?;
         let data_sqlite = data
             .files
-            .get("data.sqlite")
+            .remove("data.sqlite")
             .ok_or_else(|| PluginTransferError::InvalidInput("data.sqlite is required".into()))?;
-        validate_sqlite(data_sqlite)?;
+        validate_sqlite(&data_sqlite)?;
         validate_config(request.config, request.credential_slots)?;
         let grants = normalized_grants(request.grants)?;
         validate_credential_slots(request.credential_slots)?;
@@ -337,7 +313,7 @@ impl PluginBackupFilesystem {
         for (path, bytes) in package.files {
             files.insert(format!("{PACKAGE_DIRECTORY}/{path}"), bytes);
         }
-        files.insert(DATA_SQLITE.into(), data_sqlite.clone());
+        files.insert(DATA_SQLITE.into(), data_sqlite);
         for (path, bytes) in data.files {
             if let Some(relative) = path.strip_prefix("files/") {
                 files.insert(format!("{DATA_FILES_DIRECTORY}/{relative}"), bytes);
@@ -371,22 +347,6 @@ impl PluginBackupFilesystem {
         snapshot.directories.insert(DATA_FILES_DIRECTORY.into());
         validate_backup_tree(&snapshot)?;
         Ok((descriptor, snapshot))
-    }
-
-    fn stage_snapshot(&self, snapshot: &TreeSnapshot) -> PluginTransferResult<StagedSnapshot> {
-        let guard = StagingDirectory::allocate(&self.staging_root)?;
-        write_tree(guard.path(), snapshot)?;
-        sync_tree(guard.path())?;
-        let observed = scan_directory(guard.path(), self.limits)?;
-        if observed.files != snapshot.files {
-            return Err(PluginTransferError::Tampered(
-                "staged transfer differs from captured input".into(),
-            ));
-        }
-        Ok(StagedSnapshot {
-            _guard: guard,
-            snapshot: observed,
-        })
     }
 }
 
@@ -469,19 +429,8 @@ impl TreeSnapshot {
     }
 }
 
-struct StagedSnapshot {
-    _guard: StagingDirectory,
-    snapshot: TreeSnapshot,
-}
-
-impl StagedSnapshot {
-    fn snapshot(&self) -> &TreeSnapshot {
-        &self.snapshot
-    }
-}
-
-fn package_from_snapshot(snapshot: &TreeSnapshot) -> PluginTransferResult<ImportedPluginPackage> {
-    validate_package_tree(snapshot)?;
+fn package_from_snapshot(snapshot: TreeSnapshot) -> PluginTransferResult<ImportedPluginPackage> {
+    validate_package_tree(&snapshot)?;
     let manifest_bytes = snapshot
         .files
         .get(PLUGIN_MANIFEST_PATH)
@@ -490,7 +439,7 @@ fn package_from_snapshot(snapshot: &TreeSnapshot) -> PluginTransferResult<Import
     manifest
         .validate()
         .map_err(|error| PluginTransferError::InvalidInput(error.to_string()))?;
-    let mut files = snapshot.files.clone();
+    let mut files = snapshot.files;
     files.insert(PLUGIN_MANIFEST_PATH.into(), canonical_bytes(&manifest)?);
     let artifact_files = files
         .iter()
@@ -506,10 +455,10 @@ fn package_from_snapshot(snapshot: &TreeSnapshot) -> PluginTransferResult<Import
 }
 
 fn backup_from_snapshot(
-    snapshot: &TreeSnapshot,
+    snapshot: TreeSnapshot,
     limits: PluginTransferLimits,
 ) -> PluginTransferResult<ImportedPluginBackup> {
-    validate_backup_tree(snapshot)?;
+    validate_backup_tree(&snapshot)?;
     let manifest: PluginBackupManifest = parse_canonical(
         snapshot
             .files
@@ -519,44 +468,14 @@ fn backup_from_snapshot(
     )?;
     manifest.validate()?;
 
-    let body = snapshot
-        .files
-        .iter()
-        .filter(|(path, _)| path.as_str() != BACKUP_MANIFEST)
-        .map(|(path, bytes)| (path.clone(), bytes.clone()))
-        .collect::<BTreeMap<_, _>>();
+    let mut body = snapshot.files;
+    body.remove(BACKUP_MANIFEST);
     if file_records(&body) != manifest.files {
         return Err(PluginTransferError::Tampered(
             "backup file inventory or digest mismatch".into(),
         ));
     }
 
-    let package_files = body
-        .iter()
-        .filter_map(|(path, bytes)| {
-            path.strip_prefix("package/")
-                .map(|relative| (relative.to_owned(), bytes.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let package = package_from_snapshot(&TreeSnapshot::from_files(package_files))?;
-    if package.artifact.artifact_digest != manifest.artifact_digest {
-        return Err(PluginTransferError::Tampered(
-            "backup package differs from artifact_digest".into(),
-        ));
-    }
-
-    let data_sqlite = body
-        .get(DATA_SQLITE)
-        .cloned()
-        .ok_or_else(|| PluginTransferError::InvalidInput("backup data.sqlite is required".into()))?;
-    validate_sqlite(&data_sqlite)?;
-    let files = body
-        .iter()
-        .filter_map(|(path, bytes)| {
-            path.strip_prefix("data/files/")
-                .map(|relative| (relative.to_owned(), bytes.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
     let config: Value = parse_canonical(
         required_file(&body, CONFIG_FILE)?,
         limits.max_json_bytes,
@@ -572,6 +491,26 @@ fn backup_from_snapshot(
     validate_config(&config, &credential_slots)?;
     let grants = normalized_grants(&grants)?;
     validate_credential_slots(&credential_slots)?;
+
+    let data_sqlite = body
+        .remove(DATA_SQLITE)
+        .ok_or_else(|| PluginTransferError::InvalidInput("backup data.sqlite is required".into()))?;
+    validate_sqlite(&data_sqlite)?;
+    let mut package_files = BTreeMap::new();
+    let mut files = BTreeMap::new();
+    for (path, bytes) in body {
+        if let Some(relative) = path.strip_prefix("package/") {
+            package_files.insert(relative.to_owned(), bytes);
+        } else if let Some(relative) = path.strip_prefix("data/files/") {
+            files.insert(relative.to_owned(), bytes);
+        }
+    }
+    let package = package_from_snapshot(TreeSnapshot::from_files(package_files))?;
+    if package.artifact.artifact_digest != manifest.artifact_digest {
+        return Err(PluginTransferError::Tampered(
+            "backup package differs from artifact_digest".into(),
+        ));
+    }
 
     Ok(ImportedPluginBackup {
         plugin_id: manifest.plugin_id,
@@ -883,14 +822,7 @@ where
 }
 
 fn strict_json_from_slice<T: DeserializeOwned>(bytes: &[u8]) -> PluginTransferResult<T> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = StrictJsonValueSeed
-        .deserialize(&mut deserializer)
-        .map_err(|error| PluginTransferError::Json(error.to_string()))?;
-    deserializer
-        .end()
-        .map_err(|error| PluginTransferError::Json(error.to_string()))?;
-    serde_json::from_value(value).map_err(|error| PluginTransferError::Json(error.to_string()))
+    crate::strict_json::from_slice(bytes).map_err(PluginTransferError::Json)
 }
 
 fn scan_directory(root: &Path, limits: PluginTransferLimits) -> PluginTransferResult<TreeSnapshot> {
@@ -1037,6 +969,22 @@ fn scan_zip(path: &Path, limits: PluginTransferLimits) -> PluginTransferResult<T
         }
         snapshot.files.insert(normalized, bytes);
     }
+    // A captured ZIP must describe a realizable tree without materializing it.
+    // In particular, a file cannot also be an implicit parent directory.
+    let file_keys = snapshot
+        .files
+        .keys()
+        .map(|path| windows_collision_key(path))
+        .collect::<PluginTransferResult<HashSet<_>>>()?;
+    for path in snapshot.files.keys().chain(&snapshot.directories) {
+        let mut parent = path.as_str();
+        while let Some((ancestor, _)) = parent.rsplit_once('/') {
+            if file_keys.contains(&windows_collision_key(ancestor)?) {
+                return Err(PluginTransferError::DuplicateEntry(ancestor.into()));
+            }
+            parent = ancestor;
+        }
+    }
     Ok(snapshot)
 }
 
@@ -1049,7 +997,7 @@ fn zip_entry_is_special(mode: Option<u32>, directory: bool) -> bool {
 fn atomic_write_directory(destination: &Path, snapshot: &TreeSnapshot) -> PluginTransferResult<()> {
     let parent = destination_parent(destination)?;
     require_absent(destination)?;
-    let mut staging = StagingDirectory::allocate_with_prefix(parent, STAGING_PREFIX)?;
+    let mut staging = StagingDirectory::allocate(parent)?;
     write_tree(staging.path(), snapshot)?;
     sync_tree(staging.path())?;
     require_absent(destination)?;
@@ -1161,13 +1109,9 @@ struct StagingDirectory {
 
 impl StagingDirectory {
     fn allocate(parent: &Path) -> PluginTransferResult<Self> {
-        Self::allocate_with_prefix(parent, STAGING_PREFIX)
-    }
-
-    fn allocate_with_prefix(parent: &Path, prefix: &str) -> PluginTransferResult<Self> {
         require_real_directory(parent)?;
         for _ in 0..16 {
-            let path = parent.join(format!("{prefix}{}", Uuid::now_v7()));
+            let path = parent.join(format!("{STAGING_PREFIX}{}", Uuid::now_v7()));
             match fs::create_dir(&path) {
                 Ok(()) => {
                     return Ok(Self {
@@ -1327,25 +1271,6 @@ fn read_bounded(path: &Path, limit: u64) -> PluginTransferResult<Vec<u8>> {
     fs::read(path).map_err(|source| io_error(path, source))
 }
 
-fn ensure_real_directory(path: &Path) -> PluginTransferResult<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-                return Err(unsafe_path(path, "expected a real directory"));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
-            let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
-            if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-                return Err(unsafe_path(path, "created path is not a real directory"));
-            }
-        }
-        Err(source) => return Err(io_error(path, source)),
-    }
-    Ok(())
-}
-
 fn require_real_directory(path: &Path) -> PluginTransferResult<()> {
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
@@ -1459,100 +1384,5 @@ fn io_error(path: &Path, source: io::Error) -> PluginTransferError {
     PluginTransferError::Io {
         path: path.to_path_buf(),
         source,
-    }
-}
-
-struct StrictJsonValueSeed;
-
-impl<'de> DeserializeSeed<'de> for StrictJsonValueSeed {
-    type Value = Value;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonValueVisitor)
-    }
-}
-
-struct StrictJsonValueVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonValueVisitor {
-    type Value = Value;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("strict JSON without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(Value::Bool(value))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(Value::Number(Number::from(value)))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(Value::Number(Number::from(value)))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| E::custom("non-finite JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(Value::String(value.into()))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(Value::String(value))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictJsonValueSeed.deserialize(deserializer)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(StrictJsonValueSeed)? {
-            values.push(value);
-        }
-        Ok(Value::Array(values))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = Map::new();
-        let mut keys = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate decoded JSON object key: {key}"
-                )));
-            }
-            values.insert(key, map.next_value_seed(StrictJsonValueSeed)?);
-        }
-        Ok(Value::Object(values))
     }
 }

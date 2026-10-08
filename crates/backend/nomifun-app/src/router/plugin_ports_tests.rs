@@ -19,39 +19,6 @@ const ARTIFACT_DIGEST: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const KEY: [u8; 32] = [0x42; 32];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DesktopCall {
-    plugin_id: String,
-    request: DesktopFileOpenRequest,
-}
-
-#[derive(Default)]
-struct RecordingDesktop {
-    calls: Mutex<Vec<DesktopCall>>,
-}
-
-#[async_trait]
-impl PluginDesktopOwner for RecordingDesktop {
-    async fn open_file(
-        &self,
-        caller_plugin_id: &PluginId,
-        request: DesktopFileOpenRequest,
-        cancellation: PluginServiceCancellation,
-    ) -> Result<DesktopFileOpenResult, PluginServicePortError> {
-        if cancellation.is_canceled() {
-            return Err(port_error("service_call_canceled"));
-        }
-        self.calls
-            .lock()
-            .unwrap()
-            .push(DesktopCall {
-                plugin_id: caller_plugin_id.as_ref().into(),
-                request,
-            });
-        Ok(DesktopFileOpenResult { opened: true })
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct ActionCall {
     caller: String,
@@ -130,9 +97,8 @@ impl Fixture {
     fn ports(
         &self,
         dispatcher: Arc<RecordingDispatcher>,
-        desktop: Arc<RecordingDesktop>,
     ) -> PluginServicePorts {
-        build_plugin_service_ports(self.pool.clone(), KEY, dispatcher, desktop)
+        build_plugin_service_ports(self.pool.clone(), KEY, dispatcher)
     }
 }
 
@@ -457,62 +423,25 @@ async fn malformed_missing_wrong_key_and_cross_owner_credentials_fail_closed() {
 }
 
 #[tokio::test]
-async fn desktop_capability_requires_current_manifest_grant_and_never_accepts_a_raw_path() {
+async fn desktop_file_open_is_unavailable_and_keeps_grant_checks() {
     let fixture = Fixture::new().await;
-    let desktop = Arc::new(RecordingDesktop::default());
     let dispatcher = Arc::new(RecordingDispatcher::default());
-    let ports = fixture.ports(dispatcher, desktop.clone());
+    let ports = fixture.ports(dispatcher);
     let plugin_id = PluginId::from(PLUGIN_ID);
-    let result = ports
-        .host
-        .invoke(
-            &plugin_id,
-            DESKTOP_FILES_OPEN,
-            json!({"fileId":"workspace-file:note-1"}),
-            false,
-            PluginServiceCancellation::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(result, json!({"opened":true}));
-    assert_eq!(
-        desktop.calls.lock().unwrap().as_slice(),
-        [DesktopCall {
-            plugin_id: PLUGIN_ID.into(),
-            request: DesktopFileOpenRequest {
-                file_id: "workspace-file:note-1".into()
-            }
-        }]
-    );
-    assert_eq!(
-        ports
+    for preview in [false, true] {
+        assert_eq!(ports
             .host
             .invoke(
                 &plugin_id,
                 DESKTOP_FILES_OPEN,
-                json!({"path":"C:/secret.txt"}),
-                false,
+                json!({"fileId":"workspace-file:note-1"}),
+                preview,
                 PluginServiceCancellation::default(),
             )
             .await
             .unwrap_err(),
-        port_error("desktop_request_invalid")
-    );
-    assert_eq!(desktop.calls.lock().unwrap().len(), 1);
-
-    let preview = ports
-        .host
-        .invoke(
-            &PluginId::from(OTHER_PLUGIN_ID),
-            DESKTOP_FILES_OPEN,
-            json!({"fileId":"workspace-file:preview-note"}),
-            true,
-            PluginServiceCancellation::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(preview, json!({"opened":true}));
-    assert_eq!(desktop.calls.lock().unwrap().len(), 2);
+            port_error("desktop_capability_unavailable"));
+    }
 
     let other_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     sqlx::query(
@@ -569,9 +498,8 @@ async fn desktop_capability_requires_current_manifest_grant_and_never_accepts_a_
 #[tokio::test]
 async fn action_dispatch_preserves_caller_input_and_the_exact_cancellation_chain() {
     let fixture = Fixture::new().await;
-    let desktop = Arc::new(RecordingDesktop::default());
     let dispatcher = Arc::new(RecordingDispatcher::default());
-    let ports = fixture.ports(dispatcher.clone(), desktop);
+    let ports = fixture.ports(dispatcher.clone());
     let plugin_id = PluginId::from(PLUGIN_ID);
     let action = format!("plugin:{OTHER_PLUGIN_ID}/echo");
     let result = ports

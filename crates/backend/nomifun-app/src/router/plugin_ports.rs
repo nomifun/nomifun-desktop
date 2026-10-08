@@ -12,7 +12,7 @@ use nomifun_agent_contracts::{PluginBindingPoint, PluginId, PluginManifest, Stri
 use nomifun_db::sqlx::Row as _;
 use nomifun_db::{SqlitePool, sqlx};
 use nomifun_plugin_platform::{
-    AgentPluginBindings, AutomationPluginBindings, BindingFailureSemantics,
+    AgentPluginBindings, BindingFailureSemantics,
     BindingMultiplicity, BindingPointContract, DesktopPluginBindings,
     InMemoryPluginBindingRegistry, PassthroughBindingAdapter, PluginActionCallError,
     PluginActionInvocation, PluginActionRuntimePort, PluginBindingError, PluginCancellation,
@@ -20,35 +20,11 @@ use nomifun_plugin_platform::{
     PluginServiceHostPort, PluginServicePortError, PluginServicePorts, PluginServiceRuntime,
     PluginServiceSecretsPort,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use zeroize::{Zeroize as _, Zeroizing};
 
 const DESKTOP_FILES_OPEN: &str = "desktop.files.open";
 const ACTIONS_INVOKE: &str = "actions.invoke";
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DesktopFileOpenRequest {
-    /// Opaque Host-owned file reference. It is intentionally not a path.
-    pub file_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopFileOpenResult {
-    pub opened: bool,
-}
-
-#[async_trait]
-pub trait PluginDesktopOwner: Send + Sync {
-    async fn open_file(
-        &self,
-        caller_plugin_id: &PluginId,
-        request: DesktopFileOpenRequest,
-        cancellation: PluginServiceCancellation,
-    ) -> Result<DesktopFileOpenResult, PluginServicePortError>;
-}
 
 #[async_trait]
 pub trait UnifiedPluginActionDispatcher: Send + Sync {
@@ -61,24 +37,6 @@ pub trait UnifiedPluginActionDispatcher: Send + Sync {
         preview: bool,
         cancellation: PluginServiceCancellation,
     ) -> Result<JsonValue, PluginServicePortError>;
-}
-
-/// No existing Desktop host owns a safe opaque-file resolver yet. Production
-/// explicitly reports unavailability instead of turning Plugin input into a
-/// raw path or Tauri command authority.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailablePluginDesktopOwner;
-
-#[async_trait]
-impl PluginDesktopOwner for UnavailablePluginDesktopOwner {
-    async fn open_file(
-        &self,
-        _caller_plugin_id: &PluginId,
-        _request: DesktopFileOpenRequest,
-        _cancellation: PluginServiceCancellation,
-    ) -> Result<DesktopFileOpenResult, PluginServicePortError> {
-        Err(port_error("desktop_capability_unavailable"))
-    }
 }
 
 /// Late-bound dispatcher breaks the intentional Service -> Action registry ->
@@ -185,7 +143,7 @@ impl PluginActionRuntimePort for PluginServiceActionRuntime {
 
 /// Register the complete stable Binding point set before any Artifact is
 /// recovered. The registry keeps the canonical JSON envelope; Agent, Desktop,
-/// and Automation consumers apply their domain behavior at their real call
+/// consumers apply their domain behavior at their real call
 /// sites without changing Plugin identity or persistence.
 pub fn register_plugin_binding_owners(
     registry: &InMemoryPluginBindingRegistry,
@@ -282,7 +240,6 @@ pub struct PluginBindingConsumers {
     pub registry: InMemoryPluginBindingRegistry,
     pub agent: AgentPluginBindings,
     pub desktop: DesktopPluginBindings,
-    pub automation: AutomationPluginBindings,
     pub host: Arc<dyn PluginServiceHostPort>,
 }
 
@@ -294,7 +251,6 @@ impl PluginBindingConsumers {
         Self {
             agent: AgentPluginBindings::new(registry.clone()),
             desktop: DesktopPluginBindings::new(registry.clone()),
-            automation: AutomationPluginBindings::new(registry.clone()),
             host,
             registry,
         }
@@ -306,7 +262,6 @@ pub fn build_plugin_service_ports(
     pool: SqlitePool,
     encryption_key: [u8; 32],
     dispatcher: Arc<dyn UnifiedPluginActionDispatcher>,
-    desktop: Arc<dyn PluginDesktopOwner>,
 ) -> PluginServicePorts {
     let admission = Arc::new(PluginPortAdmission::new(pool.clone()));
     PluginServicePorts {
@@ -316,7 +271,6 @@ pub fn build_plugin_service_ports(
         }),
         host: Arc::new(ProductionPluginHostPort {
             admission: Arc::clone(&admission),
-            desktop,
         }),
         actions: Arc::new(ProductionPluginActionsPort {
             admission,
@@ -573,7 +527,6 @@ impl PluginPortAdmission {
 
 struct ProductionPluginHostPort {
     admission: Arc<PluginPortAdmission>,
-    desktop: Arc<dyn PluginDesktopOwner>,
 }
 
 #[async_trait]
@@ -582,7 +535,7 @@ impl PluginServiceHostPort for ProductionPluginHostPort {
         &self,
         plugin_id: &PluginId,
         capability: &str,
-        input: JsonValue,
+        _input: JsonValue,
         preview: bool,
         cancellation: PluginServiceCancellation,
     ) -> Result<JsonValue, PluginServicePortError> {
@@ -594,17 +547,9 @@ impl PluginServiceHostPort for ProductionPluginHostPort {
                 if !preview {
                     self.admission.require_grant(plugin_id, capability).await?;
                 }
-                let request: DesktopFileOpenRequest = serde_json::from_value(input)
-                    .map_err(|_| port_error("desktop_request_invalid"))?;
-                validate_opaque_file_id(&request.file_id)?;
-                let result = self
-                    .desktop
-                    .open_file(plugin_id, request, cancellation.clone())
-                    .await?;
-                if cancellation.is_canceled() {
-                    return Err(port_error("service_call_canceled"));
-                }
-                Ok(json!({"opened": result.opened}))
+                // No Host owns an opaque-file resolver. Keep this unavailable
+                // until a real Desktop capability is composed here.
+                Err(port_error("desktop_capability_unavailable"))
             }
             _ => Err(port_error("host_capability_denied")),
         }
@@ -674,19 +619,6 @@ fn validate_action_identity(value: &str) -> Result<(), PluginServicePortError> {
         Ok(())
     } else {
         Err(port_error("action_invalid"))
-    }
-}
-
-fn validate_opaque_file_id(value: &str) -> Result<(), PluginServicePortError> {
-    let valid = !value.is_empty()
-        && value.len() <= 256
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(port_error("desktop_request_invalid"))
     }
 }
 

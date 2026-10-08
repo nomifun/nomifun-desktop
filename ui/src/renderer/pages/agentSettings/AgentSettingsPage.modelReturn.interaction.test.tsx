@@ -11,7 +11,6 @@ import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hook
 import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderEvents';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
-import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 
 import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
@@ -239,7 +238,6 @@ test('opening before-tool authoring in the plugin workspace returns to the same 
   const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
     current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
     revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  const createCheck = spyOn(pluginPlatform.drafts.create, 'invoke');
   const v = await mount(undefined, original);
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
@@ -257,7 +255,6 @@ test('opening before-tool authoring in the plugin workspace returns to the same 
   expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
   expect(v.getAllByRole('combobox')).toHaveLength(1);
-  expect(createCheck).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
   expect(v.create).not.toHaveBeenCalled();
   expect(v.turn).not.toHaveBeenCalled();

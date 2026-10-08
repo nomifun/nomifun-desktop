@@ -50,26 +50,9 @@ export interface PluginBindingSummary {
   unavailable_reason?: string;
 }
 
-export interface PluginDesktopCommand {
-  action_id: string;
-  name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-  effect: PluginActionEffect;
-}
-
 export interface InvokePluginDesktopCommandRequest {
   action_id: string;
   input?: unknown;
-}
-
-export interface DispatchPluginDesktopEventRequest {
-  input?: unknown;
-}
-
-export interface PluginDesktopEventReport {
-  outputs: Array<{ action_id: string; output: unknown }>;
-  failures: Array<{ action_id: string; code: string }>;
 }
 
 export interface PluginManifestSummary {
@@ -241,21 +224,10 @@ export interface PluginDraftListResponse {
   drafts: PluginDraftSummary[];
 }
 
-export interface CreatePluginDraftRequest {
-  plugin_id?: PluginId;
-  expected_plugin_revision?: number;
-  template?: string;
-}
-
 export interface ReplacePluginDraftFileRequest {
   expected_revision: number;
   path: string;
   content_base64: string;
-}
-
-export interface DeletePluginDraftFileRequest {
-  expected_revision: number;
-  path: string;
 }
 
 export interface PluginPreviewAccessRequest {
@@ -275,10 +247,6 @@ export interface SavePluginDraftRequest {
   expected_plugin_revision?: number;
   config: Record<string, unknown>;
   credential_bindings: Record<string, string>;
-}
-
-export interface DeletePluginDraftRequest {
-  expected_revision: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -245,7 +245,7 @@ async fn backup_restore_enters_the_same_artifact_journal_and_generation_pipeline
         .unwrap();
 
     let stored = artifacts.load(&first.artifact.artifact_digest).unwrap();
-    let transfer = PluginBackupFilesystem::new(temp.path().join("transfer")).unwrap();
+    let transfer = PluginBackupFilesystem::new();
     let backup_path = temp.path().join("plugin-backup.zip");
     transfer
         .export_backup_zip(

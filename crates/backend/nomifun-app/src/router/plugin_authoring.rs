@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use super::plugin::{self, PluginHttpError, PluginRouterState};
+use super::engine_tool_host::EngineToolDispatchRecord;
+use nomifun_agent_runtime::AgentEngineEvent;
+use nomifun_engine_core::EngineToolResult;
 
 fn hash(value:&Value)->String { digest_payload(value).expect("JSON value").as_ref().to_owned() }
 fn error(message:&str)->PluginHttpError { PluginHttpError::bad_request(message) }
@@ -35,40 +38,67 @@ pub(super) async fn current_conversation_consumed(
 ) -> Result<bool,nomifun_common::AppError> {
     let case=&report["plan"]["current_conversation_case"];
     if case.is_null() { return Ok(true); }
-    let rows:Vec<String>=nomifun_db::sqlx::query_scalar(
-        "SELECT inline_json FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded' AND inline_json IS NOT NULL ORDER BY seq"
-    ).bind(conversation).bind(operation).fetch_all(pool).await.map_err(|error|nomifun_common::AppError::Internal(error.to_string()))?;
-    let events=rows.iter().map(|row|serde_json::from_str::<Value>(row))
-        .collect::<Result<Vec<_>,_>>().map_err(|error|nomifun_common::AppError::Internal(error.to_string()))?;
+    let failure=|error: String|nomifun_common::AppError::Conflict(format!("Plugin consumption evidence: {error}"));
+    let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.map_err(|error|failure(error.to_string()))?;
+    let facts=store.turn_output_facts(&conversation.into(),&operation.into()).await.map_err(|error|failure(error.to_string()))?;
+    let events=facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"
+        && event.correlation_id.as_ref()==operation).map(|event| {
+        if event.kind_version!=1 || event.producer_id.as_ref()!="runtime_supervisor" {
+            return Err(failure("unsupported Runtime progress source".into()));
+        }
+        let payload=facts.event_payloads.get(event.event_id.as_ref())
+            .ok_or_else(||failure("Runtime progress has no resolved canonical payload".into()))?;
+        serde_json::from_value::<ConsumptionProgress>(payload.clone()).map(|progress|progress.event)
+            .map_err(|error|failure(error.to_string()))
+    }).collect::<Result<Vec<_>,_>>()?;
     Ok(consumption_evidence(&events,report))
 }
 
-fn consumption_evidence(events:&[Value], report:&Value) -> bool {
+#[derive(Deserialize)]
+struct ConsumptionProgress { event: ConsumptionEvent }
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConsumptionEvent {
+    Runtime(AgentEngineEvent),
+    Host(ConsumptionHostEvent),
+}
+
+#[derive(Deserialize)]
+#[serde(tag="event",rename_all="snake_case")]
+enum ConsumptionHostEvent {
+    HostToolDispatch { dispatch: EngineToolDispatchRecord },
+    HostToolSettled { operation_id: String, call_id: String, result: Option<EngineToolResult>, error: Option<String> },
+    #[serde(rename="host_resource_dispatch",alias="host_resource_settled",alias="host_process_dispatch",
+        alias="host_process_quiescent",alias="host_cleanup_proven")]
+    Other,
+}
+
+fn consumption_evidence(events:&[ConsumptionEvent], report:&Value) -> bool {
     let case=&report["plan"]["current_conversation_case"];
-    let plugin=report["delivery"]["plugin_id"].as_str().unwrap_or_default();
-    let stable=format!("plugin:{plugin}/{}",case["action"].as_str().unwrap_or_default());
+    let (Some(plugin),Some(action),Some(input),Some(expected))=(report["delivery"]["plugin_id"].as_str(),
+        case["action"].as_str(),case.get("input"),case.get("expected_output")) else{return false;};
+    let stable=nomifun_agent_contracts::plugin::plugin_action_id(&plugin.into(),action);
     let mut proposals=HashMap::new();
     let mut dispatches=HashMap::new();
     let mut installed=false;
-    for payload in events {
-        let event=&payload["event"];
-        match event["event"].as_str() {
-            Some("tool_call_completed")=>{
-                if let Some(id)=event["call"]["call_id"].as_str() { proposals.insert(id.to_owned(),event["call"]["arguments"].clone()); }
+    for event in events {
+        match event {
+            ConsumptionEvent::Runtime(AgentEngineEvent::ToolCallCompleted {call,..})=>{
+                proposals.insert(call.call_id.as_ref(),&call.arguments.0);
             }
-            Some("host_tool_dispatch")=>{
-                if let Some(id)=event["dispatch"]["operation_id"].as_str() { dispatches.insert(id.to_owned(),event["dispatch"].clone()); }
+            ConsumptionEvent::Host(ConsumptionHostEvent::HostToolDispatch {dispatch})=>{
+                dispatches.insert(dispatch.operation_id.as_str(),dispatch);
             }
-            Some("host_tool_settled")=>{
-                let Some(dispatch)=event["operation_id"].as_str().and_then(|id|dispatches.get(id)) else { continue; };
-                let Ok(result)=serde_json::from_value::<nomifun_engine_core::EngineToolResult>(event["result"].clone()) else { continue; };
-                if result.is_error || !event["error"].is_null() { continue; }
+            ConsumptionEvent::Host(ConsumptionHostEvent::HostToolSettled {operation_id,call_id,result:Some(result),error:None})=>{
+                let Some(dispatch)=dispatches.get(operation_id.as_str()) else { continue; };
+                if result.is_error || result.call_id.as_ref()!=call_id || *call_id!=dispatch.call_id { continue; }
                 let Ok(output)=serde_json::from_str::<Value>(&result.output_text()) else { continue; };
-                if dispatch["capability_id"]=="plugin.development" && dispatch["action_id"]=="plugin.development/install"
+                if dispatch.capability_id=="plugin.development" && dispatch.action_id=="plugin.development/install"
                     && output["delivery"]==report["delivery"] { installed=true; }
-                else if installed && dispatch["capability_id"]==stable && dispatch["action_id"]==case["action"]
-                    && dispatch["call_id"].as_str().and_then(|id|proposals.get(id))==Some(&case["input"])
-                    && output==case["expected_output"] { return true; }
+                else if installed && dispatch.capability_id==stable && dispatch.action_id==action
+                    && proposals.get(dispatch.call_id.as_str())==Some(&input)
+                    && output==*expected { return true; }
             }
             _=>{},
         }
@@ -154,29 +184,64 @@ mod credential_context_tests {
         assert_eq!(interrupted[0]["step_index"],0);
     }
 
-    #[test]
-    fn current_consumption_requires_exact_dispatch_input_and_settlement_after_install() {
+    fn consumption_fixture(input:Value) -> (Value,Vec<Value>) {
         let delivery=json!({"plugin_id":"plugin-id","artifact_digest":"digest","context_digest":"context"});
         let report=json!({"delivery":delivery,"plan":{"current_conversation_case":{
-            "action":"normalize","input":{"text":"abc"},"expected_output":{"text":"ABC"}
+            "action":"normalize","input":input,"expected_output":{"text":"ABC"}
         }}});
         let result=|call:&str,value:Value| serde_json::to_value(nomifun_engine_core::EngineToolResult::text(
             call.to_owned().into(),value.to_string(),false)).unwrap();
         let event=|event:Value|json!({"event":event});
-        let mut events=vec![
+        let events=vec![
             event(json!({"event":"host_tool_dispatch","dispatch":{"operation_id":"install","call_id":"install","capability_id":"plugin.development","action_id":"plugin.development/install"}})),
-            event(json!({"event":"host_tool_settled","operation_id":"install","result":result("install",json!({"delivery":delivery}))})),
-            event(json!({"event":"tool_call_completed","call":{"call_id":"use","arguments":{"text":"abc"}}})),
+            event(json!({"event":"host_tool_settled","operation_id":"install","call_id":"install","result":result("install",json!({"delivery":delivery}))})),
+            event(json!({"event":"tool_call_completed","step":1,"call":{"call_id":"use","name":"normalize","arguments":input}})),
             event(json!({"event":"host_tool_dispatch","dispatch":{"operation_id":"use","call_id":"use","capability_id":"plugin:plugin-id/normalize","action_id":"normalize"}})),
-            event(json!({"event":"host_tool_settled","operation_id":"use","result":result("use",json!({"text":"ABC"}))})),
+            event(json!({"event":"host_tool_settled","operation_id":"use","call_id":"use","result":result("use",json!({"text":"ABC"}))})),
         ];
-        assert!(consumption_evidence(&events,&report));
+        (report,events)
+    }
+
+    fn evidence(events:&[Value],report:&Value) -> bool {
+        let events=events.iter().map(|event|serde_json::from_value::<ConsumptionProgress>(event.clone()).unwrap().event).collect::<Vec<_>>();
+        consumption_evidence(&events,report)
+    }
+
+    #[test]
+    fn current_consumption_requires_exact_dispatch_input_and_settlement_after_install() {
+        let (report,mut events)=consumption_fixture(json!({"text":"abc"}));
+        assert!(evidence(&events,&report));
         events[3]["event"]["dispatch"]["capability_id"]=json!("plugin.development");
-        assert!(!consumption_evidence(&events,&report),"preview/creator calls cannot prove conversation consumption");
+        assert!(!evidence(&events,&report),"preview/creator calls cannot prove conversation consumption");
         events[3]["event"]["dispatch"]["capability_id"]=json!("plugin:plugin-id/normalize");
         events[2]["event"]["call"]["arguments"]=json!({"text":"different"});
-        assert!(!consumption_evidence(&events,&report));
-        assert!(!consumption_evidence(&events[2..],&report),"an installation boundary is required");
+        assert!(!evidence(&events,&report));
+        assert!(!evidence(&events[2..],&report),"an installation boundary is required");
+        events[2]["event"]["call"]["arguments"]=json!({"text":"abc"});
+        events[4]["event"]["call_id"]=json!("other-call");
+        assert!(!evidence(&events,&report),"the settlement must identify the dispatched call");
+        events[4]["event"]["call_id"]=json!("use");
+        events[4]["event"]["result"]["call_id"]=json!("other-result");
+        assert!(!evidence(&events,&report),"the result must belong to the dispatched call");
+    }
+
+    #[tokio::test]
+    async fn current_consumption_resolves_stored_canonical_payloads_and_rejects_wrong_input() {
+        let (mut report,events)=consumption_fixture(json!({"text":"x".repeat(70*1024)}));
+        let (journal,pool)=super::super::engine_journal::test_fixture().await;
+        for (index,payload) in events.iter().enumerate() {
+            let write=if matches!(index,1|4) {super::super::engine_journal::EngineJournalWrite::Settlement}
+                else {super::super::engine_journal::EngineJournalWrite::Progress};
+            journal.append(payload["event"].to_string(),None,write).await.unwrap();
+        }
+        let stored:i64=nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind='runtime/progress-recorded' AND payload_id IS NOT NULL")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(stored,1,"the oversized model proposal must use a stored Payload");
+        let session="0190f5fe-7c00-7a00-8000-000000000002";
+        assert!(current_conversation_consumed(&pool,session,"turn",&report).await.unwrap());
+        report["plan"]["current_conversation_case"]["input"]=json!({"text":"wrong"});
+        assert!(!current_conversation_consumed(&pool,session,"turn",&report).await.unwrap());
+        assert!(current_conversation_consumed(&pool,session,"other-turn",&report).await.is_err());
     }
 
     #[test]

@@ -1,11 +1,7 @@
-#[allow(dead_code)]
-#[path = "../src/data_root.rs"]
-mod data_root;
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use data_root::{
+use nomifun_plugin_platform::{
     DataGeneration, PluginDataRootError, PluginDataRootManager, PluginMigrationRecord,
     PluginSqlStatement, PluginSqlValue,
 };

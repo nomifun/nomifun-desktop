@@ -4,6 +4,7 @@
 //! One local Plugin identity owns one Active Artifact and one generation DataRoot.
 
 mod store;
+mod strict_json;
 mod data_root;
 mod model;
 mod repository;

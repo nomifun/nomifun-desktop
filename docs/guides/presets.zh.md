@@ -131,4 +131,4 @@ Agent revision、Snapshot、Session 与 Module 授权的当前实现见
 [Agent Session 架构](../architecture/agent-session.zh.md)。
 
 Plugin 的创建、预览、安装、配置和 Backup 请见
-[`Unified Plugin Core`](../specs/2026-09-22-unified-plugin-core/README.zh.md)。
+[插件平台架构](../architecture/plugin-platform.zh.md)。

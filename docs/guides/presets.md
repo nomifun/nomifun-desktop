@@ -151,5 +151,5 @@ Module authorization, see
 [Agent Session architecture](../architecture/agent-session.md).
 
 For Plugin creation, preview, install, configuration, and Backup, see
-[`Unified Plugin Core`](../specs/2026-09-22-unified-plugin-core/README.zh.md)
+[Plugin Platform architecture](../architecture/plugin-platform.zh.md)
 (Chinese only).

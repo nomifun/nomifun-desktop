@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_plugin_platform::{
-    AgentPluginBindings, AutomationPluginBindings, BindingFailureSemantics,
+    AgentPluginBindings, BindingFailureSemantics,
     BindingInvocationAdapter, BindingMultiplicity, BindingPointContract, DesktopPluginBindings,
     InMemoryPluginBindingRegistry, PassthroughBindingAdapter, PluginActionAvailability,
     PluginActionCallError, PluginActionInvocation, PluginActionRegistration, PluginCancellation,
@@ -544,10 +544,14 @@ async fn desktop_events_commands_and_automation_use_registered_adapters() {
         ]
     );
 
-    let automation = AutomationPluginBindings::new(registry);
-    let action = automation.actions().unwrap()[0].stable_action_id.clone();
-    automation
-        .trigger(
+    let action = registry
+        .list_binding(PluginBindingPoint::AutomationAction)
+        .unwrap()[0]
+        .stable_action_id
+        .clone();
+    registry
+        .dispatch_binding(
+            PluginBindingPoint::AutomationAction,
             &action,
             StrictJsonValue(json!({"source": "automation"})),
             Default::default(),
@@ -614,25 +618,6 @@ async fn agent_tools_context_and_hooks_keep_activation_order() {
         format!("plugin:{}/second", plugin_id.as_ref()),
         format!("plugin:{}/first", plugin_id.as_ref()),
     ];
-    assert_eq!(
-        agent
-            .contexts()
-            .unwrap()
-            .iter()
-            .map(|action| action.stable_action_id.clone())
-            .collect::<Vec<_>>(),
-        expected,
-    );
-    assert_eq!(
-        agent
-            .before_model()
-            .unwrap()
-            .iter()
-            .map(|action| action.stable_action_id.clone())
-            .collect::<Vec<_>>(),
-        expected,
-    );
-    assert_eq!(agent.before_tool().unwrap()[0].stable_action_id, expected[0]);
     let snapshot = agent.snapshot().unwrap();
     assert!(snapshot.revision > 0);
     assert_eq!(
@@ -644,38 +629,16 @@ async fn agent_tools_context_and_hooks_keep_activation_order() {
         expected,
     );
     assert_eq!(snapshot.tools.len(), 1);
-    assert_eq!(snapshot.before_model.len(), 2);
-    assert_eq!(snapshot.before_tool.len(), 1);
-    let context = agent
-        .contribute_context(StrictJsonValue(json!({})), Default::default())
-        .await
-        .unwrap();
     assert_eq!(
-        context
-            .outputs
+        snapshot
+            .before_model
             .iter()
-            .map(|output| output.stable_action_id.clone())
+            .map(|action| action.stable_action_id.clone())
             .collect::<Vec<_>>(),
         expected,
     );
-    assert_eq!(
-        agent
-            .run_before_model(StrictJsonValue(json!({})), Default::default())
-            .await
-            .unwrap()
-            .outputs
-            .len(),
-        2,
-    );
-    assert_eq!(
-        agent
-            .run_before_tool(StrictJsonValue(json!({})), Default::default())
-            .await
-            .unwrap()
-            .outputs
-            .len(),
-        1,
-    );
+    assert_eq!(snapshot.before_tool.len(), 1);
+    assert_eq!(snapshot.before_tool[0].stable_action_id, expected[0]);
     let tool = agent.tools().unwrap()[0].stable_action_id.clone();
     agent
         .invoke_tool(&tool, StrictJsonValue(json!({})), Default::default())

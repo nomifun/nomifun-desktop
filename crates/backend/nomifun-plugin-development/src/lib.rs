@@ -35,12 +35,9 @@ struct Handler(Arc<dyn PluginDevelopmentHost>);
 #[async_trait]
 impl CapabilityHandler for Handler {
     async fn invoke(&self, context: CapabilityInvocationContext, input: StrictJsonValue) -> Result<StrictJsonValue, KernelError> {
-        if context.capability_id.as_ref() != MODULE_ID
-            || !ACTIONS.iter().any(|action| context.action_id.as_ref() == action_id(action))
-        {
-            return Err(KernelError::CapabilityExecution { reason: "Unknown Plugin development action".into() });
-        }
-        let action = context.action_id.as_ref().strip_prefix("plugin.development/").expect("checked action");
+        let action = context.action_id.as_ref().strip_prefix("plugin.development/")
+            .filter(|action| context.capability_id.as_ref() == MODULE_ID && ACTIONS.contains(action))
+            .ok_or_else(|| KernelError::CapabilityExecution { reason: "Unknown Plugin development action".into() })?;
         if action == "plan" {
             let diagnostics = plan_case_diagnostics(&input.0["plan"]);
             if !diagnostics.is_empty() {
@@ -139,6 +136,12 @@ fn object(properties: Value, required: &[&str]) -> Value {
 }
 fn string() -> Value { json!({"type":"string","minLength":1,"maxLength":32768}) }
 fn revision() -> Value { json!({"type":"integer","minimum":1}) }
+fn ui_steps_schema() -> Value {
+    json!({"type":"array","minItems":1,"maxItems":32,"items":object(json!({
+        "operation":{"type":"string","enum":["click","fill","text","count","reopen"]},
+        "selector":string(),"value":{"type":["string","number"]}
+    }), &["operation"])})
+}
 
 pub fn input_schema(action: &str) -> Value {
     let config = json!({"type":"object","description":"Actual values matching configSchema; no invented credentials."});
@@ -158,10 +161,7 @@ pub fn input_schema(action: &str) -> Value {
         "test_action" => json!({"draft_id":string(),"expected_revision":revision(),"action":string(),"input":{},"expected_output":{},"case_name":string(),"restart":{"type":"boolean"}}),
         "test_ui" => json!({
             "draft_id":string(),"expected_revision":revision(),"case_name":string(),
-            "steps":{"type":"array","minItems":1,"maxItems":32,"items":object(json!({
-                "operation":{"type":"string","enum":["click","fill","text","count","reopen"]},
-                "selector":string(),"value":{"type":["string","number"]}
-            }), &["operation"])}
+            "steps":ui_steps_schema()
         }),
         "install" => json!({
             "draft_id":string(),"expected_revision":revision(),"expected_plugin_revision":revision(),
@@ -217,7 +217,7 @@ fn plan_action_case_schema() -> Value {
         &["kind","action","input","expected_output"])
 }
 fn plan_ui_case_schema() -> Value {
-    object(json!({"kind":{"const":"ui"},"steps":input_schema("test_ui")["properties"]["steps"]}),&["kind","steps"])
+    object(json!({"kind":{"const":"ui"},"steps":ui_steps_schema()}),&["kind","steps"])
 }
 /// Precise per-case diagnostics for the plan's oneOf case branches. Errors
 /// carry their full /plan/cases/<name> path so a rejected plan names the
@@ -330,10 +330,9 @@ pub fn plan_evidence_complete(report: &Value) -> bool {
     if !plan["cases"].as_object().expect("validated").keys()
         .all(|name|report["cases"][name]["passed"]==json!(true)) { return false; }
     plan["features"].as_array().expect("validated").iter().all(|feature| {
-        let names=feature["case_names"].as_array().expect("validated");
-        names.iter().all(|name|report["cases"][name.as_str().expect("validated")]["passed"]==json!(true))
-            && (feature["requires_persistence"]!=json!(true) || names.iter().any(|name|
-                report["cases"][name.as_str().expect("validated")]["persistence_checked"]==json!(true)))
+        feature["requires_persistence"]!=json!(true)
+            || feature["case_names"].as_array().expect("validated").iter().any(|name|
+                report["cases"][name.as_str().expect("validated")]["persistence_checked"]==json!(true))
     })
 }
 

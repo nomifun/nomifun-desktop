@@ -4,15 +4,6 @@ use nomifun_agent_contracts::{DigestHex, PluginArtifact, PluginDraftId, PluginId
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginObservedState {
-    Stopped,
-    Starting,
-    Running,
-    Failed,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginRecord {
     pub owner_user_id: String,

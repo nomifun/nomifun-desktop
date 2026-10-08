@@ -1288,14 +1288,7 @@ async fn test_fixture_from_pool(
     let input = StrictJsonValue(json!({
         "content": "fixture",
         "admission": {
-            "route_identity": {
-                "model_task": "chat",
-                "provider_id": "provider",
-                "model": "model",
-                "protocol": "openai_chat_completions",
-                "connection_role": "default",
-                "capability_revision": 1
-            },
+            "route_identity": ChatRouteIdentity::new("preset@1", "agent_chat", "fixture-route".into(), 1),
             "resolved_snapshot_ref": binding.resolved_snapshot_ref,
         }
     }));

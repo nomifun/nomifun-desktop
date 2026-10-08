@@ -246,7 +246,7 @@ UI 与 Service 入口覆盖纯 UI、无头与混合形态，不需要额外的�
 统一 SDK 暴露 SQLite、KV、Files、内存态 Cache、Config、Credential 引用、Host 能力与
 跨插件 Action。Preview 复用同一套 Bridge 与存储适配器，落在临时 DataRoot 上。Package
 导出不含用户数据；Backup 携带当前数据与非机密配置，但绝不包含 Credential 明文。参见
-[Unified Plugin Core 合同](docs/specs/2026-09-22-unified-plugin-core/README.zh.md)。
+[插件平台架构](docs/architecture/plugin-platform.zh.md)。
 
 ### 🎨 创意工坊 —— 专注的无限画布创作
 

@@ -27,11 +27,6 @@ const PROBE_SCRIPT: &str = concat!(
     "}))"
 );
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JavaScriptWorkKind {
-    PluginServiceHost,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedNodeRuntime {
     executable_path: PathBuf,
@@ -79,14 +74,7 @@ pub enum JavaScriptRuntimeError {
 
 #[async_trait]
 pub trait CommittedRuntimeProvider: Send + Sync {
-    async fn acquire_use(
-        &self,
-        kind: JavaScriptWorkKind,
-    ) -> Result<RuntimeUseLease, JavaScriptRuntimeError>;
-
-    async fn committed_runtime(
-        &self,
-    ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError>;
+    async fn acquire_use(&self) -> Result<RuntimeUseLease, JavaScriptRuntimeError>;
 }
 
 /// Immutable authority established exactly once during application startup.
@@ -113,19 +101,10 @@ impl RuntimeAuthority {
 
 #[async_trait]
 impl CommittedRuntimeProvider for RuntimeAuthority {
-    async fn acquire_use(
-        &self,
-        _kind: JavaScriptWorkKind,
-    ) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
+    async fn acquire_use(&self) -> Result<RuntimeUseLease, JavaScriptRuntimeError> {
         Ok(RuntimeUseLease {
             runtime: Arc::clone(&self.runtime),
         })
-    }
-
-    async fn committed_runtime(
-        &self,
-    ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError> {
-        Ok(Some((*self.runtime).clone()))
     }
 }
 
@@ -200,11 +179,11 @@ mod tests {
             return;
         };
         let first = authority
-            .acquire_use(JavaScriptWorkKind::PluginServiceHost)
+            .acquire_use()
             .await
             .unwrap();
         let second = authority
-            .acquire_use(JavaScriptWorkKind::PluginServiceHost)
+            .acquire_use()
             .await
             .unwrap();
         assert_eq!(first.runtime(), second.runtime());
