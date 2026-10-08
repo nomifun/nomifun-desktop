@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/zh/workspace.png" alt="当前 NomiFun Desktop 工作台" width="100%">
+  <img src="docs/images/readme/zh/workspace.jpg" alt="当前 NomiFun Desktop 工作台" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
@@ -139,27 +139,27 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 </p>
 
 <p>
-  <img src="docs/images/readme/zh/workspace.png" alt="当前 NomiFun Desktop 工作台" width="100%">
+  <img src="docs/images/readme/zh/workspace.jpg" alt="当前 NomiFun Desktop 工作台" width="100%">
   <br/><sub><b>统一工作台 · 会话、Agent、任务、工具与连接设备集中管理</b></sub>
 </p>
 
 <p>
-  <img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="NomiFun 创意工坊 Canvas 库" width="100%">
+  <img src="docs/images/creative-studio/zh-CN/02-canvas-workspace.jpg" alt="NomiFun 0.8.0 画布工作区与咖啡品牌生图示例" width="100%">
   <br/><sub><b>创意工坊 · 持久化 Canvas、媒体节点 Composer、可复用提示词与素材和模板</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 供应商、能力与按任务路由</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/zh/companions.png" alt="NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴 · 人格、记忆、模型与远程控制</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/models.jpg" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 供应商、能力与按任务路由</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/companions.jpg" alt="NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴 · 人格、记忆、模型与远程控制</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/skills.jpg" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
     <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、素材库、模板、Assistant、技能与伙伴协同流程。</sub></td>
   </tr>
 </table>
 
-<sub>已从当前 NomiFun 产品构建重新采集。完整截图清单、同步关系与使用范围见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
+<sub>采集于 NomiFun Desktop 0.8.0（2026 年 10 月 8 日），包含真实示例对话、生图结果、素材与模板。完整截图清单、同步关系与使用范围见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
 
 </div>
 
@@ -174,24 +174,27 @@ Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原�
 
 <table>
   <tr>
-    <td colspan="2" width="100%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/zh-CN/02-canvas-workspace.jpg" alt="创意工坊咖啡品牌示例画布"><br/><sub><b>画布工作区</b> · 品牌简报与三张真实生图，可继续复用到素材与模板</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/05-prompt-center.png" alt="创意工坊 Prompt Center"><br/><sub><b>Prompt Center</b> · 可搜索、带来源归属的提示词目录，支持分类、标签、复制与保存到素材</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/06-asset-library.png" alt="创意工坊我的素材"><br/><sub><b>My Assets</b> · 可复用文字、图片、视频、音频，支持筛选、集合、标签与选择器</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.jpg" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/07-template-studio.png" alt="创意工坊 Template Studio"><br/><sub><b>Template Studio</b> · 私有单图与多图系列模板、变量和精确模型设置</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/08-template-editor.png" alt="创意工坊 AI Create 模板编辑器"><br/><sub><b>AI Create + 模板编辑器</b> · 审阅一份受限草稿，编辑后显式保存再复用</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/05-prompt-center.jpg" alt="创意工坊 Prompt Center"><br/><sub><b>Prompt Center</b> · 可搜索、带来源归属的提示词目录，支持分类、标签、复制与保存到素材</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/06-asset-library.jpg" alt="创意工坊我的素材"><br/><sub><b>My Assets</b> · 可复用文字、图片、视频、音频，支持筛选、集合、标签与选择器</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/11-companion-settings.png" alt="NomiFun 桌面伙伴工作区"><br/><sub><b>伙伴工作区</b> · 伙伴形象、人格、模型、记忆、Skills 与“显示在桌面”控制</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/12-companion-workspace.png" alt="创作时显示的 NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴协同</b> · 原生伙伴窗口可以在创作时保持可用</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/07-template-studio.jpg" alt="创意工坊 Template Studio"><br/><sub><b>Template Studio</b> · 私有单图与多图系列模板、变量和精确模型设置</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/08-template-editor.jpg" alt="创意工坊 AI Create 模板编辑器"><br/><sub><b>模板编辑器</b> · 可复用变量、提示词、精确模型、宽高比与分辨率</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/11-companion-settings.jpg" alt="NomiFun 桌面伙伴工作区"><br/><sub><b>伙伴工作区</b> · 伙伴形象、人格、模型、记忆、Skills 与“显示在桌面”控制</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/12-native-companion.jpg" alt="NomiFun 原生桌面伙伴与模型生成的品牌短句"><br/><sub><b>原生桌面伙伴</b> · 快捷对话与真实生成的咖啡品牌短句</sub></td>
   </tr>
 </table>
 
-保留的编号路径是 Creative Studio 画廊的稳定 README 约定：`01`、`05`–`08` 与 `11`–`12`。
-`03`/`04` 工作台截图对应已退役的独立页面，仅在清单中作为历史记录保留。上方
+0.8.0 画廊覆盖画布库与工作区、提示词、素材、模板和伙伴。已替换的旧截图及
+已退役的独立工作台截图均已删除。上方
 Skills Hub 截图展示 Creative Studio 技能作为可复用能力包。所有截图都应来自正在运行的产品，不应是
 mockup 或凭空扩展的能力。完整来源与采集说明见
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md)。

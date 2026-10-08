@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
+  <img src="docs/images/readme/en/workspace.jpg" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
@@ -152,27 +152,27 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
+  <img src="docs/images/readme/en/workspace.jpg" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
   <br/><sub><b>Workspace · conversations, Agents, tasks, tools, and connected devices in one desktop</b></sub>
 </p>
 
 <p>
-  <img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="NomiFun Creative Studio Canvas library" width="100%">
+  <img src="docs/images/creative-studio/en-US/02-canvas-workspace.jpg" alt="NomiFun 0.8.0 Canvas workspace with generated coffee-brand visuals" width="100%">
   <br/><sub><b>Creative Studio · persistent Canvases, media node composers, reusable prompts and assets, and templates</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/companions.png" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/models.jpg" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/companions.jpg" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/skills.jpg" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
     <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, asset libraries, templates, Assistant, skills, and companion workflow.</sub></td>
   </tr>
 </table>
 
-<sub>Freshly captured from the current NomiFun product build. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source, synchronization, and usage details.</sub>
+<sub>Captured from NomiFun Desktop 0.8.0 on October 8, 2026, with example conversations, generated images, assets, and templates. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source, synchronization, and usage details.</sub>
 
 </div>
 
@@ -189,26 +189,28 @@ and an optional native desktop companion.
 
 <table>
   <tr>
-    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/02-canvas-workspace.jpg" alt="Creative Studio coffee-brand example canvas"><br/><sub><b>Canvas workspace</b> · a brand brief and three generated visuals, ready to reuse in assets and templates</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.png" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · a searchable, attributed prompt catalog with categories, tags, copy, and save-to-assets actions</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.png" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio assets with filters, collections, tags, and pickers</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.jpg" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.png" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private single-image and multi-image-series templates with variables and exact model settings</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio AI Create template editor"><br/><sub><b>AI Create + Template Editor</b> · review one bounded draft, edit it, and explicitly Save before reuse</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.jpg" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · a searchable, attributed prompt catalog with categories, tags, copy, and save-to-assets actions</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.jpg" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio assets with filters, collections, tags, and pickers</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.png" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/12-companion-workspace.png" alt="NomiFun desktop companion beside Creative Studio"><br/><sub><b>Desktop companion collaboration</b> · the native companion can stay visible while you create</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.jpg" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private single-image and multi-image-series templates with variables and exact model settings</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.jpg" alt="Creative Studio AI Create template editor"><br/><sub><b>Template Editor</b> · reusable variables, prompts, exact models, aspect ratios, and resolution</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.jpg" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/12-native-companion.jpg" alt="NomiFun native desktop companion with a generated brand tagline"><br/><sub><b>Native desktop companion</b> · quick replies and a real coffee-brand tagline</sub></td>
   </tr>
 </table>
 
-The retained numbered paths are the stable README contract for the Creative Studio
-gallery: `01`, `05`–`08`, and `11`–`12`. The `03`/`04` workbench captures
-document retired standalone pages and are kept in the manifest as historical
-references only. The Skills Hub capture above shows the
+The 0.8.0 gallery covers the Canvas library and workspace, prompts, assets,
+templates, and companions. Replaced screenshots and captures of retired
+standalone workbenches have been removed. The Skills Hub capture above shows the
 Creative Studio skill packages as reusable capabilities. All captures
 should represent the running product, not a mockup or an invented capability. See
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture
