@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,11 +22,39 @@ import {
   TARGET_ID,
   assertSelfTest,
   compareCapabilityInventory,
+  inspectCefBundle,
   parseArgs,
   readCanonicalCapabilityIds,
   readCanonicalCapabilityInventory,
   runValidation,
 } from './check-macos-arm64-native.mjs';
+import { MACOS_CEF_LOCALE_DIRECTORIES } from '../lib/macos-browser-bundle.mjs';
+
+function cefFixture(root) {
+  const app = join(root, 'NomiFun.app');
+  const framework = join(app, 'Contents/Frameworks/Chromium Embedded Framework.framework');
+  mkdirSync(framework, { recursive: true });
+  writeFileSync(join(framework, 'Chromium Embedded Framework'), 'cef fixture');
+  chmodSync(join(framework, 'Chromium Embedded Framework'), 0o555);
+  for (const name of CEF_HELPER_NAMES) {
+    const directory = join(app, 'Contents/Frameworks', `${name}.app`, 'Contents/MacOS');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, name), 'helper fixture');
+    chmodSync(join(directory, name), 0o555);
+  }
+  for (const name of MACOS_CEF_LOCALE_DIRECTORIES) {
+    const directory = join(framework, 'Resources', name);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'locale.pak'), `${name} fixture`);
+  }
+  const legal = join(app, 'Contents/Resources/browser-cef');
+  mkdirSync(legal, { recursive: true });
+  writeFileSync(join(legal, 'runtime.json'), JSON.stringify(EXPECTED_CEF));
+  writeFileSync(join(legal, 'CREDITS.html'), 'credits fixture');
+  return { app, framework, legal };
+}
+
+const signedArm64FixtureCommand = (name) => ({ status: 0, stdout: name === 'lipo' ? 'arm64\n' : '', stderr: '' });
 
 describe('macOS arm64 host validation helper', () => {
   test('rejects retired executor flags instead of ignoring or launching them', () => {
@@ -46,6 +75,42 @@ describe('macOS arm64 host validation helper', () => {
   });
   test('self-test covers regular files, missing paths, and symlink rejection', () => {
     expect(assertSelfTest()).toEqual({ status: 'pass' });
+  });
+
+  test('requires distributed locale packs and exact metadata policy in native artifact checks', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-locales-'));
+    try {
+      const { app, framework, legal } = cefFixture(root);
+      expect(inspectCefBundle(app, signedArm64FixtureCommand).status).toBe('pass');
+      const pack = join(framework, 'Resources/en.lproj/locale.pak');
+      rmSync(pack);
+      const missing = inspectCefBundle(app, signedArm64FixtureCommand);
+      expect(missing.status).toBe('fail');
+      expect(missing.locales.packs.find(locale => locale.name === 'en.lproj').status).toBe('fail');
+      writeFileSync(pack, 'restored English pack');
+      writeFileSync(join(legal, 'runtime.json'), JSON.stringify({ ...EXPECTED_CEF, locale_variants: [''] }));
+      expect(inspectCefBundle(app, signedArm64FixtureCommand).metadata.status).toBe('fail');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('rejects excess languages and locale pack symlinks while checking real filesystem paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-locales-owned-'));
+    try {
+      const { app, framework } = cefFixture(root);
+      mkdirSync(join(framework, 'Resources/ja.lproj'));
+      writeFileSync(join(framework, 'Resources/ja.lproj/locale.pak'), 'Japanese pack');
+      const excessive = inspectCefBundle(app, signedArm64FixtureCommand);
+      expect(excessive.status).toBe('fail');
+      expect(excessive.locales.unexpected).toEqual(['ja.lproj']);
+      rmSync(join(framework, 'Resources/ja.lproj'), { recursive: true });
+      const pack = join(framework, 'Resources/en.lproj/locale.pak');
+      rmSync(pack);
+      writeFileSync(join(root, 'external.pak'), 'external pack');
+      symlinkSync(join(root, 'external.pak'), pack);
+      const external = inspectCefBundle(app, signedArm64FixtureCommand);
+      expect(external.status).toBe('fail');
+      expect(external.locales.packs.find(locale => locale.name === 'en.lproj').owned).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
 
@@ -140,6 +205,11 @@ describe('macOS arm64 host validation helper', () => {
       const cefBinary = join(cefFramework, 'Chromium Embedded Framework');
       writeFileSync(cefBinary, 'cef fixture');
       chmodSync(cefBinary, 0o555);
+      for (const name of MACOS_CEF_LOCALE_DIRECTORIES) {
+        const directory = join(cefFramework, 'Resources', name);
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(join(directory, 'locale.pak'), `${name} fixture`);
+      }
       for (const name of CEF_HELPER_NAMES) {
         const helper = join(frameworks, `${name}.app`, 'Contents', 'MacOS', name);
         mkdirSync(join(frameworks, `${name}.app`, 'Contents', 'MacOS'), { recursive: true });

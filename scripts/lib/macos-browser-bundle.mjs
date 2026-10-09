@@ -3,13 +3,16 @@
 // credential value; callers provide an identity name/hash or '-' for ad-hoc.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cp,
   mkdir,
   mkdtemp,
+  lstat,
   open,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -19,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 
 export const MACOS_BROWSER_RUNTIME = Object.freeze(JSON.parse(readFileSync(
   new URL('../../apps/desktop/browser-runtime.json', import.meta.url), 'utf8',
@@ -37,6 +40,61 @@ export const MACOS_CEF_ARCHIVE = MACOS_BROWSER_RUNTIME.archive;
 export const MACOS_CEF_ARCHIVE_SHA1 = MACOS_BROWSER_RUNTIME.archive_sha1;
 export const MACOS_CEF_HELPER_NAMES = Object.freeze([...MACOS_BROWSER_RUNTIME.helpers]);
 export const MACOS_CEF_REQUIRED_RESOURCES = Object.freeze([...MACOS_BROWSER_RUNTIME.resources]);
+export function macosCefLocaleDirectories(contract = MACOS_BROWSER_RUNTIME) {
+  return contract.locales.flatMap(locale =>
+    contract.locale_variants.map(variant => `${locale}${variant ? `_${variant}` : ''}.lproj`),
+  );
+}
+export const MACOS_CEF_LOCALE_DIRECTORIES = Object.freeze(macosCefLocaleDirectories());
+
+const isOwned = (root, path) => {
+  const owned = relative(root, path);
+  return !!owned && owned !== '..' && !owned.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(owned);
+};
+
+async function localeInventory(appPath, frameworkPath, contract) {
+  const app = await realpath(appPath);
+  const framework = await realpath(frameworkPath);
+  const resources = await realpath(join(framework, 'Resources'));
+  if (!isOwned(app, framework) || !isOwned(framework, resources)) {
+    throw new Error('CEF locale resources must belong to the staged application framework');
+  }
+  const locales = [];
+  for (const entry of await readdir(resources, { withFileTypes: true })) {
+    if (!entry.name.endsWith('.lproj')) continue;
+    if (!entry.isDirectory() || !/^[a-z]{2,3}(?:_(?:[A-Z]{2}|\d{3}))?(?:_(?:FEMININE|MASCULINE|NEUTER))?\.lproj$/.test(entry.name)) {
+      throw new Error(`invalid CEF locale directory: ${entry.name}`);
+    }
+    const path = join(resources, entry.name, 'locale.pak');
+    const pack = await lstat(path).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!pack?.isFile() || !pack.size) throw new Error(`CEF locale pack must be a nonempty regular file: ${entry.name}`);
+    locales.push({ name: entry.name, bytes: pack.size });
+  }
+  const found = new Set(locales.map(locale => locale.name));
+  for (const name of macosCefLocaleDirectories(contract)) {
+    if (!found.has(name)) throw new Error(`required CEF locale is missing: ${name}`);
+  }
+  return { resources, locales };
+}
+
+// Only mutate the copied framework inside an App, before its nested signatures.
+// CEF's empty Settings.locale already selects en-US. Keep English and Chinese
+// resource variants without changing locale, Accept-Language or web features.
+export async function pruneMacosCefLocales({ appPath, frameworkPath, target = hostTarget() }) {
+  const contract = macosBrowserRuntime(target);
+  const { resources, locales } = await localeInventory(appPath, frameworkPath, contract);
+  const required = new Set(macosCefLocaleDirectories(contract));
+  let removedBytes = 0;
+  for (const locale of locales) {
+    if (required.has(locale.name)) continue;
+    await rm(join(resources, locale.name), { recursive: true });
+    removedBytes += locale.bytes;
+  }
+  return { retained: [...required], removed: locales.length - required.size, removedBytes };
+}
 
 // Discover only the pinned cef-dll-sys Cargo outputs for this exact build.
 // Host builds omit a target component; explicit --target builds include it.
@@ -104,6 +162,14 @@ export async function compileBrowserEnvironment({ root, target = null, profile =
 
 export async function inspectMacosBrowserBundle(appPath) {
   const contents = join(resolve(appPath), 'Contents');
+  const metadataPath = join(contents, 'Resources', 'browser-cef', 'runtime.json');
+  const metadata = await readFile(metadataPath, 'utf8').then(JSON.parse).catch(error => {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;
+    throw error;
+  });
+  const contract = metadata?.architecture === 'arm64' ? MACOS_BROWSER_RUNTIME
+    : metadata?.architecture === 'x86_64' ? MACOS_INTEL_BROWSER_RUNTIME : null;
+  const localeDirectories = macosCefLocaleDirectories(contract ?? MACOS_BROWSER_RUNTIME);
   const ownedRoot = await realpath(appPath).catch(error => {
     if (error.code === 'ENOENT') return null;
     throw error;
@@ -112,10 +178,11 @@ export async function inspectMacosBrowserBundle(appPath) {
     ['host', join(contents, 'MacOS', 'nomifun-desktop'), true],
     ['Info.plist', join(contents, 'Info.plist'), false],
     ['CEF framework', join(contents, 'Frameworks', 'Chromium Embedded Framework.framework', 'Chromium Embedded Framework'), true],
-    ['CEF runtime metadata', join(contents, 'Resources', 'browser-cef', 'runtime.json'), false],
+    ['CEF runtime metadata', metadataPath, false],
     ['CEF credits', join(contents, 'Resources', 'browser-cef', 'CREDITS.html'), false],
-    ...MACOS_CEF_REQUIRED_RESOURCES.map(name => [name, join(contents, 'Frameworks', 'Chromium Embedded Framework.framework', 'Resources', name), false]),
-    ...MACOS_CEF_HELPER_NAMES.flatMap(name => [
+    ...(contract?.resources ?? MACOS_CEF_REQUIRED_RESOURCES).map(name => [name, join(contents, 'Frameworks', 'Chromium Embedded Framework.framework', 'Resources', name), false]),
+    ...localeDirectories.map(name => [`${name}/locale.pak`, join(contents, 'Frameworks', 'Chromium Embedded Framework.framework', 'Resources', name, 'locale.pak'), false]),
+    ...(contract?.helpers ?? MACOS_CEF_HELPER_NAMES).flatMap(name => [
       [name, join(contents, 'Frameworks', `${name}.app`, 'Contents', 'MacOS', name), true],
       [`${name} Info.plist`, join(contents, 'Frameworks', `${name}.app`, 'Contents', 'Info.plist'), false],
     ]),
@@ -137,14 +204,19 @@ export async function inspectMacosBrowserBundle(appPath) {
     }
   }
   if (!missing.length) {
-    const metadata = await readFile(files[3][1], 'utf8').then(JSON.parse).catch(error => {
-      if (error instanceof SyntaxError) return null;
-      throw error;
-    });
-    const contract = metadata?.architecture === 'arm64' ? MACOS_BROWSER_RUNTIME
-      : metadata?.architecture === 'x86_64' ? MACOS_INTEL_BROWSER_RUNTIME : null;
     if (!contract || ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1'].some(field => metadata?.[field] !== contract[field])) {
       missing.push({ label: 'pinned CEF runtime identity', path: files[3][1] });
+    }
+    if (!contract || ['locales', 'locale_variants'].some(field => JSON.stringify(metadata?.[field]) !== JSON.stringify(contract[field]))) {
+      missing.push({ label: 'CEF locale distribution policy', path: files[3][1] });
+    }
+    try {
+      const { locales } = await localeInventory(appPath, join(contents, 'Frameworks', 'Chromium Embedded Framework.framework'), contract ?? MACOS_BROWSER_RUNTIME);
+      if (locales.some(locale => !localeDirectories.includes(locale.name))) {
+        missing.push({ label: 'unexpected CEF locale resources', path: appPath });
+      }
+    } catch (error) {
+      missing.push({ label: error.message, path: appPath });
     }
   }
   return { status: missing.length ? 'fail' : 'pass', appPath: resolve(appPath), missing };
@@ -207,28 +279,63 @@ export async function verifyMacosUpdaterArchive(archivePath, appPath) {
   const entries = (await run('/usr/bin/tar', ['-tzf', archivePath,
     ...(process.platform === 'darwin' ? ['--options=!mac-ext'] : [])], true)).split('\n');
   const prefix = basename(appPath);
+  const seen = new Set();
   for (const entry of entries) {
-    const parts = entry.replace(/\/$/, '').split('/');
-    if (parts[0] !== prefix || (parts.length === 1 && !entry.endsWith('/')) ||
+    const normalized = entry.replace(/\/$/, '');
+    const parts = normalized.split('/');
+    if (parts[0] !== prefix || (parts.length === 1 && !entry.endsWith('/')) || seen.has(normalized) ||
         parts.some(part => !part || part === '.' || part === '..' || part.startsWith('._') || part === '__MACOSX')) {
       throw new Error(`updater archive entry is incompatible with Tauri macOS installation: ${entry}`);
     }
+    seen.add(normalized);
   }
-
   const temporary = await mkdtemp(join(tmpdir(), 'nomifun-updater-verify-'));
   try {
     const extracted = join(temporary, prefix);
     await mkdir(extracted);
-    await run('/usr/bin/tar', ['-xzf', archivePath, '-C', extracted, '--strip-components=1'], true);
-    // Reuse the App contract after extraction instead of maintaining a second
-    // list of required runtime files that only checks archive names.
+    await run('/usr/bin/tar', ['-xzf', archivePath, '-C', extracted, '--strip-components=1'], true,
+      { ...process.env, COPYFILE_DISABLE: '1' });
     const inspected = await inspectMacosBrowserBundle(extracted);
     if (inspected.status !== 'pass') {
       throw new Error(`updater archive contains an incomplete macOS Browser bundle: ${inspected.missing.map(item => item.label).join(', ')}`);
     }
+    // Matching bytes, modes and symlinks includes every nested code signature;
+    // metadata identity and archive member names alone cannot prove parity.
+    if (JSON.stringify(await appTreeFingerprint(extracted)) !== JSON.stringify(await appTreeFingerprint(appPath))) {
+      throw new Error('updater archive contents differ from the final application bundle');
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+async function appTreeFingerprint(appPath) {
+  const root = await realpath(appPath);
+  const files = [];
+  async function visit(directory) {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      // Match the archive's established metadata exclusions; all deliverable
+      // files, permissions and symlinks still require exact App parity.
+      if (entry.name.startsWith('._') || entry.name === '__MACOSX') continue;
+      const path = join(directory, entry.name);
+      const name = relative(root, path);
+      if (entry.isSymbolicLink()) {
+        if (!isOwned(root, await realpath(path))) throw new Error(`application symlink escapes its bundle: ${name}`);
+        files.push([name, 'symlink', await readlink(path)]);
+      } else if (entry.isDirectory()) {
+        files.push([name, 'directory']);
+        await visit(path);
+      } else if (entry.isFile()) {
+        const digest = createHash('sha256');
+        for await (const chunk of createReadStream(path)) digest.update(chunk);
+        files.push([name, 'file', (await stat(path)).mode & 0o777, digest.digest('hex')]);
+      } else {
+        throw new Error(`application contains an unsupported file: ${name}`);
+      }
+    }
+  }
+  await visit(root);
+  return files;
 }
 
 // Updater bytes must be derived from the same final, nested-signed App as DMG.
@@ -242,8 +349,10 @@ export async function createMacosUpdaterArchive({ appPath, projectRoot, environm
   const staged = join(temporary, `${basename(appPath)}.tar.gz`);
   try {
     await run('/usr/bin/tar', ['-czf', staged, '--format=pax', '--no-xattrs',
-      '--exclude=._*', '--exclude=__MACOSX', '-C', dirname(resolve(appPath)), basename(appPath)],
-    true, { ...environment, COPYFILE_DISABLE: '1' });
+      '--exclude=._*', '--exclude=__MACOSX',
+      ...(process.platform === 'darwin' ? ['--options=gzip:compression-level=9'] : []),
+      '-C', dirname(resolve(appPath)), basename(appPath)], true,
+    { ...environment, COPYFILE_DISABLE: '1' });
     await verifyMacosUpdaterArchive(staged, appPath);
     await new Promise((accept, reject) => {
       const child = spawn('bun', ['x', 'tauri', 'signer', 'sign', staged], {
@@ -254,7 +363,7 @@ export async function createMacosUpdaterArchive({ appPath, projectRoot, environm
       // Do not echo signer diagnostics: malformed key errors could contain input.
       child.stderr.resume();
       child.once('error', reject);
-      child.once('exit', code => code === 0 ? accept() : reject(new Error(`updater signer exited ${code}`)));
+      child.once('close', code => code === 0 ? accept() : reject(new Error(`updater signer exited ${code}`)));
     });
     await requireFile(`${staged}.sig`, 'updater signature');
     await rename(staged, archive);
@@ -307,7 +416,7 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
   const frameworks = join(contents, 'Frameworks');
   const frameworkSource = join(runtime, 'Chromium Embedded Framework.framework');
   const framework = join(frameworks, 'Chromium Embedded Framework.framework');
-  const helperNames = MACOS_CEF_HELPER_NAMES;
+  const helperNames = contract.helpers;
   let temporary;
   try {
     if (process.platform !== 'darwin') {
@@ -316,7 +425,7 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
     await requireFile(join(contents, 'MacOS', 'nomifun-desktop'), 'NomiFun host');
     await requireFile(helper, 'CEF helper');
     await requireFile(join(frameworkSource, 'Chromium Embedded Framework'), 'CEF framework');
-    for (const name of MACOS_CEF_REQUIRED_RESOURCES) await requireFile(join(frameworkSource, 'Resources', name), name);
+    for (const name of contract.resources) await requireFile(join(frameworkSource, 'Resources', name), name);
     const archive = JSON.parse(await readFile(join(runtime, 'archive.json'), 'utf8'));
     if (archive.name !== contract.archive || archive.sha1 !== contract.archive_sha1) {
       throw new Error(`unexpected CEF archive: ${archive.name || 'unknown'}`);
@@ -337,6 +446,7 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
       dereference: false,
       verbatimSymlinks: true,
     });
+    const locales = await pruneMacosCefLocales({ appPath: app, frameworkPath: framework, target });
 
     const common = {
       CFBundlePackageType: 'APPL',
@@ -379,6 +489,8 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
       archive: archive.name,
       archive_sha1: archive.sha1,
       architecture: contract.architecture,
+      locales: contract.locales,
+      locale_variants: contract.locale_variants,
     }, null, 2)}\n`);
 
     temporary = await mkdtemp(join(tmpdir(), 'nomifun-cef-sign-'));
@@ -407,6 +519,7 @@ export async function stageMacosBrowserBundle({ appPath, helperPath, runtimePath
       chromium: contract.chromium,
       architecture: contract.architecture,
       framework: `Contents/Frameworks/${basename(framework)}`,
+      locales,
       helpers: helperNames.map(name => `Contents/Frameworks/${name}.app`),
       credits: 'Contents/Resources/browser-cef/CREDITS.html',
       info_plist_serialization: 'canonical-xml',

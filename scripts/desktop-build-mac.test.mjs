@@ -22,6 +22,16 @@ describe('macOS Desktop build contract', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('请分别构建 arm 和 intel');
   });
+
+  test.skipIf(process.platform !== 'darwin')('rejects an invalid DMG format before build tools or compilation', () => {
+    const result = spawnSync('bash', [fileURLToPath(new URL('./desktop-build-mac.sh', import.meta.url))], {
+      env: { ...process.env, NOMIFUN_MACOS_DMG_FORMAT: 'ULFO' }, encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('NOMIFUN_MACOS_DMG_FORMAT must be ULMO');
+    expect(result.stdout).not.toContain('构建');
+    expect(source.indexOf('DMG_FORMAT="$(bun "$DMG_TOOL" format)"')).toBeLessThan(source.indexOf('for tool in bun cargo'));
+  });
   test('keeps the context-only shutdown probe separate from navigation and soak', () => {
     const runner = readFileSync(new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8');
     const fixture = readFileSync(new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8');
@@ -49,17 +59,19 @@ describe('macOS Desktop build contract', () => {
     expect(JSON.parse(overlay).bundle).toEqual({});
   });
 
-  test('stages the pinned arm64 CEF bundle before creating the DMG', () => {
+  test('stages the matching architecture CEF bundle before creating the DMG', () => {
     expect(source.includes('stage-macos-cef-bundle.mjs')).toBe(true);
     expect(source.includes('nomifun-browser-cef-helper')).toBe(true);
     expect(source.includes('"$BROWSER_BUNDLE_TOOL" runtime')).toBe(true);
+    expect(source.includes('--identity "$identity" --target "$target"')).toBe(true);
     const stage = source.indexOf('stage_macos_cef "$app" "$t"');
     const dmg = source.indexOf('create_dmg_from_staged_app "$app" "$t" "$dmg_dir"');
-    const dmgImage = source.indexOf('hdiutil create');
+    const dmgImage = source.indexOf('bun "$DMG_TOOL" create --app "$app" --output "$output"');
     const dmgSign = source.indexOf('codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"');
     const notarize = source.indexOf('notarize_dmg_dir "$dmg_dir"');
     expect(stage).toBeGreaterThan(0);
     expect(dmg).toBeGreaterThan(stage);
+    expect(dmgImage).toBeGreaterThan(0);
     expect(dmgSign).toBeGreaterThan(dmgImage);
     expect(notarize).toBeGreaterThan(dmg);
     expect(source.includes('TRIPLES=(aarch64-apple-darwin)')).toBe(true);

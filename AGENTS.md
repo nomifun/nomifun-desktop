@@ -40,8 +40,12 @@
   archived plans as current development inputs or generator requirements.
 - Preserve explicit current-generation Agent/model transitions and native
   checkpoint safety. These are not authorization to import retired Agent data.
-- Agent clean cut clears Agent data while preserving non-Agent configuration;
-  unknown or partial database lineage must fail closed without conversion.
+- Agent clean cut clears Agent data while preserving non-Agent configuration.
+  Destructive-release startup rebuilds readable incompatible database lineages
+  through the dataset coordinator without converting historical data. Database
+  I/O failures and damage to a supported schema fail closed; backup and restore
+  never obtain startup rebuild authority. More migration rows do not prove a
+  newer application version across destructive baseline changes.
 - Read `docs/architecture/agent-session.zh.md` before changing Session storage
   or content. Run `bun run check:agent-session-boundary` and the affected
   canonical history, reset and consumer tests.

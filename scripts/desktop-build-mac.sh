@@ -5,6 +5,8 @@
 #   bun run build:mac                 # 默认打 Apple Silicon arm64 DMG(不签名)
 #   bun run build:mac --signed        # arm64 + Developer ID 签名 + 公证
 #   bun run build:mac arm             # 显式选择 Apple Silicon
+#   NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
+#                                     # 兼容 zlib9；默认 ULMO/LZMA(macOS 10.15+)
 #   Engine 随主程序源码编译打包；不导入外部 Runtime 二进制。
 #   bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
 #                                     # 未知 --xxx 选项会原样透传给 tauri build
@@ -44,6 +46,7 @@ RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
 CEF_STAGE_TOOL="$ROOT/scripts/validation/stage-macos-cef-bundle.mjs"
 BROWSER_BUNDLE_TOOL="$ROOT/scripts/lib/macos-browser-bundle.mjs"
 ONNX_RUNTIME_TOOL="$ROOT/scripts/lib/macos-onnx-runtime.mjs"
+DMG_TOOL="$ROOT/scripts/lib/macos-dmg.mjs"
 CHECK_ONLY=0
 
 # ── 解析参数:架构选择/开关归本脚本,未知 --xxx 起原样透传给 tauri build ─────
@@ -71,6 +74,10 @@ for arg in "$@"; do
     SELECT+=("$arg")
   fi
 done
+
+# Validate the installation-container choice before any target installation or
+# compilation. Both native targets use ULMO, supported on macOS 10.15+.
+DMG_FORMAT="$(bun "$DMG_TOOL" format)"
 
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -251,23 +258,8 @@ create_dmg_from_staged_app() {
   local suffix="aarch64"
   [[ "$target" != "x86_64-apple-darwin" ]] || suffix="x64"
   local output="$dmg_dir/NomiFun_${version}_${suffix}.dmg"
-  local temporary
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/nomifun-macos-dmg.XXXXXX")"
-  local staging="$temporary/root"
-  mkdir -p "$staging" "$dmg_dir"
-  if ! ditto --noqtn "$app" "$staging/NomiFun.app"; then
-    rm -rf "$temporary"
-    return 1
-  fi
-  ln -s /Applications "$staging/Applications"
-  echo "▶ 从已装配 CEF 的 App 生成 DMG: $output"
-  if ! hdiutil create -quiet -ov -fs HFS+ -format UDZO \
-    -volname NomiFun -srcfolder "$staging" "$temporary/NomiFun.dmg"; then
-    rm -rf "$temporary"
-    return 1
-  fi
-  mv -f "$temporary/NomiFun.dmg" "$output"
-  rm -rf "$temporary"
+  echo "▶ 从已装配 CEF 的 App 生成 $DMG_FORMAT DMG: $output"
+  NOMIFUN_MACOS_DMG_FORMAT="$DMG_FORMAT" bun "$DMG_TOOL" create --app "$app" --output "$output"
   if [[ "$SIGNED" -eq 1 ]]; then
     echo "▶ 签名 DMG: $output"
     codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"

@@ -5,6 +5,8 @@
   "architecture": "x86_64",
   "archive": "cef_binary_152.0.6+g708dc14+chromium-152.0.7977.83_macosx64_minimal.tar.bz2",
   "archive_sha1": "fed74cac2af95dec716000e9a35ebed8eb4f9a25",
+  "locales": ["en", "en_GB", "zh_CN", "zh_TW"],
+  "locale_variants": ["", "FEMININE", "MASCULINE", "NEUTER"],
   "resources": [
     "icudtl.dat",
     "resources.pak",

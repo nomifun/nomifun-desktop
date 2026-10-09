@@ -358,7 +358,7 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon and Intel macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
 - **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
 - **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
 - **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
@@ -628,12 +628,12 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 - **`--signed`** — sign (and, on macOS, notarize). Requires local signing config; see each OS.
 - **`-- …`** — forwards supported arguments to `tauri build`
   (e.g. Windows `-- --bundles nsis`). macOS product packaging fixes the release
-  profile, arm64 target and complete App/DMG output; flags that bypass this contract
+  profile, selected native target and complete App/DMG output; flags that bypass this contract
   are rejected. For updater builds, layer on the committed overlay as a **file path**:
   `bun run build:<os> --config apps/desktop/tauri.updater.conf.json` — pass the file, not
   inline JSON, because Windows PowerShell 5.1 strips the quotes from `--config '{...}'`.
 
-**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64)
+**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64 or Intel x64)
 
 | Goal | Command |
 | --- | --- |
@@ -653,6 +653,16 @@ Native Intel hardware acceptance was not performed. All macOS product commands u
 CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
 are generated from the final App after its CEF components have been installed and
 signed; updater signing also requires the configured Tauri updater private key.
+
+DMGs use **ULMO/LZMA** compression by default. To produce a compatibility image
+with **UDZO/zlib level 9**, run
+`NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac` (the setting also applies to
+signed builds). ULMO can be mounted on macOS 10.15+; the existing embedded-browser
+target remains macOS 14+ for both native architectures. Compression changes neither the App's
+minimum-system declarations nor its browser runtime. For signed release builds
+with notarization configured, the final App is signed, notarized and stapled
+before either distribution container is generated; DMG signing and notarization
+follow container creation.
 
 `bun run dev` launches a complete development `.app` and waits for native browser
 cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
@@ -703,8 +713,9 @@ Arch aliases: `x64`/`x86_64`, `arm64`/`aarch64`/`arm`. Linux has no signing/nota
 ⚠️ Cross-arch (e.g. building arm64 on an x64 host) needs the target's sysroot/toolchain and often
 fails on the webkit2gtk link — build on the target architecture's machine/container instead.
 
-> `bun run build` builds for the current OS. On macOS it uses the complete arm64
-> CEF packaging pipeline; Windows and Linux retain their existing Tauri build path.
+> `bun run build` builds for the current OS. On macOS it uses the complete CEF
+> packaging pipeline with arm64 as the default; `build:mac intel` selects Intel.
+> Windows and Linux retain their existing Tauri build path.
 
 <details>
 <summary><b>Full script catalog</b></summary>

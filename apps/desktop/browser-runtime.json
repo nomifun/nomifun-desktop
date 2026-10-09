@@ -5,6 +5,8 @@
   "architecture": "arm64",
   "archive": "cef_binary_152.0.6+g708dc14+chromium-152.0.7977.83_macosarm64_minimal.tar.bz2",
   "archive_sha1": "426836139b0ea7b7278aa0915cfae90eb460551f",
+  "locales": ["en", "en_GB", "zh_CN", "zh_TW"],
+  "locale_variants": ["", "FEMININE", "MASCULINE", "NEUTER"],
   "resources": [
     "icudtl.dat",
     "resources.pak",

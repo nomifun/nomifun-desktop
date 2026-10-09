@@ -195,6 +195,25 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
 pub async fn validate_known_migration_lineage_prefix(
     pool: &SqlitePool,
 ) -> Result<bool, DbError> {
+    match inspect_migration_lineage(pool).await? {
+        MigrationLineage::Current => Ok(true),
+        MigrationLineage::KnownPrefix => Ok(false),
+        MigrationLineage::Incompatible(reason) => Err(DbError::Init(reason)),
+    }
+}
+
+/// A read-only compatibility decision, separate from database I/O failures.
+/// Only the application dataset coordinator may rebuild an incompatible
+/// lineage. Migration count alone cannot determine an application's version:
+/// older releases can have more receipts than a destructive new baseline.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MigrationLineage {
+    Current,
+    KnownPrefix,
+    Incompatible(String),
+}
+
+pub async fn inspect_migration_lineage(pool: &SqlitePool) -> Result<MigrationLineage, DbError> {
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
@@ -212,7 +231,7 @@ pub async fn validate_known_migration_lineage_prefix(
             .await
             .map_err(DbError::Query)?;
     if rows.is_empty() || rows.len() > expected.len() {
-        return Err(DbError::Init(format!(
+        return Ok(MigrationLineage::Incompatible(format!(
             "database migration lineage contains {} rows but this binary recognizes at most {}",
             rows.len(),
             expected.len(),
@@ -227,13 +246,17 @@ pub async fn validate_known_migration_lineage_prefix(
             || !success
             || checksum.as_slice() != expected.checksum.as_ref()
         {
-            return Err(DbError::Init(format!(
+            return Ok(MigrationLineage::Incompatible(format!(
                 "database migration lineage does not match embedded migration {}",
                 expected.version
             )));
         }
     }
-    Ok(rows.len() == expected.len())
+    Ok(if rows.len() == expected.len() {
+        MigrationLineage::Current
+    } else {
+        MigrationLineage::KnownPrefix
+    })
 }
 
 /// Initialize a file-backed SQLite database.
@@ -629,6 +652,26 @@ async fn ensure_installation_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lineage_inspection_separates_incompatible_receipts_and_query_failures() {
+        let database = init_database_memory().await.unwrap();
+        assert_eq!(inspect_migration_lineage(database.pool()).await.unwrap(), MigrationLineage::Current);
+        let next_version = DB_MIGRATOR.iter().count() as i64 + 1;
+        sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, 'future', 1, X'00', 0)")
+            .bind(next_version).execute(database.pool()).await.unwrap();
+        assert!(matches!(inspect_migration_lineage(database.pool()).await.unwrap(), MigrationLineage::Incompatible(_)));
+        assert!(validate_known_migration_lineage_prefix(database.pool()).await.is_err());
+
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 1")
+            .execute(database.pool()).await.unwrap();
+        assert!(matches!(inspect_migration_lineage(database.pool()).await.unwrap(), MigrationLineage::Incompatible(_)));
+        assert!(validate_known_migration_lineage_prefix(database.pool()).await.is_err());
+
+        sqlx::query("DROP TABLE _sqlx_migrations").execute(database.pool()).await.unwrap();
+        assert!(matches!(inspect_migration_lineage(database.pool()).await, Err(DbError::Query(_))));
+        database.close().await;
+    }
 
     #[tokio::test]
     async fn initialization_enables_secure_delete_on_every_database_connection() {
