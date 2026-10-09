@@ -6,11 +6,11 @@
 
 import type { IApiSshConfigScan, IApiSshHost } from '@/common/adapter/ipcBridge';
 import { ipcBridge } from '@/common';
-import { useCallback, useState } from 'react';
-import { Alert, Button, Form, Input, InputNumber, Message, Modal, Select, Spin } from '@arco-design/web-react';
+import { useCallback, useRef, useState } from 'react';
+import { Alert, Button, Dropdown, Form, Input, InputNumber, Menu, Message, Modal, Select, Spin } from '@arco-design/web-react';
 import NomiModal from '@renderer/components/base/NomiModal';
-import { VisualEmpty, VisualListRow, VisualPanel, VisualSearch } from '../components/CodeVisualPrimitives';
-import { Certificate, Download, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
+import { VisualEmpty, VisualListRow, VisualSearch } from '../components/CodeVisualPrimitives';
+import { Certificate, Delete, Download, Edit, Fingerprint, Key, Lock, More, Plus, Server, Speed, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 import type { I18nKey } from '@renderer/services/i18n';
@@ -405,6 +405,8 @@ const SshHostManagement: React.FC = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [importVisible, setImportVisible] = useState(false);
   const [editHost, setEditHost] = useState<IApiSshHost | undefined>();
+  const [menuHostId, setMenuHostId] = useState<string>();
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const cta = hostBookPrimaryCta(scan);
   const isEmpty = !hosts || hosts.length === 0;
@@ -467,16 +469,70 @@ const SshHostManagement: React.FC = () => {
           </>} />
       ) : !visibleHosts.length ? <VisualEmpty icon={<Server theme='outline' size={22} />} title={t('settings.workspace.noResults')}
         action={<Button onClick={() => setQuery('')}>{t('settings.workspace.clearSearch')}</Button>} /> : (
-        <VisualPanel title={t('settings.workspace.hostList')} action={<span className='cv-toolbar__hint'>{visibleHosts.length} / {hosts?.length}</span>}>
-          {visibleHosts.map((host) => <VisualListRow key={host.sshHostId} icon={<Server theme='outline' size={17} />} title={host.name}
-            description={<span className='cv-host-endpoint'>{host.username}@{host.host}:{host.port}</span>}
-            meta={<span className='inline-flex items-center gap-6px'>{AUTH_ICON[host.authType]}{t(AUTH_LABEL_KEY[host.authType])}{host.sudoPassword ? <span>· sudo</span> : null}</span>}
-            action={<div className='cv-host-actions'>
-              <Button type='primary' size='small' onClick={() => void openSession(host)}>{t('ssh.newSession')}</Button>
-              <Button size='small' aria-label={t('ssh.form.editTitle')} icon={<Edit theme='outline' size={14} />} onClick={() => openEdit(host)} />
-              <Button size='small' status='danger' onClick={() => handleDelete(host)}>{t('ssh.delete.ok')}</Button>
-            </div>} />)}
-        </VisualPanel>
+        <section className='cv-host-list' aria-label={t('settings.workspace.hostList')}>
+          {visibleHosts.map((host) => (
+            <VisualListRow
+              key={host.sshHostId}
+              icon={<Server theme='outline' size={17} />}
+              title={host.name}
+              description={
+                <span className='cv-host-details'>
+                  <span className='cv-host-endpoint'>{host.username}@{host.host}:{host.port}</span>
+                  <span className='inline-flex items-center gap-6px'>
+                    {AUTH_ICON[host.authType]}{t(AUTH_LABEL_KEY[host.authType])}{host.sudoPassword ? <span>· sudo</span> : null}
+                  </span>
+                </span>
+              }
+              action={
+                <Dropdown
+                  trigger='click'
+                  position='br'
+                  popupVisible={menuHostId === host.sshHostId}
+                  onVisibleChange={(visible) => setMenuHostId((current) =>
+                    visible ? host.sshHostId : current === host.sshHostId ? undefined : current
+                  )}
+                  triggerProps={{ escToClose: true }}
+                  droplist={
+                    <Menu className='cv-host-menu' onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.stopPropagation();
+                        setMenuHostId(undefined);
+                        menuTriggerRef.current?.focus();
+                      }
+                    }}>
+                      <Menu.Item key='session' onClick={() => void openSession(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Terminal theme='outline' size={15} />{t('ssh.newSession')}
+                        </span>
+                      </Menu.Item>
+                      <Menu.Item key='edit' onClick={() => openEdit(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Edit theme='outline' size={15} />{t('common.edit')}
+                        </span>
+                      </Menu.Item>
+                      <Menu.Item key='delete' className='cv-host-menu__delete' onClick={() => handleDelete(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Delete theme='outline' size={15} />{t('ssh.delete.ok')}
+                        </span>
+                      </Menu.Item>
+                    </Menu>
+                  }
+                >
+                  <Button
+                    className='cv-host-more'
+                    size='small'
+                    aria-label={`${t('common.more')} · ${host.name}`}
+                    aria-haspopup='menu'
+                    aria-expanded={menuHostId === host.sshHostId}
+                    title={t('common.more')}
+                    onFocus={(event) => { menuTriggerRef.current = event.currentTarget; }}
+                    icon={<More theme='outline' size={17} />}
+                  />
+                </Dropdown>
+              }
+            />
+          ))}
+        </section>
       )}
 
       <SshHostFormModal
