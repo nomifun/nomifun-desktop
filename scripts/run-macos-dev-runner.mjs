@@ -46,6 +46,16 @@ export function parseMacosCargoRunnerArguments(args, architecture = process.arch
   };
 }
 
+export function macosDevelopmentApplicationArguments(args) {
+  // AppKit documents this debug/test default for ignoring existing window
+  // restoration state. NSArgumentDomain is process-local: a prior crashed dev
+  // build cannot hold Tauri Ready/backend startup behind its recovery alert.
+  // Do not write user defaults, remove saved state, or alter the signed bundle.
+  // Keep caller arguments in their original order; the desktop main parses its
+  // own fixed CLI argv, while Foundation consumes this native launch default.
+  return [...args, '-ApplePersistenceIgnoreState', 'YES'];
+}
+
 export function runCommand(program, args, { cwd = ROOT, environment = process.env, capture = false } = {}) {
   return new Promise((accept, reject) => {
     const child = spawn(program, args, { cwd, env: environment, stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit' });
@@ -211,7 +221,7 @@ export async function main(args = process.argv.slice(2)) {
     const hostPath = await runCargoArtifact(plan.build, 'nomifun-desktop', { cwd, environment: compiler.environment });
     const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: compiler.bundleFiles });
     console.error(`[dev] native app: ${dirname(dirname(dirname(program)))}`);
-    const result = await generation.launch({ program, args: plan.application, environment: process.env, cwd });
+    const result = await generation.launch({ program, args: macosDevelopmentApplicationArguments(plan.application), environment: process.env, cwd });
     process.exitCode = result.code ?? (result.signal ? 1 : 0);
   } catch (error) {
     // Tauri 2.11 recognizes a Cargo compilation failure by exit 101 and the
