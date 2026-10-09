@@ -189,6 +189,26 @@ impl BrowserWorkspace {
     pub fn key(&self) -> &BrowserResourceKey {
         &self.key
     }
+    /// Read the existing user's exact tab; diagnostics never initialize a
+    /// runtime, grant Agent authority, or disturb the native input owner.
+    pub async fn navigation_diagnostics(
+        &self,
+        target: crate::runtime::BrowserTabTarget,
+    ) -> Result<crate::navigation::BrowserNavigationReport, WorkspaceError> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
+        if target.runtime_generation != self.runtime_generation() {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        let runtime = self.slot.inner.lock().await.runtime.clone()
+            .ok_or(WorkspaceError::TabNotFound)?;
+        let report = runtime.navigation_diagnostics(target.clone()).await?;
+        if self.closing.load(Ordering::Acquire) || report.target != target {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        Ok(report.project_metadata())
+    }
     pub async fn snapshot(&self) -> Result<BrowserUserSnapshot, WorkspaceError> {
         let state = self.slot.inner.lock().await;
         let interaction_capabilities = state.runtime.as_ref().and_then(|runtime| runtime.interaction_capabilities());

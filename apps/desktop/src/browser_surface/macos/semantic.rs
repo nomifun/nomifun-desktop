@@ -60,6 +60,9 @@ fn native_error(error: &str) -> WorkspaceError {
         "BROWSER_ELEMENT_NOT_ACTIONABLE" => WorkspaceError::NotActionable,
         "BROWSER_CANCELLED" => RunAdmissionError::Cancelled.into(),
         "BROWSER_ACTION_DENIED" => WorkspaceError::ActionDenied,
+        "BROWSER_PAGE_FAILED" => WorkspaceError::PageFailed,
+        "BROWSER_PAGE_STOPPED" => WorkspaceError::PageStopped,
+        "BROWSER_PAGE_CRASHED" => WorkspaceError::PageCrashed,
         _ => WorkspaceError::NativeCommandFailed,
     }
 }
@@ -176,8 +179,12 @@ impl TabAutomation {
         if self.references.len() != elements.len() { return Err(WorkspaceError::NativeCommandFailed); }
         self.nonce = nonce;
         self.observed_target = Some(target.clone());
+        let snapshot = page.snapshot();
+        if snapshot.document_generation != target.document_generation { return Err(WorkspaceError::StaleObservation); }
         Ok(BrowserObservation { target, observation_generation:self.observation, content:result.content,
-            elements, script_dialog:None, unobserved_frames:result.unobserved_frames })
+            elements, script_dialog:None, unobserved_frames:result.unobserved_frames,
+            load: Some(snapshot.load.agent_projection()),
+            content_url: snapshot.load.content_url.as_deref().map(nomifun_browser_platform::url_projection::project_metadata_url) })
     }
 
     pub(crate) async fn act(

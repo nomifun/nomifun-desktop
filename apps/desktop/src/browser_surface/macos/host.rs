@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::{Arc, Weak, Mutex as StdMutex, atomic::{A
 use async_trait::async_trait;
 use nomifun_browser_macos::engine::{Context, Engine, NavigationCommand as Navigation, Page, ParentView, PopupCandidate};
 use nomifun_browser_platform::{run_guard::{NativeInputGate, RunAdmissionError}, runtime::*};
+use nomifun_browser_platform::navigation::{BrowserNavigationReport, BrowserNavigationSource};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -82,6 +83,9 @@ fn native_error(error: impl std::fmt::Display) -> WorkspaceError {
         "BROWSER_STALE_OBSERVATION" => WorkspaceError::StaleObservation,
         "BROWSER_UNSUPPORTED_ACTION" => WorkspaceError::UnsupportedAction,
         "BROWSER_ELEMENT_NOT_ACTIONABLE" => WorkspaceError::NotActionable,
+        "BROWSER_PAGE_FAILED" => WorkspaceError::PageFailed,
+        "BROWSER_PAGE_STOPPED" => WorkspaceError::PageStopped,
+        "BROWSER_PAGE_CRASHED" => WorkspaceError::PageCrashed,
         _ => WorkspaceError::NativeCommandFailed,
     }
 }
@@ -92,6 +96,10 @@ fn valid_url(input: &str) -> Result<url::Url, WorkspaceError> {
 }
 
 impl DesktopBrowserRuntime {
+    fn navigation_source(&self) -> BrowserNavigationSource {
+        if self.input_locked.load(Ordering::Acquire) { BrowserNavigationSource::AgentCommand }
+        else { BrowserNavigationSource::UserCommand }
+    }
     fn build_native_tab(&self, page: Arc<Page>) -> Arc<NativeTab> {
         let id = format!("browser-{}", page.id());
         let metadata = Arc::new(StdMutex::new(BrowserTabSnapshot {
@@ -103,6 +111,7 @@ impl DesktopBrowserRuntime {
             title: String::new(),
             url: String::new(),
             lifecycle: BrowserTabLifecycle::Loading,
+            load: None,
             can_go_back: false,
             can_go_forward: false,
             zoom_percent: 100,
@@ -125,6 +134,7 @@ impl DesktopBrowserRuntime {
             metadata.url = snapshot.url;
             metadata.title = snapshot.title;
             metadata.lifecycle = snapshot.lifecycle;
+            metadata.load = Some(snapshot.load);
             metadata.can_go_back = snapshot.can_go_back;
             metadata.can_go_forward = snapshot.can_go_forward;
             metadata.blocked_permissions = snapshot.blocked_permissions;
@@ -375,7 +385,10 @@ impl DesktopBrowserRuntime {
             self.retire_native_tab(&tab).await?;
             return Err(error);
         }
-        navigation_command(&tab.view, Navigation::Navigate(url.to_string()), tab.view.page.snapshot().document_generation, cancel, &self.closing).await?;
+        if self.input_locked.load(Ordering::Acquire) {
+            self.present_for_agent(&tab, cancel).await?;
+        }
+        navigation_command(&tab.view, Navigation::Navigate(url.to_string()), tab.view.page.snapshot().document_generation, cancel, &self.closing, self.navigation_source()).await?;
         self.revision.bump(); Ok(())
     }
 }
@@ -388,6 +401,25 @@ impl BrowserRuntime for DesktopBrowserRuntime {
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { Some(self) }
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         let state = self.state.lock().await; if state.closed { return Err(WorkspaceError::WorkspaceClosed); } Ok(self.snapshot_locked(&state))
+    }
+    async fn navigation_diagnostics(&self, target: BrowserTabTarget) -> Result<BrowserNavigationReport, WorkspaceError> {
+        let tab = {
+            let state = self.state.lock().await;
+            if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
+            self.target(&state, &target)?.clone()
+        };
+        let snapshot = tab.view.page.snapshot();
+        if snapshot.document_generation != target.document_generation { return Err(WorkspaceError::StaleTarget); }
+        let report = BrowserNavigationReport {
+            target: target.clone(),
+            load: Some(snapshot.load.agent_projection()),
+            trace: tab.view.page.navigation_trace(),
+            identity: Some(nomifun_browser_macos::identity_report()),
+            runtime: Some(nomifun_browser_macos::runtime_info()),
+        };
+        let state = self.state.lock().await;
+        if state.closed || !Arc::ptr_eq(self.target(&state, &target)?, &tab) { return Err(WorkspaceError::StaleTarget); }
+        Ok(report.project_metadata())
     }
     async fn execute(&self, command: BrowserTabCommand, cancel: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> { self.execute_owned(command, cancel).await }
     async fn close(&self) -> Result<(), WorkspaceError> {
@@ -440,7 +472,7 @@ impl NativeInputGate for DesktopBrowserRuntime {
     }
 }
 
-async fn navigation_command(view: &View, command: Navigation, generation: u64, cancel: &CancellationToken, closing: &CancellationToken) -> Result<(), WorkspaceError> {
+async fn navigation_command(view: &View, command: Navigation, generation: u64, cancel: &CancellationToken, closing: &CancellationToken, source: BrowserNavigationSource) -> Result<(), WorkspaceError> {
     if closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
     if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
     let dispatched = Arc::new(AtomicBool::new(false));
@@ -453,18 +485,39 @@ async fn navigation_command(view: &View, command: Navigation, generation: u64, c
         marker.store(true, Ordering::Release);
         true
     });
-    // Await the dispatch acknowledgement even after cancellation. The native
-    // guard rejects queued work before it changes the page, and sent navigation
-    // is never replayed. stopLoading does not settle script/dialog callbacks.
-    let result = view.page.navigate_guarded(command, guard).await;
+    // Capture the exact attempt in the native dispatch, not from a later
+    // snapshot which may already belong to a website-initiated successor.
+    let result = view.page.navigate_guarded_receipt(command, guard, source).await;
+    let performed = match &result {
+        Ok(receipt) => receipt.document_generation != generation,
+        // If no receipt acknowledged a dispatched request, preserve uncertainty.
+        Err(_) => dispatched.load(Ordering::Acquire),
+    };
     if closing.is_cancelled() || cancel.is_cancelled() {
-        if dispatched.load(Ordering::Acquire) { view.page.stop_loading().await.map_err(native_error)?; }
+        if let Ok(receipt) = &result && performed {
+            match view.page.stop_loading_guarded(receipt.document_generation, receipt.navigation_sequence, Arc::new(|| true)).await {
+                Ok(()) => {},
+                Err(error) if matches!(error.as_str(), "BROWSER_STALE_OBSERVATION" | "BROWSER_STALE_TARGET" | "BROWSER_CANCELLED") => {},
+                Err(error) => return Err(native_error(error)),
+            }
+        }
         return Err(if closing.is_cancelled() { WorkspaceError::WorkspaceClosed }
-            else if dispatched.load(Ordering::Acquire) { WorkspaceError::ActionInterrupted }
+            else if performed { WorkspaceError::ActionInterrupted }
             else { RunAdmissionError::Cancelled.into() });
     }
     if !dispatched.load(Ordering::Acquire) && view.page.snapshot().document_generation != generation { return Err(WorkspaceError::StaleTarget); }
-    result.map_err(native_error)
+    result.map(|_| ()).map_err(native_error)
+}
+
+async fn stop_command(view: &View, target: &BrowserTabTarget, cancel: &CancellationToken, closing: &CancellationToken) -> Result<(), WorkspaceError> {
+    if closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+    if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+    let expected = view.page.snapshot();
+    if expected.document_generation != target.document_generation { return Err(WorkspaceError::StaleTarget); }
+    let dispatch_cancel = cancel.clone();
+    let dispatch_closing = closing.clone();
+    let guard = Arc::new(move || !dispatch_cancel.is_cancelled() && !dispatch_closing.is_cancelled());
+    view.page.stop_loading_guarded(target.document_generation, expected.load.navigation_sequence, guard).await.map_err(native_error)
 }
 
 #[async_trait]
@@ -663,8 +716,11 @@ impl DesktopBrowserRuntime {
             let id=tab_id.or_else(||state.active.clone()).ok_or(WorkspaceError::TabNotFound)?;
             state.tabs.get(&id).cloned().ok_or(WorkspaceError::TabNotFound)?
         };
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+        if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+        if let Some(error) = tab.view.page.document_unavailable_error() { return Err(native_error(error)); }
         self.present_for_agent(&tab, &cancel).await?;
-        tab.view.page.wait_bootstrap_ready(&cancel, &self.closing).await.map_err(native_error)?;
+        tab.view.page.wait_document_available(&cancel, &self.closing).await.map_err(native_error)?;
         let mut automation=tab.automation.lock().await;
         let target=tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).target.clone();
         {
@@ -726,8 +782,11 @@ impl DesktopBrowserRuntime {
                 .cloned()
                 .ok_or(WorkspaceError::TabNotFound)?
         };
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+        if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+        if let Some(error) = tab.view.page.document_unavailable_error() { return Err(native_error(error)); }
         self.present_for_agent(&tab, &cancel).await?;
-        tab.view.page.wait_bootstrap_ready(&cancel, &self.closing).await.map_err(native_error)?;
+        tab.view.page.wait_document_available(&cancel, &self.closing).await.map_err(native_error)?;
         let mut automation = tab.automation.lock().await;
         let target = {
             let state = self.state.lock().await;
@@ -784,6 +843,15 @@ impl DesktopBrowserRuntime {
         } else {
             None
         };
+        // Recovering a page requires a shown, acknowledged panel, not an old
+        // executable document. Layout itself needs the automation lock, so
+        // complete this admission before taking that lock below.
+        if self.input_locked.load(Ordering::Acquire)
+            && matches!(&command, BrowserTabCommand::Navigate { .. } | BrowserTabCommand::Reload { .. } | BrowserTabCommand::Back { .. } | BrowserTabCommand::Forward { .. })
+            && let Some(tab) = &selected
+        {
+            self.present_for_agent(tab, &cancel).await?;
+        }
         let _page = match &selected {
             Some(tab) => Some(tab.automation.lock().await),
             None => None,
@@ -854,25 +922,25 @@ impl DesktopBrowserRuntime {
                 let url = valid_url(&url)?;
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                navigation_command(&tab.view, Navigation::Navigate(url.to_string()), target.document_generation, &cancel, &self.closing).await?;
+                navigation_command(&tab.view, Navigation::Navigate(url.to_string()), target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::Reload { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                navigation_command(&tab.view, Navigation::Reload, target.document_generation, &cancel, &self.closing).await?;
+                navigation_command(&tab.view, Navigation::Reload, target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::StopLoading { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                tab.view.page.stop_loading().await.map_err(native_error)?;
+                stop_command(&tab.view, &target, &cancel, &self.closing).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::Back { target } | BrowserTabCommand::Forward { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                navigation_command(&tab.view, if backwards { Navigation::Back } else { Navigation::Forward }, target.document_generation, &cancel, &self.closing).await?;
+                navigation_command(&tab.view, if backwards { Navigation::Back } else { Navigation::Forward }, target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
         }

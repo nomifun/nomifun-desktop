@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::run_guard::{NativeInputGate, RunAdmissionError};
+pub use crate::navigation::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -61,6 +62,12 @@ pub enum WorkspaceError {
     NativeInitializationFailed,
     #[error("The native browser command failed.")]
     NativeCommandFailed,
+    #[error("The page failed to load. Inspect its current state before choosing a recovery navigation.")]
+    PageFailed,
+    #[error("The page loading was stopped. Navigate to a page before observing or interacting with it.")]
+    PageStopped,
+    #[error("The page process terminated. Reload or navigate the tab before observing or interacting with it.")]
+    PageCrashed,
     #[error("The Browser profile identity or persistence policy is invalid.")]
     ProfileCleanupInvalid,
     #[error("Persistent Browser profile cleanup is not configured on this host.")]
@@ -95,6 +102,9 @@ impl WorkspaceError {
             Self::DownloadDenied => "BROWSER_DOWNLOAD_DENIED",
             Self::NativeInitializationFailed => "BROWSER_NATIVE_INITIALIZATION_FAILED",
             Self::NativeCommandFailed => "BROWSER_NATIVE_COMMAND_FAILED",
+            Self::PageFailed => "BROWSER_PAGE_FAILED",
+            Self::PageStopped => "BROWSER_PAGE_STOPPED",
+            Self::PageCrashed => "BROWSER_PAGE_CRASHED",
             Self::ProfileCleanupInvalid => "BROWSER_PROFILE_CLEANUP_INVALID",
             Self::ProfileCleanupUnavailable => "BROWSER_PROFILE_CLEANUP_UNAVAILABLE",
             Self::ProfileCleanupFailed => "BROWSER_PROFILE_CLEANUP_FAILED",
@@ -557,6 +567,7 @@ pub enum BrowserTabLifecycle {
     Ready,
     Failed,
     Crashed,
+    Stopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -565,6 +576,9 @@ pub struct BrowserTabSnapshot {
     pub title: String,
     pub url: String,
     pub lifecycle: BrowserTabLifecycle,
+    /// None means this adapter does not report detailed load evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<BrowserLoadSummary>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     /// Native page zoom for this tab, as a whole-number percentage.
@@ -780,6 +794,10 @@ pub trait BrowserRuntime: NativeInputGate + Send + Sync {
     }
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort>;
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError>;
+    /// Read-only metadata for this runtime's owned, exact tab target.
+    async fn navigation_diagnostics(&self, _target: BrowserTabTarget) -> Result<BrowserNavigationReport, WorkspaceError> {
+        Err(WorkspaceError::UnsupportedAction)
+    }
     /// Must await native command settlement, even if cancellation arrives.
     async fn execute(
         &self,
@@ -811,6 +829,12 @@ pub struct BrowserObservation {
     pub target: BrowserTabTarget,
     pub observation_generation: u64,
     pub content: String,
+    /// Projected page load evidence. Never serialize a raw workspace summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<BrowserLoadSummary>,
+    /// The observed document's projected address, which can differ from a failed request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_url: Option<String>,
     pub elements: Vec<BrowserElement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_dialog: Option<BrowserDialog>,

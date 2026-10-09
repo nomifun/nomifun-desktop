@@ -1,10 +1,11 @@
 //! Thread-safe handles to native objects retained solely on AppKit's main thread.
 //! No browser subprocess owner, protocol server, IPC bridge or second event loop.
-use crate::{callbacks::Delegate, interactions::NativeInteractions};
+use crate::{callbacks::Delegate, interactions::NativeInteractions, navigation};
 use block2::RcBlock;
 use nomifun_browser_platform::runtime::{
     BrowserDialogKind, BrowserDownloadSnapshot, BrowserPermissionRequest, BrowserSurfaceBounds,
-    BrowserTabLifecycle,
+    BrowserTabLifecycle, BrowserContentState, BrowserLoadSummary, BrowserNavigationPhase,
+    BrowserNavigationSource, BrowserNavigationTrace, BrowserNavigationTraceSnapshot,
 };
 use objc2::{
     AnyThread, MainThreadMarker, Message, msg_send,
@@ -23,7 +24,7 @@ use objc2_web_kit::{
     WKContentWorld, WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     rc::Rc,
@@ -46,11 +47,22 @@ pub enum NavigationCommand {
     Forward,
     Reload,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct NativeNavigationReceipt {
+    pub document_generation: u64,
+    pub navigation_sequence: u64,
+}
+impl NativeNavigationReceipt {
+    fn matches(self, snapshot: &PageSnapshot) -> bool {
+        self.document_generation == snapshot.document_generation
+            && self.navigation_sequence == snapshot.load.navigation_sequence
+    }
+}
 const INTERRUPTED: &str = "BROWSER_ACTION_INTERRUPTED";
 const UNCONFIRMED: &str = "BROWSER_EXECUTION_UNCONFIRMED";
 const STALE: &str = "BROWSER_STALE_OBSERVATION";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NativeDialog {
     pub request_id: String,
     pub document_generation: u64,
@@ -60,12 +72,16 @@ pub struct NativeDialog {
     pub origin: String,
     pub text_truncated: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PageSnapshot {
     pub document_generation: u64,
     pub url: String,
     pub title: String,
     pub lifecycle: BrowserTabLifecycle,
+    pub load: BrowserLoadSummary,
+    pub bootstrap_ready: bool,
+    pub(crate) bootstrap_loading: bool,
+    pub(crate) navigation_source: BrowserNavigationSource,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub dialog: Option<NativeDialog>,
@@ -79,6 +95,10 @@ impl Default for PageSnapshot {
             url: "about:blank".into(),
             title: String::new(),
             lifecycle: BrowserTabLifecycle::Loading,
+            load: BrowserLoadSummary::default(),
+            bootstrap_ready: false,
+            bootstrap_loading: false,
+            navigation_source: BrowserNavigationSource::Unknown,
             can_go_back: false,
             can_go_forward: false,
             dialog: None,
@@ -98,6 +118,7 @@ pub(crate) struct NativePage {
     pub delegate: Retained<Delegate>,
     pub interactions: Rc<NativeInteractions>,
     pub owner: Weak<Page>,
+    surface_requested: Cell<bool>,
     context: Arc<Context>,
 }
 struct NativeContext {
@@ -223,11 +244,13 @@ impl Engine {
         on_main(move || {
             let parent = parent()?;
             let native = create_native_page(&pending, parent, None)?;
+            native.delegate.prepare_bootstrap();
             unsafe {
-                native.view.loadHTMLString_baseURL(
+                let navigation = native.view.loadHTMLString_baseURL(
                     &NSString::from_str("<!doctype html><meta charset=utf-8><title></title>"),
                     None,
                 );
+                native.delegate.track_navigation(navigation, &native.view);
             }
             Ok(())
         })
@@ -245,6 +268,7 @@ impl Engine {
             closed,
             close_requested: AtomicBool::new(false),
             visible: AtomicBool::new(false),
+            panel_presented: AtomicBool::new(false),
             input_locked: AtomicBool::new(true),
             blocked_inputs: AtomicUsize::new(0),
             dialog_draining: AtomicBool::new(false),
@@ -252,6 +276,7 @@ impl Engine {
             popup_sender: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             downloads: Mutex::new(vec![]),
+            navigation_trace: Mutex::new(BrowserNavigationTrace::default()),
         });
         self.pages
             .lock()
@@ -546,6 +571,7 @@ pub struct Page {
     closed: watch::Sender<bool>,
     pub(crate) close_requested: AtomicBool,
     visible: AtomicBool,
+    panel_presented: AtomicBool,
     input_locked: AtomicBool,
     blocked_inputs: AtomicUsize,
     dialog_draining: AtomicBool,
@@ -553,13 +579,48 @@ pub struct Page {
     pub(crate) popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
     pending: Mutex<BTreeMap<Uuid, Box<dyn FnOnce(&'static str) + Send>>>,
     downloads: Mutex<Vec<BrowserDownloadSnapshot>>,
+    navigation_trace: Mutex<BrowserNavigationTrace>,
 }
 impl Page {
+    #[cfg(test)]
+    pub(crate) fn test_user_surface(presented: bool, visible: bool, locked: bool, draining: bool) -> Arc<Self> {
+        let engine = Arc::new(Engine { id: Uuid::now_v7(), closing: AtomicBool::new(false),
+            pages: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()) });
+        let context = Arc::new(Context { id: Uuid::now_v7(), identifier: None, closed: AtomicBool::new(true) });
+        let page = engine.allocate_page(context);
+        page.panel_presented.store(presented, Ordering::Release);
+        page.visible.store(visible, Ordering::Release);
+        page.input_locked.store(locked, Ordering::Release);
+        page.dialog_draining.store(draining, Ordering::Release);
+        page
+    }
     pub fn id(&self) -> Uuid {
         self.id
     }
     pub fn snapshot(&self) -> PageSnapshot {
         self.metadata.borrow().clone()
+    }
+    /// A known empty terminal page needs no renderer-layout wait to explain
+    /// its state. Valid retained/partial documents remain readable.
+    pub fn document_unavailable_error(&self) -> Option<&'static str> {
+        page_unavailable(&self.snapshot())
+    }
+    pub fn navigation_trace(&self) -> BrowserNavigationTraceSnapshot {
+        self.navigation_trace.lock().unwrap().snapshot()
+    }
+    pub(crate) fn transition(&self, update: navigation::Update) {
+        let mut trace = self.navigation_trace.lock().unwrap();
+        let changed = self.metadata.send_if_modified(|snapshot| {
+            let before = snapshot.clone();
+            for event in navigation::reduce(snapshot, update) { trace.push(event); }
+            *snapshot != before
+        });
+        drop(trace);
+        if changed {
+            if let Some(native) = native_page(self.id) { apply_native_mask(&native); }
+            let listener = self.change_listener.lock().unwrap().clone();
+            if let Some(listener) = listener { listener(); }
+        }
     }
     pub fn subscribe(&self) -> watch::Receiver<PageSnapshot> {
         self.metadata.subscribe()
@@ -581,6 +642,17 @@ impl Page {
     }
     pub(crate) fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Acquire)
+    }
+    /// The active, acknowledged user surface can remain presented while a
+    /// first navigation becomes a download without committing any document.
+    /// Document interactions must continue to use is_visible instead.
+    pub(crate) fn is_presented(&self) -> bool {
+        self.panel_presented.load(Ordering::Acquire)
+    }
+    pub(crate) fn allows_user_download(&self) -> bool {
+        !self.close_requested.load(Ordering::Acquire) && !self.input_locked()
+            && !self.dialog_draining() && self.is_presented()
+            && self.snapshot().load.phase != BrowserNavigationPhase::Crashed
     }
     pub fn blocked_input_count(&self) -> usize {
         self.blocked_inputs.load(Ordering::Acquire)
@@ -610,10 +682,26 @@ impl Page {
             loop {
                 let snapshot = state.borrow_and_update().clone();
                 if *closed.borrow_and_update() || cancel.is_cancelled() || closing.is_cancelled() { return Err(INTERRUPTED.into()); }
-                match snapshot.lifecycle { BrowserTabLifecycle::Ready => return Ok(()), BrowserTabLifecycle::Failed | BrowserTabLifecycle::Crashed => return Err("WK bootstrap failed".into()), _ => {} }
+                if snapshot.bootstrap_ready || snapshot.load.content_state != BrowserContentState::None { return Ok(()); }
+                if let Some(error) = page_unavailable(&snapshot) { return Err(error.into()); }
                 tokio::select! { _ = cancel.cancelled() => return Err(INTERRUPTED.into()), _ = closing.cancelled() => return Err(INTERRUPTED.into()), r = state.changed() => { r.map_err(|_| INTERRUPTED)?; }, r = closed.changed() => {r.map_err(|_| INTERRUPTED)?;} }
             }
         }).await.map_err(|_| "WK bootstrap timed out".to_owned())?
+    }
+    pub async fn wait_document_available(
+        &self, cancel: &CancellationToken, closing: &CancellationToken,
+    ) -> Result<(), String> {
+        let mut state = self.subscribe();
+        let mut closed = self.closed();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if *closed.borrow_and_update() || cancel.is_cancelled() || closing.is_cancelled() { return Err(INTERRUPTED.into()); }
+                if snapshot.load.content_state != BrowserContentState::None { return Ok(()); }
+                if let Some(error) = page_unavailable(&snapshot) { return Err(error.into()); }
+                tokio::select! { _ = cancel.cancelled() => return Err(INTERRUPTED.into()), _ = closing.cancelled() => return Err(INTERRUPTED.into()), r = state.changed() => { r.map_err(|_| INTERRUPTED)?; }, r = closed.changed() => {r.map_err(|_| INTERRUPTED)?;} }
+            }
+        }).await.map_err(|_| "WK document timed out".to_owned())?
     }
     pub fn listen_popups(&self) -> Result<mpsc::Receiver<PopupCandidate>, String> {
         let mut slot = self.popup_sender.lock().unwrap();
@@ -659,21 +747,33 @@ impl Page {
         command: NavigationCommand,
         guard: Arc<DispatchGuard>,
     ) -> Result<(), String> {
+        self.navigate_guarded_receipt(command, guard, BrowserNavigationSource::Unknown).await.map(|_| ())
+    }
+    pub async fn navigate_guarded_receipt(
+        self: &Arc<Self>, command: NavigationCommand, guard: Arc<DispatchGuard>,
+        source: BrowserNavigationSource,
+    ) -> Result<NativeNavigationReceipt, String> {
         if matches!(&command,NavigationCommand::Navigate(url) if !navigation_allowed(url)) {
             return Err("WK navigation requires an HTTP(S) URL without credentials".into());
         }
-        self.mutate(move |native| {
+        let page = self.clone();
+        on_main(move || {
+            if page.close_requested.load(Ordering::Acquire) { return Err(INTERRUPTED.into()); }
+            let native = native_page(page.id).ok_or(INTERRUPTED)?;
             if !guard() {
                 return Err("BROWSER_CANCELLED".into());
             }
             unsafe {
                 if matches!(command, NavigationCommand::Back) && !native.view.canGoBack() {
-                    return Ok(());
+                    let snapshot = page.snapshot();
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
                 }
                 if matches!(command, NavigationCommand::Forward) && !native.view.canGoForward() {
-                    return Ok(());
+                    let snapshot = page.snapshot();
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
                 }
-                native.delegate.prepare_navigation();
+                let requested = match &command { NavigationCommand::Navigate(url) => Some(url.clone()), _ => Some(page.snapshot().url) };
+                native.delegate.prepare_navigation(requested, source);
                 let navigation = match command {
                     NavigationCommand::Navigate(url) => {
                         let url = NSURL::URLWithString(&NSString::from_str(&url))
@@ -686,22 +786,24 @@ impl Page {
                 };
                 native.delegate.track_navigation(navigation, &native.view);
             }
-            Ok(())
+            let snapshot = page.snapshot();
+            Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence })
         })
         .await
     }
     pub async fn stop_loading(self: &Arc<Self>) -> Result<(), String> {
-        self.mutate(|n| {
-            unsafe {
-                n.view.stopLoading();
-            }
-            n.interactions.drain_dialogs();
-            let lifecycle = n
-                .owner
-                .upgrade()
-                .filter(|page| page.snapshot().lifecycle == BrowserTabLifecycle::Loading)
-                .map(|_| BrowserTabLifecycle::Ready);
-            n.delegate.refresh(&n.view, lifecycle);
+        let expected = self.snapshot();
+        self.stop_loading_guarded(expected.document_generation, expected.load.navigation_sequence, Arc::new(|| true)).await
+    }
+    pub async fn stop_loading_guarded(
+        self: &Arc<Self>, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
+    ) -> Result<(), String> {
+        self.mutate(move |n| {
+            if !guard() { return Err("BROWSER_CANCELLED".into()); }
+            let page = n.owner.upgrade().ok_or(INTERRUPTED)?;
+            let snapshot = page.snapshot();
+            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence }).matches(&snapshot) { return Err(STALE.into()); }
+            n.delegate.stop_loading(&n.view);
             Ok(())
         })
         .await
@@ -721,6 +823,8 @@ impl Page {
     pub async fn hide(self: &Arc<Self>) -> Result<(), String> {
         let page = self.clone();
         self.mutate(move |n| {
+            n.surface_requested.set(false);
+            page.panel_presented.store(false, Ordering::Release);
             page.visible.store(false, Ordering::Release);
             release_browser_responder(n)?;
             // WebsiteDialog's renderer overlay hides the native child while
@@ -740,7 +844,6 @@ impl Page {
         if !bounds.is_valid() {
             return Err("WK invalid surface bounds".into());
         }
-        let page = self.clone();
         self.mutate(move |n| {
             if cancel.is_cancelled() {
                 return Err("BROWSER_CANCELLED".into());
@@ -754,12 +857,8 @@ impl Page {
                 NSPoint::new(bounds.x, y),
                 NSSize::new(bounds.width, bounds.height),
             ));
-            n.view.setHidden(!visible);
-            page.visible.store(visible, Ordering::Release);
-            if !visible {
-                release_browser_responder(n)?;
-                n.interactions.cancel_user_panels();
-            }
+            n.surface_requested.set(visible);
+            apply_native_mask(n);
             Ok(())
         })
         .await
@@ -846,6 +945,7 @@ impl Page {
         guard: Arc<DispatchGuard>,
         cancel: CancellationToken,
     ) -> Result<serde_json::Value, String> {
+        let navigation_sequence = self.snapshot().load.navigation_sequence;
         let (tx, mut rx) = oneshot::channel();
         let sender = Arc::new(Mutex::new(Some(tx)));
         let page = self.clone();
@@ -862,7 +962,7 @@ impl Page {
         );
         dispatch2::DispatchQueue::main().exec_async(move || {
             if let Some(native) = native_page(page.id) {
-                native.delegate.refresh(&native.view, None);
+                native.delegate.refresh(&native.view);
             }
             let rejection = if callback_cancel.is_cancelled() || !guard() {
                 Some("BROWSER_CANCELLED")
@@ -934,7 +1034,7 @@ impl Page {
         // nonsettling script closes its page, but retirement does not prove
         // execution settled. The host keeps its uncertainty latch/input lock.
         tokio::select! { result = &mut rx => result.map_err(|_| INTERRUPTED.to_owned())?, _ = cancel.cancelled() => {
-            let _ = self.stop_loading().await;
+            let _ = self.stop_loading_guarded(generation, navigation_sequence, Arc::new(|| true)).await;
             match tokio::time::timeout(Duration::from_secs(5), &mut rx).await { Ok(result) => result.map_err(|_| UNCONFIRMED.to_owned())?, Err(_) => {let _=self.force_close().await; Err(UNCONFIRMED.into())} }
         }}
     }
@@ -959,7 +1059,7 @@ impl Page {
         );
         dispatch2::DispatchQueue::main().exec_async(move || {
             if let Some(native) = native_page(page.id) {
-                native.delegate.refresh(&native.view, None);
+                native.delegate.refresh(&native.view);
             }
             if cancel.is_cancelled()
                 || page.snapshot().document_generation != generation
@@ -1029,6 +1129,7 @@ impl Page {
     pub(crate) fn close_native(self: &Arc<Self>) {
         self.close_requested.store(true, Ordering::Release);
         self.visible.store(false, Ordering::Release);
+        self.panel_presented.store(false, Ordering::Release);
         self.dialog_draining.store(true, Ordering::Release);
         if *self.closed.borrow() {
             return;
@@ -1065,10 +1166,7 @@ impl Page {
             native.view.removeFromSuperview();
         }
         self.settle_pending(UNCONFIRMED);
-        self.changed(|s| {
-            s.document_generation = s.document_generation.saturating_add(1);
-            s.dialog = None;
-        });
+        self.transition(navigation::Update::Closed);
         self.closed.send_replace(true);
         self.engine.pages.lock().unwrap().remove(&self.id);
     }
@@ -1151,6 +1249,7 @@ pub(crate) fn create_native_page(
         &configuration,
         Arc::downgrade(page),
     );
+    crate::identity::apply(&view)?;
     let interactions = NativeInteractions::new(Arc::downgrade(page));
     let delegate = Delegate::new(mtm, Arc::downgrade(page), interactions.clone());
     unsafe {
@@ -1168,6 +1267,7 @@ pub(crate) fn create_native_page(
         delegate,
         interactions,
         owner: Arc::downgrade(page),
+        surface_requested: Cell::new(false),
         context: page.context.clone(),
     });
     REGISTRY.with(|r| r.borrow_mut().pages.insert(page.id, native.clone()));
@@ -1185,10 +1285,40 @@ fn schedule_metadata(page: Weak<Page>) {
             return;
         }
         if let Some(native) = native_page(owner.id) {
-            native.delegate.refresh(&native.view, None);
+            native.delegate.refresh(&native.view);
             schedule_metadata(page);
         }
     });
+}
+fn page_unavailable(snapshot: &PageSnapshot) -> Option<&'static str> {
+    if snapshot.load.content_state != BrowserContentState::None {
+        return None;
+    }
+    match snapshot.load.phase {
+        BrowserNavigationPhase::Failed => Some("BROWSER_PAGE_FAILED"),
+        BrowserNavigationPhase::Cancelled => Some("BROWSER_PAGE_STOPPED"),
+        BrowserNavigationPhase::Crashed => Some("BROWSER_PAGE_CRASHED"),
+        _ => None,
+    }
+}
+fn apply_native_mask(native: &NativePage) {
+    let Some(page) = native.owner.upgrade() else { return; };
+    let snapshot = page.snapshot();
+    let presented = native.surface_requested.get() && !page.close_requested.load(Ordering::Acquire);
+    page.panel_presented.store(presented, Ordering::Release);
+    let visible = native_displayable(presented, false, &snapshot);
+    native.view.setHidden(!visible);
+    page.visible.store(visible, Ordering::Release);
+    if !visible {
+        let _ = release_browser_responder(native);
+    }
+    if revoke_user_choices(presented, &snapshot) { native.interactions.cancel_user_panels(); }
+}
+fn revoke_user_choices(presented: bool, snapshot: &PageSnapshot) -> bool {
+    !presented || snapshot.load.phase == BrowserNavigationPhase::Crashed
+}
+fn native_displayable(requested: bool, closed: bool, snapshot: &PageSnapshot) -> bool {
+    requested && !closed && snapshot.load.content_state != BrowserContentState::None
 }
 fn release_browser_responder(native: &NativePage) -> Result<(), String> {
     if let Some(window) = native.view.window() {
@@ -1211,6 +1341,25 @@ fn has_key_characters(kind: NSEventType) -> bool {
 mod event_contract_tests {
     use super::*;
     #[test]
+    fn early_page_error_preserves_readable_retained_and_partial_documents() {
+        let mut snapshot = PageSnapshot::default();
+        for (phase, error) in [
+            (BrowserNavigationPhase::Failed, "BROWSER_PAGE_FAILED"),
+            (BrowserNavigationPhase::Cancelled, "BROWSER_PAGE_STOPPED"),
+        ] {
+            snapshot.load.phase = phase;
+            snapshot.load.content_state = BrowserContentState::None;
+            assert_eq!(page_unavailable(&snapshot), Some(error));
+            for content in [BrowserContentState::RetainedDocument, BrowserContentState::CurrentDocument] {
+                snapshot.load.content_state = content;
+                assert_eq!(page_unavailable(&snapshot), None);
+            }
+        }
+        snapshot.load.phase = BrowserNavigationPhase::Crashed;
+        snapshot.load.content_state = BrowserContentState::None;
+        assert_eq!(page_unavailable(&snapshot), Some("BROWSER_PAGE_CRASHED"));
+    }
+    #[test]
     fn modifier_transitions_never_read_key_characters() {
         assert!(has_key_characters(NSEventType::KeyDown));
         assert!(has_key_characters(NSEventType::KeyUp));
@@ -1222,6 +1371,51 @@ mod event_contract_tests {
         ] {
             assert!(!has_key_characters(kind));
         }
+    }
+    #[test]
+    fn stale_stop_receipt_does_not_match_a_successor_or_crashed_document() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/first".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        let receipt = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        assert!(receipt.matches(&snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/second".into()), source: BrowserNavigationSource::PageNavigation, bootstrap: false });
+        assert!(!receipt.matches(&snapshot));
+        let second = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(!second.matches(&snapshot));
+    }
+    #[test]
+    fn late_show_cannot_cover_an_empty_failure_but_retained_content_stays_visible() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        navigation::reduce(&mut snapshot, navigation::Update::Failed { domain: "NSURLErrorDomain".into(), code: -1009 });
+        assert!(!native_displayable(true, false, &snapshot));
+        snapshot.load.content_state = BrowserContentState::RetainedDocument;
+        assert!(native_displayable(true, false, &snapshot));
+        assert!(!native_displayable(false, false, &snapshot));
+        assert!(!native_displayable(true, true, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(!native_displayable(true, false, &snapshot));
+    }
+    #[test]
+    fn first_attachment_mask_keeps_user_destination_choice_until_surface_revoke_or_crash() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/attachment".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        assert!(!native_displayable(true, false, &snapshot));
+        assert!(!revoke_user_choices(true, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Cancelled(nomifun_browser_platform::runtime::BrowserCancellationReason::Unknown));
+        assert!(!revoke_user_choices(true, &snapshot));
+        assert!(revoke_user_choices(false, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(revoke_user_choices(true, &snapshot));
+    }
+    #[test]
+    fn crashed_presented_surface_cannot_admit_a_late_download() {
+        let page = Page::test_user_surface(true, false, false, false);
+        assert!(page.allows_user_download());
+        page.transition(navigation::Update::Crashed);
+        assert!(page.is_presented());
+        assert!(!page.allows_user_download());
     }
 }
 pub(crate) fn navigation_allowed(value: &str) -> bool {

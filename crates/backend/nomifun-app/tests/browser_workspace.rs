@@ -60,6 +60,24 @@ impl NativeInputGate for Runtime {
 impl BrowserRuntime for Runtime {
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { None }
 
+    async fn navigation_diagnostics(&self, target: nomifun_browser_platform::runtime::BrowserTabTarget)
+        -> Result<nomifun_browser_platform::navigation::BrowserNavigationReport, WorkspaceError> {
+        use nomifun_browser_platform::navigation::*;
+        if target.runtime_generation != self.0 || target.tab_id != "owned-diagnostic-tab" || target.document_generation != 2 {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        Ok(BrowserNavigationReport {
+            target,
+            load: Some(BrowserLoadSummary {
+                requested_url: Some("https://example.test/search?credential=secret#private".into()),
+                content_url: Some("https://example.test/previous?token=private".into()),
+                ..Default::default()
+            }),
+            trace: BrowserNavigationTrace::default().snapshot(),
+            identity: None, runtime: None,
+        })
+    }
+
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         Ok(BrowserRuntimeSnapshot {
             downloads: Vec::new(),
@@ -304,6 +322,10 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
         request.extensions_mut().insert(nomifun_auth::CurrentUser { id: nomifun_common::UserId::parse(id.to_owned()).unwrap(), username: "route-fixture".into() });
         request
     };
+    let diagnostic_query = "tab_id=owned-diagnostic-tab&runtime_generation=1&document_generation=2";
+    let absent = router.clone().oneshot(request(owner_id, "GET", format!("{base}/diagnostics?{diagnostic_query}"), "")).await.unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+    assert!(factory.created.lock().unwrap().is_empty(), "reading diagnostics must not create a runtime or a browser grant");
     let ensure = router.clone().oneshot(request(owner_id, "POST", base.clone(), "{}")).await.unwrap();
     assert_eq!(ensure.status(), StatusCode::OK);
     let payload: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(ensure.into_body(), 64 * 1024).await.unwrap()).unwrap();
@@ -313,6 +335,18 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
     let create = router.clone().oneshot(request(owner_id, "POST", format!("{base}/commands"), r#"{"command":"create","url":"https://example.test/"}"#)).await.unwrap();
     assert_eq!(create.status(), StatusCode::OK);
     assert_eq!(factory.created.lock().unwrap().len(), 1, "the native runtime port was used without Agent Browser authority");
+    let generation = factory.created.lock().unwrap()[0].runtime_generation;
+    let diagnostic_query = format!("tab_id=owned-diagnostic-tab&runtime_generation={generation}&document_generation=2");
+    let diagnostic = router.clone().oneshot(request(owner_id, "GET", format!("{base}/diagnostics?{diagnostic_query}"), "")).await.unwrap();
+    assert_eq!(diagnostic.status(), StatusCode::OK);
+    let diagnostic: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(diagnostic.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(diagnostic["data"]["load"]["requested_url"], "https://example.test/search");
+    assert_eq!(diagnostic["data"]["load"]["content_url"], "https://example.test/previous");
+    let stale = router.clone().oneshot(request(owner_id, "GET", format!("{base}/diagnostics?tab_id=owned-diagnostic-tab&runtime_generation={generation}&document_generation=1"), "")).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let foreign_diagnostic = router.clone().oneshot(request("0190f5fe-7c00-7a00-8000-000000000002", "GET", format!("{base}/diagnostics?{diagnostic_query}"), "")).await.unwrap();
+    assert_eq!(foreign_diagnostic.status(), StatusCode::FORBIDDEN);
+    assert_eq!(factory.created.lock().unwrap().len(), 1);
     let observed = sessions.get(&owner, &session).await.unwrap();
     assert_eq!(observed.session.agent_binding, binding, "user browsing never writes a canonical Agent grant or binding");
     assert!(sessions.active_capability_ids(&owner, &session).await.unwrap().is_empty());

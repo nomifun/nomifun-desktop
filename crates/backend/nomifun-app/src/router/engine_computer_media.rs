@@ -249,6 +249,7 @@ mod tests {
             target: BrowserTabTarget { tab_id: "tab".into(), runtime_generation: 1, document_generation: 2 },
             observation_generation: 3,
             content: "Page text".into(), elements: vec![], script_dialog: None, unobserved_frames: 1,
+            load: None, content_url: None,
         }
     }
 
@@ -263,6 +264,25 @@ mod tests {
             observation, Some(BrowserInteractionCapabilities::wk_webview()), screenshot, true,
         ).unwrap();
         EngineToolResult::text(ToolCallId::from("page"), serde_json::to_string(&output.0).unwrap(), false)
+    }
+
+    #[test]
+    fn browser_navigation_metadata_is_projected_before_entering_tool_history() {
+        use nomifun_browser_platform::navigation::BrowserLoadSummary;
+        let mut observation = browser_observation();
+        observation.load = Some(BrowserLoadSummary {
+            requested_url: Some("https://example.test/new?token=secret#private".into()),
+            content_url: Some("https://example.test/retained?credential=secret".into()),
+            ..Default::default()
+        });
+        observation.content_url = Some("https://example.test/retained?credential=secret".into());
+        let output = super::super::engine_browser_tools::encode_managed_observation(
+            observation, None, None, false,
+        ).unwrap();
+        assert_eq!(output.0["load"]["requested_url"], "https://example.test/new");
+        assert_eq!(output.0["load"]["content_url"], "https://example.test/retained");
+        assert_eq!(output.0["content_url"], "https://example.test/retained");
+        assert!(!serde_json::to_string(&output.0).unwrap().contains("secret"));
     }
 
     #[test]
