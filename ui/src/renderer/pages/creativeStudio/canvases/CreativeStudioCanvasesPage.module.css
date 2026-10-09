@@ -46,9 +46,9 @@
 
 .title {
   color: var(--color-text-1, var(--text-primary));
-  font-size: 24px;
-  font-weight: 550;
-  line-height: 30px;
+  font-size: var(--page-title-size);
+  font-weight: 600;
+  line-height: var(--page-title-line-height);
   letter-spacing: normal;
 }
 

@@ -23,7 +23,7 @@ const SystemSettings: React.FC = () => {
   })();
 
   return (
-    <SettingsPageWrapper contentClassName={isAboutPage ? 'max-w-640px' : undefined}>
+    <SettingsPageWrapper>
       {content}
     </SettingsPageWrapper>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import SiderNavItem from '@/renderer/components/layout/Sider/SiderNav/SiderNavItem';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import type { PluginSummary } from '@/common/types/pluginPlatform';
 import { subscribePluginLibraryChanges } from './pluginLibraryState';
@@ -7,7 +7,6 @@ import styles from './PluginPlatform.module.css';
 
 export default function PluginPinnedEntries({ collapsed }: { collapsed: boolean }) {
   const [plugins, setPlugins] = useState<Array<{ plugin: PluginSummary; name: string }>>([]);
-  const navigate = useNavigate();
 
   useEffect(() => {
     let active = true;
@@ -43,14 +42,7 @@ export default function PluginPinnedEntries({ collapsed }: { collapsed: boolean 
   return (
     <div className={styles.fileList}>
       {plugins.map(({ plugin, name }) => (
-        <button
-          type='button'
-          className={styles.fileButton}
-          key={plugin.plugin_id}
-          onClick={() => navigate(`/plugins/run/${encodeURIComponent(plugin.plugin_id)}`)}
-        >
-          {name}
-        </button>
+        <SiderNavItem key={plugin.plugin_id} label={name} to={`/plugins/run/${encodeURIComponent(plugin.plugin_id)}`} />
       ))}
     </div>
   );

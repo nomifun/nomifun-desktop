@@ -21,7 +21,7 @@
 .page { display: flex; flex-direction: column; gap: 22px; box-sizing: border-box; width: 100%; max-width: 1500px; margin: 0 auto; padding: 34px 36px 44px; }
 .pageHeader, .pluginDetailHeader { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .headerCopy { min-width: 0; }
-.headerCopy h1 { margin: 4px 0 8px; color: var(--color-text-1); font-size: 28px; line-height: 1.25; font-weight: 650; letter-spacing: -0.8px; overflow-wrap: anywhere; }
+.headerCopy h1 { margin: 0 0 4px; color: var(--color-text-1); font-size: var(--page-title-size); line-height: var(--page-title-line-height); font-weight: 600; overflow-wrap: anywhere; }
 .headerCopy p { margin: 0; color: var(--color-text-3); font-size: 13px; line-height: 1.65; }
 .eyebrow { color: var(--plugin-accent); font-size: 10px; font-weight: 650; letter-spacing: 1.7px; text-transform: uppercase; }
 .headerActions, .toolbarActions, .actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
@@ -140,7 +140,6 @@
 }
 @container plugin-main (max-width: 720px) {
   .page { padding: 20px 22px 32px; gap: 16px; }
-  .headerCopy h1 { font-size: 24px; }
   .headerActions { gap: 7px; }
   .libraryFilters { gap: 8px; }
   .collectionFilters { padding-top: 10px; }

@@ -21,6 +21,8 @@ import {
   Voice,
 } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
+import SiderNavItem from '@/renderer/components/layout/Sider/SiderNav/SiderNavItem';
+import SiderSectionHeader from '@/renderer/components/layout/Sider/SiderNav/SiderSectionHeader';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
@@ -294,10 +296,13 @@ const ModelHubPage: React.FC = () => {
     const selected = section === s.key;
     const index = FLAT_SECTIONS.findIndex((item) => item.key === s.key);
     return (
-      <div
+      <SiderNavItem
         key={s.key}
         id={`model-hub-tab-${s.key}`}
         role='tab'
+        label={t(s.labelKey)}
+        icon={s.icon}
+        isActive={selected}
         aria-selected={selected}
         aria-controls='model-hub-panel'
         tabIndex={selected ? 0 : -1}
@@ -321,21 +326,7 @@ const ModelHubPage: React.FC = () => {
             focusSectionTab(next);
           }
         }}
-        className={classNames(
-          'h-34px rd-8px flex items-center gap-8px px-10px cursor-pointer shrink-0 transition-colors outline-none text-t-primary',
-          selected ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-        )}
-      >
-        <span
-          className={classNames(
-            'size-22px flex items-center justify-center shrink-0 line-height-0',
-            selected ? 'text-primary-6' : 'text-t-secondary'
-          )}
-        >
-          {s.icon}
-        </span>
-        <span className='text-14px font-[500] leading-24px truncate'>{t(s.labelKey)}</span>
-      </div>
+      />
     );
   };
 
@@ -351,18 +342,10 @@ const ModelHubPage: React.FC = () => {
             only `tab` children, so exposing them would break that contract while
             the tabs themselves already carry their labels and position. */}
         <div className='flex flex-col px-8px pb-8px' role='tablist' aria-orientation='vertical'>
-          {SECTION_GROUPS.map((group, groupIndex) => (
+          {SECTION_GROUPS.map((group) => (
             <React.Fragment key={group.key}>
-              <div
-                aria-hidden='true'
-                className={classNames(
-                  'px-10px pb-4px text-11px font-600 leading-16px text-t-tertiary select-none',
-                  groupIndex === 0 ? 'pt-2px' : 'pt-12px'
-                )}
-              >
-                {t(group.titleKey)}
-              </div>
-              <div className='flex flex-col gap-2px'>{group.sections.map(renderTab)}</div>
+              <SiderSectionHeader label={t(group.titleKey)} collapsed={false} aria-hidden='true' />
+              <div className='flex flex-col gap-1px'>{group.sections.map(renderTab)}</div>
             </React.Fragment>
           ))}
         </div>
