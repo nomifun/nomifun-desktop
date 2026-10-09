@@ -9,9 +9,8 @@ import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  MACOS_BROWSER_RUNTIME, compileBrowserEnvironment, inspectMacosBrowserBundle, stageMacosBrowserBundle,
-} from './lib/macos-browser-bundle.mjs';
+import { inspectMacosAppBundle, signMacosAppBundle } from './lib/macos-app-bundle.mjs';
+import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-build-environment.mjs';
 import { acquireMacosDevGeneration } from './lib/macos-dev-supervisor.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSealArguments } from './lib/macos-dev-signing.mjs';
 
@@ -25,15 +24,12 @@ function option(args, name) {
 }
 
 export function parseMacosCargoRunnerArguments(args, architecture = process.arch) {
-  if (architecture !== 'arm64') throw new Error('the pinned macOS Browser runtime requires Apple Silicon arm64');
   if (args[0] !== 'run') throw new Error('the macOS development runner accepts only Tauri cargo run');
   const separator = args.indexOf('--');
   const cargo = args.slice(1, separator < 0 ? undefined : separator);
   const application = separator < 0 ? [] : args.slice(separator + 1);
   const target = option(cargo, '--target');
-  if (target && target !== 'aarch64-apple-darwin') {
-    throw new Error('the pinned macOS Browser runtime supports only aarch64-apple-darwin');
-  }
+  resolveMacosTarget(target, architecture);
   const binary = option(cargo, '--bin');
   if (binary && binary !== 'nomifun-desktop') throw new Error('Tauri development must run the nomifun-desktop host');
   if (cargo.some(arg => ['--example', '--examples', '--lib', '--bins', '--tests', '--benches', '--all-targets'].includes(arg))) {
@@ -41,33 +37,23 @@ export function parseMacosCargoRunnerArguments(args, architecture = process.arch
   }
   if (option(cargo, '--message-format')) throw new Error('the macOS development runner owns Cargo artifact reporting');
   if (!binary) cargo.push('--bin', 'nomifun-desktop');
-  const helper = ['build', '--locked', '-p', 'nomifun-browser-macos', '--bin', 'nomifun-browser-cef-helper'];
-  if (target) helper.push('--target', target);
   const profile = option(cargo, '--profile');
-  if (profile) helper.push('--profile', profile);
-  else if (cargo.includes('--release') || cargo.includes('-r')) helper.push('--release');
   return {
     build: ['build', ...cargo, '--message-format=json-render-diagnostics'],
-    helper: [...helper, '--message-format=json-render-diagnostics'],
     application,
     target,
     profile: profile ?? (cargo.includes('--release') || cargo.includes('-r') ? 'release' : 'debug'),
   };
 }
 
-export function nativeBrowserLaunchEnvironment(environment = process.env) {
-  const result = { ...environment };
-  delete result.CEF_PATH;
-  delete result.FLATPAK;
-  return result;
-}
-
-export async function macosBrowserCompilerEnvironment({
-  root = ROOT, target = null, profile = 'debug', environment = process.env,
-}) {
-  // CEF bytes are profile-independent. Custom Cargo profiles may reuse the
-  // same verified debug/release runtime without changing their compile flags.
-  return compileBrowserEnvironment({ root, target, profile: profile === 'release' ? 'release' : 'debug', environment });
+export function macosDevelopmentApplicationArguments(args) {
+  // AppKit documents this debug/test default for ignoring existing window
+  // restoration state. NSArgumentDomain is process-local: a prior crashed dev
+  // build cannot hold Tauri Ready/backend startup behind its recovery alert.
+  // Do not write user defaults, remove saved state, or alter the signed bundle.
+  // Keep caller arguments in their original order; the desktop main parses its
+  // own fixed CLI argv, while Foundation consumes this native launch default.
+  return [...args, '-ApplePersistenceIgnoreState', 'YES'];
 }
 
 export function runCommand(program, args, { cwd = ROOT, environment = process.env, capture = false } = {}) {
@@ -135,7 +121,9 @@ export async function developmentInfoPlist(root = ROOT, environment = process.en
     LSMinimumSystemVersion: '14.0', NSHighResolutionCapable: true,
   };
   const permissions = await readFile(join(root, 'apps/desktop/Info.plist'), 'utf8');
-  const native = permissions.match(/<dict>([\s\S]*?)<\/dict>/)?.[1];
+  // Preserve nested native dictionaries (for example web-content ATS) and
+  // subsequent privacy keys. The last dict before </plist> is the root close.
+  const native = permissions.match(/<dict>([\s\S]*)<\/dict>\s*<\/plist>/)?.[1];
   if (!native) throw new Error('desktop Info.plist has no permission dictionary');
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
@@ -145,20 +133,22 @@ export async function developmentInfoPlist(root = ROOT, environment = process.en
 }
 
 export async function ensureMacosDevelopmentBundle({
-  hostPath, helperPath, runtimePath, root = ROOT, environment = process.env,
-}, { stage = stageMacosBrowserBundle, inspect = inspectMacosBrowserBundle, run = runCommand } = {}) {
+  hostPath, target = resolveMacosTarget(), bundleFiles = {}, root = ROOT, environment = process.env,
+}, { sign = signMacosAppBundle, inspect = inspectMacosAppBundle, run = runCommand } = {}) {
   const plist = await developmentInfoPlist(root, environment);
   const signingIdentity = macosDevelopmentSigningIdentity(environment);
   // Separate test identifiers/datasets can run beside an existing dev app.
   const identity = createHash('sha256').update(plist)
-    .update(environment.NOMIFUN_DATA_DIR ?? '').update(JSON.stringify(signingIdentity)).digest('hex').slice(0, 16);
-  const cache = join(root, 'target', 'macos-dev-browser', identity);
+    .update(environment.NOMIFUN_DATA_DIR ?? '').update(target).update(JSON.stringify(signingIdentity)).digest('hex').slice(0, 16);
+  const cache = join(root, 'target', 'macos-dev-app', identity);
   const fingerprintPath = join(cache, 'complete.json');
   const hostDigest = await digestFile(hostPath);
-  const components = createHash('sha256').update(JSON.stringify(MACOS_BROWSER_RUNTIME))
+  const files = await Promise.all(Object.entries(bundleFiles).sort(([a], [b]) => a.localeCompare(b))
+    .map(async ([destination, source]) => ({ destination, source, digest: await digestFile(source) })));
+  const components = createHash('sha256').update(target)
     .update(JSON.stringify(signingIdentity))
-    .update(await digestFile(helperPath))
-    .update(await readFile(join(root, 'scripts/lib/macos-browser-bundle.mjs')))
+    .update(JSON.stringify(files))
+    .update(await readFile(join(root, 'scripts/lib/macos-app-bundle.mjs')))
     .digest('hex');
   const host = createHash('sha256').update(hostDigest).update(plist).digest('hex');
   let cached;
@@ -188,22 +178,31 @@ export async function ensureMacosDevelopmentBundle({
   if (complete) {
     await cp(cached.appPath, appPath, {
       recursive: true, dereference: false, verbatimSymlinks: true,
-      // APFS can share the immutable framework bytes; fall back to copying on
+      // APFS can share immutable resource bytes; fall back to copying on
       // filesystems without clone support, preserving the same bundle contract.
       mode: constants.COPYFILE_FICLONE,
     });
   }
   await mkdir(join(contents, 'MacOS'), { recursive: true });
   await cp(hostPath, program);
+  if (await digestFile(program) !== hostDigest) throw new Error('desktop build changed while freezing the development app');
   await writeFile(join(contents, 'Info.plist'), plist);
   if (complete) {
-    // Cargo's incremental host rebuild does not change the pinned signed
-    // framework/helpers. Reuse those components and refresh only the app seal.
+    // The resource fingerprint is unchanged. Reuse signed native libraries
+    // and refresh the app seal in this new immutable generation.
     await run('/usr/bin/plutil', ['-convert', 'xml1', join(contents, 'Info.plist')]);
     await run('codesign', macosDevelopmentSealArguments(appPath, signingIdentity));
     await run('codesign', ['--verify', '--deep', '--strict', appPath]);
   } else {
-    await stage({ appPath, helperPath, runtimePath, identity: signingIdentity });
+    for (const file of files) {
+      const destination = resolve(contents, file.destination);
+      const owned = relative(contents, destination);
+      if (!owned || owned.startsWith('..') || isAbsolute(owned)) throw new Error('development bundle resource must stay within Contents');
+      await mkdir(dirname(destination), { recursive: true });
+      await cp(file.source, destination);
+      if (await digestFile(destination) !== file.digest) throw new Error('native resource changed while freezing the development app');
+    }
+    await sign({ appPath, target, identity: signingIdentity });
   }
   const publication = join(generation, 'complete.json');
   await writeFile(publication, `${JSON.stringify({ components, host, appPath })}\n`);
@@ -218,16 +217,11 @@ export async function main(args = process.argv.slice(2)) {
     const plan = parseMacosCargoRunnerArguments(args);
     generation = await acquireMacosDevGeneration(process.env.NOMIFUN_DEV_SUPERVISOR_SOCKET);
     const cwd = process.cwd();
-    const compiler = await macosBrowserCompilerEnvironment({ target: plan.target, profile: plan.profile });
+    const compiler = await prepareMacosBuildEnvironment({ target: plan.target });
     const hostPath = await runCargoArtifact(plan.build, 'nomifun-desktop', { cwd, environment: compiler.environment });
-    const helperPath = await runCargoArtifact(plan.helper, 'nomifun-browser-cef-helper', { environment: compiler.environment });
-    const runtimeEnvironment = nativeBrowserLaunchEnvironment();
-    // This private helper command reports its exact compiled Cargo runtime
-    // path without loading CEF or discovering an installation through PATH.
-    const runtimePath = compiler.runtimePath ?? await runCommand(helperPath, ['--print-runtime-path'], { capture: true, environment: runtimeEnvironment });
-    const program = await ensureMacosDevelopmentBundle({ hostPath, helperPath, runtimePath });
-    console.error(`[dev] native Browser app: ${dirname(dirname(dirname(program)))}`);
-    const result = await generation.launch({ program, args: plan.application, environment: runtimeEnvironment, cwd });
+    const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: compiler.bundleFiles });
+    console.error(`[dev] native app: ${dirname(dirname(dirname(program)))}`);
+    const result = await generation.launch({ program, args: macosDevelopmentApplicationArguments(plan.application), environment: process.env, cwd });
     process.exitCode = result.code ?? (result.signal ? 1 : 0);
   } catch (error) {
     // Tauri 2.11 recognizes a Cargo compilation failure by exit 101 and the

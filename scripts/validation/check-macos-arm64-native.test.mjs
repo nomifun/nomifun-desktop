@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   chmodSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -16,45 +17,26 @@ import {
 } from '../release/release-lock.mjs';
 
 import {
-  CEF_HELPER_NAMES,
-  EXPECTED_CEF,
   EXPECTED_TARGET,
   TARGET_ID,
   assertSelfTest,
   compareCapabilityInventory,
-  inspectCefBundle,
+  inspectMountedDmg,
+  inspectNativeAppBundle,
   parseArgs,
   readCanonicalCapabilityIds,
   readCanonicalCapabilityInventory,
   runValidation,
 } from './check-macos-arm64-native.mjs';
-import { MACOS_CEF_LOCALE_DIRECTORIES } from '../lib/macos-browser-bundle.mjs';
-
-function cefFixture(root) {
+function appFixture(root) {
   const app = join(root, 'NomiFun.app');
-  const framework = join(app, 'Contents/Frameworks/Chromium Embedded Framework.framework');
-  mkdirSync(framework, { recursive: true });
-  writeFileSync(join(framework, 'Chromium Embedded Framework'), 'cef fixture');
-  chmodSync(join(framework, 'Chromium Embedded Framework'), 0o555);
-  for (const name of CEF_HELPER_NAMES) {
-    const directory = join(app, 'Contents/Frameworks', `${name}.app`, 'Contents/MacOS');
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, name), 'helper fixture');
-    chmodSync(join(directory, name), 0o555);
-  }
-  for (const name of MACOS_CEF_LOCALE_DIRECTORIES) {
-    const directory = join(framework, 'Resources', name);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, 'locale.pak'), `${name} fixture`);
-  }
-  const legal = join(app, 'Contents/Resources/browser-cef');
-  mkdirSync(legal, { recursive: true });
-  writeFileSync(join(legal, 'runtime.json'), JSON.stringify(EXPECTED_CEF));
-  writeFileSync(join(legal, 'CREDITS.html'), 'credits fixture');
-  return { app, framework, legal };
+  const host = join(app, 'Contents/MacOS/nomifun-desktop');
+  mkdirSync(join(app, 'Contents/MacOS'), { recursive: true });
+  writeFileSync(host, 'host fixture');
+  chmodSync(host, 0o555);
+  writeFileSync(join(app, 'Contents/Info.plist'), '<plist/>');
+  return { app, host };
 }
-
-const signedArm64FixtureCommand = (name) => ({ status: 0, stdout: name === 'lipo' ? 'arm64\n' : '', stderr: '' });
 
 describe('macOS arm64 host validation helper', () => {
   test('rejects retired executor flags instead of ignoring or launching them', () => {
@@ -77,43 +59,87 @@ describe('macOS arm64 host validation helper', () => {
     expect(assertSelfTest()).toEqual({ status: 'pass' });
   });
 
-  test('requires distributed locale packs and exact metadata policy in native artifact checks', () => {
-    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-locales-'));
+  test('accepts a native app without a bundled browser runtime', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-system-webkit-'));
     try {
-      const { app, framework, legal } = cefFixture(root);
-      expect(inspectCefBundle(app, signedArm64FixtureCommand).status).toBe('pass');
-      const pack = join(framework, 'Resources/en.lproj/locale.pak');
-      rmSync(pack);
-      const missing = inspectCefBundle(app, signedArm64FixtureCommand);
-      expect(missing.status).toBe('fail');
-      expect(missing.locales.packs.find(locale => locale.name === 'en.lproj').status).toBe('fail');
-      writeFileSync(pack, 'restored English pack');
-      writeFileSync(join(legal, 'runtime.json'), JSON.stringify({ ...EXPECTED_CEF, locale_variants: [''] }));
-      expect(inspectCefBundle(app, signedArm64FixtureCommand).metadata.status).toBe('fail');
+      const { app } = appFixture(root);
+      expect((await inspectNativeAppBundle(app)).status).toBe('pass');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test('rejects excess languages and locale pack symlinks while checking real filesystem paths', () => {
-    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-locales-owned-'));
+  test('rejects bundled CEF, WebKit, retired helper apps and runtime metadata', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-browser-policy-'));
     try {
-      const { app, framework } = cefFixture(root);
-      mkdirSync(join(framework, 'Resources/ja.lproj'));
-      writeFileSync(join(framework, 'Resources/ja.lproj/locale.pak'), 'Japanese pack');
-      const excessive = inspectCefBundle(app, signedArm64FixtureCommand);
-      expect(excessive.status).toBe('fail');
-      expect(excessive.locales.unexpected).toEqual(['ja.lproj']);
-      rmSync(join(framework, 'Resources/ja.lproj'), { recursive: true });
-      const pack = join(framework, 'Resources/en.lproj/locale.pak');
-      rmSync(pack);
-      writeFileSync(join(root, 'external.pak'), 'external pack');
-      symlinkSync(join(root, 'external.pak'), pack);
-      const external = inspectCefBundle(app, signedArm64FixtureCommand);
-      expect(external.status).toBe('fail');
-      expect(external.locales.packs.find(locale => locale.name === 'en.lproj').owned).toBe(false);
+      const { app } = appFixture(root);
+      for (const forbidden of [
+        'Frameworks/Chromium Embedded Framework.framework',
+        'Frameworks/WebKit.framework',
+        'Frameworks/NomiFun Helper.app',
+        'Frameworks/NomiFun Helper (Renderer).app',
+        'Resources/browser-cef',
+        'MacOS/nomifun-browser-cef-helper',
+      ]) {
+        const path = join(app, 'Contents', forbidden);
+        mkdirSync(path, { recursive: true });
+        const result = await inspectNativeAppBundle(app);
+        expect(result.status).toBe('fail');
+        expect(result.missing.some(item => item.path === path)).toBe(true);
+        rmSync(path, { recursive: true });
+      }
+      expect((await inspectNativeAppBundle(app)).status).toBe('pass');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  test('requires a regular host and rejects symlink escapes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-app-owned-'));
+    try {
+      const { app, host } = appFixture(root);
+      rmSync(host);
+      expect((await inspectNativeAppBundle(app)).status).toBe('fail');
+      const external = join(root, 'external-host');
+      writeFileSync(external, 'external executable');
+      chmodSync(external, 0o555);
+      symlinkSync(external, host);
+      expect((await inspectNativeAppBundle(app)).status).toBe('fail');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
+  test('mounted DMG compares all files and rejects modified or extra payloads', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nomifun-native-dmg-'));
+    try {
+      const { app } = appFixture(root);
+      mkdirSync(join(app, 'Contents/Resources'));
+      writeFileSync(join(app, 'Contents/Resources/data.txt'), 'original');
+      let mutation = null;
+      const commands = [];
+      const command = (name, args) => {
+        commands.push([name, ...args]);
+        if (name === 'hdiutil' && args[0] === 'attach') {
+          const mountpoint = args[args.indexOf('-mountpoint') + 1];
+          const mountedApp = join(mountpoint, 'NomiFun.app');
+          cpSync(app, mountedApp, { recursive: true });
+          symlinkSync('/Applications', join(mountpoint, 'Applications'));
+          mutation?.(mountedApp);
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      };
+      expect((await inspectMountedDmg(join(root, 'fixture.dmg'), app, command)).status).toBe('pass');
+      for (const change of [
+        mounted => writeFileSync(join(mounted, 'Contents/Resources/data.txt'), 'changed'),
+        mounted => writeFileSync(join(mounted, 'Contents/Resources/extra.txt'), 'unexpected'),
+        mounted => {
+          const host = join(mounted, 'Contents/MacOS/nomifun-desktop');
+          chmodSync(host, 0o755);
+          writeFileSync(host, 'different executable');
+        },
+        mounted => mkdirSync(join(mounted, 'Contents/Frameworks/WebKit.framework'), { recursive: true }),
+      ]) {
+        mutation = change;
+        expect((await inspectMountedDmg(join(root, 'fixture.dmg'), app, command)).status).toBe('fail');
+      }
+      expect(commands.filter(([name, action]) => name === 'hdiutil' && action === 'detach')).toHaveLength(5);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   test('loads the canonical capability ID set from the generated inventory', () => {
     const inventory = readCanonicalCapabilityInventory();
@@ -192,36 +218,10 @@ describe('macOS arm64 host validation helper', () => {
     const root = mkdtempSync(join(tmpdir(), 'nomifun-macos-native-'));
     try {
       const sourceCommit = 'd'.repeat(40);
-      const host = join(root, 'NomiFun.app', 'Contents', 'MacOS', 'nomifun-desktop');
+      const { host } = appFixture(root);
       const packagePath = join(root, 'NomiFun.dmg');
       const releaseLock = join(root, 'release-lock.json');
       const missingNomiCore = join(root, 'missing-nomicore');
-      mkdirSync(join(root, 'NomiFun.app', 'Contents', 'MacOS'), { recursive: true });
-      writeFileSync(host, 'host fixture');
-      chmodSync(host, 0o555);
-      const frameworks = join(root, 'NomiFun.app', 'Contents', 'Frameworks');
-      const cefFramework = join(frameworks, 'Chromium Embedded Framework.framework');
-      mkdirSync(cefFramework, { recursive: true });
-      const cefBinary = join(cefFramework, 'Chromium Embedded Framework');
-      writeFileSync(cefBinary, 'cef fixture');
-      chmodSync(cefBinary, 0o555);
-      for (const name of MACOS_CEF_LOCALE_DIRECTORIES) {
-        const directory = join(cefFramework, 'Resources', name);
-        mkdirSync(directory, { recursive: true });
-        writeFileSync(join(directory, 'locale.pak'), `${name} fixture`);
-      }
-      for (const name of CEF_HELPER_NAMES) {
-        const helper = join(frameworks, `${name}.app`, 'Contents', 'MacOS', name);
-        mkdirSync(join(frameworks, `${name}.app`, 'Contents', 'MacOS'), { recursive: true });
-        writeFileSync(helper, `${name} fixture`);
-        chmodSync(helper, 0o555);
-      }
-      const cefResources = join(root, 'NomiFun.app', 'Contents', 'Resources', 'browser-cef');
-      mkdirSync(cefResources, { recursive: true });
-      writeFileSync(join(cefResources, 'CREDITS.html'), 'credits');
-      writeFileSync(join(cefResources, 'runtime.json'), JSON.stringify({
-        ...EXPECTED_CEF,
-      }));
       writeFileSync(packagePath, 'package fixture');
       const lock = createReleaseLock({
         root,
@@ -277,7 +277,7 @@ describe('macOS arm64 host validation helper', () => {
             status: 'pass',
             applications_link: 'pass',
             app_matches_staged_source: true,
-            cef: { status: 'pass' },
+            bundle: { status: 'pass' },
           }),
         },
       );
@@ -287,9 +287,9 @@ describe('macOS arm64 host validation helper', () => {
           expect.objectContaining({ id: 'native-host', status: 'pass' }),
           expect.objectContaining({ id: 'release-lock:real-artifacts', status: 'pass' }),
           expect.objectContaining({ id: 'macos-app:architectures', status: 'pass' }),
-          expect.objectContaining({ id: 'macos-app:cef-runtime-framework-helpers', status: 'pass' }),
+          expect.objectContaining({ id: 'macos-app:system-webkit-policy', status: 'pass' }),
           expect.objectContaining({ id: 'macos-package:hdiutil-verify', status: 'pass' }),
-          expect.objectContaining({ id: 'macos-package:mounted-app-cef-identity', status: 'pass' }),
+          expect.objectContaining({ id: 'macos-package:mounted-app-identity', status: 'pass' }),
           expect.objectContaining({ id: 'macos-package:codesign', status: 'not_required' }),
           expect.objectContaining({ id: 'macos-package:notarization-ticket', status: 'not_required' }),
           expect.objectContaining({ id: 'canonical-capability-inventory', status: 'pass' }),

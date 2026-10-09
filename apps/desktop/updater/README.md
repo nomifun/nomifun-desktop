@@ -46,8 +46,10 @@ App (running version, from workspace Cargo.toml)
   during installation, so every entry must belong to the single `NomiFun.app/`
   root. The packaging verifier lists raw entries with libarchive's `!mac-ext`
   option, extracts with that same path layout, and reuses the App bundle
-  inspection for executable permissions, helpers, symlinks, and CEF identity.
-  Run `bun test ./scripts/lib/macos-browser-bundle.test.mjs` for this contract.
+  inspection for executable permissions, symlinks, and absence of bundled browser
+  runtimes. Every extracted file and mode must match the final App, including
+  Intel ONNX resources and nested signatures.
+  Run `bun test ./scripts/lib/macos-app-bundle.test.mjs` for this contract.
 - **Install failures:** after the installer accepts the package, failures keep
   the native slot claimed and show recovery guidance before exiting. Native
   installation errors are written to the app logs. A package that never reached

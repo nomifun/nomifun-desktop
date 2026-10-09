@@ -24,8 +24,9 @@ macOS 更新包必须从最终已签名、公证的 App 生成，固定使用 `C
 禁用扩展属性并排除 AppleDouble（`._*` / `__MACOSX`）元数据。Tauri 安装时会去掉
 每个条目的第一层路径，因此归档必须只有 `NomiFun.app/` 一个根目录。打包校验使用
 libarchive 的 `!mac-ext` 选项读取原始条目，按安装时的路径布局实际解压，再复用
-App 检查验证可执行权限、helper、符号链接与 CEF 身份。
-回归命令为 `bun test ./scripts/lib/macos-browser-bundle.test.mjs`。
+App 检查验证可执行权限、符号链接与不存在打包浏览器运行时；全部解压文件及权限
+必须与最终 App 一致，包括 Intel ONNX 资源和嵌套签名。
+回归命令为 `bun test ./scripts/lib/macos-app-bundle.test.mjs`。
 
 安装器接收更新包后，如果安装失败，原生槽位保持占用并写入错误日志；应用显示
 手动安装指引后退出。尚未进入安装器的拒绝仍可恢复。归档修复必须重新生成并签名

@@ -12,7 +12,7 @@ export function macosDevelopmentSigningIdentity(environment = process.env) {
 
 export function macosDevelopmentSigningNotice(environment = process.env) {
   return macosDevelopmentSigningIdentity(environment) === '-'
-    ? '[macOS dev] 使用 ad-hoc 签名；重建后可能需 macOS 钥匙串授权。可显式设置 NOMIFUN_MACOS_DEV_SIGN_IDENTITY 使用已安装的稳定签名身份。'
+    ? '[macOS dev] 使用 ad-hoc 签名。可显式设置 NOMIFUN_MACOS_DEV_SIGN_IDENTITY 使用已安装的稳定签名身份。'
     : null;
 }
 

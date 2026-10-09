@@ -20,7 +20,7 @@ Agent 选择 attached Chrome 不改变用户的内置浏览器，也不会把用
 不同 exact managed Provider 不能静默借用既有实体，必须明确重建原生浏览器。
 
 所有 Agent Turn（包括没有 Browser 工具的普通聊天及 attached Chrome Agent）均在 Runtime 预备阶段取得
-同 Session 内置浏览器的输入锁。实体创建本身不调用 `cef_initialize` 或创建 Context；运行中首次创建原生 child 时输入已禁用。
+同 Session 内置浏览器的输入锁。实体创建本身不创建原生网页；运行中首次创建原生 child 时输入已禁用。
 canonical Turn 已进入 running、但输入锁尚未得到证明时，用户命令及首次打开明确拒绝，不能短暂显示 UserReady。
 预备失败或取消必须等待 retained owner 排空输入操作；settle 阶段保持硬件输入锁，只有 exact Turn 终态成功持久化后才 finish 并恢复用户输入。begin 未发出 guard 时也分为排空与终态后 failed-start recovery 两阶段，终态写入或下游清理失败不能提前解锁。
 
@@ -30,9 +30,22 @@ canonical Turn 已进入 running、但输入锁尚未得到证明时，用户命
 完整 Runtime teardown 成功后，Kernel 资源上下文只按对应实例的 Arc 身份退出 Weak cache；即使旧 handle 仍被持有，
 后继 Runtime 也不能复用已关闭上下文，迟到的旧 cleanup 不能驱逐新的实例。
 
-正式内置浏览器 Profile 固定按认证 owner 与 Session 隔离，持久目录为
-`browser-v4/agent-sessions/<identity-hash>/`。Profile namespace 为 `nomifun.browser.session-managed-profile.v2`，
-身份不含 Agent resource definition、项目路径或 Agent persistence 参数。旧 Profile 不读取、扫描或迁移。
+正式内置浏览器 Profile 固定按认证 owner 与 Session 隔离。Windows 保留目录
+`browser-v4/agent-sessions/<identity-hash>/`，namespace 为 `nomifun.browser.session-managed-profile.v2`。
+macOS 14+ 使用公开 `WKWebsiteDataStore.dataStoreForIdentifier` 的独立持久 store：
+从 `nomifun.browser.webkit.session-store.v1`、编译渠道、canonical 数据根路径、已有可信 `storage-generation`、
+认证 owner 与 canonical AgentSession 以长度前缀 SHA-256 稳定派生 UUID。身份不含 Agent resource definition、
+项目路径或 Agent persistence 参数。重启保持同一 store；开发/生产/测试及不同数据根不共享登录态。
+移动或复制数据根会选择新的登录 namespace，站点数据不随 portable backup 搬运。恢复为新目标创建 generation，
+不修改源安装的系统 store。重置使用原始数据根、已归档的可信 generation 与 canonical Session owner 推导旧 store，
+等待原生删除完成后才由既有 dataset coordinator 完成重置，不建立第二套 Session 或 Profile 账本。
+归档身份信息缺失或无效时拒绝继续；CLI 或无 Browser 构建缺少原生清理端口时，重置保持 pending，须在 NomiFun Desktop
+完成。会话删除同样要求原生清理证明；站点清理等待 WK 公开回调，不能只删目录或由浏览器自行补建 generation。
+WK 不继承 Safari 或旧 CEF Cookie；切换后允许首次重新登录。旧 CEF 用户文件保持原样，不读取、扫描、迁移或自动删除，
+处理旧资料须由用户明确选择；切换浏览器不额外清空聊天、模型配置或凭证。
+旧 Profile 的存在与内容不参与新版启动、身份派生、恢复或清理决策，不维护旧数据格式、双读、回退或专用迁移流程。
+保留磁盘上的用户资料不构成运行时兼容合同；新版只管理当前 WK store。重置归档中的 canonical 表若存在，
+必须满足当前身份字段合同，缺失字段不能当作“没有会话”放行。
 独立原生 conformance fixture 可以使用 Ephemeral Profile，不改变正式用户侧栏的策略。
 canonical Session 删除先关闭真实 runtime，再安全删除该 Session 的精确用户 Profile，即使它从未拥有 Agent Browser binding；
 重启后也按同一身份计算，无第二份 Profile/授权账本。已结算效果引用的 Agent 资源定义仍按 canonical 契约保留。
@@ -41,7 +54,7 @@ canonical Session 删除先关闭真实 runtime，再安全删除该 Session 的
 禁用该入口，边界扫描防止重新开启。底层 WebView2 协议调用仍用于 Agent 观察、原生输入、
 Frame 与生命周期，但仅属宿主内部实现，不构成 DevTools 产品功能。
 
-会话内嵌浏览器使用 WebView2/操作系统原生网络栈，不安装应用转发代理、IP/端口白名单或网络设置。
+会话内嵌浏览器在 Windows 使用 WebView2，在 macOS 14+ 使用系统 WKWebView；均使用操作系统网络栈，不安装应用转发代理、IP/端口白名单或网络设置。
 这保留系统代理、证书、localhost、LAN、WebSocket 和 HMR。最小边界是顶层导航仅限无内嵌凭据的
 HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend credential 或任意文件权限。
 后台 `web.research` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
@@ -60,35 +73,85 @@ canonical running 或未完成的 settlement 仍明确拒绝，重建入口不�
 用户另选保存位置仍由原生保存对话框决定，菜单不会声称该系统目录包含所有自选位置的文件。
 此命令只携带当前 Runtime 代际，不接受路径/URL，不启动或更换浏览器；Agent 运行中拒绝、Agent 工具不可调用。
 打开失败只显示轻量提示，不销毁当前网页、不自动重试。Windows 原生 OS handoff 与页面保留已有 smoke 证据，
-不将 OS 接受请求等同于完整 Explorer 视觉验收；macOS 实现仍后置。
+不将 OS 接受请求等同于完整 Explorer 视觉验收；macOS 使用公开 NSWorkspace 目录打开 API，验收单独记录。
 
-macOS 的 CEF 库加载与引擎初始化分为两个阶段。桌面进程入口先校验所属 `.app` 的 framework 与完整 helper
-布局，然后在 Tauri、Tokio 和其他宿主 worker 启动前，于启动主线程预加载固定 CEF 动态库。库 constructor
-会调整 macOS malloc zone；在 SQLite 等 worker 已分配内存后才加载，会引入 allocator race 与堆损坏。
-该库从预加载成功起一直 resident 到进程退出，不在关闭网页、`cef_shutdown` 或闲置宿主退出时卸载。
+macOS 复用 Tauri 已建立的 AppKit 主线程与事件循环，创建真实可见的 WKWebView child view。
+WK/AppKit 对象由主线程创建、操作和释放，不启动第二个 NSApplication，不下载或打包浏览器运行时，
+不打包系统 WebKit.framework。WebContent 进程由系统 WebKit 管理；不保留 CEF helper、guardian、
+framework preload、message pump、allocator 特例或隐藏回退内核。
 
-预加载不调用 `cef_initialize`，不启动 guardian/helper，不创建 Context/Profile，也不触发 Keychain。
-首次真正需要原生 runtime 时，才在已经建立主应用的主线程安装 CefAppProtocol 并初始化 CEF，再由 retained owner
-持有 guardian、Context 与页面。没有使用过浏览器的宿主可直接结束闲置生命周期；使用过的宿主仍等待页面、
-Context、helper 与 native shutdown 的真实清理证明，再结束 guardian。库 resident 不替代这些资源的关闭证明，
-也不改变 canonical Session、Agent grant、RunGuard 或 exact Turn 终态后的用户输入恢复边界。
+## 平台能力矩阵
+
+| 能力 | macOS WKWebView | Windows WebView2 |
+| --- | --- | --- |
+| 可见页面、标签页、导航、历史、刷新、停止、普通用户输入 | 保留原生工作区 | 保留现有实现 |
+| 页面观察、文本、元素引用、截图 | 主文档语义观察；公开原生 snapshot | 保留协议观察与原生截图 |
+| 普通点击、填值、选项选择、滚动、表单提交按钮 | `semantic_dom`；点击仅单次左键语义操作，输入替换文字 | 保留 `browser_input` |
+| 持续拖拽、hover、组合键、右键/中键/双击、pointer capture、复杂 Canvas/编辑器 | 明确 `BROWSER_UNSUPPORTED_ACTION` | 保留既有能力及原有 frame 限制 |
+| iframe、closed shadow DOM | 未覆盖内容不产生可操作引用；显式 `unobserved_frames` | 保留已有 Frame 路由 |
+| 用户文件选择与下载 | 公开 WK/AppKit 原生流程；不按 HTML `accept` 预筛选 | 保留现有原生流程与筛选 |
+| Agent 自动上传/下载、开发者 evaluate、全量 CDP 网络诊断 | 首版明确不支持 | 保留已有能力及授权 |
+| 独立持久登录态、会话删除与站点清理 | macOS 14+ 独立 WKWebsiteDataStore | 保留目录 Profile |
+
+`semantic_dom` 不伪造 `isTrusted`，也不是 user activation；DOM API 或事件分发完成不代表网站已完成业务操作，
+Agent 必须重新观察结果。网站要求真实用户激活时由用户按既有 Stop → 等待清理 → 恢复输入流程处理。
+工具观察与用户工作区携带 `interaction_capabilities`，工具 schema 的动作全集不代表每个平台均支持。
+不支持错误明确禁止同动作重试；单项不支持不会关闭普通浏览能力。浏览器菜单同时说明常见限制。
+
+公开 `WKOpenPanelParameters` 只提供多选、目录等选项，不提供 HTML `accept` 的 MIME/扩展名提示。
+因此 macOS 文件选择器不预筛选文件类型，用户须选择网站接受的类型；此限制不扩大文件访问权限，
+也不改变 Windows 原有的文件筛选能力。
+
+`browser/observe` 默认只返回语义观察；显式 `screenshot:true` 获取同一原生标签页的可见截图。
+工具入口先校验当前精确模型路由的 ImageInput 能力，返回 typed image part，不把 base64 当作模型文本。
+截图与观察的目标代际必须一致；网站对话框阻塞时返回 `screenshot_status=awaiting_dialog`，不制造图片。
+此截图不使用 Computer 屏幕录制权限、不使用 Headless 渲染，也不作为 renderer 网页显示路径。
 
 ## 当前实现
 
-macOS 首次系统授权与完整 cold 验收仍未闭环。最新实机中，bootstrap 原生文档约 25 ms 达到 Ready，
+### WK 验证 — 2026-10-09
+
+已在 Apple Silicon、macOS 26.6.2 的实际 Tauri 桌面 App 中执行验证。canonical AgentSession/Engine
+调用链使用本地脚本化模型完成 18 轮、220 个事件，覆盖可见页面导航、观察、表单填写/选择/提交、滚动，
+以及原生截图进入模型 typed image part。语义动作的 `isTrusted=false`，物理用户操作为 `true`。
+旧元素引用被拒绝，拖拽返回不支持后仍可继续同页普通操作。这是真实 App 与工具集成验证，
+模型为确定性本地夹具，不作为外部真实模型自主执行的验收结果。
+
+- Agent 运行期间物理用户输入被锁定，GUI Stop 后恢复。网站 dialog 等待中的 Stop 已取得 GUI/DOM
+  状态及 canonical cancelled 终态证据；独立 HTTP 见证缺失，因此不声称该 HTTP 完成条件已验证。
+- App 中的用户操作覆盖中文粘贴、confirm/prompt 对话框、popup、原生文件选择，以及 HTTP/blob 下载。
+  最终 App 验证中，后退和前进均恢复了预期 URL 与原生页面内容；实际在途加载可停止，随后仍可正常导航。
+- A/B 两个持久 Profile 在重启后保持隔离；清理 A 并再次重启后，A 的数据消失且 B 不受影响。
+  终止精确归属的 WebContent 子进程后重新加载，Cookie 保留。
+- Session C 删除前实际显示独立 Cookie 与 localStorage。首次 DELETE 返回 HTTP 200，canonical 状态为
+  `deleted`；生产成功条件要求公开 store 枚举中已不存在该身份，精确系统 store 目录也已消失。
+  A、配置、聊天及旧浏览器资料对照的 6 组前后 SHA-256 全部一致；GUI 确认原生 child 已移除、会话列表
+  仅剩 A。先前 B 的 DELETE HTTP 409 仍保留为单独失败；后续 App 启动恢复另记，不将首次失败改为通过。
+- 独立临时数据集通过正式 factory-reset API 接受一次请求，正常退出并重启后，旧 WK store 删除、
+  旧 canonical Session 清除、新 generation 与 dataset receipt 建立、pending 标记消费均通过。
+  实际 App 显示空会话列表与“选择模型”。这是隔离开发数据集的主动重置验证，不是浏览器迁移时清空用户数据。
+- 定向检查通过：后端 105 项、原生 7 项、UI 80 项。最终分发物检查中，arm64 App 为 162,339,889 字节、
+  6 个普通文件，最低 macOS 14，ad-hoc 签名有效，链接系统 WebKit，无 CEF、浏览器 helper 或打包的 WebKit。
+  ULMO DMG 为 54,522,639 字节，通过验证、只读挂载及完整 App 内容一致性检查；gzip level 9 updater
+  为 72,064,001 字节，通过解包一致性与一次性测试密钥签名验证，测试私钥随后已删除。工作区未提交时，
+  release lock 按预期以退出码 3 拒绝发布。这些是本地测试产物，未作为正式发行发布。
+- Intel 适配器交叉编译检查通过；不代表完整 Intel App 或 Intel 实机运行验收。上述范围、外部真实模型、
+  新一轮 Windows GUI 回归、Developer ID 签名及公证均保持未验证。
+
+下方历史 CEF 失败与 Windows 证据保留各自原始范围，不替代上述 WK 证据，也不扩大其验收覆盖。
+
+以下为迁移前 CEF 的历史失败记录，仍保持失败，不用 WK 检查改写：bootstrap 原生文档约 25 ms 达到 Ready，
 新 ad-hoc 签名应用的首次 persistent 导航仍出现 30 秒协议超时；同一 artifact 重启后的 cold 导航约 120 ms
 完成，原生测试与退出通过。独立 Ephemeral 对照导航可通过，但一次 shutdown worker 的栈明确停在
 `SecItemCopyMatching` / Keychain decrypt，等待超过 260 秒；runner 被迫清理，按失败记录，不作为退出成功证明。
 因此不能把暖启动、同 artifact 重启或部分 native 测试等同于所有新签名应用的首次 cold 成功。
 
-首次 Keychain 系统授权可能需要用户处理原生提示。开发构建反复 ad-hoc 重签会改变应用代码身份，可能增加
-重复授权或等待的风险；应由用户明确选择稳定开发签名身份。宿主不能自动挑选签名身份、代输入密码或修改
-钥匙串 ACL，也不能用加长超时、强杀 helper 或跳过待完成操作伪造成功。CEF 库预加载只处理 allocator 启动
-顺序，不处理 Keychain 授权；CEF 152 与已检查的 154 stable 未提供所需的官方 Keychain namespace 设置，
-当前实现不添加猜测的配置字段或以未验收升级替代问题定位。
+这些 CEF/Keychain 记录不再定义当前实现，也不构成 WK 的验收证据。WK 验收分别记录正式 App、
+Agent 工具直调、确定性模型、外部真实模型、原生 fixture、ARM/Intel 编译与目标机器执行结果。
+未运行的范围保持未验证，不以暖启动、mock 或独立原生窗口替代产品闭环。
 
 
-- 会话菜单已接用户专用站点数据清理：明确确认后关闭此会话网页，在相同 Profile 的短生命周期空白原生 controller
+- Windows 会话菜单已接用户专用站点数据清理：明确确认后关闭此会话网页，在相同 Profile 的短生命周期空白原生 controller
   上等待清理回调，再销毁该 controller；无其他站点浏览/工具能力，也不进入 Tab 列表。未知任务不按超时放行，
   恢复关闭前仍等待原生 Pending 收尾。原生双持久 Profile 对照、预分发取消、代际/Agent 拒绝和 UI 确认回归通过；
   主 GUI 清理点击及完整清理中崩溃/关闭矩阵仍待验收；最新独立 conversation 预览已包含本次代码，但尚未手动启动。
@@ -143,7 +206,7 @@ dialog 打断的输入、导航、观察及截图；Agent 答复经过当前 run
 异步 dialog 及 popup 首屏 dialog 已有正式宿主 smoke 证据；等待期间可精确关闭单个标签，销毁后只收束其作用域内工作，不取消整个 run 或其他页面的 dialog，并行关闭按标签串行化。
 完整 frame/创建/取消竞态和主应用视觉验收仍需继续。
 
-网页 iframe 坐标使用原生 `DOM.getBoxModel` 内容四边形与投影变换，不再手工解析 CSS transform。
+Windows 网页 iframe 坐标使用原生 `DOM.getBoxModel` 内容四边形与投影变换，不再手工解析 CSS transform。
 同进程祖先先从协议 session 根坐标还原到父文档坐标，再逐层验证命中；OOPIF 保持各自 session 边界。
 输入前复查四边形与 viewport，退化、非有限或已变化的几何不产生输入点。静态透视、父元素 perspective、独立 3D
 属性、motion-path、同进程嵌套透视点击/中文输入与父层遮挡已通过真实验证；不代表所有动态变换或跨进程拖放均已完成。

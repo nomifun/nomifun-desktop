@@ -318,7 +318,7 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 Apple Silicon 与 Intel macOS 嵌入原生 CEF，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
+- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 macOS 14+（Apple Silicon 与 Intel）嵌入系统 WKWebView，Linux 暂缓。用户与 Agent 共用真实页面、标签页、导航、表单、历史、独立登录态、WebSocket 与 HMR。macOS Agent 使用网页语义操作完成常规按钮和表单任务，高阶手势及自动文件传输明确不支持，详见[平台能力矩阵](docs/architecture/browser-platform.zh.md)。
 - **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
 - **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
 - **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
@@ -561,12 +561,11 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 
 ### macOS 构建与发行
 
-内置浏览器为 Apple Silicon 与 Intel 分别固定 CEF 运行库，明确拒绝混合架构 Universal 包。
+Apple Silicon 与 Intel 均使用系统 WKWebView，不下载或打包浏览器运行时，明确拒绝混合架构 Universal 包。
 架构参数支持 `arm`/`aarch64`/`silicon` 与 `intel`/`x64`/`x86_64`；Intel 包还包含校验过的
-ONNX Runtime 1.23.2 及其许可证。Apple Silicon 请使用原生 arm64 包：Chromium 不维护
-Rosetta 运行方式，v0.8.1 的翻译环境 CEF 关闭测试未通过；本次未执行 Intel 实机验收。
+ONNX Runtime 1.23.2 及其许可证。请使用对应架构的原生包；交叉编译不代表目标机器验收。
 `build`、`build:mac`、`build:signed` 和 `build:updater` 在 macOS 上使用同一套完整装配流程：
-先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
+装配资源及相应架构依赖后签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
 更新包还需要独立的 Tauri updater 签名密钥。
 
 DMG 默认使用 **ULMO/LZMA** 压缩；需要兼容格式时，执行
@@ -586,15 +585,12 @@ DMG 默认使用 **ULMO/LZMA** 压缩；需要兼容格式时，执行
 | 可直接运行、包含内置浏览器的开发 App | `bun run build:fast` |
 
 `bun run dev` 从完整开发 `.app` 启动，并在 Rust 热重载前等待原生浏览器完成退出清理；
-`build:fast` 也会生成完整开发 `.app` 并输出路径。裸 Cargo 二进制没有配套浏览器 App Bundle。
+`build:fast` 也会生成完整开发 `.app` 并输出路径。产品验证使用 App Bundle，以包含正确应用身份与系统权限声明。
 开发时可显式设置 `NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"`，
-再运行 `bun run dev` 或 `bun run build:fast`。主 App、CEF Framework、全部 Helper 和增量重建
+再运行 `bun run dev` 或 `bun run build:fast`。主 App 和增量重建
 都使用这个已安装的身份，缓存按签名身份隔离。脚本不会自动选择或创建证书；未配置时保留 ad-hoc
-签名，并在启动时提示一次“重建后可能需 macOS 钥匙串授权”。
-
-当前固定 CEF 使用默认 **Chromium Safe Storage** 钥匙串项目。macOS 的明确访问授权与 Agent Browser
-能力授权分别管理；固定签名身份和 Bundle ID 可让系统识别后续更新，但不能替代用户首次授权。
-SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md)。
+签名。WK 网站数据独立于 Safari 与旧浏览器资料，升级后可能需要首次重新登录网站；保留原有
+AgentSession 数据与应用配置。签名建议见 [macOS 签名说明](apps/desktop/signing/README.md)。
 
 生产入口固定 release profile、所选原生架构和完整 App/DMG，不接受绕过装配的 `--debug`、`--no-bundle` 等参数。
 签名读取 gitignored 的 `apps/desktop/signing/.env.signing`，要求已安装的 `APPLE_SIGNING_IDENTITY`；
@@ -613,12 +609,12 @@ SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
+| `bun run build:fast` | 快速构建 debug；macOS 输出原生 WKWebView .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
+| `bun run build:mac` | 构建 macOS App 和 DMG（默认 arm64，可选 Intel），并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
-| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
+| `bun run build:signed` | 构建完整 macOS App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终签名 App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
@@ -635,6 +631,7 @@ SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
+| `bun run test:upgrade` | 运行启动、数据集兼容与升级定向 Rust 测试 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
@@ -645,8 +642,8 @@ SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md
 | `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
 | `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
-| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
-| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
+| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创作页面、路由、API、翻译与 Gateway 标记回流 |
+| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创作标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |

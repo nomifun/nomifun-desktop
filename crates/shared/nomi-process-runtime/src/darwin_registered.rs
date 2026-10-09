@@ -1,7 +1,7 @@
 //! Exact Darwin authority for a child registered through a local socket.
 //!
-//! CEF, for example, launches its own children without giving the application
-//! an owned `Child` handle. A launch nonce belongs to the caller's registration
+//! Native libraries can launch children without giving the application an
+//! owned `Child` handle. A launch nonce belongs to the caller's registration
 //! protocol; it is not an OS process identity. After authenticating that
 //! protocol, the caller can bind a socket peer to its actual parent, executable
 //! and kernel audit token here. No PID/group signal fallback is permitted.

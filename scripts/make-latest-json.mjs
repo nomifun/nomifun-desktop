@@ -45,7 +45,7 @@ function flag(name, fallback = undefined) {
 const repo = flag('repo', DEFAULT_REPO);
 const out = flag('out', DEFAULT_OUT);
 const collect = flag('collect', false) === true;
-// Current macOS managed Browser ships only an arm64 CEF runtime.
+// Optional release selection; both native macOS architectures are supported.
 const macosArm64Only = flag('macos-arm64-only', false) === true;
 const targetDirArg = flag('target-dir', join(ROOT, 'target'));
 if (typeof targetDirArg !== 'string') {

@@ -1,14 +1,15 @@
 #!/usr/bin/env bun
-// Fast macOS builds still need the same complete Browser runtime as releases.
-// They stop at a signed development .app; other platforms keep no-bundle.
+// Fast macOS builds stop at a signed development .app; other platforms keep
+// no-bundle. The system WebKit runtime does not require any staging.
 import { readdir, readFile, mkdir, mkdtemp, cp, writeFile } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { developmentEnvironment } from './run-dev.mjs';
-import { runCargoArtifact, runCommand, macosBrowserCompilerEnvironment, nativeBrowserLaunchEnvironment } from './run-macos-dev-runner.mjs';
-import { stageMacosBrowserBundle } from './lib/macos-browser-bundle.mjs';
+import { runCommand } from './run-macos-dev-runner.mjs';
+import { signMacosAppBundle } from './lib/macos-app-bundle.mjs';
+import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-build-environment.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,9 +23,7 @@ export function fastBuildInvocation(args, platform = process.platform, architect
   };
   const target = value('--target') ?? value('-t');
   if (platform === 'darwin') {
-    if (architecture !== 'arm64' || (target && target !== 'aarch64-apple-darwin')) {
-      throw new Error('the pinned macOS Browser runtime requires an Apple Silicon arm64 build');
-    }
+    resolveMacosTarget(target, architecture);
     if (args.some(arg => arg === '--no-bundle' || arg === '--bundles' || arg === '-b' || arg.startsWith('--bundles='))) {
       throw new Error('macOS build:fast produces a complete app bundle; bundle overrides are unsupported');
     }
@@ -95,13 +94,12 @@ export async function freezeBuiltMacosApp(outDir) {
   return receipt;
 }
 
-export async function completeFastMacosApp({ outDir, buildHelper, environment = process.env, stage = stageMacosBrowserBundle }) {
+export async function completeFastMacosApp({ outDir, target = resolveMacosTarget(), environment = process.env, sign = signMacosAppBundle }) {
   const identity = macosDevelopmentSigningIdentity(environment);
   const built = await freezeBuiltMacosApp(outDir);
-  const { helperPath, runtimePath } = await buildHelper();
-  // The helper can wait behind an active watcher for minutes. Only this
-  // immutable verified copy is staged; raw Cargo/Tauri outputs are not reread.
-  await stage({ appPath: built.appPath, helperPath, runtimePath, identity });
+  // Sign only the immutable verified copy; a watcher may replace the raw
+  // Cargo/Tauri outputs while native signing is still in progress.
+  await sign({ appPath: built.appPath, target, identity });
   return built.appPath;
 }
 
@@ -118,27 +116,26 @@ export async function main(args = process.argv.slice(2)) {
     }
     const tauri = join(ROOT, 'node_modules/.bin', process.platform === 'win32' ? 'tauri.exe' : 'tauri');
     const compiler = process.platform === 'darwin'
-      ? await macosBrowserCompilerEnvironment({ target: invocation.target, environment })
-      : { environment, runtimePath: null };
+      ? await prepareMacosBuildEnvironment({ target: invocation.target, environment })
+      : { environment, bundleConfig: null };
     const metadata = process.platform === 'darwin'
       ? JSON.parse(await runCommand('cargo', ['metadata', '--format-version', '1', '--no-deps'], { capture: true, environment }))
       : null;
-    const outDir = metadata ? join(metadata.target_directory, ...(invocation.target ? [invocation.target] : []), 'debug') : null;
-    await runCommand(tauri, invocation.args, { environment: compiler.environment });
+    const requestedTarget = invocation.target ?? environment.CARGO_BUILD_TARGET;
+    const outDir = metadata ? join(metadata.target_directory, ...(requestedTarget ? [requestedTarget] : []), 'debug') : null;
+    const buildArgs = [...invocation.args];
+    if (compiler.bundleConfig) {
+      const separator = buildArgs.indexOf('--');
+      buildArgs.splice(separator < 0 ? buildArgs.length : separator, 0, '--config', compiler.bundleConfig);
+    }
+    await runCommand(tauri, buildArgs, { environment: compiler.environment });
     if (process.platform !== 'darwin') return;
     const appPath = await completeFastMacosApp({
       outDir,
+      target: compiler.target,
       environment,
-      buildHelper: async () => {
-        const helperArgs = ['build', '--locked', '-p', 'nomifun-browser-macos', '--bin', 'nomifun-browser-cef-helper',
-          ...(invocation.target ? ['--target', invocation.target] : []), '--message-format=json-render-diagnostics'];
-        const helperPath = await runCargoArtifact(helperArgs, 'nomifun-browser-cef-helper', { environment: compiler.environment });
-        const runtimeEnvironment = nativeBrowserLaunchEnvironment(environment);
-        const runtimePath = compiler.runtimePath ?? await runCommand(helperPath, ['--print-runtime-path'], { capture: true, environment: runtimeEnvironment });
-        return { helperPath, runtimePath };
-      },
     });
-    console.log(`[build:fast] complete native Browser app: ${appPath}`);
+    console.log(`[build:fast] complete native app: ${appPath}`);
   } catch (error) {
     console.error(`[build:fast] ${error.message}`);
     process.exitCode = error.exitCode ?? 1;
