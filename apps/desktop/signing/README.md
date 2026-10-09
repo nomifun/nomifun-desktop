@@ -30,8 +30,9 @@ Apple 芯片 Mac 上,被隔离 + 未正规签名公证的 App,Gatekeeper 直接�
 | Developer ID 证书私钥 | macOS **登录钥匙串**(不是文件) | ❌ 不在仓库里 |
 
 `build:signed` 与 `build:mac --signed` 使用同一流程，运行时读取本地
-`.env.signing`。CEF Framework、五类 Helper 与资源装配完成后，统一签名最终 App，
-再执行已配置的公证。当前产物仅支持 Apple Silicon arm64。
+`.env.signing`。签名最终 App 和随附原生库后，再执行已配置的公证。
+支持分别构建 Apple Silicon arm64 和 Intel x86_64；浏览器使用系统 WKWebView，
+不下载或打包浏览器 framework、helper 或系统 WebKit.framework。
 
 ---
 
@@ -79,9 +80,9 @@ bun run build:signed
 产物在 `target/aarch64-apple-darwin/release/bundle/{macos,dmg}/`，DMG 同时汇总到
 `dist/desktop/`。脚本先公证并 staple 最终 `.app`，由这份 App 生成 DMG 和可选 updater
 `.app.tar.gz`，随后公证并 staple DMG。updater 包另需 Tauri updater 私钥生成 `.sig`。
-完整 CEF 嵌套签名要求钥匙串中已安装 `APPLE_SIGNING_IDENTITY`；仅配置 `.p12` 内容不够。
+最终 App 签名要求钥匙串中已安装 `APPLE_SIGNING_IDENTITY`；仅配置 `.p12` 内容不够。
 
-## 开发签名与浏览器钥匙串授权
+## 开发签名
 
 `bun run dev` 和 `bun run build:fast` 默认使用 ad-hoc 签名。需要在本机使用稳定的已安装签名身份时，
 可显式配置名称或证书哈希：
@@ -91,23 +92,15 @@ NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" bun run 
 NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" bun run build:fast
 ```
 
-开发装配会以同一身份签名主 App、CEF Framework 和五类 Helper；Rust 增量重建继续以同一身份封装主 App。
+开发装配会以同一身份签名主 App 和随附原生库；Rust 增量重建继续以同一身份封装主 App。
 开发缓存包含身份，换身份不会复用另一身份的签名组件。配置不触发证书自动查找、生成或导入，也不修改钥匙串 ACL。
-未配置时仍能生成完整 App，但启动会提示一次：重建后可能需 macOS 钥匙串授权。
-
-当前固定的 CEF 152.0.6 使用 OSCrypt 的默认 **Chromium Safe Storage / Chromium** service/account，
-独立 Profile 不会改变这个钥匙串名称。新 ad-hoc 二进制的 CodeDirectory hash 会随重建变化，因此旧的系统授权
-可能不再匹配；CEF 的加密初始化会等待 macOS 的明确授权，首次持久网页导航和退出也可能随之等待。
-系统提示需要用户自行处理；Agent Browser grant 不授予系统钥匙串权限。
+未配置时仍能生成完整 App，并提示当前使用 ad-hoc 签名。
+WKWebView 的网页存储由系统管理；应用不访问 Chromium Safe Storage 钥匙串项。
+系统权限提示仍需用户处理；Agent Browser grant 不授予系统权限。
 
 正式发行保持相同 Team、Bundle ID 和嵌套签名链，让更新继续满足原 Designated Requirement。
 这有助于保持已授予的访问权限，首次访问仍由 macOS 请求用户授权。Keychain 的身份跟踪规则见
 [Apple TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)。
-
-CEF 上游已合并 [产品专属 Keychain 名称的 API](https://github.com/chromiumembedded/cef/pull/4247)，
-但当前固定 SDK，以及已核对的 cef/cef-dll-sys 154.4.0 + CEF 154.0.33，均未提供这两个字段。
-配置产品专属名称需要支持它的匹配 runtime 和 Rust 绑定；不能通过修改 App 名称、猜测启动参数或手写 ABI 实现。
-后续启用新名称还需处理已有加密网页数据的兼容性，不能直接换名并声称原有登录状态可读。
 
 ## 验证(发出去前自检)
 
@@ -139,7 +132,8 @@ spctl -a -vvv -t open --context context:primary-signature "$DMG"  # 期望: acce
 - **`APPLE_API_KEY_PATH 必须指向 AuthKey_*.p8`**:`APPLE_API_KEY_PATH` 是 App Store
   Connect API Key 路径,不要填 Developer ID `.p12` 证书路径。
 - **公证被拒 / `Invalid` 状态**:多为「未启用 hardened runtime」或缺 entitlements。
-  CEF 装配签名启用 hardened runtime，并为 Helper 设置 `allow-jit` entitlement。
+  最终 App 签名启用 hardened runtime。WKWebView 使用系统 WebContent 进程，
+  本应用无需浏览器 `allow-jit` entitlement。
   额外 App entitlement 需要与最终装配签名流程一起核对。
   查看具体原因:`xcrun notarytool log <submission-id> --key ... --key-id ... --issuer ...`。
 - **只签名没公证**:别人会看到「无法验证开发者」(不是「已损坏」)。补上公证变量即可。

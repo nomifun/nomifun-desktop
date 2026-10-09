@@ -208,7 +208,7 @@ impl BrowserRoleOwner {
     async fn open_managed_turn(&self, principal: &PrincipalRef, agent_session_id: &AgentSessionId, turn_id: &OperationId) -> Result<(), AppError> {
         // Every Agent turn locks its Session's managed user browser, including
         // Agents without Browser tools and Agents bound to attached Chrome.
-        // Creating this domain entity does not initialize CEF or grant tools.
+        // Creating this domain entity does not initialize a native view or grant tools.
         if let Some(resources) = &self.resources {
             let key = TurnKey::new(&principal.principal_id, agent_session_id.as_ref(), turn_id.as_ref());
             let cancelled = tokio_util::sync::CancellationToken::new();
@@ -618,9 +618,23 @@ impl BrowserRoleOwner {
                 let input: ObserveInput = decode(input)?;
                 match self.run(admission).await? {
                     ActiveBrowserRun::Managed { resource, guard } => {
-                        encode(resource.observe(guard, input.tab_id).await?)
+                        // Capture can activate the tab and invalidate previous references.
+                        // The final observation must therefore follow capture on both hosts.
+                        let screenshot = if input.screenshot {
+                            match resource.screenshot(guard, input.tab_id.clone()).await {
+                                Ok(screenshot) => Some(screenshot),
+                                Err(WorkspaceError::DialogPending) => None,
+                                Err(error) => return Err(error.into()),
+                            }
+                        } else { None };
+                        let observation = resource.observe(guard, input.tab_id).await?;
+                        let capabilities = resource.snapshot().await?.interaction_capabilities;
+                        encode_managed_observation(observation, capabilities, screenshot, input.screenshot)
                     }
                     ActiveBrowserRun::AttachedChrome(turn) => {
+                        if input.screenshot {
+                            return Err(BrowserHostFailure::Unsupported("Attached Chrome does not support visible screenshots through browser/observe. Do not repeat this request; observe without screenshot.".into()));
+                        }
                         match input.tab_id {
                             Some(tab_id) => {
                                 set_attached_target(admission, &tab_id)?;
@@ -840,7 +854,7 @@ impl Wave2HostPort for BrowserRoleOwner {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum BrowserHostFailure {
+pub(super) enum BrowserHostFailure {
     #[error("there is no active Browser turn")]
     NoActiveTurn,
     #[error("the Browser turn authority changed")]
@@ -1034,6 +1048,39 @@ fn encode(value: impl serde::Serialize) -> Result<StrictJsonValue, BrowserHostFa
         .map_err(|_| BrowserHostFailure::Serialization)
 }
 
+pub(super) fn encode_managed_observation(
+    observation: nomifun_browser_platform::runtime::BrowserObservation,
+    capabilities: Option<nomifun_browser_platform::runtime::BrowserInteractionCapabilities>,
+    screenshot: Option<nomifun_browser_platform::runtime::BrowserScreenshot>,
+    screenshot_requested: bool,
+) -> Result<StrictJsonValue, BrowserHostFailure> {
+    if screenshot.as_ref().is_some_and(|screenshot| screenshot.target != observation.target) {
+        return Err(WorkspaceError::StaleTarget.into());
+    }
+    // A dialog can open between capture and observation. Do not show pixels as
+    // the current operable page in that case; retain only the exact dialog.
+    let screenshot = if observation.script_dialog.is_some() { None } else { screenshot };
+    if screenshot_requested && screenshot.is_none() && observation.script_dialog.is_none() {
+        return Err(WorkspaceError::DialogPending.into());
+    }
+    let mut output = encode(observation)?;
+    let object = output.0.as_object_mut().ok_or(BrowserHostFailure::Serialization)?;
+    if let Some(capabilities) = capabilities {
+        object.insert("interaction_capabilities".into(), serde_json::to_value(capabilities)
+                .map_err(|_| BrowserHostFailure::Serialization)?);
+    }
+    if let Some(screenshot) = screenshot {
+        object.insert("screenshot".into(), serde_json::json!({
+            "target": screenshot.target, "width": screenshot.width, "height": screenshot.height,
+            "viewport_width": screenshot.viewport_width, "viewport_height": screenshot.viewport_height,
+            "png_base64": screenshot.png_base64,
+        }));
+    } else if screenshot_requested {
+        object.insert("screenshot_status".into(), serde_json::json!("awaiting_dialog"));
+    }
+    Ok(output)
+}
+
 fn runtime_output(
     authority: &BrowserSessionAuthority,
     mut snapshot: BrowserRuntimeSnapshot,
@@ -1095,6 +1142,8 @@ fn browser_outcome_may_be_unknown(code: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct ObserveInput {
     tab_id: Option<String>,
+    #[serde(default)]
+    screenshot: bool,
 }
 
 #[derive(Deserialize)]
@@ -1728,6 +1777,7 @@ mod managed_user_browser_tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
         let root = tempfile::tempdir().unwrap();
+        crate::config::load_or_create_storage_generation(root.path()).unwrap();
         let fail_lock = Arc::new(AtomicBool::new(true));
         let physical_locked = Arc::new(AtomicBool::new(false));
         let resources = Arc::new(BrowserResourceService::new(Arc::new(GateFactory(fail_lock, physical_locked.clone(), Arc::new(AtomicBool::new(false))))));
@@ -1768,6 +1818,7 @@ mod managed_user_browser_tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
         let root = tempfile::tempdir().unwrap();
+        crate::config::load_or_create_storage_generation(root.path()).unwrap();
         let physical_locked = Arc::new(AtomicBool::new(false));
         let factory = Arc::new(GateFactory(Arc::new(AtomicBool::new(false)), physical_locked.clone(), Arc::new(AtomicBool::new(true))));
         let resources = Arc::new(BrowserResourceService::new(factory));

@@ -411,6 +411,11 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
           event.preventDefault(); setMenuOpen(true); focusMenuItem(event.key === 'ArrowUp' ? 'last' : 'first');
         }}>⋯</button>
         {menuOpen && <div ref={menu} className={styles.menuPopover} role='menu' aria-label={t('browserWorkspace.menu')} onKeyDown={handleMenuKey}>
+          {snapshot?.interaction_capabilities?.interaction_fidelity === 'semantic_dom' && <div className={styles.capabilityNote} role='note'>
+            <strong>{t('browserWorkspace.semanticActionsTitle')}</strong>
+            <span>{t('browserWorkspace.semanticActionsHint')}</span>
+            <span>{t('browserWorkspace.semanticActionsManual')}</span>
+          </div>}
           <div className={styles.zoomRow} role='group' aria-label={t('browserWorkspace.zoom')}>
             <span>{t('browserWorkspace.zoom')}</span>
             <div className={styles.zoomActions}>

@@ -16,8 +16,8 @@ struct Factory {
     fail_shutdown_once: AtomicBool,
     shutdown: Option<Arc<DelayedShutdown>>,
     clear: Option<Arc<DelayedClear>>,
-    storage_independent: bool,
-    after_storage_calls: AtomicUsize,
+    deleted_profiles: Mutex<Vec<BrowserProfile>>,
+    fail_profile_delete_once: AtomicBool,
 }
 
 #[derive(Default)]
@@ -44,9 +44,12 @@ struct Runtime {
 
 #[async_trait]
 impl BrowserRuntimeFactory for Factory {
-    fn supports_storage_independent_shutdown(&self)->bool {self.storage_independent}
-    async fn shutdown_after_storage_close(&self)->Result<(),WorkspaceError> {
-        self.after_storage_calls.fetch_add(1,Ordering::SeqCst);self.shutdown().await
+    async fn delete_persistent_profile(&self, profile: &BrowserProfile) -> Result<(), WorkspaceError> {
+        if self.fail_profile_delete_once.swap(false, Ordering::SeqCst) {
+            return Err(WorkspaceError::ProfileCleanupFailed);
+        }
+        self.deleted_profiles.lock().await.push(profile.clone());
+        Ok(())
     }
     async fn create(
         &self,
@@ -99,6 +102,7 @@ impl NativeInputGate for Runtime {
 
 #[async_trait]
 impl BrowserRuntime for Runtime {
+    fn automation(&self) -> Option<&dyn BrowserAutomationPort> { Some(self) }
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> {
         None
     }
@@ -202,6 +206,32 @@ impl BrowserRuntime for Runtime {
     }
 }
 
+#[async_trait]
+impl BrowserAutomationPort for Runtime {
+    async fn screenshot(&self, tab_id: Option<String>, _: CancellationToken) -> Result<BrowserScreenshot, WorkspaceError> {
+        let snapshot = self.snapshot.lock().await;
+        let id = tab_id.or_else(|| snapshot.active_tab_id.clone()).ok_or(WorkspaceError::TabNotFound)?;
+        let target = snapshot.tabs.iter().find(|tab| tab.target.tab_id == id).ok_or(WorkspaceError::TabNotFound)?.target.clone();
+        Ok(BrowserScreenshot { target, width: 1, height: 1, viewport_width: 880., viewport_height: 600., png_base64: "fixture".into() })
+    }
+    async fn observe(&self, _: Option<String>, _: CancellationToken) -> Result<BrowserObservation, WorkspaceError> { Err(WorkspaceError::UnsupportedAction) }
+    async fn act(&self, _: BrowserAction, _: CancellationToken) -> Result<BrowserActionResult, WorkspaceError> { Err(WorkspaceError::UnsupportedAction) }
+}
+
+#[tokio::test]
+async fn visible_screenshot_requires_observe_not_headless_render_authority() {
+    for (action, permitted) in [(BrowserCapabilityAction::Observe, true), (BrowserCapabilityAction::RenderContent, false)] {
+        let service = service(Arc::new(Factory::default()), &["managed"]);
+        let resource = service.ensure(authority("alice", "screenshot-scope", "managed", [action]), BrowserProfile::Ephemeral).await.unwrap();
+        resource.user_command(create()).await.unwrap();
+        let guard = resource.begin_run().await.unwrap();
+        let captured = resource.screenshot(&guard, None).await;
+        if permitted { assert!(captured.is_ok()); }
+        else { assert!(matches!(captured, Err(WorkspaceError::ActionDenied))); }
+        resource.workspace().finish_run(&guard).await.unwrap();
+    }
+}
+
 fn descriptor(id: &str) -> BrowserProviderDescriptor {
     BrowserProviderDescriptor::new(
         id,
@@ -243,7 +273,7 @@ fn service_with_profiles(
     factory: Arc<Factory>,
     data_dir: &std::path::Path,
 ) -> (BrowserResourceService, BrowserProfileStore) {
-    let store = BrowserProfileStore::new(data_dir.to_path_buf()).unwrap();
+    let store = BrowserProfileStore::for_directory_host_test(data_dir.to_path_buf()).unwrap();
     (
         BrowserResourceService::new(factory).with_profile_store(store.clone()),
         store,
@@ -258,6 +288,69 @@ fn profile_path(store: &BrowserProfileStore, key: &BrowserResourceKey) -> std::p
         panic!("persistent profile")
     };
     path
+}
+
+#[tokio::test]
+async fn webkit_delete_after_restart_uses_native_removal_and_retains_other_session_and_old_files() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+    let store = BrowserProfileStore::for_webkit_host_test(root.path()).unwrap();
+    let factory = Arc::new(Factory::default());
+    let service = BrowserResourceService::new(factory.clone()).with_profile_store(store.clone());
+    let key = managed_workspace_key("alice", "removed-session").unwrap();
+    let expected = store.profile_for(&key, BrowserProfilePersistence::Persistent).unwrap();
+    let other = store.profile_for(&managed_workspace_key("alice", "remaining-session").unwrap(), BrowserProfilePersistence::Persistent).unwrap();
+    let BrowserProfile::Persistent(legacy) = BrowserProfile::for_agent_session(root.path(), &key, false) else { panic!("directory") };
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("sentinel"), b"old browser data").unwrap();
+    service.delete_agent_session("alice", "removed-session").await.unwrap();
+    assert_eq!(*factory.deleted_profiles.lock().await, vec![expected]);
+    assert!(!factory.deleted_profiles.lock().await.contains(&other));
+    assert!(legacy.join("sentinel").exists());
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 0, "cleanup after restart must not create a native view");
+}
+
+#[tokio::test]
+async fn webkit_native_close_and_profile_removal_failures_block_deletion_until_retry() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+    let store = BrowserProfileStore::for_webkit_host_test(root.path()).unwrap();
+    let factory = Arc::new(Factory::default());
+    let service = BrowserResourceService::new(factory.clone()).with_profile_store(store.clone());
+    let key = managed_workspace_key("alice", "session").unwrap();
+    let profile = store.profile_for(&key, BrowserProfilePersistence::Persistent).unwrap();
+    let workspace = service.ensure_user("alice", "session", profile.clone()).await.unwrap();
+    workspace.user_command(create()).await.unwrap();
+    factory.fail_close_once.store(true, Ordering::SeqCst);
+    assert_eq!(service.delete_agent_session("alice", "session").await, Err(WorkspaceError::NativeCommandFailed));
+    assert!(factory.deleted_profiles.lock().await.is_empty());
+    factory.fail_profile_delete_once.store(true, Ordering::SeqCst);
+    assert_eq!(service.delete_agent_session("alice", "session").await, Err(WorkspaceError::ProfileCleanupFailed));
+    assert!(factory.deleted_profiles.lock().await.is_empty());
+    service.delete_agent_session("alice", "session").await.unwrap();
+    assert_eq!(*factory.deleted_profiles.lock().await, vec![profile]);
+}
+
+#[tokio::test]
+async fn retired_dataset_webkit_cleanup_uses_archived_generation_and_cannot_run_with_live_resources() {
+    let root = tempfile::tempdir().unwrap();
+    let old_generation = "0190f5fe-7c00-7a00-8000-000000000002";
+    let current_generation = "0190f5fe-7c00-7a00-8000-000000000003";
+    std::fs::write(root.path().join("storage-generation"), current_generation).unwrap();
+    let store = BrowserProfileStore::for_webkit_host_test(root.path()).unwrap();
+    let factory = Arc::new(Factory::default());
+    let service = BrowserResourceService::new(factory.clone()).with_profile_store(store.clone());
+    let key = managed_workspace_key("alice", "retired-session").unwrap();
+    let retired = store.webkit_profile_for_generation(&key, old_generation).unwrap();
+    let current = store.webkit_profile_for(&key).unwrap();
+    assert_ne!(retired, current);
+    service.delete_retired_webkit_profile("alice", "retired-session", old_generation).await.unwrap();
+    assert_eq!(*factory.deleted_profiles.lock().await, vec![retired]);
+    assert_eq!(std::fs::read_to_string(root.path().join("storage-generation")).unwrap(), current_generation);
+    service.ensure_user("alice", "retired-session", current).await.unwrap();
+    assert_eq!(service.delete_retired_webkit_profile("alice", "retired-session", old_generation).await,
+        Err(WorkspaceError::ProfileCleanupFailed));
+    assert_eq!(factory.deleted_profiles.lock().await.len(), 1);
 }
 
 fn all_actions() -> [BrowserCapabilityAction; 7] {
@@ -864,33 +957,6 @@ async fn failed_native_shutdown_allows_explicit_retry_without_reopening_resource
     service.shutdown().await.unwrap();
     service.close_native_runtime().await.unwrap();
     assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn storage_qualified_shutdown_requires_opt_in_and_cannot_upgrade_an_existing_flight() {
-    let default=Arc::new(Factory::default());let ordinary=service(default.clone(),&["managed"]);
-    ordinary.close_resources().await.unwrap();
-    assert_eq!(ordinary.close_native_runtime_after_storage_close().await,Err(WorkspaceError::UnsupportedAction));
-    assert_eq!(default.shutdowns.load(Ordering::SeqCst),0);
-    let held=Arc::new(DelayedShutdown::default());
-    let factory=Arc::new(Factory {storage_independent:true,shutdown:Some(held.clone()),..Default::default()});
-    let service=Arc::new(service(factory.clone(),&["managed"]));service.close_resources().await.unwrap();
-    let first=tokio::spawn({let service=service.clone();async move {service.close_native_runtime().await}});
-    held.started.notified().await;first.abort();let _=first.await;
-    assert_eq!(service.close_native_runtime_after_storage_close().await,Err(WorkspaceError::NativeCommandFailed));
-    assert_eq!(factory.after_storage_calls.load(Ordering::SeqCst),0);
-    held.release.notify_one();service.close_native_runtime().await.unwrap();
-    assert_eq!(factory.shutdowns.load(Ordering::SeqCst),1);
-}
-
-#[tokio::test]
-async fn storage_qualified_shutdown_uses_the_distinct_host_entry_once() {
-    let factory=Arc::new(Factory {storage_independent:true,..Default::default()});
-    let service=service(factory.clone(),&["managed"]);service.close_resources().await.unwrap();
-    service.close_native_runtime_after_storage_close().await.unwrap();
-    service.close_native_runtime_after_storage_close().await.unwrap();
-    assert_eq!(factory.after_storage_calls.load(Ordering::SeqCst),1);
-    assert_eq!(factory.shutdowns.load(Ordering::SeqCst),1);
 }
 
 #[tokio::test(start_paused = true)]

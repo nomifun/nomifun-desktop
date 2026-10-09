@@ -37,7 +37,7 @@ pub(super) async fn verify(view: &View, url: &str) -> Result<Value, String> {
         // their chooser interception before the first click; this remains
         // before any semantic observation or element-reference creation.
         driver.configure_file_choosers(view,true).await.map_err(|error|error.to_string())?;
-        // Let AppKit/CEF commit the resumed child view's first geometry pass;
+        // Let the native child view commit its first geometry pass;
         // frameReady is a DOM signal and can precede the native hit-test update.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let mut early=native::file_chooser::FileChooser::listen(view).await.map_err(|error|error.to_string())?;

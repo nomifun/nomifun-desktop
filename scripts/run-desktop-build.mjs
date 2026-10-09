@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Every macOS product build must pass through CEF staging before distribution.
+// Every macOS product build signs and verifies its final app before distribution.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
