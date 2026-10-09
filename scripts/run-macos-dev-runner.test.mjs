@@ -6,7 +6,7 @@ import { EventEmitter, once } from 'node:events';
 import { connect } from 'node:net';
 import { createMacosDevLifetime } from './run-dev.mjs';
 import { createMacosDevSupervisor, acquireMacosDevGeneration, validateDevelopmentLaunch } from './lib/macos-dev-supervisor.mjs';
-import { parseMacosCargoRunnerArguments, developmentInfoPlist, ensureMacosDevelopmentBundle, runCargoArtifact } from './run-macos-dev-runner.mjs';
+import { parseMacosCargoRunnerArguments, macosDevelopmentApplicationArguments, developmentInfoPlist, ensureMacosDevelopmentBundle, runCargoArtifact } from './run-macos-dev-runner.mjs';
 import { fastBuildInvocation, findBuiltMacosApp, completeFastMacosApp } from './run-fast-build.mjs';
 import { prepareMacosBuildEnvironment } from './lib/macos-build-environment.mjs';
 import { INTEL_ONNX_RUNTIME } from './lib/macos-onnx-runtime.mjs';
@@ -33,6 +33,18 @@ describe('macOS cargo runner', () => {
     expect(parseMacosCargoRunnerArguments(['run', '--target', 'x86_64-apple-darwin'], 'arm64').target).toBe('x86_64-apple-darwin');
     expect(() => parseMacosCargoRunnerArguments(['run', '--target', 'x86_64-unknown-linux-gnu'], 'arm64')).toThrow('macOS builds');
     expect(() => parseMacosCargoRunnerArguments(['run', '--bin', 'unrelated'], 'arm64')).toThrow('desktop');
+  });
+
+  test('isolates AppKit restoration for the dev process while preserving application arguments', () => {
+    const args = Object.freeze(['--fixture', '中文', 'nomifun-dev://fixture']);
+    expect(macosDevelopmentApplicationArguments(args)).toEqual([
+      '--fixture', '中文', 'nomifun-dev://fixture', '-ApplePersistenceIgnoreState', 'YES',
+    ]);
+    expect(args).toEqual(['--fixture', '中文', 'nomifun-dev://fixture']);
+    expect(macosDevelopmentApplicationArguments([])).toEqual(['-ApplePersistenceIgnoreState', 'YES']);
+    const plan = parseMacosCargoRunnerArguments(['run', '--profile', 'release', '--', '--fixture'], 'arm64');
+    expect(plan.build).not.toContain('-ApplePersistenceIgnoreState');
+    expect(macosDevelopmentApplicationArguments(plan.application)).toEqual(['--fixture', '-ApplePersistenceIgnoreState', 'YES']);
   });
 
   test('fast Mac builds produce an app while Windows and Linux keep no-bundle', () => {
@@ -282,6 +294,40 @@ describe('complete development app cache', () => {
 });
 
 describe('macOS watch generation ownership', () => {
+  test('every watch generation forwards process-scoped restoration arguments without changing identity or data root', async () => {
+    const root = join(tmpdir(), 'nomifun-owned-workspace');
+    const program = join(root, 'target', 'macos-dev-app', 'same-identity', 'generation-fixture', 'NomiFun Dev.app', 'Contents', 'MacOS', 'nomifun-desktop');
+    const cwd = join(root, 'apps', 'desktop');
+    const children = [];
+    const launches = [];
+    const supervisor = await createMacosDevSupervisor({
+      root,
+      createLifetime: async () => ({ socketPath: '/fake-native-lifetime', stop: async () => {} }),
+      spawnProgram(program, args, options) {
+        launches.push({ program, args, options });
+        const child = new EventEmitter();
+        children.push(child);
+        return child;
+      },
+    });
+    try {
+      for (const label of ['first', 'watch-restart']) {
+        const generation = await acquireMacosDevGeneration(supervisor.socketPath);
+        const plan = parseMacosCargoRunnerArguments(['run', '--', '--fixture', label], 'arm64');
+        const exited = generation.launch({ program, args: macosDevelopmentApplicationArguments(plan.application), environment: { NOMIFUN_DATA_DIR: '/isolated-owned-data' }, cwd });
+        const index = label === 'first' ? 0 : 1;
+        while (!children[index]) await new Promise(accept => setImmediate(accept));
+        expect(launches[index].program).toBe(program);
+        expect(launches[index].args).toEqual(['--fixture', label, '-ApplePersistenceIgnoreState', 'YES']);
+        expect(launches[index].options.env.NOMIFUN_DATA_DIR).toBe('/isolated-owned-data');
+        expect(launches[index].options.cwd).toBe(cwd);
+        children[index].emit('exit', 0, null);
+        expect((await exited).code).toBe(0);
+        generation.close();
+      }
+    } finally { await supervisor.stop(); }
+  });
+
   test('runner death requests native cleanup and blocks the next launch until child exit', async () => {
     const children = [];
     const desktops = [];

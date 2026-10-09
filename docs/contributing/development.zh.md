@@ -71,10 +71,15 @@ bun run serve:web
 或隔离网络。
 
 带 Rust 后端的开发入口（`dev`、`dev:web`、`build:fast`）统一使用 `dev`
-构建 channel，因此默认数据目录是 `NomiFun-dev`（stable 根的同级目录，
-永远不嵌套在其内部）。生产形态的 `serve:web` 和
+构建 channel。桌面 `bun run dev` 未指定数据根时，启动器根据当前 canonical baseline
+派生 `NomiFun-dev-schema-<fingerprint>`，复用同一 schema 的开发数据，并保留原有目录。
+开发根位于 stable 根之外，永远不嵌套在其内部。生产形态的 `serve:web` 和
 release 构建仍使用 stable 的 `NomiFun` 目录。需要隔离复现时显式设置
 `NOMIFUN_DATA_DIR` 或 `--data-dir`；开发启动不会导入 stable 的历史 Agent 状态。
+
+macOS 开发启动器给每一代 App 进程传入 `-ApplePersistenceIgnoreState YES`，
+避免上一次崩溃的系统窗口恢复提示阻塞 Tauri 启动及后端监听。该设置只作用于当前进程，
+不写入用户偏好，不删除系统保存状态，也不改变正式发布 App 的窗口恢复行为。
 
 桌面循环已经不是旧 Electron 模型。Tauri shell 直接链接 `nomifun-app`，在进程内
 启动后端，选择一个空闲 localhost 端口，注入 `window.__backendPort` 与
