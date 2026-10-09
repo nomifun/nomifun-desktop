@@ -60,6 +60,7 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
         };
         let directory = match &request.profile {
             BrowserProfile::Persistent(path) => path.clone(),
+            BrowserProfile::WebKitPersistent { .. } => return Err(WorkspaceError::ProfileCleanupInvalid),
             BrowserProfile::Ephemeral => temporary.as_ref().unwrap().path().to_path_buf(),
         };
         let input_enabled = request.user_input_enabled;

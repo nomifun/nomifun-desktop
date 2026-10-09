@@ -109,7 +109,7 @@
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | 基于 `portable-pty` 的终端会话，支持 resize，通过 WS 进行输入 / 输出流式传输。 |
 | [`nomifun-ssh`](../../crates/backend/nomifun-ssh/) | SSH 远程会话：加密的 owner 作用域主机簿（`ssh_hosts`）、连接池/provider、`/api/ssh-hosts` 路由，以及给 SSH 绑定会话的 Agent 提供远程工具族的 `SshBackend` sink。传输层在隔离的共享 crate `nomi-ssh`（`russh`/`russh-sftp`）。 |
-| [`nomifun-browser-macos`](../../crates/backend/nomifun-browser-macos/) | Browser Workspace 的 macOS 专用原生 CEF 适配器；Windows 保留独立 WebView2 宿主。 |
+| [`nomifun-browser-macos`](../../crates/backend/nomifun-browser-macos/) | Browser Workspace 的 macOS 14+ 系统 WKWebView 适配器；Windows 保留独立 WebView2 宿主。 |
 | [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 会话持有的原生 Browser Workspace 类型契约：run/输入所有权、Tab 与 runtime generation、snapshot、上传/下载、Profile 清理，以及 Attached Chrome Provider 的授权模型。桌面宿主提供原生 WebView；隔离搜索/渲染与附着个人浏览器保持为不同消费者。 |
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | 统一多模态模型调用层：类型化任务请求 / 结果、声明式鉴权方案、共享 HTTP 传输、协议适配器接缝 + 注册表与模型目录解析管线；被 `nomifun-shell` STT/TTS、`nomifun-creation` 等模型调用方消费。 |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |

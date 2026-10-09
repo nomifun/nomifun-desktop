@@ -1448,7 +1448,10 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
             &["command"],
         ),
         "browser/observe" => strict_object_schema(
-            serde_json::json!({"tab_id":{"type":"string","minLength":1,"maxLength":512}}),
+            serde_json::json!({
+                "tab_id":{"type":"string","minLength":1,"maxLength":512},
+                "screenshot":{"type":"boolean","description":"Optional visible-page screenshot, default false. Requires an image-capable model route and a managed native browser. Returns pixels as a typed image with the observation; does not use Computer screen recording or headless rendering."}
+            }),
             &[],
         ),
         "browser/navigate" => strict_object_schema(
@@ -1612,7 +1615,7 @@ fn browser_act_input_schema() -> StrictJsonValue {
     let action_schema = serde_json::json!({
         "type":"object",
         "additionalProperties":false,
-        "description":"Choose one action variant. For click, hover, type, press, select, and scroll, copy the complete element object unchanged from the latest browser/observe result into `element`.",
+        "description":"Choose one action supported by this runtime. Read interaction_capabilities in browser/observe; schema variants are not a promise that every platform supports them. BROWSER_UNSUPPORTED_ACTION must not be retried with the same action. For click, hover, type, press, select, and scroll, copy the complete element object unchanged from the latest browser/observe result into `element`.",
         "properties":{
             "action":{"type":"string","enum":["click","hover","type","press","select","scroll","drag","dialog"]},
             "element":element.clone(),
@@ -2588,7 +2591,7 @@ fn capability_display(capability_id: &str) -> (&str, &str) {
         ),
         BROWSER_MODULE_ID => (
             "Browser",
-            "Use exact Browser actions on the bound native browser. For a browser/act click, the top-level object contains only `action`, `element`, and optional `button` or `click_count`. Copy the complete element object `{reference, role, name, focused}` from the latest observation into `element`. Top-level `reference`, `role`, `name`, `focused`, or `target` fields are invalid; never JSON-stringify a nested object.",
+            "Use exact Browser actions on the bound native browser. Read interaction_capabilities and unobserved_frames from observations; available actions differ by runtime. macOS WKWebView uses semantic_dom actions, which do not create trusted input or user activation. Do not repeat BROWSER_UNSUPPORTED_ACTION; manual interaction requires stopping the Agent and waiting for cleanup and input unlock. For a browser/act click, the top-level object contains only `action`, `element`, and optional `button` or `click_count`. Copy the complete element object `{reference, role, name, focused}` from the latest observation into `element`. Top-level `reference`, `role`, `name`, `focused`, or `target` fields are invalid; never JSON-stringify a nested object.",
         ),
         _ => (capability_id, "Bundled Wave 2 coding-extension capability."),
     }
@@ -2618,6 +2621,10 @@ mod tests {
         assert!(description.contains("contains only `action`, `element`"));
         assert!(description.contains("Top-level `reference`"));
         assert!(description.contains("never JSON-stringify"));
+        assert!(description.contains("semantic_dom"));
+        assert!(description.contains("Do not repeat BROWSER_UNSUPPORTED_ACTION"));
+        let observation_schema = super::action_input_schema("browser/observe");
+        assert_eq!(observation_schema.0.pointer("/properties/screenshot/type"), Some(&serde_json::json!("boolean")));
         let schema = super::action_input_schema("browser/act");
         assert_eq!(
             schema.0.pointer("/type"),

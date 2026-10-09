@@ -84,7 +84,7 @@
     },
     "build:fast": {
       "group": "build",
-      "desc": "快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制"
+      "desc": "快速构建 debug；macOS 输出原生 WKWebView .app，其余平台输出二进制"
     },
     "build:win": {
       "group": "build",
@@ -92,7 +92,7 @@
     },
     "build:mac": {
       "group": "build",
-      "desc": "装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/"
+      "desc": "构建 macOS App 和 DMG（默认 arm64，可选 Intel），并汇总到 dist/desktop/"
     },
     "build:linux": {
       "group": "build",
@@ -100,11 +100,11 @@
     },
     "build:signed": {
       "group": "build",
-      "desc": "装配完整 macOS CEF App，签名并执行已配置的公证"
+      "desc": "构建完整 macOS App，签名并执行已配置的公证"
     },
     "build:updater": {
       "group": "build",
-      "desc": "构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包"
+      "desc": "构建自更新包与 .sig；macOS 从最终签名 App 生成更新包"
     },
     "make:latest": {
       "group": "build",
@@ -161,6 +161,10 @@
     "test:desktop": {
       "group": "test",
       "desc": "运行桌面壳测试，不监听或打包 ui/dist 资源"
+    },
+    "test:upgrade": {
+      "group": "test",
+      "desc": "运行启动、数据集兼容与升级定向 Rust 测试"
     },
     "test:browser": {
       "group": "test",

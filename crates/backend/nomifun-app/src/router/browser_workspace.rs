@@ -198,6 +198,7 @@ async fn snapshot(
     let mut snapshot = match workspace {
         Some(workspace) => workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?,
         None => BrowserUserSnapshot {
+            interaction_capabilities: None,
             agent_session_id, browser_id: "managed-browser".to_owned(),
             run: BrowserRunSnapshot { revision: 0, input_state: BrowserInputState::UserReady, input_gate_failed: false },
             runtime: None,

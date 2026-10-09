@@ -12,5 +12,5 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The signed entry uses exactly the same CEF staging and final artifacts.
+# The signed entry uses exactly the same final App and distribution artifacts.
 exec bash "$SCRIPT_DIR/desktop-build-mac.sh" --signed "$@"

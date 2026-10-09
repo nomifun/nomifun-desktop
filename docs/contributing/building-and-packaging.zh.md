@@ -111,7 +111,7 @@ NOMIFUN_NFAGENT_PATH=<已存在的 nfagent 绝对路径>
 
 ## macOS 签名与公证
 
-完整 macOS 包支持 Apple Silicon arm64 与 Intel x64，各自使用独立的 CEF 运行库，
+完整 macOS 包支持 Apple Silicon arm64 与 Intel x64，均使用系统 WKWebView，
 明确拒绝混合架构 Universal。`bun run build:mac` 默认生成 arm64 包；
 `bun run build:mac intel` 生成 Intel 包，并包含校验过的 ONNX Runtime 与许可证。
 两种原生架构的内置浏览器均沿用 macOS 14+ 的既有目标。DMG 默认使用 ULMO/LZMA 压缩，要求
@@ -122,12 +122,13 @@ NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
 ```
 
 该设置也适用于 `build:signed` 和 `build:updater`。压缩策略不修改 App 最低
-系统声明，也不替换 CEF 运行库。签名发布构建配置公证时，最终 App 在生成
+系统 macOS 14+ 声明。签名发布构建配置公证时，最终 App 在生成
 DMG/updater 字节之前完成签名、公证与装订票据；DMG 创建后再执行自身的签名与公证。
 
-CEF 保留 `en`、`en_GB`、`zh_CN`、`zh_TW` 及对应的 `FEMININE`、`MASCULINE`、
-`NEUTER` 语言资源变体。其他语言资源仅在 framework 复制后、签名前裁剪，不修改
-CEF 当前默认语言或网页功能。updater 仍使用 `.app.tar.gz`，压缩等级为 gzip level 9。
+不下载或打包浏览器运行时、helper、语言包或系统 WebKit.framework，打包检查会拒绝
+这些浏览器组件。Intel ONNX Runtime、rpath 和许可证继续作为独立应用依赖保留。
+updater 仍使用 `.app.tar.gz`，压缩等级为 gzip level 9；实际解压后核对全部文件字节、
+权限和符号链接目标与最终 App 一致。
 
 ad-hoc 签名产物只适合本地测试，不适合发给别人。生成 Developer ID 签名并公证的 DMG：
 

@@ -16,14 +16,14 @@
 # 架构别名:
 #   arm / aarch64 / silicon  -> aarch64-apple-darwin   (Apple Silicon 原生)
 #   intel / x64 / x86_64    -> x86_64-apple-darwin    (Intel)
-#   每个架构使用单独固定的 CEF runtime；不生成混合架构 Universal 包。
+#   分别构建 ARM 和 Intel 原生产物；Intel 包含独立的 ONNX Runtime。
 #
 # 缺失的 Rust 编译目标会自动 `rustup target add`。
 #
 # 签名(--signed)说明:
 #   密钥/口令全部来自本地 apps/desktop/signing/.env.signing(已 gitignore,绝不入库),
 #   与 build:signed 用同一份配置，并要求钥匙串中已安装 APPLE_SIGNING_IDENTITY。
-#   CEF 装配后签名最终 App，按配置公证/staple；DMG/updater 均从该 App 生成。
+#   签名最终 App，按配置公证/staple；DMG/updater 均从该 App 生成。
 #
 # 注:Windows / Linux 包无法在 macOS 上交叉构建,请到对应系统上分别用
 #     bun run build:win / build:linux。
@@ -43,8 +43,7 @@ CONF="apps/desktop/tauri.conf.json"
 MAC_CONF="apps/desktop/tauri.macos.conf.json"
 DIST="$ROOT/dist/desktop"
 RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
-CEF_STAGE_TOOL="$ROOT/scripts/validation/stage-macos-cef-bundle.mjs"
-BROWSER_BUNDLE_TOOL="$ROOT/scripts/lib/macos-browser-bundle.mjs"
+APP_BUNDLE_TOOL="$ROOT/scripts/lib/macos-app-bundle.mjs"
 ONNX_RUNTIME_TOOL="$ROOT/scripts/lib/macos-onnx-runtime.mjs"
 DMG_TOOL="$ROOT/scripts/lib/macos-dmg.mjs"
 CHECK_ONLY=0
@@ -94,10 +93,6 @@ done
   echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
   exit 1
 }
-[[ -f "$CEF_STAGE_TOOL" ]] || {
-  echo "❌ missing CEF staging tool: $CEF_STAGE_TOOL" >&2
-  exit 1
-}
 [[ -f "$ROOT/$MAC_CONF" ]] || {
   echo "❌ missing macOS Tauri overlay: $ROOT/$MAC_CONF" >&2
   exit 1
@@ -116,7 +111,7 @@ resolve_triple() {
 
 TRIPLES=()
 if [[ "${#SELECT[@]}" -eq 0 ]]; then
-  # 默认 Apple Silicon；Intel 使用独立固定的 CEF framework/helper。
+  # 默认 Apple Silicon；Intel 包含匹配的 ONNX Runtime。
   TRIPLES=(aarch64-apple-darwin)
 else
   for s in "${SELECT[@]}"; do
@@ -126,7 +121,7 @@ fi
 
 for t in "${TRIPLES[@]}"; do
   if [[ "$t" != "aarch64-apple-darwin" && "$t" != "x86_64-apple-darwin" ]]; then
-    echo "❌ 每个 CEF runtime 固定到一个架构；请分别构建 arm 和 intel，不能生成 $t 包。" >&2
+    echo "❌ 请分别构建 arm 和 intel，不能生成 $t 包。" >&2
     exit 1
   fi
 done
@@ -172,12 +167,7 @@ verify_macos_app() {
   else
     [[ "$archs" == "x86_64" ]] || { echo "❌ x86_64 app has architectures: $archs" >&2; exit 1; }
   fi
-  local cef_framework="$app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
-  local cef_runtime="$app/Contents/Resources/browser-cef/runtime.json"
-  [[ -f "$cef_framework" && -f "$cef_runtime" ]] || {
-    echo "❌ app 缺少固定 CEF framework/runtime metadata: $app" >&2
-    exit 1
-  }
+  bun "$APP_BUNDLE_TOOL" inspect --app "$app" >/dev/null
   if [[ "$target" == "x86_64-apple-darwin" ]]; then
     local ort_library="$app/Contents/Frameworks/$(bun -e 'console.log(require("./apps/desktop/onnx-runtime-intel.json").library)')"
     [[ -f "$ort_library" && "$(lipo -archs "$ort_library")" == "x86_64" ]] || {
@@ -185,23 +175,6 @@ verify_macos_app() {
       exit 1
     }
   fi
-  local helper_name
-  for helper_name in \
-    "NomiFun Helper" \
-    "NomiFun Helper (GPU)" \
-    "NomiFun Helper (Renderer)" \
-    "NomiFun Helper (Plugin)" \
-    "NomiFun Helper (Alerts)"; do
-    [[ -x "$app/Contents/Frameworks/$helper_name.app/Contents/MacOS/$helper_name" ]] || {
-      echo "❌ app 缺少可执行 CEF helper: $helper_name" >&2
-      exit 1
-    }
-  done
-}
-
-find_cef_runtime() {
-  local target="$1"
-  bun "$BROWSER_BUNDLE_TOOL" runtime --root "$ROOT" --target "$target" --profile release
 }
 
 notarize_final_app() {
@@ -213,7 +186,7 @@ notarize_final_app() {
     rm -rf "$temporary"
     return 1
   fi
-  echo "▶ 公证最终 CEF App 并装订票据"
+  echo "▶ 公证最终 App 并装订票据"
   if ! submit_for_notarization "$temporary/NomiFun.zip"; then
     rm -rf "$temporary"
     return 1
@@ -223,30 +196,15 @@ notarize_final_app() {
   xcrun stapler validate "$app"
 }
 
-stage_macos_cef() {
+sign_final_app() {
   local app="$1"
   local target="$2"
   local identity="-"
   if [[ "$SIGNED" -eq 1 ]]; then
-    identity="${APPLE_SIGNING_IDENTITY:-}"
-    [[ -n "$identity" ]] || {
-      echo "❌ CEF nested signing requires APPLE_SIGNING_IDENTITY。" >&2
-      exit 1
-    }
+    identity="${APPLE_SIGNING_IDENTITY:?installed signing identity is required}"
   fi
-
-  echo "▶ 构建固定 CEF helper: $target"
-  local cached_runtime
-  cached_runtime="$(bun "$BROWSER_BUNDLE_TOOL" compile-runtime --root "$ROOT" --target "$target" --profile release)"
-  unset CEF_PATH FLATPAK
-  [[ -z "$cached_runtime" ]] || export CEF_PATH="$cached_runtime"
-  cargo build --locked -p nomifun-browser-macos --bin nomifun-browser-cef-helper \
-    --release --target "$target"
-  local helper="$ROOT/target/$target/release/nomifun-browser-cef-helper"
-  local runtime
-  runtime="${cached_runtime:-$(find_cef_runtime "$target")}"
-  echo "▶ 装配并签名固定 CEF runtime/helper"
-  bun "$CEF_STAGE_TOOL" --app "$app" --helper "$helper" --runtime "$runtime" --identity "$identity" --target "$target"
+  echo "▶ 签名最终 App 和随附的原生库"
+  bun "$APP_BUNDLE_TOOL" sign --app "$app" --identity "$identity" --target "$target"
 }
 
 create_dmg_from_staged_app() {
@@ -258,7 +216,7 @@ create_dmg_from_staged_app() {
   local suffix="aarch64"
   [[ "$target" != "x86_64-apple-darwin" ]] || suffix="x64"
   local output="$dmg_dir/NomiFun_${version}_${suffix}.dmg"
-  echo "▶ 从已装配 CEF 的 App 生成 $DMG_FORMAT DMG: $output"
+  echo "▶ 从最终 App 生成 $DMG_FORMAT DMG: $output"
   NOMIFUN_MACOS_DMG_FORMAT="$DMG_FORMAT" bun "$DMG_TOOL" create --app "$app" --output "$output"
   if [[ "$SIGNED" -eq 1 ]]; then
     echo "▶ 签名 DMG: $output"
@@ -317,7 +275,7 @@ if [[ "$SIGNED" -eq 1 ]]; then
   load_signing_env "$ROOT"
   require_signing_identity
   [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || {
-    echo "❌ 完整 CEF App 的嵌套签名需要已安装的 APPLE_SIGNING_IDENTITY；仅 APPLE_CERTIFICATE 的临时钥匙串不能供后续 CEF 装配复用。" >&2
+    echo "❌ 最终 App 签名需要已安装的 APPLE_SIGNING_IDENTITY；仅 APPLE_CERTIFICATE 的临时钥匙串不能供后续签名复用。" >&2
     exit 1
   }
   detect_notary
@@ -341,12 +299,9 @@ BASE_RUSTFLAGS="${RUSTFLAGS:-}"
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
-  # Tauri's updater archive precedes CEF staging. Disable it here and generate
-  # both distribution formats only after the final App is staged and signed.
-  updater="$(bun "$BROWSER_BUNDLE_TOOL" build-settings --root "$ROOT" -- ${PASSTHRU[@]+"${PASSTHRU[@]}"})"
-  cached_runtime="$(bun "$BROWSER_BUNDLE_TOOL" compile-runtime --root "$ROOT" --target "$t" --profile release)"
-  unset CEF_PATH FLATPAK
-  [[ -z "$cached_runtime" ]] || export CEF_PATH="$cached_runtime"
+  # Tauri's updater archive precedes final signing. Disable it here and generate
+  # both distribution formats only after the final App is signed.
+  updater="$(bun "$APP_BUNDLE_TOOL" build-settings --root "$ROOT" -- ${PASSTHRU[@]+"${PASSTHRU[@]}"})"
   ONNX_CONFIG=()
   unset ORT_LIB_PATH ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
   export RUSTFLAGS="$BASE_RUSTFLAGS"
@@ -372,13 +327,13 @@ for t in "${TRIPLES[@]}"; do
     echo "❌ Tauri App does not contain this exact desktop build; refusing stale or mismatched output。" >&2
     exit 1
   }
-  stage_macos_cef "$app" "$t"
+  sign_final_app "$app" "$t"
   verify_macos_app "$app" "$t"
   notarize_final_app "$app"
   create_dmg_from_staged_app "$app" "$t" "$dmg_dir"
   if [[ "$updater" == "true" ]]; then
-    echo "▶ 从同一最终 CEF App 生成并签名 updater"
-    bun "$BROWSER_BUNDLE_TOOL" updater --root "$ROOT" --app "$app"
+    echo "▶ 从同一最终 App 生成并签名 updater"
+    bun "$APP_BUNDLE_TOOL" updater --root "$ROOT" --app "$app"
     archive_name="NomiFun.app.tar.gz"
     [[ "$t" != "x86_64-apple-darwin" ]] || archive_name="NomiFun_$(bun -e 'console.log(require("./package.json").version)')_x64.app.tar.gz"
     archive="$app.tar.gz"

@@ -77,11 +77,19 @@ bun run serve:web
 `--insecure-no-auth`, so keep it on localhost or an isolated network.
 
 The Rust-backed development loops (`dev`, `dev:web`, and `build:fast`) use the
-`dev` build channel and therefore default to the `NomiFun-dev` data directory
-(a sibling of the stable root, never nested inside it).
+`dev` build channel. Without an explicit data root, the desktop `bun run dev`
+launcher derives `NomiFun-dev-schema-<fingerprint>` from the current canonical
+baseline, reuses development data for that schema, and preserves former directories.
+Development roots stay outside the stable root and are never nested inside it.
 Production-style `serve:web` and release builds remain on the stable `NomiFun`
 directory. Use `NOMIFUN_DATA_DIR` or `--data-dir` for an explicit isolated root;
 development startup does not import historical Agent state from stable.
+
+On macOS, the development runner passes `-ApplePersistenceIgnoreState YES` to
+each App generation so a previous crash's system window-restoration prompt cannot
+block Tauri startup and backend listening. This setting applies only to that
+process; it does not write user preferences, delete saved state, or change the
+published App's restoration behavior.
 
 The desktop loop does **not** use the old Electron process model. The Tauri
 shell links `nomifun-app`, starts the backend in-process on a free localhost
