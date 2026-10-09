@@ -16,7 +16,7 @@ lines up with how a request travels through the server.
 The normal product seam is
 [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/). Feature crates
 that need agent concepts should consume them through
-`nomifun_ai_agent::{nomi_config, nomi_types, RequirementSink}` when possible.
+`nomifun_ai_agent::{nomi_config, nomi_types}` when possible.
 
 There are deliberate, feature-gated direct-dependency exceptions:
 
@@ -73,7 +73,7 @@ identifiers remain opaque.
 
 | Crate | Responsibility |
 | --- | --- |
-| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds the built-in `nomi` Agent runtime, while `AgentRuntimeRegistry` caches one process-local runtime handle per Conversation. It broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...), and re-exports `nomi_config`, `nomi_types`, and `RequirementSink` for the rest of the backend. |
+| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds the built-in `nomi` Agent runtime, while `AgentRuntimeSessions` manages process-local runtime handles. It broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...), and re-exports `nomi_config` and `nomi_types` for the rest of the backend. |
 
 ## Feature crates (the bulk of the product)
 
@@ -86,7 +86,7 @@ identifiers remain opaque.
 | [`nomifun-channel`](../../crates/backend/nomifun-channel/) | External chat-channel adapters (Telegram, Lark, DingTalk, WeChat) — feature-gated. Maps inbound messages into the shared Agent / Conversation runtime, resolves per-bot or per-platform companion ownership, and applies channel Agent context. This is an integration boundary, not a separate Agent type or mode. |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **Platform Gateway MCP** — in-process capability registry and transport for `nomi_*` compatibility tools (conversations, cron, companion memory, requirements, and other domain services). Browser/Computer Role capabilities are owned by `AgentPlatform`. Internal child processes reach it through `nomicore mcp-gateway-stdio` with a server-derived, scoped, expiring signed claim; no Conversation or build-extra field grants access. Authenticated public fronts project only their allowed capability subset. |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | Scheduled tasks: cron expressions, timezone repair, the cron daemon, slash-command-driven creation. |
-| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **Persistent AutoWork runner** — backend-driven, boot-resume loop. Speaks to the Agent layer through `RequirementSink`. |
+| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **Persistent AutoWork runner** — backend-driven, boot-resume loop. `RequirementServiceSink` implements `nomifun_common::RequirementCreator` for the opt-in channel-to-requirement pipeline, wired by `nomifun-app`. |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | Intelligent Decision-Making Mode: an opt-in canonical AgentSession supervisor for provider faults, model silence, and decision stalls (rule tier + constrained bypass model); it owns no second Session or Runtime. See [Intelligent Decision](../guides/intelligent-decision.md). |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | Outbound Lark sender and `CompletionNotifier` for completed Agent work. |
 | [`nomifun-agent-contracts`](../../crates/backend/nomifun-agent-contracts/) | Canonical machine contracts for the Agent platform: frozen types and deterministic artifacts only; no dependency on Conversation, app composition, or product state. |

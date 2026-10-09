@@ -9,14 +9,12 @@ repository.workspace = true
 [dependencies]
 nomi-types.workspace    = true
 nomi-config.workspace   = true
-nomi-tools.workspace    = true
 nomi-a11y.workspace     = true
 
 tracing.workspace     = true
 tokio.workspace       = true
 serde_json.workspace  = true
 serde.workspace       = true
-async-trait.workspace = true
 
 xcap.workspace   = true
 enigo.workspace  = true

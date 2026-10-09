@@ -58,6 +58,3 @@ impl A11yEngine for MacEngine {
 }
 
 mod actor;
-mod ocr;
-
-pub use ocr::ocr_screenshot;

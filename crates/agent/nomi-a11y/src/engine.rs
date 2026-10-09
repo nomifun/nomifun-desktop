@@ -3,8 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use nomi_types::tool::ToolImage;
-
 /// Monotonic snapshot generation. A `ref` (index into a snapshot's element
 /// list) is only valid against the generation it was produced in; backends use
 /// this to reject stale references instead of acting on a moved element.
@@ -22,8 +20,7 @@ pub struct ElementId {
 
 /// A rectangle. Backends return element bounds in **OS accessibility
 /// coordinates** (e.g. macOS global screen points, top-left origin); mapping to
-/// screenshot-pixel space for overlays/pixel-fallback is the caller's job (see
-/// the design's AX-points→pixel conversion).
+/// screenshot-pixel space for pixel fallback is the caller's job.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,
@@ -41,7 +38,7 @@ impl Rect {
     }
 }
 
-/// Where an element entry came from. Set-of-Marks fuses these.
+/// Where an element entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -69,15 +66,6 @@ pub struct ElementEntry {
     pub source: Source,
 }
 
-/// A line of text recognized by OCR, with bounds in screenshot-pixel space
-/// (top-left origin). Fused into the Set-of-Marks list where the accessibility
-/// tree is thin (Electron/canvas/games).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OcrLine {
-    pub text: String,
-    pub bounds: Rect,
-}
-
 /// How synthetic input is delivered on this platform/session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,7 +87,7 @@ pub struct Capabilities {
     pub os: String,
     /// Can read the accessibility tree (`observe`).
     pub tree_read: bool,
-    /// Can capture a screenshot for the Set-of-Marks overlay.
+    /// Can capture a screenshot.
     pub screenshot: bool,
     /// Can perform semantic actions (AXPress / Invoke / do_action) on elements.
     pub semantic_action: bool,
@@ -108,14 +96,12 @@ pub struct Capabilities {
     pub window_management: bool,
 }
 
-/// A completed `observe`: the filtered interactable elements + an optional
-/// Set-of-Marks overlay image, plus the indented text rendering for the model.
+/// A completed `observe`: the filtered interactable elements and their
+/// indented text rendering for the model.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub generation: SnapshotGen,
     pub entries: Vec<ElementEntry>,
-    /// Set-of-Marks overlay (numbered boxes on the screenshot), when produced.
-    pub overlay: Option<ToolImage>,
     /// Indented text rendering: `[14] button "Submit" enabled`.
     pub text: String,
     /// True if the tree exceeded the node budget and was truncated.
@@ -200,7 +186,7 @@ pub trait A11yEngine: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
     /// Read the frontmost (or `opts.pid`) window's accessibility tree, filter to
-    /// interactable elements, and return them numbered as a Set-of-Marks
+    /// interactable elements, and return them as a numbered element
     /// snapshot. Element `bounds` are in OS accessibility coordinates.
     fn observe(&self, opts: &ObserveOpts) -> Result<Snapshot, A11yError>;
 

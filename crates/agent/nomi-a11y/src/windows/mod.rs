@@ -9,9 +9,6 @@
 //! per-command reply; raw UIA element handles never cross the actor boundary —
 //! only serializable `Snapshot` / `Effect` data does (so `WinEngine` is
 //! `Send + Sync` automatically, no `unsafe impl` needed).
-//!
-//! OCR (`Windows.Media.Ocr`) has no apartment affinity and runs on whatever
-//! thread the caller uses (the computer tool calls it from `spawn_blocking`).
 
 use crate::engine::{
     A11yEngine, A11yError, Capabilities, Effect, ElementAction, InputKind, ObserveOpts, Snapshot,
@@ -19,10 +16,8 @@ use crate::engine::{
 };
 
 mod actor;
-mod ocr;
 mod tree_map;
 
-pub use ocr::ocr_screenshot;
 
 pub struct WinEngine {
     inner: actor::ActorHandle,

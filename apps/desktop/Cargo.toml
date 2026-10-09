@@ -110,11 +110,6 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 tempfile.workspace = true
 tauri = { version = "2", features = ["test"] }
-nomi-tools.workspace = true
-nomi-types.workspace = true
-nomifun-agent-kernel.workspace = true
-nomifun-agent-contracts.workspace = true
-nomifun-ai-agent.workspace = true
 image.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true

@@ -178,10 +178,6 @@ pub(crate) async fn build(
         .collect::<BTreeSet<_>>();
     let wave4_context =
         super::nomi_core_wave4::nomi_core_wave4_context_capability_ids();
-    let mut lifecycle_capability_ids =
-        super::nomi_core_wave4::nomi_core_wave4_lifecycle_capability_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
     let robot_owner = services.robot.as_ref().map(|robot| {
         Arc::new(super::nomi_core_robot::RobotModuleOwner::new(
             Arc::clone(&services.authoritative_user_id),
@@ -278,14 +274,13 @@ pub(crate) async fn build(
         .into_iter()
         .chain(wave4_context)
         .collect();
-    lifecycle_capability_ids.extend(wave2_lifecycle);
 
     Ok(NomiCoreBuiltinPlan {
         registrations,
         tool_capability_ids,
         host_dynamic_tool_capability_ids,
         context_capability_ids,
-        lifecycle_capability_ids,
+        lifecycle_capability_ids: wave2_lifecycle,
         schema_resolver: Arc::new(schema_router),
         wave4_owners: wave4,
         wave5_owner,

@@ -910,16 +910,6 @@
   "skills": {
     "loaded": "已加载技能"
   },
-  "mcp": {
-    "loaded": "已加载 MCP",
-    "managementHint": "如果某个 MCP 加载异常，请检查其 JSON 配置，并在 MCP 管理页手动检测可用性。",
-    "openSettings": "前往 MCP 管理",
-    "status": {
-      "loaded": "已加载",
-      "failed": "失败",
-      "unsupported": "不支持"
-    }
-  },
   "capabilityPicker": {
     "unavailable": "已移除或不可用",
     "ariaLabel": "会话能力",

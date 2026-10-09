@@ -2932,9 +2932,8 @@ fn main() -> std::process::ExitCode {
     //   NOMI_LOG_LEVEL=debug            (everything)
     //   NOMI_LOG_LEVEL=info             (default)
     // At `debug`, the `nomi_providers` target logs the outgoing request body and
-    // each SSE chunk, and `nomi_mcp` logs MCP connect results — exactly what is
-    // needed to diagnose a provider/gateway stall. Console output appears in the
-    // terminal that launched `tauri dev`; it is also written to the log files
+    // each SSE chunk, and `nomifun_mcp` logs MCP connection tests. Console output
+    // appears in the terminal that launched `tauri dev`; it is also written to the log files
     // under {data-dir}/logs/.
     if let Ok(level) = std::env::var("NOMI_LOG_LEVEL") {
         let level = level.trim();

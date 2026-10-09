@@ -12,9 +12,9 @@ nomifun-desktop/
 │   ├── web/                      nomifun-web：独立 Web/API host
 │   └── desktop/                  nomifun-desktop：Tauri 桌面壳
 ├── crates/
-│   ├── agent/                    11 个 nomi-* crate，AI agent 引擎
+│   ├── agent/                    7 个 nomi-* crate，提供商、配置及桌面自动化基础实现
 │   ├── backend/                  54 个 nomifun-* crate，HTTP/WS 后端
-│   └── shared/                   5 个跨层共享 crate
+│   └── shared/                   4 个跨层共享 crate
 ├── ui/                           React SPA，Vite + UnoCSS，唯一 Bun workspace
 ├── docs/                         当前文档、专项历史决策、外部 skill 与图片资源
 ├── packaging/linux/              nomifun-web systemd unit 与部署说明
@@ -48,15 +48,19 @@ binary 存在，用于诊断、stdio MCP bridge、canonical Remote 调用和无�
 
 | 目录 | 前缀 | 数量 | 职责 |
 | --- | --- | --- | --- |
-| [`crates/agent/`](../../crates/agent) | `nomi-*` | 11 | AI agent 引擎，尽量保持独立。 |
+| [`crates/agent/`](../../crates/agent) | `nomi-*` | 7 | 提供商、配置及桌面自动化基础实现，尽量保持独立。 |
 | [`crates/backend/`](../../crates/backend) | `nomifun-*` | 54 | HTTP/WS 后端、数据层、认证、Agent Store、Unified Plugin、cron、knowledge、terminal、companion、public gateway 等。 |
-| [`crates/shared/`](../../crates/shared) | mixed | 5 | 真正跨 agent/backend 使用的共享工具。 |
+| [`crates/shared/`](../../crates/shared) | mixed | 4 | 真正跨 agent/backend 使用的共享工具。 |
+
+模型/工具循环位于 `nomifun-agent-runtime`。`nomifun-engine-core` 将已准入的
+工具计划投影到 `nomifun-agent-kernel`，应用宿主提供具体能力 adapter；
+`nomifun-mcp` 持有 MCP 连接与调用。
 
 ## Agent 层接缝
 
 后端代码需要 agent 类型或执行能力时，默认应通过
 [`crates/backend/nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent)。
-它再导出常用的 `nomi_config`、`nomi_types` 和 `RequirementSink`。
+它再导出常用的 `nomi_config` 和 `nomi_types`。
 
 当前 workspace 仍存在少数 feature-gated 直接依赖例外：`nomifun-app` 与
 `nomifun-gateway` 为 browser/computer-use bridge 工具直接触达部分 `nomi-*`

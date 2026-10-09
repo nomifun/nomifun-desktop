@@ -30,7 +30,11 @@ See `docs/architecture/backend-crates.md` for the maintained map.
 
 Only `nomifun-ai-agent` should depend directly on `nomi-*` crates. Other backend
 crates consume agent-facing types through its re-exports, for example
-`nomifun_ai_agent::{nomi_config, nomi_types, RequirementSink}`.
+`nomifun_ai_agent::{nomi_config, nomi_types}`.
+
+The opt-in channel-to-requirement hook is `nomifun_common::RequirementCreator`.
+`nomifun_requirement::RequirementServiceSink` implements it; `nomifun-app`
+wires that implementation into the channel action executor.
 
 This keeps the agent layer isolated enough to reason about, but the older
 `nomifun-agent-rs` extraction language in historical specs is not a current

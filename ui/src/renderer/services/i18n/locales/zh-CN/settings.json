@@ -462,7 +462,6 @@
   "agentIdleTimeout": "执行引擎空闲超时（分钟）",
   "agentIdleTimeoutDesc": "空闲超过该时长后自动终止执行引擎进程以释放内存",
   "gemini": "Gemini CLI",
-  "model": "模型",
   "system": "系统",
   "about": "关于",
   "advancedSettings": "高级设置",
@@ -641,7 +640,6 @@
   "lightMode": "浅色",
   "darkMode": "深色",
   "agent": "对话Agent",
-  "tools": "工具",
   "capabilities": "能力扩展",
   "capabilitiesTab": {
     "skills": "技能",
@@ -933,7 +931,6 @@
   "channels.extension.defaultDesc": "扩展渠道插件",
   "channels.mediaSendFailed": "发送 {{name}} 失败",
   "channels.mediaPathNotAllowed": "无法发送 {{name}}，因为该文件不在允许发送的目录中",
-  "display": "显示",
   "mcp": "MCP 集成",
   "mcpSettings": "MCP 服务器",
   "mcpServerList": "MCP 服务器",

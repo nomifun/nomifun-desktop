@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'ui', 'dist');
 const CHECK_DIST = process.argv.includes('--dist');
+const RETIRED_TRANSLATION_GROUPS = /^(?:audio|video|product|workbenchComposer|workbenchSider)$/;
 
 const LEGACY_TRACKED_PATHS = [
   /^ui\/src\/renderer\/pages\/creativeStudio\/workbenches\//,
@@ -43,6 +44,10 @@ const RUNTIME_MARKERS = [
     label: 'retired translation namespace',
     pattern: /\b(?:t|i18n\.t)\(\s*['"]workshop(?:Canvas|Assets|Editor|Generation|Agent)?\./g,
   },
+  {
+    label: 'retired independent generation translation namespace',
+    pattern: /\bcreativeStudio\.(?:audio|video|product|workbenchComposer|workbenchSider)(?:\.|['"`])/g,
+  },
   { label: 'retired HTTP namespace', pattern: /\/api\/workshop(?:\/|['"`])/g },
   {
     label: 'retired unowned creation task API',
@@ -57,6 +62,10 @@ const DIST_MARKERS = [
   {
     label: 'retired translation namespace',
     pattern: /workshop(?:Canvas|Assets|Editor|Generation|Agent)\.|workshop\.beta/g,
+  },
+  {
+    label: 'retired independent generation translation namespace',
+    pattern: /\bcreativeStudio\.(?:audio|video|product|workbenchComposer|workbenchSider)(?:\.|['"`])/g,
   },
   { label: 'retired canvas route pattern', pattern: /\/workshop\/:id/g },
   { label: 'retired HTTP namespace', pattern: /\/api\/workshop\//g },
@@ -117,6 +126,18 @@ const retiredTracked = files.filter((path) =>
 const runtimeViolations = files
   .filter((path) => isRuntimeSource(path) || /^ui\/src\/renderer\/services\/i18n\/locales\/[^/]+\/[^/]+\.json$/.test(path))
   .flatMap((path) => scanSource(path, readFileSync(join(ROOT, path), 'utf8'), RUNTIME_MARKERS));
+for (const path of files.filter((path) => /^ui\/src\/renderer\/services\/i18n\/locales\/[^/]+\/creativeStudio\.json$/.test(path))) {
+  const source = readFileSync(join(ROOT, path), 'utf8');
+  for (const group of Object.keys(JSON.parse(source)).filter((key) => RETIRED_TRANSLATION_GROUPS.test(key))) {
+    const match = new RegExp(`^  "${group}"\\s*:`, 'm').exec(source);
+    runtimeViolations.push({
+      path,
+      line: match ? lineOf(source, match.index) : 1,
+      label: 'retired independent generation translation namespace',
+      token: `creativeStudio.${group}`,
+    });
+  }
+}
 for (const path of files.filter((path) => /^crates\/backend\/[^/]+\/src\/.+\.rs$/.test(path))) {
   runtimeViolations.push(...scanSource(path, readFileSync(join(ROOT, path), 'utf8'), BACKEND_MARKERS));
 }

@@ -6,28 +6,7 @@ use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
 
-use common::{body_json, get_with_token, setup_and_login};
-
-async fn build_app() -> (axum::Router, nomifun_app::compatibility::AppServices) {
-    let root = tempfile::Builder::new()
-        .prefix("nomifun-auxiliary-e2e-")
-        .tempdir()
-        .unwrap()
-        .keep();
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::compatibility::AppServices::from_config(
-        db,
-        &nomifun_app::AppConfig {
-            data_dir: root.join("data"),
-            work_dir: root.join("work"),
-            ..nomifun_app::AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-    let router = nomifun_app::compatibility::create_router(&services).await;
-    (router, services)
-}
+use common::{body_json, build_app, get_with_token, setup_and_login};
 
 async fn setup_owner(
     app: &mut axum::Router,

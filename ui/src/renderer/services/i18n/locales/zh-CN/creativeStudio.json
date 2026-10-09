@@ -1,14 +1,6 @@
 {
   "title": "$t(agentSettings.template.creativeStudio.default.name)",
   "siderTitle": "$t(agentSettings.template.creativeStudio.default.name)",
-  "workbenchSider": {
-    "collapse": "收起生成设置",
-    "expand": "展开生成设置",
-    "resize": "调整生成设置宽度",
-    "resizeHint": "拖动调整宽度，双击恢复默认宽度",
-    "resizeHeight": "调整生成设置高度",
-    "resizeHeightHint": "拖动调整高度，双击贴合内容"
-  },
   "focus": {
     "backToWorkbench": "返回工作台"
   },
@@ -265,86 +257,6 @@
     "view": {
       "grid": "网格视图",
       "list": "列表视图"
-    }
-  },
-  "audio": {
-    "actions": {
-      "cancelTask": "取消任务",
-      "downloadAudio": "下载音频",
-      "downloadResult": "下载 {{title}}",
-      "insertCanvas": "插入画布",
-      "pause": "暂停",
-      "play": "播放",
-      "regenerate": "重新生成",
-      "retryResult": "重试此结果"
-    },
-    "fields": {
-      "format": "输出格式",
-      "instructions": "声音指令",
-      "instructionsPlaceholder": "例如：自然、温暖、语速轻快，结尾略微上扬。",
-      "instructionsUnsupported": "当前模型协议未声明声音指令能力。",
-      "model": "语音模型",
-      "modelAndVoice": "模型与音色",
-      "modelDefault": "模型默认",
-      "speed": "语速",
-      "speedUnsupported": "当前模型协议未声明语速参数。",
-      "text": "朗读文本",
-      "textPlaceholder": "输入需要合成的旁白、对白或播报文本…",
-      "textShortcut": "Ctrl / ⌘ + Enter 提交；当前 NomiFun `/api/tts` 上限为 4096 字符。",
-      "voice": "音色",
-      "voiceHint": "voice 保持自由文本，避免把供应商音色 ID 锁死在前端。",
-      "voicePlaceholder": "使用模型默认音色或输入 voice ID"
-    },
-    "generate": {
-      "running": "正在生成",
-      "submit": "生成音频",
-      "waiting": "等待模型"
-    },
-    "header": {
-      "description": "把文字、语气与真实参考素材交给已配置的语音模型。",
-      "eyebrow": "AUDIO STUDIO",
-      "title": "音频工作台"
-    },
-    "references": {
-      "choose": "从画布或资产库选择",
-      "empty": "没有参考音频",
-      "optional": "可选",
-      "remove": "移除 {{name}}",
-      "removeAria": "移除参考音频 {{name}}",
-      "required": "必需",
-      "requiredEmpty": "请选择一段真实参考音频",
-      "title": "参考音频",
-      "unsupported": "当前模型未声明参考音频能力。"
-    },
-    "result": {
-      "canceled": "已取消",
-      "failed": "失败",
-      "queued": "排队中",
-      "running": "生成中",
-      "succeeded": "已完成",
-      "waitingActions": "任务完成后可播放、下载或插入画布"
-    },
-    "results": {
-      "description": "结果由外部任务与资产服务提供；这里不创建临时音频。",
-      "emptyDescription": "填写文本并选择语音模型，真实生成结果会显示在这里。",
-      "emptyTitle": "还没有音频结果",
-      "title": "音频结果"
-    },
-    "task": {
-      "canceled": "已取消",
-      "failed": "生成失败",
-      "idle": "等待生成",
-      "queued": "排队中",
-      "running": "生成中",
-      "succeeded": "生成完成"
-    },
-    "validation": {
-      "modelRequired": "请选择 speech_synthesis 模型",
-      "referenceRequired": "当前模式需要参考音频",
-      "referenceUnsupported": "当前模型不支持必需的参考音频",
-      "textRequired": "请先填写朗读文本",
-      "textTooLong": "朗读文本超过长度限制",
-      "unavailable": "当前配置暂不可提交"
     }
   },
   "canvas": {
@@ -1415,95 +1327,6 @@
       "videoGeneration": "视频生成"
     }
   },
-  "product": {
-    "errors": {
-      "busy": "已有任务正在进行。",
-      "catalogError": "模型目录加载失败。",
-      "catalogLoading": "模型目录仍在加载。",
-      "disposed": "此工作台已不可用。",
-      "invalidParameters": "任务参数无效。",
-      "modelNotCompatible": "所选模型与当前任务不兼容。",
-      "modelRequired": "请先选择兼容的模型。",
-      "operationFailed": "工作台操作失败。",
-      "referencesRestoring": "参考素材草稿仍在恢复，未发起生成。",
-      "referenceInvalid": "所选参考素材无效。",
-      "retryUnavailable": "此任务无法重试。",
-      "taskNotFound": "找不到任务 {{taskId}}。",
-      "taskUnavailable": "任务已不可用。",
-      "unsupportedState": "工作台返回了不受支持的状态。"
-    },
-    "history": {
-      "cancel": "取消",
-      "invalidSelection": "每次必须选择 1-100 条终态历史。",
-      "loadFailed": "{{label}}历史加载失败",
-      "loadingDescription": "正在读取独立工作台的任务与结果，请稍候。",
-      "restoring": "正在恢复{{label}}历史",
-      "retire": "从历史移除",
-      "retireDescription": "任务审计、输入素材和生成结果会继续安全保留；这里只让所选记录不再出现在当前工作台历史中。",
-      "retireManyTitle": "从历史移除 {{recordCount}} 条？",
-      "retireOneTitle": "从历史移除这条记录？",
-      "retiring": "正在移除…",
-      "retry": "重试",
-      "runningTask": "运行中的任务必须先取消，不能直接从历史移除。"
-    },
-    "image": {
-      "editModel": {
-        "configure": "配置图片编辑模型",
-        "empty": "没有已启用且具备“图片编辑”能力的模型。",
-        "error": "图片编辑模型目录加载失败。",
-        "loading": "正在加载图片编辑模型…",
-        "placeholder": "选择图片编辑模型",
-        "unavailable": "已选图片编辑模型当前不可用，请重新选择。"
-      },
-      "errors": {
-        "maxCount": "当前模型最多支持生成 {{imageCount}} 张图片。",
-        "modelRequired": "没有可用且明确选择的真实模型，未发起生成。",
-        "unreadableReference": "存在无法读取的图片参考，未把 I2I 请求降级成 T2I。",
-        "unsupportedSize": "当前模型不支持该尺寸，请重新选择尺寸。"
-      },
-      "generationModel": {
-        "configure": "配置生图模型",
-        "empty": "没有已启用且具备“图像生成”能力的模型。",
-        "error": "生图模型目录加载失败。",
-        "loading": "正在加载生图模型…",
-        "placeholder": "选择生图模型",
-        "unavailable": "已选生图模型当前不可用，请重新选择。"
-      },
-      "historyLabel": "生图",
-      "model": {
-        "disabled": "生成任务进行中，暂不可切换模型。"
-      }
-    },
-    "model": {
-      "label": "模型"
-    },
-    "submission": {
-      "confirmStatus": "确认任务状态",
-      "retrySync": "重试任务同步",
-      "uncertain": "任务提交结果尚未确认，可使用原幂等请求安全重试。"
-    },
-    "video": {
-      "addImageReference": "添加图片参考",
-      "durationFive": "5 秒",
-      "durationTen": "10 秒",
-      "errors": {
-        "concurrentCount": "视频并发任务数必须在 1-{{max}} 之间。",
-        "incompleteSnapshot": "任务 {{taskId}} 的视频参数快照不完整，无法载入。",
-        "imageReferenceOnly": "当前视频生成只支持图片参考。",
-        "modelRequired": "没有可用且明确选择的真实视频模型，未发起生成。",
-        "noDetails": "任务没有错误详情。",
-        "noDownloadResult": "视频任务没有唯一可下载结果。",
-        "referenceLimit": "当前视频生成只支持一张可读取的真实图片参考；V2V 与多图引用尚未开放。",
-        "notVideoTask": "任务 {{taskId}} 不是视频生成任务。",
-        "unsupportedAspect": "不支持的视频画幅：{{aspect}}",
-        "unsupportedHistoryReference": "该历史任务使用当前视频工作台未开放的参考类型。",
-        "unsupportedResolution": "不支持的视频分辨率：{{resolution}}",
-        "unsupportedSnapshotSize": "任务 {{taskId}} 的视频尺寸不属于当前工作台的精确选项。"
-      },
-      "historyLabel": "视频",
-      "parametersUnavailable": "高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。"
-    }
-  },
   "prompts": {
     "addToAssets": "加入资产库",
     "addedToAssets": "已加入素材",
@@ -1572,91 +1395,6 @@
     "updatedAt": "更新于 {{date}}",
     "viewPrompt": "查看提示词：{{title}}",
     "viewSource": "查看来源"
-  },
-  "video": {
-    "actions": {
-      "addReference": "添加参考素材",
-      "cancel": "取消",
-      "clear": "清空",
-      "clearPrompt": "清空提示词",
-      "details": "详情",
-      "download": "下载",
-      "load": "载入",
-      "moreParameters": "更多生成参数",
-      "new": "新建",
-      "openParameters": "打开高级参数",
-      "openPromptLibrary": "打开提示词库",
-      "promptLibrary": "提示词库",
-      "retry": "重试"
-    },
-    "generate": {
-      "pending": "{{taskCount}} 个处理中",
-      "pendingTasks": "{{taskCount}} 个任务正在处理",
-      "ready": "准备就绪",
-      "start": "开始创作"
-    },
-    "header": {
-      "settings": "生成设置",
-      "title": "视频创作台"
-    },
-    "layout": {
-      "bottom": "底部",
-      "label": "工作台布局",
-      "side": "侧边",
-      "switchToSide": "切换到侧边工作台"
-    },
-    "prompt": {
-      "label": "视频提示词",
-      "labelShort": "提示词",
-      "placeholder": "描述镜头运动、主体动作、场景氛围和画面风格"
-    },
-    "references": {
-      "addDefault": "添加图片、视频或音频",
-      "addMore": "继续添加",
-      "moveNext": "后移参考素材 {{name}}",
-      "movePrevious": "前移参考素材 {{name}}",
-      "remove": "移除参考素材 {{name}}",
-      "title": "参考素材"
-    },
-    "results": {
-      "canceledDescription": "任务已取消，没有生成视频",
-      "clearAll": "取消全选",
-      "copyPrompt": "复制任务 {{id}} 的提示词",
-      "creatingProgress": "正在创作 {{progress}}%",
-      "currentProgress": "当前创作进度",
-      "emptyDescription": "输入提示词并选择视频模型，生成成果会出现在这里。",
-      "emptyTitle": "还没有生成视频",
-      "generatedVideo": "生成视频：{{prompt}}",
-      "generationFailed": "生成失败",
-      "historyFailed": "生成历史加载失败",
-      "historyLoading": "正在恢复生成历史",
-      "historyLoadingDescription": "正在读取当前工作台的真实任务与结果。",
-      "loadMore": "加载更多历史",
-      "loadedCount": "已加载 {{resultCount}}",
-      "loadingMore": "正在加载…",
-      "pendingCount": "{{taskCount}} 个处理中",
-      "removeFromHistory": "从历史移除 {{id}}",
-      "removeSelected": "移除{{suffix}}",
-      "selectAll": "全选",
-      "selectTask": "选择任务 {{id}}",
-      "taskCount": "数量 {{taskCount}}",
-      "title": "全部成果",
-      "waitingForModel": "等待模型开始处理"
-    },
-    "settings": {
-      "aspectRatio": "宽高比",
-      "duration": "时长",
-      "model": "模型",
-      "resolution": "分辨率",
-      "taskCount": "任务数量"
-    },
-    "task": {
-      "canceled": "已取消",
-      "failed": "失败",
-      "queued": "排队中",
-      "running": "生成中",
-      "succeeded": "成功"
-    }
   },
   "templates": {
     "errors": {
@@ -1935,10 +1673,5 @@
       "updatedAt": "更新于 {{date}}",
       "variableCount": "{{count}} 个变量"
     }
-  },
-  "workbenchComposer": {
-    "referenceCount": "{{count}} 项",
-    "addMore": "继续添加",
-    "addImageReference": "添加图片参考"
   }
 }

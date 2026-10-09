@@ -1,66 +1,39 @@
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use nomifun_app::AppConfig;
-use nomifun_app::compatibility::AppServices;
-
-fn build_request(method: &str, uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .expect("failed to build request")
-}
-
-async fn response_json(body: Body) -> serde_json::Value {
-    let bytes = body.collect().await.expect("failed to read body").to_bytes();
-    serde_json::from_slice(&bytes).expect("failed to parse JSON")
-}
-
-async fn build_app() -> axum::Router {
-    let root = tempfile::Builder::new()
-        .prefix("nomifun-health-e2e-")
-        .tempdir()
-        .unwrap()
-        .keep();
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(
-        db,
-        &AppConfig {
-            data_dir: root.join("data"),
-            work_dir: root.join("work"),
-            ..AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-    nomifun_app::compatibility::create_router(&services).await
-}
+use common::{body_json, build_app, get_request};
 
 #[tokio::test]
 async fn health_check_returns_ok() {
-    let app = build_app().await;
+    let (app, _) = build_app().await;
 
     let response = app
-        .oneshot(build_request("GET", "/health"))
+        .oneshot(get_request("/health"))
         .await
         .expect("request failed");
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let json = response_json(response.into_body()).await;
+    let json = body_json(response).await;
     assert_eq!(json["status"], "ok");
 }
 
 #[tokio::test]
 async fn health_check_post_blocked_by_csrf() {
-    let app = build_app().await;
+    let (app, _) = build_app().await;
 
     // POST without CSRF token is rejected by the global CSRF middleware
     let response = app
-        .oneshot(build_request("POST", "/health"))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("request failed");
 
@@ -69,10 +42,10 @@ async fn health_check_post_blocked_by_csrf() {
 
 #[tokio::test]
 async fn unknown_route_returns_not_found() {
-    let app = build_app().await;
+    let (app, _) = build_app().await;
 
     let response = app
-        .oneshot(build_request("GET", "/nonexistent"))
+        .oneshot(get_request("/nonexistent"))
         .await
         .expect("request failed");
 
@@ -81,10 +54,10 @@ async fn unknown_route_returns_not_found() {
 
 #[tokio::test]
 async fn health_check_has_security_headers() {
-    let app = build_app().await;
+    let (app, _) = build_app().await;
 
     let response = app
-        .oneshot(build_request("GET", "/health"))
+        .oneshot(get_request("/health"))
         .await
         .expect("request failed");
 

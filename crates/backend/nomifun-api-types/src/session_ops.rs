@@ -7,13 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Request body for setting the session model.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetModelRequest {
-    pub model_id: String,
-}
-
 /// A single available model entry in the frontend-facing model info response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInfoEntry {
@@ -74,15 +67,6 @@ pub struct SideQuestionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn set_model_request_serde() {
-        let json = json!({ "model_id": "claude-sonnet-4" });
-        let req: SetModelRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.model_id, "claude-sonnet-4");
-    }
-
     #[test]
     fn workspace_entry_type_is_wire_named_type() {
         let entry = WorkspaceEntry {

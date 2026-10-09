@@ -969,7 +969,6 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
     Ok(Snapshot {
         generation,
         entries,
-        overlay: None, // the computer tool captures the screenshot + draws the overlay
         text,
         truncated,
         pid: Some(primary_pid as i32),

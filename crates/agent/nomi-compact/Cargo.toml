@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-regex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
+serde_json.workspace = true

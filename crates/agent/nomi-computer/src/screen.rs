@@ -28,9 +28,8 @@ pub struct CaptureGeometry {
     pub origin_y: i32,
 }
 
-/// A completed screen capture. `image` is the downscaled RGBA frame (not yet
-/// encoded) so callers can draw a Set-of-Marks overlay before encoding; use
-/// `encode_png` to produce the `ToolImage`.
+/// A completed screen capture. `image` is the downscaled RGBA frame before
+/// encoding for the canonical image transport.
 #[derive(Debug)]
 pub struct CapturedScreen {
     pub image: image::RgbaImage,
@@ -42,7 +41,6 @@ pub struct CapturedScreen {
     pub display_index: usize,
 }
 
-const MAX_SCREENSHOT_PNG_BYTES: usize = 5 * 1024 * 1024;
 /// The canonical Capability Kernel port carries Computer output through a
 /// bounded JSON envelope before the application restores a typed image part.
 /// Keep that screenshot below the 2 MiB base64 transport ceiling.
@@ -66,13 +64,8 @@ fn png_bytes(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-/// Encode a (possibly overlay-annotated) RGBA frame as a byte-bounded PNG.
-/// High-entropy or unusually large frames are downscaled deterministically so
-/// native Computer screenshots can never exceed the shared 5 MiB image limit.
-pub fn encode_png(img: &image::RgbaImage) -> Result<EncodedPng, String> {
-    encode_png_with_limit(img, MAX_SCREENSHOT_PNG_BYTES)
-}
-
+/// Encode an RGBA frame as a byte-bounded PNG.
+/// High-entropy or unusually large frames are downscaled deterministically.
 pub(crate) fn encode_png_with_limit(
     img: &image::RgbaImage,
     max_png_bytes: usize,
@@ -234,7 +227,8 @@ mod tests {
     fn capture_primary_screen_real() {
         let captured = capture_screen(None, 1568).expect("capture should succeed");
         assert!(captured.image.width() > 0 && captured.image.height() > 0);
-        let encoded = encode_png(&captured.image).expect("encode should succeed");
+        let encoded = encode_png_with_limit(&captured.image, CANONICAL_SCREENSHOT_PNG_BYTES)
+            .expect("encode should succeed");
         assert_eq!(encoded.image.media_type, "image/png");
         assert!(!encoded.image.data.is_empty());
         assert!(captured.geometry.img_w.max(captured.geometry.img_h) <= 1568);
@@ -249,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_png_bounds_high_entropy_screenshot_payload() {
+    fn canonical_png_bounds_high_entropy_screenshot_payload() {
         let img = image::RgbaImage::from_fn(3_000, 2_000, |x, y| {
             let mut value = x
                 .wrapping_mul(0x9e37_79b9)
@@ -265,21 +259,14 @@ mod tests {
             ])
         });
 
-        let encoded = encode_png(&img).expect("encode should succeed");
-
-        const MAX_BASE64_BYTES: usize = (5 * 1024 * 1024_usize).div_ceil(3) * 4;
-        assert!(encoded.image.data.len() <= MAX_BASE64_BYTES);
+        let encoded = encode_png_with_limit(&img, CANONICAL_SCREENSHOT_PNG_BYTES)
+            .expect("canonical encode should succeed");
+        let png_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded.image.data)
+            .expect("canonical screenshot should be base64");
+        assert!(png_bytes.len() <= CANONICAL_SCREENSHOT_PNG_BYTES);
         assert!(encoded.width > 0 && encoded.height > 0);
         assert!(encoded.width < img.width() || encoded.height < img.height());
-
-        let canonical = encode_png_with_limit(&img, CANONICAL_SCREENSHOT_PNG_BYTES)
-            .expect("canonical encode should succeed");
-        let canonical_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&canonical.image.data)
-            .expect("canonical screenshot should be base64");
-        assert!(canonical_bytes.len() <= CANONICAL_SCREENSHOT_PNG_BYTES);
-        assert!(canonical.width > 0 && canonical.height > 0);
-        assert!(canonical.width <= encoded.width && canonical.height <= encoded.height);
     }
 
     #[cfg(target_os = "macos")]

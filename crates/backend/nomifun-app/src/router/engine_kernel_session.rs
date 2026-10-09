@@ -443,9 +443,6 @@ impl EngineKernelSession {
     pub fn active_state(&self) -> &Arc<SessionCapabilityState> {
         &self.active
     }
-    pub fn workspace(&self) -> &str {
-        &self.workspace
-    }
     pub fn execution_constraints(&self) -> ExecutionConstraints {
         self.constraints
     }
