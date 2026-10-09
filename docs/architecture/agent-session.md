@@ -46,8 +46,9 @@ typed resource and BrowserRunGuard. Attached Chrome remains a separate connected
 Every Agent Turn locks its Session's managed browser during retained Runtime preparation, including chat without
 Browser tools. Settlement drains native operations while retaining the hardware input gate. Only the exact durable
 Turn terminal permits final release; later cleanup or terminal-write failures leave input locked. User commands and first native
-creation fail closed while canonical running precedes a proven gate. User profiles use owner/Session identity under
-`browser-v4/agent-sessions/<hash>/`, independent of grant definitions. Session deletion includes this browser and its
+creation fail closed while canonical running precedes a proven gate. User profiles use owner/Session identity independent
+of grant definitions: Windows uses `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
+WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its
 profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
 See the [browser architecture](browser-platform.md).
 

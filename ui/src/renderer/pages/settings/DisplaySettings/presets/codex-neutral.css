@@ -3,153 +3,157 @@
  *
  * A restrained black / white / gray preset for long coding and planning
  * sessions. Light mode mirrors the Codex reference: white work surface, soft
- * gray sider, black primary action. Dark mode flips the axis to near-black
- * work surfaces with silver primary emphasis, while keeping semantic states
- * readable enough to remain useful.
+ * gray navigation, quiet borders and a charcoal primary action. Dark mode uses
+ * layered charcoal surfaces with silver primary emphasis. Neutral fills stay
+ * opaque so their tone is consistent across pages, controls and overlays.
  * ========================================================================== */
 
 /* ===== Light ===== */
 :root,
 body {
   /* Primary */
-  --color-primary: #171717;
-  --primary: #171717;
-  --color-primary-light-1: #f5f5f5;
+  --color-primary: #242424;
+  --primary: #242424;
+  --color-primary-light-1: #ececec;
   --color-primary-light-2: #e5e5e5;
-  --color-primary-light-3: #d4d4d4;
-  --color-primary-light-4: #a3a3a3;
-  --color-primary-dark-1: #000000;
-  --primary-rgb: 23, 23, 23;
+  --color-primary-light-3: #d6d6d6;
+  --color-primary-light-4: #b4b4b4;
+  --color-primary-dark-1: #171717;
+  --primary-rgb: 36, 36, 36;
 
   /* Brand */
-  --brand: #404040;
+  --brand: #484848;
   --brand-light: #f5f5f5;
-  --brand-hover: #d4d4d4;
-  --color-brand-fill: #404040;
+  --brand-hover: #dedede;
+  --color-brand-fill: #484848;
   --color-brand-bg: #f5f5f5;
 
   /* Neutral brand scale */
   --aou-1: #fafafa;
   --aou-2: #f5f5f5;
-  --aou-3: #e5e5e5;
-  --aou-4: #d4d4d4;
-  --aou-5: #a3a3a3;
-  --aou-6: #737373;
+  --aou-3: #e9e9e9;
+  --aou-4: #d6d6d6;
+  --aou-5: #adadad;
+  --aou-6: #707070;
   --aou-7: #525252;
   --aou-8: #404040;
   --aou-9: #262626;
-  --aou-10: #171717;
+  --aou-10: #242424;
 
   /* Background */
   --bg-base: #ffffff;
-  --color-bg-1: #fafafa;
-  --bg-1: #fafafa;
-  --color-bg-2: #f4f4f3;
-  --bg-2: #f4f4f3;
-  --color-bg-3: #e7e7e5;
-  --bg-3: #e7e7e5;
-  --color-bg-4: #d6d6d3;
-  --bg-4: #d6d6d3;
-  --bg-5: #b9b9b5;
-  --bg-6: #8a8a86;
-  --bg-8: #565652;
-  --bg-9: #272725;
-  --bg-10: #111110;
+  --color-bg-1: #ffffff;
+  --bg-1: #ffffff;
+  --color-bg-2: #f7f7f7;
+  --bg-2: #f7f7f7;
+  --color-bg-3: #e9e9e9;
+  --bg-3: #e9e9e9;
+  --color-bg-4: #d6d6d6;
+  --bg-4: #d6d6d6;
+  --bg-5: #b8b8b8;
+  --bg-6: #707070;
+  --bg-8: #4d4d4d;
+  --bg-9: #2b2b2b;
+  --bg-10: #1f1f1f;
   --color-bg-5: #ffffff;
   --color-bg-popup: #ffffff;
   --color-bg-white: #ffffff;
 
   /* Interactive */
-  --bg-hover: rgba(0, 0, 0, 0.045);
-  --bg-active: rgba(0, 0, 0, 0.08);
+  --bg-hover: #f1f1f1;
+  --bg-active: #e9e9e9;
 
   /* Fill */
-  --fill: #f6f6f5;
-  --color-fill: #f6f6f5;
+  --fill: #f7f7f7;
+  --color-fill: #f7f7f7;
   --fill-0: #ffffff;
   --fill-white-to-black: #ffffff;
   --dialog-fill-0: #ffffff;
   --inverse: #ffffff;
-  --color-fill-1: rgba(0, 0, 0, 0.025);
-  --color-fill-2: rgba(0, 0, 0, 0.055);
-  --color-fill-3: rgba(0, 0, 0, 0.1);
-  --color-fill-4: rgba(0, 0, 0, 0.16);
+  --color-fill-1: #f7f7f7;
+  --color-fill-2: #f1f1f1;
+  --color-fill-3: #ebebeb;
+  --color-fill-4: #e1e1e1;
 
   /* Text */
-  --color-text-1: #191919;
-  --text-primary: #191919;
-  --color-text-2: #4b4b4b;
-  --text-secondary: #4b4b4b;
-  --color-text-3: #7a7a76;
-  --color-text-4: #b8b8b4;
-  --text-disabled: #b8b8b4;
-  --text-0: #000000;
+  --color-text-1: #292929;
+  --text-primary: #292929;
+  --color-text-2: #5d5d5d;
+  --text-secondary: #5d5d5d;
+  --color-text-3: #707070;
+  --color-text-4: #a6a6a6;
+  --text-disabled: #a6a6a6;
+  --text-0: #292929;
   --text-white: #ffffff;
 
   /* Border */
-  --color-border: #e0e0de;
-  --color-border-1: #ededeb;
-  --color-border-2: #e0e0de;
-  --color-border-3: #cfcfcb;
-  --color-border-4: #b8b8b4;
-  --border-base: #e0e0de;
-  --border-light: #ededeb;
-  --border-special: #d8d8d5;
+  --color-border: #e5e5e5;
+  --color-border-1: #eeeeee;
+  --color-border-2: #e5e5e5;
+  --color-border-3: #d8d8d8;
+  --color-border-4: #bcbcbc;
+  --border-base: #e5e5e5;
+  --border-light: #eeeeee;
+  --border-special: #dfdfdf;
 
   /* Semantic */
   --success: #1f883d;
   --warning: #9a6700;
   --danger: #cf222e;
-  --info: #57606a;
+  --info: #626262;
 
   /* Components */
-  --message-user-bg: #eeeeec;
-  --message-tips-bg: #f5f5f4;
+  --message-user-bg: #f1f1f1;
+  --message-tips-bg: #f7f7f7;
   --feedback-bubble-bg: #ffffff;
-  --workspace-btn-bg: #f0f0ef;
-  --color-guid-agent-bar: #eeeeec;
-  --sider-section-title-color: #777774;
+  --workspace-btn-bg: #f5f5f5;
+  --color-guid-agent-bar: #f1f1f1;
+  --sider-section-title-color: #707070;
+  --classic-content-sider-bg: #fcfcfc;
+  --classic-composer-shadow: 0 2px 8px rgba(0, 0, 0, 0.025), 0 8px 28px rgba(0, 0, 0, 0.035);
+  --classic-composer-focus-shadow: 0 0 0 3px rgba(36, 36, 36, 0.07), 0 6px 20px rgba(0, 0, 0, 0.045);
+  --classic-popup-shadow: 0 8px 28px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
 
   /* Terminal */
   --terminal-surface-bg: #111111;
   --terminal-border: rgba(0, 0, 0, 0.12);
 
   /* Arco primary scale */
-  --primary-1: 245, 245, 245;
+  --primary-1: 236, 236, 236;
   --primary-2: 229, 229, 229;
-  --primary-3: 212, 212, 212;
-  --primary-4: 163, 163, 163;
-  --primary-5: 82, 82, 82;
-  --primary-6: 23, 23, 23;
-  --primary-7: 0, 0, 0;
+  --primary-3: 214, 214, 214;
+  --primary-4: 180, 180, 180;
+  --primary-5: 64, 64, 64;
+  --primary-6: 36, 36, 36;
+  --primary-7: 23, 23, 23;
 
   /* Arco secondary */
-  --color-secondary: #f2f2f1;
-  --color-secondary-hover: #e8e8e6;
-  --color-secondary-active: #ddddda;
-  --color-secondary-disabled: #f7f7f6;
+  --color-secondary: #f5f5f5;
+  --color-secondary-hover: #ededed;
+  --color-secondary-active: #e5e5e5;
+  --color-secondary-disabled: #fafafa;
   --button-primary-text: #ffffff;
   --button-primary-disabled-bg: var(--color-fill-2);
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
 
   /* Interactive control palette: separate from the near-black button primary. */
-  --control-selected-bg: #171717;
+  --control-selected-bg: #242424;
   --control-selected-fg: #ffffff;
-  --enhanced-checkbox-selected-bg: #171717;
+  --enhanced-checkbox-selected-bg: #242424;
   --enhanced-checkbox-selected-fg: #ffffff;
   --control-idle-bg: #ffffff;
-  --control-idle-border: #737373;
-  --control-hover-bg: #f0f0ef;
-  --control-disabled-selected-bg: #a3a3a3;
-  --control-focus-ring: rgba(23, 23, 23, 0.24);
+  --control-idle-border: #858585;
+  --control-hover-bg: #f1f1f1;
+  --control-disabled-selected-bg: #b0b0b0;
+  --control-focus-ring: rgba(36, 36, 36, 0.28);
 
   /* Arco misc */
-  --color-tooltip-bg: #272725;
-  --color-mask-bg: rgba(17, 17, 16, 0.5);
+  --color-tooltip-bg: #303030;
+  --color-mask-bg: rgba(0, 0, 0, 0.38);
   --color-spin-layer-bg: rgba(255, 255, 255, 0.66);
   --color-menu-light-bg: #ffffff;
-  --color-menu-dark-bg: #272725;
+  --color-menu-dark-bg: #292929;
 }
 
 /* ===== Dark ===== */
@@ -158,179 +162,251 @@ body {
   /* Primary */
   --color-primary: #e5e5e5;
   --primary: #e5e5e5;
-  --color-primary-light-1: rgba(255, 255, 255, 0.08);
-  --color-primary-light-2: rgba(255, 255, 255, 0.14);
-  --color-primary-light-3: rgba(255, 255, 255, 0.22);
-  --color-primary-light-4: rgba(255, 255, 255, 0.34);
+  --color-primary-light-1: #303030;
+  --color-primary-light-2: #3a3a3a;
+  --color-primary-light-3: #4a4a4a;
+  --color-primary-light-4: #606060;
   --color-primary-dark-1: #f5f5f5;
   --primary-rgb: 229, 229, 229;
 
   /* Brand */
-  --brand: #d4d4d4;
-  --brand-light: #262626;
-  --brand-hover: #737373;
-  --color-brand-fill: #d4d4d4;
-  --color-brand-bg: #262626;
+  --brand: #d0d0d0;
+  --brand-light: #2b2b2b;
+  --brand-hover: #747474;
+  --color-brand-fill: #d0d0d0;
+  --color-brand-bg: #2b2b2b;
 
   /* Neutral brand scale */
-  --aou-1: #171717;
-  --aou-2: #262626;
-  --aou-3: #404040;
-  --aou-4: #525252;
-  --aou-5: #737373;
-  --aou-6: #a3a3a3;
-  --aou-7: #d4d4d4;
-  --aou-8: #e5e5e5;
-  --aou-9: #f5f5f5;
-  --aou-10: #fafafa;
+  --aou-1: #232323;
+  --aou-2: #2b2b2b;
+  --aou-3: #393939;
+  --aou-4: #505050;
+  --aou-5: #747474;
+  --aou-6: #a0a0a0;
+  --aou-7: #c3c3c3;
+  --aou-8: #dedede;
+  --aou-9: #e9e9e9;
+  --aou-10: #f0f0f0;
 
   /* Background */
-  --bg-base: #0f0f0f;
-  --color-bg-1: #151515;
-  --bg-1: #151515;
-  --color-bg-2: #1e1e1e;
-  --bg-2: #1e1e1e;
-  --color-bg-3: #2a2a2a;
-  --bg-3: #2a2a2a;
-  --color-bg-4: #363636;
-  --bg-4: #363636;
-  --bg-5: #474747;
-  --bg-6: #666666;
-  --bg-8: #9a9a9a;
-  --bg-9: #d4d4d4;
-  --bg-10: #f5f5f5;
-  --color-bg-5: #242424;
-  --color-bg-popup: #202020;
-  --color-bg-white: #202020;
+  --bg-base: #1b1b1b;
+  --color-bg-1: #212121;
+  --bg-1: #212121;
+  --color-bg-2: #181818;
+  --bg-2: #181818;
+  --color-bg-3: #333333;
+  --bg-3: #333333;
+  --color-bg-4: #444444;
+  --bg-4: #444444;
+  --bg-5: #555555;
+  --bg-6: #a0a0a0;
+  --bg-8: #bdbdbd;
+  --bg-9: #dedede;
+  --bg-10: #f0f0f0;
+  --color-bg-5: #303030;
+  --color-bg-popup: #2c2c2c;
+  --color-bg-white: #292929;
 
   /* Interactive */
-  --bg-hover: rgba(255, 255, 255, 0.07);
-  --bg-active: rgba(255, 255, 255, 0.12);
+  --bg-hover: #2b2b2b;
+  --bg-active: #343434;
 
   /* Fill */
-  --fill: #1e1e1e;
-  --color-fill: #1e1e1e;
-  --fill-0: rgba(255, 255, 255, 0.08);
-  --fill-white-to-black: #000000;
-  --dialog-fill-0: #202020;
+  --fill: #262626;
+  --color-fill: #262626;
+  --fill-0: #262626;
+  --fill-white-to-black: #212121;
+  --dialog-fill-0: #292929;
   --inverse: #ffffff;
-  --color-fill-1: rgba(255, 255, 255, 0.04);
-  --color-fill-2: rgba(255, 255, 255, 0.07);
-  --color-fill-3: rgba(255, 255, 255, 0.12);
-  --color-fill-4: rgba(255, 255, 255, 0.18);
+  --color-fill-1: #262626;
+  --color-fill-2: #2b2b2b;
+  --color-fill-3: #343434;
+  --color-fill-4: #424242;
 
   /* Text */
-  --color-text-1: #f5f5f5;
-  --text-primary: #f5f5f5;
-  --color-text-2: #c7c7c7;
-  --text-secondary: #c7c7c7;
-  --color-text-3: #969696;
-  --color-text-4: #686868;
-  --text-disabled: #686868;
-  --text-0: #ffffff;
+  --color-text-1: #ececec;
+  --text-primary: #ececec;
+  --color-text-2: #bcbcbc;
+  --text-secondary: #bcbcbc;
+  --color-text-3: #a0a0a0;
+  --color-text-4: #737373;
+  --text-disabled: #737373;
+  --text-0: #ececec;
   --text-white: #ffffff;
 
   /* Border */
-  --color-border: #303030;
+  --color-border: #393939;
   --color-border-1: #282828;
-  --color-border-2: #303030;
-  --color-border-3: #424242;
-  --color-border-4: #575757;
-  --border-base: #303030;
+  --color-border-2: #393939;
+  --color-border-3: #494949;
+  --color-border-4: #626262;
+  --border-base: #393939;
   --border-light: #282828;
-  --border-special: #454545;
+  --border-special: #494949;
 
   /* Semantic */
   --success: #3fb950;
   --warning: #d29922;
   --danger: #ff7b72;
-  --info: #c9d1d9;
+  --info: #c3c3c3;
 
   /* Components */
-  --message-user-bg: #2a2a2a;
-  --message-tips-bg: #242424;
-  --feedback-bubble-bg: #202020;
-  --workspace-btn-bg: #242424;
-  --color-guid-agent-bar: #242424;
-  --sider-section-title-color: #969696;
+  --message-user-bg: #303030;
+  --message-tips-bg: #282828;
+  --feedback-bubble-bg: #2c2c2c;
+  --workspace-btn-bg: #2b2b2b;
+  --color-guid-agent-bar: #2b2b2b;
+  --sider-section-title-color: #a0a0a0;
+  --classic-content-sider-bg: #1c1c1c;
+  --classic-composer-shadow: 0 2px 8px rgba(0, 0, 0, 0.12), 0 8px 28px rgba(0, 0, 0, 0.16);
+  --classic-composer-focus-shadow: 0 0 0 3px rgba(229, 229, 229, 0.08), 0 6px 20px rgba(0, 0, 0, 0.2);
+  --classic-popup-shadow: 0 8px 28px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.18);
 
   /* Terminal */
-  --terminal-surface-bg: #0f0f0f;
+  --terminal-surface-bg: #161616;
   --terminal-border: rgba(255, 255, 255, 0.1);
 
   /* Arco primary scale */
-  --primary-1: 38, 38, 38;
-  --primary-2: 64, 64, 64;
-  --primary-3: 82, 82, 82;
-  --primary-4: 115, 115, 115;
-  --primary-5: 163, 163, 163;
+  --primary-1: 48, 48, 48;
+  --primary-2: 58, 58, 58;
+  --primary-3: 74, 74, 74;
+  --primary-4: 96, 96, 96;
+  --primary-5: 212, 212, 212;
   --primary-6: 229, 229, 229;
   --primary-7: 245, 245, 245;
 
   /* Arco secondary */
-  --color-secondary: rgba(255, 255, 255, 0.08);
-  --color-secondary-hover: rgba(255, 255, 255, 0.12);
-  --color-secondary-active: rgba(255, 255, 255, 0.16);
-  --color-secondary-disabled: rgba(255, 255, 255, 0.04);
-  --button-primary-text: #171717;
+  --color-secondary: #2c2c2c;
+  --color-secondary-hover: #373737;
+  --color-secondary-active: #424242;
+  --color-secondary-disabled: #232323;
+  --button-primary-text: #242424;
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
 
   /* The silver brand primary needs a dark indicator, not Arco's fixed white one. */
   --control-selected-bg: #e5e5e5;
-  --control-selected-fg: #171717;
-  --enhanced-checkbox-selected-bg: #000000;
-  --enhanced-checkbox-selected-fg: #ffffff;
-  --control-idle-bg: #1e1e1e;
-  --control-idle-border: #737373;
-  --control-hover-bg: #2a2a2a;
+  --control-selected-fg: #242424;
+  --enhanced-checkbox-selected-bg: #e5e5e5;
+  --enhanced-checkbox-selected-fg: #242424;
+  --control-idle-bg: #262626;
+  --control-idle-border: #858585;
+  --control-hover-bg: #343434;
   --control-disabled-selected-bg: #737373;
   --control-focus-ring: rgba(229, 229, 229, 0.28);
 
   /* Arco misc */
-  --color-tooltip-bg: #363636;
-  --color-mask-bg: rgba(0, 0, 0, 0.68);
-  --color-spin-layer-bg: rgba(21, 21, 21, 0.68);
-  --color-menu-light-bg: #202020;
-  --color-menu-dark-bg: #151515;
+  --color-tooltip-bg: #3a3a3a;
+  --color-mask-bg: rgba(0, 0, 0, 0.6);
+  --color-spin-layer-bg: rgba(33, 33, 33, 0.68);
+  --color-menu-light-bg: #2c2c2c;
+  --color-menu-dark-bg: #1c1c1c;
 }
 
-/* ===== Signature touches ===== */
+/* ===== Surface hierarchy ===== */
+
+.layout-sider {
+  background-image: none;
+}
+
+.content-sider {
+  background: var(--classic-content-sider-bg);
+  border-right: 1px solid var(--border-base);
+  box-shadow: none;
+}
+
+.content-sider .sider-section-label {
+  background-color: var(--classic-content-sider-bg);
+}
+
+.sider-nav-group,
+.sider-section-title {
+  color: var(--sider-section-title-color);
+}
+
+.layout-sider .sider-action-btn,
+.content-sider .sider-action-btn {
+  background-color: var(--color-fill-3);
+}
+
+.layout-sider .sider-action-btn:hover,
+.content-sider .sider-action-btn:hover {
+  background-color: var(--color-fill-4);
+}
+
+.arco-card {
+  background-color: var(--dialog-fill-0);
+  border-color: var(--border-light);
+  border-radius: 12px;
+}
+
+.arco-select-popup,
+.arco-dropdown-menu,
+.arco-popover-content {
+  background-color: var(--color-bg-popup);
+  border: 1px solid var(--border-base);
+  box-shadow: var(--classic-popup-shadow);
+}
+
+.arco-modal {
+  box-shadow: var(--classic-popup-shadow);
+}
+
+/* The shared composer supplies its geometry and behavior. These preset rules
+ * replace its hard-coded purple focus treatment with a quiet neutral surface.
+ * Keep the file-drag affordance owned by the composer. */
+.sendbox-panel:not(.sendbox-panel--dragging) {
+  border-color: var(--border-light);
+  box-shadow: var(--classic-composer-shadow);
+}
+
+.sendbox-panel:not(.sendbox-panel--dragging):focus-within {
+  border-color: var(--color-border-4);
+  box-shadow: var(--classic-composer-focus-shadow);
+}
+
+/* ===== Actions ===== */
 
 .arco-btn-primary:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
     .arco-btn-status-success
   ) {
   box-shadow: none;
   color: var(--button-primary-text);
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
-.arco-btn-primary:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
-    .arco-btn-status-success
-  ):hover {
-  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.12);
-}
-
-[data-theme='dark']
-  .arco-btn-primary:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
+.arco-btn.arco-btn-outline:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
     .arco-btn-status-success
   ) {
+  color: var(--text-secondary);
+  border-color: var(--color-border-3);
+}
+
+.arco-btn.arco-btn-outline:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
+    .arco-btn-status-success
+  ):hover {
+  color: var(--text-primary);
+  border-color: var(--color-border-4);
+  background-color: var(--color-fill-1);
+}
+
+/* The shared send button has its own dark fill; align it with the primary
+ * foreground so the arrow remains readable on the silver action surface. */
+.send-button-custom.arco-btn-primary:not(:disabled):not(.arco-btn-disabled) {
+  background-color: rgb(var(--primary-6));
+  border-color: rgb(var(--primary-6));
   color: var(--button-primary-text);
 }
 
-[data-theme='light'] .layout-sider {
-  background-image: linear-gradient(180deg, rgba(0, 0, 0, 0.025) 0%, rgba(0, 0, 0, 0) 42%);
+.send-button-custom.arco-btn-primary:not(:disabled):not(.arco-btn-disabled):hover {
+  background-color: rgb(var(--primary-5));
+  border-color: rgb(var(--primary-5));
 }
 
-[data-theme='dark'] .layout-sider {
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 42%);
-}
-
-[data-theme='dark'] .arco-select-popup,
-[data-theme='dark'] .arco-dropdown-menu,
-[data-theme='dark'] .arco-popover-content,
-[data-theme='dark'] .arco-modal {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48);
+.send-button-custom.arco-btn.arco-btn-primary:disabled,
+.send-button-custom.arco-btn.arco-btn-primary.arco-btn-disabled {
+  background-color: var(--button-primary-disabled-bg);
+  border-color: var(--button-primary-disabled-border);
+  color: var(--button-primary-disabled-text);
 }

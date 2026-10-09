@@ -139,7 +139,7 @@ impl BrowserResourceOperation {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserProviderKind {
     /// Platform-owned embedded provider. Windows injects WebView2; macOS
-    /// injects the independent CEF child NSView host. The product contract
+    /// injects a system WKWebView child NSView. The product contract
     /// deliberately does not offer a renderer/backend selector.
     Managed,
     /// User-connected installation Chrome. This does not replace the managed

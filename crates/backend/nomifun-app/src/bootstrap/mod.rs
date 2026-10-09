@@ -6,6 +6,8 @@
 
 mod bind;
 mod boot_log;
+#[cfg(target_os = "macos")]
+mod browser_profiles;
 mod builtin_skills;
 mod composition_cleanup;
 mod data_root;
@@ -25,7 +27,7 @@ pub use data_root::{
     resolve_startup_data_root,
 };
 pub use environment::{
-    ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
+    ServerEnvironment, finalize_data_layer, init_data_layer, init_data_layer_with_browser, init_environment,
     init_nomi_core_environment,
 };
 pub use nomi_core::NomiCoreApplication;

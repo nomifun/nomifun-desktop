@@ -25,6 +25,7 @@ pub(super) async fn verify(view: &tauri::Webview) -> Result<serde_json::Value, S
             title: String::new(),
             url: String::new(),
             lifecycle: nomifun_browser_platform::runtime::BrowserTabLifecycle::Ready,
+            load: None,
             can_go_back: false,
             can_go_forward: false,
             zoom_percent: 100,

@@ -1,451 +1,430 @@
-//! Native lifecycle and deferred dialog ownership. No Cocoa modal UI is allowed
-//! to bypass the conversation's existing dialog/Stop controls.
-use super::*;
-use nomifun_browser_platform::runtime::{
-    BrowserDialogKind, BrowserPermissionRequest, BrowserTabLifecycle,
+//! WebKit delegates have exact native ownership; late navigation callbacks are
+//! checked against the current WKNavigation before changing product state.
+use crate::{
+    engine::{Page, PopupCandidate, create_native_page, native_page, navigation_allowed},
+    interactions::NativeInteractions,
+    navigation::{self, Update},
 };
-use tokio_util::sync::CancellationToken;
+use block2::DynBlock;
+use nomifun_browser_platform::runtime::{BrowserCancellationReason, BrowserNavigationSource};
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
+    runtime::Bool,
+};
+use objc2_foundation::{NSArray, NSError, NSHTTPURLResponse, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_web_kit::*;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::{Arc, Weak, atomic::Ordering},
+};
 
-#[derive(Clone, Debug)]
-pub struct NativeDialog {
-    pub request_id: String,
-    pub document_generation: u64,
-    pub kind: BrowserDialogKind,
-    pub message: String,
-    pub default_text: String,
-    pub origin: String,
-    pub text_truncated: bool,
+pub(crate) struct DelegateState {
+    page: Weak<Page>,
+    interactions: Rc<NativeInteractions>,
+    navigation: RefCell<Option<Retained<WKNavigation>>>,
+    announced: Cell<bool>,
+    start_seen: Cell<bool>,
+    // Native requests replaced before their didStart acknowledgement retain
+    // identity until that start or terminal callback arrives. No page facts
+    // or persistent history are stored here.
+    awaiting_retired_start: RefCell<Vec<Retained<WKNavigation>>>,
 }
-
-#[derive(Clone, Debug)]
-pub struct PageSnapshot {
-    pub document_generation: u64,
-    pub url: String,
-    pub title: String,
-    pub lifecycle: BrowserTabLifecycle,
-    pub can_go_back: bool,
-    pub can_go_forward: bool,
-    pub dialog: Option<NativeDialog>,
-    pub blocked_permissions: Vec<String>,
-    pub permission_requests: Vec<BrowserPermissionRequest>,
-}
-impl Default for PageSnapshot {
-    fn default() -> Self {
-        Self { document_generation: 0, url: String::new(), title: String::new(), lifecycle: BrowserTabLifecycle::Loading,
-            can_go_back: false, can_go_forward: false, dialog: None, blocked_permissions: Vec::new(), permission_requests: Vec::new() }
-    }
-}
-
-pub(super) struct DeferredDialog {
-    pub id: String,
-    callback: JsdialogCallback,
-}
-
-pub(super) enum DeferredPermissionCallback {
-    Media {
-        callback: MediaAccessCallback,
-        allowed: u32,
-    },
-    Prompt(PermissionPromptCallback),
-}
-
-pub(super) struct DeferredPermission {
-    pub id: String,
-    pub document_generation: u64,
-    pub kind: String,
-    callback: DeferredPermissionCallback,
-}
-
-impl DeferredPermission {
-    fn finish(self, allow: bool) {
-        match self.callback {
-            DeferredPermissionCallback::Media { callback, allowed } => {
-                if allow {
-                    callback.cont(allowed);
-                } else {
-                    callback.cancel();
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[name = "NomiFunWKNavigationDelegate"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = DelegateState]
+    pub(crate) struct Delegate;
+    unsafe impl NSObjectProtocol for Delegate {}
+    unsafe impl WKNavigationDelegate for Delegate {
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        fn decide_action(
+            &self,
+            _view: &WKWebView,
+            action: &WKNavigationAction,
+            decision: &DynBlock<dyn Fn(WKNavigationActionPolicy)>,
+        ) {
+            let live = self.page().is_some();
+            let url = unsafe { action.request().URL() }
+                .and_then(|u| u.absoluteString())
+                .map(|u| u.to_string())
+                .unwrap_or_default();
+            let main = unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
+            // Non-network documents are allowed only as subframes. No local
+            // file or host IPC scheme is ever admitted into an untrusted page.
+            let download = unsafe { action.shouldPerformDownload() };
+            let generated_file = download
+                && self
+                    .page()
+                    .is_some_and(|p| p.allows_user_download())
+                && (url.starts_with("blob:") || url.starts_with("data:"));
+            let allowed = live
+                && (navigation_allowed(&url)
+                    || url == "about:blank"
+                    || (!main && (url.starts_with("data:") || url.starts_with("blob:")))
+                    || generated_file);
+            if main && (download || !allowed) {
+                if let Some(page) = self.page() {
+                    page.transition(Update::PolicyCancelled { url: Some(url.clone()), reason: if download { BrowserCancellationReason::Download } else { BrowserCancellationReason::NavigationRejected } });
                 }
             }
-            DeferredPermissionCallback::Prompt(callback) => callback.cont(if allow {
-                PermissionRequestResult::ACCEPT
+            decision.call((if !allowed {
+                WKNavigationActionPolicy::Cancel
+            } else if download {
+                WKNavigationActionPolicy::Download
             } else {
-                PermissionRequestResult::DENY
-            }),
+                WKNavigationActionPolicy::Allow
+            },));
         }
-    }
-}
-
-fn bounded(value: Option<&CefString>, limit: usize) -> (String, bool) {
-    let value = value.map(ToString::to_string).unwrap_or_default();
-    let bounded: String = value.chars().take(limit).collect();
-    let truncated = bounded.len() != value.len();
-    (bounded, truncated)
-}
-fn origin(value: Option<&CefString>) -> String {
-    value.and_then(|value| url::Url::parse(&value.to_string()).ok())
-        .filter(|url| matches!(url.scheme(), "http" | "https"))
-        .map(|url| url.origin().ascii_serialization()).unwrap_or_default()
-}
-
-impl Page {
-    pub fn snapshot(&self) -> PageSnapshot { self.metadata.borrow().clone() }
-    pub fn subscribe(&self) -> watch::Receiver<PageSnapshot> { self.metadata.subscribe() }
-
-    /// A native observer must be nonblocking, and may only signal its owning
-    /// runtime. Snapshots are updated before the signal or any dialog callback.
-    pub fn set_change_listener(&self, listener: Arc<dyn Fn() + Send + Sync>) {
-        *self.change_listener.lock().unwrap() = Some(listener);
-    }
-    pub(crate) fn changed(&self, update: impl FnOnce(&mut PageSnapshot)) {
-        self.metadata.send_modify(update);
-        let listener = self.change_listener.lock().unwrap().clone();
-        if let Some(listener) = listener { listener(); }
-    }
-    pub(super) fn clear_dialog(&self, continue_request: bool) {
-        let pending = self.dialog.lock().unwrap().take();
-        self.changed(|state| state.dialog = None);
-        self.protocol.set_modal_pending(false);
-        if continue_request {
-            if let Some(pending) = pending { pending.callback.cont(0, None); }
-        }
-    }
-
-    fn record_permission_denial(&self, kind: &str) {
-        self.changed(|state| {
-            if !state
-                .blocked_permissions
-                .iter()
-                .any(|value| value == kind)
-            {
-                state.blocked_permissions.push(kind.to_owned());
-            }
-        });
-    }
-
-    pub(super) fn clear_permissions(&self, record_denials: bool) {
-        let pending = std::mem::take(&mut *self.permissions.lock().unwrap());
-        if pending.is_empty() {
-            return;
-        }
-        let denied = pending
-            .values()
-            .map(|permission| permission.kind.clone())
-            .collect::<Vec<_>>();
-        for permission in pending.into_values() {
-            permission.finish(false);
-        }
-        self.changed(|state| {
-            state.permission_requests.clear();
-            if record_denials {
-                for kind in denied {
-                    if !state.blocked_permissions.contains(&kind) {
-                        state.blocked_permissions.push(kind);
-                    }
+        #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
+        fn decide_response(
+            &self,
+            _view: &WKWebView,
+            response: &WKNavigationResponse,
+            decision: &DynBlock<dyn Fn(WKNavigationResponsePolicy)>,
+        ) {
+            if unsafe { response.isForMainFrame() } {
+                if let Some(page) = self.page() {
+                    let native_response = unsafe { response.response() };
+                    let url = native_response.URL().and_then(|url| url.absoluteString()).map(|url| url.to_string());
+                    let status = native_response.downcast_ref::<NSHTTPURLResponse>().and_then(|response| u16::try_from(response.statusCode()).ok());
+                    page.transition(Update::Response { url, status });
                 }
             }
-        });
-    }
-
-    fn offer_permission(
-        self: &Arc<Self>,
-        kind: String,
-        origin: String,
-        callback: DeferredPermissionCallback,
-    ) -> bool {
-        if kind.is_empty()
-            || origin.is_empty()
-            || self.input_locked.load(Ordering::Acquire)
-            || !self.visible.load(Ordering::Acquire)
-            || self.close_requested.load(Ordering::Acquire)
-            || self.protocol.is_closed()
-        {
-            callback_to_denial(callback);
-            self.record_permission_denial(if kind.is_empty() {
-                "permission"
+            let policy = if self.page().is_none() {
+                WKNavigationResponsePolicy::Cancel
+            } else if unsafe { response.canShowMIMEType() } {
+                WKNavigationResponsePolicy::Allow
             } else {
-                &kind
-            });
-            return false;
+                if let Some(page) = self.page() {
+                    page.transition(Update::PolicyCancelled { url: None, reason: BrowserCancellationReason::Download });
+                }
+                WKNavigationResponsePolicy::Download
+            };
+            decision.call((policy,));
         }
-        let generation = self.metadata.borrow().document_generation;
-        let id = uuid::Uuid::now_v7().to_string();
-        {
-            let mut pending = self.permissions.lock().unwrap();
-            if pending.len() >= 4 {
-                drop(pending);
-                callback_to_denial(callback);
-                self.record_permission_denial(&kind);
-                return false;
+        #[unsafe(method(webView:didStartProvisionalNavigation:))]
+        fn started(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
+            let Some(page) = self.page() else {
+                return;
+            };
+            if self.take_retired(navigation) { return; }
+            if self.ivars().announced.get() && !self.current(navigation) {
+                return;
             }
-            pending.insert(
-                id.clone(),
-                DeferredPermission {
-                    id: id.clone(),
-                    document_generation: generation,
-                    kind: kind.clone(),
-                    callback,
-                },
-            );
+            if !self.ivars().announced.get() && self.current(navigation) { return; }
+            self.ivars().start_seen.set(true);
+            *self.ivars().navigation.borrow_mut() = navigation.map(|value| unsafe { Retained::retain(value as *const WKNavigation as *mut WKNavigation) }.unwrap());
+            if !self.ivars().announced.replace(false) {
+                page.transition(Update::Begin { url: Some(view_url(view)), source: BrowserNavigationSource::PageNavigation, bootstrap: false });
+            }
+            page.transition(Update::Started { url: view_url(view) });
+            self.ivars().interactions.drain_dialogs();
+            self.refresh(view);
         }
-        self.changed(|state| {
-            state.permission_requests.push(BrowserPermissionRequest {
-                request_id: id.clone(),
-                kind,
-                origin,
-            });
-        });
-        let weak = Arc::downgrade(self);
-        let timeout_id = id.clone();
-        let scheduled = dispatch2::DispatchQueue::main().after(
-            dispatch2::DispatchTime::try_from(std::time::Duration::from_secs(30))
-                .expect("bounded permission timeout"),
-            move || {
-                let Some(page) = weak.upgrade() else {
-                    return;
-                };
-                let permission = page.permissions.lock().unwrap().remove(&timeout_id);
-                if let Some(permission) = permission {
-                    let kind = permission.kind.clone();
-                    permission.finish(false);
-                    page.changed(|state| {
-                        state
-                            .permission_requests
-                            .retain(|request| request.request_id != timeout_id);
-                        if !state.blocked_permissions.contains(&kind) {
-                            state.blocked_permissions.push(kind);
+        #[unsafe(method(webView:didReceiveServerRedirectForProvisionalNavigation:))]
+        fn redirected(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
+            if self.active(navigation) {
+                if let Some(page) = self.page() { page.transition(Update::Redirect { url: view_url(view) }); }
+                self.refresh(view);
+            }
+        }
+        #[unsafe(method(webView:didCommitNavigation:))]
+        fn committed(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
+            if self.active(navigation) {
+                if let Some(page) = self.page() { page.transition(Update::Committed { url: view_url(view) }); }
+                self.refresh(view);
+            }
+        }
+        #[unsafe(method(webView:didFinishNavigation:))]
+        fn finished(&self, view: &WKWebView, navigation: Option<&WKNavigation>) {
+            if self.take_retired(navigation) { return; }
+            if self.active(navigation) {
+                if let Some(page) = self.page() { page.transition(Update::Finished { url: view_url(view) }); }
+                self.refresh(view);
+            }
+        }
+        #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
+        fn provisional_failed(
+            &self,
+            view: &WKWebView,
+            navigation: Option<&WKNavigation>,
+            error: &NSError,
+        ) {
+            self.failed(view, navigation, error);
+        }
+        #[unsafe(method(webView:didFailNavigation:withError:))]
+        fn navigation_failed(
+            &self,
+            view: &WKWebView,
+            navigation: Option<&WKNavigation>,
+            error: &NSError,
+        ) {
+            self.failed(view, navigation, error);
+        }
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        fn crashed(&self, _view: &WKWebView) {
+            self.ivars().announced.set(false);
+            if let Some(page) = self.page() {
+                page.transition(Update::Crashed);
+                self.ivars().interactions.drain_dialogs();
+                self.ivars().interactions.cancel_user_panels();
+                page.interrupt_pending();
+            }
+        }
+        #[unsafe(method(webView:navigationAction:didBecomeDownload:))]
+        fn action_download(
+            &self,
+            _view: &WKWebView,
+            _action: &WKNavigationAction,
+            download: &WKDownload,
+        ) {
+            self.ivars().interactions.attach_download(download);
+        }
+        #[unsafe(method(webView:navigationResponse:didBecomeDownload:))]
+        fn response_download(
+            &self,
+            _view: &WKWebView,
+            _response: &WKNavigationResponse,
+            download: &WKDownload,
+        ) {
+            self.ivars().interactions.attach_download(download);
+        }
+    }
+    unsafe impl WKUIDelegate for Delegate {
+        #[unsafe(method_id(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
+        fn popup(
+            &self,
+            _view: &WKWebView,
+            configuration: &WKWebViewConfiguration,
+            action: &WKNavigationAction,
+            _features: &WKWindowFeatures,
+        ) -> Option<Retained<WKWebView>> {
+            self.create_popup(configuration, action)
+        }
+        #[unsafe(method(webViewDidClose:))]
+        fn closed(&self, _view: &WKWebView) {
+            if let Some(page) = self.page() {
+                page.close_native();
+            }
+        }
+        #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn alert(
+            &self,
+            view: &WKWebView,
+            message: &NSString,
+            frame: &WKFrameInfo,
+            completion: &DynBlock<dyn Fn()>,
+        ) {
+            self.ivars()
+                .interactions
+                .alert(view, frame, message, completion);
+        }
+        #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
+        fn confirm(
+            &self,
+            view: &WKWebView,
+            message: &NSString,
+            frame: &WKFrameInfo,
+            completion: &DynBlock<dyn Fn(Bool)>,
+        ) {
+            self.ivars()
+                .interactions
+                .confirm(view, frame, message, completion);
+        }
+        #[unsafe(method(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:))]
+        fn prompt(
+            &self,
+            view: &WKWebView,
+            message: &NSString,
+            text: Option<&NSString>,
+            frame: &WKFrameInfo,
+            completion: &DynBlock<dyn Fn(*mut NSString)>,
+        ) {
+            self.ivars()
+                .interactions
+                .prompt(view, frame, message, text, completion);
+        }
+        #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
+        fn open_panel(
+            &self,
+            view: &WKWebView,
+            parameters: &WKOpenPanelParameters,
+            _frame: &WKFrameInfo,
+            completion: &DynBlock<dyn Fn(*mut NSArray<NSURL>)>,
+        ) {
+            self.ivars()
+                .interactions
+                .open_panel(view, parameters, completion);
+        }
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        fn media_permission(
+            &self,
+            _view: &WKWebView,
+            _origin: &WKSecurityOrigin,
+            _frame: &WKFrameInfo,
+            _kind: WKMediaCaptureType,
+            decision: &DynBlock<dyn Fn(WKPermissionDecision)>,
+        ) {
+            let allowed = self
+                .page()
+                .is_some_and(|p| !p.input_locked() && p.is_visible());
+            if !allowed {
+                if let Some(page) = self.page() {
+                    page.changed(|s| {
+                        if !s.blocked_permissions.iter().any(|p| p == "media_capture") {
+                            s.blocked_permissions.push("media_capture".into());
                         }
                     });
                 }
-            },
-        );
-        if scheduled.is_err() {
-            if let Some(permission) = self.permissions.lock().unwrap().remove(&id) {
-                permission.finish(false);
             }
-            self.changed(|state| {
-                state
-                    .permission_requests
-                    .retain(|request| request.request_id != id);
-            });
-            return false;
+            decision.call((if allowed {
+                WKPermissionDecision::Prompt
+            } else {
+                WKPermissionDecision::Deny
+            },));
         }
-        true
     }
-
-    pub async fn reply_permission(
-        self: &Arc<Self>,
-        id: String,
-        generation: u64,
-        allow: bool,
-    ) -> Result<(), String> {
-        let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            let result = (|| {
-                if page.input_locked.load(Ordering::Acquire)
-                    || !page.visible.load(Ordering::Acquire)
-                    || page.close_requested.load(Ordering::Acquire)
-                    || page.metadata.borrow().document_generation != generation
-                {
-                    return Err("CEF permission request is no longer actionable".to_owned());
-                }
-                let permission = page
-                    .permissions
-                    .lock()
-                    .unwrap()
-                    .remove(&id)
-                    .ok_or_else(|| "CEF permission request is stale".to_owned())?;
-                if permission.document_generation != generation || permission.id != id {
-                    permission.finish(false);
-                    return Err("CEF permission request belongs to an older document".to_owned());
-                }
-                let kind = permission.kind.clone();
-                permission.finish(allow);
-                page.changed(|state| {
-                    state
-                        .permission_requests
-                        .retain(|request| request.request_id != id);
-                    if !allow && !state.blocked_permissions.contains(&kind) {
-                        state.blocked_permissions.push(kind);
-                    }
-                });
-                Ok(())
-            })();
-            let _ = tx.send(result);
-        }))?;
-        rx.await
-            .map_err(|_| "CEF permission reply acknowledgement was lost")?
-    }
-    fn offer_dialog(&self, kind: BrowserDialogKind, origin_url: Option<&CefString>, message: Option<&CefString>, default: Option<&CefString>, callback: &JsdialogCallback) -> bool {
-        if self.dialog_draining.load(Ordering::Acquire) || self.close_requested.load(Ordering::Acquire)
-            || self.protocol.is_closed() || self.dialog.lock().unwrap().is_some() { return false; }
-        let (message, message_cut) = bounded(message, 4096);
-        let (default_text, default_cut) = bounded(default, 4096);
-        let id = uuid::Uuid::now_v7().to_string();
-        *self.dialog.lock().unwrap() = Some(DeferredDialog { id: id.clone(), callback: callback.clone() });
-        self.protocol.set_modal_pending(true);
-        self.changed(|state| state.dialog = Some(NativeDialog { request_id: id, document_generation: state.document_generation,
-            kind, message, default_text, origin: origin(origin_url), text_truncated: message_cut || default_cut }));
-        true
-    }
-    /// Keep cancellation policy active until the owning operation has settled.
-    /// Clearing a dialog never reissues the action which opened it.
-    pub async fn set_dialog_draining(self: &Arc<Self>, draining: bool) -> Result<(), String> {
-        let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            page.dialog_draining.store(draining, Ordering::Release);
-            if draining { page.clear_dialog(true); }
-            let _ = tx.send(());
-        }))?;
-        rx.await.map_err(|_| "CEF dialog policy acknowledgement was lost".into())
-    }
-    pub async fn reply_dialog(self: &Arc<Self>, id: String, generation: u64, accept: bool, text: String, cancel: CancellationToken) -> Result<(), String> {
-        if text.len() > 16384 { return Err("CEF dialog reply exceeds its limit".into()); }
-        let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            let result = (|| {
-                if cancel.is_cancelled() || page.dialog_draining.load(Ordering::Acquire) || page.protocol.is_closed()
-                    || page.close_requested.load(Ordering::Acquire) { return Err("CEF dialog reply was cancelled".to_owned()); }
-                if page.metadata.borrow().document_generation != generation { return Err("CEF dialog belongs to an older document".into()); }
-                let pending = {
-                    let mut slot = page.dialog.lock().unwrap();
-                    if slot.as_ref().is_none_or(|pending| pending.id != id) { return Err("CEF dialog reply is stale".into()); }
-                    slot.take().unwrap()
-                };
-                // Remove first: Continue can synchronously expose another dialog.
-                page.changed(|state| state.dialog = None);
-                page.protocol.set_modal_pending(false);
-                pending.callback.cont(i32::from(accept), Some(&CefString::from(text.as_str())));
-                Ok(())
-            })();
-            let _ = tx.send(result);
-        }))?;
-        rx.await.map_err(|_| "CEF dialog reply acknowledgement was lost")?
-    }
-}
-
-wrap_jsdialog_handler! { pub(super) struct Dialogs { page: Arc<Page>, } impl JsdialogHandler {
-    fn on_jsdialog(&self, _browser: Option<&mut Browser>, origin_url: Option<&CefString>, dialog_type: JsdialogType, message_text: Option<&CefString>, default_prompt_text: Option<&CefString>, callback: Option<&mut JsdialogCallback>, suppress_message: Option<&mut i32>) -> i32 {
-        let kind = if dialog_type == JsdialogType::ALERT { Some(BrowserDialogKind::Alert) }
-            else if dialog_type == JsdialogType::CONFIRM { Some(BrowserDialogKind::Confirm) }
-            else if dialog_type == JsdialogType::PROMPT { Some(BrowserDialogKind::Prompt) } else { None };
-        if let (Some(kind), Some(callback)) = (kind, callback) {
-            if self.page.offer_dialog(kind, origin_url, message_text, default_prompt_text, callback) { return 1; }
+);
+impl Delegate {
+    fn create_popup(
+        &self,
+        configuration: &WKWebViewConfiguration,
+        action: &WKNavigationAction,
+    ) -> Option<Retained<WKWebView>> {
+        let opener = self.page()?;
+        let url = unsafe { action.request().URL() }
+            .and_then(|u| u.absoluteString())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if !navigation_allowed(&url) && url != "about:blank" {
+            return None;
         }
-        if let Some(suppress) = suppress_message { *suppress = 1; }
-        0
-    }
-    fn on_before_unload_dialog(&self, browser: Option<&mut Browser>, message_text: Option<&CefString>, _is_reload: i32, callback: Option<&mut JsdialogCallback>) -> i32 {
-        if let Some(callback) = callback {
-            let url = browser.and_then(|browser| browser.main_frame()).map(|frame| CefString::from(&frame.url()));
-            if !self.page.offer_dialog(BrowserDialogKind::BeforeUnload, url.as_ref(), message_text, None, callback) { callback.cont(0, None); }
+        let output = opener.popup_sender.lock().unwrap().clone()?;
+        let parent = native_page(opener.id)?.parent.clone();
+        let page = opener.engine.allocate_page(opener.context.clone());
+        page.inherit_input_lock(&opener);
+        let native = create_native_page(&page, parent, Some(configuration)).ok()?;
+        let (tx, ready) = tokio::sync::oneshot::channel();
+        if output
+            .try_send(PopupCandidate {
+                page: page.clone(),
+                target_url: url,
+                ready,
+            })
+            .is_err()
+        {
+            page.close_native();
+            return None;
         }
-        1
+        let _ = tx.send(Ok(()));
+        Some(native.view.clone())
     }
-    fn on_reset_dialog_state(&self, _browser: Option<&mut Browser>) { self.page.clear_dialog(true); }
-} }
-
-wrap_load_handler! { pub(super) struct Loading { page: Arc<Page>, } impl LoadHandler {
-    fn on_loading_state_change(&self, _browser: Option<&mut Browser>, is_loading: i32, can_go_back: i32, can_go_forward: i32) {
-        self.page.changed(|state| {
-            state.can_go_back = can_go_back != 0; state.can_go_forward = can_go_forward != 0;
-            if is_loading != 0 { state.lifecycle = BrowserTabLifecycle::Loading; }
-            else if state.lifecycle == BrowserTabLifecycle::Loading { state.lifecycle = BrowserTabLifecycle::Ready; }
+    pub(crate) fn new(
+        mtm: MainThreadMarker,
+        page: Weak<Page>,
+        interactions: Rc<NativeInteractions>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(DelegateState {
+            page,
+            interactions,
+            navigation: RefCell::new(None),
+            announced: Cell::new(false),
+            start_seen: Cell::new(true),
+            awaiting_retired_start: RefCell::new(Vec::new()),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+    pub(crate) fn prepare_bootstrap(&self) {
+        self.prepare(None, BrowserNavigationSource::Unknown, true);
+    }
+    pub(crate) fn prepare_navigation(&self, url: Option<String>, source: BrowserNavigationSource) {
+        self.prepare(url, source, false);
+    }
+    fn prepare(&self, url: Option<String>, source: BrowserNavigationSource, bootstrap: bool) {
+        let awaiting_start = !self.ivars().start_seen.get();
+        self.ivars().announced.set(true);
+        // Drop the prior retained navigation before dispatch. Completion from
+        // its native token is inert even before replacement didStart arrives.
+        if let Some(previous) = self.ivars().navigation.borrow_mut().take() {
+            if awaiting_start { self.ivars().awaiting_retired_start.borrow_mut().push(previous); }
+        }
+        if let Some(page) = self.page() {
+            page.transition(Update::Begin { url, source, bootstrap });
+        }
+        self.ivars().interactions.drain_dialogs();
+    }
+    pub(crate) fn track_navigation(&self, navigation: Option<Retained<WKNavigation>>, view: &WKWebView) {
+        let none = navigation.is_none();
+        self.ivars().start_seen.set(none);
+        *self.ivars().navigation.borrow_mut() = navigation;
+        if none {
+            self.ivars().announced.set(false);
+            if !unsafe { view.isLoading() } {
+                if let Some(page) = self.page() { page.transition(Update::NoNavigation { url: view_url(view) }); }
+                self.refresh(view);
+            }
+        }
+    }
+    pub(crate) fn stop_loading(&self, view: &WKWebView) {
+        if let Some(page) = self.page() {
+            if navigation::in_flight(page.snapshot().load.phase) {
+                // Publish the terminal result and invalidate the token before
+                // stopLoading can synchronously deliver cancellation/finish.
+                self.ivars().announced.set(false);
+                page.transition(Update::Cancelled(BrowserCancellationReason::UserStop));
+                unsafe { view.stopLoading(); }
+            }
+        }
+        self.ivars().interactions.drain_dialogs();
+        self.refresh(view);
+    }
+    fn page(&self) -> Option<Arc<Page>> {
+        self.ivars()
+            .page
+            .upgrade()
+            .filter(|p| !p.close_requested.load(Ordering::Acquire))
+    }
+    fn current(&self, navigation: Option<&WKNavigation>) -> bool {
+        navigation_id(self.ivars().navigation.borrow().as_deref()) == navigation_id(navigation)
+    }
+    fn take_retired(&self, navigation: Option<&WKNavigation>) -> bool {
+        let id = navigation_id(navigation);
+        let mut retired = self.ivars().awaiting_retired_start.borrow_mut();
+        if let Some(index) = retired.iter().position(|value| navigation_id(Some(value)) == id) {
+            retired.remove(index);
+            true
+        } else { false }
+    }
+    fn active(&self, navigation: Option<&WKNavigation>) -> bool {
+        self.current(navigation) && self.page().is_some_and(|page| {
+            let state = page.snapshot();
+            state.bootstrap_loading || navigation::in_flight(state.load.phase)
+        })
+    }
+    pub(crate) fn refresh(&self, view: &WKWebView) {
+        let Some(page) = self.page() else { return; };
+        let progress = unsafe { view.estimatedProgress() };
+        page.transition(Update::Metadata {
+            url: view_url(view),
+            title: unsafe { view.title() }.map(|title| title.to_string()).unwrap_or_default(),
+            back: unsafe { view.canGoBack() }, forward: unsafe { view.canGoForward() },
+            progress: if progress.is_finite() { (progress.clamp(0.0, 1.0) * 100.0).round() as u16 } else { 0 },
         });
     }
-    fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
-        if frame.is_some_and(|frame| frame.is_main() != 0) {
-            self.page.clear_dialog(true);
-            self.page.clear_permissions(false);
-            self.page.cancel_surface_downloads();
-            self.page.changed(|state| { state.document_generation = state.document_generation.saturating_add(1); state.lifecycle = BrowserTabLifecycle::Loading; state.blocked_permissions.clear(); state.permission_requests.clear(); });
+    fn failed(&self, view: &WKWebView, navigation: Option<&WKNavigation>, error: &NSError) {
+        if self.take_retired(navigation) { return; }
+        if !self.active(navigation) { return; }
+        if let Some(page) = self.page() {
+            page.transition(Update::Failed { domain: error.domain().to_string(), code: error.code() as i64 });
         }
-    }
-    fn on_load_error(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, error_code: Errorcode, _error_text: Option<&CefString>, _failed_url: Option<&CefString>) {
-        if error_code != Errorcode::ABORTED && frame.is_some_and(|frame| frame.is_main() != 0) {
-            self.page.changed(|state| state.lifecycle = BrowserTabLifecycle::Failed);
-        }
-    }
-} }
-wrap_display_handler! { pub(super) struct Display { page: Arc<Page>, } impl DisplayHandler {
-    fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
-        if frame.is_some_and(|frame| frame.is_main() != 0) {
-            self.page.changed(|state| state.url = bounded(url, 8192).0);
-        }
-    }
-    fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) { self.page.changed(|state| state.title = bounded(title, 512).0); }
-} }
-
-// Until a runtime explicitly owns a permission deferral, deny rather than let
-// CEF show an out-of-band prompt. The host records this as blocked, never granted.
-wrap_permission_handler! { pub(super) struct Permissions { page: Arc<Page>, } impl PermissionHandler {
-    fn on_request_media_access_permission(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, requesting_origin: Option<&CefString>, requested_permissions: u32, callback: Option<&mut MediaAccessCallback>) -> i32 {
-        let camera = PermissionRequestTypes::CAMERA_STREAM.get_raw();
-        let microphone = PermissionRequestTypes::MIC_STREAM.get_raw();
-        let kind = match requested_permissions {
-            value if value == camera => "camera",
-            value if value == microphone => "microphone",
-            value if value == camera | microphone => "camera_microphone",
-            _ => "",
-        };
-        if let Some(callback) = callback {
-            self.page.offer_permission(
-                kind.to_owned(),
-                origin(requesting_origin),
-                DeferredPermissionCallback::Media { callback: callback.clone(), allowed: requested_permissions },
-            );
-        }
-        1
-    }
-    fn on_show_permission_prompt(&self, _browser: Option<&mut Browser>, _prompt_id: u64, requesting_origin: Option<&CefString>, requested_permissions: u32, callback: Option<&mut PermissionPromptCallback>) -> i32 {
-        let kind = if requested_permissions == PermissionRequestTypes::GEOLOCATION.get_raw() { "geolocation" }
-            else if requested_permissions == PermissionRequestTypes::NOTIFICATIONS.get_raw() { "notifications" }
-            else if requested_permissions == PermissionRequestTypes::CLIPBOARD.get_raw() { "clipboard" }
-            else if requested_permissions == PermissionRequestTypes::MIDI_SYSEX.get_raw() { "midi" }
-            else { "" };
-        if let Some(callback) = callback {
-            self.page.offer_permission(
-                kind.to_owned(),
-                origin(requesting_origin),
-                DeferredPermissionCallback::Prompt(callback.clone()),
-            );
-        }
-        1
-    }
-} }
-
-fn callback_to_denial(callback: DeferredPermissionCallback) {
-    match callback {
-        DeferredPermissionCallback::Media { callback, .. } => callback.cancel(),
-        DeferredPermissionCallback::Prompt(callback) => callback.cont(PermissionRequestResult::DENY),
+        self.refresh(view);
     }
 }
-
-// These deferrals must be replaced by host-owned upload/download admission
-// before production availability is enabled. Defaults would display native UI
-// outside the RunGuard and cannot be allowed to run while an Agent owns input.
-wrap_dialog_handler! { pub(super) struct FileDialogs; impl DialogHandler {
-    fn on_file_dialog(&self, _browser: Option<&mut Browser>, _mode: FileDialogMode, _title: Option<&CefString>, _default_file_path: Option<&CefString>, _accept_filters: Option<&mut CefStringList>, _accept_extensions: Option<&mut CefStringList>, _accept_descriptions: Option<&mut CefStringList>, callback: Option<&mut FileDialogCallback>) -> i32 {
-        if let Some(callback) = callback { callback.cancel(); }
-        1
-    }
-} }
-wrap_download_handler! { pub(super) struct Downloads { page: Arc<Page>, } impl DownloadHandler {
-    fn can_download(&self, _browser: Option<&mut Browser>, url: Option<&CefString>, _request_method: Option<&CefString>) -> i32 { i32::from(self.page.can_download(url)) }
-    fn on_before_download(&self, _browser: Option<&mut Browser>, download_item: Option<&mut DownloadItem>, suggested_name: Option<&CefString>, callback: Option<&mut BeforeDownloadCallback>) -> i32 {
-        i32::from(self.page.begin_download(download_item, suggested_name, callback))
-    }
-    fn on_download_updated(&self, _browser: Option<&mut Browser>, download_item: Option<&mut DownloadItem>, callback: Option<&mut DownloadItemCallback>) {
-        self.page.update_download(download_item, callback);
-    }
-} }
-wrap_context_menu_handler! { pub(super) struct Menus { page: Arc<Page>, } impl ContextMenuHandler {
-    fn on_before_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>) {
-        if let Some(model) = model {
-            if self.page.input_locked() { model.clear(); }
-            else { model.remove(cef::sys::cef_menu_id_t::MENU_ID_VIEW_SOURCE as i32); }
-        }
-    }
-} }
+fn navigation_id(value: Option<&WKNavigation>) -> usize {
+    value.map_or(0, |value| value as *const WKNavigation as usize)
+}
+fn view_url(view: &WKWebView) -> String {
+    unsafe { view.URL() }.and_then(|url| url.absoluteString()).map(|url| url.to_string()).unwrap_or_else(|| "about:blank".into())
+}

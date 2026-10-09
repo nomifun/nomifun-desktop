@@ -68,6 +68,7 @@ impl Fixture {
             ..Default::default()
         };
         std::fs::create_dir_all(&config.data_dir).unwrap();
+        crate::config::load_or_create_storage_generation(&config.data_dir).unwrap();
         let database_path = config.database_path();
         let database = nomifun_db::init_database(&database_path).await.unwrap();
         let services = crate::services::AppServices::from_config(database, &config).await.unwrap();

@@ -121,8 +121,8 @@ manual upload runbook.
 
 ## macOS Signing and Notarization
 
-Complete macOS bundles support Apple Silicon arm64 and Intel x64, with separate
-CEF runtimes for each architecture; Universal builds are rejected. Use
+Complete macOS bundles support Apple Silicon arm64 and Intel x64 using system
+WKWebView; Universal builds are rejected. Use
 `bun run build:mac` for the arm64 default or `bun run build:mac intel` for Intel,
 whose bundle also carries the verified ONNX Runtime and its licenses. The
 embedded-browser target remains macOS 14+ for both native architectures.
@@ -134,16 +134,16 @@ NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
 ```
 
 The override also applies to `build:signed` and `build:updater`. Compression does
-not change the App's minimum-system declarations or replace its CEF runtime.
+not change the App's macOS 14+ minimum-system declaration.
 For signed release builds with notarization configured, the final App is signed,
 notarized and stapled before creating DMG/updater bytes; DMG signing and
 notarization remain after container creation.
 
-The CEF bundle keeps `en`, `en_GB`, `zh_CN` and `zh_TW` resources, including their
-`FEMININE`, `MASCULINE` and `NEUTER` variants. Other locale resources are removed
-from the copied framework before signing, without changing the current CEF
-default locale or web features. Updater payloads remain `.app.tar.gz` and use
-gzip level 9.
+No browser runtime, helper, locale pack, or system WebKit.framework is downloaded
+or bundled. The package verifier rejects such browser components. Native Intel
+ONNX Runtime, rpath and licenses remain separate application requirements.
+Updater payloads remain `.app.tar.gz` and use gzip level 9; extraction verifies
+all application bytes, permissions and symlink targets against the final App.
 
 Unsigned/ad-hoc macOS artifacts are useful for local testing but are not suitable
 for distributing to other people. To produce a Developer ID signed and notarized

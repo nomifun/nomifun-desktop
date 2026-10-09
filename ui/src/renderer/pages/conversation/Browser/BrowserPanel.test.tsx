@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import BrowserPanel, { browserFailure } from './BrowserPanel';
-import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut } from './client';
+import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut, type BrowserLoadSummary } from './client';
 import words from '../../../services/i18n/locales/en-US/browserWorkspace.json';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
@@ -32,6 +32,26 @@ function clipboardFixture(write: (text: string) => Promise<void> = async () => {
   return copied;
 }
 
+test('shows semantic Agent limitations from host facts without disabling normal navigation', async () => {
+  const screen = fixture({ async ensure() { return { ...initial, interaction_capabilities: {
+    engine: 'wk_webview', interaction_fidelity: 'semantic_dom', actions: ['click', 'type', 'select', 'scroll', 'dialog'],
+    unsupported_actions: ['drag', 'hover', 'press', 'agent_upload', 'agent_download'], limitations: [],
+  } }; } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.getByText(words.semanticActionsTitle)).toBeTruthy();
+  expect(screen.getByText(words.semanticActionsHint)).toBeTruthy();
+  expect(screen.getByText(words.semanticActionsManual)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+});
+
+test('does not present WK limitations for other runtime facts', async () => {
+  const screen = fixture();
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.queryByText(words.semanticActionsTitle)).toBeNull();
+});
+
 function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest, onClose: () => void = () => {}, hostSurfaceAvailable = true) {
   const commands: BrowserCommand[] = [], detached: number[] = [];
   const consumedLinks: Array<[number, boolean]> = [];
@@ -43,6 +63,7 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
     async closeResource() {},
     async ensure() { return initial; },
     async command(_id, command) { commands.push(command); return initial; },
+    async diagnostics() { return { coverage: 'main_document_navigation', events: [], dropped: 0 }; },
     async attach(_id, _bounds, onEvent) { emit = onEvent; attached = true; return 1; },
     async update() {}, async detach(id) { detached.push(id); }, async scaleFactor() { return 1; },
     ...overrides,
@@ -997,4 +1018,221 @@ test('a canonical preparation lock tells the user to stop the Agent without open
   expect(await screen.findByText(words.stopHint)).toBeTruthy();
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
   expect(attaches).toBe(0);
+});
+
+function pageSnapshot(load: BrowserLoadSummary, lifecycle: 'loading' | 'ready' | 'stopped' | 'failed' | 'crashed', revision = 2): BrowserSnapshot {
+  return { ...initial, runtime: { ...initial.runtime!, revision, tabs: [{ ...initial.runtime!.tabs[0]!, load, lifecycle }] } };
+}
+
+test.each(['failed', 'crashed', 'stopped'] as const)('a %s page shows single-page recovery while retaining the native attachment', async lifecycle => {
+  const layouts: boolean[] = [];
+  const state = pageSnapshot({ navigation_sequence: 1, phase: lifecycle === 'stopped' ? 'cancelled' : lifecycle, content_state: 'none',
+    cancellation_reason: lifecycle === 'stopped' ? 'user_stop' : undefined,
+    problem: lifecycle === 'failed' ? { stage: 'provisional', safe_reason: 'dns', native_domain_class: 'url', native_code: -1003 } : undefined,
+  }, lifecycle);
+  const screen = fixture({ async ensure() { return state; }, async update(_id, _sequence, _bounds, visible) { layouts.push(visible); } });
+  await screen.ready();
+  expect(screen.getByText(lifecycle === 'failed' ? words.pageFailed : lifecycle === 'crashed' ? words.pageCrashed : words.pageStopped)).toBeTruthy();
+  await waitFor(() => expect(layouts.at(-1)).toBe(true));
+  expect(screen.detached).toEqual([]);
+  expect(screen.commands).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: words.reenterAddress }));
+  const address = screen.getByRole('textbox', { name: words.address });
+  expect(document.activeElement).toBe(address);
+  expect((address as HTMLInputElement).disabled).toBe(false);
+  fireEvent.change(address, { target: { value: 'https://recovery.example/' } });
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'navigate', target, url: 'https://recovery.example/' }]));
+});
+
+test('provisional failure keeps the previous content and reports its source outside the native slot', async () => {
+  const state = pageSnapshot({ navigation_sequence: 2, phase: 'failed', content_state: 'retained_document',
+    requested_url: 'https://new.example/', content_url: 'https://previous.example/document',
+    problem: { stage: 'provisional', safe_reason: 'network_connection', native_domain_class: 'url', native_code: -1009 },
+  }, 'failed');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  expect(screen.getByText(words.retainedDocumentHint)).toBeTruthy();
+  expect(screen.getByText('https://previous.example/document').closest('[data-browser-surface]')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.commands).toEqual([]);
+});
+
+test('committed failure describes a partial document without replacing the website response', async () => {
+  const screen = fixture({ async ensure() { return pageSnapshot({ navigation_sequence: 3, phase: 'failed', content_state: 'current_document',
+    problem: { stage: 'committed', safe_reason: 'timeout', native_domain_class: 'url', native_code: -1001 }, response_status: 500 }, 'failed'); } });
+  await screen.ready();
+  expect(screen.getByText(words.partialDocumentHint)).toBeTruthy();
+  expect(screen.getByText(words.loadProblems.timeout)).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+test('HTTP errors that finish normally retain the website page', async () => {
+  const screen = fixture({ async ensure() { return pageSnapshot({ navigation_sequence: 3, phase: 'finished', content_state: 'current_document', response_status: 403 }, 'ready'); } });
+  await screen.ready();
+  expect(screen.queryByText(words.pageFailed)).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.commands).toEqual([]);
+});
+
+test('loading progress and slow guidance do not reload or stop a page', async () => {
+  const originalTimer = window.setTimeout;
+  let slow: (() => void) | undefined;
+  window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if (delay === 10_000 && typeof handler === 'function') { slow = handler as () => void; return 987_654; }
+    return originalTimer(handler, delay, ...args);
+  }) as typeof window.setTimeout;
+  try {
+    const state = pageSnapshot({ navigation_sequence: 1, phase: 'provisional', content_state: 'none', estimated_progress: 42 }, 'loading');
+    const screen = fixture({ async ensure() { return state; } });
+    await screen.ready();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('42');
+    expect(screen.container.querySelector('[data-browser-surface]')?.getAttribute('aria-busy')).toBe('true');
+    await act(async () => slow?.());
+    expect(screen.getByText(words.pageLoadingSlow)).toBeTruthy();
+    expect(screen.commands).toEqual([]);
+    await act(async () => screen.emit({ kind: 'snapshot', snapshot: pageSnapshot({ ...state.runtime!.tabs[0]!.load!, navigation_sequence: 2 }, 'loading', 3) }));
+    expect(screen.queryByText(words.pageLoadingSlow)).toBeNull();
+    expect(screen.commands).toEqual([]);
+  } finally { window.setTimeout = originalTimer; }
+});
+
+test.each(['agent_running', 'input_gate_failed'] as const)('page recovery and diagnostic copy obey the %s input gate', async gate => {
+  const state = pageSnapshot({ navigation_sequence: 1, phase: 'crashed', content_state: 'none' }, 'crashed');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, run: { revision: 2, input_state: gate === 'agent_running' ? gate : 'user_ready', input_gate_failed: gate === 'input_gate_failed' } } }));
+  expect((screen.getByRole('button', { name: words.reenterAddress }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('menuitem', { name: words.copyDiagnostics }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: words.reenterAddress }));
+  expect(screen.commands).toEqual([]);
+});
+
+test('diagnostics are fetched for the exact target and copied only on the explicit menu action', async () => {
+  const copied = clipboardFixture();
+  const requests: unknown[] = [];
+  const report = { coverage: 'main_document_navigation', events: [{ kind: 'redirect', url: 'https://example.test/path' }], dropped: 0 };
+  const screen = fixture({ async diagnostics(id, actualTarget) { requests.push([id, actualTarget]); return report; } });
+  await screen.ready();
+  expect(requests).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(screen.getByRole('menuitem', { name: words.copyDiagnostics }));
+  await screen.findByText(words.diagnosticsCopied);
+  expect(requests).toEqual([['session-1', target]]);
+  expect(copied).toEqual([JSON.stringify(report, null, 2)]);
+  expect(screen.commands).toEqual([]);
+});
+
+test('diagnostic failure never copies raw errors or disrupts the active page', async () => {
+  const copied = clipboardFixture();
+  const screen = fixture({ async diagnostics() { throw new Error('private native/path credential'); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(screen.getByRole('menuitem', { name: words.copyDiagnostics }));
+  await screen.findByText(words.diagnosticsCopyFailed);
+  expect(copied).toEqual([]);
+  expect(screen.queryByText(/private native/)).toBeNull();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+  expect(screen.detached).toEqual([]);
+});
+
+test('a late diagnostic response cannot copy after the active document changes', async () => {
+  const copied = clipboardFixture();
+  let finish!: (value: unknown) => void;
+  const screen = fixture({ diagnostics: () => new Promise(resolve => { finish = resolve; }) });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(screen.getByRole('menuitem', { name: words.copyDiagnostics }));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, runtime: { ...initial.runtime!, revision: 2, tabs: [{ ...initial.runtime!.tabs[0]!, target: { ...target, document_generation: 2 } }] } } }));
+  await act(async () => finish({ events: [] }));
+  expect(copied).toEqual([]);
+  expect(screen.queryByText(words.diagnosticsCopied)).toBeNull();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+});
+
+test.each(['failed', 'cancelled'] as const)('the %s attempt address stays distinct from a retained document and is used for an explicit fresh navigation', async phase => {
+  const requested = 'https://new.example/search?q=user-query';
+  const retained = 'http://localhost:3000/';
+  const state = pageSnapshot({ navigation_sequence: 2, phase, content_state: 'retained_document', requested_url: requested,
+    content_url: retained, cancellation_reason: phase === 'cancelled' ? 'user_stop' : undefined }, phase === 'failed' ? 'failed' : 'stopped');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  await waitFor(() => expect(address.value).toBe(requested));
+  expect(screen.getByText(retained)).toBeTruthy();
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, runtime: { ...state.runtime!, revision: 3,
+    tabs: [{ ...state.runtime!.tabs[0]!, title: 'Old page title updated', url: retained }] } } }));
+  expect(address.value).toBe(requested);
+  expect(screen.commands).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: words.reenterAddress }));
+  fireEvent.submit(address.closest('form')!);
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'navigate', target, url: requested }]));
+});
+
+test('an in-flight attempt displays its requested address and successful redirects display the final address', async () => {
+  const state = pageSnapshot({ navigation_sequence: 2, phase: 'provisional', content_state: 'retained_document',
+    requested_url: 'https://requested.example/', content_url: initial.runtime!.tabs[0]!.url }, 'loading');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  await waitFor(() => expect(address.value).toBe('https://requested.example/'));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, runtime: { ...state.runtime!, revision: 3,
+    tabs: [{ ...state.runtime!.tabs[0]!, url: 'https://final.example/path', lifecycle: 'ready', load: {
+      ...state.runtime!.tabs[0]!.load!, phase: 'finished', content_state: 'current_document', content_url: 'https://final.example/path',
+    } }] } } }));
+  expect(address.value).toBe('https://final.example/path');
+});
+
+test('an unsubmitted address survives page metadata and navigation snapshots until the selected tab changes', async () => {
+  const secondTarget = { ...target, tab_id: 'browser-2' };
+  const state: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [initial.runtime!.tabs[0]!, {
+    ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second page', url: 'https://second.example/',
+  }] } };
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: 'https://unsubmitted.example/draft' } });
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, runtime: { ...state.runtime!, revision: 2, tabs: [{
+    ...state.runtime!.tabs[0]!, target: { ...target, document_generation: 2 }, url: 'https://redirect.example/',
+    load: { navigation_sequence: 2, phase: 'finished', content_state: 'current_document', requested_url: 'https://site-navigation.example/' },
+  }, state.runtime!.tabs[1]!] } } }));
+  expect(address.value).toBe('https://unsubmitted.example/draft');
+  expect(screen.commands).toEqual([]);
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...state, runtime: { ...state.runtime!, revision: 3, active_tab_id: secondTarget.tab_id } } }));
+  expect(address.value).toBe('https://second.example/');
+});
+
+test('an unsubmitted address is discarded when the session or runtime changes', async () => {
+  const screen = fixture();
+  await screen.ready();
+  let address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+  fireEvent.change(address, { target: { value: 'https://unsubmitted.example/' } });
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, runtime: { ...initial.runtime!, runtime_generation: 2,
+    tabs: [{ ...initial.runtime!.tabs[0]!, url: 'https://fresh-runtime.example/', target: { ...target, runtime_generation: 2 } }] } } }));
+  expect(address.value).toBe('https://fresh-runtime.example/');
+  fireEvent.change(address, { target: { value: 'https://second-draft.example/' } });
+  const nextClient = { ...screen.client, async ensure() { return { ...initial, agent_session_id: 'session-2' }; } };
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={nextClient} /></I18nextProvider>);
+  await waitFor(() => {
+    address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
+    expect(address.value).toBe(initial.runtime!.tabs[0]!.url);
+  });
+});
+
+test('a completed internal bootstrap never advertises a page loading operation or a Stop command', async () => {
+  const state = pageSnapshot({ navigation_sequence: 0, phase: 'idle', content_state: 'none', estimated_progress: 0 }, 'loading');
+  const screen = fixture({ async ensure() { return state; } });
+  await screen.ready();
+  expect(screen.queryByRole('button', { name: words.stopLoading })).toBeNull();
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  expect(screen.queryByText(words.pageLoadingSlow)).toBeNull();
+  expect(screen.commands).toEqual([]);
+});
+
+test('platforms without a native load summary retain lifecycle-based Stop controls', async () => {
+  const screen = fixture({ async ensure() { return { ...initial, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, lifecycle: 'loading' }] } }; } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.stopLoading }));
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'stop_loading', target }]));
 });

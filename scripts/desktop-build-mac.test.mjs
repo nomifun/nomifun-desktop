@@ -32,21 +32,6 @@ describe('macOS Desktop build contract', () => {
     expect(result.stdout).not.toContain('构建');
     expect(source.indexOf('DMG_FORMAT="$(bun "$DMG_TOOL" format)"')).toBeLessThan(source.indexOf('for tool in bun cargo'));
   });
-  test('keeps the context-only shutdown probe separate from navigation and soak', () => {
-    const runner = readFileSync(new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8');
-    const fixture = readFileSync(new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8');
-    expect(runner.includes("args.includes('--context-shutdown-only')")).toBe(true);
-    expect(runner.includes("'NOMIFUN_CEF_CONTEXT_SHUTDOWN_ONLY=1'")).toBe(true);
-    expect(runner.includes("'tauri-native-cef-context-shutdown'")).toBe(true);
-    expect(runner.includes('productAcceptance: false')).toBe(true);
-    const start = fixture.indexOf('if context_shutdown_only {');
-    const branch = fixture.slice(start, fixture.indexOf('if window_reopen_only {', start));
-    expect(branch.includes('engine.create_context(')).toBe(true);
-    expect(branch.includes('create_page(')).toBe(false);
-    expect(branch.includes('retained_shutdown_context = Some')).toBe(true);
-    expect(fixture.indexOf('drop(retained_shutdown_context)')).toBeGreaterThan(fixture.indexOf('let shutdown = engine.shutdown().await'));
-  });
-
   test('locks the host/package/legal artifacts without staging external engines', () => {
     expect(source.includes('--sidecar')).toBe(false);
     expect(source.includes('--host "$host"')).toBe(true);
@@ -56,115 +41,40 @@ describe('macOS Desktop build contract', () => {
     const overlay = readFileSync(
       new URL('../apps/desktop/tauri.macos.conf.json', import.meta.url), 'utf8',
     );
-    expect(JSON.parse(overlay).bundle).toEqual({});
+    expect(JSON.parse(overlay).bundle).toEqual({ macOS: { minimumSystemVersion: '14.0' } });
+    const base = JSON.parse(readFileSync(new URL('../apps/desktop/tauri.conf.json', import.meta.url), 'utf8'));
+    expect(base.bundle.macOS.minimumSystemVersion).toBe('14.0');
   });
 
-  test('stages the matching architecture CEF bundle before creating the DMG', () => {
-    expect(source.includes('stage-macos-cef-bundle.mjs')).toBe(true);
-    expect(source.includes('nomifun-browser-cef-helper')).toBe(true);
-    expect(source.includes('"$BROWSER_BUNDLE_TOOL" runtime')).toBe(true);
-    expect(source.includes('--identity "$identity" --target "$target"')).toBe(true);
-    const stage = source.indexOf('stage_macos_cef "$app" "$t"');
-    const dmg = source.indexOf('create_dmg_from_staged_app "$app" "$t" "$dmg_dir"');
-    const dmgImage = source.indexOf('bun "$DMG_TOOL" create --app "$app" --output "$output"');
-    const dmgSign = source.indexOf('codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"');
-    const notarize = source.indexOf('notarize_dmg_dir "$dmg_dir"');
-    expect(stage).toBeGreaterThan(0);
-    expect(dmg).toBeGreaterThan(stage);
-    expect(dmgImage).toBeGreaterThan(0);
-    expect(dmgSign).toBeGreaterThan(dmgImage);
-    expect(notarize).toBeGreaterThan(dmg);
-    expect(source.includes('TRIPLES=(aarch64-apple-darwin)')).toBe(true);
-  });
-
-  test('generates updater bytes only after CEF staging and final App notarization', () => {
-    const stage = source.indexOf('stage_macos_cef "$app" "$t"');
+  test('signs the final application before DMG and updater generation', () => {
+    const sign = source.indexOf('sign_final_app "$app" "$t"');
     const notarizeApp = source.indexOf('notarize_final_app "$app"');
-    const updater = source.indexOf('"$BROWSER_BUNDLE_TOOL" updater --root "$ROOT" --app "$app"');
-    expect(source.includes('"createUpdaterArtifacts":false')).toBe(true);
-    expect(notarizeApp).toBeGreaterThan(stage);
+    const dmg = source.indexOf('create_dmg_from_staged_app "$app" "$t" "$dmg_dir"');
+    const updater = source.indexOf('"$APP_BUNDLE_TOOL" updater --root "$ROOT" --app "$app"');
+    const notarizeDmg = source.indexOf('notarize_dmg_dir "$dmg_dir"');
+    expect(sign).toBeGreaterThan(0);
+    expect(notarizeApp).toBeGreaterThan(sign);
+    expect(dmg).toBeGreaterThan(notarizeApp);
     expect(updater).toBeGreaterThan(notarizeApp);
+    expect(notarizeDmg).toBeGreaterThan(dmg);
+    expect(source).toContain('"createUpdaterArtifacts":false');
+    expect(source).toContain('codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"');
   });
 
-  test('declares website media and local-network privacy reasons in the host and staged CEF helpers', () => {
-    const hostPlist = readFileSync(
-      new URL('../apps/desktop/Info.plist', import.meta.url), 'utf8',
-    );
-    const stage = readFileSync(
-      new URL('./lib/macos-browser-bundle.mjs', import.meta.url), 'utf8',
-    );
-    const smoke = readFileSync(
-      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
-    );
-    for (const key of [
-      'NSMicrophoneUsageDescription',
-      'NSCameraUsageDescription',
-      'NSLocationUsageDescription',
-      'NSLocalNetworkUsageDescription',
-    ]) {
-      expect(hostPlist.includes(`<key>${key}</key>`)).toBe(true);
-      expect(stage.includes(`${key}:`)).toBe(true);
-      expect(smoke.includes(`${key}:`)).toBe(true);
+  test('retains Intel ONNX packaging and runtime linkage with no browser download or helpers', () => {
+    expect(source).toContain('x86_64-apple-darwin');
+    expect(source).toContain('ORT_LIB_PATH="$(bun "$ONNX_RUNTIME_TOOL")"');
+    expect(source).toContain('-C link-arg=-Wl,-rpath,@executable_path/../Frameworks');
+    expect(source).toContain('onnxruntime-LICENSE');
+    expect(source).toContain('onnxruntime-ThirdPartyNotices.txt');
+    expect(source).toContain('"$APP_BUNDLE_TOOL" inspect --app "$app"');
+    expect(source).not.toMatch(/CEF|cef|browser-runtime|download-cef/);
+  });
+
+  test('preserves host website media and local-network privacy reasons', () => {
+    const hostPlist = readFileSync(new URL('../apps/desktop/Info.plist', import.meta.url), 'utf8');
+    for (const key of ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription', 'NSLocationUsageDescription', 'NSLocalNetworkUsageDescription']) {
+      expect(hostPlist).toContain(`<key>${key}</key>`);
     }
-  });
-
-  test('canonicalizes host and helper Info.plists before CEF bundle signing', () => {
-    const stage = readFileSync(
-      new URL('./lib/macos-browser-bundle.mjs', import.meta.url), 'utf8',
-    );
-    const hostCanonicalization = stage.indexOf(
-      "await canonicalizeInfoPlist(join(contents, 'Info.plist'));",
-    );
-    const helperCanonicalization = stage.indexOf(
-      "await canonicalizeInfoPlist(join(frameworks, `${name}.app`, 'Contents/Info.plist'));",
-    );
-    const helperSigning = stage.indexOf(
-      'for (const name of helperNames) await sign(join(frameworks, `${name}.app`), true);',
-    );
-    const appSigning = stage.indexOf('await sign(app);');
-    expect(stage.includes("run('/usr/bin/plutil', ['-convert', 'xml1', path])")).toBe(true);
-    expect(hostCanonicalization).toBeGreaterThan(0);
-    expect(helperCanonicalization).toBeGreaterThan(hostCanonicalization);
-    expect(helperCanonicalization).toBeLessThan(helperSigning);
-    expect(hostCanonicalization).toBeLessThan(appSigning);
-    expect(stage.includes("info_plist_serialization: 'canonical-xml'")).toBe(true);
-  });
-
-  test('keeps the native CEF 100-cycle soak isolated and fail-closed', () => {
-    const runner = readFileSync(
-      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
-    );
-    const fixture = readFileSync(
-      new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8',
-    );
-    expect(runner.includes("args.includes('--soak-only')")).toBe(true);
-    expect(runner.includes("'NOMIFUN_CEF_SOAK_ONLY=1'")).toBe(true);
-    expect(runner.includes("infoPlistSerialization: 'canonical-xml'")).toBe(true);
-    expect(fixture.includes('for cycle in 0..100usize')).toBe(true);
-    expect(fixture.includes('Err(WorkspaceError::StaleTarget)')).toBe(true);
-    expect(fixture.includes('stale_target_rejections == 99')).toBe(true);
-    expect(fixture.includes('latency_not_sequence_degraded')).toBe(true);
-    expect(fixture.includes('let close = runtime.close().await')).toBe(true);
-    expect(fixture.includes('let shutdown = engine.shutdown().await')).toBe(true);
-  });
-
-  test('keeps native CEF window replacement identities and pending-work fences explicit', () => {
-    const runner = readFileSync(
-      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
-    );
-    const fixture = readFileSync(
-      new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8',
-    );
-    const lifecycle = readFileSync(
-      new URL('../apps/desktop/examples/support/browser_window_reopen.rs', import.meta.url), 'utf8',
-    );
-    expect(runner.includes("args.includes('--window-reopen-only')")).toBe(true);
-    expect(runner.includes("'NOMIFUN_CEF_WINDOW_REOPEN_ONLY=1'")).toBe(true);
-    expect(fixture.includes('mod browser_window_reopen;')).toBe(true);
-    expect(lifecycle.includes('BrowserEvaluationOutcome::AwaitingDialog')).toBe(true);
-    expect(lifecycle.includes('Err(WorkspaceError::WorkspaceClosed)')).toBe(true);
-    expect(lifecycle.includes('Err(WorkspaceError::TabNotFound)')).toBe(true);
-    expect(lifecycle.includes('old_window_identity == new_window_identity')).toBe(true);
-    expect(lifecycle.includes('create_runtime(engine, app, base_url, 52, "new")')).toBe(true);
   });
 });

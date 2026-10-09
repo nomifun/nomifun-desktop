@@ -462,6 +462,7 @@ impl DesktopBrowserRuntime {
         match self.start_work(Work::Observe(tab),cancel).await? {
             Yielded::Finished(Output::Observe(result))=>Ok(result),
             Yielded::Dialog(dialog)=>Ok(BrowserObservation {target:dialog.target.clone(), observation_generation:0,
+                load:None,content_url:None,
                 content:"The page is paused by an untrusted website dialog. Respond to the exact dialog, then observe again.".into(),
                 elements:vec![],unobserved_frames:1,script_dialog:Some(dialog)}),
             _=>Err(WorkspaceError::NativeCommandFailed),

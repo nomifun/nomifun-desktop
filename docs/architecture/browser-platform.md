@@ -20,7 +20,7 @@ An Agent using attached Chrome leaves the user's managed browser independent. A 
 cannot silently reuse the existing entity.
 
 Every Agent Turn, including ordinary chat without Browser tools and attached Chrome Agents, acquires the managed
-browser input gate during Runtime preparation. Creating the entity does not call `cef_initialize` or create a Context. A native child first
+browser input gate during Runtime preparation. Creating the entity does not create a native page. A native child first
 created during a run starts with user input disabled. When the canonical Turn is already running but its native
 gate is not proven yet, user commands and first opening fail closed. Retained preparation owners drain cancellation
 and failure while keeping hardware input locked. Only the exact durable Turn terminal permits final release; downstream
@@ -33,17 +33,33 @@ its separate exact witness for generation zero. After complete Runtime teardown,
 from its Weak cache by exact Arc identity. Old handles may remain alive, but replacements cannot reuse a closed
 context and late old cleanup cannot evict the successor.
 
-Production profile identity is the authenticated owner and Session, with namespace
+Production profiles belong to the authenticated owner and Session. Windows retains namespace
 `nomifun.browser.session-managed-profile.v2` and directory `browser-v4/agent-sessions/<identity-hash>/`.
-Agent resource definition IDs, project paths and Agent persistence parameters do not select profiles.
-Old profiles are not read, scanned or migrated. Standalone native conformance fixtures may still use ephemeral data.
+macOS 14+ uses a separate persistent `WKWebsiteDataStore.dataStoreForIdentifier`: a length-prefixed SHA-256
+derivation combines `nomifun.browser.webkit.session-store.v1`, compiled channel, canonical data root, existing
+trusted `storage-generation`, owner and canonical AgentSession into a stable UUID. Agent resource definition IDs,
+project paths and Agent persistence parameters do not select profiles. Restart retains sign-in; channels, test roots
+and distinct data roots do not share it. Moving/copying the data root selects a fresh sign-in namespace. WK data
+is not part of portable backups. Restore creates a new destination generation and leaves the source installation's
+system stores unchanged. Reset cleanup derives retired stores from the original root, archived trusted generation
+and canonical Session owners, then awaits native deletion before the existing dataset coordinator finalizes reset.
+There is no second Session/profile ledger. Missing/invalid archived identity evidence fails closed; without the native
+cleanup port (including CLI/no-browser builds), reset stays pending and must finish in NomiFun Desktop. Session
+deletion likewise requires confirmed native cleanup. Site clearing awaits public WK removal callbacks.
+WK does not inherit Safari or CEF cookies; signing in once after switching is expected. Old CEF files are neither
+read, scanned, migrated nor automatically deleted; removing them requires explicit user choice. Switching does not
+clear chats, model configuration or credentials. Standalone native conformance fixtures may still use ephemeral data.
+Old profile presence and contents do not affect startup, identity derivation, recovery or cleanup decisions. No old-format
+reader, dual read, fallback or migration workflow is maintained. Leaving user files on disk creates no runtime compatibility
+contract; the new Mac implementation owns only current WK stores. If the reset archive contains the canonical table,
+its required current identity fields must be present; missing fields cannot be treated as an empty session set.
 Canonical Session deletion closes the physical runtime and safely deletes its exact user profile even without an
 Agent Browser binding, including after restart. No second profile or Agent authorization ledger is introduced;
 historical Agent resource definitions remain available for settled effect receipts.
 
 The embedded browser does not expose F12, Inspect, or a user-visible DevTools window. Ordinary pages, popups, and host maintenance views explicitly disable that entry point, and the boundary scanner prevents it from returning. Low-level WebView2 protocol calls still implement Agent observation, native input, frames, and lifecycle; they are host-internal transport, not a DevTools product feature.
 
-The conversation browser uses the native WebView2/operating-system network stack. It does not install an application proxy, IP/port allowlist, or network settings UI, preserving system proxies and certificates plus localhost, LAN, WebSocket, and HMR workflows. The minimal boundary accepts only credential-free HTTP(S) top-level navigation and gives browser children no Tauri capability, local trust, backend credential, or arbitrary filesystem authority. Background `web.research` and rendering are separate consumers and retain strict public DNS/IP pinning.
+The conversation browser uses WebView2 on Windows and system WKWebView on macOS 14+, with the operating-system network stack. It does not install an application proxy, IP/port allowlist, or network settings UI, preserving system proxies and certificates plus localhost, LAN, WebSocket, and HMR workflows. The minimal boundary accepts only credential-free HTTP(S) top-level navigation and gives browser children no Tauri capability, local trust, backend credential, or arbitrary filesystem authority. Background `web.research` and rendering are separate consumers and retain strict public DNS/IP pinning.
 
 Before compiling Agent configuration, a native host derives the Browser Role v2 default binding from its materialized bundled Provider. This is exact boot composition, not a user-facing Role setting or a migration of old installation bindings.
 
@@ -57,22 +73,105 @@ the Operation through the formal Stop/cancel path and prove Runtime cleanup befo
 and retry final release. The new user Workspace has another generation and cannot be released by the old owner;
 the model is not replayed and the original outcome is not rewritten.
 
-macOS separates loading the CEF library from initializing the engine. The process entry validates its owned `.app`
-framework and complete helper layout, then preloads the fixed CEF library on the startup main thread before Tauri,
-Tokio or other host workers begin. The library constructor changes macOS malloc zones; loading it after SQLite or
-other workers have allocated memory can race allocator registration and corrupt the host heap. Once loaded, the
-library stays resident until process exit, including after page closure, `cef_shutdown` or an unused host shutdown.
+macOS embeds a visible WKWebView child using Tauri's existing AppKit main thread and event loop. WK/AppKit
+objects are created, used and released on that thread. There is no second NSApplication, downloaded browser
+runtime, bundled system WebKit.framework, CEF helper/guardian, framework preload, message pump, allocator
+exception or fallback engine. System WebKit owns WebContent processes.
 
-Preloading does not call `cef_initialize`, start the guardian/helpers, create contexts/profiles or access Keychain.
-The first actual native runtime demand installs CefAppProtocol and initializes CEF on the established application
-main thread. A retained owner then holds the guardian, contexts and pages. An unused host closes without
-manufacturing initialization; an initialized host still proves page, context, helper and native shutdown cleanup
-before joining the guardian. A resident library is not a cleanup receipt and does not change canonical Session
-ownership, Agent grants, RunGuard or the exact durable Turn terminal boundary for releasing user input.
+## Browser identity and navigation recovery
+
+Before the first request, ordinary macOS tabs and popups share one native desktop Safari compatibility identity: `macos-desktop-webkit-safari17-v1`. Its `Version/17.0` token is an advertised compatibility baseline, not a measured Safari/WebKit runtime version. Actual OS information is reported separately and unknown framework metadata remains unknown. The policy neither changes Session/Profile identity nor clears cookies, bundles Safari or another engine, patches JavaScript getters, or sets individual request headers. Windows retains its native identity.
+
+One Page reducer owns request/start/redirect/commit/finish/cancellation/failure/process-termination state. The `load` summary reports an attempt sequence, phase, displayable content, rounded progress, safe problems, and attempted/content addresses. Internal bootstrap has explicit source identity and is not user content; genuine about:blank popups can hold documents. Cancelled attempts map to `Stopped`, never successful navigation. Cancellation classification checks domain and code. Retained native navigation objects and dispatch receipts reject late callbacks, stale Stop commands, and old layout updates.
+
+Panel/layout admission, native child displayability, and input ownership are independent. Empty failed/stopped/crashed pages hide the child on the native main thread and show host recovery content; retained/partial documents remain visible with their attempted/content address distinction. Every native show reapplies the current Page mask. Authorized Agent recovery navigation waits for layout without requiring an executable old document. Empty reads return `BROWSER_PAGE_FAILED`, `BROWSER_PAGE_STOPPED`, or `BROWSER_PAGE_CRASHED`; valid retained/partial content can be observed and captured with a safe load summary. Existing execution-uncertainty errors remain intact: no automatic DOM, POST, or Agent action replay.
+
+User downloads use panel presentation independently of the document mask. A first direct attachment can continue destination confirmation while an empty document is hidden; actual panel hiding, input-owner changes and process termination still revoke pending choices. DOM interaction, media permissions and upload selection continue to require actual document visibility.
+
+The Page-owned main-document trace is ephemeral and bounded to 32 attempts, 128 events, and a 128 KiB serialized-event budget. Capacity loss increments dropped independently of routing-proof loss. Response callbacks have no WKNavigation identity; unproven response association remains a Page-scoped sample and does not update the current response summary. Matching URLs or the latest sequence are insufficient proof. This does not claim console, subresource, or Fetch/XHR coverage; existing unavailable semantics remain.
+
+The user explicitly copies navigation diagnostics through an owner-checked read of the existing Workspace and exact target. It does not initialize a runtime, grant Agent authority, or upload data. Actual navigation/address bars retain original URLs; Agent/diagnostic metadata removes userinfo, query and fragment through the shared safe projection and enforces text limits. Cookies, credentials, bodies, form values and arbitrary NSError descriptions are excluded. Recovery remains explicit and tab-scoped; slow-load hints never trigger infinite reloads, bypass challenges, or clear the whole workspace.
+
+### Navigation recovery validation 2026-10-10
+
+A separate real Tauri window on macOS 26.3.0 passed ephemeral native checks for initial Stop without content, actual child masking, same-tab recovery, HTTP/JavaScript UA agreement across ordinary pages/iframes/fetch/images/popups, two-hop redirects within one attempt, page reload versus host-request separation, prompt empty-page errors, and retained HTTP 403 content after a subsequent failed navigation. A separate native Page without automatic download-directory configuration verified the real first-attachment destination picker, masking without picker cancellation, and cancellation through explicit cancel/panel hiding/input ownership change. No destination was selected or file written to user Downloads.
+
+A 60-second live-site run in an ephemeral native Profile observed the Bilibili homepage without the browser-version advice page and readable Baidu search results; each retained one host navigation with no host reload loop. Login, actual video playback, minimum-macOS and Intel hardware runs remain uncovered, and site challenge avoidance is not promised. The identity uses existing dependencies and system frameworks with no new bundled engine resources; exact release-package byte deltas require an identical-parameter build comparison.
+
+## Platform capabilities
+
+| Capability | macOS WKWebView | Windows WebView2 |
+| --- | --- | --- |
+| Visible pages, tabs, navigation/history, reload/stop, ordinary user input | Native workspace retained | Existing implementation retained |
+| Text/elements and visible screenshot | Main-document semantic observation; native snapshot | Existing protocol observation and screenshot |
+| Ordinary click, text fill, option select, scroll, submit button | `semantic_dom`; single left click, replacement text | Existing `browser_input` |
+| Drag, hover, key combinations, right/middle/double click, pointer capture, complex canvas/editors | Explicit `BROWSER_UNSUPPORTED_ACTION` | Existing support and frame restrictions retained |
+| Iframes and closed shadow content | Uncovered content has no actionable refs; `unobserved_frames` is explicit | Existing frame routing |
+| User file picker and download | Public WK/AppKit flow; no HTML `accept` prefilter | Existing native flow and filters |
+| Agent upload/download, developer evaluate, full CDP diagnostics | Unsupported in this version | Existing actions and grants retained |
+| Persistent sign-in, Session deletion/site-data clear | Separate macOS 14+ WKWebsiteDataStore | Directory Profile retained |
+
+`semantic_dom` never fabricates `isTrusted` or user activation. Successful DOM calls or event dispatch do not
+prove a site's business outcome; observe again. When a site requires manual interaction, use the existing
+Stop, wait for cleanup, and unlock flow. Observation and user snapshots report `interaction_capabilities`;
+the schema action union does not promise all actions on every runtime. Unsupported errors forbid repeating
+the same action without making ordinary browsing unavailable. The browser menu explains common limits.
+
+The public `WKOpenPanelParameters` API exposes multiple-selection and directory options, but no HTML `accept`
+MIME/extension hints. The macOS chooser therefore does not prefilter file types; the user must choose a type
+accepted by the website. This limitation does not grant extra file access or alter Windows picker filtering.
+
+`browser/observe` returns semantic observation by default. Optional `screenshot:true` captures the same native
+tab's viewport after exact model-route ImageInput admission. Pixels become a typed image part, never base64
+model text. Screenshot and DOM observation must have the same target generation. A pending website dialog
+returns `screenshot_status=awaiting_dialog`, not a fabricated image. This path needs no Computer Screen
+Recording permission and does not use Headless rendering or supply the renderer's browser surface.
 
 ## Current implementation
 
-macOS first-use authorization and complete cold acceptance remain unverified. In the latest native run, the bootstrap
+### WK validation — 2026-10-09
+
+The actual Tauri desktop App was exercised on Apple Silicon running macOS 26.6.2. Its canonical
+AgentSession/Engine path used a local scripted model for 18 rounds and 220 events: visible navigation,
+observation, form entry/selection/submission, scrolling and native snapshots reached typed model image parts.
+Semantic actions reported `isTrusted=false`; a physical user action reported `true`. Stale references were
+rejected, and unsupported drag was followed by successful ordinary interaction on the same page. This is
+real App/tool integration with a deterministic model, not an external live-model acceptance result.
+
+- Physical user input was blocked while the Agent ran and restored after GUI Stop. Pending-dialog Stop was
+  observed in the GUI/DOM and the canonical cancelled terminal; its separate HTTP witness was absent, so
+  that HTTP completion is not claimed.
+- User interaction covered Chinese paste, confirm/prompt dialogs, popup, native file selection, and HTTP/blob
+  downloads in the App. Back and Forward each restored the expected URL and native page content in the
+  final App validation run. An in-flight page load stopped through the toolbar, with normal navigation still
+  working afterward.
+- Persistent profiles A/B remained isolated across restart. Clearing A remained effective after another
+  restart without clearing B. Terminating the exact owned WebContent child and reloading preserved cookies.
+- Session C displayed its distinct cookie and localStorage before deletion. Its first DELETE returned HTTP 200
+  and canonical state `deleted`; production completion required absence from public store enumeration, and
+  the exact system-store directory was gone. Six before/after SHA-256 comparisons for the A/configuration/chat/
+  legacy-data controls remained identical. GUI inspection confirmed the removed native child and only A left
+  in the session list. The earlier B DELETE HTTP 409 remains a separate failed attempt; the later App startup
+  recovery is recorded separately and does not turn that first failure into a pass.
+- An isolated temporary dataset accepted one request through the real factory-reset API. After normal exit
+  and restart, the old WK store and canonical sessions were removed, a new generation and dataset receipt
+  were established, and pending reset markers were consumed. The actual App displayed an empty session list
+  and model selection. This was an explicitly exercised reset of disposable development data, not data clearing
+  during the browser migration.
+- Targeted checks passed: 105 backend tests, 7 native tests and 80 UI tests. The final distribution check found
+  an arm64 App of 162,339,889 bytes across 6 regular files, with macOS 14 minimum, a valid ad-hoc signature,
+  system WebKit linkage and no CEF, browser helpers or bundled WebKit. The ULMO DMG is 54,522,639 bytes;
+  verification, read-only mounting and complete App parity passed. The gzip level 9 updater is 72,064,001 bytes;
+  extraction parity and a disposable test-key signature passed, and the private test key was deleted. The dirty
+  source tree correctly failed the release lock with exit 3. These are local test artifacts, not a published release.
+- The Intel adapter cross-compilation check passed; this does not establish a complete Intel App or Intel
+  hardware runtime. Those scopes, external live-model execution, a new Windows GUI regression, Developer ID
+  signing and notarization remain unverified.
+
+The historical CEF failures and Windows evidence below retain their original scope; they do not replace the
+WK receipts above or expand their acceptance coverage.
+
+The following is historical pre-migration CEF failure evidence; WK checks must not rewrite it as success. The bootstrap
 document reached Ready in about 25 ms, but a newly ad-hoc-signed application's first persistent navigation still hit
 the 30-second protocol deadline. Restarting the same artifact completed cold navigation in about 120 ms and passed
 the native suite and exit. An independent ephemeral comparison navigated successfully, but a shutdown worker was
@@ -80,15 +179,13 @@ observed waiting in `SecItemCopyMatching` / Keychain decrypt for over 260 second
 as failure, not successful native shutdown. Warm runs, same-artifact restarts and partial native tests do not prove
 all first cold runs of freshly signed applications.
 
-Initial Keychain authorization may require the user to handle a native system prompt. Repeated ad-hoc signing changes
-application code identity and may increase repeated authorization or waiting risk; a stable development signing identity
-must be explicitly selected by the user. The host does not choose signing identities, enter passwords or change Keychain
-ACLs. Longer deadlines, killed helpers and skipped pending work cannot manufacture completion. Framework preloading fixes
-allocator startup order, not Keychain permission. Checked CEF 152 and 154 stable do not expose the required official
-Keychain namespace setting; the implementation does not invent a field or substitute an unverified upgrade for diagnosis.
+Those CEF/Keychain records no longer define implementation requirements and are not WK acceptance evidence.
+WK receipts distinguish the actual App, direct Agent tool calls, deterministic model fixtures, external live models,
+native fixtures, ARM/Intel compilation and target-machine execution. Unrun scopes remain unverified; warm runs,
+mocks and independent native windows cannot substitute for the product journey.
 
 
-The conversation menu now wires user-only site-data clearing with explicit confirmation. The runtime closes its pages, awaits native Profile clearing on an inert, hidden, same-profile controller, then destroys that controller. It is not a tab or an automation browser. Unknown work is not released by a timeout; recovery teardown still waits for native pending work. The two-persistent-profile regression, pre-dispatch cancellation, generation/Agent rejection and UI confirmation tests pass. Main-GUI clicking and the complete in-flight crash/shutdown matrix remain unfinished; the latest isolated preview includes the code but has not yet been launched manually.
+The Windows conversation menu wires user-only site-data clearing with explicit confirmation. The runtime closes its pages, awaits native Profile clearing on an inert, hidden, same-profile controller, then destroys that controller. It is not a tab or an automation browser. Unknown work is not released by a timeout; recovery teardown still waits for native pending work. The two-persistent-profile regression, pre-dispatch cancellation, generation/Agent rejection and UI confirmation tests pass. Main-GUI clicking and the complete in-flight crash/shutdown matrix remain unfinished; the latest isolated preview includes the code but has not yet been launched manually.
 
 The Windows main GUI now has live-model counter-repair evidence: capabilities selected in the workbench, a native click reproducing +2, Read/Edit changing app.js, a reload followed by trusted clicks yielding 1/2/3, and user continuation to 4 on the same page. An initial unadvertised Glob call was rejected; a corrective follow-up was needed. This is not an uninterrupted autonomous pass or full framework startup/build/GUI acceptance. See the implementation record for failures and receipts.
 
@@ -107,7 +204,7 @@ Windows currently supports real HTML drag/drop within one native protocol sessio
 
 Windows tabs now install native script-dialog handling before their first navigation, including before popup binding. A single owned-work registry retains input, navigation, observation and screenshot operations when a dialog interrupts them. Agent replies use the current run guard; idle-user replies use the user gate and tab-local website dialog. A paused observation has no actionable element references, and a paused screenshot returns dialog metadata rather than a fabricated image. Initial-document prompts, beforeunload accept/cancel, asynchronous dialogs and popup initial dialogs have production-host smoke evidence. Exact-tab close now destroys the native page and settles only its scoped work, without cancelling the run or another page's dialog; concurrent closes serialize per tab. Full frame/creation/cancellation races and main-app visual acceptance still need work.
 
-Iframe input uses native `DOM.getBoxModel` content quads and projective mapping instead of reimplementing CSS transforms. Same-process parents are converted from the protocol-session root back to their own viewport before hit testing; OOPIF session boundaries stay intact. Quads and viewports are rechecked before input, with degenerate, non-finite or changed geometry rejected. Real tests cover static perspective, ancestor perspective, individual 3D properties, motion paths, nested same-process clicking/typing and parent overlays. Dynamic-transform and cross-process drag completion coverage is still incomplete.
+Windows iframe input uses native `DOM.getBoxModel` content quads and projective mapping instead of reimplementing CSS transforms. Same-process parents are converted from the protocol-session root back to their own viewport before hit testing; OOPIF session boundaries stay intact. Quads and viewports are rechecked before input, with degenerate, non-finite or changed geometry rejected. Real tests cover static perspective, ancestor perspective, individual 3D properties, motion paths, nested same-process clicking/typing and parent overlays. Dynamic-transform and cross-process drag completion coverage is still incomplete.
 
 Native WebView2 zoom at 80%, 125% and 150% has verified far-positioned root buttons, nested projected clicks and trusted text input, with ZoomFactor readback and matching CSS viewport sizes. A scrolled root viewport at 150% also preserves correct input placement. This is native page-zoom acceptance, not device/phone emulation or a new product mode.
 

@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import classNames from 'classnames';
+import PageHeader from '@/renderer/components/layout/PageHeader';
 
 interface ModelHubPageHeaderProps {
   title: React.ReactNode;
@@ -23,16 +23,8 @@ const ModelHubPageHeader: React.FC<ModelHubPageHeaderProps> = ({
   actions,
   className,
 }) => (
-  <header className={classNames('flex items-start justify-between gap-12px flex-wrap', className)}>
-    <div className='min-w-0'>
-      <div className='flex min-w-0 items-center gap-8px flex-wrap'>
-        <h2 className='m-0 text-15px font-600 leading-20px text-t-primary'>{title}</h2>
-        {badge}
-      </div>
-      <p className='m-0 mt-4px text-12px leading-18px text-t-tertiary'>{description}</p>
-    </div>
-    {actions}
-  </header>
+  <PageHeader level={2} title={title} description={description} badge={badge} actions={actions}
+    className={['page-header--flush', className].filter(Boolean).join(' ')} />
 );
 
 export default ModelHubPageHeader;

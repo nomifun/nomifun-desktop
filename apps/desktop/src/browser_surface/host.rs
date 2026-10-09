@@ -60,6 +60,7 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
         };
         let directory = match &request.profile {
             BrowserProfile::Persistent(path) => path.clone(),
+            BrowserProfile::WebKitPersistent { .. } => return Err(WorkspaceError::ProfileCleanupInvalid),
             BrowserProfile::Ephemeral => temporary.as_ref().unwrap().path().to_path_buf(),
         };
         let input_enabled = request.user_input_enabled;
@@ -445,6 +446,7 @@ impl DesktopBrowserRuntime {
             title: String::new(),
             url: request.url.clone(),
             lifecycle: BrowserTabLifecycle::Loading,
+            load: None,
             can_go_back: false,
             can_go_forward: false,
             zoom_percent: 100,
@@ -686,6 +688,7 @@ impl DesktopBrowserRuntime {
             title: String::new(),
             url: "about:blank".into(),
             lifecycle: BrowserTabLifecycle::Loading,
+            load: None,
             can_go_back: false,
             can_go_forward: false,
             zoom_percent: 100,

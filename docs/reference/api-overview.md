@@ -128,6 +128,7 @@ page. There is no user-control transfer state.
 | `POST /api/agent-sessions/{agent_session_id}/browser` | Ensure the session's native Browser Workspace and return its snapshot. |
 | `DELETE /api/agent-sessions/{agent_session_id}/browser` | Close an idle Browser Workspace using its exact `runtime_generation`; stale or active requests are rejected. |
 | `POST /api/agent-sessions/{agent_session_id}/browser/commands` | Run one typed user command against the native tabs while input is user-owned: create/activate/close/navigate/history/reload, close all pages, open Downloads or the current URL externally, cancel an owned download, answer a website permission/dialog, or clear this session's site data. |
+| `GET /api/agent-sessions/{agent_session_id}/browser/diagnostics?tab_id=…&runtime_generation=…&document_generation=…` | Read bounded, sanitized main-document navigation diagnostics for an existing owned tab; never creates a runtime or Agent grant. Coverage and unknown response association are explicit. |
 | `GET /api/browser-providers/attached-chrome` | Read the attached-Chrome connection state. |
 | `POST /api/browser-providers/attached-chrome` | Attach to an already-running Chrome instance after the user enabled Chrome remote debugging. NomiFun does not launch Chrome or import its profile. |
 | `DELETE /api/browser-providers/attached-chrome` | Disconnect the exact attachment without closing Chrome or its tabs. |

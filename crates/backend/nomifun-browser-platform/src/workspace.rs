@@ -106,6 +106,8 @@ pub struct BrowserResourceSnapshot {
     pub provider_id: String,
     pub provider_kind: BrowserProviderKind,
     pub allowed_actions: BTreeSet<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_capabilities: Option<crate::runtime::BrowserInteractionCapabilities>,
     pub run: BrowserRunSnapshot,
     pub runtime: Option<BrowserRuntimeSnapshot>,
 }
@@ -115,6 +117,8 @@ pub struct BrowserResourceSnapshot {
 pub struct BrowserUserSnapshot {
     pub agent_session_id: String,
     pub browser_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_capabilities: Option<crate::runtime::BrowserInteractionCapabilities>,
     pub run: BrowserRunSnapshot,
     pub runtime: Option<BrowserRuntimeSnapshot>,
 }
@@ -185,8 +189,29 @@ impl BrowserWorkspace {
     pub fn key(&self) -> &BrowserResourceKey {
         &self.key
     }
+    /// Read the existing user's exact tab; diagnostics never initialize a
+    /// runtime, grant Agent authority, or disturb the native input owner.
+    pub async fn navigation_diagnostics(
+        &self,
+        target: crate::runtime::BrowserTabTarget,
+    ) -> Result<crate::navigation::BrowserNavigationReport, WorkspaceError> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
+        if target.runtime_generation != self.runtime_generation() {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        let runtime = self.slot.inner.lock().await.runtime.clone()
+            .ok_or(WorkspaceError::TabNotFound)?;
+        let report = runtime.navigation_diagnostics(target.clone()).await?;
+        if self.closing.load(Ordering::Acquire) || report.target != target {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        Ok(report.project_metadata())
+    }
     pub async fn snapshot(&self) -> Result<BrowserUserSnapshot, WorkspaceError> {
         let state = self.slot.inner.lock().await;
+        let interaction_capabilities = state.runtime.as_ref().and_then(|runtime| runtime.interaction_capabilities());
         let runtime = match &state.runtime {
             Some(runtime) => Some(runtime.snapshot().await?),
             None => None,
@@ -195,6 +220,7 @@ impl BrowserWorkspace {
         Ok(BrowserUserSnapshot {
             agent_session_id: self.key.agent_session_id.clone(),
             browser_id: self.key.resource_binding_id.clone(),
+            interaction_capabilities,
             run: self.coordinator.snapshot().await,
             runtime,
         })
@@ -369,7 +395,7 @@ impl BrowserResource {
         let workspace = self.clone();
         self.coordinator.agent_operation(run, move |cancel| async move {
             Ok(async {
-                workspace.authority.authorize(BrowserCapabilityAction::RenderContent)?;
+                workspace.authority.authorize(BrowserCapabilityAction::Observe)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
                 let runtime = workspace.slot.ensure().await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.screenshot(tab_id, cancel).await
@@ -510,12 +536,14 @@ impl BrowserResource {
 
     pub async fn snapshot(&self) -> Result<BrowserResourceSnapshot, WorkspaceError> {
         let state = self.slot.inner.lock().await;
+        let interaction_capabilities = state.runtime.as_ref().and_then(|runtime| runtime.interaction_capabilities());
         let runtime = match &state.runtime {
             Some(runtime) => Some(runtime.snapshot().await?),
             None => None,
         };
         drop(state);
         Ok(BrowserResourceSnapshot {
+            interaction_capabilities,
             agent_session_id: self.key.agent_session_id.clone(),
             resource_binding_id: self.key.resource_binding_id.clone(),
             provider_id: self
@@ -571,7 +599,6 @@ struct ServiceLifecycle {
     resources_closed: bool,
     native_shutdown: Option<tokio::task::JoinHandle<Result<(), WorkspaceError>>>,
     native_closed: bool,
-    native_after_storage: bool,
 }
 
 impl BrowserResourceService {
@@ -630,10 +657,7 @@ impl BrowserResourceService {
         let _lifecycle = self.lifecycle.lock().await;
         let key = managed_workspace_key(principal_id, agent_session_id)?;
         if let Some(store) = &self.profile_store {
-            let persistence = match &profile {
-                BrowserProfile::Persistent(_) => BrowserProfilePersistence::Persistent,
-                BrowserProfile::Ephemeral => BrowserProfilePersistence::Ephemeral,
-            };
+            let persistence = profile.persistence();
             if store.profile_for(&key, persistence)? != profile {
                 return Err(WorkspaceError::ProfileCleanupInvalid);
             }
@@ -725,12 +749,41 @@ impl BrowserResourceService {
         let key = managed_workspace_key(principal_id, agent_session_id)?;
         let _lifecycle = self.lifecycle.lock().await;
         let live = self.close_agent_session_locked(principal_id, agent_session_id).await?;
-        let persistent = live.iter().any(|(_, profile)| matches!(profile, BrowserProfile::Persistent(_)));
+        let persistent = live.iter().any(|(_, profile)| profile.persistence() == BrowserProfilePersistence::Persistent);
         let Some(store) = self.profile_store.clone() else {
             return if persistent { Err(WorkspaceError::ProfileCleanupUnavailable) } else { Ok(()) };
         };
-        tokio::task::spawn_blocking(move || store.delete_persistent_profile(&key))
-            .await.map_err(|_| WorkspaceError::ProfileCleanupFailed)?
+        let profile = store.profile_for(&key, BrowserProfilePersistence::Persistent)?;
+        if live.iter().any(|(_, existing)| existing.persistence() == BrowserProfilePersistence::Persistent && existing != &profile) {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        self.factory.delete_persistent_profile(&profile).await?;
+        match profile {
+            BrowserProfile::WebKitPersistent { .. } => Ok(()),
+            BrowserProfile::Persistent(_) => tokio::task::spawn_blocking(move || store.delete_persistent_profile(&key))
+                .await.map_err(|_| WorkspaceError::ProfileCleanupFailed)?,
+            BrowserProfile::Ephemeral => Err(WorkspaceError::ProfileCleanupInvalid),
+        }
+    }
+
+    /// Bootstrap dataset coordinator only. Retired canonical keys and the
+    /// archived storage generation identify system-owned data after filesystem
+    /// quarantine; no directory or replacement Session ledger is introduced.
+    /// A live runtime prevents this offline cleanup path from running.
+    pub async fn delete_retired_webkit_profile(
+        &self,
+        principal_id: &str,
+        agent_session_id: &str,
+        storage_generation: &str,
+    ) -> Result<(), WorkspaceError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if !self.resources.lock().await.is_empty() {
+            return Err(WorkspaceError::ProfileCleanupFailed);
+        }
+        let store = self.profile_store.as_ref().ok_or(WorkspaceError::ProfileCleanupUnavailable)?;
+        let key = managed_workspace_key(principal_id, agent_session_id)?;
+        let profile = store.webkit_profile_for_generation(&key, storage_generation)?;
+        self.factory.delete_persistent_profile(&profile).await
     }
 
     async fn close_agent_session_locked(
@@ -803,11 +856,6 @@ impl BrowserResourceService {
         }).await.map_err(|_| WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
     }
 
-    /// Factory opt-in only; this is not proof that resources have closed.
-    pub fn supports_storage_independent_shutdown(&self) -> bool {
-        self.factory.supports_storage_independent_shutdown()
-    }
-
     /// Permanently close admission and wait for every Resource's native view
     /// and owned operation cleanup. Process-wide native infrastructure remains
     /// alive so the host can complete its other shutdown prerequisites.
@@ -848,17 +896,6 @@ impl BrowserResourceService {
     /// The stored worker survives a dropped caller; retries join that same
     /// physical shutdown, and an acknowledged success is never re-entered.
     pub async fn close_native_runtime(&self) -> Result<(), WorkspaceError> {
-        self.close_native_runtime_inner(false).await
-    }
-
-    /// Used only after the host has joined consumers and acknowledged storage
-    /// closure. Ordinary resource callers cannot upgrade an existing flight.
-    pub async fn close_native_runtime_after_storage_close(&self) -> Result<(), WorkspaceError> {
-        if !self.supports_storage_independent_shutdown() {return Err(WorkspaceError::UnsupportedAction);}
-        self.close_native_runtime_inner(true).await
-    }
-
-    async fn close_native_runtime_inner(&self, after_storage: bool) -> Result<(), WorkspaceError> {
         let mut lifecycle = self.lifecycle.lock().await;
         if !lifecycle.resources_closed {
             return Err(WorkspaceError::NativeCommandFailed);
@@ -868,13 +905,8 @@ impl BrowserResourceService {
         }
         if lifecycle.native_shutdown.is_none() {
             let factory = self.factory.clone();
-            lifecycle.native_after_storage=after_storage;
             lifecycle.native_shutdown =
-                Some(tokio::spawn(async move {
-                    if after_storage {factory.shutdown_after_storage_close().await} else {factory.shutdown().await}
-                }));
-        } else if after_storage && !lifecycle.native_after_storage {
-            return Err(WorkspaceError::NativeCommandFailed);
+                Some(tokio::spawn(async move { factory.shutdown().await }));
         }
         let result = lifecycle
             .native_shutdown

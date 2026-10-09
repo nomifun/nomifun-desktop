@@ -16,8 +16,8 @@ serde_json.workspace = true
 [dependencies]
 # The unified backend, linked in-process (no spawned binary, no bundled-nomicore).
 # computer-use: the desktop host is the one place screen/input control is sane.
-# browser-use: likewise, the desktop host is where a managed/connected Chromium
-# is sane (the in-process self-hosted CDP engine).
+# browser-use: the desktop host supplies the native visible Browser surface
+# (WebView2 on Windows, system WKWebView on macOS).
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
 nomifun-runtime.workspace = true
 nomifun-browser-platform.workspace = true
