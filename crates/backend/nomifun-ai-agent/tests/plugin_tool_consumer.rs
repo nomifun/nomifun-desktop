@@ -5,12 +5,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use nomi_types::tool::ToolCategory;
-use nomi_tools::{
-    Tool, ToolExecutionContext,
-    registry::ToolRegistry,
-};
-use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_agent_contracts::{
     ActionId, AgentPresetId, AgentPresetRevision,
     AgentPresetRevisionPayload, AgentSessionId, ArtifactEnvelope,
@@ -28,10 +22,10 @@ use nomifun_agent_contracts::{
     PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PresetRevisionRef,
-    PrincipalRef, ResourceBindingId, ResourceKind, ResourceId,
+    PrincipalRef,
     RuntimeProfileKind, RuntimeTarget, ScopeKey,
     StrictJsonValue, ToolPresentationKind, UserId,
-    TypedResourceBinding, ValidatedPluginConfig, VersionString, capability_surface_declarations,
+    ValidatedPluginConfig, VersionString, capability_surface_declarations,
     digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -43,9 +37,7 @@ use nomifun_agent_kernel::{
     PluginStatePersistence,
 };
 use nomifun_ai_agent::{
-    KernelNomiPluginToolSession, NomiPlatformBuiltinToolAdmission,
-    NomiPlatformBuiltinToolSchemaResolver, NomiPluginToolError,
-    NomiPluginToolSchemaResolver,
+    NomiPluginToolError,
 };
 use serde_json::{Value, json};
 
@@ -126,76 +118,6 @@ impl CapabilityContextContributionFactory for EmptyContextFactory {
                 "role": "assistant"
             }))),
         })
-    }
-}
-
-#[derive(Default)]
-struct SchemaMap {
-    schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
-}
-
-#[async_trait]
-impl NomiPluginToolSchemaResolver for SchemaMap {
-    async fn resolve(
-        &self,
-        _capability: &nomifun_agent_contracts::ResolvedCapability,
-        reference: &CanonicalSchemaRef,
-    ) -> Result<StrictJsonValue, String> {
-        self.schemas
-            .get(reference)
-            .cloned()
-            .ok_or_else(|| format!("schema {} is missing", reference.as_ref()))
-    }
-}
-
-#[async_trait]
-impl NomiPlatformBuiltinToolSchemaResolver for SchemaMap {
-    async fn resolve(
-        &self,
-        _capability: &nomifun_agent_contracts::ResolvedCapability,
-        reference: &CanonicalSchemaRef,
-    ) -> Result<StrictJsonValue, String> {
-        self.schemas
-            .get(reference)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "bundled schema {} is missing",
-                    reference.as_ref()
-                )
-            })
-    }
-}
-
-struct NativeSentinel;
-
-#[async_trait]
-impl Tool for NativeSentinel {
-    fn name(&self) -> &str {
-        "Read"
-    }
-
-    fn description(&self) -> &str {
-        "Native regression sentinel."
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        json!({
-            "type": "object",
-            "additionalProperties": false
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: Value) -> ToolResult {
-        ToolResult::text("native-ok")
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Info
     }
 }
 
@@ -316,7 +238,7 @@ fn registration(
     prefix: &'static str,
     calls: Arc<AtomicUsize>,
     evidence: Arc<Mutex<Vec<InvocationEvidence>>>,
-) -> (PluginRegistration, Arc<SchemaMap>) {
+) -> PluginRegistration {
     registration_with_source(
         artifact_byte,
         prefix,
@@ -334,7 +256,7 @@ fn registration_with_source(
     evidence: Arc<Mutex<Vec<InvocationEvidence>>>,
     source_kind: PluginSourceKind,
     declare_capability_host_port: bool,
-) -> (PluginRegistration, Arc<SchemaMap>) {
+) -> PluginRegistration {
     registration_with_context_factory(
         artifact_byte, prefix, calls, evidence, source_kind,
         declare_capability_host_port, Arc::new(EmptyContextFactory),
@@ -349,7 +271,7 @@ fn registration_with_context_factory(
     source_kind: PluginSourceKind,
     declare_capability_host_port: bool,
     context_factory: Arc<dyn CapabilityContextContributionFactory>,
-) -> (PluginRegistration, Arc<SchemaMap>) {
+) -> PluginRegistration {
     let package = PackageRef {
         id: PackageId::from(PACKAGE),
         version: VersionString::from(VERSION),
@@ -548,13 +470,7 @@ fn registration_with_context_factory(
         )
         .unwrap();
 
-    let schemas = Arc::new(SchemaMap {
-        schemas: BTreeMap::from([(
-            agent_action.input_schema,
-            StrictJsonValue(input_schema),
-        )]),
-    });
-    (registration, schemas)
+    registration
 }
 
 fn policy() -> MaterializationPolicy {
@@ -685,316 +601,17 @@ fn try_compile_revision(
     )
 }
 
-async fn session(
-    kernel: Arc<KernelRegistry>,
-    compiled: nomifun_agent_kernel::CompiledSnapshot,
-    schemas: Arc<SchemaMap>,
-) -> nomifun_ai_agent::NomiPluginToolSession {
-    try_session(kernel, compiled, schemas).await.unwrap()
-}
-
-async fn try_session(
-    kernel: Arc<KernelRegistry>,
-    compiled: nomifun_agent_kernel::CompiledSnapshot,
-    schemas: Arc<SchemaMap>,
-) -> Result<nomifun_ai_agent::NomiPluginToolSession, NomiPluginToolError> {
-    KernelNomiPluginToolSession::materialize(
-        kernel,
-        Arc::new(compiled),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        schemas,
-    )
-    .await
-}
-
-async fn session_with_platform_builtins(
-    kernel: Arc<KernelRegistry>,
-    compiled: nomifun_agent_kernel::CompiledSnapshot,
-    schemas: Arc<SchemaMap>,
-    admission: Arc<NomiPlatformBuiltinToolAdmission>,
-) -> nomifun_ai_agent::NomiPluginToolSession {
-    let plugin_schema_resolver: Arc<dyn NomiPluginToolSchemaResolver> =
-        schemas;
-    KernelNomiPluginToolSession::materialize_with_platform_builtins(
-        kernel,
-        Arc::new(compiled),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        plugin_schema_resolver,
-        admission,
-    )
-    .await
-    .unwrap()
-}
-
-async fn session_with_platform_builtins_and_context(
-    kernel: Arc<KernelRegistry>,
-    compiled: nomifun_agent_kernel::CompiledSnapshot,
-    schemas: Arc<SchemaMap>,
-    tool_admission: Arc<NomiPlatformBuiltinToolAdmission>,
-    context_admission: Arc<
-        nomifun_ai_agent::NomiPlatformBuiltinContextAdmission,
-    >,
-) -> nomifun_ai_agent::NomiPluginToolSession {
-    let plugin_schema_resolver: Arc<dyn NomiPluginToolSchemaResolver> =
-        schemas;
-    KernelNomiPluginToolSession::materialize_with_platform_builtins_and_context(
-        kernel,
-        Arc::new(compiled),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        plugin_schema_resolver,
-        tool_admission,
-        context_admission,
-    )
-    .await
-    .unwrap()
-}
-
-#[tokio::test]
-async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let evidence = Arc::new(Mutex::new(Vec::new()));
-    let (registration, schemas) =
-        registration('a', "first:", Arc::clone(&calls), Arc::clone(&evidence));
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let session = session(
-        Arc::clone(&kernel),
-        compile(&materialized),
-        schemas,
-    )
-    .await;
-
-    assert_eq!(session.actions().len(), 1);
-    let action = &session.actions()[0];
-    assert_eq!(action.capability_id().as_ref(), AGENT_TOOL);
-    assert_eq!(action.action_id().as_ref(), AGENT_ACTION);
-    assert!(action.provider_name().starts_with("plugin__"));
-    assert!(action.provider_name().len() <= 64);
-    assert!(action.activation_identity().contains(AGENT_TOOL));
-    assert!(action.activation_identity().contains(AGENT_ACTION));
-    assert!(action.activation_identity().contains(&"a".repeat(64)));
-    assert_eq!(
-        action.artifact_identity(),
-        format!("{AGENT_TOOL} {AGENT_ACTION}")
-    );
-    assert!(
-        nomifun_ai_agent::runtime_output::artifact_contract(action.artifact_identity())
-            .is_none(),
-        "ordinary Plugin Tools must not inherit artifact obligations from provenance JSON"
-    );
-    assert!(
-        nomifun_ai_agent::runtime_output::artifact_contract(action.activation_identity())
-            .is_some(),
-        "regression fixture must demonstrate why canonical activation JSON is unsafe for artifact classification"
-    );
-
-    let mut registry = ToolRegistry::new();
-    assert!(registry.register(Box::new(NativeSentinel)));
-    let mut allowed = vec!["Read".to_owned()];
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.retain_only_named(&allowed);
-    session.register_into(&mut registry).unwrap();
-
-    assert!(registry.get("Read").is_some());
-    let definition = registry
-        .to_tool_defs()
-        .into_iter()
-        .find(|definition| definition.name == action.provider_name())
-        .unwrap();
-    assert_eq!(definition.input_schema, action.input_schema().0);
-    assert!(!definition.deferred);
-
-    let native = registry.get("Read").unwrap().execute(json!({})).await;
-    assert!(!native.is_error);
-    assert_eq!(native.content, "native-ok");
-
-    let execution_context =
-        ToolExecutionContext::from_scoped_tool_call("turn-1", "call-1");
-    let result = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "hello"}),
-            &execution_context,
-        )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
-    assert_eq!(
-        serde_json::from_str::<Value>(&result.content).unwrap()["echo"],
-        "first:hello"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let evidence = evidence.lock().unwrap();
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(evidence[0].agent_session_id, SESSION);
-    assert_eq!(evidence[0].capability_id, AGENT_TOOL);
-    assert_eq!(evidence[0].action_id, AGENT_ACTION);
-    assert_eq!(evidence[0].target_artifact_digest, "a".repeat(64));
-    assert_eq!(evidence[0].operation_id, evidence[0].idempotency_key);
-    assert_eq!(evidence[0].operation_id, evidence[0].correlation_id);
-    assert!(evidence[0].operation_id.starts_with("nomi-plugin:tool-call-v1-"));
-}
-
-#[tokio::test]
-async fn unbound_enhancement_capability_stays_declared_without_exposing_its_tool() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let evidence = Arc::new(Mutex::new(Vec::new()));
-    let (mut registration, schemas) =
-        registration('c', "resource:", Arc::clone(&calls), Arc::clone(&evidence));
-    let manifest = &mut registration.metadata.manifest.payload;
-    manifest
-        .contributions
-        .capabilities
-        .iter_mut()
-        .find(|capability| capability.id.as_ref() == AGENT_TOOL)
-        .unwrap()
-        .contributions
-        .resource_kinds = BTreeSet::from([ResourceKind::from("workspace")]);
-    registration.metadata.manifest = ArtifactEnvelope::new(manifest.clone()).unwrap();
-
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let compiled = compile(&materialized);
-    assert!(!compiled
-        .capability_resources_bound(&CapabilityId::from(AGENT_TOOL))
-        .unwrap());
-    let unbound = session(Arc::clone(&kernel), compiled.clone(), Arc::clone(&schemas)).await;
-    assert!(unbound.actions().is_empty());
-
-    let bound = compiled
-        .with_target_resource_bindings(
-            &owner(),
-            vec![TypedResourceBinding {
-                binding_id: ResourceBindingId::from("workspace:fixture"),
-                resource_kind: ResourceKind::from("workspace"),
-                resource_id: ResourceId::from("fixture"),
-                owner_id: OWNER.to_owned(),
-                operations: BTreeSet::from(["read".to_owned()]),
-                connection_config_ref: None,
-                typed_parameters: BTreeMap::new(),
-            }],
-        )
-        .unwrap();
-    let bound = session(kernel, bound, schemas).await;
-    assert_eq!(bound.actions().len(), 1);
-    assert_eq!(bound.actions()[0].capability_id().as_ref(), AGENT_TOOL);
-}
-
-#[tokio::test]
-async fn explicitly_admitted_bundled_tool_invokes_the_exact_kernel_handler() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let evidence = Arc::new(Mutex::new(Vec::new()));
-    let (registration, schemas) = registration_with_source(
-        'b',
-        "bundled:",
-        Arc::clone(&calls),
-        Arc::clone(&evidence),
-        PluginSourceKind::Bundled,
-        true,
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy_for(PluginSourceKind::Bundled),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let compiled = compile(&materialized);
-
-    let plugin_only = session(
-        Arc::clone(&kernel),
-        compiled.clone(),
-        Arc::clone(&schemas),
-    )
-    .await;
-    assert!(
-        plugin_only.actions().is_empty(),
-        "the legacy module-only entrypoint must not implicitly expose bundled tools"
-    );
-
-    let builtin_schema_resolver: Arc<
-        dyn NomiPlatformBuiltinToolSchemaResolver,
-    > = schemas.clone();
-    let admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            BTreeSet::from([CapabilityId::from(AGENT_TOOL)]),
-            BTreeSet::new(),
-            builtin_schema_resolver,
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        admission.approved_capability_ids(),
-        BTreeSet::from([CapabilityId::from(AGENT_TOOL)])
-    );
-    let session = session_with_platform_builtins(
-        Arc::clone(&kernel),
-        compiled,
-        schemas,
-        admission,
-    )
-    .await;
-    assert_eq!(session.actions().len(), 1);
-
-    let action = &session.actions()[0];
-    let mut registry = ToolRegistry::new();
-    let mut allowed = Vec::new();
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.retain_only_named(&allowed);
-    session.register_into(&mut registry).unwrap();
-    let result = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "hello"}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-bundled",
-                "call-bundled",
-            ),
-        )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
-    assert_eq!(
-        serde_json::from_str::<Value>(&result.content).unwrap()["echo"],
-        "bundled:hello"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let evidence = evidence.lock().unwrap();
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(evidence[0].capability_id, AGENT_TOOL);
-    assert_eq!(
-        evidence[0].target_artifact_digest,
-        materialized
-            .capability(&CapabilityId::from(AGENT_TOOL))
-            .unwrap()
-            .target_artifact_digest
-            .as_ref()
-    );
+async fn initial_context(
+    kernel: &Arc<KernelRegistry>,
+    compiled: &nomifun_agent_kernel::CompiledSnapshot,
+    admission: Option<&nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
+) -> Result<(Vec<nomifun_ai_agent::NomiInitialContextContribution>, Vec<CapabilityId>), NomiPluginToolError> {
+    let registry = kernel.snapshot()?;
+    let active = nomifun_agent_kernel::SessionCapabilityState::new(compiled).snapshot()?;
+    nomifun_ai_agent::assemble_initial_capability_context(
+        kernel, compiled, &active, &registry, &owner(), &AgentSessionId::from(SESSION),
+        &ScopeKey::from(format!("session:{SESSION}")), admission,
+    ).await
 }
 
 struct CapturingContextFactory {
@@ -1025,7 +642,7 @@ fn managed_context_fixture(
     context_calls: Arc<AtomicUsize>,
     value: Option<StrictJsonValue>,
     fail: bool,
-) -> (PluginRegistration, Arc<SchemaMap>) {
+) -> PluginRegistration {
     registration_with_context_factory(
         artifact_byte, "tool:", Arc::new(AtomicUsize::new(0)),
         Arc::new(Mutex::new(Vec::new())), PluginSourceKind::ManagedLocal,
@@ -1034,22 +651,19 @@ fn managed_context_fixture(
 }
 
 #[tokio::test]
-async fn managed_context_reaches_prompt_without_builtin_admission_or_tool_exposure() {
+async fn managed_context_reaches_prompt_through_the_canonical_context_consumer() {
     let calls = Arc::new(AtomicUsize::new(0));
     let value = StrictJsonValue(json!({"instructions": "Use the selected plugin context"}));
-    let (registration, schemas) = managed_context_fixture('a', calls.clone(), Some(value.clone()), false);
+    let registration = managed_context_fixture('a', calls.clone(), Some(value.clone()), false);
     let kernel = Arc::new(KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
     let materialized = kernel.replace_all(vec![registration]).unwrap();
     let compiled = compile(&materialized);
-    let snapshot_ref = compiled.snapshot_ref().clone();
-    let session = session(kernel, compiled, schemas).await;
+    let (contributions, turn_ids) = initial_context(&kernel, &compiled, None).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(session.resolved_snapshot_ref(), &snapshot_ref);
-    assert_eq!(session.initial_context_contributions().len(), 1);
-    assert_eq!(session.initial_context_contributions()[0].value(), &value);
-    assert!(session.provider_names_for(CONTEXT_CAPABILITY, false).is_empty());
-    let prompt = session.system_prompt_with_initial_context(Some("Base prompt")).unwrap().unwrap();
-    assert!(prompt.starts_with("Base prompt\n\n"));
+    assert_eq!(contributions.len(), 1);
+    assert_eq!(contributions[0].value(), &value);
+    assert!(turn_ids.is_empty());
+    let prompt = nomifun_ai_agent::render_initial_capability_context_section(&contributions).unwrap().unwrap();
     assert!(prompt.contains("Use the selected plugin context"));
     assert!(prompt.contains(CONTEXT_CAPABILITY));
 }
@@ -1057,7 +671,7 @@ async fn managed_context_reaches_prompt_without_builtin_admission_or_tool_exposu
 #[tokio::test]
 async fn unselected_managed_context_is_not_invoked() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let (registration, schemas) = managed_context_fixture('a', calls.clone(), None, true);
+    let registration = managed_context_fixture('a', calls.clone(), None, true);
     let kernel = Arc::new(KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
     let materialized = kernel.replace_all(vec![registration]).unwrap();
     let mut revision = revision_with_capabilities(&materialized);
@@ -1066,26 +680,24 @@ async fn unselected_managed_context_is_not_invoked() {
     revision.contribution_locks.retain(|lock| lock != context_lock);
     revision.reference.revision_digest = revision.revision_digest().unwrap();
     let compiled = compile_revision(&materialized, revision);
-    let session = session(kernel, compiled, schemas).await;
+    let (contributions, turn_ids) = initial_context(&kernel, &compiled, None).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(session.initial_context_contributions().is_empty());
-    assert_eq!(session.system_prompt_with_initial_context(Some("Base")).unwrap(), Some("Base".into()));
+    assert!(contributions.is_empty());
+    assert!(turn_ids.is_empty());
+    assert_eq!(nomifun_ai_agent::render_initial_capability_context_section(&contributions).unwrap(), None);
 }
 
 #[tokio::test]
 async fn managed_context_drift_or_withdrawal_fails_before_replacement_dispatch() {
     for withdraw in [false, true] {
         let calls = Arc::new(AtomicUsize::new(0));
-        let (original, schemas) = managed_context_fixture('a', calls.clone(), None, false);
+        let original = managed_context_fixture('a', calls.clone(), None, false);
         let kernel = Arc::new(KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
         let materialized = kernel.replace_all(vec![original]).unwrap();
         let compiled = compile(&materialized);
-        let (replacement, _) = managed_context_fixture('b', calls.clone(), None, false);
+        let replacement = managed_context_fixture('b', calls.clone(), None, false);
         kernel.replace_all(if withdraw { Vec::new() } else { vec![replacement] }).unwrap();
-        let error = KernelNomiPluginToolSession::materialize(
-            kernel, Arc::new(compiled), owner(), AgentSessionId::from(SESSION),
-            ScopeKey::from(format!("session:{SESSION}")), schemas,
-        ).await.unwrap_err();
+        let error = initial_context(&kernel, &compiled, None).await.unwrap_err();
         assert!(matches!(error, NomiPluginToolError::Kernel(
             KernelError::CapabilityProvenanceDrift { .. } | KernelError::CapabilityNotMaterialized { .. }
         )), "{error}");
@@ -1094,17 +706,14 @@ async fn managed_context_drift_or_withdrawal_fails_before_replacement_dispatch()
 }
 
 #[tokio::test]
-async fn managed_context_failure_and_oversize_do_not_silently_build_a_session() {
+async fn managed_context_failure_and_oversize_fail_the_canonical_context_consumer() {
     for fail in [false, true] {
         let calls = Arc::new(AtomicUsize::new(0));
         let value = StrictJsonValue(json!({"instructions": "x".repeat(64 * 1024)}));
-        let (registration, schemas) = managed_context_fixture('a', calls.clone(), Some(value), fail);
+        let registration = managed_context_fixture('a', calls.clone(), Some(value), fail);
         let kernel = Arc::new(KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
         let materialized = kernel.replace_all(vec![registration]).unwrap();
-        let error = KernelNomiPluginToolSession::materialize(
-            kernel, Arc::new(compile(&materialized)), owner(), AgentSessionId::from(SESSION),
-            ScopeKey::from(format!("session:{SESSION}")), schemas,
-        ).await.unwrap_err();
+        let error = initial_context(&kernel, &compile(&materialized), None).await.unwrap_err();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(error.to_string().contains(if fail { "context fixture unavailable" } else { "prompt limit" }), "{error}");
     }
@@ -1125,243 +734,126 @@ fn managed_capability_availability_matches_nomi_consumer_shapes() {
 }
 
 #[tokio::test]
-async fn explicitly_admitted_initial_context_uses_the_same_snapshot_and_prompt() {
-    let (registration, schemas) = registration_with_source(
-        'd',
-        "bundled:",
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(Mutex::new(Vec::new())),
-        PluginSourceKind::Bundled,
-        true,
+async fn explicitly_admitted_initial_context_uses_the_canonical_prompt() {
+    let registration = registration_with_source(
+        'd', "bundled:", Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(Vec::new())),
+        PluginSourceKind::Bundled, true,
     );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy_for(PluginSourceKind::Bundled),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
+    let kernel = Arc::new(KernelRegistry::new(policy_for(PluginSourceKind::Bundled),
+        Arc::new(InMemoryPluginStatePersistence::new()) as Arc<dyn PluginStatePersistence>).unwrap());
     let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> =
-        schemas.clone();
-    let tool_admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            resolver,
-        )
-        .unwrap(),
-    );
-    let context_admission = Arc::new(
-        nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-            &materialized,
-            BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
-            BTreeSet::new(),
-        )
-        .unwrap(),
-    );
-    let session = session_with_platform_builtins_and_context(
-        kernel,
-        compile(&materialized),
-        schemas,
-        tool_admission,
-        context_admission,
-    )
-    .await;
-
-    assert!(session.actions().is_empty());
-    assert_eq!(session.initial_context_contributions().len(), 1);
-    let contribution = &session.initial_context_contributions()[0];
-    assert_eq!(contribution.capability_id().as_ref(), CONTEXT_CAPABILITY);
-    assert_eq!(
-        contribution.value().0,
-        json!({
-            "source": "bundled-context-fixture",
-            "role": "assistant"
-        })
-    );
-    let prompt = session
-        .system_prompt_with_initial_context(Some("base instructions"))
-        .unwrap()
-        .unwrap();
-    assert!(prompt.starts_with("base instructions\n\n"));
+    let context_admission = nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
+        &materialized, BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]), BTreeSet::new(),
+    ).unwrap();
+    let (contributions, turn_ids) = initial_context(&kernel, &compile(&materialized), Some(&context_admission)).await.unwrap();
+    assert!(turn_ids.is_empty());
+    assert_eq!(contributions.len(), 1);
+    assert_eq!(contributions[0].capability_id().as_ref(), CONTEXT_CAPABILITY);
+    assert_eq!(contributions[0].value().0, json!({"source":"bundled-context-fixture", "role":"assistant"}));
+    let prompt = nomifun_ai_agent::render_initial_capability_context_section(&contributions).unwrap().unwrap();
     assert!(prompt.contains("<nomifun_initial_capability_context"));
     assert!(prompt.contains(CONTEXT_CAPABILITY));
     assert!(prompt.contains("bundled-context-fixture"));
     assert!(prompt.ends_with("</nomifun_initial_capability_context>"));
 }
 
-
-
-
-
-
-
 #[test]
-fn bundled_admission_rejects_placeholders_test_fixtures_and_native_duplicates() {
-    fn materialize(
-        source_kind: PluginSourceKind,
-        declare_capability_host_port: bool,
-    ) -> (
-        Arc<nomifun_agent_kernel::MaterializedRegistry>,
-        Arc<SchemaMap>,
-    ) {
-        let (registration, schemas) = registration_with_source(
-            'c',
-            "blocked:",
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(Mutex::new(Vec::new())),
-            source_kind,
-            declare_capability_host_port,
-        );
-        let kernel = KernelRegistry::new(
-            policy_for(source_kind),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap();
-        (kernel.replace_all(vec![registration]).unwrap(), schemas)
+fn bundled_context_admission_rejects_placeholders_test_fixtures_and_native_duplicates() {
+    fn materialize(source_kind: PluginSourceKind, host_port: bool) -> Arc<nomifun_agent_kernel::MaterializedRegistry> {
+        let registration = registration_with_source('c', "blocked:", Arc::new(AtomicUsize::new(0)),
+            Arc::new(Mutex::new(Vec::new())), source_kind, host_port);
+        let kernel = KernelRegistry::new(policy_for(source_kind), Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
+        kernel.replace_all(vec![registration]).unwrap()
     }
-
-    let (placeholder, schemas) =
-        materialize(PluginSourceKind::Bundled, false);
-    let resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> = schemas;
-    let error = NomiPlatformBuiltinToolAdmission::from_registry(
-        &placeholder,
-        BTreeSet::from([CapabilityId::from(AGENT_TOOL)]),
-        BTreeSet::new(),
-        resolver,
-    )
-    .expect_err("metadata-only bundled registrations must not be admitted");
-    assert!(error.to_string().contains("no typed capability host port"));
+    for (source, host_port, expected) in [
+        (PluginSourceKind::Bundled, false, "no typed host binding"),
+        (PluginSourceKind::TestFixture, true, "not an exact bundled PlatformBuiltin"),
+    ] {
+        let registry = materialize(source, host_port);
+        let error = nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
+            &registry, BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]), BTreeSet::new(),
+        ).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let registry = materialize(PluginSourceKind::Bundled, true);
     let error = nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-        &placeholder,
+        &registry, BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
         BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
-        BTreeSet::new(),
-    )
-    .expect_err("metadata-only bundled context must not be admitted");
-    assert!(error.to_string().contains("no typed host binding"));
-
-    let (fixture, schemas) =
-        materialize(PluginSourceKind::TestFixture, true);
-    let resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> = schemas;
-    let error = NomiPlatformBuiltinToolAdmission::from_registry(
-        &fixture,
-        BTreeSet::from([CapabilityId::from(AGENT_TOOL)]),
-        BTreeSet::new(),
-        resolver,
-    )
-    .expect_err("TestFixture registrations must not be admitted");
-    assert!(error.to_string().contains("not an exact bundled PlatformBuiltin"));
-
-    let (bundled, schemas) = materialize(PluginSourceKind::Bundled, true);
-    let resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> = schemas;
-    let error = NomiPlatformBuiltinToolAdmission::from_registry(
-        &bundled,
-        BTreeSet::from([CapabilityId::from(AGENT_TOOL)]),
-        BTreeSet::from([CapabilityId::from(AGENT_TOOL)]),
-        resolver,
-    )
-    .expect_err("native and Kernel Tool ownership must be disjoint");
-    assert!(error.to_string().contains("also owned by Nomi's native registry"));
-
-    let error = nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-        &bundled,
-        BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
-        BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
-    )
-    .expect_err("native and Kernel context ownership must be disjoint");
+    ).unwrap_err();
     assert!(error.to_string().contains("native context path"));
 }
 
 #[tokio::test]
-async fn non_agent_tool_non_tool_and_hidden_actions_never_register() {
-    let (registration, schemas) = registration(
-        'a',
-        "filter:",
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(Mutex::new(Vec::new())),
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let compiled = compile(&materialized);
-    assert!(!compiled
-        .content()
-        .enabled_capabilities
-        .iter()
-        .any(|capability| capability.capability.id.as_ref() == UI_ONLY_TOOL));
-    assert!(compiled
-        .content()
-        .enabled_capabilities
-        .iter()
-        .any(|capability| {
-            capability.capability.id.as_ref() == CONTEXT_CAPABILITY
-        }));
-
-    let session = session(kernel, compiled, schemas).await;
-    assert_eq!(session.actions().len(), 1);
-    assert_eq!(session.actions()[0].capability_id().as_ref(), AGENT_TOOL);
-    assert_eq!(session.actions()[0].action_id().as_ref(), AGENT_ACTION);
-}
-
-#[tokio::test]
-async fn stale_artifact_fails_before_replacement_handler_dispatch() {
-    let original_calls = Arc::new(AtomicUsize::new(0));
-    let replacement_calls = Arc::new(AtomicUsize::new(0));
-    let (original, schemas) = registration(
-        'a',
-        "original:",
-        Arc::clone(&original_calls),
-        Arc::new(Mutex::new(Vec::new())),
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![original]).unwrap();
-    let session = session(
-        Arc::clone(&kernel),
-        compile(&materialized),
-        schemas,
-    )
-    .await;
-
-    let (replacement, _) = registration(
-        'b',
-        "replacement:",
-        Arc::clone(&replacement_calls),
-        Arc::new(Mutex::new(Vec::new())),
-    );
-    kernel.replace_all(vec![replacement]).unwrap();
-
-    let mut registry = ToolRegistry::new();
-    session.register_into(&mut registry).unwrap();
-    let action = &session.actions()[0];
-    let result = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "must-not-run"}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-stale",
-                "call-stale",
-            ),
-        )
-        .await;
-    assert!(result.is_error);
-    assert!(result.content.contains("CAPABILITY_NOT_MATERIALIZED"));
-    assert!(!result.content.contains("provenance"));
-    assert_eq!(original_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
+async fn canonical_builtin_discovery_preserves_ranking_and_input_boundaries() {
+    let base = registration('a', "unused:", Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(Vec::new())));
+    let mut registration = PluginRegistration::new(base.metadata);
+    registration.metadata.manifest.payload.contributions.capabilities.iter_mut()
+        .find(|capability| capability.id.as_ref() == AGENT_TOOL).unwrap()
+        .contributions.actions = vec![nomifun_ai_agent::tool_discovery::action()];
+    registration.metadata.manifest = ArtifactEnvelope::new(registration.metadata.manifest.payload.clone()).unwrap();
+    registration.add_capability_handler(AGENT_TOOL.into(), Arc::new(nomifun_ai_agent::tool_discovery::BuiltinDiscovery)).unwrap();
+    registration.add_capability_handler(UI_ONLY_TOOL.into(), Arc::new(CapturingHandler {
+        prefix: "unused:", calls: Arc::new(AtomicUsize::new(0)), evidence: Arc::new(Mutex::new(Vec::new())),
+    })).unwrap();
+    registration.add_capability_context_factory(CONTEXT_CAPABILITY.into(), Arc::new(EmptyContextFactory)).unwrap();
+    let kernel = Arc::new(KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap());
+    let registry = kernel.replace_all(vec![registration]).unwrap();
+    let mut revision = revision_with_capabilities(&registry);
+    revision.payload.enabled_capabilities.iter_mut().find(|selection| selection.capability.id.as_ref() == AGENT_TOOL).unwrap()
+        .action_allowlist = BTreeSet::from([ActionId::from(nomifun_ai_agent::tool_discovery::ACTION_ID)]);
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    let compiled = Arc::new(compile_revision(&registry, revision));
+    let active = nomifun_agent_kernel::SessionCapabilityState::new(&compiled).snapshot().unwrap();
+    async fn discover(
+        kernel: &Arc<KernelRegistry>, compiled: &Arc<nomifun_agent_kernel::CompiledSnapshot>,
+        active: &nomifun_agent_kernel::ActiveCapabilitySetSnapshot, input: Value,
+    ) -> Result<Value, KernelError> {
+        let key = format!("discovery-test:{}", uuid::Uuid::now_v7());
+        kernel.invoke_shared(compiled.clone(), active, nomifun_agent_kernel::CapabilityInvocationRequest {
+            principal: owner(), session_owner: owner(), agent_session_id: SESSION.into(),
+            turn_id: "turn-discovery-test".into(), operation_id: key.clone().into(),
+            idempotency_key: key.clone().into(), correlation_id: key.into(),
+            resolved_snapshot_ref: compiled.snapshot_ref().clone(), active_set_generation: active.generation,
+            capability_id: AGENT_TOOL.into(), action_id: nomifun_ai_agent::tool_discovery::ACTION_ID.into(),
+            resource_binding_ids: BTreeSet::new(), state_scope_key: format!("session:{SESSION}").into(),
+            input: StrictJsonValue(input),
+        }).await.map(|value| value.0)
+    }
+    let candidates = json!([
+        {"name":"Alpha", "description":"", "aliases":[]},
+        {"name":"AliasHolder", "description":"", "aliases":["alpha", "special"]},
+        {"name":"Alphabet", "description":"", "aliases":[]},
+    ]);
+    for (query, expected) in [(" ALPHA ", json!(["Alpha"])), ("special", json!(["AliasHolder"])), ("missing", json!([]))] {
+        let output = discover(&kernel, &compiled, &active, json!({"query":query,"candidates":candidates,"limit":5})).await.unwrap();
+        assert_eq!(output["names"], expected);
+    }
+    let ranked = json!([
+        {"name":"Description", "description":"find", "aliases":[]},
+        {"name":"ContainsAlias", "description":"", "aliases":["x-find-y"]},
+        {"name":"something_find", "description":"", "aliases":[]},
+        {"name":"Alias", "description":"", "aliases":["find-here"]},
+        {"name":"find-z", "description":"", "aliases":[]},
+        {"name":"find-a", "description":"", "aliases":[]},
+    ]);
+    for (limit, expected) in [(5, json!(["find-a","find-z","Alias","something_find","ContainsAlias"])), (2, json!(["find-a","find-z"]))] {
+        let output = discover(&kernel, &compiled, &active, json!({"query":"find","candidates":ranked,"limit":limit})).await.unwrap();
+        assert_eq!(output["names"], expected);
+    }
+    for input in [
+        json!({"query":"", "candidates":[], "limit":5}),
+        json!({"query":"   ", "candidates":[], "limit":5}),
+        json!({"query":"find", "candidates":ranked, "limit":0}),
+        json!({"query":"find", "candidates":ranked, "limit":6}),
+        json!({"query":"a", "candidates":[{"name":"Alpha","description":"", "aliases":[]}], "limit":5}),
+    ] {
+        assert!(discover(&kernel, &compiled, &active, input).await.is_err());
+    }
+    for candidates in [
+        json!([{"name":"a", "description":"", "aliases":[]}]),
+        json!([{"name":"ShortAlias", "description":"", "aliases":["a"]}]),
+    ] {
+        let output = discover(&kernel, &compiled, &active, json!({"query":"a","candidates":candidates,"limit":5})).await.unwrap();
+        assert_eq!(output["names"].as_array().unwrap().len(), 1);
+    }
 }

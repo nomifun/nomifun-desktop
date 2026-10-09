@@ -23,7 +23,6 @@ use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::session_port::CompanionHostPorts;
-use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
     CompanionMemory, CompanionSkill, CompanionStore,
@@ -477,18 +476,6 @@ impl CompanionService {
     /// wins; later calls are ignored (`OnceLock` semantics).
     pub fn set_cleanup_hooks(&self, hooks: Vec<Arc<dyn CompanionCleanupHook>>) {
         let _ = self.cleanup_hooks.set(hooks);
-    }
-
-    /// Build the `CompanionSkillSink` the agent factory needs — gives companion_session
-    /// conversations the `companion_skill` tool + the per-turn when_to_use injection
-    /// over the owning companion's self-evolved skills (design §7).
-    pub fn skill_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionSkillSink> {
-        Arc::new(CompanionSkillStoreSink {
-            store: self.store.clone(),
-            config: self.config.clone(),
-            registry: self.registry.clone(),
-            skill_paths: self.skill_paths.clone(),
-        })
     }
 
     fn companion(&self) -> Result<&CompanionThreads, AppError> {

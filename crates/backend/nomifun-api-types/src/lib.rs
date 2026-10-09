@@ -45,7 +45,7 @@ mod webhook;
 mod websocket;
 
 pub use session_ops::{
-    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModelRequest, SideQuestionRequest,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SideQuestionRequest,
     SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
@@ -96,9 +96,8 @@ pub use channel::{
 };
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
-    ActiveCountResponse, CloneConversationRequest,
-    ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
-    ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
+    ConversationListResponse, ConversationResponse, ConversationRuntimeStateKind,
+    ConversationRuntimeSummary,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse,
     MessageResponse, MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
     PluginDeliveryRequirement, SendMessageRequest, SendMessageResponse, UpdateConversationRequest,

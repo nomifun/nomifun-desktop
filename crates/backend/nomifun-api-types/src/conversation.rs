@@ -4,27 +4,6 @@ use nomifun_common::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::McpServerId;
-
-/// Per-MCP snapshot status stored in `conversation.extra`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationMcpStatusKind {
-    Loaded,
-    Failed,
-    Unsupported,
-}
-
-/// A single MCP item shown in the conversation-scoped MCP list.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConversationMcpStatus {
-    pub mcp_server_id: McpServerId,
-    pub name: String,
-    pub status: ConversationMcpStatusKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 // ── Request types ──────────────────────────────────────────────────
 
 /// A user-selected deliverable obligation, not a capability grant.
@@ -90,17 +69,6 @@ pub struct CreateConversationRequest {
 pub struct UpdateConversationRequest {
     pub name: Option<String>,
     pub pinned: Option<bool>,
-}
-
-/// Body for `POST /api/conversations/clone`.
-///
-/// Despite the name, this endpoint no longer supports cloning from an
-/// existing conversation — it's kept as a distinct route because multiple
-/// call sites pass a pre-built `CreateConversationRequest` payload shape.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CloneConversationRequest {
-    pub conversation: CreateConversationRequest,
 }
 
 /// Body for `POST /api/conversations/:id/messages`.
@@ -375,12 +343,6 @@ pub struct MessageResponse {
 
 /// Paginated list of messages.
 pub type MessageListResponse = PaginatedResult<MessageResponse>;
-
-/// Response for `GET /api/conversations/active-count`.
-#[derive(Debug, Serialize)]
-pub struct ActiveCountResponse {
-    pub count: usize,
-}
 
 /// A single item from cross-conversation message search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -735,21 +697,6 @@ mod tests {
         .unwrap();
         assert_eq!(req.name.as_deref(), Some("Updated"));
         assert_eq!(req.pinned, Some(true));
-    }
-
-    // ── CloneConversationRequest ────────────────────────────────────
-
-    #[test]
-    fn deserialize_clone_request() {
-        let raw = json!({
-            "conversation": {
-                "type": "nomi",
-                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
-                "extra": {}
-            }
-        });
-        let req: CloneConversationRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.conversation.r#type, AgentType::Nomi);
     }
 
     // ── ListConversationsQuery ──────────────────────────────────────

@@ -30,7 +30,7 @@ Desktop仓库：
     cargo test -p nomifun-agent-runtime -p nomifun-chat-model-broker --lib
     cargo test -p nomifun-agent-execution --lib
     cargo test -p nomifun-conversation --lib
-    cargo test -p nomifun-voice -p nomifun-voice-core -p nomifun-audio
+    cargo test -p nomifun-voice -p nomifun-voice-core
     cargo test -p nomifun-model-invoke --lib voice
     cargo test -p nomifun-app --no-default-features --lib voice
     cargo test --manifest-path tests/fixtures/voice-external-adapter/Cargo.toml

@@ -1,14 +1,12 @@
 //! Exact ToolSearch policy contract and Kernel adapter. This is a hidden
 //! capability action, not another ToolSearch route or a second registry.
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomi_tools::tool_search::{ToolDiscoveryInput, ToolDiscoveryPolicy, rank_tool_discovery};
 use nomifun_agent_contracts::*;
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, CapabilityInvocationRequest, CompiledSnapshot,
-    KernelError, KernelRegistry, MaterializedRegistry, SessionCapabilityState,
+    CapabilityHandler, CapabilityInvocationContext,
+    KernelError, MaterializedRegistry,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -17,6 +15,63 @@ pub const CAPABILITY_ID: &str = "agent.tool-discovery";
 pub const ROLE_ID: &str = "system.tool-discovery";
 pub const PACKAGE_ID: &str = "nomifun.tool-discovery";
 pub const ACTION_ID: &str = "tool.discovery.rank";
+
+/// Schema-free metadata supplied by the host's authorized tool catalog.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolDiscoveryCandidate {
+    name: String,
+    description: String,
+    aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolDiscoveryInput {
+    query: String,
+    candidates: Vec<ToolDiscoveryCandidate>,
+    limit: usize,
+}
+
+fn rank_tool_discovery(input: &ToolDiscoveryInput) -> Vec<String> {
+    let query = input.query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(u8, &str)> = input
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let name = candidate.name.to_lowercase();
+            let rank = if name == query {
+                0
+            } else if candidate.aliases.iter().any(|alias| alias == &query) {
+                1
+            } else if name.starts_with(&query) {
+                2
+            } else if candidate.aliases.iter().any(|alias| alias.starts_with(&query)) {
+                3
+            } else if name.contains(&query) {
+                4
+            } else if candidate.aliases.iter().any(|alias| alias.contains(&query)) {
+                5
+            } else if candidate.description.to_lowercase().contains(&query) {
+                6
+            } else {
+                return None;
+            };
+            Some((rank, candidate.name.as_str()))
+        })
+        .collect();
+    ranked.sort_unstable();
+    let exact = ranked.first().map(|(rank, _)| *rank).filter(|rank| *rank <= 1);
+    ranked
+        .into_iter()
+        .take_while(|(rank, _)| exact.is_none_or(|exact| *rank == exact))
+        .take(input.limit.min(nomifun_agent_runtime::MAX_TOOL_DISCOVERY_MATCHES))
+        .map(|(_, name)| name.to_owned())
+        .collect()
+}
 
 pub fn schemas() -> BTreeMap<CanonicalSchemaRef, StrictJsonValue> {
     [("input", input_schema()), ("output", output_schema())]
@@ -69,7 +124,7 @@ pub fn supports(manifest: &CapabilityManifest) -> bool {
         && manifest.contributions.actions == [action()]
 }
 
-/// The bundled implementation shares the algorithm with standalone Nomi.
+/// The bundled pure ranking implementation for the canonical discovery Role.
 pub struct BuiltinDiscovery;
 
 #[async_trait]
@@ -100,36 +155,6 @@ impl CapabilityHandler for BuiltinDiscovery {
         Ok(StrictJsonValue(
             json!({"names":rank_tool_discovery(&input)}),
         ))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Selection {
-    names: Vec<String>,
-}
-
-pub(crate) fn decode_selection(value: StrictJsonValue) -> Result<Vec<String>, String> {
-    let output: Selection = serde_json::from_value(value.0).map_err(|e| e.to_string())?;
-    Ok(output.names)
-}
-
-#[derive(Clone)]
-pub(crate) enum DiscoveryBinding {
-    Ready(CapabilityId, Arc<dyn ToolDiscoveryPolicy>),
-}
-
-impl DiscoveryBinding {
-    pub(crate) fn id(&self) -> &CapabilityId {
-        let Self::Ready(id, _) = self;
-        id
-    }
-
-    pub(crate) fn policy(
-        &self,
-    ) -> Result<Arc<dyn ToolDiscoveryPolicy>, crate::NomiPluginToolError> {
-        let Self::Ready(_, policy) = self;
-        Ok(policy.clone())
     }
 }
 
@@ -182,95 +207,4 @@ fn selected_capability<'a>(
         }
     }
     Ok(selected)
-}
-
-pub(crate) struct KernelDiscoveryPolicy {
-    kernel: Arc<KernelRegistry>,
-    compiled: Arc<CompiledSnapshot>,
-    active: Arc<SessionCapabilityState>,
-    owner: PrincipalRef,
-    session: AgentSessionId,
-    scope: ScopeKey,
-    capability: CapabilityId,
-}
-
-impl KernelDiscoveryPolicy {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn materialize(
-        kernel: Arc<KernelRegistry>,
-        compiled: Arc<CompiledSnapshot>,
-        active: Arc<SessionCapabilityState>,
-        owner: PrincipalRef,
-        session: AgentSessionId,
-        scope: ScopeKey,
-    ) -> Result<Option<DiscoveryBinding>, crate::NomiPluginToolError> {
-        let registry = kernel.snapshot()?;
-        let Some(resolved) = selected_capability(&registry, compiled.content())? else {
-            return Ok(None);
-        };
-        let policy = compiled.policy(&resolved.capability.id).ok_or_else(|| {
-            crate::NomiPluginToolError::Contract(
-                "Discovery policy has no compiled authority".into(),
-            )
-        })?;
-        if !policy.allowed_actions.contains(&ActionId::from(ACTION_ID)) {
-            return Err(crate::NomiPluginToolError::Contract(
-                "Selected discovery capability must allow its rank action".into(),
-            ));
-        }
-        let capability = resolved.capability.id.clone();
-        Ok(Some(DiscoveryBinding::Ready(
-            capability.clone(),
-            Arc::new(Self {
-                kernel,
-                compiled,
-                active,
-                owner,
-                session,
-                scope,
-                capability,
-            }) as Arc<dyn ToolDiscoveryPolicy>,
-        )))
-    }
-}
-
-#[async_trait]
-impl ToolDiscoveryPolicy for KernelDiscoveryPolicy {
-    async fn select(&self, input: ToolDiscoveryInput) -> Result<Vec<String>, String> {
-        let active = self.active.snapshot().map_err(|e| e.to_string())?;
-        let policy = self
-            .compiled
-            .policy(&self.capability)
-            .ok_or("Discovery policy lost compiled authority")?;
-        let key = format!(
-            "nomi-discovery:{}:{}",
-            self.session.as_ref(),
-            uuid::Uuid::now_v7()
-        );
-        let result = self
-            .kernel
-            .invoke_shared(
-                self.compiled.clone(),
-                &active,
-                CapabilityInvocationRequest {
-                    principal: self.owner.clone(),
-                    session_owner: self.owner.clone(),
-                    agent_session_id: self.session.clone(),
-                    turn_id: key.clone().into(),
-                    operation_id: key.clone().into(),
-                    idempotency_key: key.clone().into(),
-                    correlation_id: key.into(),
-                    resolved_snapshot_ref: self.compiled.snapshot_ref().clone(),
-                    active_set_generation: active.generation,
-                    capability_id: self.capability.clone(),
-                    action_id: ACTION_ID.into(),
-                    resource_binding_ids: policy.resource_binding_ids.clone(),
-                    state_scope_key: self.scope.clone(),
-                    input: StrictJsonValue(serde_json::to_value(input).map_err(|e| e.to_string())?),
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        decode_selection(result)
-    }
 }

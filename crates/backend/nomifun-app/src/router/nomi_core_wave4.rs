@@ -15,28 +15,24 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::collections::BTreeMap;
 
 use nomifun_agent_contracts::{
-    AgentSessionId, CanonicalSchemaRef, CapabilityId, CorrelationId,
-    DigestHex, OperationId, PrincipalRef, ResolvedSnapshotRef, ScopeKey,
-    StrictJsonValue, TypedResourceBinding, digest_payload,
+    CapabilityId, StrictJsonValue, digest_payload,
 };
 use nomifun_agent_domain_wave4::{
-    CHANNEL_GROUP_POLICY, CHANNEL_PAIRING, CHANNEL_RECEIVE,
-    CHANNEL_RESOURCE_KIND,
     Wave4CapabilityOperation, Wave4ContextHostPort, Wave4HostPort,
     Wave4HostPortError, Wave4HostRequest, Wave4TurnMiddlewareHostPort,
     Wave4TurnMiddlewareHostRequest,
 };
 #[cfg(test)]
-use nomifun_agent_domain_wave4::COMPANION_RESOURCE_KIND;
+use nomifun_agent_domain_wave4::{CHANNEL_RESOURCE_KIND, COMPANION_RESOURCE_KIND};
+#[cfg(test)]
+use nomifun_agent_contracts::{AgentSessionId, TypedResourceBinding};
 use nomifun_channel::error::ChannelError;
 use nomifun_channel::{
     ChannelAgentCapabilityOwner, ChannelCustomerBindingAuthority,
     ChannelSceneIngressPort,
 };
-use nomifun_channel::group_policy::GroupPolicyFence;
 use nomifun_channel::manager::ChannelManager;
 use nomifun_channel::message_service::ChannelMessageService;
-use nomifun_channel::pairing::PairingService;
 #[cfg(test)]
 use nomifun_channel::types::UnifiedOutgoingMessage;
 use nomifun_common::AppError;
@@ -49,7 +45,6 @@ const WAVE4_ACTION_OUTCOME_UNKNOWN: &str =
     nomifun_agent_domain_wave4::WAVE4_ACTION_OUTCOME_UNKNOWN;
 const WAVE4_IDEMPOTENCY_LEDGER_FAILED: &str = "WAVE4_IDEMPOTENCY_LEDGER_FAILED";
 const CHANNEL_DELIVERY_FAILED: &str = "CHANNEL_DELIVERY_FAILED";
-const CHANNEL_NOT_CONNECTED: &str = "CHANNEL_NOT_CONNECTED";
 const COMPANION_OPERATION_FAILED: &str = "COMPANION_OPERATION_FAILED";
 const COMPANION_MODEL_NOT_CONFIGURED: &str =
     "COMPANION_MODEL_NOT_CONFIGURED";
@@ -74,35 +69,6 @@ pub(crate) fn nomi_core_wave4_context_capability_ids() -> BTreeSet<CapabilityId>
     .into_iter()
     .map(CapabilityId::from)
     .collect()
-}
-
-pub(crate) fn nomi_core_wave4_lifecycle_capability_ids() -> BTreeSet<CapabilityId> {
-    BTreeSet::new()
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct NomiCoreWave4Support {
-    pub companion_context: bool,
-    pub companion_actions: bool,
-    pub channel_ingress: bool,
-    pub channel_actions: bool,
-    pub channel_pairing: bool,
-    pub channel_group_policy: bool,
-}
-
-#[cfg(test)]
-impl NomiCoreWave4Support {
-    pub(crate) fn capability_is_ready(self, capability_id: &str) -> bool {
-        match capability_id {
-            nomifun_agent_domain_wave4::COMPANION_MODULE_ID => self.companion_actions,
-            CHANNEL_RECEIVE => self.channel_ingress,
-            nomifun_agent_domain_wave4::CHANNEL_MESSAGING_MODULE_ID => self.channel_actions,
-            CHANNEL_PAIRING => self.channel_pairing,
-            CHANNEL_GROUP_POLICY => self.channel_group_policy,
-            _ => false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -468,20 +434,6 @@ fn action_input(operation: &Wave4CapabilityOperation) -> &StrictJsonValue {
     }
 }
 
-fn exact_binding<'a>(
-    bindings: &'a [TypedResourceBinding],
-    resource_kind: &str,
-) -> Result<&'a TypedResourceBinding, Wave4HostPortError> {
-    bindings
-        .iter()
-        .find(|binding| binding.resource_kind.as_ref() == resource_kind)
-        .ok_or_else(|| {
-            Wave4HostPortError::resource_not_bound(format!(
-                "target resource kind {resource_kind} is not bound"
-            ))
-        })
-}
-
 fn ensure_installation_owner(
     authoritative_user_id: &str,
     actual: &str,
@@ -520,14 +472,6 @@ fn channel_error(error: ChannelError) -> Wave4HostPortError {
         _ => CHANNEL_DELIVERY_FAILED,
     };
     Wave4HostPortError::new(code, error.to_string())
-}
-
-struct ChannelRuntimeOwners {
-    manager: Arc<ChannelManager>,
-    pairing_service: Arc<PairingService>,
-    group_policy_fence: Arc<GroupPolicyFence>,
-    repository: Arc<dyn nomifun_db::IChannelRepository>,
-    customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
 }
 
 struct CanonicalChannelSceneIngress {
@@ -588,196 +532,11 @@ impl ChannelCustomerBindingAuthority for CanonicalChannelCustomerBinding {
     }
 }
 
-async fn load_channel_resource(
-    runtime: &ChannelRuntimeOwners,
-    binding: &TypedResourceBinding,
-) -> Result<nomifun_db::models::ChannelPluginRow, Wave4HostPortError> {
-    let plugin_id = binding.resource_id.as_ref();
-    let plugin = runtime
-        .repository
-        .get_plugin(plugin_id)
-        .await
-        .map_err(|error| {
-            Wave4HostPortError::new(
-                CHANNEL_DELIVERY_FAILED,
-                format!("channel resource lookup failed: {error}"),
-            )
-        })?
-        .ok_or_else(|| {
-            Wave4HostPortError::new(
-                RESOURCE_NOT_FOUND,
-                format!("bound Channel resource {plugin_id} does not exist"),
-            )
-        })?;
-    if !plugin.enabled {
-        return Err(Wave4HostPortError::new(
-            CHANNEL_NOT_CONNECTED,
-            format!("bound Channel resource {plugin_id} is disabled"),
-        ));
-    }
-    match plugin.owner_domain.as_str() {
-        nomifun_db::models::CHANNEL_OWNER_DOMAIN_COMPANION => {
-            if binding.typed_parameters.contains_key("cs_agent_id") {
-                return Err(Wave4HostPortError::resource_owner_mismatch(
-                    "companion-owned Channel binding carries customer-service ownership",
-                ));
-            }
-            let bound_companion_id = binding
-                .typed_parameters
-                .get("companion_id")
-                .ok_or_else(|| {
-                    Wave4HostPortError::resource_not_bound(
-                        "companion-owned Channel binding has no frozen companion_id",
-                    )
-                })?;
-            if plugin.companion_id.as_deref()
-                != Some(bound_companion_id.as_str())
-            {
-                return Err(Wave4HostPortError::resource_owner_mismatch(
-                    format!(
-                        "bound companion Channel resource {plugin_id} was reassigned after this Session binding was resolved"
-                    ),
-                ));
-            }
-        }
-        nomifun_db::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE => {
-            if binding.typed_parameters.contains_key("companion_id")
-                || plugin.companion_id.is_some()
-            {
-                return Err(Wave4HostPortError::resource_owner_mismatch(
-                    "customer-service Channel binding carries Companion ownership",
-                ));
-            }
-            let bound_cs_agent_id = binding
-                .typed_parameters
-                .get("cs_agent_id")
-                .ok_or_else(|| {
-                    Wave4HostPortError::resource_not_bound(
-                        "customer-service Channel binding has no frozen cs_agent_id",
-                    )
-                })?;
-            let current = runtime
-                .customer_service
-                .binding_for_plugin(plugin_id)
-                .await
-                .map_err(app_error)?;
-            if current.as_deref() != Some(bound_cs_agent_id.as_str()) {
-                return Err(Wave4HostPortError::resource_owner_mismatch(
-                    format!(
-                        "bound customer-service Channel resource {plugin_id} was reassigned after this Session binding was resolved"
-                    ),
-                ));
-            }
-        }
-        other => {
-            return Err(Wave4HostPortError::resource_owner_mismatch(format!(
-                "bound Channel resource {plugin_id} has unsupported owner domain {other}"
-            )));
-        }
-    }
-    Ok(plugin)
-}
-
-/// Host-authenticated activation request for Channel EventSource, Transport,
-/// and TurnMiddleware contributions. It is assembled by the Nomi resource
-/// resolver from one compiled Session, never from model input.
-#[derive(Clone, Debug)]
-pub(crate) struct NomiCoreChannelLifecycleRequest {
-    pub(crate) principal: PrincipalRef,
-    pub(crate) agent_session_id: AgentSessionId,
-    pub(crate) operation_id: OperationId,
-    pub(crate) correlation_id: CorrelationId,
-    pub(crate) resolved_snapshot_ref: ResolvedSnapshotRef,
-    pub(crate) registry_generation: u64,
-    pub(crate) registry_digest: DigestHex,
-    pub(crate) capability_id: CapabilityId,
-    pub(crate) state_scope_key: ScopeKey,
-    pub(crate) resource_bindings: Vec<TypedResourceBinding>,
-    pub(crate) schema_ref: Option<CanonicalSchemaRef>,
-    pub(crate) turn_input: StrictJsonValue,
-}
-
-impl NomiCoreChannelLifecycleRequest {
-    fn validate(&self) -> Result<(), Wave4HostPortError> {
-        let fields = [
-            ("principal.kind", self.principal.principal_kind.as_str()),
-            ("principal.id", self.principal.principal_id.as_str()),
-            ("agent_session_id", self.agent_session_id.as_ref()),
-            ("operation_id", self.operation_id.as_ref()),
-            ("correlation_id", self.correlation_id.as_ref()),
-            (
-                "snapshot_id",
-                self.resolved_snapshot_ref.snapshot_id.as_ref(),
-            ),
-            (
-                "snapshot_digest",
-                self.resolved_snapshot_ref.snapshot_digest.as_ref(),
-            ),
-            ("registry_digest", self.registry_digest.as_ref()),
-            ("state_scope_key", self.state_scope_key.as_ref()),
-        ];
-        if let Some((field, _)) = fields
-            .iter()
-            .find(|(_, value)| value.trim().is_empty())
-        {
-            return Err(Wave4HostPortError::invalid_request(format!(
-                "{field} must be non-empty"
-            )));
-        }
-        if self.registry_generation == 0 {
-            return Err(Wave4HostPortError::invalid_request(
-                "registry_generation must identify a published generation",
-            ));
-        }
-        if !self.turn_input.0.is_object() {
-            return Err(Wave4HostPortError::invalid_request(
-                "Channel lifecycle turn_input must be a JSON object",
-            ));
-        }
-        if !matches!(
-            self.capability_id.as_ref(),
-            CHANNEL_RECEIVE | CHANNEL_PAIRING | CHANNEL_GROUP_POLICY
-        ) {
-            return Err(Wave4HostPortError::action_operation_mismatch(
-                "Channel lifecycle owner received a Tool or foreign capability",
-            ));
-        }
-        let binding = exact_binding(
-            &self.resource_bindings,
-            CHANNEL_RESOURCE_KIND,
-        )?;
-        if binding.owner_id != self.principal.principal_id {
-            return Err(Wave4HostPortError::resource_owner_mismatch(format!(
-                "bound Channel resource belongs to {}, not {}",
-                binding.owner_id, self.principal.principal_id
-            )));
-        }
-        let required_operation = match self.capability_id.as_ref() {
-            CHANNEL_RECEIVE => "receive",
-            CHANNEL_PAIRING | CHANNEL_GROUP_POLICY => "manage",
-            _ => unreachable!("validated lifecycle capability"),
-        };
-        if !binding.operations.contains(required_operation) {
-            return Err(Wave4HostPortError::resource_not_bound(format!(
-                "{} requires operation {required_operation} on the bound Channel",
-                self.capability_id.as_ref()
-            )));
-        }
-        if self.schema_ref.is_some() {
-            return Err(Wave4HostPortError::invalid_request(
-                "Channel scene lifecycle is binding-derived and cannot carry an Agent capability schema",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Late-bound Channel owner. The object is installed in the Nomi provider
 /// before the router becomes reachable; the Nomi Kernel and Catalog retain the
 /// same Arc for the process lifetime.
 pub(crate) struct NomiCoreChannelWave4Owner {
     authoritative_user_id: Arc<str>,
-    runtime: OnceLock<ChannelRuntimeOwners>,
     ingress: OnceLock<Arc<ChannelMessageService>>,
     target: OnceLock<Arc<ChannelAgentCapabilityOwner>>,
     ledger: Arc<Wave4DurableActionLedger>,
@@ -786,12 +545,10 @@ pub(crate) struct NomiCoreChannelWave4Owner {
 impl NomiCoreChannelWave4Owner {
     fn new(
         authoritative_user_id: Arc<str>,
-        _companion_service: Arc<nomifun_companion::CompanionService>,
         ledger: Arc<Wave4DurableActionLedger>,
     ) -> Self {
         Self {
             authoritative_user_id,
-            runtime: OnceLock::new(),
             ingress: OnceLock::new(),
             target: OnceLock::new(),
             ledger,
@@ -801,20 +558,10 @@ impl NomiCoreChannelWave4Owner {
     pub(crate) fn install(
         self: &Arc<Self>,
         manager: Arc<ChannelManager>,
-        pairing_service: Arc<PairingService>,
         repository: Arc<dyn nomifun_db::IChannelRepository>,
         customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     ) -> Result<(), String> {
         let group_policy_fence = manager.group_policy_fence();
-        self.runtime
-            .set(ChannelRuntimeOwners {
-                manager: Arc::clone(&manager),
-                pairing_service,
-                group_policy_fence: Arc::clone(&group_policy_fence),
-                repository: Arc::clone(&repository),
-                customer_service: Arc::clone(&customer_service),
-            })
-            .map_err(|_| "Nomi-core Wave 4 Channel owner is already installed".to_owned())?;
         let target = ChannelAgentCapabilityOwner::new(
             Arc::clone(&self.authoritative_user_id),
             manager,
@@ -865,120 +612,6 @@ impl NomiCoreChannelWave4Owner {
             .await)
     }
 
-    #[cfg(test)]
-    pub(crate) fn support(&self) -> NomiCoreWave4Support {
-        let ready = self.runtime.get().is_some();
-        NomiCoreWave4Support {
-            companion_context: false,
-            companion_actions: false,
-            channel_ingress: ready && self.ingress.get().is_some(),
-            channel_actions: ready,
-            channel_pairing: ready,
-            channel_group_policy: ready,
-        }
-    }
-
-    /// Activate one non-Tool Channel contribution for an exact Nomi Session.
-    ///
-    /// `channel.transport/receive` proves the bound bot is live on the process message
-    /// loop; `channel.transport/pairing` reads the real pairing owner; and
-    /// `channel.transport/group_policy` reads under the same per-bot fence used by
-    /// inbound admission and policy writes.
-    pub(crate) async fn activate_lifecycle(
-        &self,
-        request: NomiCoreChannelLifecycleRequest,
-    ) -> Result<StrictJsonValue, Wave4HostPortError> {
-        request.validate()?;
-        ensure_installation_owner(
-            self.authoritative_user_id.as_ref(),
-            &request.principal.principal_id,
-        )?;
-        let binding = exact_binding(
-            &request.resource_bindings,
-            CHANNEL_RESOURCE_KIND,
-        )?;
-        let runtime = self.runtime.get().ok_or_else(|| {
-            Wave4HostPortError::unavailable(
-                "Nomi-core Channel lifecycle owner has not completed startup",
-            )
-        })?;
-        let plugin_id = binding.resource_id.as_ref();
-        // The policy snapshot must be read after any in-flight writer commits.
-        let _policy = if request.capability_id.as_ref() == CHANNEL_GROUP_POLICY {
-            Some(runtime.group_policy_fence.read(plugin_id).await)
-        } else {
-            None
-        };
-        let plugin = load_channel_resource(runtime, binding).await?;
-        match request.capability_id.as_ref() {
-            CHANNEL_RECEIVE => {
-                if !runtime.manager.is_plugin_running(plugin_id) {
-                    return Err(Wave4HostPortError::new(
-                        CHANNEL_NOT_CONNECTED,
-                        format!(
-                            "bound Channel resource {plugin_id} is not connected to the live message loop"
-                        ),
-                    ));
-                }
-                if plugin.owner_domain
-                    == nomifun_db::models::CHANNEL_OWNER_DOMAIN_COMPANION
-                {
-                    let companion_id = binding
-                        .typed_parameters
-                        .get("companion_id")
-                        .expect("validated companion Channel binding");
-                    self.ingress
-                        .get()
-                        .ok_or_else(|| {
-                            Wave4HostPortError::unavailable(
-                                "Nomi-core Channel ingress owner has not completed startup",
-                            )
-                        })?
-                        .bind_agent_session_ingress(
-                            plugin_id,
-                            companion_id,
-                            request.agent_session_id.as_ref(),
-                        )
-                        .await
-                        .map_err(channel_error)?;
-                }
-                Ok(StrictJsonValue(serde_json::json!({
-                    "kind": "channel_receive",
-                    "channel_plugin_id": plugin_id,
-                    "platform": plugin.r#type,
-                    "agent_session_id": request.agent_session_id,
-                    "state": "active",
-                })))
-            }
-            CHANNEL_PAIRING => {
-                let pending_count = runtime
-                    .pairing_service
-                    .get_pending_pairings()
-                    .await
-                    .map_err(channel_error)?
-                    .into_iter()
-                    .filter(|pairing| {
-                        pairing.channel_plugin_id.as_deref() == Some(plugin_id)
-                    })
-                    .count();
-                Ok(StrictJsonValue(serde_json::json!({
-                    "kind": "channel_pairing",
-                    "channel_plugin_id": plugin_id,
-                    "pending_count": pending_count,
-                    "state": "active",
-                })))
-            }
-            CHANNEL_GROUP_POLICY => {
-                Ok(StrictJsonValue(serde_json::json!({
-                    "kind": "channel_group_policy",
-                    "channel_plugin_id": plugin_id,
-                    "mode": plugin.group_access_mode,
-                    "state": "active",
-                })))
-            }
-            _ => unreachable!("validated lifecycle capability"),
-        }
-    }
 
 }
 
@@ -1024,16 +657,6 @@ impl Wave4TurnMiddlewareHostPort for NomiCoreChannelWave4Owner {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn combined_support(
-    channel: &NomiCoreChannelWave4Owner,
-) -> NomiCoreWave4Support {
-    let mut support = channel.support();
-    support.companion_context = true;
-    support.companion_actions = true;
-    support
-}
-
 /// One Nomi-core composition object for the two Wave 4 packages that share
 /// Companion/Channel product state.
 pub(crate) struct NomiCoreWave4Owners {
@@ -1056,7 +679,6 @@ impl NomiCoreWave4Owners {
         ));
         let channel = Arc::new(NomiCoreChannelWave4Owner::new(
             authoritative_user_id,
-            Arc::clone(&companion_service),
             Arc::clone(&ledger),
         ));
         let action_port = nomifun_agent_domain_wave4::composed_host_port(
@@ -1103,12 +725,11 @@ impl NomiCoreWave4Owners {
     pub(crate) fn install_channel(
         &self,
         manager: Arc<ChannelManager>,
-        pairing_service: Arc<PairingService>,
         repository: Arc<dyn nomifun_db::IChannelRepository>,
         customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     ) -> Result<(), String> {
         self.channel
-            .install(manager, pairing_service, repository, customer_service)
+            .install(manager, repository, customer_service)
     }
 
     pub(crate) fn install_channel_ingress(
@@ -1140,43 +761,6 @@ impl NomiCoreWave4Owners {
         self.channel.unbind_session_ingress(session_id).await?;
         self.purge_session_receipts(owner_id, session_id).await?;
         Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl nomifun_ai_agent::NomiPlatformBuiltinLifecycleInvoker
-    for NomiCoreWave4Owners
-{
-    async fn activate(
-        &self,
-        request: nomifun_ai_agent::NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<StrictJsonValue, String> {
-        let capability_id = request.capability.capability.id.clone();
-        if !nomi_core_wave4_lifecycle_capability_ids()
-            .contains(&capability_id)
-        {
-            return Err(format!(
-                "WAVE4_ACTION_OPERATION_MISMATCH: {} is not owned by the Channel lifecycle adapter",
-                capability_id.as_ref()
-            ));
-        }
-        self.channel
-            .activate_lifecycle(NomiCoreChannelLifecycleRequest {
-                principal: request.principal,
-                agent_session_id: request.agent_session_id,
-                operation_id: request.operation_id,
-                correlation_id: request.correlation_id,
-                resolved_snapshot_ref: request.resolved_snapshot_ref,
-                registry_generation: request.registry_generation,
-                registry_digest: request.registry_digest,
-                capability_id,
-                state_scope_key: request.state_scope_key,
-                resource_bindings: request.resource_bindings,
-                schema_ref: request.schema_ref,
-                turn_input: request.turn_input,
-            })
-            .await
-            .map_err(|error| error.to_string())
     }
 }
 
@@ -1525,55 +1109,6 @@ mod tests {
         }
     }
 
-    fn channel_lifecycle_request(
-        capability_id: &str,
-        channel_plugin_id: &str,
-        companion_id: &str,
-    ) -> NomiCoreChannelLifecycleRequest {
-        NomiCoreChannelLifecycleRequest {
-            principal: PrincipalRef {
-                principal_kind: "user".to_owned(),
-                principal_id: TEST_OWNER.to_owned(),
-            },
-            agent_session_id: AgentSessionId::from(TEST_SESSION),
-            resolved_snapshot_ref: ResolvedSnapshotRef {
-                snapshot_id: "snapshot".into(),
-                snapshot_digest: "digest".into(),
-            },
-            operation_id: OperationId::from("lifecycle-operation"),
-            correlation_id: CorrelationId::from("lifecycle-correlation"),
-            registry_generation: 1,
-            registry_digest: DigestHex::from("registry-digest"),
-            capability_id: CapabilityId::from(capability_id),
-            state_scope_key: ScopeKey::from("session:session"),
-            resource_bindings: vec![TypedResourceBinding {
-                binding_id: nomifun_agent_contracts::ResourceBindingId::from(
-                    "channel",
-                ),
-                resource_kind: nomifun_agent_contracts::ResourceKind::from(
-                    CHANNEL_RESOURCE_KIND,
-                ),
-                resource_id: nomifun_agent_contracts::ResourceId::from(
-                    channel_plugin_id.to_owned(),
-                ),
-                owner_id: TEST_OWNER.to_owned(),
-                operations: BTreeSet::from([
-                    "manage".to_owned(),
-                    "receive".to_owned(),
-                    "reply".to_owned(),
-                    "send".to_owned(),
-                ]),
-                connection_config_ref: None,
-                typed_parameters: BTreeMap::from([(
-                    "companion_id".to_owned(),
-                    companion_id.to_owned(),
-                )]),
-            }],
-            schema_ref: None,
-            turn_input: StrictJsonValue(serde_json::json!({})),
-        }
-    }
-
     fn request(input: serde_json::Value) -> Wave4HostRequest {
         use nomifun_agent_contracts::{
             ActionId, AgentSessionId, CorrelationId, OperationId,
@@ -1834,77 +1369,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn support_plan_requires_the_real_channel_runtime() {
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let companion_dir = tempfile::tempdir().unwrap();
-        let channel = NomiCoreChannelWave4Owner::new(
-            Arc::from(TEST_OWNER),
-            companion_service(companion_dir.path()).await,
-            Arc::new(Wave4DurableActionLedger::new(
-                database.pool().clone(),
-            )),
-        );
-        let support = combined_support(&channel);
-        assert!(support.companion_context);
-        assert!(support.companion_actions);
-        for capability in [
-            CHANNEL_RECEIVE,
-            nomifun_agent_domain_wave4::CHANNEL_MESSAGING_MODULE_ID,
-            CHANNEL_PAIRING,
-            CHANNEL_GROUP_POLICY,
-        ] {
-            assert!(!support.capability_is_ready(capability));
-        }
-        database.close().await;
-    }
-
-    #[tokio::test]
-    async fn channel_lifecycle_keeps_unbound_resource_distinct_from_startup() {
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let companion_dir = tempfile::tempdir().unwrap();
-        let channel = NomiCoreChannelWave4Owner::new(
-            Arc::from(TEST_OWNER),
-            companion_service(companion_dir.path()).await,
-            Arc::new(Wave4DurableActionLedger::new(
-                database.pool().clone(),
-            )),
-        );
-        let request = NomiCoreChannelLifecycleRequest {
-            principal: nomifun_agent_contracts::PrincipalRef {
-                principal_kind: "user".to_owned(),
-                principal_id: TEST_OWNER.to_owned(),
-            },
-            agent_session_id: nomifun_agent_contracts::AgentSessionId::from(
-                TEST_SESSION,
-            ),
-            operation_id: OperationId::from("lifecycle-operation"),
-            correlation_id: CorrelationId::from("lifecycle-correlation"),
-            resolved_snapshot_ref:
-                nomifun_agent_contracts::ResolvedSnapshotRef {
-                    snapshot_id: "snapshot".into(),
-                    snapshot_digest: "digest".into(),
-            },
-            registry_generation: 1,
-            registry_digest: DigestHex::from("registry-digest"),
-            capability_id: CapabilityId::from(CHANNEL_RECEIVE),
-            state_scope_key: ScopeKey::from("session:session"),
-            resource_bindings: Vec::new(),
-            schema_ref: None,
-            turn_input: StrictJsonValue(serde_json::json!({})),
-        };
-        let error = channel.activate_lifecycle(request).await.unwrap_err();
-        assert_eq!(
-            error.code,
-            nomifun_agent_domain_wave4::WAVE4_RESOURCE_NOT_BOUND
-        );
-        assert_ne!(
-            error.code,
-            nomifun_agent_domain_wave4::WAVE4_HOST_PORT_UNAVAILABLE
-        );
-        database.close().await;
-    }
-
-    #[tokio::test]
     async fn companion_context_reads_only_the_explicit_live_binding() {
         let dir = tempfile::tempdir().unwrap();
         let service = companion_service(dir.path()).await;
@@ -1973,160 +1437,6 @@ mod tests {
         assert_eq!(
             owner.invoke(evolve).await.unwrap_err().code,
             COMPANION_MODEL_NOT_CONFIGURED
-        );
-        database.close().await;
-    }
-
-    #[tokio::test]
-    async fn channel_lifecycle_reads_the_real_pairing_and_group_policy_owners() {
-        use nomifun_db::IChannelRepository;
-
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let companion_dir = tempfile::tempdir().unwrap();
-        let companion_service = companion_service(companion_dir.path()).await;
-        let companion = companion_service
-            .create_companion("Bound", "ink")
-            .await
-            .unwrap();
-        let repository: Arc<dyn IChannelRepository> = Arc::new(
-            nomifun_db::SqliteChannelRepository::new(database.pool().clone()),
-        );
-        let now = nomifun_common::now_ms();
-        let companion_id = companion.companion_id;
-        let plugin = repository
-            .create_plugin(&nomifun_db::models::NewChannelPluginRow {
-                r#type: "telegram".to_owned(),
-                name: "test channel".to_owned(),
-                enabled: true,
-                config: "{}".to_owned(),
-                status: Some("stopped".to_owned()),
-                last_connected: None,
-                companion_id: Some(companion_id.clone()),
-                bot_key: Some("test-bot".to_owned()),
-                owner_domain: nomifun_db::models::CHANNEL_OWNER_DOMAIN_COMPANION
-                    .to_owned(),
-                group_access_mode:
-                    nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST
-                        .to_owned(),
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .unwrap();
-        let events = Arc::new(nomifun_realtime::BroadcastEventBus::new(16));
-        let (message_tx, _message_rx) = tokio::sync::mpsc::channel(4);
-        let manager = Arc::new(ChannelManager::new(
-            Arc::clone(&repository),
-            events.clone(),
-            TEST_OWNER,
-            [7; 32],
-            message_tx,
-        ));
-        let pairing = Arc::new(
-            PairingService::new(
-                Arc::clone(&repository),
-                events,
-                TEST_OWNER,
-            )
-            .with_group_policy_fence(manager.group_policy_fence()),
-        );
-        let owner = Arc::new(NomiCoreChannelWave4Owner::new(
-            Arc::from(TEST_OWNER),
-            Arc::clone(&companion_service),
-            Arc::new(Wave4DurableActionLedger::new(
-                database.pool().clone(),
-            )),
-        ));
-        let customer_service = customer_service(&database);
-        owner
-            .install(
-                manager,
-                pairing,
-                Arc::clone(&repository),
-                Arc::clone(&customer_service),
-            )
-            .unwrap();
-        owner
-            .install_ingress(ingress_message_service(
-                &database,
-                Arc::clone(&repository),
-                &plugin.channel_plugin_id,
-                &companion_id,
-                TEST_SESSION,
-            ))
-            .unwrap();
-        let support = owner.support();
-        for capability in [
-            CHANNEL_RECEIVE,
-            nomifun_agent_domain_wave4::CHANNEL_MESSAGING_MODULE_ID,
-            CHANNEL_PAIRING,
-            CHANNEL_GROUP_POLICY,
-        ] {
-            assert!(support.capability_is_ready(capability));
-        }
-
-        let group = owner
-            .activate_lifecycle(channel_lifecycle_request(
-                CHANNEL_GROUP_POLICY,
-                &plugin.channel_plugin_id,
-                &companion_id,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            group.0["mode"],
-            nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST
-        );
-        let fence = &owner.runtime.get().unwrap().group_policy_fence;
-        let writer = fence.write(&plugin.channel_plugin_id).await;
-        let mut waiting = Box::pin(owner.activate_lifecycle(channel_lifecycle_request(
-            CHANNEL_GROUP_POLICY, &plugin.channel_plugin_id, &companion_id,
-        )));
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting).await.is_err());
-        repository.update_plugin_group_access_mode_and_clear_non_direct_sessions(
-            &plugin.channel_plugin_id, nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED,
-        ).await.unwrap();
-        assert_eq!(repository.get_plugin(&plugin.channel_plugin_id).await.unwrap().unwrap().group_access_mode,
-            nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED);
-        drop(writer);
-        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
-            .await.unwrap().unwrap();
-        assert_eq!(observed.0["mode"], nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED);
-        let pairing = owner
-            .activate_lifecycle(channel_lifecycle_request(
-                CHANNEL_PAIRING,
-                &plugin.channel_plugin_id,
-                &companion_id,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(pairing.0["pending_count"], 0);
-        let receive = owner
-            .activate_lifecycle(channel_lifecycle_request(
-                CHANNEL_RECEIVE,
-                &plugin.channel_plugin_id,
-                &companion_id,
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(receive.code, CHANNEL_NOT_CONNECTED);
-
-        let mut rebound = plugin.clone();
-        rebound.companion_id = Some(
-            nomifun_common::CompanionId::new().into_string(),
-        );
-        repository.update_plugin(&rebound).await.unwrap();
-        let stale = owner
-            .activate_lifecycle(channel_lifecycle_request(
-                CHANNEL_GROUP_POLICY,
-                &plugin.channel_plugin_id,
-                &companion_id,
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            stale.code,
-            nomifun_agent_domain_wave4::WAVE4_RESOURCE_OWNER_MISMATCH
         );
         database.close().await;
     }
@@ -2206,17 +1516,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let pairing = Arc::new(
-            PairingService::new(
-                Arc::clone(&repository),
-                events,
-                TEST_OWNER,
-            )
-            .with_group_policy_fence(manager.group_policy_fence()),
-        );
         let owner = Arc::new(NomiCoreChannelWave4Owner::new(
             Arc::from(TEST_OWNER),
-            Arc::clone(&companion_service),
             Arc::new(Wave4DurableActionLedger::new(
                 database.pool().clone(),
             )),
@@ -2225,7 +1526,6 @@ mod tests {
         owner
             .install(
                 Arc::clone(&manager),
-                pairing,
                 Arc::clone(&repository),
                 Arc::clone(&customer_service),
             )
@@ -2243,13 +1543,15 @@ mod tests {
         owner
             .install_ingress(Arc::clone(&message_service))
             .unwrap();
-        let mut receive = channel_lifecycle_request(
-            CHANNEL_RECEIVE,
-            &channel_plugin_id,
-            &companion_id,
-        );
-        receive.agent_session_id = AgentSessionId::from(agent_session_id.clone());
-        owner.activate_lifecycle(receive).await.unwrap();
+        let target = owner.target().unwrap();
+        let receive_binding = target.resolve_scene_binding(
+            TEST_OWNER, &channel_plugin_id,
+            &nomifun_channel::agent_capability::ChannelSceneTarget::Companion {
+                companion_id: companion_id.clone(),
+            },
+            &BTreeSet::from([nomifun_channel::agent_capability::CHANNEL_SEND_ACTION_ID.to_owned()]),
+        ).await.unwrap();
+        target.activate_scene_binding(TEST_OWNER, &agent_session_id, &receive_binding).await.unwrap();
         assert_eq!(
             message_service
                 .bound_agent_session_ingress(&channel_plugin_id)
@@ -2335,21 +1637,17 @@ mod tests {
             .await
             .unwrap();
 
-        let mut customer_receive = channel_lifecycle_request(
-            CHANNEL_RECEIVE,
-            &customer_plugin_id,
-            &companion_id,
-        );
-        customer_receive.resource_bindings[0].typed_parameters =
-            BTreeMap::from([("cs_agent_id".to_owned(), cs_agent.cs_agent_id.clone())]);
-        let customer_lifecycle = owner
-            .activate_lifecycle(customer_receive)
-            .await
-            .unwrap();
-        assert_eq!(
-            customer_lifecycle.0["channel_plugin_id"],
-            customer_plugin_id
-        );
+        let customer_binding = target.resolve_scene_binding(
+            TEST_OWNER, &customer_plugin_id,
+            &nomifun_channel::agent_capability::ChannelSceneTarget::CustomerService {
+                cs_agent_id: cs_agent.cs_agent_id.clone(),
+            },
+            &BTreeSet::from([nomifun_channel::agent_capability::CHANNEL_SEND_ACTION_ID.to_owned()]),
+        ).await.unwrap();
+        let customer_context = target.activate_scene_binding(
+            TEST_OWNER, &agent_session_id, &customer_binding,
+        ).await.unwrap();
+        assert_eq!(customer_context.channel_plugin_id, customer_plugin_id);
 
         let mut customer_send = request(serde_json::json!({
             "destination_ref": "customer-chat",

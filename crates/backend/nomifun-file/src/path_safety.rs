@@ -365,10 +365,9 @@ fn is_windows_reserved_device_name(name: &str) -> bool {
 /// user's own permissions are the only boundary; external channel / remote
 /// sessions get [`PathAuthority::Confined`] to their session workspace.
 ///
-/// This unifies the two historically-divergent file-access boundaries (the
-/// native `nomi-tools` write-root and this crate's `allowed_roots` sandbox)
-/// under a single, surface-scoped model. Traversal / NUL bytes are rejected in
-/// BOTH modes — `Unrestricted` removes root *containment*, not path hygiene.
+/// File access uses a single, surface-scoped model. Traversal / NUL bytes are
+/// rejected in BOTH modes — `Unrestricted` removes root *containment*, not path
+/// hygiene.
 #[derive(Debug, Clone)]
 pub enum PathAuthority {
     /// No sandbox-root containment: the OS user's own filesystem permissions

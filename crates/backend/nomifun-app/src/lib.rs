@@ -36,13 +36,6 @@ pub use desktop::{
     StartupCleanupDisposition, WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
 pub use nomifun_auth::AuthPolicy;
-pub use router::engine_session_host::{AdmittedEngineSession, EngineSessionHost, EngineTurnReceipt};
-pub use router::engine_journal::{EngineJournalWrite, EngineTurnJournal};
-pub use router::engine_history::{EngineHistoryRecord, EngineHistoryTurn, EngineHistoryWindow, CanonicalContextMessage, CanonicalContextRole};
-pub use router::engine_model_facts::{EngineModelLimits, EngineRouteCandidateFacts, EngineRouteModelFacts};
-pub use router::engine_kernel_session::EngineKernelSession;
-pub use router::engine_skills::SelectedSkills as SelectedEngineSkills;
-pub use router::engine_tool_host::{EngineToolHost, EngineToolObservationPolicy, BoundedEngineToolObservation, EngineToolDispatchRecord, bounded_engine_tool_result};
 
 /// Test assembly facade for the in-process Nomi-core graph.
 ///

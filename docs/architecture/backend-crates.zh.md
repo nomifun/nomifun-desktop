@@ -8,7 +8,7 @@
 
 ## Agent 层依赖规则
 
-正常的产品接缝是 [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/)。需要 agent 概念的功能 crate 应尽量通过 `nomifun_ai_agent::{nomi_config, nomi_types, RequirementSink}` 来消费它们。
+正常的产品接缝是 [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/)。需要 agent 概念的功能 crate 应尽量通过 `nomifun_ai_agent::{nomi_config, nomi_types}` 来消费它们。
 
 存在有意为之、由 feature 控制的直接依赖例外：
 
@@ -61,7 +61,7 @@
 
 | Crate | 职责 |
 | --- | --- |
-| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **通往 `crates/agent/` 的运行时桥梁。** 构建内置 `nomi` Agent runtime，由 `runtime session handles` 按 Conversation 缓存唯一的进程内 runtime handle，广播 `AgentStreamEvent`，暴露运行时信息与工具接缝。再导出 `nomi_config`、`nomi_types` 和 `RequirementSink` 供其余后端使用。 |
+| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **通往 `crates/agent/` 的运行时桥梁。** 构建内置 `nomi` Agent runtime，由 `AgentRuntimeSessions` 管理进程内 runtime handles，广播 `AgentStreamEvent`，暴露运行时信息与工具接缝。再导出 `nomi_config` 和 `nomi_types` 供其余后端使用。 |
 | [`nomifun-agent-contracts`](../../crates/backend/nomifun-agent-contracts/) | AgentPreset、Revision、ContributionLock、Snapshot、Role 和平台 Capability Catalog 的 canonical Rust/schema 合同；只依赖基础类型，不持有产品 service。 |
 | [`nomifun-agent-control-plane`](../../crates/backend/nomifun-agent-control-plane/) | Agent 工作台的 owner-scoped application service：官方 seed、Draft、Preview、Save、Revision、Catalog 查询和 AgentBinding；调用 canonical Compiler，不安装或管理 Plugin。 |
 | [`nomifun-agent-kernel`](../../crates/backend/nomifun-agent-kernel/) | 冻结执行闭包、typed resource binding 与调用准入。 |
@@ -90,7 +90,7 @@
 | [`nomifun-channel`](../../crates/backend/nomifun-channel/) | 外部聊天渠道适配器（Telegram、Lark、DingTalk、WeChat）——通过 feature 控制。将入站消息映射到共享的 Agent / Conversation runtime，解析按机器人或平台配置的伙伴归属，并应用渠道 Agent 上下文。它是接入边界，不是额外的 Agent 类型或模式。 |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **平台 Gateway MCP** —— `nomi_*` 兼容工具（会话、定时任务、伙伴记忆、需求平台等）的进程内能力注册表与传输层。Browser/Computer 走 canonical `AgentPlatform` Role host，不由 Gateway 持有。内部子进程经 `nomicore mcp-gateway-stdio` 接入，只接收服务端派生、带作用域、有效期和签名的能力声明；Conversation 或 build-extra 字段都不能授权。公开入口只投影其鉴权边界允许的能力子集。 |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | 定时任务：cron 表达式、时区修复、cron 守护进程、由斜杠命令驱动的创建。 |
-| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **AutoWork 持久执行器** —— 后端驱动、支持 boot-resume 的持久循环。通过 `RequirementSink` 与 Agent 层通信。 |
+| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **AutoWork 持久执行器** —— 后端驱动、支持 boot-resume 的持久循环。`RequirementServiceSink` 实现 `nomifun_common::RequirementCreator`，由 `nomifun-app` 注入按需启用的渠道消息转需求链路。 |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | 智能决策模式（IDMM）：canonical AgentSession 的可选监督器，在提供商故障、模型静默与决策停滞时通过规则层和受限旁路模型恢复任务；不拥有第二套 Session/Runtime。详见[智能决策](../guides/intelligent-decision.zh.md)。 |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | 外发飞书消息发送器，以及 Agent 工作完成时的 `CompletionNotifier`。 |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及机器人 / 设备绑定集成。 |

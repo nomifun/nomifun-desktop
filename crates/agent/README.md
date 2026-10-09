@@ -1,20 +1,24 @@
 # crates/agent
 
-AI agent engine crates. Package names use the `nomi-*` prefix.
+Agent provider, configuration, and desktop automation crates. Package names use
+the `nomi-*` prefix.
 
 Current crates:
 
 | Crate | Role |
 | --- | --- |
-| `nomi-types` | Provider-neutral data types and native tool effect categories. |
-| `nomi-compact` | Conversation compaction and context shaping. |
+| `nomi-types` | Provider-neutral model, message, and tool data types. |
+| `nomi-compact` | Compaction-level configuration type used by `nomi-config`. |
 | `nomi-config` | Provider, auth, hook, and runtime configuration. |
 | `nomi-providers` | LLM provider clients and streaming logic. |
-| `nomi-tools` | Built-in tool registry. |
-| `nomi-mcp` | MCP client, config, transports, and tool proxying. |
 | `nomi-computer` | Desktop computer-use tool implementation. |
 | `nomi-a11y` | Accessibility helpers used by computer-use flows. |
 | `nomi-browser-engine` | Self-hosted browser/CDP automation engine. |
+
+The model/tool loop lives in `nomifun-agent-runtime`. `nomifun-engine-core`
+projects admitted tool plans into `nomifun-agent-kernel`; the application host
+supplies capability adapters. MCP connections and invocation are owned by
+`nomifun-mcp`.
 
 ## Boundary
 

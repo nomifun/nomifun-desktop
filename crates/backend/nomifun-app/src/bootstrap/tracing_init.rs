@@ -14,12 +14,8 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::Subs
 const NOISE_SUPPRESSIONS: &[&str] = &["sqlx::query=warn", "hyper_util=warn", "reqwest=warn"];
 
 const NOMI_TARGETS: &[&str] = &[
-    "nomi_agent",
     "nomi_config",
-    "nomi_compact",
-    "nomi_mcp",
     "nomi_providers",
-    "nomi_tools",
 ];
 
 fn build_env_filter(log_level: Option<&str>) -> EnvFilter {
