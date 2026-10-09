@@ -5,6 +5,16 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.3 - 2026-10-09
+
+- Replace the bundled macOS browser engine (CEF) with the system WKWebView,
+  shrinking installers and raising the minimum system version to macOS 14.0.
+- Restore macOS site compatibility and navigation recovery, and ignore macOS
+  window restoration during startup.
+- Simplify remote host rows and actions, unify compact settings and
+  navigation, and refine the classic light and dark themes.
+- Clear the companion card background lingering after hover.
+
 ## v0.8.2 - 2026-10-09
 
 - **Older installations can start after the destructive upgrade.** Historical
