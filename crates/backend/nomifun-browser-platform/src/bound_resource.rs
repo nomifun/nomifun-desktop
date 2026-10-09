@@ -42,6 +42,7 @@ impl BoundBrowserProviderResource {
     pub fn inactive_snapshot(&self) -> BrowserResourceSnapshot {
         let authority = self.authority();
         BrowserResourceSnapshot {
+            interaction_capabilities: None,
             agent_session_id: authority.agent_session_id().to_owned(),
             resource_binding_id: authority.resource().binding_id().to_owned(),
             provider_id: authority.resource().provider().provider_id().to_owned(),

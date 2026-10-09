@@ -575,7 +575,7 @@ async fn build_nomi_core_agent_api_state(
     let installation_role_bindings = {
         let mut bindings = installation_role_bindings;
         // Provider ownership and live resource readiness are separate facts.
-        // A dev host without packaged CEF can still own the Attached Chrome
+        // A host without an embedded native surface can still own the Attached Chrome
         // provider contract; an unavailable concrete Browser resource then
         // narrows the tool surface instead of invalidating the whole Agent.
         let browser_provider_owned = services.browser_resources.is_some()

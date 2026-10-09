@@ -32,7 +32,7 @@ const send = (socket, value) => {
 };
 
 export function validateDevelopmentLaunch(request, root) {
-  const cache = join(resolve(root), 'target', 'macos-dev-browser');
+  const cache = join(resolve(root), 'target', 'macos-dev-app');
   const program = resolve(request.program ?? '');
   const within = relative(cache, program);
   if (!within || within.startsWith('..') || isAbsolute(within)
@@ -95,8 +95,8 @@ export async function createMacosDevSupervisor({
               cwd: launch.cwd,
               env: { ...launch.environment, NOMIFUN_DEV_LIFETIME_SOCKET: lifetime.socketPath },
               stdio: 'inherit',
-              // Keep terminal Ctrl-C on run-dev. Otherwise the terminal also
-              // signals CEF's child processes before native cleanup can run.
+              // Keep terminal Ctrl-C on run-dev so native cleanup runs through
+              // the app's ExitCoordinator before the next generation starts.
               detached: true,
             });
             const exited = new Promise((accept, reject) => {
@@ -110,7 +110,7 @@ export async function createMacosDevSupervisor({
               closed.then(async () => { await lifetime.stop(); return exited; }),
             ]);
             if (result.code !== 0 || result.signal) {
-              failure = new Error('macOS development app exited abnormally; Browser helper cleanup is unconfirmed and new launches are blocked');
+              failure = new Error('macOS development app exited abnormally; native cleanup is unconfirmed and new launches are blocked');
             }
             send(socket, { event: 'exit', ...result });
             socket.end();

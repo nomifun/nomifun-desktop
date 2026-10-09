@@ -159,7 +159,7 @@
     "modelManagement": { "name": "Model management", "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults." },
     "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
     "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },
-    "browser": { "name": "Browser", "description": "Observe and interact with a bound managed browser or authorized Chrome. The provider never adds permissions." },
+    "browser": { "name": "Browser", "description": "Observe and interact with a bound browser. Available actions depend on the browser: macOS supports ordinary page and form actions; advanced gestures and automatic file transfer are unavailable. The provider never adds permissions." },
     "channelMessaging": { "name": "Channel messaging", "description": "Reply or send through a channel selected by the usage target." },
     "companion": { "name": "Companion", "description": "Learn and evolve the selected companion within its product boundary." },
     "companionMemory": { "name": "Companion memory", "description": "Recall or write memory for the selected companion." },

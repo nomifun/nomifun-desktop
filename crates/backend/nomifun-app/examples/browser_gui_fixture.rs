@@ -2,6 +2,8 @@
 //! Deterministic modes read no user dataset or real provider credential.
 //! Opt-in --live-frontend / --live-commands / --live-general-commands /
 //! --live-default-general-commands accept the live key only via stdin.
+//! --wk-actions prepares a deterministic real-App WK acceptance task. See
+//! scripts/validation/run-macos-wk-app-acceptance.mjs for the authenticated driver.
 //! --user-browser-only prepares a normal chat Session with no Browser Module
 //! or Browser Resource binding, for testing the independent user sidebar.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--user-browser-only|--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
@@ -30,6 +32,9 @@ use std::{
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
+
+#[path = "support/wk_browser_fixture.rs"]
+mod wk_browser_fixture;
 
 struct LiveFrontend {
     model: LiveModelSpec,
@@ -398,6 +403,9 @@ struct Fixture {
     calls: AtomicUsize,
     native_url: Option<String>,
     native_pause: bool,
+    wk_actions: bool,
+    wk_evidence: Mutex<serde_json::Map<String, Value>>,
+    wk_screenshot: Option<PathBuf>,
     computer_denied: bool,
     computer_granted: bool,
     computer_a11y_denied: bool,
@@ -455,7 +463,7 @@ struct PointerCounts {
 
 /// Declares the native Browser provider while the disposable dataset is being
 /// compiled, but can never execute a page. The subsequently launched desktop
-/// replaces this preparatory host with the real WebView2 factory before any
+/// replaces this preparatory host with the real platform factory before any
 /// Agent turn is accepted.
 struct PreparatoryBrowserFactory;
 
@@ -2534,6 +2542,13 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         };
     }
     let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if fixture.wk_actions && body["messages"].as_array().and_then(|messages| messages.iter().rev().find(|message|message["role"]=="user"))
+        .is_some_and(|message|message["content"].to_string().contains("WK_UPGRADE_PRESERVATION_SEED")) {
+        // A real completed canonical Turn predates the new App launch. No
+        // Browser call or historical Agent-data import is needed to seed it.
+        let chunk=|delta:Value,finish:Option<&str>|json!({"id":"wk-upgrade-seed","object":"chat.completion.chunk","created":1,"model":"browser-gui-fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string();
+        return ([("content-type","text/event-stream")],format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",chunk(json!({"role":"assistant","content":"WK_UPGRADE_PRESERVED_REPLY"}),None),chunk(json!({}),Some("stop")))).into_response();
+    }
     // Local-only protocol fault: enough canonical events to put the pause past
     // the first 500-event consumer page, followed by the normal rate-limit path.
     if fixture.native_pause && call >= 45 {
@@ -2565,10 +2580,18 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
     }
     // Ordinary fixtures reset per Turn. The one-Turn pause fixture keeps its
     // monotonic request counter across context compaction.
-    let step = if fixture.native_pause { call } else { body["messages"].as_array().map(|messages| messages.iter().rev()
+    let step = if fixture.wk_actions { wk_browser_fixture::step(&body) } else if fixture.native_pause { call } else { body["messages"].as_array().map(|messages| messages.iter().rev()
         .take_while(|message| message["role"] != "user")
         .filter(|message| message["role"] == "tool").count()).unwrap_or(0) };
-    let operation: Option<(String, String, Value)> = if fixture.native_url.is_some() {
+    let operation: Option<(String, String, Value)> = if fixture.wk_actions {
+        match wk_browser_fixture::operation(&fixture, &body, step) {
+            Ok(operation) => operation.map(|(tool, arguments)| (wk_browser_fixture::call_id(&body,step), tool, arguments)),
+            Err(error) => {
+                fixture.failure.lock().unwrap().get_or_insert_with(|| error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"wk_fixture_error"}}))).into_response();
+            }
+        }
+    } else if fixture.native_url.is_some() {
         match native_operation(&fixture, &body, step) {
             Ok(operation) => operation.map(|(tool, arguments)| {
                 (format!("gui-native-{step}"), tool, arguments)
@@ -2780,6 +2803,15 @@ async fn api(app: &DesktopServer, path: &str, body: Value) -> anyhow::Result<Val
     );
     Ok(value["data"].clone())
 }
+
+async fn fixture_read(app: &DesktopServer, path: &str) -> anyhow::Result<Value> {
+    let response=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build()?
+        .get(format!("http://127.0.0.1:{}{path}",app.loopback_port()))
+        .header("x-nomi-local-trust",app.local_trust_secret()).send().await?;
+    anyhow::ensure!(response.status().is_success(),"Fixture read failed: {path}");
+    let value:Value=response.json().await?;
+    Ok(value["data"].clone())
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(
@@ -2826,7 +2858,8 @@ async fn main() -> anyhow::Result<()> {
     let mode = std::env::args().nth(2);
     let user_browser_only = mode.as_deref() == Some("--user-browser-only");
     let native_pause = mode.as_deref() == Some("--native-pause");
-    let native_actions = mode.as_deref() == Some("--native-actions") || native_pause;
+    let wk_actions = mode.as_deref() == Some("--wk-actions");
+    let native_actions = mode.as_deref() == Some("--native-actions") || native_pause || wk_actions;
     let computer_denied = mode.as_deref() == Some("--computer-denied");
     let computer_granted = mode.as_deref() == Some("--computer-granted");
     let computer_a11y_denied = mode.as_deref() == Some("--computer-a11y-denied");
@@ -2921,6 +2954,9 @@ async fn main() -> anyhow::Result<()> {
         calls: AtomicUsize::new(0),
         native_url: native_actions.then(|| format!("http://{address}/")),
         native_pause,
+        wk_actions,
+        wk_evidence: Mutex::new(serde_json::Map::new()),
+        wk_screenshot: wk_actions.then(||root.join(format!("wk-visible-page-{}.png",uuid::Uuid::new_v4()))),
         computer_denied,
         computer_granted,
         computer_a11y_denied,
@@ -2972,7 +3008,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|State(f):State<Arc<Fixture>>| async move {
             eprintln!("BROWSER_GUI_FIXTURE_HTTP_GET timestamp_ms={}", std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-            ([("cache-control","no-store")],Html(if f.live.is_some() {FRONTEND_PAGE} else {PAGE}))
+            ([("cache-control","no-store")],Html(if f.live.is_some() {FRONTEND_PAGE} else if f.wk_actions {wk_browser_fixture::PAGE} else {PAGE}))
         }))
         .route("/app.js", get(|State(f):State<Arc<Fixture>>| async move {
             if let Some(live)=&f.live {
@@ -2987,7 +3023,15 @@ async fn main() -> anyhow::Result<()> {
             axum::http::StatusCode::NOT_FOUND.into_response()
         }))
         .route("/v1/chat/completions", post(model))
+        .route("/download", get(|| async {
+            ([("content-type", "text/plain; charset=utf-8"), ("content-disposition", "attachment; filename=wk-acceptance.txt")], "NomiFun WK user download fixture\n")
+        }))
+        .route("/popup", get(||async {Html("<!doctype html><meta charset=utf-8><title>WK ordinary popup</title><style>body{font:20px system-ui;margin:32px}button,input{font:inherit;margin:12px;padding:8px}</style><h1>普通网页弹窗已打开</h1><label for=popup-field>弹窗输入</label><input id=popup-field><button onclick=\"document.getElementById('popup-result').textContent=document.getElementById('popup-field').value\">弹窗回显</button><output id=popup-result></output>")}))
         .route("/witness", post(|State(f): State<Arc<Fixture>>, Json(value): Json<Value>| async move {
+            let mut value=value;
+            if f.wk_actions && value.is_object() {
+                value["received_at_ms"]=json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+            }
             let mut witnesses = f.witnesses.lock().unwrap();
             if witnesses.len() < 64 { witnesses.push(value); }
             axum::http::StatusCode::NO_CONTENT
@@ -3006,7 +3050,7 @@ async fn main() -> anyhow::Result<()> {
                         "live_output_limit":f.live.as_ref().map(|live|live.budget.output_tokens),
                         "live_seconds":f.live.as_ref().map(|live|live.budget.seconds),
                         "live_stopped_status":f.live.as_ref().map(|live|live.stopped_status.load(Ordering::SeqCst)),
-                        "native_actions":f.native_url.is_some(),"native_pause":f.native_pause,
+                        "native_actions":f.native_url.is_some(),"native_pause":f.native_pause,"wk_actions":f.wk_actions,
                         "computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,
                         "computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,
                         "computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,
@@ -3026,7 +3070,8 @@ async fn main() -> anyhow::Result<()> {
                     json!({"unicode_verified":f.unicode_verified.load(Ordering::SeqCst),"large_a11y_verified":f.large_a11y_verified.load(Ordering::SeqCst),
                         "soak_verified":f.soak_verified.load(Ordering::SeqCst),"missing_launch_rejected":f.missing_launch_rejected.load(Ordering::SeqCst),
                         "failure":f.failure.lock().unwrap().clone(),"witnesses":f.witnesses.lock().unwrap().clone(),"served_versions":versions.len(),
-                        "changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)})
+                        "changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS),
+                        "wk_evidence":f.wk_evidence.lock().unwrap().clone()})
                 ];
                 for section in sections { if let Value::Object(fields)=section { status.extend(fields); } }
                 Json(Value::Object(status))
@@ -3101,8 +3146,23 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let prepared = async {
+        if wk_actions {
+            // This file exists only inside the newly created disposable root.
+            // The driver logs in normally; no desktop trust secret is exported.
+            let credentials = json!({"username":"wkfixture","password":uuid::Uuid::new_v4().to_string()});
+            api(&app,"/api/auth/setup",credentials.clone()).await?;
+            let mut options=std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)] {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            use std::io::Write;
+            let mut file=options.open(root.join("wk-acceptance-auth.json"))?;
+            file.write_all(&serde_json::to_vec(&credentials)?)?;
+        }
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
-        let model_traits = if computer_granted || computer_screen_denied || computer_pointer_input || computer_click_variants || computer_drag_cancel { json!(["vision_input"]) } else { json!([]) };
+        let model_traits = if wk_actions || computer_granted || computer_screen_denied || computer_pointer_input || computer_click_variants || computer_drag_cancel { json!(["vision_input"]) } else { json!([]) };
         let model_spec=fixture.live.as_ref().map(|live|live.model);
         let model_name=if live_commands {model_spec.expect("live command model frozen").name}else{"browser-gui-fixture"};
         let mut chat_capability=json!({"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096});
@@ -3252,6 +3312,39 @@ async fn main() -> anyhow::Result<()> {
         };
         let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":display_name,"resource_selections":resources,"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         let session_id=session["agent_session_id"].as_str().ok_or_else(||anyhow::anyhow!("session id missing"))?.to_owned();
+        if wk_actions {
+            let secondary=api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"WK 隔离对照会话","resource_selections":resources,"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
+            api(&app,&format!("/api/agent-sessions/{session_id}/turns"),json!({"input":{"content":"WK_UPGRADE_PRESERVATION_SEED"},"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(30);
+            let seed_messages=loop {
+                let messages=fixture_read(&app,&format!("/api/agent-sessions/{session_id}/messages?after_seq=0&limit=100")).await?;
+                let events=fixture_read(&app,&format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=1000")).await?;
+                if messages.to_string().contains("WK_UPGRADE_PRESERVED_REPLY") && events.to_string().contains("turn/completed") {break messages;}
+                anyhow::ensure!(tokio::time::Instant::now()<deadline,"Canonical upgrade seed turn did not complete");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            let preserved_session=fixture_read(&app,&format!("/api/agent-sessions/{session_id}")).await?;
+            let owner=preserved_session["session"]["owner_ref"]["principal_id"].as_str().ok_or_else(||anyhow::anyhow!("Fixture canonical owner missing"))?;
+            let key=nomifun_browser_platform::workspace::managed_workspace_key(owner,&session_id)?;
+            let nomifun_browser_platform::runtime::BrowserProfile::Persistent(legacy_profile)=
+                nomifun_browser_platform::runtime::BrowserProfile::for_agent_session(&root,&key,false) else {anyhow::bail!("Directory profile fixture identity missing")};
+            let legacy_sentinel=legacy_profile.join("Default/retained-user-profile.txt");
+            std::fs::create_dir_all(legacy_sentinel.parent().unwrap())?;
+            std::fs::write(&legacy_sentinel,b"Legacy CEF user profile remains user-owned. Do not migrate or delete.\n")?;
+            let providers=fixture_read(&app,"/api/providers").await?;
+            let preserved_provider=providers.as_array().and_then(|items|items.iter().find(|item|item["provider_id"]==provider))
+                .cloned().ok_or_else(||anyhow::anyhow!("Fixture provider missing from authoritative list"))?;
+            std::fs::write(root.join("wk-upgrade-preservation.json"),serde_json::to_vec_pretty(&json!({
+                "provider_id":provider,"provider":preserved_provider,"session":preserved_session,"messages":seed_messages,
+                "legacy_sentinel":legacy_sentinel.strip_prefix(&root)?,
+                "legacy_sentinel_text":"Legacy CEF user profile remains user-owned. Do not migrate or delete.\n"
+            }))?)?;
+            std::fs::write(root.join("wk-acceptance.json"),serde_json::to_vec_pretty(&json!({
+                "mode":"wk-actions","data_dir":root,"control":format!("http://{address}"),"page":format!("http://{address}/"),
+                "session_id":session_id,"secondary_session_id":secondary["agent_session_id"],
+                "prompt":"Verify the packaged WK Browser surface."
+            }))?)?;
+        }
         if let Some(live)=&fixture.live {
             let source=install_live_source(&live.work,&session_id)?;
             *live.source.lock().unwrap()=source;

@@ -27,6 +27,8 @@
 .menuPopover > button:disabled { opacity:.42; cursor:default; }
 .menuDivider { height:1px; margin:4px 2px; background:var(--bg-3); }
 .menuGroupLabel { padding:2px 9px; color:var(--text-secondary); font-size:11px; font-weight:600; }
+.capabilityNote { display:flex; flex-direction:column; gap:5px; max-width:300px; padding:8px 9px; color:var(--text-secondary); font-size:11px; line-height:1.5; white-space:normal; }
+.capabilityNote strong { color:var(--text-primary); }
 .status { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:30px; padding:4px 12px; font-size:11px; color:var(--text-secondary); flex-shrink:0; border-bottom:1px solid color-mix(in srgb, var(--bg-3) 58%, transparent); }
 .state { display:flex; align-items:center; gap:7px; min-width:0; }
 .dot { width:5px; height:5px; background:var(--text-secondary); border-radius:50%; }

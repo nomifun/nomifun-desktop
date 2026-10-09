@@ -760,7 +760,11 @@ impl DesktopServer {
         config.auth_policy = AuthPolicy::TrustLocalToken;
         config.local_trust_secret = Some(secret.clone());
 
-        let database = bootstrap::init_data_layer(&config)
+        let database = bootstrap::init_data_layer_with_browser(
+            &config,
+            #[cfg(feature = "browser-use")]
+            host_services.browser_resources.as_deref(),
+        )
             .await
             .map_err(DesktopStartError::verified)?;
         let services = match AppServices::try_from_config_with_host(database, &config, host_services).await {

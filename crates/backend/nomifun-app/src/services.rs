@@ -664,7 +664,6 @@ struct HostShutdownStage {
     storage_task: Option<JoinHandle<()>>,
     storage_closed: bool,
     storage_failure: Option<String>,
-    native_after_storage: bool,
     complete: bool,
 }
 
@@ -1250,21 +1249,6 @@ impl AppServices {
         Ok(())
     }
 
-    async fn shutdown_browser_native_after_storage_close(&self) -> anyhow::Result<()> {
-        #[cfg(feature="browser-use")]
-        if let Some(resources)=&self.browser_resources {
-            resources.close_native_runtime_after_storage_close().await.map_err(|error|anyhow::anyhow!("managed Browser native shutdown failed after storage close: {error}"))?;
-        }
-        Ok(())
-    }
-
-    fn browser_native_can_close_after_storage(&self) -> bool {
-        #[cfg(feature="browser-use")]
-        {self.browser_resources.as_ref().is_some_and(|resources|resources.supports_storage_independent_shutdown())}
-        #[cfg(not(feature="browser-use"))]
-        {false}
-    }
-
     async fn finish_host_storage_shutdown(&self, stage: &mut HostShutdownStage) -> anyhow::Result<()> {
         if let Some(error)=&stage.storage_failure {return Err(anyhow::anyhow!("Host storage cleanup remains unproven: {error}"));}
         if !stage.storage_closed {
@@ -1278,7 +1262,6 @@ impl AppServices {
             }
             stage.storage_closed=true;
         }
-        if stage.native_after_storage {self.shutdown_browser_native_after_storage_close().await?;}
         stage.complete=true;
         Ok(())
     }
@@ -1359,13 +1342,12 @@ impl AppServices {
     pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
         let mut stage=self.host_shutdown_stage.lock().await;
         if stage.complete {return Ok(());}
-        // A cancelled waiter or failed native close cannot re-run producers
+        // A cancelled storage waiter cannot re-run producers
         // against SQLite that the retained storage worker has already closed.
         if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
             return self.finish_host_storage_shutdown(&mut stage).await;
         }
         let mut errors = Vec::new();
-        let native_after_storage=self.browser_native_can_close_after_storage();
 
         self.request_background_shutdown();
         self.shutdown_cron_timers();
@@ -1423,8 +1405,8 @@ impl AppServices {
             Err(_) => errors.push("terminal cleanup timed out after 5 seconds".to_owned()),
         }
 
-        // Join non-Browser producers before native CEF can occupy the main
-        // thread. Unknown producer cleanup cannot authorize physical teardown.
+        // Join non-Browser producers before native platform teardown.
+        // Unknown producer cleanup cannot authorize physical teardown.
         let mut producers_stopped = true;
         if let Some(robot) = &self.robot {
             if let Err(error) = robot.shutdown_and_wait().await {
@@ -1452,9 +1434,7 @@ impl AppServices {
         // Retain native cleanup authority when an Agent or producer may still
         // submit work. A later shutdown joins the same quarantined owners.
         if runtimes_stopped && producers_stopped && errors.is_empty() {
-            let browser=if native_after_storage {self.shutdown_browser_resources().await}
-                else {self.shutdown_browser_platform().await};
-            if let Err(error) = browser {
+            if let Err(error) = self.shutdown_browser_platform().await {
                 errors.push(format!("browser/gateway cleanup failed: {error:#}"));
             }
         }
@@ -1476,7 +1456,6 @@ impl AppServices {
 
         if errors.is_empty() {
             let companion=self.companion_service.clone();let database=self.database.clone();
-            stage.native_after_storage=native_after_storage;
             stage.storage_task=Some(tokio::spawn(async move {
                 companion.close_storage().await;
                 database.close().await;
@@ -2931,56 +2910,26 @@ mod tests {
     }
 
     #[cfg(feature="browser-use")]
-    struct StorageIndependentFactory {
+    struct HeldNativeShutdownFactory {
         database: Database,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Semaphore>,
         calls: AtomicUsize,
-        fail_once: AtomicBool,
     }
 
     #[cfg(feature="browser-use")]
     #[async_trait::async_trait]
-    impl nomifun_browser_platform::runtime::BrowserRuntimeFactory for StorageIndependentFactory {
-        fn supports_storage_independent_shutdown(&self)->bool {true}
+    impl nomifun_browser_platform::runtime::BrowserRuntimeFactory for HeldNativeShutdownFactory {
         async fn create(&self,_:nomifun_browser_platform::runtime::CreateBrowserRuntime)
             -> Result<Arc<dyn nomifun_browser_platform::runtime::BrowserRuntime>,nomifun_browser_platform::runtime::WorkspaceError> {
             panic!("shutdown test must not create a Browser runtime")
         }
         async fn shutdown(&self)->Result<(),nomifun_browser_platform::runtime::WorkspaceError> {
-            assert!(self.database.pool().is_closed(),"SQLite must close before storage-independent native entry");
+            assert!(!self.database.pool().is_closed(),"SQLite must remain open until native Browser cleanup succeeds");
             self.calls.fetch_add(1,Ordering::AcqRel);self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
-            if self.fail_once.swap(false,Ordering::AcqRel) {
-                Err(nomifun_browser_platform::runtime::WorkspaceError::NativeCommandFailed)
-            } else {Ok(())}
+            Ok(())
         }
-    }
-
-    #[cfg(feature="browser-use")]
-    #[tokio::test]
-    async fn storage_independent_native_retry_joins_after_db_close_without_restarting_producers() {
-        let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();
-        let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
-        let allow=Arc::new(AtomicBool::new(true));
-        services.agent_runtime_sessions=Arc::new(ShutdownRegistryProbe {inner:services.agent_runtime_sessions.clone(),allow:allow.clone()});
-        let factory=Arc::new(StorageIndependentFactory {database:services.database.clone(),entered:Arc::new(tokio::sync::Notify::new()),
-            release:Arc::new(tokio::sync::Semaphore::new(0)),calls:AtomicUsize::new(0),fail_once:AtomicBool::new(true)});
-        services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())));
-        let services=Arc::new(services);let owner=services.clone();
-        let first=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
-        factory.entered.notified().await;
-        assert!(services.database.pool().is_closed());assert!(!first.is_finished());
-        first.abort();assert!(first.await.unwrap_err().is_cancelled());
-        allow.store(false,Ordering::Release); // Re-running the Agent producer would now fail.
-        let owner=services.clone();let retry=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
-        tokio::task::yield_now().await;assert_eq!(factory.calls.load(Ordering::Acquire),1);
-        factory.release.add_permits(1);assert!(retry.await.unwrap().is_err());
-        let owner=services.clone();let retry=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
-        factory.entered.notified().await;factory.release.add_permits(1);retry.await.unwrap().unwrap();
-        assert_eq!(factory.calls.load(Ordering::Acquire),2);
-        services.shutdown_nomi_core_host().await.unwrap();
-        assert_eq!(factory.calls.load(Ordering::Acquire),2,"acknowledged native success is not re-entered");
     }
 
     #[cfg(feature="browser-use")]
@@ -2998,16 +2947,16 @@ mod tests {
             let added=state.tasks.iter().filter(|task|!before.contains(&task.id())).collect::<Vec<_>>();
             assert_eq!(added.len(),1,"actual channel assembly must register exactly its pairing timer");
             added[0].abort_handle()};
-        let factory=Arc::new(StorageIndependentFactory {database:services.database.clone(),entered:Arc::new(tokio::sync::Notify::new()),
-            release:Arc::new(tokio::sync::Semaphore::new(0)),calls:AtomicUsize::new(0),fail_once:AtomicBool::new(false)});
+        let factory=Arc::new(HeldNativeShutdownFactory {database:services.database.clone(),entered:Arc::new(tokio::sync::Notify::new()),
+            release:Arc::new(tokio::sync::Semaphore::new(0)),calls:AtomicUsize::new(0)});
         services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())));
         let services=Arc::new(services);let closing=services.clone();
         let wait=tokio::spawn(async move {closing.shutdown_nomi_core_host().await});
         factory.entered.notified().await;
-        assert!(services.database.pool().is_closed());assert!(timer.is_finished(),"the actual pairing task must finish before native entry");
+        assert!(!services.database.pool().is_closed());assert!(timer.is_finished(),"the actual pairing task must finish before native entry");
         assert_eq!(services.background_tasks.snapshot(),(BackgroundTaskRegistryPhase::Closed,0));
         // SQLite's real worker must initialize under wall time. Only freeze
-        // the clock after its pool is closed and the native gate is entered.
+        // the clock after initialization and entering the native gate.
         // Keep one runnable task so paused time cannot auto-run a native timeout.
         tokio::time::pause();
         let keep_running=tokio::spawn(async {loop {tokio::task::yield_now().await;}});
@@ -3017,6 +2966,8 @@ mod tests {
         assert!(timer.is_finished());assert_eq!(services.background_tasks.snapshot(),(BackgroundTaskRegistryPhase::Closed,0));
         tokio::time::resume();keep_running.abort();let _=keep_running.await;
         factory.release.add_permits(1);wait.await.unwrap().unwrap();
+        assert!(services.database.pool().is_closed(),"storage closes only after native Browser cleanup");
+        assert_eq!(factory.calls.load(Ordering::Acquire),1);
     }
 
     #[tokio::test]

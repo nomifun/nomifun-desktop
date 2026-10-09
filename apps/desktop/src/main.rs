@@ -2917,28 +2917,6 @@ fn main() -> std::process::ExitCode {
     let explicit_desktop_data_root = std::env::var_os("NOMIFUN_DATA_DIR")
         .is_some_and(|value| !value.is_empty());
     let data_dir = default_data_dir();
-    #[cfg(target_os = "macos")]
-    let prepared_cef_engine = browser_surface::macos::lifecycle::prepare(&data_dir)
-        .and_then(|engine| {
-            // SAFETY: private command-only helpers already returned, and no
-            // Tauri/Tokio/host workers have started. CEF's allocator constructor
-            // must run here, while actual engine initialization stays deferred.
-            unsafe { engine.preload_framework()?; }
-            Ok(engine)
-        });
-    #[cfg(target_os = "macos")]
-    if let Err(error) = &prepared_cef_engine {
-        eprintln!("managed macOS Browser Provider unavailable: {error}");
-        nomifun_app::bootstrap::record_boot_note(
-            nomifun_app::bootstrap::BootNoteLevel::Warn,
-            format!("macOS built-in browser is unavailable: {error}"),
-        );
-    } else {
-        nomifun_app::bootstrap::record_boot_note(
-            nomifun_app::bootstrap::BootNoteLevel::Info,
-            "macOS built-in browser framework preloaded before workers; native initialization remains deferred until first use",
-        );
-    }
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
@@ -2966,16 +2944,6 @@ fn main() -> std::process::ExitCode {
     }
 
     let tauri_context = generated_tauri_context();
-
-    #[cfg(target_os = "macos")]
-    let cef_engine = Arc::new(std::sync::OnceLock::<
-        Result<Arc<browser_surface::macos::lifecycle::DeferredEngine>, String>,
-    >::new());
-    #[cfg(target_os = "macos")]
-    let setup_cef_engine = cef_engine.clone();
-    #[cfg(target_os = "macos")]
-    cef_engine.set(prepared_cef_engine)
-        .unwrap_or_else(|_| panic!("macOS CEF availability resolved more than once"));
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -3018,23 +2986,12 @@ fn main() -> std::process::ExitCode {
                 ),
             ));
             #[cfg(target_os = "macos")]
-            let browser_resources = match setup_cef_engine
-                .get()
-                .expect("macOS CEF bundle availability is resolved before app setup")
-            {
-                Ok(engine) => Some(Arc::new(
-                    nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
-                        browser_surface::macos::host::DesktopBrowserHost::new_deferred(
-                            app_handle.clone(),
-                            engine.clone(),
-                        ),
-                    ))
-                    .with_profile_store(
-                        desktop_browser_profile_store(&data_dir)?,
-                    ),
-                )),
-                Err(_) => None,
-            };
+            let browser_resources = Some(Arc::new(
+                nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
+                    browser_surface::macos::host::DesktopBrowserHost::new(app_handle.clone()),
+                ))
+                .with_profile_store(desktop_browser_profile_store(&data_dir)?),
+            ));
             #[cfg(not(any(windows, target_os = "macos")))]
             let browser_resources = None;
             #[cfg(any(windows, target_os = "macos"))]

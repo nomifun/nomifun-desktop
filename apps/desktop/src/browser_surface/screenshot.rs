@@ -87,22 +87,6 @@ impl RenderLease {
     }
 }
 
-// CEF capture reads the same native page's compositor without showing or
-// focusing its NSView. Native fixture acceptance covers hidden capture.
-#[cfg(target_os = "macos")]
-struct RenderLease { rendering: Arc<AtomicBool> }
-#[cfg(target_os = "macos")]
-impl Drop for RenderLease { fn drop(&mut self) { self.rendering.store(false, Ordering::Release); } }
-#[cfg(target_os = "macos")]
-impl RenderLease {
-    async fn start(view: &View, rendering: Arc<AtomicBool>) -> Result<Self, WorkspaceError> {
-        if view.page.protocol.is_closed() { return Err(WorkspaceError::NativeCommandFailed); }
-        rendering.store(true, Ordering::Release);
-        Ok(Self { rendering })
-    }
-    async fn finish(&mut self) -> Result<(), WorkspaceError> { self.rendering.store(false, Ordering::Release); Ok(()) }
-}
-
 fn geometry(metrics: &Value) -> Result<(f64, f64, f64, f64, f64), WorkspaceError> {
     let viewport = &metrics["cssVisualViewport"];
     let numbers: Option<Vec<f64>> = ["pageX", "pageY", "clientWidth", "clientHeight", "zoom"]

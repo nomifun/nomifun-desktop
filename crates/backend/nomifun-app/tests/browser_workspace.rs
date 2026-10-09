@@ -154,6 +154,7 @@ async fn canonical_route_binder_selects_managed_and_attached_without_fallback() 
     let managed_session = "0190f5fe-7c00-7a00-8000-000000000085";
     let attached_session = "0190f5fe-7c00-7a00-8000-000000000086";
     let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
     let resources = Arc::new(BrowserResourceService::new(Arc::new(Factory::default())));
     let attached = browser_provider::attached_provider::AttachedChromeProviderService::new();
     attached
@@ -289,6 +290,7 @@ async fn user_api_opens_without_agent_browser_grants_and_rejects_foreign_owners_
     let opened = sessions.open(owner.clone(), binding.clone(), None, vec![], "user-browser-route", 1).await.unwrap();
     let session = opened.session.agent_session_id;
     let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
     let factory = Arc::new(Factory::default());
     let resources = Arc::new(BrowserResourceService::new(factory.clone()).with_profile_store(
         nomifun_browser_platform::runtime::BrowserProfileStore::new(root.path()).unwrap()));

@@ -32,6 +32,26 @@ function clipboardFixture(write: (text: string) => Promise<void> = async () => {
   return copied;
 }
 
+test('shows semantic Agent limitations from host facts without disabling normal navigation', async () => {
+  const screen = fixture({ async ensure() { return { ...initial, interaction_capabilities: {
+    engine: 'wk_webview', interaction_fidelity: 'semantic_dom', actions: ['click', 'type', 'select', 'scroll', 'dialog'],
+    unsupported_actions: ['drag', 'hover', 'press', 'agent_upload', 'agent_download'], limitations: [],
+  } }; } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.getByText(words.semanticActionsTitle)).toBeTruthy();
+  expect(screen.getByText(words.semanticActionsHint)).toBeTruthy();
+  expect(screen.getByText(words.semanticActionsManual)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+});
+
+test('does not present WK limitations for other runtime facts', async () => {
+  const screen = fixture();
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.queryByText(words.semanticActionsTitle)).toBeNull();
+});
+
 function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest, onClose: () => void = () => {}, hostSurfaceAvailable = true) {
   const commands: BrowserCommand[] = [], detached: number[] = [];
   const consumedLinks: Array<[number, boolean]> = [];

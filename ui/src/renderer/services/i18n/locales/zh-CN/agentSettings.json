@@ -159,7 +159,7 @@
     "modelManagement": { "name": "模型管理", "description": "根据会话中提供的配置添加提供商和模型，查询协议要求与已有配置。不会覆盖已有模型或切换默认模型。" },
     "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。" },
     "automationSchedule": { "name": "定时任务", "description": "创建和管理持久计划，不暴露调度器内部机制。" },
-    "browser": { "name": "浏览器", "description": "观察和操作已绑定的内置浏览器或已授权 Chrome；Provider 不会扩大权限。" },
+    "browser": { "name": "浏览器", "description": "观察和操作已绑定的浏览器。可用动作取决于浏览器：macOS 支持普通网页和表单操作，暂不支持高阶手势及自动文件传输；Provider 不会扩大权限。" },
     "channelMessaging": { "name": "渠道消息", "description": "通过使用目标选择的渠道回复或发送消息。" },
     "companion": { "name": "伙伴", "description": "在产品边界内学习和演进所选伙伴。" },
     "companionMemory": { "name": "伙伴记忆", "description": "读取或写入所选伙伴的记忆。" },

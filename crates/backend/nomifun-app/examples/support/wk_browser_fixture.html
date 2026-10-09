@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>NomiFun WK product acceptance</title>
+<style>
+body { font: 17px system-ui; margin: 28px; color: #182832; background: #f4f7f8; }
+h1 { font-size: 24px; } label { display:block; margin-top: 12px; }
+input, select, button { font: inherit; padding:8px 12px; }
+button, a { margin:4px 8px 4px 0; } .manual { border-top:1px solid #bcc9cf; margin-top:20px; padding-top:12px; }
+#scroll { height:100px; width:400px; overflow:auto; border:1px solid #81929c; margin:14px 0; }
+#scroll p { height:600px; padding:10px; } output { display:block; margin:14px 0; }
+</style>
+<h1>实际 App WKWebView 验收</h1>
+<p>Agent 与用户使用同一原生页面。自动化使用 DOM 语义操作，事件保持真实的 isTrusted 值。</p>
+<form id="form">
+<label for="name">验收姓名</label><input id="name" autocomplete="off">
+<label for="choice">验收选项</label><select id="choice"><option>Alpha</option><option>Café 中文</option><option>Omega</option></select>
+<div id="scroll" role="region" aria-label="验收滚动区域" tabindex="0"><p>滚动内容起点</p><p>滚动内容终点</p></div>
+<button id="submit" type="submit">提交验收</button>
+</form>
+<output id="result">等待 Agent 表单操作</output>
+<output id="profile"></output>
+<button id="user" type="button">用户计数</button><output id="count">0</output>
+<section class="manual"><h2>普通用户操作</h2>
+<button id="popup" type="button">打开普通弹窗</button>
+<button id="alert" type="button">显示 Alert</button>
+<button id="dialog" type="button">显示 Confirm</button>
+<button id="prompt" type="button">显示 Prompt</button>
+<output id="manual-result">等待用户操作</output>
+<label for="file">用户选择文件</label><input id="file" type="file" accept=".txt,text/plain">
+<output id="file-result">尚未选择文件</output>
+<a href="/download" download="wk-acceptance.txt">下载 HTTP 文本</a>
+<button id="blob" type="button">下载 Blob 文本</button></section>
+<script>
+(() => {
+  const byId=id=>document.getElementById(id);
+  const nonce=crypto.randomUUID(), query=new URLSearchParams(location.search);
+  const report=value=>fetch('/witness',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce,...value})});
+  const profileKey='nomifun-wk-acceptance-only';
+  if(query.has('seed')) { localStorage.setItem(profileKey,query.get('seed')); document.cookie='wk_acceptance='+encodeURIComponent(query.get('seed'))+'; Max-Age=86400; SameSite=Lax; Path=/'; }
+  const stored=localStorage.getItem(profileKey), cookie=document.cookie.split('; ').find(x=>x.startsWith('wk_acceptance='))?.slice('wk_acceptance='.length)??null;
+  byId('profile').textContent='验收 Profile：'+(stored??'空');
+  void report({kind:'profile',case:query.get('case'),stored,cookie});
+  let lastClickTrusted=null, count=0;
+  byId('submit').addEventListener('click',event=>lastClickTrusted=event.isTrusted);
+  byId('form').addEventListener('submit',event=>{
+    event.preventDefault();
+    const name=byId('name').value, selected=byId('choice').value, scrollTop=byId('scroll').scrollTop;
+    byId('result').textContent='已提交：'+name+' / '+selected+' / '+(scrollTop>0?'滚动完成':'尚未滚动')+' / isTrusted='+lastClickTrusted;
+    void report({kind:'submit',name,selected,scrollTop,clickTrusted:lastClickTrusted,submitTrusted:event.isTrusted});
+  });
+  byId('user').onclick=event=>{byId('count').textContent=String(++count);void report({kind:'user',count,trusted:event.isTrusted});};
+  byId('popup').onclick=()=>window.open('/popup','_blank');
+  byId('alert').onclick=()=>{alert('WK 普通网页 Alert');byId('manual-result').textContent='Alert 已关闭';void report({kind:'alert',closed:true});};
+  byId('dialog').onclick=event=>{void report({kind:'confirm-open',trusted:event.isTrusted});const accepted=confirm('WK 普通网页 Confirm');byId('manual-result').textContent=accepted?'Confirm 已接受':'Confirm 已取消';void report({kind:'confirm',accepted});};
+  byId('prompt').onclick=()=>{const value=prompt('WK 普通网页 Prompt','初始内容');byId('manual-result').textContent=value===null?'Prompt 已取消':'Prompt：'+value;void report({kind:'prompt',accepted:value!==null});};
+  byId('file').onchange=()=>{byId('file-result').textContent=byId('file').files.length?'已选择文件：'+byId('file').files[0].name:'尚未选择文件';void report({kind:'file',selected:byId('file').files.length});};
+  byId('blob').onclick=()=>{const link=document.createElement('a');link.href=URL.createObjectURL(new Blob(['NomiFun WK blob download fixture\n'],{type:'text/plain'}));link.download='wk-blob-acceptance.txt';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),10000);};
+})();
+</script></html>
