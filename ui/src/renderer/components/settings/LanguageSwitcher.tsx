@@ -44,7 +44,7 @@ const LanguageSwitcher: React.FC = () => {
 
   return (
     <div className='flex flex-col items-end gap-4px max-w-220px'>
-      <NomiSelect ref={selectRef} className='w-200px' value={selectedValue} onChange={handleLanguageChange}>
+      <NomiSelect ref={selectRef} style={{ width: 180 }} aria-label={t('settings.language')} value={selectedValue} onChange={handleLanguageChange}>
         <NomiSelect.Option value={SYSTEM_LANGUAGE}>{t('settings.languageFollowSystem')}</NomiSelect.Option>
         <NomiSelect.Option value='zh-CN'>简体中文</NomiSelect.Option>
         <NomiSelect.Option value='en-US'>English</NomiSelect.Option>

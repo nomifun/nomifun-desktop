@@ -162,9 +162,9 @@
 }
 
 .titleRow h1 {
-  font-size: 18px;
+  font-size: var(--page-title-size);
   font-weight: 600;
-  line-height: 26px;
+  line-height: var(--page-title-line-height);
 }
 
 .headerIdentity p {

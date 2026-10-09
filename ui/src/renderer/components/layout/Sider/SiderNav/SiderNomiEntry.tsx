@@ -6,64 +6,15 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Tooltip } from '@arco-design/web-react';
 import { Peoples } from '@icon-park/react';
-import classNames from 'classnames';
-import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
+import SiderNavItem, { type SiderNavItemProps } from './SiderNavItem';
 
-interface SiderNomiEntryProps {
-  isActive: boolean;
-  collapsed: boolean;
-  siderTooltipProps: SiderTooltipProps;
-  onClick: () => void;
-}
+type SiderNomiEntryProps = Pick<SiderNavItemProps, 'isActive' | 'collapsed' | 'siderTooltipProps' | 'onClick'>;
 
-const SiderNomiEntry: React.FC<SiderNomiEntryProps> = ({
-  isActive,
-  collapsed,
-  siderTooltipProps,
-  onClick,
-}) => {
+const SiderNomiEntry: React.FC<SiderNomiEntryProps> = ({ collapsed = false, ...props }) => {
   const { t } = useTranslation();
-
-  if (collapsed) {
-    return (
-      <Tooltip {...siderTooltipProps} content={t('nomi.siderTitle')} position='right'>
-        <div
-          className={classNames(
-            'w-full h-28px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
-            isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-          )}
-          onClick={onClick}
-        >
-          <Peoples
-            theme='outline'
-            size='20'
-            fill='currentColor'
-            className='block leading-none shrink-0'
-            style={{ lineHeight: 0 }}
-          />
-        </div>
-      </Tooltip>
-    );
-  }
-
-  return (
-    <Tooltip {...siderTooltipProps} content={t('nomi.siderTitle')} position='right'>
-      <div
-        className={classNames(
-          'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
-          isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-        )}
-        onClick={onClick}
-      >
-        <span className='size-22px flex items-center justify-center shrink-0'>
-          <Peoples theme='outline' size='16' fill='currentColor' className='block leading-none' style={{ lineHeight: 0 }} />
-        </span>
-        <span className='collapsed-hidden text-14px font-[500] leading-24px'>{t('nomi.siderTitle')}</span>
-      </div>
-    </Tooltip>
-  );
+  return <SiderNavItem {...props} collapsed={collapsed} label={t('nomi.siderTitle')}
+    icon={<Peoples theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />} />;
 };
 
 export default SiderNomiEntry;
