@@ -2,6 +2,7 @@
 //! The existing immutable reset plan and retired canonical Session identities
 //! are sufficient cleanup authority; no second Session/Profile ledger is kept.
 
+use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -87,7 +88,27 @@ fn regular_file_exists(path: &Path) -> Result<bool> {
     }
 }
 
+const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// A retired database that is not a SQLite file at all cannot hold canonical
+/// Session identities, so it carries no WK website data to clean. Treating it
+/// as empty lets the pending reset finish instead of permanently blocking
+/// startup for corrupted legacy installations.
+fn retired_database_is_sqlite(database_path: &Path) -> Result<bool> {
+    let mut file =
+        std::fs::File::open(database_path).context("open retired Browser dataset evidence")?;
+    let mut header = [0u8; SQLITE_DATABASE_HEADER.len()];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == SQLITE_DATABASE_HEADER),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error).context("read retired Browser dataset evidence header"),
+    }
+}
+
 async fn read_session_identities(database_path: &Path) -> Result<Vec<(String, String)>> {
+    if !retired_database_is_sqlite(database_path)? {
+        return Ok(vec![]);
+    }
     let pool = SqlitePoolOptions::new().max_connections(1)
         .connect_with(SqliteConnectOptions::new().filename(database_path).read_only(true))
         .await.context("open retired dataset for Browser cleanup without mutation")?;
@@ -134,6 +155,16 @@ mod tests {
         sqlx::query("CREATE TABLE unrelated(value TEXT)").execute(&pool).await.unwrap();
         pool.close().await;
         assert!(read_session_identities(&path).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_treats_a_non_sqlite_retired_file_as_having_no_identities() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retired.db");
+        for bytes in [b"opaque retired dataset".as_slice(), b"short".as_slice()] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(read_session_identities(&path).await.unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
