@@ -307,7 +307,6 @@ pub(crate) async fn try_build_module_states(
     nomi_core_wave4_owners
         .install_channel(
             Arc::clone(&channel_components.manager),
-            Arc::clone(&channel_components.pairing_service),
             Arc::clone(&channel_components.repository),
             Arc::clone(&services.customer_service_service),
         )

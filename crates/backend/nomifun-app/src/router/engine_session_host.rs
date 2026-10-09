@@ -615,15 +615,6 @@ impl EngineSessionHost {
             })
     }
 
-    /// Trusted application adapters can add their own live state fences over
-    /// the same journal gate (the Runtime also fences capability activation).
-    pub(super) fn compose_model_port(
-        &self,
-        gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,
-    ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
-        self.compose_model_port_with_configuration(gate, None)
-    }
-
     pub(super) fn compose_model_port_with_configuration(
         &self,
         gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,

@@ -1,14 +1,6 @@
 {
   "title": "$t(agentSettings.template.creativeStudio.default.name)",
   "siderTitle": "$t(agentSettings.template.creativeStudio.default.name)",
-  "workbenchSider": {
-    "collapse": "Collapse generation settings",
-    "expand": "Expand generation settings",
-    "resize": "Resize generation settings",
-    "resizeHint": "Drag to resize; double-click to restore the default width",
-    "resizeHeight": "Resize generation settings height",
-    "resizeHeightHint": "Drag to resize; double-click to fit the content"
-  },
   "focus": {
     "backToWorkbench": "Back to workbench"
   },
@@ -265,86 +257,6 @@
     "view": {
       "grid": "Grid view",
       "list": "List view"
-    }
-  },
-  "audio": {
-    "actions": {
-      "cancelTask": "Cancel task",
-      "downloadAudio": "Download audio",
-      "downloadResult": "Download {{title}}",
-      "insertCanvas": "Insert into canvas",
-      "pause": "Pause",
-      "play": "Play",
-      "regenerate": "Regenerate",
-      "retryResult": "Retry generation"
-    },
-    "fields": {
-      "format": "Output format",
-      "instructions": "Voice instructions",
-      "instructionsPlaceholder": "For example: Natural, warm, and lively, with a slight rise at the end.",
-      "instructionsUnsupported": "The current model protocol does not declare support for voice instructions.",
-      "model": "Speech model",
-      "modelAndVoice": "Model and voice",
-      "modelDefault": "Model default",
-      "speed": "Speed",
-      "speedUnsupported": "The current model protocol does not declare a speed parameter.",
-      "text": "Text to speak",
-      "textPlaceholder": "Enter narration, dialogue, or announcement text to synthesize…",
-      "textShortcut": "Press Ctrl / ⌘ + Enter to submit; the current NomiFun `/api/tts` limit is 4,096 characters.",
-      "voice": "Voice",
-      "voiceHint": "Voice is a free-text field, so provider voice IDs are not hard-coded in the app.",
-      "voicePlaceholder": "Use the model default voice or enter a voice ID"
-    },
-    "generate": {
-      "running": "Generating",
-      "submit": "Generate audio",
-      "waiting": "Waiting for model"
-    },
-    "header": {
-      "description": "Send text, delivery guidance, and reference audio to a configured speech model.",
-      "eyebrow": "AUDIO STUDIO",
-      "title": "Audio workbench"
-    },
-    "references": {
-      "choose": "Choose from canvas or asset library",
-      "empty": "No reference audio",
-      "optional": "Optional",
-      "remove": "Remove {{name}}",
-      "removeAria": "Remove reference audio {{name}}",
-      "required": "Required",
-      "requiredEmpty": "Select a reference audio clip",
-      "title": "Reference audio",
-      "unsupported": "The current model does not declare support for reference audio."
-    },
-    "result": {
-      "canceled": "Canceled",
-      "failed": "Failed",
-      "queued": "Queued",
-      "running": "Generating",
-      "succeeded": "Completed",
-      "waitingActions": "You can play, download, or insert the result after the task completes"
-    },
-    "results": {
-      "description": "Audio results come from external task and asset services; this workbench does not create temporary audio.",
-      "emptyDescription": "Enter text and choose a speech model; generated audio will appear here.",
-      "emptyTitle": "No audio results yet",
-      "title": "Audio results"
-    },
-    "task": {
-      "canceled": "Canceled",
-      "failed": "Generation failed",
-      "idle": "Waiting to generate",
-      "queued": "Queued",
-      "running": "Generating",
-      "succeeded": "Generation complete"
-    },
-    "validation": {
-      "modelRequired": "Select a speech synthesis model",
-      "referenceRequired": "Reference audio is required in the current mode",
-      "referenceUnsupported": "The current model does not support the required reference audio",
-      "textRequired": "Enter text to speak first",
-      "textTooLong": "The text exceeds the length limit",
-      "unavailable": "The current configuration cannot be submitted"
     }
   },
   "canvas": {
@@ -1415,95 +1327,6 @@
       "videoGeneration": "Video generation"
     }
   },
-  "product": {
-    "errors": {
-      "busy": "A task is already in progress.",
-      "catalogError": "The model catalog could not be loaded.",
-      "catalogLoading": "The model catalog is still loading.",
-      "disposed": "This workbench is no longer available.",
-      "invalidParameters": "The task parameters are invalid.",
-      "modelNotCompatible": "The selected model is not compatible with this task.",
-      "modelRequired": "Select a compatible model first.",
-      "operationFailed": "The workbench operation failed.",
-      "referencesRestoring": "Reference asset drafts are still being restored. Generation was not started.",
-      "referenceInvalid": "The selected reference assets are invalid.",
-      "retryUnavailable": "This task cannot be retried.",
-      "taskNotFound": "Task {{taskId}} was not found.",
-      "taskUnavailable": "The task is no longer available.",
-      "unsupportedState": "The workbench returned an unsupported state."
-    },
-    "history": {
-      "cancel": "Cancel",
-      "invalidSelection": "Select 1–100 records for finished tasks at a time.",
-      "loadFailed": "Failed to load {{label}} history",
-      "loadingDescription": "Loading tasks and results for this workbench. Please wait.",
-      "restoring": "Restoring {{label}} history",
-      "retire": "Remove from history",
-      "retireDescription": "Task audit data, input assets, and generated results will remain safely stored; only the selected records will be hidden from this workbench history.",
-      "retireManyTitle": "Remove {{recordCount}} records from history?",
-      "retireOneTitle": "Remove this record from history?",
-      "retiring": "Removing…",
-      "retry": "Retry",
-      "runningTask": "Running tasks must be canceled before they can be removed from history."
-    },
-    "image": {
-      "editModel": {
-        "configure": "Configure image-editing models",
-        "empty": "No enabled model supports image editing.",
-        "error": "Failed to load the image-editing model catalog.",
-        "loading": "Loading image-editing models…",
-        "placeholder": "Select an image-editing model",
-        "unavailable": "The selected image-editing model is unavailable. Choose another model."
-      },
-      "errors": {
-        "maxCount": "The current model can generate at most {{imageCount}} images at a time.",
-        "modelRequired": "No available image model is explicitly selected, so generation was not started.",
-        "unreadableReference": "A reference image could not be read. Generation was stopped rather than falling back from I2I to T2I.",
-        "unsupportedSize": "The current model does not support this size. Choose another size."
-      },
-      "generationModel": {
-        "configure": "Configure image-generation models",
-        "empty": "No enabled model supports image generation.",
-        "error": "Failed to load the image-generation model catalog.",
-        "loading": "Loading image-generation models…",
-        "placeholder": "Select an image-generation model",
-        "unavailable": "The selected image-generation model is unavailable. Choose another model."
-      },
-      "historyLabel": "Image",
-      "model": {
-        "disabled": "The model cannot be changed while a generation task is running."
-      }
-    },
-    "model": {
-      "label": "Model"
-    },
-    "submission": {
-      "confirmStatus": "Confirm task status",
-      "retrySync": "Retry task sync",
-      "uncertain": "Task submission could not be confirmed. You can safely retry the original request without creating a duplicate task."
-    },
-    "video": {
-      "addImageReference": "Add image reference",
-      "durationFive": "5 seconds",
-      "durationTen": "10 seconds",
-      "errors": {
-        "concurrentCount": "Video task concurrency must be between 1 and {{max}}.",
-        "incompleteSnapshot": "Task {{taskId}} has an incomplete video parameter snapshot.",
-        "imageReferenceOnly": "Video generation currently supports image references only.",
-        "modelRequired": "No available video model is explicitly selected, so generation was not started.",
-        "noDetails": "No error details are available for this task.",
-        "noDownloadResult": "This video task does not have a single downloadable result.",
-        "referenceLimit": "Video generation currently supports only one readable image reference. V2V and multiple image references are not yet supported.",
-        "notVideoTask": "Task {{taskId}} is not a video-generation task.",
-        "unsupportedAspect": "Unsupported video aspect ratio: {{aspect}}",
-        "unsupportedHistoryReference": "This historical task uses a reference type not supported by the current video workbench.",
-        "unsupportedResolution": "Unsupported video resolution: {{resolution}}",
-        "unsupportedSnapshotSize": "Task {{taskId}} uses a video size that is not available in this workbench."
-      },
-      "historyLabel": "Video",
-      "parametersUnavailable": "Advanced parameters will become available once the NomiFun protocol defines them explicitly. No undeclared parameters are being sent."
-    }
-  },
   "prompts": {
     "addToAssets": "Add to my assets",
     "addedToAssets": "Added to assets",
@@ -1572,91 +1395,6 @@
     "updatedAt": "Updated {{date}}",
     "viewPrompt": "View prompt: {{title}}",
     "viewSource": "View source"
-  },
-  "video": {
-    "actions": {
-      "addReference": "Add reference assets",
-      "cancel": "Cancel",
-      "clear": "Clear",
-      "clearPrompt": "Clear prompt",
-      "details": "Details",
-      "download": "Download",
-      "load": "Load",
-      "moreParameters": "More generation parameters",
-      "new": "New",
-      "openParameters": "Open advanced parameters",
-      "openPromptLibrary": "Open prompt library",
-      "promptLibrary": "Prompt library",
-      "retry": "Retry"
-    },
-    "generate": {
-      "pending": "Processing: {{taskCount}}",
-      "pendingTasks": "Tasks in progress: {{taskCount}}",
-      "ready": "Ready",
-      "start": "Start creating"
-    },
-    "header": {
-      "settings": "Generation settings",
-      "title": "Video workbench"
-    },
-    "layout": {
-      "bottom": "Bottom",
-      "label": "Workbench layout",
-      "side": "Side",
-      "switchToSide": "Switch to side layout"
-    },
-    "prompt": {
-      "label": "Video prompt",
-      "labelShort": "Prompt",
-      "placeholder": "Describe camera movement, subject action, atmosphere, and visual style"
-    },
-    "references": {
-      "addDefault": "Add image, video, or audio",
-      "addMore": "Add more",
-      "moveNext": "Move reference asset {{name}} later",
-      "movePrevious": "Move reference asset {{name}} earlier",
-      "remove": "Remove reference asset {{name}}",
-      "title": "Reference assets"
-    },
-    "results": {
-      "canceledDescription": "The task was canceled and no video was generated",
-      "clearAll": "Deselect all",
-      "copyPrompt": "Copy the prompt for task {{id}}",
-      "creatingProgress": "Creating {{progress}}%",
-      "currentProgress": "Current progress",
-      "emptyDescription": "Enter a prompt and choose a video model; generated results will appear here.",
-      "emptyTitle": "No generated videos yet",
-      "generatedVideo": "Generated video: {{prompt}}",
-      "generationFailed": "Generation failed",
-      "historyFailed": "Failed to load generation history",
-      "historyLoading": "Restoring generation history",
-      "historyLoadingDescription": "Loading saved tasks and results for the current workbench.",
-      "loadMore": "Load more history",
-      "loadedCount": "Results loaded: {{resultCount}}",
-      "loadingMore": "Loading…",
-      "pendingCount": "Processing: {{taskCount}}",
-      "removeFromHistory": "Remove {{id}} from history",
-      "removeSelected": "Remove{{suffix}}",
-      "selectAll": "Select all",
-      "selectTask": "Select task {{id}}",
-      "taskCount": "Tasks: {{taskCount}}",
-      "title": "All results",
-      "waitingForModel": "Waiting for the model to start processing"
-    },
-    "settings": {
-      "aspectRatio": "Aspect ratio",
-      "duration": "Duration",
-      "model": "Model",
-      "resolution": "Resolution",
-      "taskCount": "Task count"
-    },
-    "task": {
-      "canceled": "Canceled",
-      "failed": "Failed",
-      "queued": "Queued",
-      "running": "Generating",
-      "succeeded": "Completed"
-    }
   },
   "templates": {
     "errors": {
@@ -1935,10 +1673,5 @@
       "updatedAt": "Updated {{date}}",
       "variableCount": "{{count}} variables"
     }
-  },
-  "workbenchComposer": {
-    "referenceCount": "{{count}} selected",
-    "addMore": "Add more",
-    "addImageReference": "Add image reference"
   }
 }

@@ -4,60 +4,17 @@
 //! auth routes) via `nomifun_app::compatibility::create_router`, covering test-plan items
 //! T12 (security middleware), T13 (token extraction), T14 (initial bootstrap).
 
+mod common;
+
+use common::{body_json, build_app, extract_csrf_token, get_request, get_with_token, setup_and_login};
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use http_body_util::BodyExt;
 use tower::ServiceExt;
-
-use nomifun_app::AppConfig;
-use nomifun_app::compatibility::AppServices;
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-async fn build_app() -> (axum::Router, AppServices) {
-    let root = tempfile::Builder::new()
-        .prefix("nomifun-auth-e2e-")
-        .tempdir()
-        .unwrap()
-        .keep();
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(
-        db,
-        &AppConfig {
-            data_dir: root.join("data"),
-            work_dir: root.join("work"),
-            ..AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-    let router = nomifun_app::compatibility::create_router(&services).await;
-    (router, services)
-}
-
-async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-/// Extract the CSRF token from a Set-Cookie header.
-fn extract_csrf_token(resp: &axum::response::Response) -> Option<String> {
-    resp.headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|s| s.starts_with("nomifun-csrf-token="))
-        .map(|s| {
-            s.strip_prefix("nomifun-csrf-token=")
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .to_owned()
-        })
-}
 
 /// Extract the session token from a Set-Cookie header.
 fn extract_session_token(resp: &axum::response::Response) -> Option<String> {
@@ -70,19 +27,6 @@ fn extract_session_token(resp: &axum::response::Response) -> Option<String> {
             let value = s.strip_prefix("nomifun-session=")?.split(';').next()?.to_owned();
             if value.is_empty() { None } else { Some(value) }
         })
-}
-
-fn get_request(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
-}
-
-fn get_with_token(uri: &str, token: &str) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(uri)
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap()
 }
 
 fn get_with_cookie(uri: &str, token: &str) -> Request<Body> {
@@ -123,44 +67,6 @@ fn json_with_csrf(
         .header("cookie", format!("nomifun-csrf-token={csrf}"))
         .body(Body::from(body.to_owned()))
         .unwrap()
-}
-
-/// Set up a user and login, returning (session_token, csrf_token).
-///
-/// The installation owner already owns `username = "admin"` with an empty
-/// hash; if the test uses that name, overwrite the owner row in place. Other
-/// usernames use the normal create_user path.
-async fn setup_and_login(
-    app: &mut axum::Router,
-    services: &AppServices,
-    username: &str,
-    password: &str,
-) -> (String, String) {
-    // Create user
-    let hash = nomifun_auth::hash_password(password).unwrap();
-    if username == "admin" {
-        services
-            .user_repo
-            .set_system_user_credentials(username, &hash)
-            .await
-            .unwrap();
-    } else {
-        services.user_repo.create_user(username, &hash).await.unwrap();
-    }
-
-    // Get CSRF token from a GET request first
-    let resp = app.clone().oneshot(get_request("/api/auth/status")).await.unwrap();
-    let csrf = extract_csrf_token(&resp).expect("CSRF cookie should be set");
-
-    // Login (exempt from CSRF)
-    let body = format!(r#"{{"username":"{username}","password":"{password}"}}"#);
-    let resp = app.clone().oneshot(post_json_login("/login", &body)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "login should succeed");
-
-    let json = body_json(resp).await;
-    let token = json["token"].as_str().unwrap().to_owned();
-
-    (token, csrf)
 }
 
 #[tokio::test]

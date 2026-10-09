@@ -9,16 +9,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PLATFORM_PREFIX = 'crates/shared/nomi-process-runtime/src/platform/';
 const UNIX_PTY_PATH =
   'crates/shared/nomi-process-runtime/src/platform/unix_pty.rs';
-const TOOLS_MANIFEST = 'crates/agent/nomi-tools/Cargo.toml';
-const COMMAND_TOOL_FILES = new Set([
-  'crates/agent/nomi-tools/src/bash.rs',
-  'crates/agent/nomi-tools/src/exec_command.rs',
-  'crates/agent/nomi-tools/src/write_stdin.rs',
-]);
-const RETIRED_TOOL_FILES = [
-  'crates/agent/nomi-tools/src/pty.rs',
-  'crates/agent/nomi-tools/src/persistent_shell.rs',
-];
 // The user-terminal runtime is outside the Wave A Agent command paths. Pin its
 // exact reviewed primitive counts until its own migration wave so any added or
 // changed ownership path fails closed.
@@ -52,7 +42,6 @@ function workspacePaths() {
       '-z',
       '--',
       '*.rs',
-      TOOLS_MANIFEST,
       'crates/shared/nomi-process-runtime/Cargo.toml',
     ],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
@@ -565,128 +554,6 @@ function scanEntries(entries) {
         violation.detail,
       );
     }
-
-    const inToolSurface =
-      COMMAND_TOOL_FILES.has(path) ||
-      path === 'crates/agent/nomi-tools/src/process_store.rs' ||
-      path === 'crates/agent/nomi-tools/src/lib.rs' ||
-      path === 'crates/backend/nomifun-app/src/router/engine_process_host.rs';
-    if (!inToolSurface) continue;
-
-    if (COMMAND_TOOL_FILES.has(path)) {
-      const forbiddenToolPatterns = [
-        ['tool-direct-command', /\btokio\s*::\s*process\s*::\s*Command\b/g],
-        ['tool-output-future', /\.output\s*\(/g],
-        [
-          'tool-timeout-output',
-          /\b(?:tokio\s*::\s*time\s*::\s*)?timeout\s*\([\s\S]{0,500}?\.output\s*\(/g,
-        ],
-        [
-          'tool-old-pty',
-          /\b(?:PtyParams|Pty\s*::\s*spawn|MasterPty|ChildKiller|ExecSession|collect_until_deadline)\b/g,
-        ],
-        ['tool-old-pty-module', /\bcrate\s*::\s*pty\b/g],
-      ];
-      for (const [rule, pattern] of forbiddenToolPatterns) {
-        for (const match of findMatches(production, pattern)) {
-          report(
-            path,
-            source,
-            production,
-            match.index,
-            rule,
-            'command tool adapters must delegate OS execution to ProcessSupervisor',
-          );
-        }
-      }
-      if (!/\bProcessSupervisor\b/.test(production)) {
-        report(
-          path,
-          source,
-          production,
-          0,
-          'tool-supervisor-required',
-          'command tool adapter must reference ProcessSupervisor',
-        );
-      }
-    }
-  }
-
-  const toolsLibPath = 'crates/agent/nomi-tools/src/lib.rs';
-  const toolsLib = byPath.get(toolsLibPath) ?? '';
-  for (const module of ['pty', 'persistent_shell']) {
-    if (new RegExp(String.raw`\bmod\s+${module}\s*;`).test(lexicalMask(toolsLib))) {
-      report(
-        toolsLibPath,
-        toolsLib,
-        toolsLib,
-        Math.max(0, toolsLib.indexOf(`pub mod ${module};`)),
-        'retired-tool-module',
-        `${module}.rs is retired; tests must use the current ProcessSupervisor`,
-      );
-    }
-  }
-  for (const path of RETIRED_TOOL_FILES) {
-    if (byPath.has(path)) {
-      violations.push({
-        path,
-        line: 1,
-        rule: 'retired-tool-source',
-        detail: 'retired PTY implementations and their private tests must be deleted',
-        snippet: '',
-      });
-    }
-  }
-
-  const storePath = 'crates/agent/nomi-tools/src/process_store.rs';
-  const storeSource = byPath.get(storePath) ?? '';
-  const store = productionMask(storeSource);
-  for (const required of [
-    'ProcessOwner',
-    'SessionId',
-    'OutputCursor',
-    'Transport',
-  ]) {
-    if (!store.includes(required)) {
-      report(
-        storePath,
-        storeSource,
-        store,
-        0,
-        'numeric-adapter-shape',
-        `ProcessStore must retain ${required} metadata`,
-      );
-    }
-  }
-  for (const match of findMatches(
-    store,
-    /\b(?:PtyParams|Pty\s*::\s*spawn|MasterPty|ChildKiller|ExecSession|std\s*::\s*process\s*::\s*Child|tokio\s*::\s*process\s*::\s*Child)\b/g,
-  )) {
-    report(
-      storePath,
-      storeSource,
-      store,
-      match.index,
-      'numeric-adapter-process-free',
-      'ProcessStore must not own a PTY or OS process',
-    );
-  }
-
-  const toolsManifest = byPath.get(TOOLS_MANIFEST) ?? '';
-  for (const [lineIndex, line] of toolsManifest.split(/\r?\n/).entries()) {
-    if (!/^\s*portable-pty(?:\.workspace)?\s*=/.test(line)) continue;
-    const index = toolsManifest
-      .split(/\r?\n/)
-      .slice(0, lineIndex)
-      .reduce((sum, item) => sum + item.length + 1, 0);
-    report(
-      TOOLS_MANIFEST,
-      toolsManifest,
-      toolsManifest,
-      index,
-      'portable-pty-production-dependency',
-      'nomi-tools delegates PTY ownership to ProcessSupervisor and cannot retain a private portable-pty dependency',
-    );
   }
 
   const processManifestPath = 'crates/shared/nomi-process-runtime/Cargo.toml';
@@ -740,37 +607,11 @@ function assertViolation(entries, rule, message) {
 function selfTest() {
   const base = [
     {
-      path: 'crates/agent/nomi-tools/src/lib.rs',
-      source: '',
-    },
-    ...COMMAND_TOOL_FILES.values().map((path) => ({
-      path,
-      source: 'use nomi_process_runtime::ProcessSupervisor;\n',
-    })),
-    {
-      path: 'crates/agent/nomi-tools/src/process_store.rs',
-      source:
-        'use nomi_process_runtime::{ProcessOwner, SessionId, OutputCursor, Transport};\n',
-    },
-    {
-      path: TOOLS_MANIFEST,
-      source: '[dependencies]\ntokio = "1"\n[dev-dependencies]\ntempfile = "3"\n',
-    },
-    {
       path: 'crates/shared/nomi-process-runtime/Cargo.toml',
       source: '[dependencies]\ntokio = "1"\n',
     },
   ];
   assertNoViolation(base, 'baseline unexpectedly violates the boundary');
-
-  assertViolation(base.concat({ path: RETIRED_TOOL_FILES[0], source: 'fn obsolete_helper() {}' }),
-    'retired-tool-source', 'failed to reject a restored retired PTY source');
-  assertViolation(base.map((entry) => entry.path === 'crates/agent/nomi-tools/src/lib.rs'
-    ? { ...entry, source: '#[cfg(test)]\npub mod pty;\n' } : entry),
-    'retired-tool-module', 'failed to reject test-only restoration of the retired PTY module');
-  assertViolation(base.map((entry) => entry.path === TOOLS_MANIFEST
-    ? { ...entry, source: '[dev-dependencies]\nportable-pty = "0.8"\n' } : entry),
-    'portable-pty-production-dependency', 'failed to reject the retired test-only PTY dependency');
 
   assertViolation(
     base.concat({
@@ -982,32 +823,6 @@ function selfTest() {
     }),
     'unix-group-owner',
     'reviewed external runtime exception widened beyond its exact file',
-  );
-  assertViolation(
-    base.map((entry) =>
-      entry.path === TOOLS_MANIFEST
-        ? {
-            ...entry,
-            source:
-              '[dependencies]\nportable-pty = "0.8"\n[dev-dependencies]\ntempfile = "3"\n',
-          }
-        : entry,
-    ),
-    'portable-pty-production-dependency',
-    'failed to reject portable-pty in production dependencies',
-  );
-  assertViolation(
-    base.map((entry) =>
-      entry.path === TOOLS_MANIFEST
-        ? {
-            ...entry,
-            source:
-              "[target.'cfg(unix)'.dependencies]\nportable-pty = \"0.8\"\n[dev-dependencies]\ntempfile = \"3\"\n",
-          }
-        : entry,
-    ),
-    'portable-pty-production-dependency',
-    'failed to reject portable-pty in target production dependencies',
   );
 }
 

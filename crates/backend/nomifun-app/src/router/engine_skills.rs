@@ -22,10 +22,6 @@ pub struct SelectedSkills {
 }
 
 impl SelectedSkills {
-    pub fn ids(&self) -> &BTreeSet<String> { &self.ids }
-    pub fn instructions(&self) -> &[String] { &self.instructions }
-    pub fn resources(&self) -> &Arc<BTreeMap<String, EngineContextResource>> { &self.resources }
-
     pub(super) fn validate_ids(&self, ids: &[String]) -> Result<(), AppError> {
         let mut unique = BTreeSet::new();
         if ids.len() > 128 || ids.iter().any(|id| !self.ids.contains(id) || !unique.insert(id)) {
@@ -187,7 +183,7 @@ mod tests {
     async fn an_explicit_none_snapshot_keeps_inventory_readable_without_default_injection() {
         let none=library_snapshot(false).await;
         assert!(none.turn_instructions(&[]).unwrap().is_empty());
-        assert!(none.ids().contains("guide"));
+        assert!(none.ids.contains("guide"));
         assert!(none.explicit_instructions(&["guide".into()]).unwrap()[0].contains("FROZEN_DEFAULT_BODY"));
         let selected=library_snapshot(true).await;
         assert!(selected.turn_instructions(&[]).unwrap()[0].contains("FROZEN_DEFAULT_BODY"));

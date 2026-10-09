@@ -5,7 +5,7 @@
 }
 
 /* Overlay-style scroll area: scrollbar takes zero layout width so the list
-   aligns flush with the panel edge. Mirrors Sider.module.css / macOS native
+   aligns flush with the panel edge. Mirrors macOS native
    overlay scrollbars. */
 .scrollArea {
   scrollbar-width: none; /* Firefox */

@@ -9,7 +9,7 @@
 //! `actor.rs`). Compiled only on Linux.
 
 use crate::engine::{
-    A11yEngine, A11yError, Capabilities, Effect, ElementAction, ObserveOpts, OcrLine, Snapshot,
+    A11yEngine, A11yError, Capabilities, Effect, ElementAction, ObserveOpts, Snapshot,
     SnapshotGen, Target,
 };
 
@@ -44,16 +44,4 @@ impl A11yEngine for LinuxEngine {
     fn focus_window(&self, pid: i32) -> Result<Effect, A11yError> {
         self.inner.focus_window(pid)
     }
-}
-
-/// Linux has no OS-native OCR (unlike macOS Vision / Windows.Media.Ocr). The
-/// tool layer handles this `Unsupported` gracefully (it just skips OCR fusion).
-/// A `tesseract`-backed path could be added behind a cargo feature later.
-pub fn ocr_screenshot(_img: &image::RgbaImage, _langs: &[String]) -> Result<Vec<OcrLine>, A11yError> {
-    Err(A11yError::Unsupported {
-        capability: "OCR".to_string(),
-        hint: "Linux has no built-in OCR engine; accessibility-tree targeting still works, and \
-               a11y-thin content falls back to pixel actions."
-            .to_string(),
-    })
 }

@@ -105,14 +105,14 @@ on disk, not just in package names:
 
 | Folder | Purpose | Crate prefix | Count |
 | --- | --- | --- | --- |
-| `crates/agent/` | AI engine — providers, tools, sessions, MCP, skills, computer/browser use | `nomi-*` | 11 |
+| `crates/agent/` | Provider/configuration and desktop automation primitives | `nomi-*` | 7 |
 | `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 54 |
-| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 5 |
+| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 4 |
 
 The agent group is **self-contained** — no `nomi-*` crate references any
 `nomifun-*` crate, the workspace root, or frameworks like Tauri / sqlx / axum.
 The reverse direction normally goes through `nomifun-ai-agent`, which re-exports
-`nomi_config`, `nomi_types`, and `RequirementSink` for backend consumers.
+`nomi_config` and `nomi_types` for backend consumers.
 `nomifun-app` and `nomifun-gateway` have feature-gated direct dependencies for
 browser/computer bridge surfaces; those are documented exceptions, not the
 default pattern.

@@ -35,7 +35,6 @@ pub mod registry;
 pub mod routes;
 mod session_port;
 pub mod service;
-pub mod skill_sink;
 pub mod state;
 pub mod store;
 mod skill_io;
