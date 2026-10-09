@@ -5,6 +5,8 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.2 - 2026-10-09
+
 - **Older installations can start after the destructive upgrade.** Historical
   databases outside the current canonical migration chain, including the
   87-migration lineage that blocked 0.8.1 startup, are automatically retired
