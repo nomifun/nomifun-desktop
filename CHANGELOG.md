@@ -5,6 +5,16 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Older installations can start after the destructive upgrade.** Historical
+  databases outside the current canonical migration chain, including the
+  87-migration lineage that blocked 0.8.1 startup, are automatically retired
+  together with managed side stores and replaced with a fresh dataset. Old
+  conversations, model settings, credentials and other database configuration
+  are not imported. Normal restarts preserve the replacement dataset, and an
+  interrupted rebuild resumes the same generation. Current browser profiles
+  participate in the reset; earlier reset plans remain resumable. Release
+  workflows now require the desktop startup and upgrade regression checks.
+
 - **Long-running coding Agent recovery is more resilient.** Windows native
   process tools resolve executable names from PATH, failed commands enter
   explicit replanning, and completion feedback identifies stale evidence.

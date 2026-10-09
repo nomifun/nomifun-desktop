@@ -31,6 +31,7 @@
     "test:crate": "bun scripts/test-rust.mjs crate",
     "test:core": "bun scripts/test-rust.mjs core",
     "test:desktop": "bun scripts/test-rust.mjs desktop",
+    "test:upgrade": "cargo test --locked -p nomifun-app --test startup_smoke --no-default-features -- --test-threads=1",
     "test:browser": "bun scripts/test-rust.mjs browser",
     "test:ui": "bun test --cwd ui",
     "test:plugin-sdk": "node --test crates/backend/nomifun-plugin-platform/tests/plugin_sdk.test.mjs",

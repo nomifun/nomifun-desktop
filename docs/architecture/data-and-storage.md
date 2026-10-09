@@ -155,6 +155,14 @@ is retired as a whole and replaced with a new empty v3 dataset. There is no
 table-by-table historical migration, compatibility read path, ID normalization,
 or downgrade path.
 
+Destructive-release startup probes SQLx lineage read-only before classifying identity tables. A
+historical database with v3-looking identities is still rebuilt if its lineage
+is incompatible. That reset reason is independent of the previously consumed
+one-time legacy retirement marker. The database, WAL/SHM and managed side
+stores, including `browser-v4`, are retired together. New plans use a frozen v3
+root registry while v1/v2 plans remain resumable. Failed inspection and damage to a supported schema/data contract preserve
+the source and fail closed. More migration rows cannot identify a newer app. Backup/restore never run this startup rebuild policy.
+
 The baseline contract is checked at runtime:
 
 - every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`;
@@ -401,8 +409,8 @@ On a brand-new install the boot sequence is:
                                     take the exclusive {data_dir}/server.lock
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
 5. bootstrap::init_data_layer       initialize/open the v3 database baseline
-6. bootstrap::write_v3_receipt      write and finalize the dataset reset receipt
-7. AppServices::from_config         instantiate every service
+6. AppServices::from_config         initialize services and managed side stores
+7. bootstrap::finalize_data_layer   write and finalize the dataset reset receipt
 8. ensure_admin_credentials (web)   pre-seed admin if NOMIFUN_ADMIN_PASSWORD is set
 9. create_router → axum::serve      bind and start serving
 ```
@@ -410,7 +418,7 @@ On a brand-new install the boot sequence is:
 Step 3 is where a second backend on an already-claimed data dir fails fast
 (see "One directory, one state" above).
 
-In the desktop shell step 6 is skipped, but the desktop is not the old blanket
+In the desktop shell step 8 is skipped, but the desktop is not the old blanket
 `--local` story: it uses `TrustLocalToken` and trusts only its own WebView's
 per-boot secret. In the web host, if no admin exists and no
 `NOMIFUN_ADMIN_PASSWORD` is set, the install enters **interactive first-run
