@@ -1,11 +1,15 @@
 {
   "version": "0.8.3",
   "notes": "- Replace the bundled macOS browser engine (CEF) with the system WKWebView,\n  shrinking installers and raising the minimum system version to macOS 14.0.\n- Restore macOS site compatibility and navigation recovery, and ignore macOS\n  window restoration during startup.\n- Keep the destructive dataset rebuild resumable when a retired database is\n  corrupted or not a SQLite file at all, instead of blocking startup.\n- Simplify remote host rows and actions, unify compact settings and\n  navigation, and refine the classic light and dark themes.\n- Clear the companion card background lingering after hover.",
-  "pub_date": "2026-10-09T18:27:09.122Z",
+  "pub_date": "2026-10-09T18:43:34.008Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdva0M4ZHE4amJycGdYRW9CV05PY3JXcGg0c3RGM2daZWVCNWVKa2IzOXlvazhTbU1iOFpNTkdJSnMrZHdUKy8wczR0eUtReTN1eXZYV1h4N0p3OVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTcwMzY2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ckg3NXhKL2t5VnFNQmF0Z1RMQWQ5ZlF1bEI0eU9Db2JENzZiTE0zMU80NHU3L3piZFNKY2o5RkgrYWZJb3gvVFkveTJLR1d3aW5QUjZDVFFCMFUveEJBPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.3/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdZRGJkMWtlZkRkcmFiMXFWMXRFZ0JxWXlCek5UK2Njemo0OHR5OGJQTmlvaW5HQlJ3endmcVZwT3JEbWY4a0h3MVZ2Ky95NnN0R1BtNlNzK1FPd2dJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTcxMjc1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnBGeUt0M3J4Q3Bpd0JpWHBqdCtMRFVhbVp6RWIzR1U0b2Jtd3JwR3lmcExLOS9QWkVpbkg4V3hsVGVxMmpWUU9rVWphZlZhMlRYM3l5VUtxeTQ1dERRPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.3/NomiFun_0.8.3_x64.app.tar.gz"
     }
   }
 }
