@@ -91,8 +91,8 @@ describe('modality panel', () => {
   });
 
   test('page shells share the compact failover title treatment without a card background', () => {
-    expect(pageHeader.includes("text-15px font-600 leading-20px text-t-primary")).toBe(true);
-    expect(pageHeader.includes("text-12px leading-18px text-t-tertiary")).toBe(true);
+    expect(pageHeader.includes("import PageHeader from '@/renderer/components/layout/PageHeader'")).toBe(true);
+    expect(pageHeader.includes('<PageHeader level={2}')).toBe(true);
 
     for (const surface of [panel, providers]) {
       expect(surface.includes('<ModelHubPageHeader')).toBe(true);
