@@ -5,3 +5,6 @@ pub mod engine;
 mod callbacks;
 mod interactions;
 mod view;
+mod identity;
+mod navigation;
+pub use identity::{report as identity_report, runtime_info};

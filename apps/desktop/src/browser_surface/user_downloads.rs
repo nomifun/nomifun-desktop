@@ -1043,6 +1043,7 @@ mod tests {
                 title: String::new(),
                 url: "about:blank".into(),
                 lifecycle: nomifun_browser_platform::runtime::BrowserTabLifecycle::Ready,
+                load: None,
                 can_go_back: false,
                 can_go_forward: false,
                 zoom_percent: 100,

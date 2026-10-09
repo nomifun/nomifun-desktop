@@ -5,6 +5,7 @@
 //! or lease issuer is part of this crate.
 
 pub mod revision;
+pub mod navigation;
 pub mod bound_resource;
 pub mod downloads;
 pub mod product;

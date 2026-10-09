@@ -78,6 +78,26 @@ objects are created, used and released on that thread. There is no second NSAppl
 runtime, bundled system WebKit.framework, CEF helper/guardian, framework preload, message pump, allocator
 exception or fallback engine. System WebKit owns WebContent processes.
 
+## Browser identity and navigation recovery
+
+Before the first request, ordinary macOS tabs and popups share one native desktop Safari compatibility identity: `macos-desktop-webkit-safari17-v1`. Its `Version/17.0` token is an advertised compatibility baseline, not a measured Safari/WebKit runtime version. Actual OS information is reported separately and unknown framework metadata remains unknown. The policy neither changes Session/Profile identity nor clears cookies, bundles Safari or another engine, patches JavaScript getters, or sets individual request headers. Windows retains its native identity.
+
+One Page reducer owns request/start/redirect/commit/finish/cancellation/failure/process-termination state. The `load` summary reports an attempt sequence, phase, displayable content, rounded progress, safe problems, and attempted/content addresses. Internal bootstrap has explicit source identity and is not user content; genuine about:blank popups can hold documents. Cancelled attempts map to `Stopped`, never successful navigation. Cancellation classification checks domain and code. Retained native navigation objects and dispatch receipts reject late callbacks, stale Stop commands, and old layout updates.
+
+Panel/layout admission, native child displayability, and input ownership are independent. Empty failed/stopped/crashed pages hide the child on the native main thread and show host recovery content; retained/partial documents remain visible with their attempted/content address distinction. Every native show reapplies the current Page mask. Authorized Agent recovery navigation waits for layout without requiring an executable old document. Empty reads return `BROWSER_PAGE_FAILED`, `BROWSER_PAGE_STOPPED`, or `BROWSER_PAGE_CRASHED`; valid retained/partial content can be observed and captured with a safe load summary. Existing execution-uncertainty errors remain intact: no automatic DOM, POST, or Agent action replay.
+
+User downloads use panel presentation independently of the document mask. A first direct attachment can continue destination confirmation while an empty document is hidden; actual panel hiding, input-owner changes and process termination still revoke pending choices. DOM interaction, media permissions and upload selection continue to require actual document visibility.
+
+The Page-owned main-document trace is ephemeral and bounded to 32 attempts, 128 events, and a 128 KiB serialized-event budget. Capacity loss increments dropped independently of routing-proof loss. Response callbacks have no WKNavigation identity; unproven response association remains a Page-scoped sample and does not update the current response summary. Matching URLs or the latest sequence are insufficient proof. This does not claim console, subresource, or Fetch/XHR coverage; existing unavailable semantics remain.
+
+The user explicitly copies navigation diagnostics through an owner-checked read of the existing Workspace and exact target. It does not initialize a runtime, grant Agent authority, or upload data. Actual navigation/address bars retain original URLs; Agent/diagnostic metadata removes userinfo, query and fragment through the shared safe projection and enforces text limits. Cookies, credentials, bodies, form values and arbitrary NSError descriptions are excluded. Recovery remains explicit and tab-scoped; slow-load hints never trigger infinite reloads, bypass challenges, or clear the whole workspace.
+
+### Navigation recovery validation 2026-10-10
+
+A separate real Tauri window on macOS 26.3.0 passed ephemeral native checks for initial Stop without content, actual child masking, same-tab recovery, HTTP/JavaScript UA agreement across ordinary pages/iframes/fetch/images/popups, two-hop redirects within one attempt, page reload versus host-request separation, prompt empty-page errors, and retained HTTP 403 content after a subsequent failed navigation. A separate native Page without automatic download-directory configuration verified the real first-attachment destination picker, masking without picker cancellation, and cancellation through explicit cancel/panel hiding/input ownership change. No destination was selected or file written to user Downloads.
+
+A 60-second live-site run in an ephemeral native Profile observed the Bilibili homepage without the browser-version advice page and readable Baidu search results; each retained one host navigation with no host reload loop. Login, actual video playback, minimum-macOS and Intel hardware runs remain uncovered, and site challenge avoidance is not promised. The identity uses existing dependencies and system frameworks with no new bundled engine resources; exact release-package byte deltas require an identical-parameter build comparison.
+
 ## Platform capabilities
 
 | Capability | macOS WKWebView | Windows WebView2 |

@@ -532,6 +532,8 @@ impl SemanticFrames {
             target,
             observation_generation: generation,
             content,
+            load: None,
+            content_url: None,
             elements,
             script_dialog: None,
             unobserved_frames,

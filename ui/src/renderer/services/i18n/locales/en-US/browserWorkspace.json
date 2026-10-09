@@ -119,5 +119,30 @@
   },
   "start": "Start browsing",
   "startHint": "Enter an address above. You can browse directly; the Agent can use the same page only with Browser authorization.",
-  "initializationFailed": "The built-in browser could not initialize. Restart the application and try again."
+  "initializationFailed": "The built-in browser could not initialize. Restart the application and try again.",
+  "pageLoading": "Loading page…",
+  "pageLoadingSlow": "This is taking longer than usual. You can wait or stop loading.",
+  "pageFailed": "Could not load the page",
+  "pageCrashed": "The page process stopped",
+  "pageCrashedHint": "Enter an address again or open it in your system browser to continue.",
+  "pageStopped": "Loading stopped",
+  "pageCancelled": "Navigation cancelled",
+  "pageStoppedHint": "Enter an address to continue browsing.",
+  "pageDownload": "Opening a download",
+  "pageDownloadHint": "Check the browser menu for the download status.",
+  "retainedDocumentHint": "The previous page is still displayed.",
+  "partialDocumentHint": "Only part of the page may have loaded.",
+  "reenterAddress": "Enter address again",
+  "copyDiagnostics": "Copy navigation diagnostics",
+  "diagnosticsCopied": "Navigation diagnostics copied. URLs exclude query parameters and fragments.",
+  "diagnosticsCopyFailed": "Could not copy diagnostics. The page may have changed; try again.",
+  "loadProblems": {
+    "network_connection": "The network connection failed. Check your connection and the address.",
+    "dns": "The website address could not be resolved.",
+    "timeout": "The website did not respond in time.",
+    "tls": "A secure connection to the website could not be established.",
+    "unsupported_url": "The browser cannot open this address.",
+    "access_denied": "Access to the website was denied.",
+    "other": "The page could not finish loading. Enter an address again or open it in your system browser."
+  }
 }

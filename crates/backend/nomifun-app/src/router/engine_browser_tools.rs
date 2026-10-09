@@ -1049,7 +1049,7 @@ fn encode(value: impl serde::Serialize) -> Result<StrictJsonValue, BrowserHostFa
 }
 
 pub(super) fn encode_managed_observation(
-    observation: nomifun_browser_platform::runtime::BrowserObservation,
+    mut observation: nomifun_browser_platform::runtime::BrowserObservation,
     capabilities: Option<nomifun_browser_platform::runtime::BrowserInteractionCapabilities>,
     screenshot: Option<nomifun_browser_platform::runtime::BrowserScreenshot>,
     screenshot_requested: bool,
@@ -1063,6 +1063,9 @@ pub(super) fn encode_managed_observation(
     if screenshot_requested && screenshot.is_none() && observation.script_dialog.is_none() {
         return Err(WorkspaceError::DialogPending.into());
     }
+    observation.load = observation.load.as_ref().map(|load| load.agent_projection());
+    observation.content_url = observation.content_url.as_deref()
+        .map(nomifun_browser_platform::url_projection::project_metadata_url);
     let mut output = encode(observation)?;
     let object = output.0.as_object_mut().ok_or(BrowserHostFailure::Serialization)?;
     if let Some(capabilities) = capabilities {
@@ -1088,6 +1091,7 @@ fn runtime_output(
     if authority.authorize(BrowserCapabilityAction::Observe).is_ok() {
         for tab in &mut snapshot.tabs {
             tab.url = nomifun_browser_platform::url_projection::project_metadata_url(&tab.url);
+            tab.load = tab.load.as_ref().map(|load| load.agent_projection());
         }
         return encode(snapshot);
     }

@@ -4,7 +4,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,7 +16,7 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_browser_platform::{
     run_guard::{BrowserInputState, BrowserRunSnapshot, RunAdmissionError},
-    runtime::{BrowserTabCommand, WorkspaceError, BrowserProfileStore, BrowserProfilePersistence},
+    runtime::{BrowserTabCommand, BrowserTabTarget, WorkspaceError, BrowserProfileStore, BrowserProfilePersistence},
     workspace::{BrowserResourceService, BrowserWorkspace, BrowserUserSnapshot, managed_workspace_key},
 };
 use nomifun_common::AppError;
@@ -42,6 +42,10 @@ pub(crate) fn routes(state: BrowserResourceApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/browser/commands",
             post(command),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/browser/diagnostics",
+            get(navigation_diagnostics),
         )
         .route(
             "/api/browser-providers/attached-chrome",
@@ -217,6 +221,22 @@ async fn ensure(
 ) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
     let workspace = state.user_workspace(&user, &agent_session_id, true).await?;
     Ok(Json(ApiResponse::ok(workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?)))
+}
+
+async fn navigation_diagnostics(
+    State(state): State<BrowserResourceApiState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(agent_session_id): Path<String>,
+    Query(target): Query<BrowserTabTarget>,
+) -> Result<Json<ApiResponse<nomifun_browser_platform::navigation::BrowserNavigationReport>>, Response> {
+    state.require_user_session(&user, &agent_session_id).await?;
+    let workspace = state.require_service().map_err(IntoResponse::into_response)?
+        .get_for_agent_session(&user.id.to_string(), &agent_session_id).await
+        .map_err(|error| BrowserApiError(error).into_response())?
+        .ok_or_else(|| BrowserApiError(WorkspaceError::TabNotFound).into_response())?;
+    let report = workspace.navigation_diagnostics(target).await
+        .map_err(|error| BrowserApiError(error).into_response())?;
+    Ok(Json(ApiResponse::ok(report)))
 }
 
 async fn command(

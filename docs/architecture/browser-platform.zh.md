@@ -80,6 +80,26 @@ WK/AppKit 对象由主线程创建、操作和释放，不启动第二个 NSAppl
 不打包系统 WebKit.framework。WebContent 进程由系统 WebKit 管理；不保留 CEF helper、guardian、
 framework preload、message pump、allocator 特例或隐藏回退内核。
 
+## 浏览器身份与导航恢复
+
+macOS 普通页与 popup 在首次请求前通过同一原生入口设置桌面 Safari 兼容身份，当前 profile 为 `macos-desktop-webkit-safari17-v1`。`Version/17.0` 是兼容身份基线，不是测得的 Safari/WebKit 运行版本；实际 OS 信息独立报告，未知的 WebKit 元数据保持 unknown。UA 不参与 Session/Profile 身份派生，不清除 Cookie，不打包 Safari 或额外内核，不通过 JavaScript getter 或单独请求 header 改写身份。Windows 保持其原生身份。
+
+Page 统一处理请求、开始、redirect、commit、finish、取消、失败和内容进程终止。`load` 摘要携带导航尝试序号、阶段、可显示内容状态、整数进度、安全错误及尝试/内容地址。内部 bootstrap 来源单独标记，不算用户文档；真实 about:blank popup 可以承载文档。取消/停止映射为 `Stopped`，不表示新页面已成功；`NSURLErrorCancelled` 按 domain 与 code 分类，替代导航与用户停止明确区分。原生导航对象及 dispatch receipt 保留精确关联，旧 Stop、迟到回调和旧 resize 不能影响后继页面。
+
+面板挂载/布局、原生 child 可显示性和输入锁分别表达。没有内容的失败、停止和进程终止在原生主线程隐藏 child，renderer 显示明确状态及重新输入地址入口；保留旧/部分内容时继续显示网页并说明尝试地址与内容地址。每次 native show 重新应用当前 Page mask。Agent 恢复导航等待布局且保留原有授权/输入锁，不依赖旧文档可执行；无内容读取及时返回 `BROWSER_PAGE_FAILED`、`BROWSER_PAGE_STOPPED` 或 `BROWSER_PAGE_CRASHED`。有效旧/部分文档可以重新观察和截图，并携带相同安全加载摘要。执行不确定性保持既有语义，不自动重放 DOM、POST 或 Agent 操作。
+
+用户下载的面板已呈现状态独立于网页内容遮罩：首次直接下载可以继续目的地确认，空内容隐藏不撤销选择；真正的面板隐藏、输入 owner 切换与进程终止仍撤销未完成选择。DOM、媒体权限与上传选择继续要求真实文档可见。
+
+主文档导航诊断是 Page 所有的临时有界轨迹，关闭 tab 时释放：最近 32 次尝试、最多 128 条事件及 128 KiB 序列化事件预算。容量淘汰增加 dropped，关联证明失效单独表达。主 frame 响应 callback 没有 WKNavigation；无法证明关联时只保留未关联样本，不用同 URL/latest sequence 推断当前响应状态。此能力不代表 console、子资源或 Fetch/XHR 网络诊断可用，原有 unavailable 语义保持。
+
+菜单的复制导航诊断由用户显式触发，经当前 owner、已有 Workspace 和精确 target 读取；不会初始化 runtime、创建 Agent grant 或自动上传。地址栏保留原地址，诊断/Agent 输出使用现有安全 URL 投影删除 userinfo、query 和 fragment，并限制文本长度；不收集 Cookie、认证头、正文、表单或 NSError 任意描述。网络/站点异常只提供显式单标签恢复和慢加载提示，不主动无限刷新，不绕过验证码，也不清理整个工作区。
+
+### 导航恢复验收 2026-10-10
+
+在 macOS 26.3.0 的独立实际 Tauri 窗口中，临时 Profile 的原生验收通过：首次停止无内容、实际 child 遮罩、同标签恢复、普通页/iframe/fetch/image/popup 的 HTTP 与 JS UA 一致、两跳 redirect 单尝试、网站 reload 与宿主请求区分、失败快返回、403 站点内容保留及后继失败仍可观察旧内容。另以未配置自动下载目录的独立原生 Page 验证首次 attachment 的真实保存选择、内容遮罩保留选择，以及显式取消/真实面板隐藏/输入 owner 切换取消；没有选定目的地或写入用户下载目录。
+
+同系统临时原生 Profile 的 60 秒真实站点观察中，B 站首页未进入版本建议页，百度搜索结果可观察；两者保持单次宿主导航，没有宿主刷新循环。登录、实际视频播放、最低 macOS 与 Intel 实机未覆盖，这些结果不承诺规避网站风控。新增 profile 使用现有依赖和系统框架，没有新增内核打包资源；发布包的精确字节差异须同参数构建对比。
+
 ## 平台能力矩阵
 
 | 能力 | macOS WKWebView | Windows WebView2 |

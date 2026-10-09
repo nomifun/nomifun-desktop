@@ -113,6 +113,7 @@ mod tests {
             title: "Page".into(),
             url: "http://localhost/".into(),
             lifecycle: BrowserTabLifecycle::Ready,
+            load: None,
             can_go_back: true,
             can_go_forward: false,
             zoom_percent: 100,

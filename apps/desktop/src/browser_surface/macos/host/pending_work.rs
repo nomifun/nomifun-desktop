@@ -463,7 +463,7 @@ impl DesktopBrowserRuntime {
             Yielded::Finished(Output::Observe(result))=>Ok(result),
             Yielded::Dialog(dialog)=>Ok(BrowserObservation {target:dialog.target.clone(), observation_generation:0,
                 content:"The page is paused by an untrusted website dialog. Respond to the exact dialog, then observe again.".into(),
-                elements:vec![],unobserved_frames:1,script_dialog:Some(dialog)}),
+                elements:vec![],unobserved_frames:1,script_dialog:Some(dialog),load:None,content_url:None}),
             _=>Err(WorkspaceError::NativeCommandFailed),
         }
     }

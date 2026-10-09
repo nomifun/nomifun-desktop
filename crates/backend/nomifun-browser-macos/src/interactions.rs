@@ -110,6 +110,9 @@ impl NativeInteractions {
         self.page()
             .filter(|page| !page.input_locked() && !page.dialog_draining() && page.is_visible())
     }
+    fn user_download_page(&self) -> Option<std::sync::Arc<Page>> {
+        self.page().filter(|page| page.allows_user_download())
+    }
 
     fn changed(&self) {
         if let Some(page) = self.page.upgrade() {
@@ -344,10 +347,11 @@ impl NativeInteractions {
         Ok(())
     }
 
-    /// A download is admitted only while a human owns the visible page. Agent
+    /// A download is admitted only while a human owns the presented surface. A
+    /// direct attachment response may have no displayable document. Agent
     /// automated download is an explicitly unsupported capability in this host.
     pub(crate) fn attach_download(self: &Rc<Self>, download: &WKDownload) {
-        let Some(page) = self.user_page() else {
+        let Some(page) = self.user_download_page() else {
             unsafe {
                 download.cancel(None);
             }
@@ -431,7 +435,7 @@ impl NativeInteractions {
             completion.call((ptr::null_mut(),));
             return;
         }
-        if self.user_page().is_none() || !safe_filename(&filename) {
+        if self.user_download_page().is_none() || !safe_filename(&filename) {
             completion.call((ptr::null_mut(),));
             self.finish_download(key, id, BrowserDownloadState::Cancelled);
             return;
@@ -479,7 +483,7 @@ impl NativeInteractions {
             if !owner.matches_download(key, &id) {
                 return;
             }
-            let destination = if response == NSModalResponseOK && owner.user_page().is_some() {
+            let destination = if response == NSModalResponseOK && owner.user_download_page().is_some() {
                 owner
                     .state
                     .borrow()
@@ -873,6 +877,31 @@ mod tests {
         RcBlock, bounded, safe_filename, unique_download_name,
     };
     use std::{cell::Cell, rc::Rc, sync::Weak};
+
+    #[test]
+    fn first_attachment_admits_user_download_without_admitting_document_file_chooser() {
+        let page = crate::engine::Page::test_user_surface(true, false, false, false);
+        let interactions = NativeInteractions::new(std::sync::Arc::downgrade(&page));
+        assert!(interactions.user_download_page().is_some());
+        assert!(interactions.user_page().is_none());
+        page.close_requested.store(true, std::sync::atomic::Ordering::Release);
+        assert!(interactions.user_download_page().is_none());
+    }
+
+    #[test]
+    fn downloads_still_reject_background_agent_and_draining_surfaces() {
+        for (presented, visible, locked, draining) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, true, false),
+            (true, true, true, false),
+            (true, false, false, true),
+        ] {
+            let page = crate::engine::Page::test_user_surface(presented, visible, locked, draining);
+            let interactions = NativeInteractions::new(std::sync::Arc::downgrade(&page));
+            assert!(interactions.user_download_page().is_none());
+        }
+    }
 
     #[test]
     fn cosmetic_surface_hide_keeps_website_dialog_pending() {
