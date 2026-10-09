@@ -6,7 +6,7 @@ import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compileBrowserEnvironment, macosBrowserRuntime } from '../lib/macos-browser-bundle.mjs';
+import { compileBrowserEnvironment, macosBrowserRuntime, pruneMacosCefLocales } from '../lib/macos-browser-bundle.mjs';
 import { prepareIntelOnnxRuntime, INTEL_ONNX_RUNTIME } from '../lib/macos-onnx-runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -78,6 +78,7 @@ try {
     }
   }
   await cp(join(runtime, 'Chromium Embedded Framework.framework'), framework, { recursive: true, dereference: false, verbatimSymlinks: true });
+  const locales = await pruneMacosCefLocales({ appPath: app, frameworkPath: framework, target: target ?? (process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin') });
   const common = {
     CFBundlePackageType: 'APPL',
     CFBundleVersion: '1',
@@ -149,6 +150,7 @@ try {
   const helpers = [];
   for (const name of helperNames) helpers.push({ name, sha256: await hash(join(contents, 'Frameworks', `${name}.app`, 'Contents/MacOS', name)) });
   const receipt = { scope: coldNavigationOnly ? 'product-host-cold-navigation' : sqliteCompatibilityOnly ? 'early-cef-library-sqlite-compatibility' : contextShutdownOnly ? 'tauri-native-cef-context-shutdown' : soakOnly ? 'tauri-native-cef-100-cycle-soak' : windowReopenOnly ? 'tauri-native-cef-window-reopen' : 'tauri-native-cef-input', productAcceptance: false, app, report, executableSha256: await hash(executable), helpers, architecture: await run('lipo', ['-archs', executable], true), infoPlistSerialization: 'canonical-xml' };
+  receipt.locales = locales;
   await writeFile(join(stage, 'artifact.json'), JSON.stringify(receipt, null, 2));
   const launchArgs = ['-W', '-n', '--env', `NOMIFUN_CEF_REPORT=${report}`];
   if (soakOnly) launchArgs.push('--env', 'NOMIFUN_CEF_SOAK_ONLY=1');

@@ -28,13 +28,14 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, parse, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -42,14 +43,13 @@ import {
   resolveReleaseArtifactPath,
   sha256File,
 } from '../release/release-lock.mjs';
+import { MACOS_BROWSER_RUNTIME, MACOS_CEF_HELPER_NAMES, MACOS_CEF_LOCALE_DIRECTORIES } from '../lib/macos-browser-bundle.mjs';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
-export const EXPECTED_CEF = Object.freeze(JSON.parse(readFileSync(
-  new URL('../../apps/desktop/browser-runtime.json', import.meta.url), 'utf8',
-)));
-export const CEF_HELPER_NAMES = Object.freeze([...EXPECTED_CEF.helpers]);
+export const EXPECTED_CEF = MACOS_BROWSER_RUNTIME;
+export const CEF_HELPER_NAMES = MACOS_CEF_HELPER_NAMES;
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json';
 
@@ -398,7 +398,36 @@ export function inspectCefBundle(
   }
   const metadataValid = metadataShape.status === 'pass'
     && ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1']
-      .every(field => metadata?.[field] === EXPECTED_CEF[field]);
+      .every(field => metadata?.[field] === EXPECTED_CEF[field])
+    && ['locales', 'locale_variants']
+      .every(field => JSON.stringify(metadata?.[field]) === JSON.stringify(EXPECTED_CEF[field]));
+
+  const locales = MACOS_CEF_LOCALE_DIRECTORIES.map(name => {
+    const directory = join(frameworkApp, 'Resources', name);
+    const path = join(directory, 'locale.pak');
+    const directoryShape = inspectPath(directory, { kind: 'directory' });
+    const packShape = inspectPath(path);
+    const pack = existingFile(path);
+    let owned = false;
+    try {
+      const local = relative(realpathSync(frameworkApp), realpathSync(path));
+      owned = !!local && local !== '..' && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+    } catch { /* Missing or inaccessible locale packs fail closed. */ }
+    return {
+      name, path, owned,
+      status: directoryShape.status === 'pass' && packShape.status === 'pass'
+        && pack?.isFile() && pack.size > 0 && owned ? 'pass' : 'fail',
+      directory_shape: directoryShape.status,
+      pack_shape: packShape.status,
+    };
+  });
+  let unexpectedLocales = [];
+  let localeError = null;
+  try {
+    unexpectedLocales = readdirSync(join(frameworkApp, 'Resources'))
+      .filter(name => name.endsWith('.lproj') && !MACOS_CEF_LOCALE_DIRECTORIES.includes(name));
+  } catch (error) { localeError = error.message; }
+  const localesValid = !localeError && !unexpectedLocales.length && locales.every(locale => locale.status === 'pass');
 
   const frameworkShape = inspectPath(frameworkBinary, { requireExecutable: true });
   const frameworkArchitecture = frameworkShape.status === 'pass'
@@ -435,6 +464,7 @@ export function inspectCefBundle(
     120_000,
   );
   const status = metadataValid
+    && localesValid
     && creditsShape.status === 'pass'
     && frameworkShape.status === 'pass'
     && frameworkArchitecture.status === 'pass'
@@ -454,6 +484,7 @@ export function inspectCefBundle(
       error: metadataError,
     },
     credits: { status: creditsShape.status, path: credits },
+    locales: { status: localesValid ? 'pass' : 'fail', packs: locales, unexpected: unexpectedLocales, error: localeError },
     framework: {
       path: frameworkBinary,
       shape: frameworkShape.status,
@@ -482,6 +513,9 @@ function bundleFingerprints(appPath) {
       `${name}.app/Contents/MacOS`,
       name,
     );
+  }
+  for (const name of MACOS_CEF_LOCALE_DIRECTORIES) {
+    paths[`locale:${name}`] = join(appPath, 'Contents/Frameworks/Chromium Embedded Framework.framework/Resources', name, 'locale.pak');
   }
   return Object.fromEntries(
     Object.entries(paths).map(([name, path]) => [name, { path, sha256: sha256File(path) }]),

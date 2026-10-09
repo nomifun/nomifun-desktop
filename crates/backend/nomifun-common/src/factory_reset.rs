@@ -54,7 +54,8 @@ const WORK_RETIRED_DATASETS_DIR: &str = ".nomifun-retired-datasets";
 const MANAGED_WORKSPACES_DIR: &str = "conversations";
 
 const LEGACY_PLAN_VERSION: u32 = 1;
-const PLAN_VERSION: u32 = 2;
+const PREVIOUS_PLAN_VERSION: u32 = 2;
+const PLAN_VERSION: u32 = 3;
 const LEGACY_RESET_REQUEST_VERSION: u32 = 1;
 const RESET_REQUEST_VERSION: u32 = 2;
 const DB_FILE: &str = "nomifun-backend.db";
@@ -97,7 +98,7 @@ const DB_FAMILY: &[&str] = &[
 // release must not silently change which historical plan bytes are accepted.
 //
 // See [`released_plan_shape`] for how a plan version selects its frozen
-// registry, and `RELEASED_V2_MANAGED_ROOTS` for the shape written today.
+// registry, and `RELEASED_V3_MANAGED_ROOTS` for the shape written today.
 const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("nomifun-backend.db-wal", ManagedRootKind::File),
     ("nomifun-backend.db-shm", ManagedRootKind::File),
@@ -150,8 +151,7 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     (".relocated-from", ManagedRootKind::File),
     (".relocated-done", ManagedRootKind::File),
 ];
-// Exact managed-root registry emitted by the v2 reset planner, which is the
-// planner every current release still uses.
+// Exact managed-root registry emitted by the released v2 reset planner.
 //
 // This is frozen for the same reason v1 is. The plan is persisted in the user's
 // data directory and is compared element-by-element against this build's
@@ -161,16 +161,8 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
 // changes — which is exactly how the `browser-secrets` regression bricked
 // interrupted resets carried across an upgrade.
 //
-// `released_v2_managed_roots_match_the_current_writer` proves this list is
-// still what the writer produces. If that test fails, the live registry moved;
-// pick one:
-//   * the move is not intended -> restore the registry entry (removals also
-//     abandon data left by older installations, so a retired subsystem's root
-//     stays here marked cleanup-only);
-//   * the move is intended -> mint a new plan version: add
-//     `RELEASED_V3_MANAGED_ROOTS`, add an arm to `released_plan_shape`, and
-//     leave this list untouched so plans already on disk keep validating.
-// Editing this list in place is never correct.
+// v3 adds the current native browser profile root. Keep this v2 list untouched
+// so an interrupted reset written before that addition can still be resumed.
 const RELEASED_V2_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("nomifun-backend.db-wal", ManagedRootKind::File),
     ("nomifun-backend.db-shm", ManagedRootKind::File),
@@ -218,6 +210,62 @@ const RELEASED_V2_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     // Legacy cleanup only: the companion credential feature no longer owns
     // this directory. Removing it changes this frozen shape; see the note on
     // the registry entry in `dataset_roots`.
+    ("browser-secrets", ManagedRootKind::Directory),
+    ("codex-acp-home", ManagedRootKind::Directory),
+    ("agent-executions", ManagedRootKind::Directory),
+    ("terminal-mcp", ManagedRootKind::Directory),
+    ("mcp-endpoints.json", ManagedRootKind::File),
+    ("mcp-endpoints.json.tmp", ManagedRootKind::File),
+    ("local-ai", ManagedRootKind::Directory),
+    (".relocated-from", ManagedRootKind::File),
+    (".relocated-done", ManagedRootKind::File),
+];
+// Exact managed-root registry emitted by the v3 reset planner. Incompatible
+// database rebuilds must retire current browser sessions with the database.
+// Future registry changes require another plan version, never editing a
+// released shape in place.
+const RELEASED_V3_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
+    ("nomifun-backend.db-wal", ManagedRootKind::File),
+    ("nomifun-backend.db-shm", ManagedRootKind::File),
+    ("nomifun-backend.db-journal", ManagedRootKind::File),
+    ("nomifun-backend.db.migrate.lock", ManagedRootKind::File),
+    ("nomifun-backend.db", ManagedRootKind::File),
+    ("storage-generation", ManagedRootKind::File),
+    ("dataset-v3.json", ManagedRootKind::File),
+    (".dataset-v3.bootstrap.json", ManagedRootKind::File),
+    ("factory-reset.pending", ManagedRootKind::File),
+    ("encryption_key", ManagedRootKind::File),
+    (".nomifun-work-root-binding.json", ManagedRootKind::File),
+    ("conversations", ManagedRootKind::Directory),
+    ("attachments", ManagedRootKind::Directory),
+    ("knowledge", ManagedRootKind::Directory),
+    ("projects", ManagedRootKind::Directory),
+    ("companion", ManagedRootKind::Directory),
+    ("cron", ManagedRootKind::Directory),
+    ("workshop", ManagedRootKind::Directory),
+    ("public-agents", ManagedRootKind::Directory),
+    ("preview-history", ManagedRootKind::Directory),
+    ("agent-process-registry.json", ManagedRootKind::File),
+    ("browser-profile", ManagedRootKind::Directory),
+    ("browser-profiles", ManagedRootKind::Directory),
+    ("browser-data", ManagedRootKind::Directory),
+    ("browser-v4", ManagedRootKind::Directory),
+    ("browser-state", ManagedRootKind::Directory),
+    ("login-profile", ManagedRootKind::Directory),
+    ("knowledge-browser", ManagedRootKind::Directory),
+    ("skills", ManagedRootKind::Directory),
+    ("builtin-skills", ManagedRootKind::Directory),
+    ("builtin-rules", ManagedRootKind::Directory),
+    (".builtin-skills.tmp", ManagedRootKind::Directory),
+    (".builtin-skills.old", ManagedRootKind::Directory),
+    (".builtin-skills.lock", ManagedRootKind::File),
+    ("preset-rules", ManagedRootKind::Directory),
+    ("preset-skills", ManagedRootKind::Directory),
+    ("preset-instructions", ManagedRootKind::Directory),
+    ("preset-avatars", ManagedRootKind::Directory),
+    ("extensions", ManagedRootKind::Directory),
+    ("extension-states.json", ManagedRootKind::File),
+    ("custom-skill-paths.json", ManagedRootKind::File),
     ("browser-secrets", ManagedRootKind::Directory),
     ("codex-acp-home", ManagedRootKind::Directory),
     ("agent-executions", ManagedRootKind::Directory),
@@ -285,8 +333,12 @@ fn released_plan_shape(version: u32) -> Result<ReleasedPlanShape, AppError> {
             managed_roots: RELEASED_V1_MANAGED_ROOTS,
             persists_work_dir: false,
         }),
-        PLAN_VERSION => Ok(ReleasedPlanShape {
+        PREVIOUS_PLAN_VERSION => Ok(ReleasedPlanShape {
             managed_roots: RELEASED_V2_MANAGED_ROOTS,
+            persists_work_dir: true,
+        }),
+        PLAN_VERSION => Ok(ReleasedPlanShape {
+            managed_roots: RELEASED_V3_MANAGED_ROOTS,
             persists_work_dir: true,
         }),
         _ => Err(AppError::Internal(format!(
@@ -304,7 +356,7 @@ fn released_plan_shape(version: u32) -> Result<ReleasedPlanShape, AppError> {
 /// may have been written by another build.
 ///
 /// The two are held together by
-/// `released_v2_managed_roots_match_the_current_writer`. Drift is also
+/// `released_v3_managed_roots_match_the_current_writer`. Drift is also
 /// self-announcing at runtime: `arm_v3_dataset_reset` validates the plan it
 /// just built against the frozen shape, so a drifted registry fails before any
 /// data is moved rather than persisting a plan no reader accepts.
@@ -584,9 +636,10 @@ impl CompletedAutomaticLegacyRetirement {
         if matches!(
             self.reason,
             DatasetResetReason::ExplicitFactoryReset
+                | DatasetResetReason::IncompatibleDatabase
         ) {
             return Err(AppError::Internal(
-                "an explicit reset cannot consume automatic legacy retirement"
+                "this reset reason cannot consume automatic legacy retirement"
                     .into(),
             ));
         }
@@ -612,6 +665,9 @@ impl CompletedAutomaticLegacyRetirement {
 #[serde(rename_all = "snake_case")]
 pub enum DatasetResetReason {
     NonV3Dataset,
+    /// A read-only probe rejected the active database contract. The current
+    /// product release rebuilds this dataset without converting old records.
+    IncompatibleDatabase,
     ExplicitFactoryReset,
     WorkDirChange,
 }
@@ -620,7 +676,8 @@ fn request_origin_for_reason(
     reason: DatasetResetReason,
 ) -> Option<DatasetResetRequestOrigin> {
     match reason {
-        DatasetResetReason::NonV3Dataset => None,
+        DatasetResetReason::NonV3Dataset
+        | DatasetResetReason::IncompatibleDatabase => None,
         DatasetResetReason::ExplicitFactoryReset => {
             Some(DatasetResetRequestOrigin::UserExplicitFactoryReset)
         }
@@ -681,7 +738,9 @@ pub struct DatasetResetPlan {
 fn plan_requires_work_dir_persistence(
     plan: &DatasetResetPlan,
 ) -> bool {
-    (plan.version == PLAN_VERSION && plan.persist_work_dir)
+    (released_plan_shape(plan.version)
+        .is_ok_and(|shape| shape.persists_work_dir)
+        && plan.persist_work_dir)
         || plan.reason == DatasetResetReason::WorkDirChange
 }
 
@@ -1745,7 +1804,10 @@ fn completed_plan_replay_mismatch(
         || matches!(
             plan.reason,
             DatasetResetReason::ExplicitFactoryReset
+                | DatasetResetReason::IncompatibleDatabase
         ) && plan.automatic_legacy_retirement
+        || plan.reason == DatasetResetReason::IncompatibleDatabase
+            && plan.version != PLAN_VERSION
     {
         return Ok(Some(
             "completed reset plan replay has an invalid automatic-retirement flag"
@@ -2752,7 +2814,10 @@ fn validate_plan(
         || matches!(
             plan.reason,
             DatasetResetReason::ExplicitFactoryReset
+                | DatasetResetReason::IncompatibleDatabase
         ) && plan.automatic_legacy_retirement
+        || plan.reason == DatasetResetReason::IncompatibleDatabase
+            && plan.version != PLAN_VERSION
     {
         return Err(AppError::Internal(
             "v3 dataset reset plan automatic-retirement flag does not match its authority"
@@ -3074,9 +3139,9 @@ pub fn arm_v3_dataset_reset(
     let canonical_work_string = canonical_work.display().to_string();
     let active_request = read_v3_dataset_reset_request(data_dir)?;
     let automatic_legacy_retirement = active_request.is_none()
-        && !matches!(
+        && matches!(
             reason,
-            DatasetResetReason::ExplicitFactoryReset
+            DatasetResetReason::NonV3Dataset | DatasetResetReason::WorkDirChange
         );
     let managed_roots = current_writer_managed_roots();
     if reason == DatasetResetReason::WorkDirChange {
@@ -4806,6 +4871,37 @@ pub fn retire_non_v3_dataset_after_probe(
     Ok(DatasetPreparation::ResetApplied)
 }
 
+/// Rebuild an incompatible database and its managed side stores after the
+/// application has rejected the database contract through a read-only probe.
+///
+/// Call only during locked startup, before opening a writable database pool or
+/// starting workers. This release deliberately converts no historical data.
+/// The reset coordinator durably retires exact managed roots and installs a
+/// fresh generation; database bootstrap then creates the current schema.
+/// Unlike the historical one-time legacy retirement, this product policy is
+/// independent of any previously consumed automatic retirement marker.
+pub fn rebuild_incompatible_dataset_after_probe(
+    data_dir: &Path,
+    work_dir: &Path,
+) -> Result<DatasetPreparation, AppError> {
+    if read_pending_v3_reset(data_dir, work_dir)?.is_some() {
+        return Err(AppError::Internal(
+            "the active database is incompatible while a dataset reset is already pending"
+                .into(),
+        ));
+    }
+    let plan = arm_v3_dataset_reset(
+        data_dir,
+        work_dir,
+        DatasetResetReason::IncompatibleDatabase,
+    )?;
+    apply_pending_v3_dataset_reset(data_dir, work_dir)?;
+    if plan_requires_work_dir_persistence(&plan) {
+        crate::dir_config::set_work_dir(data_dir, Path::new(&plan.work_dir))?;
+    }
+    Ok(DatasetPreparation::ResetApplied)
+}
+
 /// Arm an explicit v3 reset request. The destructive transition occurs during
 /// the next pre-database boot so it cannot race live pools or background jobs.
 pub fn request_v3_dataset_reset(
@@ -5103,12 +5199,13 @@ fn read_completed_automatic_legacy_retirement(
 fn plan_consumes_automatic_legacy_retirement(
     plan: &DatasetResetPlan,
 ) -> bool {
-    plan.automatic_legacy_retirement
-        || plan.version == LEGACY_PLAN_VERSION
-            && !matches!(
-                plan.reason,
-                DatasetResetReason::ExplicitFactoryReset
-            )
+    plan.reason != DatasetResetReason::IncompatibleDatabase
+        && (plan.automatic_legacy_retirement
+            || plan.version == LEGACY_PLAN_VERSION
+                && !matches!(
+                    plan.reason,
+                    DatasetResetReason::ExplicitFactoryReset
+                ))
 }
 
 fn write_completed_automatic_legacy_retirement(
@@ -5641,6 +5738,7 @@ mod tests {
         plan.roots.retain(|root| {
             root.relative_path != WORK_ROOT_BINDING_FILE
                 && root.relative_path != AGENT_PROCESS_REGISTRY_FILE
+                && root.relative_path != "browser-v4"
         });
         let dir_config_index = lifecycle_managed_roots().count()
             + managed_dataset_roots()
@@ -6112,6 +6210,144 @@ mod tests {
             "a new explicit user request remains available after the one automatic retirement"
         );
         assert!(!data.path().join(DB_FILE).exists());
+    }
+
+    #[test]
+    fn incompatible_dataset_rebuild_ignores_a_consumed_legacy_retirement() {
+        let data = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        retire_non_v3_dataset_after_probe(data.path(), work.path()).unwrap();
+        let first_plan = read_pending_v3_reset(data.path(), work.path())
+            .unwrap()
+            .unwrap();
+        touch(&data.path().join(DB_FILE));
+        write_v3_dataset_receipt_for_work_dir(
+            data.path(),
+            work.path(),
+            &first_plan.generation,
+        )
+        .unwrap();
+        finalize_v3_dataset_reset(data.path(), work.path()).unwrap();
+        let legacy_marker = fs::read(automatic_legacy_retirement_path(data.path())).unwrap();
+
+        fs::write(data.path().join(DB_FILE), b"old-incompatible-database").unwrap();
+        seed_managed_root(data.path(), "browser-v4", ManagedRootKind::Directory);
+        seed_managed_root(work.path(), MANAGED_WORKSPACES_DIR, ManagedRootKind::Directory);
+        touch(&data.path().join("user-notes.txt"));
+        touch(&work.path().join("external-project.txt"));
+        assert_eq!(
+            rebuild_incompatible_dataset_after_probe(data.path(), work.path()).unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        let plan = read_pending_v3_reset(data.path(), work.path()).unwrap().unwrap();
+        assert_eq!(plan.reason, DatasetResetReason::IncompatibleDatabase);
+        assert_eq!(request_origin_for_reason(plan.reason), None);
+        assert!(!plan.automatic_legacy_retirement);
+        assert!(!plan_consumes_automatic_legacy_retirement(&plan));
+        assert_ne!(plan.generation, first_plan.generation);
+        assert_eq!(
+            fs::read(data.path().join(&plan.retired_dir).join(DB_FILE)).unwrap(),
+            b"old-incompatible-database"
+        );
+        assert!(data.path().join(&plan.retired_dir).join("browser-v4/sentinel").is_file());
+        assert!(work.path().join(&plan.work_retired_dir).join("conversations/sentinel").is_file());
+        assert!(data.path().join("user-notes.txt").is_file());
+        assert!(work.path().join("external-project.txt").is_file());
+        assert_eq!(
+            fs::canonicalize(crate::dir_config::persisted_work_dir(data.path()).unwrap()).unwrap(),
+            fs::canonicalize(work.path()).unwrap()
+        );
+
+        fs::write(data.path().join(DB_FILE), b"current-database").unwrap();
+        seed_managed_root(data.path(), "browser-v4", ManagedRootKind::Directory);
+        write_v3_dataset_receipt_for_work_dir(data.path(), work.path(), &plan.generation).unwrap();
+        finalize_v3_dataset_reset(data.path(), work.path()).unwrap();
+        assert_eq!(fs::read(automatic_legacy_retirement_path(data.path())).unwrap(), legacy_marker);
+        assert_eq!(
+            prepare_v3_dataset(data.path(), work.path()).unwrap(),
+            DatasetPreparation::Unchanged
+        );
+        assert_eq!(fs::read(data.path().join(DB_FILE)).unwrap(), b"current-database");
+        assert!(data.path().join("browser-v4/sentinel").is_file());
+        assert_eq!(fs::read_to_string(data.path().join(STORAGE_GENERATION_FILE)).unwrap(), plan.generation);
+        assert!(!reset_dir(data.path()).exists());
+    }
+
+    #[test]
+    fn incompatible_dataset_rebuild_resumes_one_pending_generation() {
+        let data = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        fs::write(data.path().join(DB_FILE), b"old-incompatible-database").unwrap();
+        let plan = arm_v3_dataset_reset(
+            data.path(), work.path(), DatasetResetReason::IncompatibleDatabase,
+        ).unwrap();
+        let initial_control = snapshot_active_reset_control(data.path());
+        let error = rebuild_incompatible_dataset_after_probe(data.path(), work.path()).unwrap_err();
+        assert!(error.to_string().contains("already pending"));
+        assert_eq!(snapshot_active_reset_control(data.path()), initial_control);
+        assert_eq!(fs::read(data.path().join(DB_FILE)).unwrap(), b"old-incompatible-database");
+
+        // A restart recovers the already armed operation, including a crash
+        // after generation installation but before work-dir persistence.
+        apply_pending_v3_dataset_reset(data.path(), work.path()).unwrap();
+        assert!(crate::dir_config::persisted_work_dir(data.path()).is_none());
+        assert_eq!(prepare_v3_dataset(data.path(), work.path()).unwrap(), DatasetPreparation::ResetApplied);
+        let resumed = read_pending_v3_reset(data.path(), work.path()).unwrap().unwrap();
+        assert_eq!(resumed.operation_id, plan.operation_id);
+        assert_eq!(resumed.generation, plan.generation);
+        touch(&data.path().join(DB_FILE));
+        write_v3_dataset_receipt_for_work_dir(data.path(), work.path(), &plan.generation).unwrap();
+        finalize_v3_dataset_reset(data.path(), work.path()).unwrap();
+        assert!(!automatic_legacy_retirement_path(data.path()).exists());
+        assert_eq!(prepare_v3_dataset(data.path(), work.path()).unwrap(), DatasetPreparation::Unchanged);
+        assert!(!reset_dir(data.path()).exists());
+    }
+
+    #[test]
+    fn incompatible_dataset_rebuild_rejects_invalid_retirement_authority() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        let mut plan = arm_v3_dataset_reset(
+            data.path(), data.path(), DatasetResetReason::IncompatibleDatabase,
+        ).unwrap();
+        plan.automatic_legacy_retirement = true;
+        assert!(validate_plan(&plan, data.path(), data.path()).is_err());
+        assert!(completed_plan_replay_mismatch(&plan, data.path()).unwrap().is_some());
+
+        plan.automatic_legacy_retirement = false;
+        plan.version = PREVIOUS_PLAN_VERSION;
+        plan.roots.retain(|root| root.relative_path != "browser-v4");
+        assert!(validate_plan(&plan, data.path(), data.path()).is_err());
+        assert!(completed_plan_replay_mismatch(&plan, data.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn incompatible_dataset_rebuild_rejects_nested_managed_work_roots() {
+        let data = tempfile::tempdir().unwrap();
+        let work = data.path().join("browser-v4/external-work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(data.path().join(DB_FILE), b"preserved-database").unwrap();
+        let error = rebuild_incompatible_dataset_after_probe(data.path(), &work).unwrap_err();
+        assert!(error.to_string().contains("overlaps a product-managed data root"));
+        assert_eq!(fs::read(data.path().join(DB_FILE)).unwrap(), b"preserved-database");
+        assert!(!reset_dir(data.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incompatible_dataset_rebuild_rejects_symlinked_browser_roots() {
+        use std::os::unix::fs::symlink;
+        let data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        touch(&external.path().join("external-browser-sentinel"));
+        fs::write(data.path().join(DB_FILE), b"preserved-database").unwrap();
+        symlink(external.path(), data.path().join("browser-v4")).unwrap();
+        let error = rebuild_incompatible_dataset_after_probe(data.path(), data.path()).unwrap_err();
+        assert!(error.to_string().contains("symlink/reparse indirection"));
+        assert_eq!(fs::read(data.path().join(DB_FILE)).unwrap(), b"preserved-database");
+        assert!(external.path().join("external-browser-sentinel").is_file());
+        assert!(!reset_dir(data.path()).exists());
     }
 
     #[test]
@@ -6779,13 +7015,12 @@ mod tests {
         WORK_ROOT_OWNER_FILE,
         WORK_ROOT_BINDING_FILE,
         AGENT_PROCESS_REGISTRY_FILE,
+        "browser-v4",
     ];
 
     /// The persisted plan shape is a compatibility surface, not an
     /// implementation detail: `RELEASED_V1_MANAGED_ROOTS` must stay
-    /// reproducible from the live registry, and the v2 registry that
-    /// v0.3.1..=v0.3.7 wrote into user data dirs is the live registry filtered
-    /// by [`ResetPolicy::Retire`].
+    /// reproducible from the live registry after excluding later additions.
     ///
     /// So dropping a root from `MANAGED_DATASET_ROOTS` — even one whose
     /// subsystem was deleted — both stops factory reset from sweeping data left
@@ -6846,21 +7081,58 @@ mod tests {
         );
     }
 
-    /// The v2 plan shape must be a contract, not a snapshot of whatever this
-    /// process computes. `RELEASED_V2_MANAGED_ROOTS` is what readers validate
-    /// persisted plans against, and `current_writer_managed_roots` is what the
-    /// planner writes; if they drift, every plan already on disk stops
-    /// validating and an interrupted reset carried across the upgrade hard-fails
-    /// at startup. That is the `browser-secrets` regression, generalized.
-    ///
-    /// If this fails, do not edit the frozen list. Either restore the live
-    /// registry, or mint a plan version: add `RELEASED_V3_MANAGED_ROOTS`, add an
-    /// arm to `released_plan_shape`, bump `PLAN_VERSION`, and give the new
-    /// version its own `persists_work_dir` answer.
+    /// The previously released v2 shape remains exact even though the current
+    /// writer also retires the browser root introduced in plan v3.
     #[test]
-    fn released_v2_managed_roots_match_the_current_writer() {
+    fn released_v2_managed_roots_stay_reproducible_from_the_live_registry() {
+        let derived = current_writer_managed_roots()
+            .into_iter()
+            .filter(|(path, _)| *path != "browser-v4")
+            .collect::<Vec<_>>();
+        assert_eq!(derived, RELEASED_V2_MANAGED_ROOTS);
+        let shape = released_plan_shape(PREVIOUS_PLAN_VERSION).unwrap();
+        assert_eq!(shape.managed_roots, RELEASED_V2_MANAGED_ROOTS);
+        assert!(shape.persists_work_dir);
+    }
+
+    #[test]
+    fn released_v2_plan_recovers_work_config_and_completed_control_replay() {
+        let data = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        let mut plan = arm_v3_dataset_reset(
+            data.path(), work.path(), DatasetResetReason::NonV3Dataset,
+        ).unwrap();
+        plan.version = PREVIOUS_PLAN_VERSION;
+        plan.roots.retain(|root| root.relative_path != "browser-v4");
+        write_atomic(&plan_path(data.path()), &serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+        validate_plan(&plan, data.path(), work.path()).unwrap();
+        assert!(plan_requires_work_dir_persistence(&plan));
+
+        apply_pending_v3_dataset_reset(data.path(), work.path()).unwrap();
+        assert!(crate::dir_config::persisted_work_dir(data.path()).is_none());
+        assert_eq!(prepare_v3_dataset(data.path(), work.path()).unwrap(), DatasetPreparation::ResetApplied);
+        assert_eq!(
+            fs::canonicalize(crate::dir_config::persisted_work_dir(data.path()).unwrap()).unwrap(),
+            fs::canonicalize(work.path()).unwrap()
+        );
+        let completed_control = snapshot_active_reset_control(data.path());
+        fs::write(data.path().join(DB_FILE), b"current-v2-reset-database").unwrap();
+        write_v3_dataset_receipt_for_work_dir(data.path(), work.path(), &plan.generation).unwrap();
+        finalize_v3_dataset_reset(data.path(), work.path()).unwrap();
+
+        restore_active_reset_control(data.path(), &completed_control);
+        assert_eq!(prepare_v3_dataset(data.path(), work.path()).unwrap(), DatasetPreparation::Unchanged);
+        assert_eq!(fs::read(data.path().join(DB_FILE)).unwrap(), b"current-v2-reset-database");
+        assert!(!reset_dir(data.path()).exists());
+    }
+
+    /// New plans must match their own frozen shape while released v1/v2
+    /// readers remain independent of current registry changes.
+    #[test]
+    fn released_v3_managed_roots_match_the_current_writer() {
         let written = current_writer_managed_roots();
-        let frozen = RELEASED_V2_MANAGED_ROOTS.to_vec();
+        let frozen = RELEASED_V3_MANAGED_ROOTS.to_vec();
         let dropped = frozen
             .iter()
             .filter(|(path, _)| {
@@ -6875,29 +7147,29 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             dropped.is_empty(),
-            "the current writer no longer plans roots that the frozen v2 shape \
+            "the current writer no longer plans roots that the frozen v3 shape \
              lists: {dropped:?}. Plans written by released builds still list \
              them, and a removed root is also data the reset stops sweeping."
         );
         assert!(
             gained.is_empty(),
-            "the current writer plans roots the frozen v2 shape does not list: \
+            "the current writer plans roots the frozen v3 shape does not list: \
              {gained:?}. Adding a root changes the persisted plan shape, so it \
-             needs a new plan version rather than an edit to v2."
+             needs a new plan version rather than an edit to v3."
         );
         assert_eq!(
             written, frozen,
             "the current writer's managed-root order or kinds drifted from the \
-             frozen v2 shape; persisted plans are compared element-by-element"
+             frozen v3 shape; persisted plans are compared element-by-element"
         );
         assert_eq!(
             released_plan_shape(PLAN_VERSION).unwrap().managed_roots,
-            RELEASED_V2_MANAGED_ROOTS,
-            "the current plan version must resolve to the frozen v2 shape"
+            RELEASED_V3_MANAGED_ROOTS,
+            "the current plan version must resolve to the frozen v3 shape"
         );
         assert!(
             released_plan_shape(PLAN_VERSION).unwrap().persists_work_dir,
-            "v2 plans always persist their work root"
+            "v3 plans always persist their work root"
         );
         assert!(
             !released_plan_shape(LEGACY_PLAN_VERSION)

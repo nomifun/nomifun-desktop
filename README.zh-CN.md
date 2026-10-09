@@ -318,7 +318,7 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 Apple Silicon macOS 嵌入原生 CEF，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
+- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 Apple Silicon 与 Intel macOS 嵌入原生 CEF，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
 - **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
 - **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
 - **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
@@ -568,6 +568,13 @@ Rosetta 运行方式，v0.8.1 的翻译环境 CEF 关闭测试未通过；本次
 `build`、`build:mac`、`build:signed` 和 `build:updater` 在 macOS 上使用同一套完整装配流程：
 先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
 更新包还需要独立的 Tauri updater 签名密钥。
+
+DMG 默认使用 **ULMO/LZMA** 压缩；需要兼容格式时，执行
+`NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac`，生成 **UDZO/zlib level 9**
+镜像（签名构建同样支持该设置）。ULMO 要求挂载系统为 macOS 10.15+，内置浏览器
+两种原生架构均沿用 macOS 14+ 的既有目标；压缩策略不修改 App 最低系统声明或
+浏览器运行库。签名发布构建配置公证时，最终 App 在生成 DMG/updater 之前完成
+签名、公证与装订票据；DMG 创建后再执行自身的签名与公证。
 
 | 目标 | 命令 |
 | --- | --- |

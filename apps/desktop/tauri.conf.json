@@ -19,7 +19,6 @@
     "active": true,
     "targets": ["nsis", "app", "dmg", "appimage", "deb", "rpm"],
     "resources": {
-      "../../ui/dist/": "webui-dist/",
       "../../LICENSE": "LICENSE",
       "../../NOTICE": "NOTICE"
     },

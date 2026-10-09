@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -89,15 +89,28 @@ check(nsis?.template === 'nsis/installer.nsi', 'bundle.windows.nsis.template mus
 
 const resources = config?.bundle?.resources ?? {};
 const requiredResources = {
-  '../../ui/dist/': 'webui-dist/',
   '../../LICENSE': 'LICENSE',
   '../../NOTICE': 'NOTICE',
 };
 for (const [source, target] of Object.entries(requiredResources)) {
   check(resources[source] === target, 'bundle resource must map ' + source + ' to ' + target);
-  if (source !== '../../ui/dist/') {
-    check(existsSync(resolve(dirname(configPath), source)), 'bundle resource source is missing: ' + source);
-  }
+  check(existsSync(resolve(dirname(configPath), source)), 'bundle resource source is missing: ' + source);
+}
+
+// Desktop and LAN WebUI share Tauri's exact embedded frontend. A resource
+// sidecar adds a second copy to every installer without serving production.
+check(config?.build?.frontendDist === '../../ui/dist', 'build.frontendDist must embed ../../ui/dist');
+const embeddedFrontendDir = resolve(dirname(configPath), '../../ui/dist');
+for (const [source, target] of Object.entries(resources)) {
+  const resourcePath = resolve(dirname(configPath), source);
+  check(
+    resourcePath !== embeddedFrontendDir && !resourcePath.startsWith(embeddedFrontendDir + sep),
+    'bundle resource must not duplicate the embedded frontend: ' + source,
+  );
+  check(
+    typeof target !== 'string' || !/^webui-dist(?:[\\/]|$)/.test(target),
+    'bundle resource must not recreate the retired webui-dist sidecar: ' + target,
+  );
 }
 
 const notice = readFileSync(noticePath, 'utf8');

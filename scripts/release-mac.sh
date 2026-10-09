@@ -281,6 +281,9 @@ if [[ "$NeedBump" -eq 1 ]]; then
   [[ "$CurVer" == "$TargetVersion" ]] || fail "bump 后版本仍为 ${CurVer}，期望 ${TargetVersion}。"
 fi
 
+echo "▶ 验证安装升级与数据库启动回归 ..."
+bun run test:upgrade || fail "安装升级回归测试失败，停止发布。"
+
 if [[ -n "${NotesContent//[[:space:]]/}" ]]; then
   NotesTmp="$(mktemp "${TMPDIR:-/tmp}/nomifun-relnotes-${TargetVersion}.XXXXXX.md")"
   printf "%s\n" "$NotesContent" > "$NotesTmp"

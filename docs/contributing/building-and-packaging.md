@@ -29,7 +29,10 @@ bun run build:ui
 Output: `ui/dist/`.
 
 Desktop builds bundle this directory through `frontendDist` in
-`apps/desktop/tauri.conf.json`. `nomifun-web` serves it from `--dist` /
+`apps/desktop/tauri.conf.json`. The desktop window and production LAN WebUI use
+the same embedded assets; desktop bundles do not carry a separate `webui-dist`
+copy. An explicit `NOMIFUN_WEBUI_DIST` directory retains its precedence and must
+match the desktop frontend build identity. `nomifun-web` serves it from `--dist` /
 `NOMIFUN_WEB_DIST`; when running from the repo, the default points at
 `../../ui/dist` from `apps/web`.
 
@@ -117,6 +120,30 @@ the manifest is live. See the root [`RELEASING.md`](../../RELEASING.md) for the
 manual upload runbook.
 
 ## macOS Signing and Notarization
+
+Complete macOS bundles support Apple Silicon arm64 and Intel x64, with separate
+CEF runtimes for each architecture; Universal builds are rejected. Use
+`bun run build:mac` for the arm64 default or `bun run build:mac intel` for Intel,
+whose bundle also carries the verified ONNX Runtime and its licenses. The
+embedded-browser target remains macOS 14+ for both native architectures.
+DMGs use ULMO/LZMA compression by default, supported for mounting on macOS 10.15+.
+For the UDZO compatibility format with zlib level 9, use:
+
+```bash
+NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
+```
+
+The override also applies to `build:signed` and `build:updater`. Compression does
+not change the App's minimum-system declarations or replace its CEF runtime.
+For signed release builds with notarization configured, the final App is signed,
+notarized and stapled before creating DMG/updater bytes; DMG signing and
+notarization remain after container creation.
+
+The CEF bundle keeps `en`, `en_GB`, `zh_CN` and `zh_TW` resources, including their
+`FEMININE`, `MASCULINE` and `NEUTER` variants. Other locale resources are removed
+from the copied framework before signing, without changing the current CEF
+default locale or web features. Updater payloads remain `.app.tar.gz` and use
+gzip level 9.
 
 Unsigned/ad-hoc macOS artifacts are useful for local testing but are not suitable
 for distributing to other people. To produce a Developer ID signed and notarized

@@ -43,7 +43,7 @@ fn prepare_executable(executable: &Path, data_dir: &Path) -> Result<Arc<Deferred
     let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(&metadata_path)
         .map_err(|_| "CEF runtime metadata cannot be read")?)
         .map_err(|_| "CEF runtime metadata is invalid")?;
-    for field in ["cef", "chromium", "crate", "architecture", "archive", "archive_sha1"] {
+    for field in ["cef", "chromium", "crate", "architecture", "archive", "archive_sha1", "locales", "locale_variants"] {
         if metadata.get(field) != expected.get(field) {
             return Err(format!("CEF runtime metadata does not match this application: {field}"));
         }
@@ -64,7 +64,33 @@ fn prepare_executable(executable: &Path, data_dir: &Path) -> Result<Arc<Deferred
         let path = owned_component(&paths.main_bundle, &paths.framework.join("Resources").join(resource), resource)?;
         if !path.is_file() { return Err(format!("CEF browser resource is missing: {resource}")); }
     }
+    for resource in locale_resources(&expected) {
+        let path = paths.framework.join("Resources").join(&resource);
+        owned_component(&paths.main_bundle, &path, &resource)?;
+        // Framework/Resources may use the standard version symlink layout,
+        // but locale directories and packs must be the staged regular files.
+        let directory = std::fs::symlink_metadata(path.parent().expect("CEF locale directory"))
+            .map_err(|_| format!("CEF locale directory cannot be inspected: {resource}"))?;
+        let pack = std::fs::symlink_metadata(&path)
+            .map_err(|_| format!("CEF locale pack cannot be inspected: {resource}"))?;
+        if !directory.file_type().is_dir() || !pack.file_type().is_file() || pack.len() == 0 {
+            return Err(format!("CEF locale pack must be a non-empty regular file in a regular locale directory: {resource}"));
+        }
+    }
     Ok(Arc::new(DeferredEngine { paths: Mutex::new(Some(paths)), initialization: Arc::new(Initialization::default()) }))
+}
+
+fn locale_resources(expected: &serde_json::Value) -> Vec<String> {
+    let locales = expected["locales"].as_array().expect("compiled CEF locale contract");
+    let variants = expected["locale_variants"].as_array().expect("compiled CEF locale variant contract");
+    locales.iter().flat_map(|locale| {
+        let locale = locale.as_str().expect("compiled CEF locale name");
+        variants.iter().map(move |variant| {
+            let variant = variant.as_str().expect("compiled CEF locale variant");
+            let suffix = if variant.is_empty() { String::new() } else { format!("_{variant}") };
+            format!("{locale}{suffix}.lproj/locale.pak")
+        })
+    }).collect()
 }
 
 fn owned_component(bundle: &Path, component: &Path, label: &str) -> Result<PathBuf, String> {
@@ -246,6 +272,11 @@ mod tests {
             let resource = resource.as_str().unwrap();
             std::fs::write(framework.join("Resources").join(resource), "fixture").unwrap();
         }
+        for resource in locale_resources(&expected) {
+            let pack = framework.join("Resources").join(resource);
+            std::fs::create_dir_all(pack.parent().unwrap()).unwrap();
+            std::fs::write(pack, "locale fixture").unwrap();
+        }
         let metadata = bundle.join("Contents/Resources/browser-cef/runtime.json");
         std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
         std::fs::write(metadata, serde_json::to_vec(&expected).unwrap()).unwrap();
@@ -304,6 +335,70 @@ mod tests {
         let outside = root.path().join("outside-helper");
         std::fs::rename(&helper, &outside).unwrap();
         std::os::unix::fs::symlink(&outside, &helper).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("outside its application"));
+    }
+
+    #[test]
+    fn every_configured_locale_pack_is_required_before_initialization() {
+        let expected: serde_json::Value = serde_json::from_str(BROWSER_RUNTIME).unwrap();
+        for resource in locale_resources(&expected) {
+            let root = tempfile::tempdir().unwrap();
+            let executable = complete_bundle(root.path());
+            let pack = root.path().join("NomiFun.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources").join(&resource);
+            std::fs::remove_file(pack).unwrap();
+            let error = prepare_executable(&executable, root.path()).err().unwrap();
+            assert!(error.contains(&resource), "missing {resource} must be identified: {error}");
+        }
+    }
+
+    #[test]
+    fn locale_metadata_must_match_the_compiled_distribution() {
+        for field in ["locales", "locale_variants"] {
+            let root = tempfile::tempdir().unwrap();
+            let executable = complete_bundle(root.path());
+            let metadata = root.path().join("NomiFun.app/Contents/Resources/browser-cef/runtime.json");
+            let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&metadata).unwrap()).unwrap();
+            value[field].as_array_mut().unwrap().pop();
+            std::fs::write(&metadata, serde_json::to_vec(&value).unwrap()).unwrap();
+            let error = prepare_executable(&executable, root.path()).err().unwrap();
+            assert!(error.contains(field), "mismatched {field} must be identified: {error}");
+            value.as_object_mut().unwrap().remove(field);
+            std::fs::write(&metadata, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(prepare_executable(&executable, root.path()).err().unwrap().contains(field));
+        }
+    }
+
+    #[test]
+    fn locale_resources_must_be_regular_and_non_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = complete_bundle(root.path());
+        let expected: serde_json::Value = serde_json::from_str(BROWSER_RUNTIME).unwrap();
+        let resource = locale_resources(&expected).into_iter().next().unwrap();
+        let pack = root.path().join("NomiFun.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources").join(&resource);
+        std::fs::write(&pack, []).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("non-empty regular file"));
+        std::fs::remove_file(&pack).unwrap();
+        std::fs::create_dir(&pack).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("non-empty regular file"));
+        std::fs::remove_dir(&pack).unwrap();
+        std::fs::write(&pack, "locale fixture").unwrap();
+        let locale_directory = pack.parent().unwrap();
+        let staged_directory = locale_directory.with_extension("fixture");
+        std::fs::rename(locale_directory, &staged_directory).unwrap();
+        std::os::unix::fs::symlink(&staged_directory, locale_directory).unwrap();
+        assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("regular locale directory"));
+    }
+
+    #[test]
+    fn locale_pack_symlinks_cannot_escape_the_application_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = complete_bundle(root.path());
+        let expected: serde_json::Value = serde_json::from_str(BROWSER_RUNTIME).unwrap();
+        let resource = locale_resources(&expected).into_iter().next().unwrap();
+        let pack = root.path().join("NomiFun.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources").join(&resource);
+        let outside = root.path().join("outside-locale.pak");
+        std::fs::rename(&pack, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &pack).unwrap();
         assert!(prepare_executable(&executable, root.path()).err().unwrap().contains("outside its application"));
     }
 

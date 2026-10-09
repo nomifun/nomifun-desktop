@@ -168,6 +168,11 @@ if ($NeedBump) {
   if ($CurVer -ne $TargetVersion) { Fail "bump 后版本仍为 $CurVer，期望 $TargetVersion。" }
 }
 
+# ── 安装升级回归门禁 ─────────────────────────────────────────────────────────
+Write-Host "▶ 验证安装升级与数据库启动回归 ..."
+& bun run test:upgrade
+if ($LASTEXITCODE -ne 0) { Fail "安装升级回归测试失败，停止发布。" }
+
 # ── 临时 note 文件：gh 与 make:latest 共用，避免 PowerShell 多行参数问题 ──────
 $NotesTmp = $null
 if ($NotesContent) {
