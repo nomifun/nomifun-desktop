@@ -11,41 +11,41 @@ import type {
   ThinkingContentDisplayLength,
   ThinkingSummaryDisplayLength,
 } from '@/common/config/thinkingDisplay';
-import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import NomiSelect from '@/renderer/components/base/NomiSelect';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
-import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
-import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
-import { FolderSearch } from '@icon-park/react';
+import { Alert, Button, Message, Modal } from '@arco-design/web-react';
+import { FolderOpen, FolderSearch, Search } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
-import DirInputItem from './DirInputItem';
+import { useSearchParams } from 'react-router-dom';
+import { VisualChoice, VisualEmpty, VisualListRow, VisualPanel, VisualRow, VisualSearch, VisualSwitch, VisualTabs } from '@/renderer/pages/settings/components/CodeVisualPrimitives';
+import PageHeader from '@/renderer/components/layout/PageHeader';
 import FactoryResetModal from './FactoryResetModal';
-import PreferenceRow from './PreferenceRow';
 
 /**
  * System settings content component
  *
- * Provides system-level configuration options including language, directory config,
- * and developer tools (dev mode only).
+ * Groups install-wide preferences without changing their configuration keys.
  */
 const SystemModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const [form] = Form.useForm();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [query, setQuery] = useState('');
+  const [changingDirectory, setChangingDirectory] = useState(false);
+  const [committedWorkDir, setCommittedWorkDir] = useState<string>();
   // arco types Modal.useModal() methods (confirm/info/...) as optional even
   // though the hook always supplies them; assert the non-optional shape so
   // `modal.confirm(...)` doesn't trip TS2722.
   const [modalRaw, modalContextHolder] = Modal.useModal();
   const modal = modalRaw as Required<typeof modalRaw>;
   const [error, setError] = useState<string | null>(null);
-  const initializingRef = useRef(true);
+  const savingRef = useRef(false);
 
   const [startOnBoot, setStartOnBoot] = useState<IStartOnBootStatus>({
     supported: false,
@@ -92,7 +92,7 @@ const SystemModalContent: React.FC = () => {
       const previousStatus = startOnBoot;
       setStartOnBoot((prev) => ({ ...prev, enabled: checked }));
 
-      ipcBridge.application.setStartOnBoot
+      return ipcBridge.application.setStartOnBoot
         .invoke({ enabled: checked })
         .then((result) => {
           if (result.success && result.data) {
@@ -137,7 +137,7 @@ const SystemModalContent: React.FC = () => {
   const handleNotificationEnabledChange = useCallback(async (checked: boolean) => {
     if (checked && !(await ensureNotificationPermission())) return;
     setNotificationEnabled(checked);
-    configService.set('system.notificationEnabled', checked).catch(() => {
+    await configService.set('system.notificationEnabled', checked).catch(() => {
       setNotificationEnabled(!checked);
       configService.setLocal('system.notificationEnabled', !checked);
     });
@@ -146,7 +146,7 @@ const SystemModalContent: React.FC = () => {
   const handleCronNotificationEnabledChange = useCallback(async (checked: boolean) => {
     if (checked && !(await ensureNotificationPermission())) return;
     setCronNotificationEnabled(checked);
-    configService.set('system.cronNotificationEnabled', checked).catch(() => {
+    await configService.set('system.cronNotificationEnabled', checked).catch(() => {
       setCronNotificationEnabled(!checked);
       configService.setLocal('system.cronNotificationEnabled', !checked);
     });
@@ -154,7 +154,7 @@ const SystemModalContent: React.FC = () => {
 
   const handleSaveUploadToWorkspaceChange = useCallback((checked: boolean) => {
     setSaveUploadToWorkspace(checked);
-    configService.set('upload.saveToWorkspace', checked).catch(() => {
+    return configService.set('upload.saveToWorkspace', checked).catch(() => {
       setSaveUploadToWorkspace(!checked);
       configService.setLocal('upload.saveToWorkspace', !checked);
     });
@@ -162,7 +162,7 @@ const SystemModalContent: React.FC = () => {
 
   const handleAutoPreviewOfficeFilesChange = useCallback((checked: boolean) => {
     setAutoPreviewOfficeFiles(checked);
-    configService.set('system.autoPreviewOfficeFiles', checked).catch(() => {
+    return configService.set('system.autoPreviewOfficeFiles', checked).catch(() => {
       setAutoPreviewOfficeFiles(!checked);
       configService.setLocal('system.autoPreviewOfficeFiles', !checked);
     });
@@ -180,7 +180,7 @@ const SystemModalContent: React.FC = () => {
   const handleThinkingVisibleChange = useCallback(
     (checked: boolean) => {
       const previous = thinkingDisplay.visible;
-      configService.set('chat.thinking.visible', checked).catch(() => {
+      return configService.set('chat.thinking.visible', checked).catch(() => {
         configService.setLocal('chat.thinking.visible', previous);
         Message.error(t('settings.thinkingDisplaySaveFailed'));
       });
@@ -213,7 +213,7 @@ const SystemModalContent: React.FC = () => {
   const { keepAwake, setKeepAwake: applyKeepAwake } = useKeepAwake();
   const handleDecisionBasisChange = useCallback((checked: boolean) => {
     const previous = showDecisionBasis;
-    void setShowDecisionBasis(checked).catch(() => {
+    return setShowDecisionBasis(checked).catch(() => {
       configService.setLocal('chat.idmm.showDecisionBasis', previous);
       Message.error(t('settings.idmmDecisionBasisSaveFailed'));
     });
@@ -235,279 +235,136 @@ const SystemModalContent: React.FC = () => {
       });
   }, [systemInfo?.logDir]);
 
-  // Initialize form data
-  useEffect(() => {
-    if (systemInfo) {
-      initializingRef.current = true;
-      form.setFieldsValue({ workDir: systemInfo.workDir });
-      requestAnimationFrame(() => {
-        initializingRef.current = false;
+  const handlePickWorkDir = useCallback(async () => {
+    if (!systemInfo || savingRef.current) return;
+    savingRef.current = true;
+    setChangingDirectory(true);
+    setError(null);
+    try {
+      const selected = await ipcBridge.dialog.showOpen.invoke({
+        defaultPath: committedWorkDir ?? systemInfo.workDir,
+        properties: ['openDirectory', 'createDirectory'],
       });
+      const workDir = selected?.[0];
+      if (!workDir || workDir === (committedWorkDir ?? systemInfo.workDir)) return;
+      const confirmed = await new Promise<boolean>((resolve) => {
+        modal.confirm({
+          title: t('settings.workDirChangeConfirmTitle'),
+          content: t('settings.workDirChangeConfirmContent'),
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        });
+      });
+      if (!confirmed) return;
+      await ipcBridge.application.updateSystemInfo.invoke({ cacheDir: systemInfo.cacheDir, workDir });
+      // Once persisted, show the committed directory even if relaunch fails.
+      setCommittedWorkDir(workDir);
+      await ipcBridge.application.restart.invoke();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      savingRef.current = false;
+      setChangingDirectory(false);
     }
-  }, [systemInfo, form]);
+  }, [committedWorkDir, modal, systemInfo, t]);
 
-  const preferenceItems = [
+  const switchControl = (label: string, checked: boolean, onChange: (checked: boolean) => void | Promise<void>, disabled = false) =>
+    <VisualSwitch label={label} checked={checked} onChange={onChange} disabled={disabled} />;
+
+  const groups: Array<{
+    key: string; title: string; description: string;
+    rows: Array<{ key: string; label: string; description?: string; disabled?: boolean; control: React.ReactNode }>;
+    directories?: Array<{ key: string; label: string; path?: string; icon: React.ReactNode; action: React.ReactNode }>;
+  }> = [
     {
-      key: 'language',
-      label: t('settings.language'),
-      description: t('settings.languagePreferenceDesc'),
-      component: <LanguageSwitcher />,
+      key: 'preferences', title: t('settings.workspace.preferences'), description: t('settings.workspace.preferencesDesc'),
+      rows: [
+        { key: 'language', label: t('settings.language'), description: t('settings.languagePreferenceDesc'), control: <LanguageSwitcher /> },
+        { key: 'startOnBoot', label: t('settings.startOnBoot'), description: startOnBoot.supported ? t('settings.startOnBootDesc') : t('settings.startOnBootUnsupported'), control: switchControl(t('settings.startOnBoot'), startOnBoot.enabled, handleStartOnBootChange, !startOnBoot.supported) },
+        { key: 'keepAwake', label: t('settings.keepAwake'), description: t('settings.keepAwakeDesc'), control: switchControl(t('settings.keepAwake'), keepAwake, handleKeepAwakeChange) },
+      ],
     },
     {
-      key: 'sendKey',
-      label: t('settings.sendKey'),
-      description: t('settings.sendKeyDesc'),
-      component: (
-        <NomiSelect
-          className='w-200px'
-          value={sendKey}
-          onChange={(v) => handleSendKeyChange(v as 'enter' | 'mod-enter')}
-        >
-          <NomiSelect.Option value='enter'>{t('settings.sendKeyEnter')}</NomiSelect.Option>
-          <NomiSelect.Option value='mod-enter'>{t('settings.sendKeyModEnter')}</NomiSelect.Option>
-        </NomiSelect>
-      ),
+      key: 'conversation', title: t('settings.workspace.conversation'), description: t('settings.workspace.conversationDesc'),
+      rows: [
+        { key: 'sendKey', label: t('settings.sendKey'), description: t('settings.sendKeyDesc'), control:
+          <VisualChoice label={t('settings.sendKey')} value={sendKey} onChange={handleSendKeyChange} options={[
+            { value: 'enter', label: t('settings.sendKeyEnter') }, { value: 'mod-enter', label: t('settings.sendKeyModEnter') },
+          ]} /> },
+        { key: 'thinkingVisible', label: t('settings.thinkingProcessVisible'), description: t('settings.thinkingProcessVisibleDesc'), control: switchControl(t('settings.thinkingProcessVisible'), thinkingDisplay.visible, handleThinkingVisibleChange) },
+        { key: 'thinkingContentLength', label: t('settings.thinkingContentLength'), description: t('settings.thinkingContentLengthDesc'), disabled: !thinkingDisplay.visible, control:
+          <VisualChoice<ThinkingContentDisplayLength> label={t('settings.thinkingContentLength')} value={thinkingDisplay.contentLength} disabled={!thinkingDisplay.visible} onChange={handleThinkingContentLengthChange} options={[
+            { value: 'compact', label: t('settings.thinkingContentCompact') }, { value: 'full', label: t('settings.thinkingContentFull') },
+          ]} /> },
+        { key: 'thinkingSummaryLength', label: t('settings.thinkingSummaryLength'), description: t('settings.thinkingSummaryLengthDesc'), disabled: !thinkingDisplay.visible, control:
+          <VisualChoice<ThinkingSummaryDisplayLength> label={t('settings.thinkingSummaryLength')} value={thinkingDisplay.summaryLength} disabled={!thinkingDisplay.visible} onChange={handleThinkingSummaryLengthChange} options={[
+            { value: 'hidden', label: t('settings.thinkingSummaryHidden') }, { value: 'shown', label: t('settings.thinkingSummaryShown') },
+          ]} /> },
+        { key: 'idmmDecisionBasis', label: t('settings.idmmDecisionBasis'), description: t('settings.idmmDecisionBasisDesc'), control: switchControl(t('settings.idmmDecisionBasis'), showDecisionBasis === true, handleDecisionBasisChange) },
+      ],
     },
     {
-      key: 'thinkingVisible',
-      label: t('settings.thinkingProcessVisible'),
-      description: t('settings.thinkingProcessVisibleDesc'),
-      component: <Switch checked={thinkingDisplay.visible} onChange={handleThinkingVisibleChange} />,
+      key: 'files', title: t('settings.workspace.files'), description: t('settings.workspace.filesDesc'),
+      rows: [
+        { key: 'saveUploadToWorkspace', label: t('settings.saveUploadToWorkspace'), control: switchControl(t('settings.saveUploadToWorkspace'), saveUploadToWorkspace, handleSaveUploadToWorkspaceChange) },
+        { key: 'autoPreviewOfficeFiles', label: t('settings.autoPreviewOfficeFiles'), description: t('settings.autoPreviewOfficeFilesDesc'), control: switchControl(t('settings.autoPreviewOfficeFiles'), autoPreviewOfficeFiles, handleAutoPreviewOfficeFilesChange) },
+      ],
+      directories: [
+        { key: 'workDir', label: t('settings.workDir'), path: committedWorkDir ?? systemInfo?.workDir, icon: <FolderOpen theme='outline' size={17} />, action:
+          <Button size='small' loading={changingDirectory} disabled={!systemInfo} onClick={() => void handlePickWorkDir()}>{t('settings.workspace.changeDirectory')}</Button> },
+        { key: 'logDir', label: t('settings.logDir'), path: systemInfo?.logDir, icon: <FolderSearch theme='outline' size={17} />, action:
+          <Button size='small' disabled={!systemInfo?.logDir} onClick={handleOpenLogDir}>{t('settings.workspace.openDirectory')}</Button> },
+      ],
     },
     {
-      key: 'idmmDecisionBasis',
-      label: t('settings.idmmDecisionBasis'),
-      description: t('settings.idmmDecisionBasisDesc'),
-      component: <Switch checked={showDecisionBasis === true} onChange={handleDecisionBasisChange} />,
+      key: 'notifications', title: t('settings.notification'), description: t('settings.workspace.notificationsDesc'),
+      rows: [
+        { key: 'notification', label: t('settings.notification'), control: switchControl(t('settings.notification'), notificationEnabled, handleNotificationEnabledChange) },
+        { key: 'cronNotificationEnabled', label: t('settings.cronNotificationEnabled'), description: t('settings.workspace.cronNotificationDesc'), disabled: !notificationEnabled, control: switchControl(t('settings.cronNotificationEnabled'), cronNotificationEnabled, handleCronNotificationEnabledChange, !notificationEnabled) },
+      ],
     },
     {
-      key: 'thinkingContentLength',
-      label: t('settings.thinkingContentLength'),
-      description: t('settings.thinkingContentLengthDesc'),
-      component: (
-        <NomiSelect
-          className='w-200px'
-          value={thinkingDisplay.contentLength}
-          disabled={!thinkingDisplay.visible}
-          onChange={(value) => handleThinkingContentLengthChange(value as ThinkingContentDisplayLength)}
-        >
-          <NomiSelect.Option value='compact'>{t('settings.thinkingContentCompact')}</NomiSelect.Option>
-          <NomiSelect.Option value='full'>{t('settings.thinkingContentFull')}</NomiSelect.Option>
-        </NomiSelect>
-      ),
-    },
-    {
-      key: 'thinkingSummaryLength',
-      label: t('settings.thinkingSummaryLength'),
-      description: t('settings.thinkingSummaryLengthDesc'),
-      component: (
-        <NomiSelect
-          className='w-200px'
-          value={thinkingDisplay.summaryLength}
-          disabled={!thinkingDisplay.visible}
-          onChange={(value) => handleThinkingSummaryLengthChange(value as ThinkingSummaryDisplayLength)}
-        >
-          <NomiSelect.Option value='hidden'>{t('settings.thinkingSummaryHidden')}</NomiSelect.Option>
-          <NomiSelect.Option value='shown'>{t('settings.thinkingSummaryShown')}</NomiSelect.Option>
-        </NomiSelect>
-      ),
-    },
-    {
-      key: 'startOnBoot',
-      label: t('settings.startOnBoot'),
-      description: startOnBoot.supported ? t('settings.startOnBootDesc') : t('settings.startOnBootUnsupported'),
-      component: (
-        <Switch checked={startOnBoot.enabled} onChange={handleStartOnBootChange} disabled={!startOnBoot.supported} />
-      ),
-    },
-    {
-      key: 'keepAwake',
-      label: t('settings.keepAwake'),
-      description: t('settings.keepAwakeDesc'),
-      component: <Switch checked={keepAwake} onChange={handleKeepAwakeChange} />,
-    },
-    {
-      key: 'saveUploadToWorkspace',
-      label: t('settings.saveUploadToWorkspace'),
-      component: <Switch checked={saveUploadToWorkspace} onChange={handleSaveUploadToWorkspaceChange} />,
-    },
-    {
-      key: 'autoPreviewOfficeFiles',
-      label: t('settings.autoPreviewOfficeFiles'),
-      description: t('settings.autoPreviewOfficeFilesDesc'),
-      component: <Switch checked={autoPreviewOfficeFiles} onChange={handleAutoPreviewOfficeFilesChange} />,
+      key: 'data', title: t('settings.workspace.data'), description: t('settings.workspace.dataDesc'),
+      rows: [{ key: 'factoryReset', label: t('settings.factoryReset.title'), description: t('settings.factoryReset.rowDesc'), control:
+        <Button status='danger' onClick={() => setFactoryResetVisible(true)}>{t('settings.factoryReset.button')}</Button> }],
     },
   ];
-
-  const saveDirConfigValidate = (_values: { workDir: string }): Promise<unknown> => {
-    return new Promise((resolve, reject) => {
-      modal.confirm({
-        title: t('settings.workDirChangeConfirmTitle'),
-        content: t('settings.workDirChangeConfirmContent'),
-        onOk: resolve,
-        onCancel: reject,
-      });
-    });
-  };
-
-  const savingRef = useRef(false);
-
-  const handleValuesChange = useCallback(
-    async (_changedValue: unknown, allValues: Record<string, string>) => {
-      if (initializingRef.current || savingRef.current || !systemInfo) return;
-      const { workDir } = allValues;
-      const needsRestart = workDir !== systemInfo.workDir;
-      if (!needsRestart) return;
-
-      savingRef.current = true;
-      setError(null);
-      try {
-        // Confirm, then persist. A failure (or cancel) here means nothing was
-        // written, so reverting the field to the current value is correct.
-        try {
-          await saveDirConfigValidate({ workDir });
-          // Pass systemInfo.cacheDir as-is: cacheDir is no longer user-editable
-          // (removed from UI), but the backend IPC interface still expects it.
-          // Passing the current value ensures existing custom paths are preserved.
-          await ipcBridge.application.updateSystemInfo.invoke({ cacheDir: systemInfo.cacheDir, workDir });
-        } catch (persistError: unknown) {
-          form.setFieldValue('workDir', systemInfo.workDir);
-          if (persistError) {
-            setError(persistError instanceof Error ? persistError.message : String(persistError));
-          }
-          return;
-        }
-        // Persisted: the new dir is now authoritative and applies on the next
-        // boot. Relaunch applies it immediately (and never returns). If relaunch
-        // instead throws, do NOT revert the field — the on-disk config already
-        // holds the new dir, so reverting would make the UI contradict reality;
-        // surface the error and let the user restart manually.
-        try {
-          await ipcBridge.application.restart.invoke();
-        } catch (restartError: unknown) {
-          if (restartError) {
-            setError(restartError instanceof Error ? restartError.message : String(restartError));
-          }
-        }
-      } finally {
-        savingRef.current = false;
-      }
-    },
-    [systemInfo, form, saveDirConfigValidate]
-  );
+  const requestedSection = searchParams.get('section');
+  const activeSection = groups.some((group) => group.key === requestedSection) ? requestedSection! : 'preferences';
+  const search = query.trim().toLocaleLowerCase();
+  const matches = (label: string, description?: string) => !search || (label + ' ' + (description ?? '')).toLocaleLowerCase().includes(search);
+  const visibleGroups = groups.filter((group) => search || group.key === activeSection).map((group) => {
+    const groupMatches = Boolean(search && matches(group.title, group.description));
+    return { ...group, rows: group.rows.filter((row) => groupMatches || matches(row.label, row.description)),
+      directories: group.directories?.filter((row) => groupMatches || matches(row.label, row.path)) };
+  }).filter((group) => group.rows.length || group.directories?.length);
 
   return (
-    <div className='flex flex-col h-full w-full'>
+    <div>
       {modalContextHolder}
-
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
-        <div className='space-y-16px'>
-          <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            {/*
-              `divide-y` emits only a width; with no border reset in this project the style stays
-              `none`, so `divide-solid` is mandatory or the separators never paint. `divide-solid`
-              styles all four sides, hence `divide-x-0` to keep the unset left/right widths from
-              falling back to the CSS initial `medium` (~3px). `divide-border-2` was dead — there is
-              no theme colour named `border`.
-            */}
-            <div className='w-full flex flex-col divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
-              {preferenceItems.map((item) => (
-                <PreferenceRow key={item.key} label={item.label} description={item.description}>
-                  {item.component}
-                </PreferenceRow>
-              ))}
-            </div>
-            {/* Notification settings with collapsible sub-options */}
-            <Collapse
-              bordered={false}
-              activeKey={notificationEnabled ? ['notification'] : []}
-              onChange={(_, keys) => {
-                const shouldExpand = (keys as string[]).includes('notification');
-                if (shouldExpand && !notificationEnabled) {
-                  handleNotificationEnabledChange(true);
-                } else if (!shouldExpand && notificationEnabled) {
-                  handleNotificationEnabledChange(false);
-                }
-              }}
-              className='[&_.arco-collapse-item]:!border-none [&_.arco-collapse-item-header]:!px-0 [&_.arco-collapse-item-header-title]:!flex-1 [&_.arco-collapse-item-content-box]:!px-0 [&_.arco-collapse-item-content-box]:!pb-0'
-            >
-              <Collapse.Item
-                name='notification'
-                showExpandIcon={false}
-                header={
-                  <div className='flex flex-1 items-center justify-between w-full'>
-                    <span className='text-14px text-2 ml-12px'>{t('settings.notification')}</span>
-                    <Switch
-                      checked={notificationEnabled}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={handleNotificationEnabledChange}
-                    />
-                  </div>
-                }
-              >
-                <div className='pl-12px'>
-                  <PreferenceRow label={t('settings.cronNotificationEnabled')}>
-                    <Switch
-                      checked={cronNotificationEnabled}
-                      disabled={!notificationEnabled}
-                      onChange={handleCronNotificationEnabledChange}
-                    />
-                  </PreferenceRow>
-                </div>
-              </Collapse.Item>
-            </Collapse>
-            <Form form={form} layout='vertical' className='!mt-32px space-y-16px' onValuesChange={handleValuesChange}>
-              <DirInputItem label={t('settings.workDir')} field='workDir' />
-              {/* Log directory (read-only, click to open in file manager) */}
-              <div>
-                <Form.Item label={t('settings.logDir')}>
-                  <div className='nomi-dir-input h-[32px] flex items-center rounded-8px border border-solid border-transparent pl-14px bg-[var(--fill-0)] '>
-                    <Tooltip content={systemInfo?.logDir || ''} position='top'>
-                      <div className='flex-1 min-w-0 text-13px text-t-primary truncate'>{systemInfo?.logDir || ''}</div>
-                    </Tooltip>
-                    <Button
-                      type='text'
-                      style={{ borderLeft: '1px solid var(--color-border-2)', borderRadius: '0 8px 8px 0' }}
-                      icon={<FolderSearch theme='outline' size='18' fill={iconColors.primary} />}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenLogDir();
-                      }}
-                    />
-                  </div>
-                </Form.Item>
-              </div>
-              {error && (
-                <Alert
-                  className='mt-16px'
-                  type='error'
-                  content={
-                    <span>
-                      {typeof error === 'string' ? error : JSON.stringify(error)}
-                      <FeedbackButton className='ml-6px' />
-                    </span>
-                  }
-                />
-              )}
-            </Form>
-          </div>
-
-          {/* Danger zone: factory reset (clears the database + derived data) */}
-          <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-            <div className='text-13px font-600 text-danger-6'>{t('settings.factoryReset.dangerZone')}</div>
-            <div className='flex items-center justify-between gap-12px flex-wrap'>
-              <div className='flex-1 min-w-200px'>
-                <div className='text-14px text-t-primary'>{t('settings.factoryReset.title')}</div>
-                <div className='text-12px text-t-secondary mt-2px leading-20px'>{t('settings.factoryReset.rowDesc')}</div>
-              </div>
-              <Button status='danger' onClick={() => setFactoryResetVisible(true)}>
-                {t('settings.factoryReset.button')}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </NomiScrollArea>
-
+      <PageHeader title={t('settings.workspace.generalTitle')} />
+      <div className='cv-toolbar'>
+        <VisualSearch value={query} onChange={setQuery} label={t('settings.workspace.search')} clearLabel={t('settings.workspace.clearSearch')} />
+        <span className='cv-toolbar__hint'>{t('settings.workspace.autoSave')}</span>
+      </div>
+      {!search && <VisualTabs id='general-settings' label={t('settings.workspace.generalTitle')}
+        items={groups.map((group) => ({ key: group.key, label: group.title }))} activeKey={activeSection}
+        onChange={(key) => setSearchParams((previous) => {
+          const next = new URLSearchParams(previous); next.set('section', key); return next;
+        }, { replace: true })} />}
+      <div className='cv-stack' id='general-settings-panel' role={search ? undefined : 'tabpanel'}
+        aria-labelledby={search ? undefined : 'general-settings-tab-' + activeSection}>
+        {visibleGroups.map((group) => <VisualPanel key={group.key} label={group.title}
+          title={search ? group.title : undefined} description={search ? group.description : undefined}
+          className={group.key === 'data' ? 'cv-danger' : undefined}>
+          {group.rows.map((row) => <VisualRow key={row.key} label={row.label} description={row.description} disabled={row.disabled}>{row.control}</VisualRow>)}
+          {group.directories?.map((directory) => <VisualListRow key={directory.key} icon={directory.icon} title={directory.label}
+            description={<span className='cv-directory-path'>{directory.path || t('settings.dirNotConfigured')}</span>} action={directory.action} />)}
+        </VisualPanel>)}
+        {!visibleGroups.length && <VisualEmpty icon={<Search theme='outline' size={22} />} title={t('settings.workspace.noResults')}
+          description={t('settings.workspace.noResultsDesc')} action={<Button onClick={() => setQuery('')}>{t('settings.workspace.clearSearch')}</Button>} />}
+        {error && <Alert type='error' content={<span>{error}<FeedbackButton className='ml-6px' /></span>} />}
+      </div>
       <FactoryResetModal visible={factoryResetVisible} onClose={() => setFactoryResetVisible(false)} />
     </div>
   );

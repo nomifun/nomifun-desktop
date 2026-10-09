@@ -1840,7 +1840,7 @@ const KnowledgeDetailPage: React.FC = () => {
           <div className='flex gap-14px items-center'>
             {base && kindConfig && <DetailKindIcon kind={base.kind} config={kindConfig} />}
             <div className='flex flex-col gap-6px'>
-              <h1 className='m-0 text-21px font-700 text-[var(--color-text-1)] flex items-center gap-9px'>
+              <h1 className='m-0 text-[length:var(--page-title-size)] font-600 leading-[var(--page-title-line-height)] text-[var(--color-text-1)] flex items-center gap-9px'>
                 {base?.name ?? '...'}
                 {/* Pen icon — edit entry point (actual editing in D5/Settings tab) */}
                 <span

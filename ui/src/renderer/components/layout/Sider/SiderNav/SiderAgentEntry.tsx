@@ -6,69 +6,15 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Tooltip } from '@arco-design/web-react';
 import { Robot } from '@icon-park/react';
-import classNames from 'classnames';
-import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
+import SiderNavItem, { type SiderNavItemProps } from './SiderNavItem';
 
-interface SiderAgentEntryProps {  isActive: boolean;
-  collapsed: boolean;
-  siderTooltipProps: SiderTooltipProps;
-  onClick: () => void;
-}
+type SiderAgentEntryProps = Pick<SiderNavItemProps, 'isActive' | 'collapsed' | 'siderTooltipProps' | 'onClick'>;
 
-/** The single public entry for Agent authoring and testing. */
-const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({  isActive,
-  collapsed,
-  siderTooltipProps,
-  onClick,
-}) => {
+const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({ collapsed = false, ...props }) => {
   const { t } = useTranslation();
-  const label = t('agentSettings.navigation.railTitle', { defaultValue: 'Agent Workbench' });
-
-  if (collapsed) {
-    return (
-      <Tooltip {...siderTooltipProps} content={label} position='right'>
-        <div
-          className={classNames(
-            'w-full h-28px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
-            isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-          )}
-          onClick={onClick}
-        >
-          <Robot
-            theme='outline'
-            size='20'
-            fill='currentColor'
-            className='block leading-none shrink-0'
-            style={{ lineHeight: 0 }}
-          />
-        </div>
-      </Tooltip>
-    );
-  }
-
-  return (
-    <Tooltip {...siderTooltipProps} content={label} position='right'>
-      <div
-        className={classNames(
-          'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',          isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-        )}
-        onClick={onClick}
-      >
-        <span className='size-22px flex items-center justify-center shrink-0'>
-          <Robot
-            theme='outline'
-            size='16'
-            fill='currentColor'
-            className='block leading-none'
-            style={{ lineHeight: 0 }}
-          />
-        </span>
-        <span className='collapsed-hidden text-14px font-[500] leading-24px'>{label}</span>
-      </div>
-    </Tooltip>
-  );
+  return <SiderNavItem {...props} collapsed={collapsed} label={t('agentSettings.navigation.railTitle', { defaultValue: 'Agent Workbench' })}
+    icon={<Robot theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />} />;
 };
 
 export default SiderAgentEntry;

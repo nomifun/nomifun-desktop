@@ -1,0 +1,7 @@
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.page-header__copy { min-width: 0; }
+.page-header__title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.app-page-title { margin: 0; color: var(--text-primary); font-size: var(--page-title-size); line-height: var(--page-title-line-height); font-weight: 600; letter-spacing: normal; }
+.page-header__description { margin-top: 4px; color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+.page-header__actions { display: flex; align-items: center; flex-shrink: 0; gap: 8px; }
+.page-header--flush { margin-bottom: 0; }
