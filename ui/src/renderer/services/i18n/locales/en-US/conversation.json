@@ -910,16 +910,6 @@
   "skills": {
     "loaded": "Loaded Skills"
   },
-  "mcp": {
-    "loaded": "Loaded MCP",
-    "managementHint": "If an MCP looks abnormal, review its JSON configuration and run an availability check in MCP management.",
-    "openSettings": "Open MCP management",
-    "status": {
-      "loaded": "Loaded",
-      "failed": "Failed",
-      "unsupported": "Unsupported"
-    }
-  },
   "capabilityPicker": {
     "unavailable": "Removed or unavailable",
     "ariaLabel": "Session capabilities",

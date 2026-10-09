@@ -273,7 +273,6 @@ async fn do_observe(
     Ok(Snapshot {
         generation,
         entries,
-        overlay: None,
         text,
         truncated,
         pid: None,

@@ -464,7 +464,6 @@
   "agentIdleTimeout": "Execution Engine Idle Timeout (min)",
   "agentIdleTimeoutDesc": "Stop idle execution engine processes after this duration to free memory",
   "gemini": "Gemini CLI",
-  "model": "Model",
   "system": "System",
   "about": "About",
   "advancedSettings": "Advanced Settings",
@@ -643,7 +642,6 @@
   "lightMode": "Light",
   "darkMode": "Dark",
   "agent": "Agent",
-  "tools": "Tools",
   "capabilities": "Capabilities",
   "capabilitiesTab": {
     "skills": "Skills",
@@ -935,7 +933,6 @@
   "channels.extension.defaultDesc": "Extension channel plugin",
   "channels.mediaSendFailed": "Failed to send {{name}}",
   "channels.mediaPathNotAllowed": "Couldn't send {{name}} because the file is outside the allowed send directories",
-  "display": "Display",
   "mcp": "MCP Integration",
   "mcpSettings": "MCP Servers",
   "mcpServerList": "MCP Servers",

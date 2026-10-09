@@ -13,8 +13,7 @@
 //! AXObserver on the frontmost app. Change notifications flip a `dirty` flag so
 //! `observe` re-serves the cached snapshot when nothing has changed and
 //! re-walks the tree otherwise. Every mutating command also marks `dirty`, so
-//! the cache is never stale after one of our own actions. OCR/vision fusion
-//! lives one layer up (the computer tool fuses `nomi_a11y::ocr_screenshot`).
+//! the cache is never stale after one of our own actions.
 
 // This whole module is FFI against the Accessibility C API; every helper is an
 // `unsafe fn` that is only valid on the actor thread. We keep the pre-2024
@@ -520,7 +519,6 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
                 return Ok(Snapshot {
                     generation: state.current_gen,
                     entries: c.entries.clone(),
-                    overlay: None,
                     text: format_entries(&c.entries),
                     truncated: c.truncated,
                     pid: c.pid,
@@ -589,7 +587,6 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
         Ok(Snapshot {
             generation,
             entries,
-            overlay: None, // the tool captures the screenshot + draws the overlay
             text,
             truncated,
             pid: app_pid,

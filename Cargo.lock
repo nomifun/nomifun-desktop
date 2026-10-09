@@ -1933,15 +1933,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "convert_case"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2127,33 +2118,6 @@ name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
-
-[[package]]
-name = "crossterm"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
-dependencies = [
- "bitflags 2.13.1",
- "crossterm_winapi",
- "derive_more",
- "document-features",
- "mio",
- "parking_lot",
- "rustix 1.1.4",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm_winapi"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
-dependencies = [
- "winapi",
-]
 
 [[package]]
 name = "crunchy"
@@ -2519,7 +2483,6 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
- "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
@@ -4549,17 +4512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "is-terminal"
-version = "0.4.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
-dependencies = [
- "hermit-abi",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "is-wsl"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5027,7 +4979,7 @@ checksum = "b6b8cfa2a7656627b4c92c6b9ef929433acd673d5ab3708cda1b18478ac00df4"
 dependencies = [
  "bitflags 2.13.1",
  "cc",
- "convert_case 0.8.0",
+ "convert_case",
  "cookie-factory",
  "libc",
  "libspa-sys",
@@ -5135,15 +5087,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "lru"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
-dependencies = [
- "hashbrown 0.17.1",
-]
 
 [[package]]
 name = "lru-slab"
@@ -5520,12 +5463,6 @@ dependencies = [
  "atspi",
  "core-foundation 0.10.1",
  "core-graphics",
- "image",
- "nomi-types",
- "objc2",
- "objc2-core-foundation",
- "objc2-foundation",
- "objc2-vision",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -5572,7 +5509,6 @@ dependencies = [
 name = "nomi-compact"
 version = "0.8.2"
 dependencies = [
- "regex",
  "serde",
  "serde_json",
 ]
@@ -5581,7 +5517,6 @@ dependencies = [
 name = "nomi-computer"
 version = "0.8.2"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "core-foundation 0.10.1",
  "dispatch2",
@@ -5589,7 +5524,6 @@ dependencies = [
  "image",
  "nomi-a11y",
  "nomi-config",
- "nomi-tools",
  "nomi-types",
  "objc2",
  "open",
@@ -5622,27 +5556,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "nomi-mcp"
-version = "0.8.2"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "futures",
- "nomi-config",
- "nomi-process-runtime",
- "nomi-tools",
- "nomi-types",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -5714,33 +5627,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "zeroize",
-]
-
-[[package]]
-name = "nomi-tools"
-version = "0.8.2"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "git2",
- "globset",
- "jsonschema",
- "junction",
- "libc",
- "lru",
- "nomi-config",
- "nomi-process-runtime",
- "nomi-types",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "which 7.0.3",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5946,7 +5832,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "crossterm",
  "dashmap",
  "dirs 6.0.0",
  "flate2",
@@ -5955,18 +5840,14 @@ dependencies = [
  "futures-util",
  "hex",
  "image",
- "is-terminal",
  "libc",
  "nomi-browser-engine",
  "nomi-config",
- "nomi-mcp",
  "nomi-process-runtime",
  "nomi-providers",
  "nomi-redact",
- "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
- "nomifun-agent-domain-wave1",
  "nomifun-agent-kernel",
  "nomifun-agent-runtime",
  "nomifun-api-types",
@@ -5974,13 +5855,11 @@ dependencies = [
  "nomifun-browser-platform",
  "nomifun-chat-model-broker",
  "nomifun-common",
- "nomifun-creation",
  "nomifun-db",
  "nomifun-engine-core",
  "nomifun-knowledge",
  "nomifun-model-invoke",
  "nomifun-net",
- "nomifun-realtime",
  "nomifun-runtime",
  "nomifun-terminal",
  "regex",
@@ -5990,7 +5869,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sqlx",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -6142,13 +6020,6 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "nomifun-audio"
-version = "0.8.2"
-dependencies = [
- "nomifun-voice-contracts",
 ]
 
 [[package]]
@@ -6469,11 +6340,6 @@ dependencies = [
  "mime_guess",
  "nomi-browser-engine",
  "nomi-process-runtime",
- "nomi-tools",
- "nomi-types",
- "nomifun-agent-contracts",
- "nomifun-agent-kernel",
- "nomifun-ai-agent",
  "nomifun-app",
  "nomifun-browser-macos",
  "nomifun-browser-platform",
@@ -6871,7 +6737,6 @@ dependencies = [
  "axum",
  "dashmap",
  "nomifun-agent-execution",
- "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
@@ -7610,16 +7475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-core-ml"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "201b055e6acfa0f9f15568255d3f03ce2b54bc86d1814442dc69138e36813e18"
-dependencies = [
- "objc2",
- "objc2-foundation",
-]
-
-[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7786,25 +7641,6 @@ checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
  "objc2",
  "objc2-foundation",
-]
-
-[[package]]
-name = "objc2-vision"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
-dependencies = [
- "block2",
- "objc2",
- "objc2-av-foundation",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-image",
- "objc2-core-media",
- "objc2-core-ml",
- "objc2-core-video",
- "objc2-foundation",
- "objc2-image-io",
 ]
 
 [[package]]
@@ -9984,27 +9820,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "signal-hook"
-version = "0.3.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
-name = "signal-hook-mio"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
-dependencies = [
- "libc",
- "mio",
- "signal-hook",
-]
 
 [[package]]
 name = "signal-hook-registry"

@@ -1,24 +1,18 @@
 //! Shared test helpers for nomifun-app E2E tests.
 #![allow(dead_code)]
 
-pub mod native_reliability_capture;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use wiremock::MockServer;
 
-use nomifun_ai_agent::{
-    AgentRuntimeControl, AgentRuntimeHandle, InMemoryAgentRuntimeSessions, MockAgentRuntime,
-};
 use nomifun_app::AppConfig;
 use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router, create_router_with_states,
 };
 use nomifun_auth::AuthPolicy;
 use nomifun_file::FileService;
-use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_system::VersionCheckService;
 
 fn isolated_config(prefix: &str) -> AppConfig {
@@ -121,73 +115,6 @@ pub async fn seed_openai_chat_model(pool: &nomifun_db::SqlitePool, provider_id: 
     .unwrap();
 }
 
-/// `extra` for a nomi conversation that does not pin a workspace. The backend
-/// auto-provisions a managed workspace under the work dir when this is empty.
-pub fn nomi_extra() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-/// `extra` for a nomi conversation bound to an explicit workspace path.
-pub fn nomi_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Value {
-    serde_json::json!({
-        "workspace": workspace.into(),
-    })
-}
-
-/// Build an app whose skill router reads from the given temp directories.
-///
-/// Use for HTTP integration tests that need deterministic on-disk layouts
-/// (E1 `/api/skills`, E2 `/api/skills/builtin-auto`, E3/E4 built-in reads,
-/// E5 `/api/skills/info`). Returns the router, services, and the
-/// `SkillPaths` so the test can seed fixtures at known locations.
-#[allow(dead_code)]
-pub async fn build_app_with_skill_paths(
-    root: &std::path::Path,
-) -> (axum::Router, AppServices, SkillPaths) {
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(
-        db,
-        &AppConfig {
-            data_dir: root.join("data"),
-            work_dir: root.join("work"),
-            ..AppConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-    let (mut states, _) = build_module_states(&services).await;
-
-    let builtin_dir = root.join("builtin-skills");
-    let paths = SkillPaths {
-        data_dir: root.to_path_buf(),
-        user_skills_dir: root.join("skills"),
-        cron_skills_dir: root.join("cron").join("skills"),
-        builtin_skills_dir: builtin_dir.clone(),
-        builtin_rules_dir: root.join("builtin-rules"),
-    };
-    for dir in [
-        &paths.user_skills_dir,
-        &builtin_dir,
-        &paths.builtin_rules_dir,
-    ] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
-
-    let ext_paths_mgr =
-        std::sync::Arc::new(ExternalPathsManager::with_file(root.join("paths.json")).await);
-    states.skill = SkillRouterState {
-        skill_paths: paths.clone(),
-        external_paths_manager: ext_paths_mgr,
-        skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
-            services.database.pool().clone(),
-        )),
-        builtin_skill_tags: std::sync::Arc::new(std::collections::HashMap::new()),
-    };
-
-    let router = create_router_with_states(&services, states);
-    (router, services, paths)
-}
-
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(db, &isolated_config("nomifun-noop-opener-e2e-"))
@@ -233,102 +160,6 @@ pub async fn build_app_with_mock_version(
     let router = create_router_with_states(&services, states);
     (router, services)
 }
-
-/// Build app with a mock Agent runtime registry that returns noop agents.
-///
-/// Use for tests that exercise session warmup and send-message paths where
-/// spawning a real CLI process is not feasible.
-pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
-    build_app_with_mock_agents_config(isolated_config("nomifun-mock-agent-e2e-")).await
-}
-
-pub async fn build_isolated_app_with_mock_agents(
-    root: &std::path::Path,
-) -> (axum::Router, AppServices) {
-    build_app_with_mock_agents_config(AppConfig {
-        data_dir: root.join("data"),
-        work_dir: root.join("work"),
-        ..AppConfig::default()
-    })
-    .await
-}
-
-async fn build_app_with_mock_agents_config(config: AppConfig) -> (axum::Router, AppServices) {
-    let db = nomifun_db::init_database_memory().await.unwrap();
-    let factory: std::sync::Arc<
-        dyn Fn(
-                nomifun_ai_agent::types::AgentRuntimeBuildOptions,
-            ) -> futures_util::future::BoxFuture<
-                'static,
-                Result<AgentRuntimeHandle, nomifun_common::AppError>,
-            > + Send
-            + Sync,
-    > = std::sync::Arc::new(|opts| {
-        Box::pin(async move {
-            Ok(AgentRuntimeHandle::Mock(std::sync::Arc::new(
-                NoopMockAgent {
-                    conversation_id: opts.conversation_id,
-                },
-            )))
-        })
-    });
-    let runtime_sessions: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeSessions> =
-        std::sync::Arc::new(InMemoryAgentRuntimeSessions::new(factory));
-    let services = AppServices::from_config(db, &config)
-        .await
-        .unwrap()
-        .with_agent_runtime_sessions(runtime_sessions);
-    let router = create_router(&services).await;
-    (router, services)
-}
-
-struct NoopMockAgent {
-    conversation_id: String,
-}
-
-#[async_trait::async_trait]
-impl AgentRuntimeControl for NoopMockAgent {
-    fn agent_type(&self) -> nomifun_common::AgentType {
-        nomifun_common::AgentType::Nomi
-    }
-    fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-    fn workspace(&self) -> &str {
-        "/tmp/test"
-    }
-    fn status(&self) -> Option<nomifun_common::ConversationStatus> {
-        None
-    }
-    fn is_transport_healthy(&self) -> bool {
-        true
-    }
-    fn last_activity_at(&self) -> nomifun_common::TimestampMs {
-        nomifun_common::now_ms()
-    }
-    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<nomifun_ai_agent::AgentStreamEvent> {
-        let (tx, _) = tokio::sync::broadcast::channel(1);
-        tx.subscribe()
-    }
-    async fn send_message(
-        &self,
-        _data: nomifun_ai_agent::types::SendMessageData,
-    ) -> Result<(), nomifun_ai_agent::AgentSendError> {
-        Ok(())
-    }
-    async fn cancel(&self) -> Result<(), nomifun_common::AppError> {
-        Ok(())
-    }
-    fn kill(
-        &self,
-        _reason: Option<nomifun_common::AgentKillReason>,
-    ) -> Result<(), nomifun_common::AppError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl MockAgentRuntime for NoopMockAgent {}
 
 pub async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();

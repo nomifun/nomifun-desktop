@@ -189,7 +189,6 @@ qqbot = ["nomifun-channel/qqbot"]
 # The canonical AgentPlatform Computer Role owns the native screen/input
 # implementation; web/headless builds omit the native stack entirely.
 computer-use = [
-    "nomifun-ai-agent/computer-use",
     "dep:nomi-computer",
     "dep:nomi-types",
 ]

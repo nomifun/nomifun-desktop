@@ -124,11 +124,15 @@ SPA ──HTTP/WS──▶ nomifun-conversation ──▶ nomifun-ai-agent::Agen
                               broadcast through nomifun-realtime to /ws
 ```
 
-Runtime 使用 typed `AgentEngineEvent`，由 `engine_journal` 写入同一 canonical Session。`nomifun-ai-agent::protocol::events::AgentStreamEvent` 提供 renderer 的实时展示投影，经 `WebSocketMessage` 送到 SPA；工具分类来自共享的 `nomi-types::tool::ToolCategory`。具体权限、暂停和恢复由 canonical owner 与原生 Runtime 管理，见 [Agent Session 架构](agent-session.zh.md)。
+Runtime 使用 typed `AgentEngineEvent`，由 `engine_journal` 写入同一 canonical Session。`nomifun-ai-agent::protocol::events::AgentStreamEvent` 提供 renderer 的实时展示投影，经 `WebSocketMessage` 送到 SPA。具体权限、暂停和恢复由 canonical owner 与原生 Runtime 管理，见 [Agent Session 架构](agent-session.zh.md)。
 
 第三方 agent CLI（Claude Code、Codex、Gemini CLI）不走这条通道：它们作为普通子进程运行在 `nomifun-terminal` 的 PTY session 里，后端持有伪终端而不解析它们的协议。见 [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
 
 ## MCP —— Model Context Protocol
+
+应用宿主通过 MCP adapter 将已准入的 MCP 工具计划绑定到
+`nomifun-mcp::McpOwner`。Runtime 经
+`nomifun-engine-core::EngineToolInvoker` 与 `nomifun-agent-kernel` 调用工具。
 
 MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app`
 二进制提供多个 stdio 桥子命令，而不是旧的单一 `mcp-bridge`：

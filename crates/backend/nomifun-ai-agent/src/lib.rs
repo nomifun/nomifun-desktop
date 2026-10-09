@@ -12,10 +12,7 @@ pub mod unified_runtime;
 pub mod context_contributor;
 pub mod runtime_model_middleware_contract;
 pub mod runtime_tool_middleware_contract;
-pub mod companion_tools;
-pub mod requirement_tools;
 pub mod runtime_output;
-pub mod session_control_tools;
 pub mod ssh_backend;
 pub mod engine_sdk;
 mod engine_tasks;
@@ -28,7 +25,6 @@ pub mod knowledge_completer;
 pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;
-mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
@@ -40,20 +36,11 @@ pub mod types;
 pub mod web_search;
 #[cfg(feature = "browser-use")]
 pub mod local_web_search;
-// Host/domain adapters extracted from the retired standalone Nomi loop. They
-// carry no model loop, Session store, or alternate Runtime authority.
-pub use companion_tools::{CompanionSkillSink, SkillListing};
 pub use ssh_backend::{
     RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider, SshLeaseRelease,
     SshSessionBinding, SshSessionLease,
 };
-pub use requirement_tools::RequirementSink;
 pub use context_contributor::{ContextContributor, TurnContext};
-pub use session_control_tools::{
-    AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
-    AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
-    AgentForkTool, SessionControlSink,
-};
 pub use nomi_config;
 pub use nomi_types;
 
@@ -88,22 +75,16 @@ pub use plugin_tools::{
     assemble_initial_capability_context,
     render_initial_capability_context_section,
     supports_nomi_plugin_capability,
-    KernelNomiPluginToolSession,
-    NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,
+    NomiHostDynamicToolError,
     NomiHostDynamicToolInvocation,
     NomiHostDynamicToolInvoker,
     NomiInitialContextContribution,
     NomiTurnContextContributor,
-    NomiPlatformBuiltinContextAdmission, NomiPluginToolAction,
-    NomiPluginToolError, NomiPluginToolInvocation, NomiPluginToolInvoker,
+    NomiPlatformBuiltinContextAdmission,
+    NomiPluginToolError,
     NomiPluginToolSchemaResolver,
-    NomiPlatformBuiltinToolAdmission,
     NomiPlatformBuiltinToolSchemaResolver,
     NomiPlatformBuiltinToolSchemaRouter,
-    NomiPlatformBuiltinLifecycleAdmission,
-    NomiPlatformBuiltinLifecycleInvocation,
-    NomiPlatformBuiltinLifecycleInvoker,
-    NomiPluginToolSession,
 };
 pub use factory::build_agent_model_config_resolver;
 pub use knowledge_completer::LiveKnowledgeCompleter;

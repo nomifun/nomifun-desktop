@@ -6,7 +6,7 @@
 //! `crates/backend/nomifun-ssh`, which reaches the agent layer through the
 //! `nomifun-ai-agent` seam. Keeping the transport here means russh — a crate
 //! with a fast-churning `Handler` API — is never a transitive dependency of
-//! `nomi-tools` / `nomifun-ai-agent` / `nomifun-terminal`.
+//! `nomifun-ai-agent` / `nomifun-terminal`.
 
 pub mod connection;
 pub mod credential;

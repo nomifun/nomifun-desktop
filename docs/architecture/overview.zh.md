@@ -96,11 +96,11 @@ Cargo 工作区（根 [`Cargo.toml`](../../Cargo.toml)，`resolver = "3"`，`edi
 
 | 目录 | 用途 | Crate 前缀 | 数量 |
 | --- | --- | --- | --- |
-| `crates/agent/` | AI 引擎 —— providers、tools、sessions、MCP、skills、browser/computer-use | `nomi-*` | 11 |
+| `crates/agent/` | 提供商、配置及桌面自动化基础实现 | `nomi-*` | 7 |
 | `crates/backend/` | HTTP/WS 服务器、数据、认证、各项功能 | `nomifun-*` | 54 |
-| `crates/shared/` | 真正跨层共享工具 | mixed | 5 |
+| `crates/shared/` | 真正跨层共享工具 | mixed | 4 |
 
-agent 分组是**基本自包含的** —— `nomi-*` crate 不引用 `nomifun-*` crate、工作区根目录或 Tauri / sqlx / axum 等后端框架。反向依赖默认通过 `nomifun-ai-agent` 这条接缝汇集，它再导出 `nomi_config`、`nomi_types` 和 `RequirementSink`。当前 `nomifun-app` 与 `nomifun-gateway` 为 browser/computer-use bridge 存在 feature-gated 直接依赖例外；新增例外必须有明确 feature gate 和文档说明。
+agent 分组是**基本自包含的** —— `nomi-*` crate 不引用 `nomifun-*` crate、工作区根目录或 Tauri / sqlx / axum 等后端框架。反向依赖默认通过 `nomifun-ai-agent` 这条接缝汇集，它再导出 `nomi_config` 和 `nomi_types`。当前 `nomifun-app` 与 `nomifun-gateway` 为 browser/computer-use bridge 存在 feature-gated 直接依赖例外；新增例外必须有明确 feature gate 和文档说明。
 
 ## 各部分的位置
 

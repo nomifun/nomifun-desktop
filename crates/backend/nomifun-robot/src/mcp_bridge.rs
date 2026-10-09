@@ -9,10 +9,8 @@
 //! 3. `tools/list` truncates at 8000 bytes and pages via `nextCursor = <tool
 //!    name>`, so one request is not enough to see the whole toolset.
 //!
-//! Its error objects also omit JSON-RPC's mandatory `code`, which is why this
-//! module carries its own tolerant response type instead of reusing
-//! `nomi_mcp::protocol::JsonRpcResponse` (whose `code` is required and would
-//! fail to deserialize).
+//! Its error objects also omit JSON-RPC's mandatory `code`, so this module
+//! carries a tolerant response type.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
