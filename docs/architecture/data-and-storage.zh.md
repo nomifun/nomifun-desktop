@@ -93,6 +93,14 @@ IDMM Intervention。
 
 打开 SQLite 之前，bootstrap 会检查数据集契约和 generation。不存在数据集时
 初始化 v3；检测到历史或不兼容数据集时整体退役并创建新的空 v3 数据集。
+
+本次破坏性版本的启动先只读检查 SQLx lineage，不能仅凭 `users`、
+`installation_identity` 等身份表就把历史数据库当成现役数据集。可读但
+不兼容的 lineage 通过独立重建原因进入 dataset reset，不受已消耗的旧
+一次性 retirement 标记阻断；旧数据库、WAL/SHM 与托管旁路存储一起隔离，
+包括 `browser-v4`。新 reset plan 使用冻结的 v3 清单，仍能恢复旧 v1/v2
+计划。数据库读取失败及现役 schema/data 损坏保留原数据并失败；迁移条数不能
+推断应用版本的新旧。备份恢复不执行此启动重建策略。
 不提供逐表历史迁移、兼容读取、ID 规范化或降级路径。
 
 运行时 baseline 校验至少确认：
@@ -237,15 +245,15 @@ NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进
                                     take the exclusive {data_dir}/server.lock
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
 5. bootstrap::init_data_layer       initialize/open the v3 database baseline
-6. bootstrap::write_v3_receipt      write and finalize the dataset reset receipt
-7. AppServices::from_config         instantiate every service
+6. AppServices::from_config         initialize services and managed side stores
+7. bootstrap::finalize_data_layer   write and finalize the dataset reset receipt
 8. ensure_admin_credentials (web)   pre-seed admin if NOMIFUN_ADMIN_PASSWORD is set
 9. create_router → axum::serve      bind and start serving
 ```
 
 第 3 步就是第二个后端在已被占用的数据目录上快速失败的地方（见上文「一个目录，一份状态」）。
 
-桌面外壳跳过第 6 步的管理员预置，但并不是旧式全局 `--local`：它使用 `TrustLocalToken`，只信任自己 WebView 呈递的本次启动 secret。在 Web 宿主中，如果不存在管理员且未设置 `NOMIFUN_ADMIN_PASSWORD`，安装将进入**首次运行的交互式初始化**：下一位访问浏览器的访客通过 `POST /api/auth/setup` 选择用户名与密码。如果首次运行初始化暴露在非 loopback 绑定地址上，会记录一条警告。
+桌面外壳跳过第 8 步的管理员预置，但并不是旧式全局 `--local`：它使用 `TrustLocalToken`，只信任自己 WebView 呈递的本次启动 secret。在 Web 宿主中，如果不存在管理员且未设置 `NOMIFUN_ADMIN_PASSWORD`，安装将进入**首次运行的交互式初始化**：下一位访问浏览器的访客通过 `POST /api/auth/setup` 选择用户名与密码。如果首次运行初始化暴露在非 loopback 绑定地址上，会记录一条警告。
 
 ## 备份与重装
 

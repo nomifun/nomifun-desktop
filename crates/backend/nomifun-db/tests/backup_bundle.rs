@@ -579,9 +579,78 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
     ));
 }
 
+#[tokio::test]
+async fn pre_browser_v4_coverage_remains_verifiable_and_restorable_without_relaxing_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = dir.path().join("backup.nomifun");
+    let database = init_database(&dir.path().join("source.db")).await.unwrap();
+    let current = create_backup_bundle(
+        &database,
+        &bundle,
+        &generate_id(),
+        BackupObjectGraph::full_database(),
+    )
+    .await
+    .unwrap();
+    database.close().await;
+    let browser_root = managed_dataset_roots()
+        .find(|root| root.path == "browser-v4")
+        .unwrap();
+    let BackupPolicy::Exclude(browser_reason) = browser_root.backup else {
+        panic!("browser-v4 must remain excluded from portable backups");
+    };
+    let browser_coverage = current.coverage.excluded.iter()
+        .find(|entry| entry.path == "browser-v4")
+        .expect("new backups must explicitly declare the browser-v4 exclusion");
+    assert_eq!(browser_coverage.root, BackupCoverageRoot::DataDir);
+    assert_eq!(browser_coverage.kind, BackupCoverageKind::Directory);
+    assert!(!browser_coverage.included);
+    assert_eq!(browser_coverage.exclusion_reason.as_deref(), Some(browser_reason));
+    assert_eq!(verify_backup_bundle(&bundle).unwrap(), current);
+
+    let manifest_path = bundle.join(MANIFEST_FILE);
+    for shape in ["complete", "before-binding", "before-host-controls"] {
+        let mut previous = current.clone();
+        previous.coverage.excluded.retain(|entry| {
+            entry.path != "browser-v4"
+                && (shape == "complete" || entry.path != WORK_ROOT_BINDING_FILE)
+                && (shape != "before-host-controls"
+                    || (entry.path != WORK_ROOT_OWNER_FILE
+                        && entry.path != "agent-process-registry.json"))
+        });
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+        assert_eq!(verify_backup_bundle(&bundle).unwrap(), previous, "{shape}");
+        let destination = dir.path().join(format!("restored-{shape}"));
+        let outcome = restore_backup_data_dir(&bundle, &destination).await.unwrap();
+        assert_eq!(outcome.manifest, previous, "{shape}");
+        assert!(destination.join("nomifun-backend.db").is_file());
+        assert!(destination.join(DATASET_RECEIPT_FILE).is_file());
+
+        let mut tampered = previous.clone();
+        tampered.coverage.excluded[0].exclusion_reason = Some("tampered".into());
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
+
+        let mut incomplete = previous.clone();
+        incomplete.coverage.excluded.retain(|entry| entry.path != "browser-data");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&incomplete).unwrap()).unwrap();
+        assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
+
+        let mut incomplete = previous.clone();
+        incomplete.coverage.included.retain(|entry| entry.path != "attachments");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&incomplete).unwrap()).unwrap();
+        assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
+
+        let mut wrong_schema = previous;
+        wrong_schema.schema = "incompatible-schema".into();
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&wrong_schema).unwrap()).unwrap();
+        assert!(matches!(verify_backup_bundle(&bundle), Err(BackupError::InvalidManifest(_))));
+    }
+}
+
 /// `BackupCoverage::validate` demands an exact match against the live
-/// managed-dataset registry, and its only historical allowance is the
-/// work-root host-control shape above. So dropping a root from that registry —
+/// managed-dataset registry, with exact historical allowances for work-root
+/// host controls and the later browser-v4 exclusion. Dropping a root from that registry —
 /// even one whose subsystem was deleted — silently invalidates every bundle
 /// older releases produced: the coverage entry they recorded no longer has a
 /// counterpart, and restore fails closed with `InvalidManifest`.

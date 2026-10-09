@@ -204,6 +204,7 @@ impl BackupCoverage {
         let expected = Self::complete_v3();
         if self != &expected
             && !self.is_legacy_v2_host_control_coverage(&expected)
+            && !self.is_pre_browser_v4_coverage(&expected)
         {
             return Err(BackupError::InvalidManifest(
                 "backup coverage does not exactly match the current v3 managed-dataset registry"
@@ -212,6 +213,24 @@ impl BackupCoverage {
         }
         self.validate_non_overlapping_restore_roots()?;
         Ok(())
+    }
+
+    /// Browser profiles are newly declared as excluded in this contract. Bundles
+    /// published before that declaration still have the same portable roots
+    /// and schema. Accept their exact coverage, including the already
+    /// recognized host-control publication shapes, without requiring an
+    /// exclusion that their writer did not yet know about.
+    fn is_pre_browser_v4_coverage(&self, expected: &Self) -> bool {
+        let previous = Self {
+            included: expected.included.clone(),
+            excluded: expected
+                .excluded
+                .iter()
+                .filter(|entry| entry.path != "browser-v4")
+                .cloned()
+                .collect(),
+        };
+        self == &previous || self.is_legacy_v2_host_control_coverage(&previous)
     }
 
     /// Released format-v2 predates the two host-local work-root controls and

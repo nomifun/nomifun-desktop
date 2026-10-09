@@ -159,6 +159,12 @@ pub const MANAGED_DATASET_ROOTS: &[ManagedDatasetRoot] = &[
         backup: BackupPolicy::Exclude(RUNTIME_ONLY),
     },
     ManagedDatasetRoot {
+        path: "browser-v4",
+        kind: DatasetRootKind::Directory,
+        reset: ResetPolicy::Retire,
+        backup: BackupPolicy::Exclude(RUNTIME_ONLY),
+    },
+    ManagedDatasetRoot {
         path: "browser-state",
         kind: DatasetRootKind::Directory,
         reset: ResetPolicy::Retire,
@@ -356,6 +362,16 @@ mod tests {
             );
             assert!(paths.insert(root.path), "duplicate managed dataset root: {}", root.path);
         }
+    }
+
+    #[test]
+    fn current_browser_sessions_are_retired_and_excluded_from_portable_backups() {
+        let root = managed_dataset_roots()
+            .find(|root| root.path == "browser-v4")
+            .unwrap();
+        assert_eq!(root.kind, DatasetRootKind::Directory);
+        assert_eq!(root.reset, ResetPolicy::Retire);
+        assert_eq!(root.backup, BackupPolicy::Exclude(RUNTIME_ONLY));
     }
 
     #[test]
