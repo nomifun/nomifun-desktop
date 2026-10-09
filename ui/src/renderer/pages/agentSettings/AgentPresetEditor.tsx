@@ -9,6 +9,7 @@ import type {
 } from '@/common/types/agentPlatform';
 import {
   AGENT_CHAT_MODEL_TASK,
+  agentPresetDocumentsEqual,
 } from '@/common/types/agentPlatform';
 import {
   Alert,
@@ -148,7 +149,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const moduleIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
   const taskOnlyCreation = moduleIds.includes('creation.media') && !chatRouteRecord;
   const savedDocumentUnchanged = Boolean(
-    editor.revision && JSON.stringify(draft.document) === JSON.stringify(editor.revision.document)
+    editor.revision && agentPresetDocumentsEqual(draft.document, editor.revision.document)
   );
   const metadataOnlyChange = Boolean(editor.preset.current_stable_revision) && savedDocumentUnchanged;
   const needsChatModel = !taskOnlyCreation && !chatRouteRecord;
