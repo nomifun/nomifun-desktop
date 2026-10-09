@@ -652,6 +652,16 @@ CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
 are generated from the final App after its CEF components have been installed and
 signed; updater signing also requires the configured Tauri updater private key.
 
+DMGs use **ULMO/LZMA** compression by default. To produce a compatibility image
+with **UDZO/zlib level 9**, run
+`NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac` (the setting also applies to
+signed builds). ULMO can be mounted on macOS 10.15+; the existing embedded-browser
+target remains Apple Silicon macOS 14+. Compression changes neither the App's
+minimum-system declarations nor its browser runtime. For signed release builds
+with notarization configured, the final App is signed, notarized and stapled
+before either distribution container is generated; DMG signing and notarization
+follow container creation.
+
 `bun run dev` launches a complete development `.app` and waits for native browser
 cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
 and prints its path. A bare Cargo binary lacks the embedded browser bundle.

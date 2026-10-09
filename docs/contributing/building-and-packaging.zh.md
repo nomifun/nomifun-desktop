@@ -28,6 +28,9 @@ bun run build:ui
 输出目录是 `ui/dist/`。
 
 桌面构建通过 `apps/desktop/tauri.conf.json` 的 `frontendDist` 打包该目录。
+桌面窗口和生产局域网 WebUI 使用同一份内嵌资源，桌面安装包不再携带单独的
+`webui-dist` 副本。显式 `NOMIFUN_WEBUI_DIST` 目录仍保留优先级，并必须与桌面
+前端的构建身份一致。
 `nomifun-web` 通过 `--dist` / `NOMIFUN_WEB_DIST` 服务它；从仓库内运行时，
 默认路径相对 `apps/web` 指向 `../../ui/dist`。
 
@@ -107,6 +110,22 @@ NOMIFUN_NFAGENT_PATH=<已存在的 nfagent 绝对路径>
 [`RELEASING.zh-CN.md`](../../RELEASING.zh-CN.md)。
 
 ## macOS 签名与公证
+
+当前完整 macOS 包仅支持 Apple Silicon arm64，明确拒绝 Intel 与 Universal；
+内置浏览器仍沿用 macOS 14+ 的既有目标。DMG 默认使用 ULMO/LZMA 压缩，要求
+挂载系统为 macOS 10.15+。需要 UDZO 兼容格式时，使用 zlib level 9：
+
+```bash
+NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
+```
+
+该设置也适用于 `build:signed` 和 `build:updater`。压缩策略不修改 App 最低
+系统声明，也不替换 CEF 运行库。签名发布构建配置公证时，最终 App 在生成
+DMG/updater 字节之前完成签名、公证与装订票据；DMG 创建后再执行自身的签名与公证。
+
+CEF 保留 `en`、`en_GB`、`zh_CN`、`zh_TW` 及对应的 `FEMININE`、`MASCULINE`、
+`NEUTER` 语言资源变体。其他语言资源仅在 framework 复制后、签名前裁剪，不修改
+CEF 当前默认语言或网页功能。updater 仍使用 `.app.tar.gz`，压缩等级为 gzip level 9。
 
 ad-hoc 签名产物只适合本地测试，不适合发给别人。生成 Developer ID 签名并公证的 DMG：
 
