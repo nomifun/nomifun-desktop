@@ -565,6 +565,13 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
 更新包还需要独立的 Tauri updater 签名密钥。
 
+DMG 默认使用 **ULMO/LZMA** 压缩；需要兼容格式时，执行
+`NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac`，生成 **UDZO/zlib level 9**
+镜像（签名构建同样支持该设置）。ULMO 要求挂载系统为 macOS 10.15+，内置浏览器
+仍沿用 Apple Silicon macOS 14+ 的既有目标；压缩策略不修改 App 最低系统声明或
+浏览器运行库。签名发布构建配置公证时，最终 App 在生成 DMG/updater 之前完成
+签名、公证与装订票据；DMG 创建后再执行自身的签名与公证。
+
 | 目标 | 命令 |
 | --- | --- |
 | 本地 arm64 测试安装包 | `bun run build` 或 `bun run build:mac` |
