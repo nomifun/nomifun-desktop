@@ -1,11 +1,10 @@
-//! macOS-only native CEF adapter. Windows retains its independent WebView2 host.
+//! Native macOS adapter using public system WKWebView APIs on AppKit's main thread.
 #![cfg(target_os = "macos")]
 
-pub mod protocol;
 pub mod engine;
-pub mod guardian;
-pub mod guardian_client;
-mod application;
-mod text;
-mod profile;
-mod downloads;
+mod callbacks;
+mod interactions;
+mod view;
+mod identity;
+mod navigation;
+pub use identity::{report as identity_report, runtime_info};

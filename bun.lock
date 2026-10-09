@@ -12,7 +12,7 @@
     },
     "ui": {
       "name": "@nomifun-tauri/ui",
-      "version": "0.7.6",
+      "version": "0.8.2",
       "dependencies": {
         "@arco-design/web-react": "^2.66.1",
         "@codemirror/commands": "^6.8.1",

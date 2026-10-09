@@ -721,6 +721,22 @@ function scanEntries(entries) {
     const path = normalizePath(entry.path);
     const masked = productionMask(entry.source);
 
+    const macosBrowser = path.startsWith('crates/backend/nomifun-browser-macos/src/')
+      || path.startsWith('apps/desktop/src/browser_surface/macos/');
+    if (macosBrowser && isRustSourcePath(path)) {
+      const production = lexicalMask(productionMask(entry.source, { keepLiterals: true }), { keepLiterals: true });
+      for (const match of findMatches(production, /\b(?:cef|cef_dll_sys)\s*::|\b(?:CGEventPost|CGEventPostToPid|AXUIElementPerformAction|protocol_call|preload_framework)\b|\bsetInspectable\s*\(\s*true\s*\)|["'](?:Runtime\.evaluate|Input\.dispatch\w+|_set\w+|_webProcessIdentifier|_killWebContentProcess)["']/g)) {
+        report(path, entry.source, production, match.index, 'macos-browser-public-webkit',
+          'macOS Browser uses public WKWebView APIs and declared semantic DOM actions; do not restore CEF, fake CDP, private WebKit SPI or global input control');
+      }
+    }
+    if (path === 'crates/backend/nomifun-browser-macos/Cargo.toml') {
+      for (const match of findMatches(entry.source, /^\s*(?:cef|cef-dll-sys|download-cef)\s*=/gm)) {
+        report(path, entry.source, entry.source, match.index, 'macos-browser-public-webkit',
+          'The system WKWebView adapter must not depend on a bundled browser engine');
+      }
+    }
+
     if (path === `${ENGINE_PRODUCTION_PREFIX}attached_browser.rs`
       || (path.startsWith(`${ENGINE_PRODUCTION_PREFIX}attached_browser/`) && isRustSourcePath(path) && !path.endsWith('/tests.rs'))) {
       const production = lexicalMask(productionMask(entry.source, { keepLiterals: true }), { keepLiterals: true });
@@ -1301,6 +1317,16 @@ function selfTest() {
     'native-dialog-global-shim','failed to reject global website notification overrides');
   assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/host.rs',source:'fn build(builder: Builder) { builder.devtools(true); }'}),
     'embedded-devtools-unsupported','failed to reject enabling embedded DevTools');
+  for (const source of ['fn old() { cef::initialize(); }',
+    'fn input() { CGEventPostToPid(pid, event); }',
+    'fn protocol() { call("Input.dispatchMouseEvent"); }',
+    'fn private() { call("_killWebContentProcess"); }']) {
+    assertViolation(baseline.concat({path:'crates/backend/nomifun-browser-macos/src/engine.rs',source}),
+      'macos-browser-public-webkit','failed to reject a retired or private macOS Browser implementation');
+  }
+  assertNoViolation(baseline.concat({path:'crates/backend/nomifun-browser-macos/src/engine.rs',source:
+    'fn snapshot(view: WKWebView) { view.takeSnapshotWithConfiguration_completionHandler(config, done); }'}),
+    'public WebKit snapshot became a boundary violation');
   assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/host.rs',source:'fn open(core: Core) { core.OpenDevToolsWindow(); }'}),
     'embedded-devtools-unsupported','failed to reject a DevTools window entry point');
   assertViolation(baseline.concat({path:'apps/desktop/examples/support/browser_devtools.rs',source:'// retired visible DevTools probe'}),

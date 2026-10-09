@@ -6941,8 +6941,9 @@ impl NomiCoreAgentApiState {
                         "AGENT_SESSION_BROWSER_CLEANUP_FAILED",
                         format!("Browser cleanup failed before AgentSession deletion: {error}")))?;
             } else {
-                // With no native host installed this boot there cannot be a
-                // live user entity. Exact on-disk cleanup still works without CEF.
+                // Directory-host cleanup can run offline. A system-managed
+                // WebKit profile requires its native removal port and fails
+                // closed here; deleting a former directory is not sufficient.
                 let store = self.browser_profile_store.clone();
                 let key = nomifun_browser_platform::workspace::managed_workspace_key(owner_id, agent_session_id)
                     .map_err(|error| AppError::Conflict(error.to_string()))?;
@@ -6952,7 +6953,10 @@ impl NomiCoreAgentApiState {
             }
         }
         #[cfg(not(feature = "browser-use"))]
-        if deleting_session
+        // A human can own a managed browser without any Agent Browser grant.
+        // On macOS only the native data-store port can prove cleanup; a host
+        // lacking that port must retain the canonical identity for retry.
+        if cfg!(target_os = "macos") || deleting_session
             .agent_binding
             .typed_resource_bindings
             .iter()
@@ -6961,7 +6965,7 @@ impl NomiCoreAgentApiState {
             return Err(NomiCoreApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "AGENT_SESSION_BROWSER_CLEANUP_UNAVAILABLE",
-                "Browser cleanup is unavailable in this host build",
+                "Browser cleanup is unavailable in this host build; finish Session deletion in NomiFun Desktop",
             ));
         }
         #[cfg(feature = "browser-use")]

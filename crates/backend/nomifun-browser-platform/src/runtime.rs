@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::run_guard::{NativeInputGate, RunAdmissionError};
+pub use crate::navigation::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -27,7 +28,7 @@ pub enum WorkspaceError {
     ActionInterrupted,
     #[error("A browser input is waiting for a website dialog response. Respond to that dialog before issuing another browser action.")]
     DialogPending,
-    #[error("The requested browser action is not supported by this runtime.")]
+    #[error("The requested action is unsupported by this browser or target. Do not retry the same action; use the reported interaction capabilities. If manual input is needed, stop the Agent and wait for input to unlock.")]
     UnsupportedAction,
     #[error("The browser observation exceeds its size limit.")]
     ObservationLimit,
@@ -61,6 +62,12 @@ pub enum WorkspaceError {
     NativeInitializationFailed,
     #[error("The native browser command failed.")]
     NativeCommandFailed,
+    #[error("The page failed to load. Inspect its current state before choosing a recovery navigation.")]
+    PageFailed,
+    #[error("The page loading was stopped. Navigate to a page before observing or interacting with it.")]
+    PageStopped,
+    #[error("The page process terminated. Reload or navigate the tab before observing or interacting with it.")]
+    PageCrashed,
     #[error("The Browser profile identity or persistence policy is invalid.")]
     ProfileCleanupInvalid,
     #[error("Persistent Browser profile cleanup is not configured on this host.")]
@@ -95,6 +102,9 @@ impl WorkspaceError {
             Self::DownloadDenied => "BROWSER_DOWNLOAD_DENIED",
             Self::NativeInitializationFailed => "BROWSER_NATIVE_INITIALIZATION_FAILED",
             Self::NativeCommandFailed => "BROWSER_NATIVE_COMMAND_FAILED",
+            Self::PageFailed => "BROWSER_PAGE_FAILED",
+            Self::PageStopped => "BROWSER_PAGE_STOPPED",
+            Self::PageCrashed => "BROWSER_PAGE_CRASHED",
             Self::ProfileCleanupInvalid => "BROWSER_PROFILE_CLEANUP_INVALID",
             Self::ProfileCleanupUnavailable => "BROWSER_PROFILE_CLEANUP_UNAVAILABLE",
             Self::ProfileCleanupFailed => "BROWSER_PROFILE_CLEANUP_FAILED",
@@ -150,13 +160,24 @@ pub(crate) fn is_bounded_profile_identity(value: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserProfile {
-    /// Application-owned, canonical v2 directory. Browser page input cannot select it.
+    /// Application-owned WebView2 directory. Browser page input cannot select it.
     Persistent(PathBuf),
+    /// System-managed macOS 14+ WKWebsiteDataStore. Never a filesystem path.
+    WebKitPersistent { identifier: [u8; 16] },
     Ephemeral,
 }
 
 impl BrowserProfile {
-    /// Physical identity comes from the authenticated owner and canonical Session.
+    pub fn persistence(&self) -> BrowserProfilePersistence {
+        match self {
+            Self::Persistent(_) | Self::WebKitPersistent { .. } => BrowserProfilePersistence::Persistent,
+            Self::Ephemeral => BrowserProfilePersistence::Ephemeral,
+        }
+    }
+
+    /// Directory-backed host identity comes from the authenticated owner and
+    /// canonical Session. Product callers use BrowserProfileStore::profile_for
+    /// so macOS receives a system-managed WebKit identity instead of a path.
     /// Agent authorization definitions and project paths never select profiles.
     /// This current-generation namespace does not read or migrate old profiles.
     /// Ephemeral is reserved for standalone host/conformance callers.
@@ -188,6 +209,8 @@ impl BrowserProfile {
 #[derive(Clone, Debug)]
 pub struct BrowserProfileStore {
     data_dir: PathBuf,
+    webkit: bool,
+    channel: &'static str,
 }
 
 impl BrowserProfileStore {
@@ -200,7 +223,25 @@ impl BrowserProfileStore {
         }
         let data_dir = std::fs::canonicalize(data_dir)
             .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
-        Ok(Self { data_dir })
+        Ok(Self {
+            data_dir,
+            webkit: cfg!(target_os = "macos"),
+            channel: option_env!("NOMI_CHANNEL").unwrap_or("stable"),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_directory_host_test(data_dir: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        let mut store = Self::new(data_dir)?;
+        store.webkit = false;
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_webkit_host_test(data_dir: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        let mut store = Self::new(data_dir)?;
+        store.webkit = true;
+        Ok(store)
     }
 
     pub fn profile_for(
@@ -209,6 +250,9 @@ impl BrowserProfileStore {
         persistence: BrowserProfilePersistence,
     ) -> Result<BrowserProfile, WorkspaceError> {
         key.validate_profile_identity()?;
+        if persistence == BrowserProfilePersistence::Persistent && self.webkit {
+            return self.webkit_profile_for(key);
+        }
         Ok(BrowserProfile::for_agent_session(
             &self.data_dir,
             key,
@@ -216,17 +260,72 @@ impl BrowserProfileStore {
         ))
     }
 
+    /// The dataset coordinator owns `storage-generation`; Browser never
+    /// creates, repairs or rotates it. Read it when opening/deleting a profile,
+    /// since the desktop composes this port before database startup completes.
+    /// Root relocation deliberately creates a fresh login namespace, including
+    /// copies of one dataset; restore/reset already rotates the generation.
+    /// This derives identity, not a second Session or binding ledger.
+    pub fn webkit_profile_for(&self, key: &BrowserResourceKey) -> Result<BrowserProfile, WorkspaceError> {
+        key.validate_profile_identity()?;
+        require_plain_directory(&self.data_dir)
+            .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
+        let generation_path = self.data_dir.join("storage-generation");
+        let metadata = std::fs::symlink_metadata(&generation_path)
+            .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
+        if !metadata.is_file() || path_is_link_or_reparse(&metadata) || metadata.len() != 36 {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        let generation = std::fs::read_to_string(generation_path)
+            .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
+        self.webkit_profile_for_generation(key, &generation)
+    }
+
+    /// Dataset-reset coordinator only: derive the retired generation at the
+    /// original owned root after its files have been quarantined. The caller
+    /// reads keys from the old canonical database and generation from the
+    /// existing reset receipt, never from model or web request input.
+    pub fn webkit_profile_for_generation(&self, key: &BrowserResourceKey, generation: &str) -> Result<BrowserProfile, WorkspaceError> {
+        use sha2::{Digest, Sha256};
+        key.validate_profile_identity()?;
+        let uuid = uuid::Uuid::parse_str(generation)
+            .map_err(|_| WorkspaceError::ProfileCleanupInvalid)?;
+        if uuid.get_version_num() != 7 || uuid.to_string() != generation {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"nomifun.browser.webkit.session-store.v1\0");
+        for value in [
+            self.channel.as_bytes(),
+            self.data_dir.as_os_str().as_encoded_bytes(),
+            generation.as_bytes(),
+            key.principal_id.as_bytes(),
+            key.agent_session_id.as_bytes(),
+        ] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        }
+        let hash = digest.finalize();
+        let mut identifier = [0_u8; 16];
+        identifier.copy_from_slice(&hash[..16]);
+        // RFC 9562 UUIDv8: application-defined SHA-256 identity, standard variant.
+        identifier[6] = (identifier[6] & 0x0f) | 0x80;
+        identifier[8] = (identifier[8] & 0x3f) | 0x80;
+        Ok(BrowserProfile::WebKitPersistent { identifier })
+    }
+
     pub fn delete_persistent_profile(
         &self,
         key: &BrowserResourceKey,
     ) -> Result<(), WorkspaceError> {
-        let BrowserProfile::Persistent(profile) =
-            self.profile_for(key, BrowserProfilePersistence::Persistent)?
-        else {
-            unreachable!("persistent policy always derives a persistent profile")
-        };
-        delete_exact_profile_tree(&self.data_dir, &profile)
-            .map_err(|_| WorkspaceError::ProfileCleanupFailed)
+        match self.profile_for(key, BrowserProfilePersistence::Persistent)? {
+            BrowserProfile::Persistent(profile) => delete_exact_profile_tree(&self.data_dir, &profile)
+                .map_err(|_| WorkspaceError::ProfileCleanupFailed),
+            // Filesystem deletion cannot prove removal of OS-managed website
+            // data. The native factory must acknowledge its data-store API.
+            BrowserProfile::WebKitPersistent { .. } => Err(WorkspaceError::ProfileCleanupUnavailable),
+            BrowserProfile::Ephemeral => Err(WorkspaceError::ProfileCleanupInvalid),
+        }
     }
 }
 
@@ -368,6 +467,80 @@ mod profile_tests {
         };
         assert_eq!(BrowserProfile::for_agent_session(std::path::Path::new("owned-data"), &key, true), BrowserProfile::Ephemeral);
     }
+
+    fn webkit_key() -> BrowserResourceKey {
+        BrowserResourceKey {
+            principal_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
+            agent_session_id: "0190f5fe-7c00-7a00-8000-000000000084".into(),
+            resource_binding_id: "managed-browser".into(),
+        }
+    }
+
+    #[test]
+    fn webkit_identity_survives_restart_but_isolates_roots_datasets_channels_owners_and_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let generation = "0190f5fe-7c00-7a00-8000-000000000002";
+        for path in [root.path(), other_root.path()] {
+            std::fs::write(path.join("storage-generation"), generation).unwrap();
+        }
+        let store = BrowserProfileStore::for_webkit_host_test(root.path()).unwrap();
+        let key = webkit_key();
+        let first = store.webkit_profile_for(&key).unwrap();
+        assert_eq!(first, BrowserProfileStore::new(root.path()).unwrap().webkit_profile_for(&key).unwrap());
+        assert_eq!(first, store.webkit_profile_for(&BrowserResourceKey {
+            resource_binding_id: "next-agent-binding".into(), ..key.clone()
+        }).unwrap());
+        assert_ne!(first, BrowserProfileStore::new(other_root.path()).unwrap().webkit_profile_for(&key).unwrap(), "copying or moving a root creates a distinct native login namespace");
+        for changed in [
+            BrowserResourceKey { principal_id: "0190f5fe-7c00-7a00-8000-000000000003".into(), ..key.clone() },
+            BrowserResourceKey { agent_session_id: "0190f5fe-7c00-7a00-8000-000000000004".into(), ..key.clone() },
+        ] {
+            assert_ne!(first, store.webkit_profile_for(&changed).unwrap());
+        }
+        for channel in ["stable", "dev", "test"] {
+            let mut other_channel = store.clone();
+            other_channel.channel = channel;
+            if channel != store.channel {
+                assert_ne!(first, other_channel.webkit_profile_for(&key).unwrap());
+            }
+        }
+        std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000005").unwrap();
+        assert_ne!(first, store.webkit_profile_for(&key).unwrap(), "restore/reset rotates the existing dataset identity");
+        let BrowserProfile::WebKitPersistent { identifier } = first else { panic!("WK identity") };
+        assert_eq!(uuid::Uuid::from_bytes(identifier).get_version_num(), 8);
+        assert_eq!(uuid::Uuid::from_bytes(identifier).get_variant(), uuid::Variant::RFC4122);
+    }
+
+    #[test]
+    fn webkit_profile_never_creates_or_repairs_dataset_identity_and_never_deletes_old_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        let store = BrowserProfileStore::for_webkit_host_test(root.path()).unwrap();
+        let key = webkit_key();
+        assert_eq!(store.webkit_profile_for(&key), Err(WorkspaceError::ProfileCleanupUnavailable));
+        assert!(!root.path().join("storage-generation").exists());
+        for invalid in ["", "0190F5FE-7C00-7A00-8000-000000000002", "0190f5fe-7c00-4a00-8000-000000000002", "0190f5fe-7c00-7a00-8000-000000000002\n"] {
+            std::fs::write(root.path().join("storage-generation"), invalid).unwrap();
+            assert_eq!(store.webkit_profile_for(&key), Err(WorkspaceError::ProfileCleanupInvalid));
+        }
+        std::fs::write(root.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        let BrowserProfile::Persistent(legacy) = BrowserProfile::for_agent_session(root.path(), &key, false) else { panic!("directory") };
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("sentinel"), b"former browser data").unwrap();
+        assert_eq!(store.delete_persistent_profile(&key), Err(WorkspaceError::ProfileCleanupUnavailable));
+        assert_eq!(std::fs::read(legacy.join("sentinel")).unwrap(), b"former browser data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webkit_identity_rejects_a_link_to_another_dataset_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("storage-generation"), "0190f5fe-7c00-7a00-8000-000000000002").unwrap();
+        std::os::unix::fs::symlink(other.path().join("storage-generation"), root.path().join("storage-generation")).unwrap();
+        let store = BrowserProfileStore::new(root.path()).unwrap();
+        assert_eq!(store.webkit_profile_for(&webkit_key()), Err(WorkspaceError::ProfileCleanupInvalid));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -394,6 +567,7 @@ pub enum BrowserTabLifecycle {
     Ready,
     Failed,
     Crashed,
+    Stopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -402,6 +576,9 @@ pub struct BrowserTabSnapshot {
     pub title: String,
     pub url: String,
     pub lifecycle: BrowserTabLifecycle,
+    /// None means this adapter does not report detailed load evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<BrowserLoadSummary>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     /// Native page zoom for this tab, as a whole-number percentage.
@@ -583,31 +760,32 @@ pub trait BrowserRuntimeFactory: Send + Sync {
         request: CreateBrowserRuntime,
     ) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError>;
 
-    /// Explicit host promise: after all resource closures are acknowledged,
-    /// the final factory shutdown needs neither app SQLite nor other host
-    /// consumers. Default false preserves non-CEF provider teardown ordering.
-    fn supports_storage_independent_shutdown(&self) -> bool { false }
+    /// Called only after every runtime for this exact profile has closed.
+    /// WK hosts must await removeDataStoreForIdentifier's completion; the
+    /// default refuses to pretend system-managed data was deleted on disk.
+    async fn delete_persistent_profile(&self, profile: &BrowserProfile) -> Result<(), WorkspaceError> {
+        match profile {
+            BrowserProfile::WebKitPersistent { .. } => Err(WorkspaceError::ProfileCleanupUnavailable),
+            BrowserProfile::Persistent(_) => Ok(()),
+            BrowserProfile::Ephemeral => Err(WorkspaceError::ProfileCleanupInvalid),
+        }
+    }
 
     /// Stop process-wide native browser infrastructure after every runtime
     /// created by this factory has acknowledged destruction.
     ///
-    /// Most hosts do not need a separate process-wide shutdown phase. macOS
-    /// CEF does: `cef_shutdown` must run on the application event thread after
-    /// the last child NSView has closed and before the desktop process exits.
+    /// Most hosts need no process-wide shutdown phase beyond closing their
+    /// native views on the application event thread.
     async fn shutdown(&self) -> Result<(), WorkspaceError> {
         Ok(())
     }
 
-    /// Trusted host entry after its actual storage-close barrier. It is not a
-    /// model capability or permission grant. Only an explicitly storage-
-    /// independent factory may use it to arm bounded native failure handling.
-    async fn shutdown_after_storage_close(&self) -> Result<(), WorkspaceError> {
-        self.shutdown().await
-    }
 }
 
 #[async_trait]
 pub trait BrowserRuntime: NativeInputGate + Send + Sync {
+    /// Native implementation facts, not Agent authority or a permission grant.
+    fn interaction_capabilities(&self) -> Option<BrowserInteractionCapabilities> { None }
     fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         None
     }
@@ -616,6 +794,10 @@ pub trait BrowserRuntime: NativeInputGate + Send + Sync {
     }
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort>;
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError>;
+    /// Read-only metadata for this runtime's owned, exact tab target.
+    async fn navigation_diagnostics(&self, _target: BrowserTabTarget) -> Result<BrowserNavigationReport, WorkspaceError> {
+        Err(WorkspaceError::UnsupportedAction)
+    }
     /// Must await native command settlement, even if cancellation arrives.
     async fn execute(
         &self,
@@ -647,6 +829,12 @@ pub struct BrowserObservation {
     pub target: BrowserTabTarget,
     pub observation_generation: u64,
     pub content: String,
+    /// Projected page load evidence. Never serialize a raw workspace summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<BrowserLoadSummary>,
+    /// The observed document's projected address, which can differ from a failed request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_url: Option<String>,
     pub elements: Vec<BrowserElement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_dialog: Option<BrowserDialog>,
@@ -728,11 +916,44 @@ impl BrowserAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionFidelity {
     BrowserInput,
     BrowserProtocol,
+    /// DOM operations with untrusted events. Never a native user activation receipt.
+    SemanticDom,
+}
+
+/// Explicit host limitations accompany observations and the user workspace.
+/// Absent metadata must not be interpreted as universal action support.
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserInteractionCapabilities {
+    pub engine: &'static str,
+    pub interaction_fidelity: InteractionFidelity,
+    pub actions: &'static [&'static str],
+    pub unsupported_actions: &'static [&'static str],
+    pub limitations: &'static [&'static str],
+}
+
+impl BrowserInteractionCapabilities {
+    pub fn wk_webview() -> Self {
+        Self {
+            engine: "wk_webview",
+            interaction_fidelity: InteractionFidelity::SemanticDom,
+            actions: &["click", "type", "select", "scroll", "dialog"],
+            unsupported_actions: &[
+                "hover", "drag", "press", "right_click", "middle_click", "double_click",
+                "agent_upload", "agent_download", "evaluate", "cdp_network_diagnostics",
+            ],
+            limitations: &[
+                "Click uses DOM click for a single left click; type replaces a standard input or textarea value; select uses exact option labels; scroll uses DOM scrolling. Observe again after each action.",
+                "Semantic DOM actions do not create trusted input or user activation. Canvas, pointer capture, complex editors and user-activation-only controls are not supported.",
+                "Only the main document is observed. Iframes and inaccessible shadow content are not action targets; unobserved_frames reports uncovered frames.",
+                "BROWSER_UNSUPPORTED_ACTION is not retryable with the same action. For manual input, stop the Agent and wait for cleanup and input unlock; do not bypass the run lock.",
+            ],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -852,4 +1073,24 @@ pub trait BrowserNativeSurfacePort: Send + Sync {
         visible: bool,
         layout_cancel: CancellationToken,
     ) -> Result<(), WorkspaceError>;
+}
+
+#[cfg(test)]
+mod interaction_capability_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_fidelity_is_distinct_from_native_input_and_protocol() {
+        assert_eq!(serde_json::to_value(InteractionFidelity::SemanticDom).unwrap(), "semantic_dom");
+        assert_eq!(serde_json::to_value(InteractionFidelity::BrowserInput).unwrap(), "browser_input");
+        assert_eq!(serde_json::to_value(InteractionFidelity::BrowserProtocol).unwrap(), "browser_protocol");
+        let capabilities = BrowserInteractionCapabilities::wk_webview();
+        for action in ["click", "type", "select", "scroll", "dialog"] { assert!(capabilities.actions.contains(&action)); }
+        for action in ["hover", "drag", "press", "agent_upload", "agent_download", "evaluate"] {
+            assert!(capabilities.unsupported_actions.contains(&action));
+            assert!(!capabilities.actions.contains(&action));
+        }
+        assert!(capabilities.limitations.iter().any(|item| item.contains("do not create trusted input or user activation")));
+        assert!(WorkspaceError::UnsupportedAction.to_string().contains("Do not retry the same action"));
+    }
 }

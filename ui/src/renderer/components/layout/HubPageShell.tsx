@@ -6,6 +6,7 @@
 
 import classNames from 'classnames';
 import React from 'react';
+import PageHeader, { PAGE_TITLE_CLASS } from './PageHeader';
 
 interface HubPageShellProps {
   title: string;
@@ -24,7 +25,7 @@ interface HubPageShellProps {
 }
 
 /** Shared visual contract for top-level destinations opened from the app rail. */
-export const HUB_PAGE_TITLE_CLASS = 'm-0 text-22px font-600 leading-tight text-t-primary';
+export const HUB_PAGE_TITLE_CLASS = PAGE_TITLE_CLASS;
 
 /**
  * HubPageShell — shared chrome for the homepage "hub" destinations (Model
@@ -47,20 +48,14 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
       className={classNames(
         'w-full min-h-full box-border overflow-y-auto',
         className,
-        'px-12px md:px-40px py-32px'
+        'px-24px md:px-32px py-24px'
       )}
     >
       <div className={classNames('mx-auto w-full', maxWidthClass)}>
         {hideHeading ? (
           <h1 className='sr-only'>{title}</h1>
         ) : (
-          <div className='mb-18px flex items-start justify-between gap-24px'>
-            <div className='min-w-0'>
-              <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
-              {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
-            </div>
-            {actions && <div className='flex shrink-0 items-center'>{actions}</div>}
-          </div>
+          <PageHeader title={title} description={subtitle} actions={actions} />
         )}
         {toolbar && <div className='mb-20px'>{toolbar}</div>}
         {children}

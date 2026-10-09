@@ -1,43 +1,32 @@
-//! macOS runtime: CEF request contexts and child NSViews. Windows retains its
-//! independent WebView2 host. Only semantic algorithms and operation ownership
-//! are shared through native ports.
+//! WKWebView pages in the existing desktop NSWindow. Native callbacks own
+//! lifecycle completion; Agent input uses the isolated semantic DOM world.
 use std::{collections::BTreeMap, sync::{Arc, Weak, Mutex as StdMutex, atomic::{AtomicBool, Ordering}}};
 use async_trait::async_trait;
-use nomifun_browser_macos::engine::{Context, Engine, Page, ParentView, PopupCandidate};
+use nomifun_browser_macos::engine::{Context, Engine, NavigationCommand as Navigation, Page, ParentView, PopupCandidate};
 use nomifun_browser_platform::{run_guard::{NativeInputGate, RunAdmissionError}, runtime::*};
+use nomifun_browser_platform::navigation::{BrowserNavigationReport, BrowserNavigationSource};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use super::native::{self, View};
-use super::super::automation::TabAutomation;
-#[path = "../pending_work.rs"]
+use super::semantic::TabAutomation;
+use base64::Engine as _;
 mod pending_work;
-#[path = "../evaluation.rs"]
-mod evaluation;
-#[path = "../screenshot.rs"]
-mod screenshot;
 
-enum HostEngine { Initialized(Arc<Engine>), Deferred(Arc<super::lifecycle::DeferredEngine>) }
-pub struct DesktopBrowserHost { app: tauri::AppHandle, engine: HostEngine }
+pub struct DesktopBrowserHost { app: tauri::AppHandle, engine: Arc<super::lifecycle::DeferredEngine> }
 impl DesktopBrowserHost {
-    pub fn new(app: tauri::AppHandle, engine: Arc<Engine>) -> Self { Self { app, engine: HostEngine::Initialized(engine) } }
-    pub(crate) fn new_deferred(app: tauri::AppHandle, engine: Arc<super::lifecycle::DeferredEngine>) -> Self {
-        Self { app, engine: HostEngine::Deferred(engine) }
-    }
+    pub fn new(app: tauri::AppHandle) -> Self { Self { app, engine: Arc::new(Default::default()) } }
 }
 #[async_trait]
 impl BrowserRuntimeFactory for DesktopBrowserHost {
-    fn supports_storage_independent_shutdown(&self) -> bool { true }
-
     async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
-        let engine = match &self.engine {
-            HostEngine::Initialized(engine) => engine.clone(),
-            HostEngine::Deferred(engine) => engine.get(&self.app).await.map_err(|error| {
-                tracing::error!(%error, "macOS built-in browser initialization failed; restart is required");
-                WorkspaceError::NativeInitializationFailed
-            })?,
+        let engine = self.engine.get(&self.app).await.map_err(|_| WorkspaceError::NativeInitializationFailed)?;
+        let identifier = match &request.profile {
+            BrowserProfile::Ephemeral => None,
+            BrowserProfile::WebKitPersistent { identifier } => Some(uuid::Uuid::from_bytes(*identifier)),
+            BrowserProfile::Persistent(_) => return Err(WorkspaceError::ProfileCleanupInvalid),
         };
-        let context = engine.create_context(match &request.profile { BrowserProfile::Ephemeral => None, BrowserProfile::Persistent(path) => Some(path.clone()) }).await.map_err(native_error)?;
+        let context = engine.create_context(identifier).await.map_err(native_error)?;
         let app = self.app.clone();
         let parent: Arc<ParentView> = Arc::new(move || {
             let window = app.get_window("main").ok_or("Browser parent window is gone")?;
@@ -49,57 +38,56 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
         Ok(Arc::new_cyclic(|weak| DesktopBrowserRuntime {
             weak: weak.clone(), app: self.app.clone(), engine, context, parent, request,
             input_locked: Arc::new(AtomicBool::new(!input_enabled)), revision: Default::default(),
-            creating: Mutex::new(()), site_data_view: Mutex::new(None), pending_work: Mutex::new(BTreeMap::new()), closing: CancellationToken::new(),
+            creating: Mutex::new(()), pending_work: Mutex::new(BTreeMap::new()), closing: CancellationToken::new(),
             state: Mutex::new(RuntimeState { tabs: BTreeMap::new(), active: None, bounds: None, visible: false, closed: false,
-                input_enabled, presentation_requested: false, surface_cancel: CancellationToken::new(), surface_epoch: 0, uploads: vec![], download_files: vec![] }),
+                input_enabled, presentation_requested: false, surface_cancel: CancellationToken::new(), surface_epoch: 0 }),
         }))
     }
-
-    async fn shutdown(&self) -> Result<(), WorkspaceError> {
-        match &self.engine {
-            HostEngine::Initialized(engine) => engine.shutdown().await,
-            HostEngine::Deferred(engine) => engine.shutdown().await,
-        }.map_err(native_error)
+    async fn delete_persistent_profile(&self, profile: &BrowserProfile) -> Result<(), WorkspaceError> {
+        match profile {
+            BrowserProfile::WebKitPersistent { identifier } => Engine::remove_data_store(uuid::Uuid::from_bytes(*identifier)).await.map_err(|_| WorkspaceError::ProfileCleanupFailed),
+            _ => Err(WorkspaceError::ProfileCleanupInvalid),
+        }
     }
-
-    async fn shutdown_after_storage_close(&self) -> Result<(), WorkspaceError> {
-        match &self.engine {
-            HostEngine::Initialized(engine)=>engine.shutdown_after_storage_close().await,
-            HostEngine::Deferred(engine)=>engine.shutdown_after_storage_close().await,
-        }.map_err(native_error)
-    }
+    async fn shutdown(&self) -> Result<(), WorkspaceError> { self.engine.shutdown().await.map_err(native_error) }
 }
 struct NativeTab {
     close_gate: Mutex<()>, view: View, metadata: Arc<StdMutex<BrowserTabSnapshot>>,
     automation: Arc<Mutex<TabAutomation>>, operation: Arc<StdMutex<Option<CancellationToken>>>,
-    user_files: Mutex<Option<Arc<super::user_file_chooser::UserFileChooser>>>,
-    popup_stop: CancellationToken, popup_work: Arc<Mutex<()>>, rendering_capture: Arc<AtomicBool>,
+    popup_stop: CancellationToken, popup_work: Arc<Mutex<()>>,
+    popup_cleanup: Arc<Mutex<Vec<Arc<Page>>>>,
 }
 struct RuntimeState {
     tabs: BTreeMap<String, Arc<NativeTab>>, active: Option<String>, bounds: Option<BrowserSurfaceBounds>,
     visible: bool, closed: bool, input_enabled: bool, presentation_requested: bool,
     surface_cancel: CancellationToken, surface_epoch: u64,
-    uploads: Vec<Arc<nomifun_browser_platform::uploads::PreparedBrowserUpload>>,
-    download_files: Vec<Arc<nomifun_browser_platform::downloads::PreparedBrowserDownload>>,
 }
 pub struct DesktopBrowserRuntime {
     weak: Weak<Self>, app: tauri::AppHandle, engine: Arc<Engine>, context: Arc<Context>, parent: Arc<ParentView>, request: CreateBrowserRuntime,
     input_locked: Arc<AtomicBool>, revision: Arc<nomifun_browser_platform::revision::BrowserRevision>,
-    creating: Mutex<()>, site_data_view: Mutex<Option<View>>, pending_work: Mutex<BTreeMap<String, Arc<pending_work::PendingWork>>>,
+    creating: Mutex<()>, pending_work: Mutex<BTreeMap<String, Arc<pending_work::PendingWork>>>,
     closing: CancellationToken, state: Mutex<RuntimeState>,
 }
-enum NativeOperation {
-    Input(BrowserAction),
-    Upload { element: BrowserElementRef, files: Arc<nomifun_browser_platform::uploads::PreparedBrowserUpload> },
-    Download { element: BrowserElementRef, file: Arc<nomifun_browser_platform::downloads::PreparedBrowserDownload> },
-}
+enum NativeOperation { Input(BrowserAction) }
 impl NativeOperation {
-    fn element(&self) -> &BrowserElementRef { match self { Self::Input(action) => action.element(), Self::Upload { element, .. } | Self::Download { element, .. } => element } }
+    fn element(&self) -> &BrowserElementRef { match self { Self::Input(action) => action.element() } }
 }
 struct InputScope(Arc<StdMutex<Option<CancellationToken>>>);
 impl Drop for InputScope { fn drop(&mut self) { self.0.lock().unwrap_or_else(|error| error.into_inner()).take(); } }
 fn native_error(error: impl std::fmt::Display) -> WorkspaceError {
-    tracing::warn!(%error, "CEF browser host operation failed"); WorkspaceError::NativeCommandFailed
+    // Native error messages may contain page data. Do not log them.
+    match error.to_string().as_str() {
+        "BROWSER_CANCELLED" => RunAdmissionError::Cancelled.into(),
+        "BROWSER_ACTION_INTERRUPTED" => WorkspaceError::ActionInterrupted,
+        "BROWSER_EXECUTION_UNCONFIRMED" => RunAdmissionError::WorkerFailed.into(),
+        "BROWSER_STALE_OBSERVATION" => WorkspaceError::StaleObservation,
+        "BROWSER_UNSUPPORTED_ACTION" => WorkspaceError::UnsupportedAction,
+        "BROWSER_ELEMENT_NOT_ACTIONABLE" => WorkspaceError::NotActionable,
+        "BROWSER_PAGE_FAILED" => WorkspaceError::PageFailed,
+        "BROWSER_PAGE_STOPPED" => WorkspaceError::PageStopped,
+        "BROWSER_PAGE_CRASHED" => WorkspaceError::PageCrashed,
+        _ => WorkspaceError::NativeCommandFailed,
+    }
 }
 fn valid_url(input: &str) -> Result<url::Url, WorkspaceError> {
     let url = url::Url::parse(input).map_err(|_| WorkspaceError::InvalidUrl)?;
@@ -108,6 +96,10 @@ fn valid_url(input: &str) -> Result<url::Url, WorkspaceError> {
 }
 
 impl DesktopBrowserRuntime {
+    fn navigation_source(&self) -> BrowserNavigationSource {
+        if self.input_locked.load(Ordering::Acquire) { BrowserNavigationSource::AgentCommand }
+        else { BrowserNavigationSource::UserCommand }
+    }
     fn build_native_tab(&self, page: Arc<Page>) -> Arc<NativeTab> {
         let id = format!("browser-{}", page.id());
         let metadata = Arc::new(StdMutex::new(BrowserTabSnapshot {
@@ -119,6 +111,7 @@ impl DesktopBrowserRuntime {
             title: String::new(),
             url: String::new(),
             lifecycle: BrowserTabLifecycle::Loading,
+            load: None,
             can_go_back: false,
             can_go_forward: false,
             zoom_percent: 100,
@@ -141,6 +134,7 @@ impl DesktopBrowserRuntime {
             metadata.url = snapshot.url;
             metadata.title = snapshot.title;
             metadata.lifecycle = snapshot.lifecycle;
+            metadata.load = Some(snapshot.load);
             metadata.can_go_back = snapshot.can_go_back;
             metadata.can_go_forward = snapshot.can_go_forward;
             metadata.blocked_permissions = snapshot.blocked_permissions;
@@ -164,51 +158,18 @@ impl DesktopBrowserRuntime {
             view: View::new(page),
             metadata,
             automation: Arc::new(Mutex::new(Default::default())),
-            user_files: Mutex::new(None),
             operation: Arc::new(StdMutex::new(None)),
             popup_stop: self.closing.child_token(),
             popup_work: Arc::new(Mutex::new(())),
-            rendering_capture: Arc::new(AtomicBool::new(false)),
+            popup_cleanup: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
     async fn initialize_native_tab(&self, tab: &Arc<NativeTab>) -> Result<(), WorkspaceError> {
-        let (input_enabled, visible) = {
-            let state = self.state.lock().await;
-            let id = &tab.metadata.lock().unwrap().target.tab_id;
-            (
-                state.input_enabled,
-                state.visible && state.active.as_ref() == Some(id),
-            )
-        };
-        native::set_user_input_enabled(&tab.view, input_enabled)
-            .await
-            .map_err(native_error)?;
+        let input_enabled = self.state.lock().await.input_enabled;
+        native::set_native_user_input_enabled(&tab.view, input_enabled).await.map_err(native_error)?;
         tab.view.page.set_dialog_draining(false).await.map_err(native_error)?;
-        native::protocol_call(&tab.view, "Page.enable", serde_json::json!({}))
-            .await
-            .map_err(native_error)?;
-        tab.view.page.configure_user_downloads(
-            self.app.path().download_dir().map_err(native_error)?,
-        ).map_err(native_error)?;
-        if native::diagnostics::install(
-            &tab.view,
-            tab.metadata.clone(),
-            self.revision.clone(),
-        ).await.is_err() {
-            native::diagnostics::mark_unavailable(&tab.view);
-        }
-        let chooser = super::user_file_chooser::UserFileChooser::install(
-            self.app.clone(),
-            tab.view.clone(),
-            tab.automation.clone(),
-            self.input_locked.clone(),
-            self.app.path().home_dir().map_err(native_error)?,
-        )
-        .await
-        .map_err(native_error)?;
-        chooser.set_visible(visible);
-        *tab.user_files.lock().await = Some(chooser);
+        tab.view.page.configure_user_downloads(self.app.path().download_dir().map_err(native_error)?).await.map_err(native_error)?;
         self.install_popup_worker(tab)?;
 
         let mut closed = tab.view.page.closed();
@@ -232,6 +193,7 @@ impl DesktopBrowserRuntime {
         let weak = self.weak.clone();
         let stop = tab.popup_stop.clone();
         let work = tab.popup_work.clone();
+        let cleanup = tab.popup_cleanup.clone();
         tokio::spawn(async move {
             let _work = work.lock().await;
             loop {
@@ -241,31 +203,45 @@ impl DesktopBrowserRuntime {
                     candidate = popups.recv() => candidate,
                 };
                 let Some(candidate) = candidate else { break; };
+                let page = candidate.page.clone();
                 if let Some(runtime) = weak.upgrade() {
-                    if let Err(error) = runtime.consume_popup(candidate).await {
-                        tracing::debug!(code = error.code(), "macOS CEF popup was not admitted");
+                    if let Err(error) = runtime.consume_popup(candidate, &stop).await {
+                        tracing::debug!(code = error.code(), "macOS WK popup was not admitted");
+                        if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
                     }
                 } else {
-                    let page = candidate.page.clone();
                     let _ = candidate.ready.await;
-                    let _ = page.force_close().await;
+                    if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
                 }
+            }
+            // Queued popups already own real WK views. Closing the receiver and
+            // relying on Drop is not an acknowledged Profile-cleanup barrier.
+            while let Ok(candidate) = popups.try_recv() {
+                let page = candidate.page.clone();
+                let _ = candidate.ready.await;
+                if page.force_close().await.is_err() { cleanup.lock().await.push(page); }
             }
         });
         Ok(())
     }
 
-    async fn consume_popup(self: &Arc<Self>, candidate: PopupCandidate) -> Result<(), WorkspaceError> {
+    async fn consume_popup(self: &Arc<Self>, candidate: PopupCandidate, opener_stop: &CancellationToken) -> Result<(), WorkspaceError> {
         let page = candidate.page.clone();
         if candidate.ready.await.map_err(native_error)?.is_err() {
             return Err(WorkspaceError::NativeCommandFailed);
         }
-        let _creation = self.creating.lock().await;
+        let _creation = tokio::select! { biased;
+            _ = opener_stop.cancelled() => {
+                page.force_close().await.map_err(native_error)?;
+                return Err(WorkspaceError::WorkspaceClosed);
+            }
+            guard = self.creating.lock() => guard,
+        };
         let tab = self.build_native_tab(page.clone());
         let id = tab.metadata.lock().unwrap().target.tab_id.clone();
         {
             let mut state = self.state.lock().await;
-            if state.closed || self.closing.is_cancelled() || state.tabs.len() >= 8 {
+            if state.closed || self.closing.is_cancelled() || opener_stop.is_cancelled() || state.tabs.len() >= 8 {
                 drop(state);
                 page.force_close().await.map_err(native_error)?;
                 return Err(if self.closing.is_cancelled() {
@@ -295,6 +271,44 @@ impl DesktopBrowserRuntime {
             if state.visible || self.app.emit_to("main", "browser-workspace-open", &self.request.key.agent_session_id).is_ok() { state.presentation_requested = true; }
         }
     }
+
+    /// Wait for the renderer's acknowledged native layout before evaluating an
+    /// Agent operation. Emitting the open event alone does not prove that WK is
+    /// visible, and a pending layout must never wait behind the operation mutex.
+    async fn present_for_agent(&self, tab: &Arc<NativeTab>, cancel: &CancellationToken) -> Result<(), WorkspaceError> {
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+        let mut changed = self.revision.subscribe();
+        let id = tab.metadata.lock().unwrap().target.tab_id.clone();
+        {
+            let mut state = self.state.lock().await;
+            if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+            if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
+            if state.input_enabled { return Err(RunAdmissionError::StaleRun.into()); }
+            if !state.tabs.get(&id).is_some_and(|current| Arc::ptr_eq(current, tab)) { return Err(WorkspaceError::TabNotFound); }
+            state.active = Some(id.clone());
+            // A prior shown panel may have been collapsed during this run.
+            if !state.visible { state.presentation_requested = false; }
+            self.request_presentation(&mut state);
+            self.apply_surface(&state).await?;
+        }
+        let visible = async {
+            loop {
+                {
+                    let state = self.state.lock().await;
+                    if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
+                    if state.input_enabled { return Err(RunAdmissionError::StaleRun.into()); }
+                    if !state.tabs.get(&id).is_some_and(|current| Arc::ptr_eq(current, tab)) { return Err(WorkspaceError::TabNotFound); }
+                    if state.visible && state.active.as_ref() == Some(&id) && state.bounds.is_some() && !state.surface_cancel.is_cancelled() { return Ok(()); }
+                }
+                tokio::select! { biased;
+                    _ = cancel.cancelled() => return Err(RunAdmissionError::Cancelled.into()),
+                    _ = self.closing.cancelled() => return Err(WorkspaceError::WorkspaceClosed),
+                    result = changed.changed() => { result.map_err(|_| WorkspaceError::NativeCommandFailed)?; }
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), visible).await.map_err(|_| WorkspaceError::NotActionable)?
+    }
     fn snapshot_locked(&self, state: &RuntimeState) -> BrowserRuntimeSnapshot {
         BrowserRuntimeSnapshot { runtime_generation: self.request.runtime_generation, revision: self.revision.current(), active_tab_id: state.active.clone(),
             tabs: state.tabs.values().map(|tab| tab.metadata.lock().unwrap().clone()).collect(),
@@ -306,52 +320,35 @@ impl DesktopBrowserRuntime {
         Ok(tab)
     }
     async fn apply_surface(&self, state: &RuntimeState) -> Result<(), WorkspaceError> {
+        // Teardown owns destruction, not layout. Its cancelled surface lease
+        // must not abort after the first tab while others still need closing.
+        if state.closed || self.closing.is_cancelled() { return Ok(()); }
         for (id, tab) in &state.tabs {
             if tab.popup_stop.is_cancelled() { continue; }
             if let Some(bounds) = state.bounds {
                 let visible = state.visible && state.active.as_ref() == Some(id);
                 tab.view.page.set_surface(bounds, visible, state.surface_cancel.clone()).await.map_err(native_error)?;
-                if let Some(chooser) = tab.user_files.lock().await.as_ref() {
-                    chooser.set_visible(visible);
-                }
             }
         }
         Ok(())
     }
-    async fn create_site_data_view(&self) -> Result<View, WorkspaceError> {
-        let mut retained = self.site_data_view.lock().await;
-        if let Some(view) = retained.as_ref() { return Ok(view.clone()); }
-        let view = View::new(self.engine.create_page(self.parent.clone(), self.context.clone()).await.map_err(native_error)?);
-        *retained = Some(view.clone());
-        native::protocol_call(&view, "Page.enable", serde_json::json!({})).await.map_err(native_error)?;
-        Ok(view)
-    }
-    async fn close_site_data_view(&self) -> Result<(), WorkspaceError> {
-        let mut retained = self.site_data_view.lock().await;
-        if let Some(view) = retained.as_ref() { view.page.force_close().await.map_err(native_error)?; }
-        retained.take(); Ok(())
-    }
     async fn retire_native_tab(&self, tab: &Arc<NativeTab>) -> Result<(), WorkspaceError> {
         let _close = tab.close_gate.lock().await;
         tab.popup_stop.cancel();
-        if let Some(chooser) = tab.user_files.lock().await.take() {
-            chooser
-                .close()
-                .await
-                .map_err(|error| native_error(format!("user file chooser close failed: {error}")))?;
-        }
-        tab.view.page.cancel_user_downloads();
-        tab.view
-            .page
-            .cancel_agent_download()
-            .await
-            .map_err(|error| native_error(format!("Agent download cancellation failed: {error}")))?;
+        // A website close or cancelled evaluation may already have released
+        // WK. force_close is the idempotent owner barrier and also drains its
+        // downloads; no preliminary page mutation may block retirement.
         tab.view
             .page
             .force_close()
             .await
-            .map_err(|error| native_error(format!("CEF page close failed: {error}")))?;
+            .map_err(|error| native_error(format!("WK page close failed: {error}")))?;
         let _ = tab.popup_work.lock().await;
+        let mut cleanup = tab.popup_cleanup.lock().await;
+        while let Some(page) = cleanup.last() {
+            page.force_close().await.map_err(native_error)?;
+            cleanup.pop();
+        }
         let id = tab.metadata.lock().unwrap().target.tab_id.clone();
         let mut state = self.state.lock().await;
         state.tabs.remove(&id);
@@ -384,17 +381,14 @@ impl DesktopBrowserRuntime {
             state.tabs.insert(id.clone(), tab.clone()); state.active = Some(id);
             self.apply_surface(&state).await?; self.request_presentation(&mut state);
         }
-        if let Err(error) = page.wait_bootstrap_ready(cancel, &self.closing).await {
-            self.retire_native_tab(&tab).await?;
-            if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
-            if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
-            return Err(native_error(error));
-        }
         if let Err(error) = self.initialize_native_tab(&tab).await {
             self.retire_native_tab(&tab).await?;
             return Err(error);
         }
-        navigation_command(&tab.view, "Page.navigate", serde_json::json!({"url":url.as_str()}), cancel, &self.closing).await?;
+        if self.input_locked.load(Ordering::Acquire) {
+            self.present_for_agent(&tab, cancel).await?;
+        }
+        navigation_command(&tab.view, Navigation::Navigate(url.to_string()), tab.view.page.snapshot().document_generation, cancel, &self.closing, self.navigation_source()).await?;
         self.revision.bump(); Ok(())
     }
 }
@@ -403,22 +397,39 @@ impl DesktopBrowserRuntime {
 impl BrowserRuntime for DesktopBrowserRuntime {
     fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> { Some(self.revision.subscribe()) }
     fn automation(&self) -> Option<&dyn BrowserAutomationPort> { Some(self) }
+    fn interaction_capabilities(&self) -> Option<BrowserInteractionCapabilities> { Some(BrowserInteractionCapabilities::wk_webview()) }
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { Some(self) }
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         let state = self.state.lock().await; if state.closed { return Err(WorkspaceError::WorkspaceClosed); } Ok(self.snapshot_locked(&state))
+    }
+    async fn navigation_diagnostics(&self, target: BrowserTabTarget) -> Result<BrowserNavigationReport, WorkspaceError> {
+        let tab = {
+            let state = self.state.lock().await;
+            if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
+            self.target(&state, &target)?.clone()
+        };
+        let snapshot = tab.view.page.snapshot();
+        if snapshot.document_generation != target.document_generation { return Err(WorkspaceError::StaleTarget); }
+        let report = BrowserNavigationReport {
+            target: target.clone(),
+            load: Some(snapshot.load.agent_projection()),
+            trace: tab.view.page.navigation_trace(),
+            identity: Some(nomifun_browser_macos::identity_report()),
+            runtime: Some(nomifun_browser_macos::runtime_info()),
+        };
+        let state = self.state.lock().await;
+        if state.closed || !Arc::ptr_eq(self.target(&state, &target)?, &tab) { return Err(WorkspaceError::StaleTarget); }
+        Ok(report.project_metadata())
     }
     async fn execute(&self, command: BrowserTabCommand, cancel: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> { self.execute_owned(command, cancel).await }
     async fn close(&self) -> Result<(), WorkspaceError> {
         self.closing.cancel(); self.cancel_pending_for_close().await;
         { let mut state = self.state.lock().await; state.closed = true; state.surface_cancel.cancel(); }
         let _creation = self.creating.lock().await;
-        self.close_site_data_view().await?;
         let tabs: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
         for tab in tabs { self.retire_native_tab(&tab).await?; }
-        self.retire_pending_after_close().await;
-        let mut state = self.state.lock().await;
-        for files in &state.uploads { files.close()?; } state.uploads.clear();
-        for file in &state.download_files { file.close()?; } state.download_files.clear();
+        self.retire_pending_after_close().await?;
+        self.context.close().await.map_err(native_error)?;
         Ok(())
     }
 }
@@ -434,89 +445,79 @@ impl NativeInputGate for DesktopBrowserRuntime {
         };
         let mut failed = false;
         for tab in &tabs {
-            if let Some(chooser) = tab.user_files.lock().await.as_ref() {
-                chooser.cancel();
-            }
-        }
-        for tab in &tabs { failed |= native::set_user_input_enabled(&tab.view, false).await.is_err(); }
-        for tab in tabs {
-            if tab.metadata.lock().unwrap().lifecycle != BrowserTabLifecycle::Crashed {
-                failed |= tab.automation.lock().await.configure_file_choosers(&tab.view, true).await.is_err();
-            }
+            failed |= native::set_native_user_input_enabled(&tab.view, false).await.is_err();
+            failed |= native::script_dialogs::drain(&tab.view).await.is_err();
         }
         if failed { Err(RunAdmissionError::InputGateFailed) } else { Ok(()) }
     }
     async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> {
         self.settle_pending_work().await?;
         let tabs: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
-        for tab in tabs {
-            let mut driver = tab.automation.lock().await;
-            if tab.metadata.lock().unwrap().lifecycle == BrowserTabLifecycle::Crashed { *driver = Default::default(); }
-            else { driver.settle_agent(&tab.view).await.map_err(|_| RunAdmissionError::InputGateFailed)?; }
-        }
+        for tab in tabs { tab.automation.lock().await.invalidate_observation(); }
         Ok(())
     }
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
-        let tabs = {
-            let state = self.state.lock().await;
-            if state.closed { return Ok(()); }
-            state.tabs.values().cloned().collect::<Vec<_>>()
-        };
-        for tab in &tabs { native::script_dialogs::resume(&tab.view).await.map_err(|_| RunAdmissionError::InputGateFailed)?; }
+        let mut state = self.state.lock().await;
+        if state.closed { return Ok(()); }
+        let tabs: Vec<_> = state.tabs.values().cloned().collect();
         for tab in &tabs {
-            if native::set_user_input_enabled(&tab.view, true).await.is_err() {
-                for tab in &tabs { let _ = tab.view.page.set_input_locked(true).await; }
-                return Err(RunAdmissionError::InputGateFailed);
-            }
-            if tab.automation.lock().await.configure_file_choosers(&tab.view, true).await.is_err() {
+            if native::script_dialogs::resume(&tab.view).await.is_err() || native::set_native_user_input_enabled(&tab.view, true).await.is_err() {
                 for tab in &tabs { let _ = tab.view.page.set_input_locked(true).await; }
                 return Err(RunAdmissionError::InputGateFailed);
             }
         }
-        let mut state = self.state.lock().await;
-        if state.closed { return Ok(()); }
-        state.input_enabled = true; self.input_locked.store(false, Ordering::Release); Ok(())
+        state.input_enabled = true;
+        self.input_locked.store(false, Ordering::Release);
+        Ok(())
     }
 }
 
-async fn navigation_command(
-    view: &View,
-    method: &str,
-    params: serde_json::Value,
-    cancel: &CancellationToken,
-    closing: &CancellationToken,
-) -> Result<(), WorkspaceError> {
-    if closing.is_cancelled() {
-        return Err(WorkspaceError::WorkspaceClosed);
-    }
-    if cancel.is_cancelled() {
-        return Err(RunAdmissionError::Cancelled.into());
-    }
-    let navigation = native::protocol_call(view, method, params);
-    tokio::pin!(navigation);
-    // Poll navigation first: if cancellation wins, the command has already
-    // been submitted and stopLoading is ordered after it on the UI thread.
-    let result = tokio::select! {
-        biased;
-        result=&mut navigation=>Some(result),
-        _=cancel.cancelled()=>None,
-        _=closing.cancelled()=>None,
+async fn navigation_command(view: &View, command: Navigation, generation: u64, cancel: &CancellationToken, closing: &CancellationToken, source: BrowserNavigationSource) -> Result<(), WorkspaceError> {
+    if closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+    if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let marker = dispatched.clone();
+    let dispatch_cancel = cancel.clone();
+    let dispatch_closing = closing.clone();
+    let page = view.page.clone();
+    let guard = Arc::new(move || {
+        if dispatch_cancel.is_cancelled() || dispatch_closing.is_cancelled() || page.snapshot().document_generation != generation { return false; }
+        marker.store(true, Ordering::Release);
+        true
+    });
+    // Capture the exact attempt in the native dispatch, not from a later
+    // snapshot which may already belong to a website-initiated successor.
+    let result = view.page.navigate_guarded_receipt(command, guard, source).await;
+    let performed = match &result {
+        Ok(receipt) => receipt.document_generation != generation,
+        // If no receipt acknowledged a dispatched request, preserve uncertainty.
+        Err(_) => dispatched.load(Ordering::Acquire),
     };
-    if cancel.is_cancelled() || closing.is_cancelled() || result.is_none() {
-        let stop = native::protocol_call(view, "Page.stopLoading", serde_json::json!({})).await;
-        if result.is_none() {
-            let _ = navigation.await;
+    if closing.is_cancelled() || cancel.is_cancelled() {
+        if let Ok(receipt) = &result && performed {
+            match view.page.stop_loading_guarded(receipt.document_generation, receipt.navigation_sequence, Arc::new(|| true)).await {
+                Ok(()) => {},
+                Err(error) if matches!(error.as_str(), "BROWSER_STALE_OBSERVATION" | "BROWSER_STALE_TARGET" | "BROWSER_CANCELLED") => {},
+                Err(error) => return Err(native_error(error)),
+            }
         }
-        stop.map_err(native_error)?;
-        if closing.is_cancelled() {
-            return Err(WorkspaceError::WorkspaceClosed);
-        }
-        return Err(RunAdmissionError::Cancelled.into());
+        return Err(if closing.is_cancelled() { WorkspaceError::WorkspaceClosed }
+            else if performed { WorkspaceError::ActionInterrupted }
+            else { RunAdmissionError::Cancelled.into() });
     }
-    result
-        .ok_or(WorkspaceError::NativeCommandFailed)?
-        .map_err(native_error)?;
-    Ok(())
+    if !dispatched.load(Ordering::Acquire) && view.page.snapshot().document_generation != generation { return Err(WorkspaceError::StaleTarget); }
+    result.map(|_| ()).map_err(native_error)
+}
+
+async fn stop_command(view: &View, target: &BrowserTabTarget, cancel: &CancellationToken, closing: &CancellationToken) -> Result<(), WorkspaceError> {
+    if closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+    if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+    let expected = view.page.snapshot();
+    if expected.document_generation != target.document_generation { return Err(WorkspaceError::StaleTarget); }
+    let dispatch_cancel = cancel.clone();
+    let dispatch_closing = closing.clone();
+    let guard = Arc::new(move || !dispatch_cancel.is_cancelled() && !dispatch_closing.is_cancelled());
+    view.page.stop_loading_guarded(target.document_generation, expected.load.navigation_sequence, guard).await.map_err(native_error)
 }
 
 #[async_trait]
@@ -557,7 +558,9 @@ impl BrowserNativeSurfacePort for DesktopBrowserRuntime {
             state.bounds = Some(bounds);
             state.visible = false;
             state.surface_cancel = layout_cancel;
-            return self.apply_surface(&state).await;
+            self.apply_surface(&state).await?;
+            self.revision.bump();
+            return Ok(());
         }
         loop {
             let selected = {
@@ -600,7 +603,9 @@ impl BrowserNativeSurfacePort for DesktopBrowserRuntime {
             state.bounds = Some(bounds);
             state.visible = true;
             state.surface_cancel = layout_cancel;
-            return self.apply_surface(&state).await;
+            self.apply_surface(&state).await?;
+            self.revision.bump();
+            return Ok(());
         }
     }
 }
@@ -627,38 +632,12 @@ impl BrowserAutomationPort for DesktopBrowserRuntime {
     ) -> Result<BrowserActionResult, WorkspaceError> {
         self.perform_action(NativeOperation::Input(action),cancel).await
     }
-    async fn upload(&self,element:BrowserElementRef,files:Arc<nomifun_browser_platform::uploads::PreparedBrowserUpload>,cancel:CancellationToken)->Result<BrowserActionResult,WorkspaceError> {
-        self.perform_action(NativeOperation::Upload{element,files},cancel).await
-    }
-    async fn download(&self,element:BrowserElementRef,file:Arc<nomifun_browser_platform::downloads::PreparedBrowserDownload>,cancel:CancellationToken)->Result<BrowserActionResult,WorkspaceError> {
-        self.perform_action(NativeOperation::Download{element,file},cancel).await
-    }
+
 }
 
 impl DesktopBrowserRuntime {
-    async fn evaluate_inner(&self, request: BrowserEvaluation, cancel: CancellationToken) -> Result<BrowserEvaluationResult, WorkspaceError> {
-        let tab = {
-            let state = self.state.lock().await;
-            if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
-            if state.input_enabled { return Err(RunAdmissionError::StaleRun.into()); }
-            self.target(&state, &request.target)?.clone()
-        };
-        let mut automation = tab.automation.lock().await;
-        let _scope = InputScope(tab.operation.clone());
-        {
-            let mut state = self.state.lock().await;
-            if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
-            if state.input_enabled { return Err(RunAdmissionError::StaleRun.into()); }
-            if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
-            if !Arc::ptr_eq(self.target(&state, &request.target)?, &tab) { return Err(WorkspaceError::StaleTarget); }
-            state.active = Some(request.target.tab_id.clone());
-            *tab.operation.lock().unwrap_or_else(|e|e.into_inner()) = Some(cancel.clone());
-            self.apply_surface(&state).await?;
-            self.request_presentation(&mut state);
-        }
-        automation.activate_for_agent(&tab.view, &cancel).await?;
-        automation.invalidate_observation();
-        evaluation::run(&tab.view, tab.metadata.clone(), request, &cancel).await
+    async fn evaluate_inner(&self, _request: BrowserEvaluation, _cancel: CancellationToken) -> Result<BrowserEvaluationResult, WorkspaceError> {
+        Err(WorkspaceError::UnsupportedAction)
     }
 
     async fn perform_action_inner(&self,operation:NativeOperation,cancel:CancellationToken)->Result<BrowserActionResult,WorkspaceError> {
@@ -678,6 +657,7 @@ impl DesktopBrowserRuntime {
             }
             self.target(&state, &expected)?.clone()
         };
+        self.present_for_agent(&tab, &cancel).await?;
         let mut automation = tab.automation.lock().await;
         let _scope = InputScope(tab.operation.clone());
         {
@@ -700,51 +680,10 @@ impl DesktopBrowserRuntime {
                 .unwrap_or_else(|error| error.into_inner()) = Some(cancel.clone());
             self.apply_surface(&state).await?;
         }
-        // The operation keeps the exact native tab alive, without blocking
-        // registry reads or a popup's new-tab admission on its native callback.
-        automation.activate_for_agent(&tab.view, &cancel).await?;
-        let mut download = None;
-        let fidelity=match operation {
-            NativeOperation::Download { element, file } => {
-                self.state.lock().await.download_files.push(file.clone());
-                let request = tab.view.page.arm_agent_download(file.clone(), cancel.clone())?;
-                let action = automation.act(
-                    &tab.view,
-                    BrowserAction::Click {
-                        element,
-                        button: BrowserMouseButton::Left,
-                        click_count: 1,
-                    },
-                    &cancel,
-                ).await;
-                let result = tab.view.page.finish_agent_download(request, action).await;
-                if matches!(result, Err(WorkspaceError::NativeCommandFailed)) {
-                    return Err(WorkspaceError::NativeCommandFailed);
-                }
-                let cleanup = file.close();
-                if cleanup.is_ok() {
-                    self.state.lock().await.download_files.retain(|retained| !Arc::ptr_eq(retained, &file));
-                }
-                cleanup?;
-                download = Some(result?);
-                InteractionFidelity::BrowserInput
-            }
-            NativeOperation::Input(action)=>{automation.act(&tab.view,action,&cancel).await?;InteractionFidelity::BrowserInput}
-            NativeOperation::Upload{element,files}=>{
-                if files.file_count()>0 {
-                    use nomifun_browser_platform::uploads::{MAX_RETAINED_UPLOAD_BYTES,MAX_RETAINED_UPLOAD_FILES};
-                    let mut state=self.state.lock().await;
-                    let bytes=state.uploads.iter().map(|files|files.total_bytes()).sum::<u64>();
-                    let count=state.uploads.iter().map(|files|files.file_count()).sum::<usize>();
-                    if bytes.saturating_add(files.total_bytes())>MAX_RETAINED_UPLOAD_BYTES || count.saturating_add(files.file_count())>MAX_RETAINED_UPLOAD_FILES || state.uploads.len()>=128 {return Err(WorkspaceError::UploadLimit);}
-                    // A File can be read by the page well after this Tool call.
-                    // Retain even on uncertain protocol failure, until native close.
-                    state.uploads.push(files.clone());
-                }
-                automation.upload(&tab.view,element,&files,&cancel).await?;
-                InteractionFidelity::BrowserProtocol
-            }
-        };
+        // Keep the exact native page retained until its callback acknowledges
+        // settlement. DOM actions never claim trusted hardware input.
+        let NativeOperation::Input(action) = operation;
+        automation.act(tab.view.page.clone(), action, &cancel, self.input_locked.clone()).await?;
         let target = tab
             .metadata
             .lock()
@@ -760,9 +699,9 @@ impl DesktopBrowserRuntime {
         }
         self.revision.bump();
         Ok(BrowserActionResult {
-            download,
+            download: None,
             target,
-            interaction_fidelity: fidelity,
+            interaction_fidelity: InteractionFidelity::SemanticDom,
             outcome: BrowserActionOutcome::Completed,
         })
     }
@@ -777,6 +716,11 @@ impl DesktopBrowserRuntime {
             let id=tab_id.or_else(||state.active.clone()).ok_or(WorkspaceError::TabNotFound)?;
             state.tabs.get(&id).cloned().ok_or(WorkspaceError::TabNotFound)?
         };
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+        if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+        if let Some(error) = tab.view.page.document_unavailable_error() { return Err(native_error(error)); }
+        self.present_for_agent(&tab, &cancel).await?;
+        tab.view.page.wait_document_available(&cancel, &self.closing).await.map_err(native_error)?;
         let mut automation=tab.automation.lock().await;
         let target=tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).target.clone();
         {
@@ -785,12 +729,29 @@ impl DesktopBrowserRuntime {
             if state.input_enabled { return Err(RunAdmissionError::StaleRun.into()); }
             if !Arc::ptr_eq(self.target(&state,&target)?,&tab) { return Err(WorkspaceError::StaleTarget); }
         }
-        automation.activate_for_agent(&tab.view,&cancel).await?;
-        let captured=screenshot::capture(&tab.view,target.clone(),&cancel,tab.rendering_capture.clone()).await;
-        // Capture rendering never owns surface layout. Apply the latest layout
-        // after its lease ends, including hides/activations that arrived in flight.
-        { let state=self.state.lock().await; self.apply_surface(&state).await?; }
-        let result=captured?;
+        automation.invalidate_observation();
+        {
+            let mut state = self.state.lock().await;
+            state.active = Some(target.tab_id.clone());
+            self.apply_surface(&state).await?;
+            self.request_presentation(&mut state);
+        }
+        let png = tab.view.page.screenshot(target.document_generation, cancel.clone()).await.map_err(|error| match error.as_str() {
+            "BROWSER_ACTION_INTERRUPTED" => WorkspaceError::ActionInterrupted,
+            "BROWSER_STALE_OBSERVATION" => WorkspaceError::StaleTarget,
+            "BROWSER_CANCELLED" => RunAdmissionError::Cancelled.into(),
+            _ => WorkspaceError::NativeCommandFailed,
+        })?;
+        // WK snapshots are native viewport captures, never the visible UI surface.
+        if png.len() > 1536 * 1024 { return Err(WorkspaceError::ObservationLimit); }
+        if png.len() < 33 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[8..16] != b"\0\0\0\x0dIHDR" { return Err(WorkspaceError::NativeCommandFailed); }
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        if width == 0 || height == 0 || width > 1600 || height > 1600 { return Err(WorkspaceError::ObservationLimit); }
+        let bounds = self.state.lock().await.bounds.ok_or(WorkspaceError::NotActionable)?;
+        let zoom = f64::from(tab.metadata.lock().unwrap().zoom_percent) / 100.0;
+        let result = BrowserScreenshot { target: target.clone(), width, height, viewport_width: bounds.width / zoom, viewport_height: bounds.height / zoom,
+            png_base64: base64::engine::general_purpose::STANDARD.encode(png) };
         if tab.metadata.lock().unwrap_or_else(|error|error.into_inner()).target!=target { return Err(WorkspaceError::StaleTarget); }
         let mut state=self.state.lock().await;
         if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
@@ -821,6 +782,11 @@ impl DesktopBrowserRuntime {
                 .cloned()
                 .ok_or(WorkspaceError::TabNotFound)?
         };
+        if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+        if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+        if let Some(error) = tab.view.page.document_unavailable_error() { return Err(native_error(error)); }
+        self.present_for_agent(&tab, &cancel).await?;
+        tab.view.page.wait_document_available(&cancel, &self.closing).await.map_err(native_error)?;
         let mut automation = tab.automation.lock().await;
         let target = {
             let state = self.state.lock().await;
@@ -841,9 +807,8 @@ impl DesktopBrowserRuntime {
             }
             target
         };
-        automation.activate_for_agent(&tab.view, &cancel).await?;
         let result = automation
-            .observe(&tab.view, target.clone(), &cancel)
+            .observe(tab.view.page.clone(), target.clone(), &cancel, self.input_locked.clone())
             .await?;
         if tab
             .metadata
@@ -878,6 +843,15 @@ impl DesktopBrowserRuntime {
         } else {
             None
         };
+        // Recovering a page requires a shown, acknowledged panel, not an old
+        // executable document. Layout itself needs the automation lock, so
+        // complete this admission before taking that lock below.
+        if self.input_locked.load(Ordering::Acquire)
+            && matches!(&command, BrowserTabCommand::Navigate { .. } | BrowserTabCommand::Reload { .. } | BrowserTabCommand::Back { .. } | BrowserTabCommand::Forward { .. })
+            && let Some(tab) = &selected
+        {
+            self.present_for_agent(tab, &cancel).await?;
+        }
         let _page = match &selected {
             Some(tab) => Some(tab.automation.lock().await),
             None => None,
@@ -922,17 +896,9 @@ impl DesktopBrowserRuntime {
                     return Err(WorkspaceError::NotActionable);
                 }
                 let tab = self.target(&state, &target)?.clone();
-                tab.view.page.cancel_user_download(&download_id).map_err(native_error)?;
+                tab.view.page.cancel_user_download(download_id).await.map_err(native_error)?;
             }
-            BrowserTabCommand::Permission { target, request_id, allow } => {
-                if !state.input_enabled || !state.visible || state.active.as_ref() != Some(&target.tab_id) {
-                    return Err(WorkspaceError::NotActionable);
-                }
-                let tab = self.target(&state, &target)?.clone();
-                drop(state);
-                native::permissions::respond(&tab.view, target, request_id, allow).await?;
-                state = self.state.lock().await;
-            }
+            BrowserTabCommand::Permission { .. } => return Err(WorkspaceError::UnsupportedAction),
             BrowserTabCommand::Create { url } => {
                 drop(state);
                 self.create_tab(&url, &cancel, &scope).await?;
@@ -948,88 +914,33 @@ impl DesktopBrowserRuntime {
                     return Err(WorkspaceError::NotActionable);
                 }
                 let tab = self.target(&state, &target)?;
-                let origin = url::Url::parse(&tab.metadata.lock().unwrap().url).ok().map(|url| url.origin());
                 tab.view.page.set_zoom_factor(f64::from(percent) / 100.0).await.map_err(native_error)?;
-                // CEF shares host zoom across pages from the same origin.
-                for tab in state.tabs.values() {
-                    let mut metadata = tab.metadata.lock().unwrap();
-                    if metadata.target.tab_id == target.tab_id || origin.as_ref().is_some_and(|origin| {
-                        url::Url::parse(&metadata.url).ok().is_some_and(|url| &url.origin() == origin)
-                    }) {
-                        metadata.zoom_percent = percent;
-                    }
-                }
+                tab.metadata.lock().unwrap().zoom_percent = percent;
             }
             BrowserTabCommand::Close {..} | BrowserTabCommand::CloseAll {..} | BrowserTabCommand::ClearSiteData {..} => unreachable!("close is handled before native input locks"),
             BrowserTabCommand::Navigate { target, url } => {
                 let url = valid_url(&url)?;
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                if let Some(chooser) = tab.user_files.lock().await.as_ref() { chooser.cancel(); }
-                navigation_command(
-                    &tab.view,
-                    "Page.navigate",
-                    serde_json::json!({"url":url.as_str()}),
-                    &cancel,
-                    &self.closing,
-                )
-                .await?;
+                navigation_command(&tab.view, Navigation::Navigate(url.to_string()), target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::Reload { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                if let Some(chooser) = tab.user_files.lock().await.as_ref() { chooser.cancel(); }
-                navigation_command(
-                    &tab.view,
-                    "Page.reload",
-                    serde_json::json!({}),
-                    &cancel,
-                    &self.closing,
-                )
-                .await?;
+                navigation_command(&tab.view, Navigation::Reload, target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::StopLoading { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                if let Some(chooser) = tab.user_files.lock().await.as_ref() { chooser.cancel(); }
-                native::protocol_call(&tab.view, "Page.stopLoading", serde_json::json!({}))
-                    .await
-                    .map_err(native_error)?;
+                stop_command(&tab.view, &target, &cancel, &self.closing).await?;
                 state = self.state.lock().await;
             }
             BrowserTabCommand::Back { target } | BrowserTabCommand::Forward { target } => {
                 let tab = self.target(&state, &target)?.clone();
                 drop(state);
-                if let Some(chooser) = tab.user_files.lock().await.as_ref() { chooser.cancel(); }
-                let history = native::protocol_call(
-                    &tab.view,
-                    "Page.getNavigationHistory",
-                    serde_json::json!({}),
-                )
-                .await
-                .map_err(native_error)?;
-                let current = history["currentIndex"]
-                    .as_i64()
-                    .ok_or(WorkspaceError::NativeCommandFailed)?;
-                let entries = history["entries"]
-                    .as_array()
-                    .ok_or(WorkspaceError::NativeCommandFailed)?;
-                let next = if backwards { current - 1 } else { current + 1 };
-                if let Some(entry) = usize::try_from(next)
-                    .ok()
-                    .and_then(|next| entries.get(next))
-                {
-                    navigation_command(
-                        &tab.view,
-                        "Page.navigateToHistoryEntry",
-                        serde_json::json!({"entryId":entry["id"]}),
-                        &cancel,
-                        &self.closing,
-                    )
-                    .await?;
-                }
+                navigation_command(&tab.view, if backwards { Navigation::Back } else { Navigation::Forward }, target.document_generation, &cancel, &self.closing, self.navigation_source()).await?;
                 state = self.state.lock().await;
             }
         }

@@ -216,7 +216,8 @@ bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
 bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 ```
 
-两种架构使用分别固定的 CEF 归档，并验证主程序、framework 和所有 helper 的架构。
+两种架构均使用 macOS 14+ 系统 WKWebView，不下载或打包浏览器 framework/helper。
+打包验证主程序架构，并拒绝附带浏览器运行时或系统 WebKit.framework。
 Intel 更新包命名为 `NomiFun_<version>_x64.app.tar.gz`，Apple Silicon 保留
 `NomiFun.app.tar.gz`。将 `dist/desktop/` 收集的同一批产物上传到两处分发服务。
 Rosetta 运行不等同于 Intel 实机验收。

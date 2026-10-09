@@ -358,7 +358,7 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon and Intel macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and system WKWebView on macOS 14+ (Apple Silicon and Intel); Linux is deferred. The user and the Agent share one live page with tabs, navigation, forms, history, isolated sign-in state, WebSocket and HMR. On macOS, Agent interaction uses semantic page actions for ordinary buttons and forms; advanced gestures and automatic file transfer are explicitly unsupported. See the [platform capability matrix](docs/architecture/browser-platform.md).
 - **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
 - **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
 - **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
@@ -644,15 +644,12 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 | Native Intel package and updater archive | `bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json` |
 | Complete development `.app` with embedded Browser | `bun run build:fast` |
 
-Each architecture uses its own pinned CEF runtime. Arch aliases are
+Both architectures use system WKWebView without bundling or downloading a browser runtime. Arch aliases are
 `arm`/`aarch64`/`silicon` and `intel`/`x64`/`x86_64`; Universal builds are rejected.
 Intel packages include the verified ONNX Runtime 1.23.2 and its licenses.
-Use the native arm64 package on Apple Silicon: Chromium does not maintain
-Rosetta execution, and v0.8.1's translated CEF shutdown test did not pass.
-Native Intel hardware acceptance was not performed. All macOS product commands use the same
-CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
-are generated from the final App after its CEF components have been installed and
-signed; updater signing also requires the configured Tauri updater private key.
+Use the native package for your architecture. Cross-compilation is not target-machine acceptance.
+All macOS product commands share the App assembly and signing pipeline. DMG and updater `.app.tar.gz`
+are generated from the final App; updater signing also requires the configured Tauri updater private key.
 
 DMGs use **ULMO/LZMA** compression by default. To produce a compatibility image
 with **UDZO/zlib level 9**, run
@@ -666,21 +663,17 @@ follow container creation.
 
 `bun run dev` launches a complete development `.app` and waits for native browser
 cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
-and prints its path. A bare Cargo binary lacks the embedded browser bundle.
+and prints its path. Use the App bundle for product testing, including its identity and system permissions.
 
 For a stable installed development signing identity, explicitly set
 `NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` for
-`bun run dev` or `bun run build:fast`. The same identity signs the main App, CEF
-framework and all Helpers, including incremental rebuilds; bundle caches are
+`bun run dev` or `bun run build:fast`. The same identity signs the App,
+including incremental rebuilds; bundle caches are
 separate for each configured identity. The scripts do not select or create a
-certificate. With no setting, builds use ad-hoc signing and print one startup
-notice that rebuilding may require macOS Keychain authorization again.
-
-The pinned CEF currently uses the default **Chromium Safe Storage** Keychain
-item. macOS controls explicit access to it, separately from Agent Browser grants.
-A stable signing identity and bundle identifier let Keychain recognize updates;
-they do not replace the user's initial authorization. See the
-[macOS signing notes](apps/desktop/signing/README.md) for this SDK limitation.
+certificate. With no setting, builds use ad-hoc signing. WK website data is independent
+of Safari and the retired browser's profiles; users may need to sign into sites once
+after migration. Existing AgentSession data and application configuration are preserved.
+See the [macOS signing notes](apps/desktop/signing/README.md).
 
 Developer ID signing reads `apps/desktop/signing/.env.signing` (gitignored) and
 requires an installed `APPLE_SIGNING_IDENTITY`. Configured notarization applies
@@ -713,7 +706,7 @@ Arch aliases: `x64`/`x86_64`, `arm64`/`aarch64`/`arm`. Linux has no signing/nota
 ⚠️ Cross-arch (e.g. building arm64 on an x64 host) needs the target's sysroot/toolchain and often
 fails on the webkit2gtk link — build on the target architecture's machine/container instead.
 
-> `bun run build` builds for the current OS. On macOS it uses the complete CEF
+> `bun run build` builds for the current OS. On macOS it uses the complete native
 > packaging pipeline with arm64 as the default; `build:mac intel` selects Intel.
 > Windows and Linux retain their existing Tauri build path.
 
@@ -730,12 +723,12 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
+| `bun run build:fast` | 快速构建 debug；macOS 输出原生 WKWebView .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
+| `bun run build:mac` | 构建 macOS App 和 DMG（默认 arm64，可选 Intel），并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
-| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
+| `bun run build:signed` | 构建完整 macOS App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终签名 App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
@@ -752,6 +745,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
+| `bun run test:upgrade` | 运行启动、数据集兼容与升级定向 Rust 测试 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
@@ -762,8 +756,8 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
 | `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
-| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
-| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
+| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创作页面、路由、API、翻译与 Gateway 标记回流 |
+| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创作标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |

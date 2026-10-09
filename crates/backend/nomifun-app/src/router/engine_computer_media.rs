@@ -1,9 +1,9 @@
-//! Project canonical Computer screenshots into typed model image parts.
+//! Project canonical Computer and Browser screenshots into typed model image parts.
 //!
 //! The native role owner returns a bounded JSON envelope because the Kernel
 //! capability port is JSON-only. This exact adapter removes pixel bodies from
 //! that JSON before model/history use and restores them as typed image parts.
-//! Arbitrary plugin JSON is never interpreted as Computer media.
+//! Arbitrary plugin JSON is never interpreted as native media.
 
 use std::sync::Arc;
 
@@ -39,6 +39,55 @@ fn is_computer_screenshot(capability_id: &str, action_id: &str, native_action: O
         && native_action == Some("screenshot")
 }
 
+fn is_browser_screenshot(capability_id: &str, action_id: &str, arguments: &Value) -> bool {
+    capability_id == nomifun_agent_domain_wave2::BROWSER_MODULE_ID
+        && action_id == "browser/observe"
+        && arguments.get("screenshot").and_then(Value::as_bool) == Some(true)
+}
+
+fn project_browser_screenshot(result: EngineToolResult) -> Result<EngineToolResult, EngineToolError> {
+    if result.is_error { return Ok(result); }
+    let [ChatToolResultPart::Text { text }] = result.output.as_slice() else {
+        return Err(error("Canonical Browser screenshot result has an invalid shape"));
+    };
+    let mut envelope: Value = serde_json::from_str(text)
+        .map_err(|_| error("Canonical Browser screenshot result could not be decoded"))?;
+    // BrowserRoleOwner returns the observation object itself. KernelToolInvoker
+    // serializes output.0 unchanged; Computer's result envelope is unrelated.
+    let observation = envelope.as_object_mut()
+        .ok_or_else(|| error("Canonical Browser observation payload is missing"))?;
+    if observation.get("screenshot_status").and_then(Value::as_str) == Some("awaiting_dialog")
+        && observation.get("script_dialog").is_some_and(Value::is_object)
+        && !observation.contains_key("screenshot") {
+        return Ok(result);
+    }
+    let target = observation.get("target").cloned()
+        .ok_or_else(|| error("Canonical Browser observation target is missing"))?;
+    let screenshot = observation.get_mut("screenshot").and_then(Value::as_object_mut)
+        .ok_or_else(|| error("Canonical Browser screenshot payload is missing"))?;
+    if screenshot.get("target") != Some(&target)
+        || !["width", "height"].iter().all(|key| screenshot.get(*key).and_then(Value::as_u64).is_some_and(|value| value > 0 && value <= 32_768)) {
+        return Err(error("Canonical Browser screenshot target or dimensions are invalid"));
+    }
+    let data_base64 = screenshot.remove("png_base64").and_then(|body| body.as_str().map(str::to_owned))
+        .filter(|body| !body.is_empty() && body.len() <= MAX_COMPUTER_IMAGE_ENCODED_BYTES)
+        .ok_or_else(|| error("Canonical Browser screenshot encoded body is invalid"))?;
+    let decoded = STANDARD.decode(data_base64.as_bytes())
+        .map_err(|_| error("Canonical Browser screenshot is not valid base64"))?;
+    if decoded.len() > MAX_COMPUTER_IMAGE_DECODED_BYTES || !decoded.starts_with(PNG_SIGNATURE) {
+        return Err(error("Canonical Browser screenshot body is not bounded PNG"));
+    }
+    screenshot.insert("media_type".into(), json!("image/png"));
+    screenshot.insert("notice".into(), json!("Visible viewport from the same authorized native Browser tab. DOM content and pixels are separate observations; observe again after actions or navigation. History may omit pixels."));
+    let projected = EngineToolResult {
+        call_id: result.call_id,
+        output: vec![ChatToolResultPart::Text { text: envelope.to_string() }, ChatToolResultPart::Image { media_type: "image/png".into(), data_base64 }],
+        is_error: false,
+    };
+    projected.validate_for(&projected.call_id)?;
+    Ok(projected)
+}
+
 impl ComputerMediaTools {
     fn admit_image(&self, generation: u64) -> Result<(), EngineToolError> {
         let active = self
@@ -50,7 +99,7 @@ impl ComputerMediaTools {
             || active.resolved_snapshot_ref != *self.snapshot.snapshot_ref()
         {
             return Err(error(
-                "Computer screenshot requires an eligible exact model route with ImageInput; no pixels captured",
+                "Native screenshot requires an eligible exact model route with ImageInput; no pixels delivered",
             ));
         }
         Ok(())
@@ -157,7 +206,10 @@ impl EngineToolInvoker for ComputerMediaTools {
                 .get("action")
                 .and_then(Value::as_str),
         );
-        if !screenshot {
+        let browser_screenshot = is_browser_screenshot(
+            invocation.binding.capability_id.as_ref(), invocation.binding.action_id.as_ref(), &invocation.call.arguments.0,
+        );
+        if !screenshot && !browser_screenshot {
             return self.inner.invoke(invocation, cancellation).await;
         }
         if cancellation.is_cancelled() {
@@ -173,14 +225,14 @@ impl EngineToolInvoker for ComputerMediaTools {
             item.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
         }) {
             return Err(error(
-                "Computer media projection requires the canonical platform computer/observe contribution",
+                "Native media projection requires the canonical platform Computer or Browser observation contribution",
             ));
         }
         let generation = invocation.active_set_generation;
         self.admit_image(generation)?;
         let result = self.inner.invoke(invocation, cancellation).await?;
         self.admit_image(generation)?;
-        project_computer_screenshot(result)
+        if browser_screenshot { project_browser_screenshot(result) } else { project_computer_screenshot(result) }
     }
 }
 
@@ -188,6 +240,104 @@ impl EngineToolInvoker for ComputerMediaTools {
 mod tests {
     use super::*;
     use nomifun_chat_model_broker::ToolCallId;
+    use nomifun_browser_platform::runtime::{BrowserDialog, BrowserDialogKind, BrowserInteractionCapabilities, BrowserObservation, BrowserScreenshot, BrowserTabTarget};
+
+    const BROWSER_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZkAAAAASUVORK5CYII=";
+
+    fn browser_observation() -> BrowserObservation {
+        BrowserObservation {
+            target: BrowserTabTarget { tab_id: "tab".into(), runtime_generation: 1, document_generation: 2 },
+            observation_generation: 3,
+            content: "Page text".into(), elements: vec![], script_dialog: None, unobserved_frames: 1,
+            load: None, content_url: None,
+        }
+    }
+
+    fn browser_screenshot(target: BrowserTabTarget, png_base64: String) -> BrowserScreenshot {
+        BrowserScreenshot { target, width: 1, height: 1, viewport_width: 880., viewport_height: 600., png_base64 }
+    }
+
+    fn encoded_browser_result(observation: BrowserObservation, screenshot: Option<BrowserScreenshot>) -> EngineToolResult {
+        // Exercise the BrowserRoleOwner encoder and KernelToolInvoker's actual
+        // output.0 serialization, rather than a Computer-shaped mock envelope.
+        let output = super::super::engine_browser_tools::encode_managed_observation(
+            observation, Some(BrowserInteractionCapabilities::wk_webview()), screenshot, true,
+        ).unwrap();
+        EngineToolResult::text(ToolCallId::from("page"), serde_json::to_string(&output.0).unwrap(), false)
+    }
+
+    #[test]
+    fn browser_navigation_metadata_is_projected_before_entering_tool_history() {
+        use nomifun_browser_platform::navigation::BrowserLoadSummary;
+        let mut observation = browser_observation();
+        observation.load = Some(BrowserLoadSummary {
+            requested_url: Some("https://example.test/new?token=secret#private".into()),
+            content_url: Some("https://example.test/retained?credential=secret".into()),
+            ..Default::default()
+        });
+        observation.content_url = Some("https://example.test/retained?credential=secret".into());
+        let output = super::super::engine_browser_tools::encode_managed_observation(
+            observation, None, None, false,
+        ).unwrap();
+        assert_eq!(output.0["load"]["requested_url"], "https://example.test/new");
+        assert_eq!(output.0["load"]["content_url"], "https://example.test/retained");
+        assert_eq!(output.0["content_url"], "https://example.test/retained");
+        assert!(!serde_json::to_string(&output.0).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn browser_screenshot_is_opt_in_and_exact_to_canonical_observe() {
+        assert!(is_browser_screenshot("browser", "browser/observe", &json!({"screenshot":true})));
+        assert!(!is_browser_screenshot("browser", "browser/observe", &json!({})));
+        assert!(!is_browser_screenshot("foreign.browser", "browser/observe", &json!({"screenshot":true})));
+        assert!(!is_browser_screenshot("browser", "browser/render_content", &json!({"screenshot":true})));
+    }
+
+    #[test]
+    fn browser_projection_preserves_dom_metadata_and_removes_pixels_from_text() {
+        let encoded = BROWSER_PNG.to_owned();
+        let observation = browser_observation();
+        let screenshot = browser_screenshot(observation.target.clone(), encoded.clone());
+        let result = encoded_browser_result(observation, Some(screenshot));
+        assert!(serde_json::from_str::<Value>(&result.output_text()).unwrap().get("result").is_none());
+        let projected = project_browser_screenshot(result).unwrap();
+        let ChatToolResultPart::Text { text } = &projected.output[0] else { panic!("text metadata missing") };
+        assert!(!text.contains(&encoded));
+        assert!(!text.contains("png_base64"));
+        assert!(text.contains("semantic_dom"));
+        assert!(text.contains("Page text"));
+        assert!(matches!(&projected.output[1], ChatToolResultPart::Image { media_type, data_base64 } if media_type == "image/png" && data_base64 == &encoded));
+    }
+
+    #[test]
+    fn browser_projection_rejects_mismatched_page_and_malformed_image() {
+        let observation = browser_observation();
+        let mut old_target = observation.target.clone();
+        old_target.document_generation -= 1;
+        let stale = super::super::engine_browser_tools::encode_managed_observation(
+            observation.clone(), None, Some(browser_screenshot(old_target, BROWSER_PNG.into())), true,
+        );
+        assert!(matches!(stale, Err(super::super::engine_browser_tools::BrowserHostFailure::Workspace(
+            nomifun_browser_platform::runtime::WorkspaceError::StaleTarget
+        ))));
+        let malformed = browser_screenshot(observation.target.clone(), STANDARD.encode(b"not png"));
+        assert!(project_browser_screenshot(encoded_browser_result(observation, Some(malformed))).is_err());
+    }
+
+    #[test]
+    fn pending_dialog_returns_metadata_without_fabricated_pixels() {
+        let mut observation = browser_observation();
+        observation.script_dialog = Some(BrowserDialog {
+            target: observation.target.clone(), kind: BrowserDialogKind::Alert, request_id: "dialog".into(),
+            message: "Page alert".into(), default_text: String::new(), origin: "http://localhost".into(), text_truncated: false,
+        });
+        // A dialog opening after capture discards those no-longer-operable pixels.
+        let screenshot = browser_screenshot(observation.target.clone(), BROWSER_PNG.into());
+        let result = encoded_browser_result(observation, Some(screenshot));
+        let projected = project_browser_screenshot(result).unwrap();
+        assert_eq!(projected.output.len(), 1);
+        assert!(!projected.output_text().contains(BROWSER_PNG));
+    }
 
     #[test]
     fn projection_is_exact_to_the_canonical_screenshot_action() {

@@ -359,8 +359,9 @@ bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
 bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
 ```
 
-Both targets use independently pinned CEF archives and verify the host,
-framework, and helpers against the selected architecture. The Intel updater
+Both targets use macOS 14+ system WKWebView, without downloading or bundling
+a browser framework or helper. Packaging verifies the host architecture and
+rejects bundled browser runtimes, including system WebKit.framework. The Intel updater
 uses `NomiFun_<version>_x64.app.tar.gz`; the Apple Silicon updater retains
 `NomiFun.app.tar.gz`. Upload the collected `dist/desktop/` artifacts to both
 distribution services. Rosetta execution is not native Intel acceptance.

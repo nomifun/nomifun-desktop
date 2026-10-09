@@ -15,7 +15,7 @@ import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
-import SiderResourceEntry from './SiderNav/SiderResourceEntry';
+import SiderNavItem from './SiderNav/SiderNavItem';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@renderer/pages/creativeStudio/app/canvasResumeLocation';
 import {
@@ -204,7 +204,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
             />
-            <SiderResourceEntry
+            <SiderNavItem
               label={t('creativeStudio.navigation.canvases', { defaultValue: '我的画布' })}
               icon={<FullScreen theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
               isActive={pathname === CANVASES_PATH || pathname.startsWith(CANVASES_PATH + '/')}
@@ -232,13 +232,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 onClick={handleAssetLibraryClick}
               />
             </div>
-            <SiderResourceEntry
+            <SiderNavItem
               label={t('creativeStudio.navigation.prompts', { defaultValue: '提示词库' })}
               icon={<FileText theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
               isActive={pathname === PROMPTS_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}
               onClick={() => navTo(PROMPTS_PATH)}
             />
-            <SiderResourceEntry
+            <SiderNavItem
               label={t('creativeStudio.navigation.templates', { defaultValue: '模板工作台' })}
               icon={<PageTemplate theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
               isActive={pathname === TEMPLATES_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}

@@ -6,10 +6,11 @@
 
 import type { IApiSshConfigScan, IApiSshHost } from '@/common/adapter/ipcBridge';
 import { ipcBridge } from '@/common';
-import { useCallback, useState } from 'react';
-import { Button, Form, Input, InputNumber, Message, Modal, Select } from '@arco-design/web-react';
+import { useCallback, useRef, useState } from 'react';
+import { Alert, Button, Dropdown, Form, Input, InputNumber, Menu, Message, Modal, Select, Spin } from '@arco-design/web-react';
 import NomiModal from '@renderer/components/base/NomiModal';
-import { Certificate, Download, Edit, Fingerprint, Key, Lock, Plus, Server, Speed } from '@icon-park/react';
+import { VisualEmpty, VisualListRow, VisualSearch } from '../components/CodeVisualPrimitives';
+import { Certificate, Delete, Download, Edit, Fingerprint, Key, Lock, More, Plus, Server, Speed, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 import type { I18nKey } from '@renderer/services/i18n';
@@ -391,7 +392,7 @@ const SshConfigImportModal: React.FC<ImportModalProps> = ({ visible, scan, onClo
 
 const SshHostManagement: React.FC = () => {
   const { t } = useTranslation();
-  const { data: hosts, mutate } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
+  const { data: hosts, mutate, error, isLoading } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
   // Scanned once per mount, silently: the empty state is import-first only when
   // there is genuinely something to import. `shouldRetryOnError: false` keeps a
   // backend without this route (an older build) from being polled about it.
@@ -400,9 +401,12 @@ const SshHostManagement: React.FC = () => {
     () => ipcBridge.ssh.importCandidates.invoke(),
     { shouldRetryOnError: false }
   );
+  const [query, setQuery] = useState('');
   const [modalVisible, setModalVisible] = useState(false);
   const [importVisible, setImportVisible] = useState(false);
   const [editHost, setEditHost] = useState<IApiSshHost | undefined>();
+  const [menuHostId, setMenuHostId] = useState<string>();
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const cta = hostBookPrimaryCta(scan);
   const isEmpty = !hosts || hosts.length === 0;
@@ -439,98 +443,96 @@ const SshHostManagement: React.FC = () => {
     [t, mutate]
   );
 
+  const search = query.trim().toLocaleLowerCase();
+  const visibleHosts = (hosts ?? []).filter((host) =>
+    (host.name + ' ' + host.username + ' ' + host.host).toLocaleLowerCase().includes(search)
+  );
+
   return (
     <div>
-      <div className='mb-14px flex items-center justify-between gap-8px'>
-        <div className='text-13px text-t-tertiary'>{t('ssh.description')}</div>
-        <div className='flex shrink-0 items-center gap-6px'>
-          {/* Unobtrusive entry for a book that already has hosts — the import is
-              still one click away, without competing with the main action. */}
-          {!isEmpty && cta.kind === 'import' ? (
-            <Button
-              size='small'
-              type='text'
-              icon={<Download theme='outline' size='14' />}
-              onClick={() => setImportVisible(true)}
-            >
-              {t('ssh.import.entry')}
-            </Button>
-          ) : null}
-          <Button
-            type={importFirst ? 'outline' : 'primary'}
-            icon={<Plus theme='outline' size='14' />}
-            onClick={openAdd}
-          >
-            {t('ssh.empty.add')}
-          </Button>
+      <div className='cv-toolbar'>
+        <VisualSearch value={query} onChange={setQuery} label={t('settings.workspace.hostSearch')} clearLabel={t('settings.workspace.clearSearch')} />
+        <div className='flex shrink-0 items-center gap-8px'>
+          {!isEmpty && cta.kind === 'import' && <Button size='small' type='text' icon={<Download theme='outline' size={14} />} onClick={() => setImportVisible(true)}>{t('ssh.import.entry')}</Button>}
+          <Button type={importFirst ? 'outline' : 'primary'} icon={<Plus theme='outline' size={14} />} onClick={openAdd}>{t('ssh.empty.add')}</Button>
         </div>
       </div>
-
-      {isEmpty ? (
-        <div className='flex min-h-200px flex-col items-center justify-center gap-10px rd-12px border border-solid border-arco-2 bg-fill-0 px-24px py-28px text-center'>
-          <span className='flex size-44px items-center justify-center rd-12px bg-brand-light text-brand'>
-            <Server theme='outline' size='24' fill='currentColor' />
-          </span>
-          <div className='text-15px font-600 leading-22px text-t-primary'>{t('ssh.empty.title')}</div>
-          <div className='mt-2px text-12px leading-18px text-t-tertiary'>{t('ssh.empty.description')}</div>
-          {/* Import-first, but never a button that opens an empty dialog: with no
-              candidates (or no readable config) this falls back to the add flow. */}
-          {cta.kind === 'import' ? (
-            <>
-              <Button
-                type='primary'
-                icon={<Download theme='outline' size='14' />}
-                onClick={() => setImportVisible(true)}
-              >
-                {t('ssh.import.cta')}
-              </Button>
-              <div className='text-12px leading-18px text-t-tertiary'>
-                {t('ssh.import.detected', { count: cta.count })}
-              </div>
-            </>
-          ) : (
-            <Button type='primary' icon={<Plus theme='outline' size='14' />} onClick={openAdd}>
-              {t('ssh.empty.add')}
-            </Button>
-          )}
-        </div>
-      ) : (
-        <div className='flex flex-col gap-8px'>
-          {hosts.map((host) => (
-            <div
+      {error && <Alert className='mb-16px' type='error' content={t('settings.workspace.hostsLoadFailed')}
+        action={<Button size='small' onClick={() => void mutate().catch(() => undefined)}>{t('settings.workspace.retry')}</Button>} />}
+      {isLoading && !hosts ? <div className='flex min-h-200px items-center justify-center gap-8px' role='status'>
+        <Spin /><span>{t('settings.workspace.hostsLoading')}</span>
+      </div> : error && !hosts ? null : isEmpty ? (
+        <VisualEmpty icon={<Server theme='outline' size={22} />} title={t('ssh.empty.title')} description={t('ssh.empty.description')}
+          action={cta.kind === 'import' && <>
+            <Button type='primary' icon={<Download theme='outline' size={14} />} onClick={() => setImportVisible(true)}>{t('ssh.import.cta')}</Button>
+            <span className='cv-toolbar__hint'>{t('ssh.import.detected', { count: cta.count })}</span>
+          </>} />
+      ) : !visibleHosts.length ? <VisualEmpty icon={<Server theme='outline' size={22} />} title={t('settings.workspace.noResults')}
+        action={<Button onClick={() => setQuery('')}>{t('settings.workspace.clearSearch')}</Button>} /> : (
+        <section className='cv-host-list' aria-label={t('settings.workspace.hostList')}>
+          {visibleHosts.map((host) => (
+            <VisualListRow
               key={host.sshHostId}
-              className='group flex items-center gap-10px rd-10px border border-solid border-arco-2 bg-fill-0 px-12px py-10px transition-colors hover:border-[var(--color-border-3)]'
-            >
-              <span className='flex size-30px shrink-0 items-center justify-center rd-8px bg-brand-light text-brand'>
-                <Server theme='outline' size='16' fill='currentColor' />
-              </span>
-              <div className='min-w-0 flex-1'>
-                <div className='truncate text-13px font-600 leading-19px text-t-primary'>{host.name}</div>
-                <div className='mt-2px truncate font-mono text-12px leading-18px text-t-secondary'>
-                  {host.username}@{host.host}:{host.port}
-                </div>
-                <div className='mt-3px flex items-center gap-6px text-11px leading-17px text-t-tertiary'>
-                  <span className='inline-flex items-center gap-4px'>
-                    {AUTH_ICON[host.authType]}
-                    {t(AUTH_LABEL_KEY[host.authType])}
+              icon={<Server theme='outline' size={17} />}
+              title={host.name}
+              description={
+                <span className='cv-host-details'>
+                  <span className='cv-host-endpoint'>{host.username}@{host.host}:{host.port}</span>
+                  <span className='inline-flex items-center gap-6px'>
+                    {AUTH_ICON[host.authType]}{t(AUTH_LABEL_KEY[host.authType])}{host.sudoPassword ? <span>· sudo</span> : null}
                   </span>
-                  {host.sudoPassword ? <span>· sudo</span> : null}
-                </div>
-              </div>
-              <div className='flex shrink-0 items-center gap-4px'>
-                <Button type='primary' size='small' onClick={() => void openSession(host)}>
-                  {t('ssh.newSession')}
-                </Button>
-                <div className='flex items-center gap-4px opacity-0 transition-opacity group-hover:opacity-100'>
-                  <Button size='small' type='secondary' icon={<Edit theme='outline' size='14' />} onClick={() => openEdit(host)} />
-                  <Button size='small' type='secondary' status='danger' onClick={() => handleDelete(host)}>
-                    {t('ssh.delete.ok')}
-                  </Button>
-                </div>
-              </div>
-            </div>
+                </span>
+              }
+              action={
+                <Dropdown
+                  trigger='click'
+                  position='br'
+                  popupVisible={menuHostId === host.sshHostId}
+                  onVisibleChange={(visible) => setMenuHostId((current) =>
+                    visible ? host.sshHostId : current === host.sshHostId ? undefined : current
+                  )}
+                  triggerProps={{ escToClose: true }}
+                  droplist={
+                    <Menu className='cv-host-menu' onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.stopPropagation();
+                        setMenuHostId(undefined);
+                        menuTriggerRef.current?.focus();
+                      }
+                    }}>
+                      <Menu.Item key='session' onClick={() => void openSession(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Terminal theme='outline' size={15} />{t('ssh.newSession')}
+                        </span>
+                      </Menu.Item>
+                      <Menu.Item key='edit' onClick={() => openEdit(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Edit theme='outline' size={15} />{t('common.edit')}
+                        </span>
+                      </Menu.Item>
+                      <Menu.Item key='delete' className='cv-host-menu__delete' onClick={() => handleDelete(host)}>
+                        <span className='flex items-center gap-8px'>
+                          <Delete theme='outline' size={15} />{t('ssh.delete.ok')}
+                        </span>
+                      </Menu.Item>
+                    </Menu>
+                  }
+                >
+                  <Button
+                    className='cv-host-more'
+                    size='small'
+                    aria-label={`${t('common.more')} · ${host.name}`}
+                    aria-haspopup='menu'
+                    aria-expanded={menuHostId === host.sshHostId}
+                    title={t('common.more')}
+                    onFocus={(event) => { menuTriggerRef.current = event.currentTarget; }}
+                    icon={<More theme='outline' size={17} />}
+                  />
+                </Dropdown>
+              }
+            />
           ))}
-        </div>
+        </section>
       )}
 
       <SshHostFormModal

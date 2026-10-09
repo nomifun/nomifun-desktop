@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <!-- The user-owned browser supports ordinary HTTP as well as HTTPS.
+         Keep this exception scoped to web content, not URLSession clients. -->
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
+  </dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>NomiFun uses the microphone for voice input and for websites that you explicitly allow in the built-in browser.</string>
   <key>NSCameraUsageDescription</key>

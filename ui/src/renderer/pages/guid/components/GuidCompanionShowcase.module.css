@@ -24,9 +24,8 @@
 .companionName { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 1px 6px; font-size: 13px; line-height: 20px; border-bottom: 2px solid transparent; }
 .companion[aria-pressed='true'] .companionName { border-color: rgb(var(--primary-6)); color: rgb(var(--primary-6)); }
 .compactStage { display: grid; align-items: center; gap: 8px; padding: 12px 0 2px; }
-.compactTile { display: flex; align-items: center; justify-self: center; gap: 4px; width: min(100%, 224px); min-width: 0; padding: 4px; box-sizing: border-box; border: 1px solid transparent; border-radius: 12px; background: transparent; transition: background-color 160ms ease, border-color 160ms ease; }
-.compactTile:hover, .compactTile:focus-within { background: var(--color-fill-2); }
-.compactTile[data-selected='true'] { border-color: color-mix(in srgb, rgb(var(--primary-6)) 18%, transparent); background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent); }
+.compactTile { display: flex; align-items: center; justify-self: center; gap: 4px; width: min(100%, 224px); min-width: 0; padding: 4px; box-sizing: border-box; border: 1px solid transparent; border-radius: 12px; background: transparent; transition: background-color 160ms ease; }
+.compactTile:hover { background: var(--color-fill-2); }
 .compactCompanion { display: flex; flex: 1 1 0; align-items: center; gap: 8px; width: 0; min-width: 0; max-width: none; padding: 4px; border: 0; border-radius: 8px; background: transparent; color: var(--text-primary); cursor: pointer; font: inherit; }
 .compactCompanion:hover, .compactCompanion[aria-pressed='true'] { background: transparent; }
 .compactCompanion .companionName { flex: 1 1 auto; min-width: 0; max-width: none; padding: 0; border: 0; text-align: left; }

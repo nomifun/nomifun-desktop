@@ -714,9 +714,25 @@ impl ServerEnvironment {
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
+    init_data_layer_with_browser(config, #[cfg(feature = "browser-use")] None).await
+}
+
+/// Desktop startup supplies its native Browser owner so a dataset reset also
+/// removes OS-managed website stores before the reset can be finalized.
+pub async fn init_data_layer_with_browser(
+    config: &AppConfig,
+    #[cfg(feature = "browser-use")]
+    browser: Option<&nomifun_browser_platform::workspace::BrowserResourceService>,
+) -> Result<Database> {
     let boot = Instant::now();
 
     let preparation = prepare_v3_data_layer(config).await?;
+    #[cfg(target_os = "macos")]
+    super::browser_profiles::cleanup_retired_browser_profiles(
+        config, #[cfg(feature = "browser-use")] browser,
+    ).await?;
+    #[cfg(all(not(target_os = "macos"), feature = "browser-use"))]
+    let _ = browser;
     if preparation == V3DataLayerState::BootstrapRequired
         && !config.work_dir_is_cli_override
         && nomifun_common::dir_config::replace_malformed_work_dir_after_lifecycle_proof(
