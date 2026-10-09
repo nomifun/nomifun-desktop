@@ -1,7 +1,7 @@
 {
   "version": "0.8.1",
   "notes": "# v0.8.1\n\n**升级提醒：升级前请备份 NomiFun 数据目录。** 从旧版升级时，本版本延续 v0.8.0 的一次性旧 Agent 数据清理：完整识别的旧代际 Agent 会话、消息、执行历史、预设及绑定会被移除，非 Agent 配置保留；未知、不完整或手工修改的数据谱系会拒绝转换和删除。已经完成 v0.8.0 清理的数据不会重复清理。\n\n**Upgrade warning: back up the NomiFun data directory before upgrading.** When upgrading older installations, this release retains v0.8.0's one-time cleanup of a fully recognized retired Agent generation: prior Agent sessions, messages, execution history, presets, and bindings are removed while non-Agent configuration is preserved. Unknown, partial, or hand-edited database lineage refuses conversion and deletion. Installations that already completed the v0.8.0 cleanup are not cleaned again.\n\n## macOS Packages / macOS 安装包\n\n- Apple Silicon：使用 `NomiFun_0.8.1_aarch64.dmg`。\n- Intel：使用 `NomiFun_0.8.1_x64.dmg`，面向原生 Intel Mac。本次未进行 Intel 实机验收；Rosetta 下的 CEF 关闭测试未通过。Apple Silicon 用户请使用原生 arm64 包。\n- Apple Silicon: use `NomiFun_0.8.1_aarch64.dmg`.\n- Intel: use `NomiFun_0.8.1_x64.dmg` on a native Intel Mac. Native Intel hardware acceptance was not performed; the CEF shutdown test under Rosetta did not pass. Apple Silicon users should use the native arm64 package.\n\n## 中文\n\n- 修复 macOS 自动更新归档的兼容性，更新安装失败时提供明确反馈。\n- 伙伴回复气泡更紧凑，统一会话更新和回复展示，完成的回复可以继续跟随显示；操作菜单支持点击关闭。\n- 技能市场安装与 Agent 会话解耦，已安装技能可刷新市场信息，各界面的技能目录展示保持一致。\n- 恢复 Agnes video v2.0，并修复已保存的模型能力配置。\n- 精简已退役的运行时和插件代码，修复插件交付证据；更新桌面首页截图和文档。\n\n## English\n\n- Fix macOS updater archive compatibility and show clear feedback when update installation fails.\n- Make companion reply bubbles more compact, unify Session updates and reply presentation, keep completed replies visible, and dismiss action popovers on click.\n- Decouple skill-market installation from Agent sessions, refresh installed skill metadata, and unify catalog presentation across renderer surfaces.\n- Restore Agnes video v2.0 and repair saved model-capability settings.\n- Remove retired runtime and plugin code, fix plugin delivery evidence, and refresh desktop home screenshots and documentation.",
-  "pub_date": "2026-10-08T18:45:59.296Z",
+  "pub_date": "2026-10-09T00:20:11.801Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRUL1ovWjY2cUFZcWpoTmlhSHh1M1hwbUJhQXc2aWMvU1crRFEzWm90UkpxYjNNSU1LaDh6SFAyNThoNHhRZHhQSEVxc1NPQWJyNW5wSFZtTXdTOEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNDgzNzQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkJMTzg0RVRZTXpYK0I4eDRHeXhONlRuZ0paSHliLzRmYzZRTGFBdGpWTEh6NHZFK2kxRjJTTTVGWkhBQVFNcUpsNHRHUkxxSzUvanNzZE9LVGZ5YUNnPT0K",
@@ -10,6 +10,10 @@
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhianBHZXFPZE5VQ2VWZjZZdTlTYktuZ2pzWWliVjA1OFdYdzNVTVRQNkRERnc1OGhpdHRkaFVEZnNucDBCdTFYK0Q2VWhvWjlRVy9MblJYRVhUTndZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNDg0OTAzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck01a3I4OHg4SzYzUVBJeHM0MzZTRFliaGZPckpRZ01DS0xqWENxOE95TWhESjhJVjlwbDNDaWxmekFVZmhmeUo3cWhGekEwakozQ1UxM3daUUdGS0NRPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.1/NomiFun_0.8.1_x64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHh5RDZleFJ2Szh4SjBiYXpKZmZ6L1p4V2lTRi9oTGJOU3hBckZwcXJ6NDdPV0E2Nkd1TkRpMk9FVDVldGgyN1locmVnMWVyN0FrRi83RFRwOVF0Z3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTA1MjExCWZpbGU6Tm9taUZ1bl8wLjguMV94NjQtc2V0dXAuZXhlCmUwb0xYUnlkRFUrdkVzSGNGckRwNGt4aGJEdEF4ait1WW9GWWg0QWZYenlMUllnZHV3UHBWczdhRHJWdUdNSVhWYWw0UFFaOWdWQWpPd2Q4Vy8raUNBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.1/NomiFun_0.8.1_x64-setup.exe"
     }
   }
 }
