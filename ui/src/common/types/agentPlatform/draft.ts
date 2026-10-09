@@ -19,8 +19,10 @@ function canonicalizeDraftValue(value: unknown): unknown {
   return value;
 }
 
-const draftFingerprint = (draft: AgentPresetDraft): string =>
-  JSON.stringify(canonicalizeDraftValue(draft));
+const canonicalFingerprint = (value: unknown): string =>
+  JSON.stringify(canonicalizeDraftValue(value));
+
+const draftFingerprint = (draft: AgentPresetDraft): string => canonicalFingerprint(draft);
 
 export const isDraftDirty = (
   savedDraft: AgentPresetDraft | null,
@@ -43,6 +45,29 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   },
 });
 
+/**
+ * Restore fields that the wire contract may omit when they contain their
+ * default value. Renderer code consumes the complete authoring model returned
+ * here instead of repeating transport-shape fallbacks in individual panels.
+ */
+const restoreDocumentDefaults = (document: AgentPresetDocument): AgentPresetDocument => {
+  document.chat_route_records ??= {};
+  document.system_role_provider_overrides ??= {};
+  document.starter_prompts ??= [];
+  document.runtime_policy ??= { idmm: createDefaultIdmmConfig() };
+  return document;
+};
+
+export const cloneAgentPresetDocument = (
+  document: AgentPresetDocument
+): AgentPresetDocument => restoreDocumentDefaults(structuredClone(document));
+
+export const agentPresetDocumentsEqual = (
+  left: AgentPresetDocument,
+  right: AgentPresetDocument
+): boolean => canonicalFingerprint(cloneAgentPresetDocument(left)) ===
+  canonicalFingerprint(cloneAgentPresetDocument(right));
+
 const selection = (capability: CapabilityRef): CapabilitySelection => ({
   capability,
   action_allowlist: [],
@@ -50,9 +75,7 @@ const selection = (capability: CapabilityRef): CapabilitySelection => ({
 
 export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
   const cloned = structuredClone(draft);
-  cloned.document.chat_route_records ??= {};
-  cloned.document.starter_prompts ??= [];
-  cloned.document.runtime_policy ??= { idmm: createDefaultIdmmConfig() };
+  cloned.document = restoreDocumentDefaults(cloned.document);
   return cloned;
 };
 

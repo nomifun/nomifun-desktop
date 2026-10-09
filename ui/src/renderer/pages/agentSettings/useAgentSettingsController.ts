@@ -12,6 +12,7 @@ import type {
 } from '@/common/types/agentPlatform';
 import {
   AGENT_CHAT_MODEL_TASK,
+  cloneAgentPresetDocument,
   cloneDraft,
   isDraftDirty,
 } from '@/common/types/agentPlatform';
@@ -177,12 +178,13 @@ export function useAgentSettingsController() {
       ...response,
       draft: nextDraft,
       revision: response.revision
-        ? { ...response.revision, document: response.revision.document }
+        ? { ...response.revision, document: cloneAgentPresetDocument(response.revision.document) }
         : undefined,
     });
     setDraftState(nextDraft);
     setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
+    return nextDraft;
   }, [editingDrafts]);
 
   const openPreset = useCallback(
@@ -194,15 +196,15 @@ export function useAgentSettingsController() {
         const response = await agentPlatform.getEditor.invoke({
           preset_id: preset.preset_id,
         });
-        applyEditor(response);
+        const responseDraft = applyEditor(response);
         returned ??= editingDrafts?.readPreset(preset.preset_id);
         if (returned?.preset_id === response.draft.preset_id &&
             JSON.stringify(returned.current_revision) === JSON.stringify(response.draft.current_revision)) {
-          setDraftState({ ...response.draft, ...returned, document: {
-            ...response.draft.document, ...returned.document,
-            model_route_refs: response.draft.document.model_route_refs,
-            chat_route_records: response.draft.document.chat_route_records,
-          } });
+          setDraftState(cloneDraft({ ...responseDraft, ...returned, document: {
+            ...responseDraft.document, ...returned.document,
+            model_route_refs: responseDraft.document.model_route_refs,
+            chat_route_records: responseDraft.document.chat_route_records,
+          } }));
         } else if (returned) {
           editingDrafts?.removePreset(preset.preset_id);
           setError(t('agentSettings.workbench.returnChanged'));
@@ -351,7 +353,6 @@ export function useAgentSettingsController() {
       editingDrafts?.removePreset(draft.preset_id);
       const nextDraft: AgentPresetDraft = {
         ...draft,
-        document: draft.document,
         current_revision: saved.revision.reference,
       };
       setDraftState(nextDraft);
@@ -360,7 +361,10 @@ export function useAgentSettingsController() {
         current
           ? {
               preset: saved.preset,
-              revision: saved.revision,
+              revision: {
+                ...saved.revision,
+                document: cloneAgentPresetDocument(saved.revision.document),
+              },
               draft: nextDraft,
             }
           : current

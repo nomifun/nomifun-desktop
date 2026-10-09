@@ -12,7 +12,7 @@ import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderE
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 
-import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
+import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentCatalogResponse, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
 import * as libraryPanel from './AgentPresetLibrary';
@@ -22,6 +22,7 @@ import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { PLUGIN_CREATE_ACTIONS, PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
 import seedManifest from '../../../../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json';
 import { agentEditorReturn, editingDocument, isAgentModelConfigurationMissing } from './model';
+import { AgentEditorDrafts } from './agentEditorDrafts';
 import AgentSettingsPage from './AgentSettingsPage';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
@@ -56,7 +57,7 @@ afterEach(() => {
 });
 
 async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, initialEditor?: AgentPresetEditorResponse,
-  options: { entry?: string; templates?: OfficialPresetTemplate[] } = {}) {
+  options: { entry?: string; expectedHeading?: string; templates?: OfficialPresetTemplate[]; roles?: AgentCatalogResponse['roles'] } = {}) {
   spyOn(authContext, 'useAuth').mockReturnValue({ user: { id: '01900000-0000-7000-8000-000000000071', username: 'owner' } } as ReturnType<typeof authContext.useAuth>);
   spyOn(modelProviders, 'useProvidersQuery').mockReturnValue({ data: [], error: undefined, isLoading: false,
     isValidating: false, mutate: async () => [] });
@@ -75,7 +76,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const pluginModule = { ...capabilityModule, module: { id: asCapabilityId(PLUGIN_DEVELOPMENT_MODULE) }, display_name: 'Plugins & small apps',
     actions: PLUGIN_CREATE_ACTIONS.map(action_id => ({ ...capabilityModule.actions[0], action_id })) };
   const pluginCapability = { ...capability, capability: pluginModule.module, display_name: pluginModule.display_name, action_count: pluginModule.actions.length };
-  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule, pluginModule], capabilities: [capability, pluginCapability], skills: [], mcp_tools: [], roles: [] });
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule, pluginModule], capabilities: [capability, pluginCapability], skills: [], mcp_tools: [], roles: options.roles ?? [] });
   const create = spyOn(agentPlatform.createPreset, 'invoke').mockRejectedValueOnce(error).mockImplementation(async request => {
     editor = { preset: { preset_id: presetId, source: 'user', display_name: request.display_name, bound_target_count: 0, current_stable_revision: revision },
       draft: { preset_id: presetId, display_name: request.display_name, document: request.document!, current_revision: revision },
@@ -105,7 +106,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     <NavigationHistoryProvider><Probe /><HistoryControls /><SidebarControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
       <Route path='/plugins/create' element={<Author />} /><Route path='/plugins/run/:id' element={<Saved />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
-  if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
+  if (initialEditor) await view.findByRole('heading', { name: options.expectedHeading ?? initialEditor.preset.display_name });
   else await view.findByRole('heading', { name: options.entry?.includes('assistant.general') ? en.template.assistant.general.name : en.template.chat.minimal.name });
   return { ...view, create, save, turn, states, library, getEditor };
 }
@@ -209,6 +210,45 @@ test('personal Agent header exposes name and description editing and saves metad
   await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
   await waitFor(() => expect(v.getByTestId(`library-preset-${presetId}`).textContent).toBe('Renamed Agent|saved'));
   expect(v.getByTestId('preset-cache-name').textContent).toBe('Renamed Agent');
+});
+
+test('compact editor responses can open the component implementation tab', async () => {
+  const document = createEmptyAgentPresetDocument();
+  document.enabled_capabilities = [{ capability: capability.capability, action_allowlist: [] }];
+  delete (document as Partial<typeof document>).system_role_provider_overrides;
+  const original: AgentPresetEditorResponse = {
+    preset: {
+      preset_id: presetId,
+      source: 'user',
+      display_name: 'Compact Agent',
+      bound_target_count: 0,
+      current_stable_revision: revision,
+    },
+    draft: {
+      preset_id: presetId,
+      display_name: 'Compact Agent',
+      document,
+      current_revision: revision,
+    },
+    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 },
+  };
+  const role = {
+    key: { role_id: 'business.check', contract_version: '1.0.0' },
+    contract_digest: asDigestHex('d'.repeat(64)),
+  };
+  new AgentEditorDrafts('01900000-0000-7000-8000-000000000071').writePreset({
+    ...original.draft,
+    display_name: 'Restored Compact Agent',
+  });
+  const v = await mount(undefined, original, {
+    expectedHeading: 'Restored Compact Agent',
+    roles: [{ role, capabilities: [capability.capability], providers: [] }],
+  });
+
+  fireEvent.click(v.getByRole('tab', { name: en.providers.title }));
+
+  const panel = v.getByRole('tabpanel', { name: en.providers.title });
+  expect(panel.querySelector('select')?.getAttribute('aria-label')).toBe(capability.display_name);
 });
 
 test('unrelated failures never offer model configuration as the recovery action', async () => {
