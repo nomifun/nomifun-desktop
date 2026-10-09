@@ -11,6 +11,8 @@ notes at a high level rather than a complete historical log.
   shrinking installers and raising the minimum system version to macOS 14.0.
 - Restore macOS site compatibility and navigation recovery, and ignore macOS
   window restoration during startup.
+- Keep the destructive dataset rebuild resumable when a retired database is
+  corrupted or not a SQLite file at all, instead of blocking startup.
 - Simplify remote host rows and actions, unify compact settings and
   navigation, and refine the classic light and dark themes.
 - Clear the companion card background lingering after hover.
