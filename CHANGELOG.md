@@ -5,6 +5,20 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.4 - 2026-10-11
+
+- Make bulk session deletion reliable.
+- Keep first-message progress stable through conversation creation: the user
+  bubble and progress header stay mounted as message receipts and canonical
+  turn identity arrive.
+- Separate model changes from bundled contract evolution: model-only bindings
+  are derived from immutable Session artifacts and contract changes land at
+  the canonical idle boundary, preserving frozen authority, resources, and
+  history.
+- Add MCP enabled controls and refresh the session catalog.
+- Move the navigation scrollbar closer to the rail edge.
+- Retire unused agent tooling and dead code.
+
 ## v0.8.3 - 2026-10-09
 
 - Replace the bundled macOS browser engine (CEF) with the system WKWebView,
