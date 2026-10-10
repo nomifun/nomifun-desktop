@@ -173,8 +173,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
 
   return (
     <div className='size-full flex flex-col'>
-      {/* Main content area */}
-      <div className='flex-1 min-h-0 overflow-y-auto overflow-x-hidden'>
+      {/* Extend the scrollbar into the rail's right padding while keeping rows aligned. */}
+      <div className='flex-1 min-h-0 overflow-y-auto overflow-x-hidden -mr-6px pr-6px'>
         {isSettings ? (
           <Suspense fallback={<div className='size-full' />}>
             <SettingsSider collapsed={collapsed} tooltipEnabled={tooltipEnabled} />
