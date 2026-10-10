@@ -21,9 +21,6 @@ type UseConversationActionsParams = {
   activeConversationId: ConversationId | null;
   batchMode: boolean;
   onSessionClick?: () => void;
-  onBatchModeChange?: (value: boolean) => void;
-  selectedConversationIds: Set<ConversationId>;
-  setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<ConversationId>>>;
   toggleSelectedConversation: (conversation: TChatConversation) => void;
   markAsRead: (conversation_id: ConversationId) => void;
 };
@@ -32,9 +29,6 @@ export const useConversationActions = ({
   activeConversationId,
   batchMode,
   onSessionClick,
-  onBatchModeChange,
-  selectedConversationIds,
-  setSelectedConversationIds,
   toggleSelectedConversation,
   markAsRead,
 }: UseConversationActionsParams) => {
@@ -114,43 +108,6 @@ export const useConversationActions = ({
     },
     [removeConversation, t]
   );
-
-  const handleBatchDelete = useCallback(() => {
-    if (selectedConversationIds.size === 0) {
-      Message.warning(t('conversation.history.batchNoSelection'));
-      return;
-    }
-
-    Modal.confirm({
-      title: t('conversation.history.batchDelete'),
-      content: t('conversation.history.batchDeleteConfirm', { count: selectedConversationIds.size }),
-      okText: t('conversation.history.confirmDelete'),
-      cancelText: t('conversation.history.cancelDelete'),
-      okButtonProps: { status: 'warning' },
-      onOk: async () => {
-        const selectedIds = Array.from(selectedConversationIds);
-        try {
-          const results = await Promise.all(selectedIds.map((conversation_id) => removeConversation(conversation_id)));
-          const successCount = results.filter(Boolean).length;
-          emitter.emit('chat.history.refresh');
-          if (successCount > 0) {
-            Message.success(t('conversation.history.batchDeleteSuccess', { count: successCount }));
-          } else {
-            Message.error(t('conversation.history.deleteFailed'));
-          }
-        } catch (error) {
-          console.error('Failed to batch delete conversations:', error);
-          Message.error(t('conversation.history.deleteFailed'));
-        } finally {
-          setSelectedConversationIds(new Set());
-          onBatchModeChange?.(false);
-        }
-      },
-      style: { borderRadius: '12px' },
-      alignCenter: true,
-      getPopupContainer: () => document.body,
-    });
-  }, [onBatchModeChange, removeConversation, selectedConversationIds, t, setSelectedConversationIds]);
 
   const handleEditStart = useCallback((conversation: TChatConversation) => {
     setRenameModalId(conversation.id);
@@ -235,7 +192,6 @@ export const useConversationActions = ({
     dropdownVisibleId,
     handleConversationClick,
     handleDeleteClick,
-    handleBatchDelete,
     handleEditStart,
     handleRenameConfirm,
     handleRenameCancel,

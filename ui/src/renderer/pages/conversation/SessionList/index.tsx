@@ -12,7 +12,6 @@ import DirectorySelectionModal from '@/renderer/components/settings/DirectorySel
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useCronJobsMap } from '@/renderer/pages/cron';
 import { useTerminalSessions } from '@/renderer/pages/terminal/useTerminalSessions';
-import { emitter } from '@/renderer/utils/emitter';
 import { parseSessionRoute } from '@/renderer/utils/routes/sessionRoute';
 import { scrollSidebarItemIntoView } from '@/renderer/utils/ui/scrollIntoView';
 import { cleanupSiderTooltips } from '@/renderer/utils/ui/siderTooltip';
@@ -25,7 +24,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import ConversationRow from './ConversationRow';
 import SshSessionGroup from './SshSessionGroup';
 import { useBatchSelection } from './hooks/useBatchSelection';
+import { useTerminalBatchSelection } from './hooks/useTerminalBatchSelection';
 import { useConversationActions } from './hooks/useConversationActions';
+import { useSessionBatchDelete } from './hooks/useSessionBatchDelete';
 import { isOrdinaryWorkConversation } from './hooks/conversationListFilter';
 import { useExport } from './hooks/useExport';
 import { capabilityKey, useSessionCapabilities } from './hooks/useSessionCapabilities';
@@ -156,33 +157,13 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     toggleSelectedConversation,
   } = useBatchSelection(batchMode, conversations);
 
-  // Terminal selection — same semantics, kept locally (useTerminalBatchSelection
-  // owns its own batchMode flag, which must stay unified with the prop here).
-  const [selectedTerminalIds, setSelectedTerminalIds] = useState<Set<TerminalId>>(new Set());
-  useEffect(() => {
-    if (!batchMode) setSelectedTerminalIds(new Set());
-  }, [batchMode]);
-  useEffect(() => {
-    if (!batchMode || selectedTerminalIds.size === 0) return;
-    const existing = new Set(terminals.map((session) => session.terminal_id));
-    setSelectedTerminalIds((prev) => {
-      const next = new Set(Array.from(prev).filter((id) => existing.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [batchMode, terminals, selectedTerminalIds.size]);
-
-  const toggleSelectedTerminal = useCallback((id: TerminalId) => {
-    setSelectedTerminalIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  const { selectedTerminalIds, setSelectedTerminalIds, toggleSelectedTerminal } = useTerminalBatchSelection(batchMode);
 
   const totalSelected = selectedConversationIds.size + selectedTerminalIds.size;
   const totalSelectable = conversations.length + terminals.length;
-  const allSelected = totalSelectable > 0 && totalSelected === totalSelectable;
+  const allSelected = totalSelectable > 0 &&
+    conversations.every((conversation) => selectedConversationIds.has(conversation.id)) &&
+    terminals.every((session) => selectedTerminalIds.has(session.terminal_id));
   const batchSelectionState = useMemo(
     () => ({
       conversationIds: selectedConversationIds,
@@ -195,8 +176,8 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       setSelectedConversationIds(new Set());
       setSelectedTerminalIds(new Set());
     } else {
-      setSelectedConversationIds(new Set(conversations.map((conversation) => conversation.id)));
-      setSelectedTerminalIds(new Set(terminals.map((session) => session.terminal_id)));
+      setSelectedConversationIds((previous) => new Set([...previous, ...conversations.map((conversation) => conversation.id)]));
+      setSelectedTerminalIds((previous) => new Set([...previous, ...terminals.map((session) => session.terminal_id)]));
     }
   }, [allSelected, conversations, terminals, setSelectedConversationIds]);
   const handleToggleBatchSelectionScope = useCallback(
@@ -228,9 +209,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     activeConversationId,
     batchMode,
     onSessionClick,
-    onBatchModeChange,
-    selectedConversationIds,
-    setSelectedConversationIds,
     toggleSelectedConversation,
     markAsRead,
   });
@@ -255,75 +233,15 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     onBatchModeChange,
   });
 
-  // Combined batch delete spanning both kinds. Conversation removal mirrors
-  // useConversationActions.removeConversation (event emit + navigate-away);
-  // terminal removal was carried over from the since-removed TerminalSiderSection /
-  // useTerminalBatchSelection (best-effort per id).
-  const handleBatchDeleteAll = useCallback(() => {
-    const convIds = Array.from(selectedConversationIds);
-    const termIds = Array.from(selectedTerminalIds);
-    const total = convIds.length + termIds.length;
-    if (total === 0) {
-      Message.warning(t('conversation.history.batchNoSelection'));
-      return;
-    }
-    Modal.confirm({
-      title: t('conversation.history.batchDelete', { count: total }),
-      content: t('conversation.history.batchDeleteConfirm', { count: total }),
-      okText: t('conversation.history.confirmDelete'),
-      cancelText: t('conversation.history.cancelDelete'),
-      okButtonProps: { status: 'warning' },
-      onOk: async () => {
-        let successCount = 0;
-        try {
-          const convResults = await Promise.all(
-            convIds.map(async (conversation_id) => {
-              try {
-                await ipcBridge.conversation.remove.invoke({ conversation_id: conversation_id });
-                emitter.emit('conversation.deleted', conversation_id);
-                if (activeConversationId === conversation_id) void navigate('/guid');
-                return true;
-              } catch {
-                return false;
-              }
-            })
-          );
-          successCount += convResults.filter(Boolean).length;
-          for (const terminal_id of termIds) {
-            try {
-              await ipcBridge.terminal.remove.invoke({ terminal_id: terminal_id });
-              if (activeTerminalId === terminal_id) void navigate('/guid');
-              successCount += 1;
-            } catch {
-              /* best-effort; continue */
-            }
-          }
-          emitter.emit('chat.history.refresh');
-          if (successCount > 0) {
-            Message.success(t('conversation.history.batchDeleteSuccess', { count: successCount }));
-          } else {
-            Message.error(t('conversation.history.deleteFailed'));
-          }
-        } finally {
-          setSelectedConversationIds(new Set());
-          setSelectedTerminalIds(new Set());
-          onBatchModeChange?.(false);
-        }
-      },
-      style: { borderRadius: '12px' },
-      alignCenter: true,
-      getPopupContainer: () => document.body,
-    });
-  }, [
+  const { handleBatchDelete: handleBatchDeleteAll, isDeleting } = useSessionBatchDelete({
     selectedConversationIds,
     selectedTerminalIds,
+    setSelectedConversationIds,
+    setSelectedTerminalIds,
     activeConversationId,
     activeTerminalId,
-    navigate,
     onBatchModeChange,
-    setSelectedConversationIds,
-    t,
-  ]);
+  });
 
   /* ----------------------------- create-session entries ----------------------------- */
 
@@ -751,14 +669,14 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
                 key: 'export',
                 label: t('conversation.history.batchExport', { count: selectedConversationIds.size }),
                 onClick: handleBatchExport,
-                disabled: selectedConversationIds.size === 0,
+                disabled: isDeleting || selectedConversationIds.size === 0,
               },
               {
                 key: 'delete',
                 label: t('conversation.history.batchDelete', { count: totalSelected }),
                 onClick: handleBatchDeleteAll,
                 danger: true,
-                disabled: totalSelected === 0,
+                disabled: isDeleting || totalSelected === 0,
               },
             ]}
           />

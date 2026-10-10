@@ -55,6 +55,8 @@
     "batchDelete": "删除（{{count}}）",
     "batchDeleteConfirm": "确定删除已选的 {{count}} 个话题吗？",
     "batchDeleteSuccess": "已删除 {{count}} 个话题",
+    "batchDeletePartial": "已删除 {{deleted}} 个会话，{{failed}} 个删除失败。失败项已保留选中，请重试。",
+    "batchDeleteFailed": "{{count}} 个会话删除失败。已保留选中，请重试。",
     "batchNoSelection": "请先选择话题",
     "export": "导出",
     "exportDialogTitle": "导出话题",
