@@ -1,11 +1,15 @@
 {
   "version": "0.8.4",
   "notes": "- Make bulk session deletion reliable.\n- Keep first-message progress stable through conversation creation: the user\n  bubble and progress header stay mounted as message receipts and canonical\n  turn identity arrive.\n- Separate model changes from bundled contract evolution: model-only bindings\n  are derived from immutable Session artifacts and contract changes land at\n  the canonical idle boundary, preserving frozen authority, resources, and\n  history.\n- Add MCP enabled controls and refresh the session catalog.\n- Move the navigation scrollbar closer to the rail edge.\n- Retire unused agent tooling and dead code.",
-  "pub_date": "2026-10-10T16:30:22.902Z",
+  "pub_date": "2026-10-10T16:47:26.193Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJHTWlnbENPTzBtcW42aXRLeEwvK2JrQTdlUzdmd3h6ZjNYT1VqOE12enNoQzlsMUdjRGx4SmRBekZ3TG1ZbytjbGRLazVkNFM5UktOaWh4ckZwdHdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQ5NzI2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkQ1QWJlWkNpd3hmNXB6NWN2bXVaY3pLNkMxYWNsSTdDL1lRYkFNVlRPcDQ5Mkp4NmxWR1UrZlB3eUlFcWo3OFcxNzEyTXYrU1NaRUM3Qy95TGlFQkRnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.4/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHd0STZWOGh5eEN0WXNBbGtUMVVMRXloVlhkM3M0cldKY1haZDk3RVU2amJuRDhyZFBqcHlraEJUUEJDbkJNemYvbmJVSC9RUmpIazdGOWdBV2czK2dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjUwNzM0CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck9HVnhINkRWOW56dTlnQWd1TlNESHdybUxsdUMwSUZTS252Tm5xUmpsR2Q2eUdIU29FTkJZcHhoeXdnWjZBSThJMUhLZG85d2ozWHpUMXpHUmxqekNRPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.4/NomiFun_0.8.4_x64.app.tar.gz"
     }
   }
 }
