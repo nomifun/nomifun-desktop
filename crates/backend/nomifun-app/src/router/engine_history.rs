@@ -70,12 +70,23 @@ fn native_replay_floor(
         .map(|event| event.seq)
         .max()
         .unwrap_or(0);
+    Ok(context_floor.max(canonical_agent_transition_floor(events, event_payloads, current)?))
+}
+
+/// The canonical Agent transition bounds execution-owned state independently
+/// of conversational context clearing. Other native consumers share this
+/// exact transition validation rather than interpreting a second boundary.
+pub(super) fn canonical_agent_transition_floor(
+    events: &[SessionEventRecord],
+    event_payloads: &BTreeMap<String, Value>,
+    current: &AgentBindingValue,
+) -> Result<u64, AppError> {
     let transition = events
         .iter()
         .filter(|event| event.kind.0 == "session/agent-binding-changed")
         .max_by_key(|event| event.seq);
     let Some(transition) = transition else {
-        return Ok(context_floor);
+        return Ok(0);
     };
     let payload = event_payloads
         .get(transition.event_id.as_ref())
@@ -101,7 +112,7 @@ fn native_replay_floor(
             "Agent transition event does not prove the exact current binding boundary",
         ));
     }
-    Ok(context_floor.max(transition.seq))
+    Ok(transition.seq)
 }
 
 async fn facts(

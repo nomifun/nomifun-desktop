@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
+    AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
     CapabilityConsumer, ContributionLock, OperationId,
     PresetRevisionRef, PrincipalRef,
     ResolvedSnapshotEnvelope, UserId, digest_payload,
@@ -83,6 +83,100 @@ pub struct PresetRevisionCompiler {
 type ConsumerValidator = dyn Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync;
 
 impl PresetRevisionCompiler {
+    /// A Session model change derives from immutable facts. It deliberately
+    /// does not obtain a registry, catalog, installation default or extension
+    /// resolver: none of those sources owns the Session's frozen authority.
+    pub(crate) fn derive_session_model(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        route: nomifun_agent_contracts::ChatRouteRecord,
+        source_revision: &AgentPresetRevision,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+    ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        let mut payload = source_revision.payload.clone();
+        payload.model_route_refs.insert(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.into(), route.primary.model_route_id.clone());
+        payload.chat_route_records.insert(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.into(), route);
+        let revision = derived_revision(owner, preset_id, payload,
+            source_revision.contribution_locks.clone(), "Session model switch")?;
+        let snapshot = KernelAgentPresetCompiler::derive_model_snapshot(
+            source_revision, source_snapshot, saved_snapshot_request(revision.clone(), source_snapshot),
+        ).map_err(kernel_compile_error)?;
+        Ok((revision, snapshot))
+    }
+
+    /// Resolve today's executable bundled contracts using the Session's saved
+    /// provider mounts. The typed evolution proof admits the result before any
+    /// immutable artifact is persisted; user configuration is never refreshed.
+    pub(crate) fn evolve_session_contract(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        source_revision: &AgentPresetRevision,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+        catalog: &CatalogSnapshot,
+    ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        let (revision, snapshot) = self.compile_session_configuration(
+            owner, preset_id, source_revision.payload.clone(), source_snapshot, catalog,
+            "Session bundled contract evolution",
+        )?;
+        nomifun_agent_contracts::validate_bundled_contract_evolution(
+            source_revision, source_snapshot, &revision, &snapshot,
+        ).map_err(|violation| ControlPlaneError::canonical(
+            violation.code, axum::http::StatusCode::CONFLICT, violation.message,
+        ))?;
+        Ok((revision, snapshot))
+    }
+
+    /// Session-local configuration changes preserve saved Provider selections.
+    /// An explicitly added extension may resolve newly reached Roles through
+    /// current authoring defaults; it cannot reselect an existing frozen
+    /// Provider or rewrite old explicit authorial pins.
+    pub(crate) fn compile_session_configuration(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        payload: AgentPresetRevisionPayload,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+        catalog: &CatalogSnapshot,
+        reason: &str,
+    ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        catalog.validate()?;
+        let (registry, environment) = self.canonical_inputs()?;
+        let contribution_locks = contribution_locks_for_payload(&payload, catalog, &registry)?;
+        let revision = derived_revision(owner, preset_id, payload, contribution_locks, reason)?;
+        let snapshot = KernelAgentPresetCompiler::compile_with_frozen_role_providers(
+            &registry, &environment, saved_snapshot_request(revision.clone(), source_snapshot), source_snapshot,
+        ).map_err(kernel_compile_error)?.envelope;
+        if let Some(validate) = &self.consumer_validator { validate(&registry, &snapshot)?; }
+        Ok((revision, snapshot))
+    }
+
+    /// Compile the final explicit extension intent once, then prove that all
+    /// core authority remains frozen before the caller can persist artifacts.
+    pub(crate) fn derive_session_extensions(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        payload: AgentPresetRevisionPayload,
+        source_revision: &AgentPresetRevision,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+        catalog: &CatalogSnapshot,
+        mutable_roots: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
+        protected_retained_roots: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
+    ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        let (revision, snapshot) = self.compile_session_configuration(
+            owner, preset_id, payload, source_snapshot, catalog, "Session extension selection",
+        )?;
+        nomifun_agent_contracts::validate_session_extension_derivation(
+            source_revision, source_snapshot, &revision, &snapshot,
+            mutable_roots, protected_retained_roots,
+        ).map_err(|violation| ControlPlaneError::canonical(
+            violation.code, axum::http::StatusCode::CONFLICT, violation.message,
+        ))?;
+        Ok((revision, snapshot))
+    }
+
     pub(crate) fn with_current_role_bindings(
         mut self,
         bindings: std::collections::BTreeMap<nomifun_agent_contracts::ExecutionRoleId, nomifun_agent_contracts::InstallationRoleBinding>,
@@ -342,6 +436,39 @@ impl PresetRevisionCompiler {
             )),
         }
     }
+}
+
+fn derived_revision(
+    owner: &UserId,
+    preset_id: AgentPresetId,
+    payload: AgentPresetRevisionPayload,
+    mut contribution_locks: Vec<ContributionLock>,
+    reason: &str,
+) -> Result<AgentPresetRevision, ControlPlaneError> {
+    contribution_locks.sort();
+    let revision_digest = digest_payload(&nomifun_agent_contracts::AgentPresetRevisionDigestInput {
+        payload: payload.clone(), contribution_locks: contribution_locks.clone(),
+    }).map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+    let revision = AgentPresetRevision {
+        reference: PresetRevisionRef { preset_id, revision: 1, revision_digest },
+        payload, contribution_locks, created_by: owner.clone(), created_at_ms: now_ms(),
+        reason: Some(reason.into()),
+    };
+    revision.validate().map_err(|violation| ControlPlaneError::canonical(
+        violation.code, axum::http::StatusCode::UNPROCESSABLE_ENTITY, violation.message,
+    ))?;
+    Ok(revision)
+}
+
+fn saved_snapshot_request(revision: AgentPresetRevision, source: &ResolvedSnapshotEnvelope) -> CompileRequest {
+    CompileRequest {
+        revision, principal: source.actor.clone(), scene: source.scene.clone(), surface: source.surface.clone(),
+        audience: source.audience.clone(), created_at_ms: now_ms(), resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
+    }
+}
+
+fn kernel_compile_error(error: KernelError) -> ControlPlaneError {
+    ControlPlaneError::canonical(error.canonical_code(), axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
 }
 
 fn snapshot_matches_registry(

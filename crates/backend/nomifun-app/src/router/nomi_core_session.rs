@@ -12,6 +12,8 @@ use std::time::Duration;
 mod native_turn_recovery;
 #[path = "session_capability_selection.rs"]
 mod session_capability_selection;
+#[path = "session_contract_evolution.rs"]
+mod session_contract_evolution;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
@@ -1466,6 +1468,12 @@ impl NomiCoreSessionOwner {
             }
             return Err(AppError::Conflict("canonical Turn admission is unavailable".into()));
         }
+        if expected_binding_version.is_none() {
+            self.prepare_session_contract_evolution(owner_id, session_id).await?;
+            session = self.canonical.get(&PrincipalRef {
+                principal_kind: "user".into(), principal_id: owner_id.into(),
+            }, session_id).await?;
+        }
         let mut binding = agent_binding_dto(&session.session.agent_binding)
             .map_err(|error| AppError::Conflict(error.message))?;
         let control_plane = self
@@ -1488,7 +1496,7 @@ impl NomiCoreSessionOwner {
         {
             let attempt: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
-                 WHERE conversation_id = ? AND relation = 'attempt')",
+                 WHERE conversation_id = ? AND relation IN ('attempt', 'automation'))",
             )
             .bind(session_id.as_ref())
             .fetch_one(&self.pool)
@@ -1527,9 +1535,7 @@ impl NomiCoreSessionOwner {
                     // revision. The registry's provider cache cannot detect
                     // this snapshot-only change. Prove that exact idle owner
                     // closed before committing a new immutable binding.
-                    self.runtime_sessions.terminate_and_wait_result(
-                        session_id.as_ref(),Some(nomifun_common::AgentKillReason::ConfigurationChanged),
-                    ).await?;
+                    self.settle_session_binding_runtime(owner_id, session_id).await?;
                     self.canonical.store().replace_session_model_binding(
                         &principal, session_id, &session.session.agent_binding, refreshed_value,
                     ).await.map_err(agent_session_store_error)?;
@@ -2986,15 +2992,8 @@ pub(super) fn compile_nomi_plugin_snapshot(
     }
     let registry = kernel.snapshot().map_err(kernel_error_to_app)?;
     let mut environment = compiler_environment.clone();
-    // A saved Snapshot freezes inherited choices too. Revalidate these exact
-    // targets; never consult current installation defaults during execution.
-    environment.installation_role_bindings = persisted.content.resolved_role_providers.iter()
-        .map(|(role_id, lock)| (role_id.clone(), nomifun_agent_contracts::InstallationRoleBinding {
-            selection: nomifun_agent_contracts::RoleProviderSelection {
-                role: lock.provider.role.clone(),
-                provider_mount_id: lock.provider.mount_id.clone(),
-            }, binding_version: 1, updated_at_ms: 0,
-        })).collect();
+    // Recompile on the saved Provider mounts using the same resolution path
+    // as evolution admission. Exact persisted artifact checks still apply.
     environment.required_runtime_protocol_version = persisted
         .content
         .required_runtime_protocol_version
@@ -3010,7 +3009,7 @@ pub(super) fn compile_nomi_plugin_snapshot(
     environment.host_surface = persisted.surface.clone();
     environment.availability_evidence_revision =
         persisted.availability_evidence_revision.clone();
-    let compiled = AgentPresetCompiler::compile(
+    let compiled = AgentPresetCompiler::compile_with_frozen_role_providers(
         &registry,
         &environment,
         CompileRequest {
@@ -3022,6 +3021,7 @@ pub(super) fn compile_nomi_plugin_snapshot(
             created_at_ms: persisted.created_at_ms,
             resolver_run_id: persisted.resolver_run_id.clone(),
         },
+        &persisted,
     )
     .map_err(kernel_error_to_app)?;
     // Existing Sessions must enforce the same source-aware consumer admission
@@ -11499,7 +11499,7 @@ mod agent_switch_resource_tests {
 }
 
 async fn agent_switch_recovery_blocker(
-    state: &NomiCoreAgentApiState,
+    pool: &nomifun_db::SqlitePool,
     session_id: &AgentSessionId,
 ) -> Result<Option<AgentSwitchBlockerDto>, NomiCoreApiError> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
@@ -11511,7 +11511,7 @@ async fn agent_switch_recovery_blocker(
     )
     .bind(session_id.as_ref())
     .bind(session_id.as_ref())
-    .fetch_all(&state.session_owner.pool)
+    .fetch_all(pool)
     .await
     .map_err(|error| AppError::Internal(format!("read Agent patch recovery: {error}")))?;
     agent_switch_recovery_blocker_from_rows(rows)
@@ -11673,7 +11673,7 @@ async fn agent_switch_blockers(
             details: Some(json!({ "source_has_running_processes": source_has_running_processes })),
         });
     }
-    if let Some(blocker) = agent_switch_recovery_blocker(state, session_id).await? {
+    if let Some(blocker) = agent_switch_recovery_blocker(&state.session_owner.pool, session_id).await? {
         blockers.push(blocker);
     }
     Ok(blockers)
@@ -12669,7 +12669,7 @@ async fn switch_nomi_core_agent_session_model(
     }
     let attempt_transcript: i64 = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
-         WHERE conversation_id = ? AND relation = 'attempt')",
+         WHERE conversation_id = ? AND relation IN ('attempt', 'automation'))",
     )
     .bind(session_id.as_ref())
     .fetch_one(&state.session_owner.pool)
@@ -12679,10 +12679,13 @@ async fn switch_nomi_core_agent_session_model(
         return Err(NomiCoreApiError::new(
             StatusCode::CONFLICT,
             "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
-            "AgentExecution Attempt transcripts cannot change their model binding",
+            "AgentExecution transcripts cannot change their frozen model binding",
         ));
     }
 
+    state.session_owner.prepare_session_contract_evolution(owner.as_ref(), &session_id).await?;
+    let observation = state.session_owner.canonical()
+        .get(&authenticated_principal(&owner), &session_id).await?;
     let current_dto = agent_binding_dto(&observation.session.agent_binding)?;
     let replacement_dto = state
         .control_plane
@@ -12707,6 +12710,7 @@ async fn switch_nomi_core_agent_session_model(
             "resolved Session model binding is invalid: {error}"
         )))?;
     if replacement != observation.session.agent_binding {
+        state.session_owner.settle_session_binding_runtime(owner.as_ref(), &session_id).await?;
         state
             .session_owner
             .canonical()
@@ -13791,13 +13795,15 @@ async fn warm_nomi_core_agent_session(
     let _operation_fence = state
         .session_owner
         .session_operation_lock(session_id.as_ref())
-        .read_owned()
+        .write_owned()
         .await;
-    state
-        .session_owner
-        .materialize_session_workspace(owner.as_ref(), &session_id)
-        .await?;
-    let mut projection = state
+    state.session_owner.prepare_session_contract_evolution(owner.as_ref(), &session_id).await?;
+    let observation = state.session_owner.canonical()
+        .get(&authenticated_principal(&owner), &session_id).await?;
+    state.session_owner.materialize_workspace_for_binding(
+        owner.as_ref(), &session_id, &observation.session.agent_binding,
+    ).await?;
+    let projection = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)
         .await?
@@ -13805,24 +13811,9 @@ async fn warm_nomi_core_agent_session(
             "AgentSession {} not found",
             session_id.as_ref(),
         )))?;
-    if projection
-        .extra
-        .get("workspace")
-        .and_then(Value::as_str)
-        .is_none_or(|workspace| workspace.trim().is_empty())
-    {
-        let fallback = materialize_managed_session_workspace(
-            &state.session_owner.managed_workspace_root,
-            &session_id,
-        )
-        .await?;
-        projection.extra["workspace"] = Value::String(fallback);
-        projection.extra["custom_workspace"] = Value::Bool(false);
-        projection.extra["is_temporary_workspace"] = Value::Bool(true);
-        projection.extra["temp_workspace_id"] =
-            Value::String(session_id.as_ref().to_owned());
-    }
-    let (options, _) = runtime_options_from_session(owner.as_ref(), projection, None)?;
+    let options = state.session_owner.runtime_options_for_projection(
+        owner.as_ref(), &session_id, projection,
+    ).await?;
     state
         .session_owner
         .runtime_sessions
