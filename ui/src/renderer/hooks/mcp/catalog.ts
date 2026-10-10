@@ -3,6 +3,19 @@ import type { IMcpServer, IMcpServerTransport } from '@/common/config/storage';
 
 type BackendMcpTransport = Exclude<IMcpServerTransport, { type: 'streamable_http' }>;
 
+const catalogChangedListeners = new Set<() => void>();
+
+/** Invalidate renderer views after a saved MCP mutation or a completed probe. */
+export const notifyMcpCatalogChanged = () => {
+  for (const listener of catalogChangedListeners) listener();
+};
+
+/** Notifications carry no projected data: subscribers reload the backend catalog. */
+export const subscribeMcpCatalogChanged = (listener: () => void): (() => void) => {
+  catalogChangedListeners.add(listener);
+  return () => { catalogChangedListeners.delete(listener); };
+};
+
 type BackendMcpPayload = {
   name: string;
   description?: string;

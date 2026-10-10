@@ -135,7 +135,8 @@
   },
   "mcpPage": {
     "installedMcpTab": "Installed MCP",
-    "mcpMarketTab": "MCP Market"
+    "mcpMarketTab": "MCP Market",
+    "loadFailed": "Failed to load MCP servers. Please retry."
   },
   "agentSkillImport": {
     "title": "Import from Agent",
@@ -953,6 +954,11 @@
   "mcpJsonStdioCommandRequiredError": "Stdio MCP servers require a non-empty \"command\".",
   "mcpGetApi": "Get API",
   "mcpTestConnection": "Check MCP Availability",
+  "mcpEnabled": "Enabled",
+  "mcpDisabled": "Disabled",
+  "mcpEnableServer": "Enable {{name}}",
+  "mcpDisableServer": "Disable {{name}}",
+  "mcpToggleFailed": "Failed to change the MCP enabled state. Please try again.",
   "mcpTestConnectionSuccess": "Connection test successful",
   "mcpConnected": "Available",
   "mcpAuthenticated": "Authenticated",

@@ -220,7 +220,7 @@ export interface IMcpServer {
   mcp_server_id: McpServerId;
   name: string;
   description?: string;
-  enabled: boolean; // 是否默认启用（新会话默认勾选）
+  enabled: boolean; // 全局启用状态；会话按需勾选
   transport: IMcpServerTransport;
   tools?: IMcpTool[];
   last_test_status?: 'connected' | 'disconnected' | 'error' | 'testing'; // 最近一次检测结果

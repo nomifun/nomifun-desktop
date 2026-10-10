@@ -37,6 +37,14 @@ Connection test uses a temporary MCP client, performs the handshake, lists tools
 and persists the result. Failure codes include command-not-found, permission,
 timeout, HTTP, RPC, and protocol errors.
 
+The enable/disable switch beside each server controls global availability separately
+from connection testing. Market imports remain disabled. Complete the configuration,
+test it, and enable the server to select it in a Session. Enabling before testing is
+also supported, but new Session selections require a successful test and discovered
+tools. Testing does not enable a server, and toggling does not launch a test. After
+either operation completes, mounted Session MCP lists re-read the backend catalog
+without replacing the user's selection draft.
+
 OAuth-backed HTTP/SSE servers use the `/api/mcp/oauth/*` flow.
 
 The canonical owner currently supports Streamable HTTP/stdio at `2025-03-26`

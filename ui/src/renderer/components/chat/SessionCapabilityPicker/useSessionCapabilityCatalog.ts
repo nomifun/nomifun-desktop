@@ -1,6 +1,6 @@
 import { ipcBridge } from '@/common';
-import { ensureBackendMcpCatalog } from '@/renderer/hooks/mcp/catalog';
-import { useCallback, useEffect, useState } from 'react';
+import { ensureBackendMcpCatalog, subscribeMcpCatalogChanged } from '@/renderer/hooks/mcp/catalog';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SessionCapabilityCatalog, SessionSkillOption } from './model';
 
 const EMPTY_CATALOG: SessionCapabilityCatalog = {
@@ -43,39 +43,56 @@ export const useSessionCapabilityCatalog = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error>();
   const [reloadToken, setReloadToken] = useState(0);
+  const hasLoaded = useRef(false);
   const retry = useCallback(() => setReloadToken((value) => value + 1), []);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(undefined);
-    void Promise.all([
-      ipcBridge.fs.listAvailableSkills.invoke(),
-      ipcBridge.fs.listBuiltinAutoSkills.invoke(),
-      ensureBackendMcpCatalog(),
-    ])
-      .then(([available, auto, mcp]) => {
-        if (cancelled) return;
-        const merged = mergeSkills(available, auto);
-        setCatalog({
-          skills: merged.skills,
-          autoSkillNames: merged.autoSkillNames,
-          mcpServers: mcp.allServers.filter((server) => !server.builtin),
-        });
-      })
-      .catch((cause) => {
-        if (cancelled) return;
+    let active = true;
+    let generation = 0;
+    const reload = async (mcpOnly = false) => {
+      // Increment synchronously on invalidation, so a pending older read can
+      // never commit in the gap before React runs another effect.
+      const requestGeneration = ++generation;
+      if (!hasLoaded.current) {
+        setLoading(true);
+        setError(undefined);
+      }
+      try {
+        if (mcpOnly && hasLoaded.current) {
+          const mcp = await ensureBackendMcpCatalog();
+          if (!active || requestGeneration !== generation) return;
+          setCatalog((previous) => ({
+            ...previous,
+            mcpServers: mcp.allServers.filter((server) => !server.builtin),
+          }));
+        } else {
+          const [available, auto, mcp] = await Promise.all([
+            ipcBridge.fs.listAvailableSkills.invoke(),
+            ipcBridge.fs.listBuiltinAutoSkills.invoke(),
+            ensureBackendMcpCatalog(),
+          ]);
+          if (!active || requestGeneration !== generation) return;
+          const merged = mergeSkills(available, auto);
+          setCatalog({
+            skills: merged.skills,
+            autoSkillNames: merged.autoSkillNames,
+            mcpServers: mcp.allServers.filter((server) => !server.builtin),
+          });
+        }
+        hasLoaded.current = true;
+        setError(undefined);
+      } catch (cause) {
+        if (!active || requestGeneration !== generation) return;
         const normalized = cause instanceof Error ? cause : new Error(String(cause));
         console.error('[SessionCapabilityPicker] Failed to load capability catalog:', normalized);
-        setCatalog(EMPTY_CATALOG);
         setError(normalized);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
+      } finally {
+        if (active && requestGeneration === generation) setLoading(false);
+      }
     };
+    const unsubscribe = subscribeMcpCatalogChanged(() => { void reload(true); });
+    void reload();
+    return () => { active = false; unsubscribe(); };
   }, [reloadToken]);
 
   return { catalog, loading, error, retry };
