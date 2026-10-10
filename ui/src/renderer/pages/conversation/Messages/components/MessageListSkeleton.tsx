@@ -16,8 +16,8 @@ import { useConversationColumnRef } from '../../components/useConversationColumn
  * loading state reads as "the conversation is opening", not "the app froze".
  *
  * Extracted from {@link MessageList} so the conversation-page loading gate
- * ({@link ChatConversationIndex}) and the new-conversation pending overlay can
- * reuse the exact same visual language.
+ * ({@link ChatConversationIndex}) share the same loading presentation. Live
+ * first-message submissions use the real transcript instead of this skeleton.
  */
 const MessageListSkeleton: React.FC = () => {
   const handleColumnRef = useConversationColumnRef();

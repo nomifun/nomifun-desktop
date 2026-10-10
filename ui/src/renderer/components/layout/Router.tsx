@@ -14,8 +14,9 @@ import {
   loadCreativeStudioTemplateRoute,
   loadKnowledgeDetailRoute,
   loadResourcePageBoundary,
+  loadConversationRoute,
 } from './routePreload';
-const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
+const Conversation = React.lazy(loadConversationRoute);
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
 const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));

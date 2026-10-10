@@ -76,7 +76,7 @@ import {
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
-import type { MessageId } from '@/common/types/ids';
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
 import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
@@ -746,6 +746,10 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
 const MessageList: React.FC<{
   className?: string;
   emptySlot?: React.ReactNode;
+  /** Live first-submit echo only; never added to canonical history or Turn state. */
+  pendingMessage?: IMessageText;
+  /** The real progress/result row has committed, so the submit echo can retire. */
+  onPendingMessageReady?: () => void;
   /** Windowed-history paging (nomi surfaces): prepend the next older message
    *  window when the user scrolls to the top. Omitted on chats that still load
    *  their whole transcript at once. */
@@ -754,7 +758,7 @@ const MessageList: React.FC<{
   loadingOlder?: boolean;
   /** Product opt-in; preserve the latest reply across automatic process collapse. */
   followTurnCompletion?: boolean;
-}> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder, followTurnCompletion = false }) => {
+}> = ({ emptySlot, pendingMessage, onPendingMessageReady, onLoadOlder, hasMoreOlder, loadingOlder, followTurnCompletion = false }) => {
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
@@ -1314,7 +1318,13 @@ const MessageList: React.FC<{
     scrollToBottom('smooth');
   };
 
-  const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
+  const renderTurnDisclosure = (item: ITurnProcessDisclosureVO | undefined, highlighted: boolean) => {
+    if (!item) return <TurnProcessDisclosure<IRenderableItem>
+      preparationLabel={t('conversation.pending.preparing')}
+      renderProcessItem={() => null}
+      getProcessItemKey={getProcessedItemAnchorId}
+      getProcessItemState={getProcessItemState}
+    />;
     const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
     const presentation = delegatedTurnPresentation(item, linkedDelegation);
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
@@ -1404,12 +1414,12 @@ const MessageList: React.FC<{
     );
   };
 
-  const renderItem = (_index: number, item: (typeof displayList)[0]) => {
+  const renderItem = (_index: number, item: (typeof displayList)[0], renderKey = item.id) => {
     const highlighted = matchesTargetMessage(item, highlightedMessageId);
     if ('type' in item && item.type === 'turn_process_disclosure') {
       return (
         <div
-          key={item.id}
+          key={renderKey}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-disclosure'
           className='min-w-0 message-item m-t-10px turn_process_disclosure'
@@ -1482,7 +1492,7 @@ const MessageList: React.FC<{
       source.type === 'text' && source.position === 'left' && source.turn_id === item.turn_id &&
       getProcessedItemSourceMessageIds(source).includes(continuation));
     return (
-      <React.Fragment key={(item as TMessage).id}>
+      <React.Fragment key={renderKey}>
       {!sourceLoaded && <div role='status' data-testid='missing-reply-continuation' className='text-t-tertiary text-sm m-t-10px'>
         {t('messages.missingReplyContinuation')}
         {hasMoreOlder && onLoadOlder && <button type='button' disabled={loadingOlder} onClick={() => void onLoadOlder()}>
@@ -1491,7 +1501,7 @@ const MessageList: React.FC<{
       </div>}
       <MessageItem
         message={item as TMessage}
-        key={(item as TMessage).id}
+        key={renderKey}
         highlighted={highlighted}
         hideActions={
           isActiveProcessTextItem(item, _index) ||
@@ -1502,11 +1512,60 @@ const MessageList: React.FC<{
     );
   };
 
-  if (displayList.length === 0 && isMessageListLoading) {
+  // These are React keys only. Runtime state and timing continue to come from
+  // the ordinary timeline, including a later canonical root replacing its
+  // accepted-user boundary. Keep the first request/status DOM nodes mounted.
+  const initialRenderKeys = useRef<{ conversationId?: ConversationId; renderKey?: string; requestMessageId?: MessageId }>({});
+  const savedKeys = initialRenderKeys.current.conversationId === conversationContext?.conversation_id ? initialRenderKeys.current : undefined;
+  const hasPendingPresentation = Boolean(pendingMessage && pendingMessage.conversation_id === conversationContext?.conversation_id);
+  const initialRenderKey = hasPendingPresentation ? pendingMessage!.id : savedKeys?.renderKey;
+  const initialRequestIndex = displayList.findIndex(item => item.type === 'text' && item.position === 'right'
+    && item.conversation_id === conversationContext?.conversation_id && (savedKeys?.requestMessageId
+      ? getMessageBusinessIdentity(item) === savedKeys.requestMessageId : hasPendingPresentation));
+  const initialRequest = initialRequestIndex >= 0 ? displayList[initialRequestIndex] : undefined;
+  const initialRequestMessageId = initialRequest?.type === 'text' ? getMessageBusinessIdentity(initialRequest) : undefined;
+  const initialProgressIndex = initialRequestIndex >= 0 && displayList[initialRequestIndex + 1]?.type === 'turn_process_disclosure'
+    ? initialRequestIndex + 1 : hasPendingPresentation && initialRequestIndex < 0
+      ? displayList.findIndex(item => item.type === 'turn_process_disclosure') : -1;
+  const hasInitialResult = Boolean(pauseError || (initialRequestIndex >= 0 && list.some(message =>
+    message.conversation_id === conversationContext?.conversation_id && (isTerminalAssistantItem(message)
+      || getProcessedItemTurnEndedAt(message) !== undefined))));
+  const showPendingMessage = hasPendingPresentation && initialRequestIndex < 0 && !hasInitialResult;
+  const showPreparation = hasPendingPresentation && initialProgressIndex < 0 && !hasInitialResult;
+  useLayoutEffect(() => {
+    if (hasPendingPresentation) {
+      initialRenderKeys.current = { conversationId: conversationContext?.conversation_id,
+        renderKey: pendingMessage!.id, requestMessageId: initialRequestMessageId };
+      // A user-created notification can precede the send receipt/Turn state.
+      // Only the committed replacement progress or result ends preparation.
+      if (initialRequestMessageId && (initialProgressIndex >= 0 || hasInitialResult)) onPendingMessageReady?.();
+    } else if (initialRenderKeys.current.conversationId !== conversationContext?.conversation_id) {
+      initialRenderKeys.current = {};
+    }
+  }, [hasPendingPresentation, pendingMessage, initialRequestMessageId, initialProgressIndex, hasInitialResult, conversationContext?.conversation_id, onPendingMessageReady]);
+
+  const preparationRow = showPreparation ? <React.Fragment key={`${initialRenderKey}-progress`}>
+    <div key={`${initialRenderKey}-progress`} className='min-w-0 message-item m-t-10px turn_process_disclosure' data-testid='initial-message-preparing'>
+      {renderTurnDisclosure(undefined, false)}
+    </div>
+  </React.Fragment> : null;
+  const renderedRows: React.ReactNode[] = [];
+  if (showPendingMessage && pendingMessage) renderedRows.push(<React.Fragment key={`${initialRenderKey}-request`}>
+    {renderItem(-1, pendingMessage, `${initialRenderKey}-request`)}
+  </React.Fragment>);
+  if (showPreparation && initialRequestIndex < 0) renderedRows.push(preparationRow);
+  displayList.forEach((item, index) => {
+    const key = initialRenderKey && index === initialProgressIndex ? `${initialRenderKey}-progress`
+      : initialRenderKey && index === initialRequestIndex ? `${initialRenderKey}-request` : item.id;
+    renderedRows.push(<React.Fragment key={key}>{renderItem(index, item, key)}</React.Fragment>);
+    if (showPreparation && index === initialRequestIndex) renderedRows.push(preparationRow);
+  });
+
+  if (displayList.length === 0 && isMessageListLoading && !showPendingMessage && !showPreparation) {
     return <MessageListSkeleton />;
   }
 
-  if (displayList.length === 0 && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
+  if (displayList.length === 0 && !showPendingMessage && !showPreparation && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -1532,9 +1591,7 @@ const MessageList: React.FC<{
           >
             <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
-              {displayList.map((item, index) => (
-                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
-              ))}
+              {renderedRows}
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               <div className='h-20px' />
             </div>

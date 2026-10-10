@@ -41,6 +41,6 @@ export async function refreshConversationCache(conversation_id: ConversationId):
  * refetch; SWR's default mount revalidation still refreshes in the background
  * without blocking the first paint.
  */
-export function seedConversationCache(conversation: TChatConversation): void {
-  void mutate<TChatConversation>(`conversation/${conversation.id}`, conversation, false);
+export async function seedConversationCache(conversation: TChatConversation): Promise<void> {
+  await mutate<TChatConversation>(`conversation/${conversation.id}`, conversation, false);
 }

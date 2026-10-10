@@ -3,6 +3,12 @@ import {
   type ResourceSection,
 } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 
+let conversationRoute: Promise<typeof import('@renderer/pages/conversation')> | undefined;
+export const loadConversationRoute = () => conversationRoute ??= import('@renderer/pages/conversation').catch(error => {
+  conversationRoute = undefined;
+  throw error;
+});
+
 export const loadResourcePageBoundary = () =>
   import('@renderer/pages/creativeStudio/app/ResourcePageBoundary');
 export const loadCreativeStudioCanvasesRoute = () =>

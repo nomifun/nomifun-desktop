@@ -140,7 +140,7 @@ describe('Nomi sendbox control layout', () => {
       selectorSource.indexOf('{reasoningControl}')
     );
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
-    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice)')).toBe(true);
+    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice || initialSubmissionPending)')).toBe(true);
   });
 
   test('switches the current AgentSession in place instead of navigating back to Guid', () => {

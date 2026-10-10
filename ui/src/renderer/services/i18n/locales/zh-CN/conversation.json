@@ -97,8 +97,7 @@
   "noModelConfigured": "未配置模型，请前往设置页面配置。",
   "createFailed": "创建会话失败",
   "pending": {
-    "creating": "正在创建会话…",
-    "startingAutoWork": "正在启动自动工作…"
+    "preparing": "正在准备…"
   },
   "createError": {
     "pathVariants": {

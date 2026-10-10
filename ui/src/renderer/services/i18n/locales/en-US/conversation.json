@@ -97,8 +97,7 @@
   "noModelConfigured": "No model configured. Please configure in settings.",
   "createFailed": "Failed to create conversation",
   "pending": {
-    "creating": "Creating conversation…",
-    "startingAutoWork": "Starting AutoWork…"
+    "preparing": "Preparing…"
   },
   "createError": {
     "pathVariants": {

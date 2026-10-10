@@ -31,8 +31,10 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('highlighted={highlighted}')).toBe(true);
   });
 
-  test('uses the stable view-model id as the React reconciliation key', () => {
-    expect(source.includes('<React.Fragment key={item.id}>')).toBe(true);
+  test('defaults to the stable view-model id while the first submit keeps its presentation key', () => {
+    expect(source.includes('renderKey = item.id')).toBe(true);
+    expect(source.includes(': item.id;')).toBe(true);
+    expect(source.includes('<React.Fragment key={key}>')).toBe(true);
     expect(source.includes('<React.Fragment key={getProcessedItemAnchorId(item) || index}>')).toBe(false);
   });
 
