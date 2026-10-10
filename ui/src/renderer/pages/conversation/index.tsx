@@ -80,7 +80,7 @@ const ChatConversationIndex: React.FC = () => {
     navigate('/', { replace: true });
   }, [id, isLoading, data, navigate, t]);
 
-  if (isLoading) return <MessageListSkeleton />;
+  if (isLoading && !data) return <MessageListSkeleton />;
   if (data?.session_purpose === 'plugin_authoring') {
     return <Navigate replace to={`/plugins/authoring/${encodeURIComponent(data.id)}`} />;
   }

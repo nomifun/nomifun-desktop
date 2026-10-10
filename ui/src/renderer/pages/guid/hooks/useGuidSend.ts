@@ -12,9 +12,10 @@ import {
   parseConversationId,
   type ConversationId,
 } from '@/common/types/ids';
-import { uuidv7 } from '@/common/utils';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
-import type { PendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import type { PendingInitialMessage } from '@/renderer/pages/conversation/components/ConversationShell/InitialMessageContext';
+import { persistInitialMessageDelivery } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
+import { loadConversationRoute } from '@/renderer/components/layout/routePreload';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
@@ -27,7 +28,7 @@ import type {
   ExecutableAgentPreset,
   GuidAgentSelection,
 } from '../types';
-import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
+import { planGuidEntry } from './autoWorkEntry';
 import type {
   AgentResourceSelection,
   CreateAgentSessionRequest,
@@ -73,8 +74,8 @@ export type GuidSendDeps = {
   setMentionActiveIndex: React.Dispatch<React.SetStateAction<number>>;
   navigate: NavigateFunction;
   t: TFunction;
-  beginPending?: (payload: PendingConversation) => void;
-  endPending?: () => void;
+  beginInitialMessage?: (message: PendingInitialMessage) => void;
+  endInitialMessage?: (conversationId: ConversationId, idempotencyKey: string) => void;
 };
 
 export type GuidSendResult = {
@@ -177,8 +178,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     setMentionActiveIndex,
     navigate,
     t,
-    beginPending,
-    endPending,
+    beginInitialMessage,
+    endInitialMessage,
   } = deps;
   const sendingRef = useRef(false);
 
@@ -197,6 +198,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       : '';
     let conversationId: ConversationId;
     let conversation;
+    let initialMessage: PendingInitialMessage | undefined;
 
     let launchPreset = selectedPreset;
     if (selection.kind === 'template') {
@@ -270,19 +272,17 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           });
         if (linked) conversation = linked;
       } else if (entryPlan.sendInitialMessage) {
-        sessionStorage.setItem(
+        const delivery = persistInitialMessageDelivery(
+          sessionStorage,
           sessionStorageKey(
             'initial-message-nomi',
             conversationTarget(conversationId)
           ),
-          JSON.stringify({
-            conversation_id: conversationId,
-            initial_admission_epoch: 0,
-            input,
-            files: files.length > 0 ? files : undefined,
-            idempotency_key: uuidv7(),
-          })
+          conversationId,
+          input,
+          files
         );
+        initialMessage = { ...delivery, submittedAt: Date.now() };
       }
 
     } catch (error) {
@@ -290,9 +290,19 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       throw error;
     }
     emitter.emit('chat.history.refresh');
-    seedConversationCache(conversation);
-    await navigate(`/conversation/${conversationId}`);
+    // Keep the welcome composer visible until both destination code and data
+    // are ready. The actual transcript owns preparation and the first Turn.
+    await Promise.all([seedConversationCache(conversation), loadConversationRoute()]);
+    if (initialMessage) beginInitialMessage?.(initialMessage);
+    try {
+      await navigate(`/conversation/${conversationId}`);
+    } catch (error) {
+      if (initialMessage) endInitialMessage?.(conversationId, initialMessage.idempotency_key);
+      throw error;
+    }
   }, [
+    beginInitialMessage,
+    endInitialMessage,
     applyAdvancedConfig,
     autoWork,
     current_model,
@@ -336,12 +346,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
     sendingRef.current = true;
     setLoading(true);
-    beginPending?.({
-      input,
-      files: files.length > 0 ? files : undefined,
-      sendsInitialMessage: !isAutoWorkEntry(autoWork),
-    });
-
     handleSend()
       .then(() => {
         setInput('');
@@ -363,15 +367,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       .finally(() => {
         sendingRef.current = false;
         setLoading(false);
-        endPending?.();
       });
   }, [
-    autoWork,
-    beginPending,
-    endPending,
-    files,
     handleSend,
-    input,
     loading,
     current_model,
     resourceResolutionReady,

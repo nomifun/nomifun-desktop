@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import type { TFunction } from 'i18next';
 import type { Dispatch, SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
+import { mutate, useSWRConfig } from 'swr';
 
 import type { TProviderWithModel } from '@/common/config/storage';
 import { ipcBridge } from '@/common';
@@ -467,6 +468,55 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
+  test('keeps creation on the welcome page, then hands the live input and seeded conversation to the destination together', async () => {
+    resetBrowserStorage();
+    installFetchRecorder();
+    const cacheKey = `conversation/${PRESET_CONVERSATION_ID}`;
+    await mutate(cacheKey, undefined, { revalidate: false });
+    const cache = renderHook(useSWRConfig);
+    let finishConfiguration!: () => void;
+    const configuration = new Promise<void>(resolve => { finishConfiguration = resolve; });
+    const presented: Array<Parameters<NonNullable<GuidSendDeps['beginInitialMessage']>>[0]> = [];
+    const navigations: string[] = [];
+    const ended: string[] = [];
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+      applyAdvancedConfig: () => configuration,
+      beginInitialMessage: message => { presented.push(message); },
+      endInitialMessage: (_id, key) => { ended.push(key); },
+      navigate: ((path: string) => {
+        expect(cache.result.current.cache.get(cacheKey)?.data?.id).toBe(PRESET_CONVERSATION_ID);
+        expect(presented).toHaveLength(1);
+        navigations.push(path);
+      }) as NavigateFunction,
+    }));
+    let sending!: Promise<void>;
+    await act(async () => { sending = hook.result.current.handleSend(); });
+    expect(navigations).toEqual([]);
+    expect(presented).toEqual([]);
+    await act(async () => { finishConfiguration(); await sending; });
+    expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+    expect(presented[0]).toMatchObject({ conversation_id: PRESET_CONVERSATION_ID,
+      input: INPUT, files: FILES, idempotency_key: readOnlyHandoff().idempotency_key });
+    expect(ended).toEqual([]);
+  });
+
+  test('a failed route navigation retires only the exact live input presentation', async () => {
+    resetBrowserStorage();
+    installFetchRecorder();
+    const presented: Array<Parameters<NonNullable<GuidSendDeps['beginInitialMessage']>>[0]> = [];
+    const ended: Array<[string, string]> = [];
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+      beginInitialMessage: message => { presented.push(message); },
+      endInitialMessage: (id, key) => { ended.push([id, key]); },
+      navigate: (() => { throw new Error('Route unavailable'); }) as NavigateFunction,
+    }));
+    await act(async () => { await expect(hook.result.current.handleSend()).rejects.toThrow('Route unavailable'); });
+    expect(presented).toHaveLength(1);
+    expect(ended).toEqual([[PRESET_CONVERSATION_ID, presented[0].idempotency_key]]);
+  });
+
   test('a long first task uses a valid title and keeps the complete original instruction for its initial turn', async () => {
     resetBrowserStorage();
     const input = `  请检查中文项目 ${'验收🧪'.repeat(70)}\r\n最后一项的完整指令必须保留。\r\n`;

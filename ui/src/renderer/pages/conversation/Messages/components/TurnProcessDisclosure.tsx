@@ -21,8 +21,7 @@ export interface TurnProcessDisclosureView<T> {
   hasInterruptedReply?: boolean;
 }
 
-interface TurnProcessDisclosureProps<T> {
-  item: TurnProcessDisclosureView<T>;
+interface TurnProcessDisclosureCommonProps<T> {
   highlighted?: boolean;
   renderProcessItem: (item: T) => React.ReactNode;
   getProcessItemKey: (item: T) => string;
@@ -31,6 +30,12 @@ interface TurnProcessDisclosureProps<T> {
   processFooter?: React.ReactNode;
   activityLabel?: string;
 }
+
+type TurnProcessDisclosureProps<T> = TurnProcessDisclosureCommonProps<T> & (
+  | { item: TurnProcessDisclosureView<T>; preparationLabel?: never }
+  /** A live submit has no Turn timing until the normal timeline supplies it. */
+  | { item?: undefined; preparationLabel: string }
+);
 
 export interface TurnProcessDisclosureExpansionSnapshot {
   itemId: string;
@@ -73,11 +78,12 @@ const formatTurnDuration = (ms: number, t: ReturnType<typeof useTranslation>['t'
 // thinking/tool journal. Stream renders also sample wall time, and foreground
 // events catch up immediately after desktop/browser timer throttling.
 const TurnWorkDuration: React.FC<{
-  startAt: number;
-  endAt: number;
+  startAt?: number;
+  endAt?: number;
   running: boolean;
   state: TurnDisclosureProcessState;
-}> = ({ startAt, endAt, running, state }) => {
+  preparationLabel?: string;
+}> = ({ startAt, endAt, running, state, preparationLabel }) => {
   const { t } = useTranslation();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -95,7 +101,7 @@ const TurnWorkDuration: React.FC<{
   }, [running, startAt]);
 
   const durationEndAt = running ? Math.max(now, Date.now()) : endAt;
-  const durationMs = durationEndAt - startAt;
+  const durationMs = typeof durationEndAt === 'number' && typeof startAt === 'number' ? durationEndAt - startAt : NaN;
   const durationLabel = Number.isFinite(durationMs) && durationMs >= 0
     ? t('messages.turnDuration', {
         duration: formatTurnDuration(durationMs, t),
@@ -105,11 +111,12 @@ const TurnWorkDuration: React.FC<{
   const label = state === 'canceled'
     ? `${t('messages.canceledExecution', { defaultValue: 'Execution canceled' })} · ${durationLabel}`
     : durationLabel;
-  return <span className='turn-process-disclosure__label'>{label}</span>;
+  return <span className='turn-process-disclosure__label' role={preparationLabel ? 'status' : undefined}>{preparationLabel ?? label}</span>;
 };
 
 function TurnProcessDisclosure<T>({
   item,
+  preparationLabel,
   highlighted = false,
   renderProcessItem,
   getProcessItemKey,
@@ -119,45 +126,50 @@ function TurnProcessDisclosure<T>({
   activityLabel,
 }: TurnProcessDisclosureProps<T>) {
   const { t } = useTranslation();
-  const hasProcessItems = item.processItems.length > 0 || processFooter != null;
-  const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
+  const hasProcessItems = Boolean(item && (item.processItems.length > 0 || processFooter != null));
+  const itemId = item?.id ?? '';
+  const defaultCollapsed = item?.defaultCollapsed ?? true;
+  const running = item?.running === true;
+  const beganPreparing = useRef(!item);
+  const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, defaultCollapsed));
   const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
-    itemId: item.id,
+    itemId,
     hasProcessItems,
-    defaultCollapsed: item.defaultCollapsed,
-    running: item.running,
+    defaultCollapsed,
+    running,
   });
 
   useEffect(() => {
     const nextSnapshot: TurnProcessDisclosureExpansionSnapshot = {
-      itemId: item.id,
+      itemId,
       hasProcessItems,
-      defaultCollapsed: item.defaultCollapsed,
-      running: item.running,
+      defaultCollapsed,
+      running,
     };
     const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
     expansionSnapshotRef.current = nextSnapshot;
-    if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-  }, [hasProcessItems, item.defaultCollapsed, item.id]);
+    if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, defaultCollapsed));
+  }, [hasProcessItems, defaultCollapsed, itemId]);
 
   useEffect(() => {
     if (highlighted && hasProcessItems) setExpanded(true);
   }, [hasProcessItems, highlighted]);
 
   const currentItemKey = useMemo(() => {
-    if (!item.running) return undefined;
+    if (!item?.running) return undefined;
     const latestItem = item.processItems.findLast(processItem => {
       const kind = getProcessItemLayoutKind?.(processItem);
       return getProcessItemState(processItem) === 'running' && (kind === 'thinking' || kind === 'tool');
     });
     return latestItem ? getProcessItemKey(latestItem) : undefined;
-  }, [getProcessItemKey, getProcessItemLayoutKind, getProcessItemState, item.processItems, item.running]);
+  }, [getProcessItemKey, getProcessItemLayoutKind, getProcessItemState, item?.processItems, item?.running]);
 
-  const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
-  const disclosureExpanded = hasProcessItems && expanded;
+  const bodyId = `turn-process-disclosure-body-${sanitizeDomId(itemId)}`;
+  const disclosureExpanded = hasProcessItems && (beganPreparing.current && expansionSnapshotRef.current.itemId === ''
+    ? getDefaultExpanded(hasProcessItems, defaultCollapsed) : expanded);
   const headerContent = (
     <>
-      <TurnWorkDuration startAt={item.startAt} endAt={item.endAt} running={item.running} state={item.state} />
+      <TurnWorkDuration startAt={item?.startAt} endAt={item?.endAt} running={running} state={item?.state ?? 'completed'} preparationLabel={!item ? preparationLabel : undefined} />
       {activityLabel && <span className='turn-process-disclosure__activity' role='status'>{activityLabel}</span>}
       {hasProcessItems && (
         <Right
@@ -177,22 +189,23 @@ function TurnProcessDisclosure<T>({
     <div
       className={classNames(
         'turn-process-disclosure',
-        `turn-process-disclosure--${item.state}`,
-        item.running && 'turn-process-disclosure--live'
+        `turn-process-disclosure--${item?.state ?? 'preparing'}`,
+        running && 'turn-process-disclosure--live'
       )}
     >
       <div className={classNames('turn-process-disclosure__header', !hasProcessItems && 'turn-process-disclosure__header--static')}>
-        {hasProcessItems ? (
+        {hasProcessItems || beganPreparing.current ? (
           <button
             type='button'
-            className='turn-process-disclosure__toggle'
+            className={classNames('turn-process-disclosure__toggle', !hasProcessItems && 'turn-process-disclosure__toggle--static')}
+            disabled={!hasProcessItems}
             onClick={() => setExpanded((value) => !value)}
-            aria-label={t(
+            aria-label={hasProcessItems ? t(
               disclosureExpanded ? 'messages.turnProcess.collapse' : 'messages.turnProcess.expand',
               { defaultValue: disclosureExpanded ? 'Collapse thinking process' : 'Expand thinking process' }
-            )}
-            aria-expanded={disclosureExpanded}
-            aria-controls={bodyId}
+            ) : undefined}
+            aria-expanded={hasProcessItems ? disclosureExpanded : undefined}
+            aria-controls={hasProcessItems ? bodyId : undefined}
           >
             {headerContent}
           </button>
@@ -202,14 +215,14 @@ function TurnProcessDisclosure<T>({
           </div>
         )}
       </div>
-      {item.state === 'canceled' && !item.running && item.hasInterruptedReply && (
+      {item?.state === 'canceled' && !item.running && item.hasInterruptedReply && (
         <div data-testid='interrupted-reply-notice' className='mt-4px text-12px text-t-secondary'>
           {t('messages.turnProcess.interruptedReply', {
             defaultValue: 'The reply below was written before stopping and is incomplete.',
           })}
         </div>
       )}
-      {disclosureExpanded && (
+      {disclosureExpanded && item && (
         <div id={bodyId} className='turn-process-disclosure__body'>
           {item.processItems.map((processItem) => {
             const itemKey = getProcessItemKey(processItem);

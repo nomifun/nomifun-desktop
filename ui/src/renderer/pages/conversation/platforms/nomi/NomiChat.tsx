@@ -15,7 +15,7 @@ import {
   useMessageLstCache,
 } from '@renderer/pages/conversation/Messages/hooks';
 import HOC from '@renderer/utils/ui/HOC';
-import React, { useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
 import { useNomiMessage } from './useNomiMessage';
@@ -23,6 +23,9 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
 import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { currentModelProviderTarget } from './currentModelProviderTarget';
+import { useInitialMessage } from '../../components/ConversationShell/InitialMessageContext';
+import type { IMessageText } from '@/common/chat/chatLib';
+import { buildDisplayMessage } from '@/renderer/utils/file/messageFiles';
 
 const NomiChat: React.FC<{
   conversation_id: ConversationId;
@@ -80,6 +83,21 @@ const NomiChat: React.FC<{
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
   const historyPaging = useMessageLstCache(conversation_id);
   const turnActivity = useNomiMessage(conversation_id);
+  const { pending, end: endInitialMessage } = useInitialMessage();
+  const handlePendingMessageReady = useCallback(() => {
+    if (pending?.conversation_id === conversation_id) endInitialMessage(conversation_id, pending.idempotency_key);
+  }, [pending, conversation_id, endInitialMessage]);
+  const pendingMessage = useMemo<IMessageText | undefined>(() => pending?.conversation_id === conversation_id
+    ? {
+        id: `initial-${pending.idempotency_key}`,
+        conversation_id,
+        type: 'text',
+        position: 'right',
+        status: 'pending',
+        created_at: pending.submittedAt,
+        content: { content: buildDisplayMessage(pending.input, pending.files, workspace) },
+      }
+    : undefined, [pending, conversation_id, workspace]);
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
@@ -134,6 +152,8 @@ const NomiChat: React.FC<{
             <MessageList
               className='flex-1'
               emptySlot={emptySlot}
+              pendingMessage={pendingMessage}
+              onPendingMessageReady={handlePendingMessageReady}
               onLoadOlder={historyPaging.loadOlder}
               hasMoreOlder={historyPaging.hasMore}
               loadingOlder={historyPaging.loadingOlder}

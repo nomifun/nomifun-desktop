@@ -21,7 +21,8 @@ import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/co
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl, { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
-import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import { useInitialMessage } from '@/renderer/pages/conversation/components/ConversationShell/InitialMessageContext';
+import { loadConversationRoute } from '@/renderer/components/layout/routePreload';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   agentResourceKindMayRemainUnbound,
@@ -92,7 +93,7 @@ const GuidPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const pendingConversation = usePendingConversation();
+  const initialMessage = useInitialMessage();
   const guidContainerRef = useRef<HTMLDivElement>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -109,7 +110,7 @@ const GuidPage: React.FC = () => {
   }, [capabilityCatalog.catalog, capabilityCatalog.loading, capabilityCatalog.error]);
 
   useEffect(() => {
-    void import('@renderer/pages/conversation');
+    void loadConversationRoute().catch(() => {});
   }, []);
 
   const navigationState = location.state as GuidNavigationState | null;
@@ -349,8 +350,8 @@ const GuidPage: React.FC = () => {
     setMentionActiveIndex: mention.setMentionActiveIndex,
     navigate,
     t,
-    beginPending: pendingConversation.begin,
-    endPending: pendingConversation.end,
+    beginInitialMessage: initialMessage.begin,
+    endInitialMessage: initialMessage.end,
   });
 
   const handleInputChange = useCallback(
