@@ -18,7 +18,7 @@ pub struct McpServerRow {
     /// Unique server name (used as identifier when syncing to Agent CLIs).
     pub name: String,
     pub description: Option<String>,
-    /// Whether this server is synced to Agent CLIs.
+    /// Global availability; Sessions select enabled servers with discovered tools.
     pub enabled: bool,
     /// One of: "stdio", "sse", "http".
     pub transport_type: String,

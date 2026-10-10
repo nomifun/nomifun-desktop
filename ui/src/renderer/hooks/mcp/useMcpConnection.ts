@@ -1,5 +1,4 @@
-import type React from 'react';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Message } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
@@ -8,6 +7,7 @@ import { mcpService } from '@/common/adapter/ipcBridge';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
 import { getMcpConfigurationFields, supportsMcpOAuthLogin } from './mcpAuthConfig';
+import { notifyMcpCatalogChanged } from './catalog';
 
 /**
  * 截断过长的错误消息，保持可读性
@@ -195,12 +195,17 @@ const formatThrownMcpErrorMessage = (t: TFunction, error: unknown): string => {
  * 处理MCP服务器的连接测试和状态更新
  */
 export const useMcpConnection = (
-  setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>,
   onAuthRequired?: (server: IMcpServer) => void,
   onAuthResolved?: (server: IMcpServer) => void
 ) => {
   const { t } = useTranslation();
   const [testingServers, setTestingServers] = useState<Record<string, boolean>>({});
+  const active = useRef(true);
+  const pendingTests = useRef(new Map<string, number>());
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
 
   type TestOptions = {
     notify?: boolean;
@@ -225,28 +230,8 @@ export const useMcpConnection = (
         return;
       }
 
-      setTestingServers((prev) => ({ ...prev, [server.mcp_server_id]: true }));
-
-      // 更新服务器状态 - 使用统一的保存函数，避免竞态条件
-      const updateServerStatus = async (
-        last_test_status: IMcpServer['last_test_status'],
-        additionalData?: Partial<IMcpServer>
-      ) => {
-        setMcpServers((prevServers) =>
-          prevServers.map((s) =>
-            s.mcp_server_id === server.mcp_server_id
-              ? {
-                  ...s,
-                  last_test_status,
-                  updated_at: Date.now(),
-                  ...additionalData,
-                }
-              : s
-          )
-        );
-      };
-
-      await updateServerStatus('testing');
+      pendingTests.current.set(server.mcp_server_id, (pendingTests.current.get(server.mcp_server_id) ?? 0) + 1);
+      if (active.current) setTestingServers((prev) => ({ ...prev, [server.mcp_server_id]: true }));
 
       try {
         const result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
@@ -255,7 +240,6 @@ export const useMcpConnection = (
 
         // 检查是否需要认证
         if (needsAuth) {
-          await updateServerStatus('disconnected');
           const canUseOAuth = authMethod === 'oauth' && supportsMcpOAuthLogin(server.transport);
           if (notify) {
             Message.warning({
@@ -282,16 +266,6 @@ export const useMcpConnection = (
         }
 
         if (result.success) {
-          // Record the latest successful availability test in local UI state.
-          await updateServerStatus('connected', {
-            tools: result.tools?.map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              ...(tool.input_schema ? { input_schema: tool.input_schema } : {}),
-              ...(tool._meta ? { _meta: tool._meta } : {}),
-            })),
-            last_connected: Date.now(),
-          });
           if (notify) {
             Message.success({
               content: `${server.name}: ${t('settings.mcpTestConnectionSuccess')}`,
@@ -299,10 +273,7 @@ export const useMcpConnection = (
             });
           }
 
-          // 连接测试成功，不执行额外操作
         } else {
-          // Record the latest failed availability test in local UI state.
-          await updateServerStatus('error');
           const errorMsg = truncateErrorMessage(formatMcpErrorMessage(t, result));
           if (notify) {
             Message.error({
@@ -316,8 +287,6 @@ export const useMcpConnection = (
           }
         }
       } catch (error) {
-        // Record the latest failed availability test in local UI state.
-        await updateServerStatus('error');
         const errorMsg = truncateErrorMessage(formatThrownMcpErrorMessage(t, error));
         if (notify) {
           Message.error({
@@ -330,13 +299,19 @@ export const useMcpConnection = (
           });
         }
       } finally {
-        setTestingServers((prev) => ({
-          ...prev,
-          [server.mcp_server_id]: false,
-        }));
+        const remaining = (pendingTests.current.get(server.mcp_server_id) ?? 1) - 1;
+        if (remaining > 0) pendingTests.current.set(server.mcp_server_id, remaining);
+        else pendingTests.current.delete(server.mcp_server_id);
+        if (active.current) {
+          setTestingServers((prev) => ({ ...prev, [server.mcp_server_id]: remaining > 0 }));
+        }
+        // The backend persists success, failure, and authentication outcomes
+        // before the response settles. Reload that row, including after errors
+        // such as a stale probe, instead of inventing a local catalog result.
+        notifyMcpCatalogChanged();
       }
     },
-    [setMcpServers, t, onAuthRequired, onAuthResolved]
+    [t, onAuthRequired, onAuthResolved]
   );
 
   const handleTestMcpConnections = useCallback(

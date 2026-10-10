@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Alert, Spin, Tabs } from '@arco-design/web-react';
+import { Alert, Button, Spin, Tabs } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -27,8 +27,8 @@ const McpPage: React.FC = () => {
     mcpServers,
     isMcpServersLoading,
     mcpServersLoadFailed,
+    retryMcpServers,
     saveMcpServers,
-    setMcpServers,
   } = useMcpServers();
   const [headerActionHost, setHeaderActionHost] = React.useState<HTMLDivElement | null>(null);
   const tabParam = searchParams.get('tab');
@@ -66,16 +66,17 @@ const McpPage: React.FC = () => {
           {isMcpServersLoading ? (
             <Spin tip={t('common.loading')} />
           ) : mcpServersLoadFailed ? (
-            <Alert type='error' content={t('settings.mcpPage.loadFailed', {
-              defaultValue: 'Failed to load MCP servers. Reopen this page to retry.',
-            })} />
+            <Alert
+              type='error'
+              content={t('settings.mcpPage.loadFailed')}
+              action={<Button size='mini' onClick={retryMcpServers}>{t('common.retry')}</Button>}
+            />
           ) : (
             <ToolsModalContentWithState
               mcpMessage={mcpMessage}
               mcpMessageContext={mcpMessageContext}
               mcpServers={mcpServers}
               saveMcpServers={saveMcpServers}
-              setMcpServers={setMcpServers}
               headerActionHost={activeTab === 'servers' ? headerActionHost : null}
             />
           )}

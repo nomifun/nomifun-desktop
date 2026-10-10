@@ -12,11 +12,13 @@ interface McpServerItemProps {
   isTestingConnection: boolean;
   oauthStatus?: McpOAuthStatus;
   isLoggingIn?: boolean;
+  isTogglingEnabled?: boolean;
   onToggleCollapse: () => void;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
   onDeleteServer: (serverId: McpServerId) => void;
   onOAuthLogin?: (server: IMcpServer) => void;
+  onToggleEnabled: (server: IMcpServer) => void;
 }
 
 const McpServerItem: React.FC<McpServerItemProps> = ({
@@ -25,11 +27,13 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
   isTestingConnection,
   oauthStatus,
   isLoggingIn,
+  isTogglingEnabled,
   onToggleCollapse,
   onTestConnection,
   onEditServer,
   onDeleteServer,
   onOAuthLogin,
+  onToggleEnabled,
 }) => {
   return (
     <Collapse
@@ -45,10 +49,12 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
             isTestingConnection={isTestingConnection}
             oauthStatus={oauthStatus}
             isLoggingIn={isLoggingIn}
+            isTogglingEnabled={isTogglingEnabled}
             onTestConnection={onTestConnection}
             onEditServer={onEditServer}
             onDeleteServer={onDeleteServer}
             onOAuthLogin={onOAuthLogin}
+            onToggleEnabled={onToggleEnabled}
           />
         }
         name='1'

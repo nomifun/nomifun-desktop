@@ -26,10 +26,9 @@ const MCP_SERVER_PAGE_SIZE = 10;
 const ModalMcpManagementSection: React.FC<{
   message: MessageInstance;
   mcpServers: IMcpServer[];
-  setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
   headerActionHost: HTMLDivElement | null;
-}> = ({ message, mcpServers, setMcpServers, saveMcpServers, headerActionHost }) => {
+}> = ({ message, mcpServers, saveMcpServers, headerActionHost }) => {
   const { t } = useTranslation();
   const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
@@ -64,7 +63,6 @@ const ModalMcpManagementSection: React.FC<{
   );
 
   const { testingServers, handleTestMcpConnection, handleTestMcpConnections } = useMcpConnection(
-    setMcpServers,
     handleAuthRequired,
     handleAuthResolved
   );
@@ -81,8 +79,14 @@ const ModalMcpManagementSection: React.FC<{
     hideDeleteConfirm,
     toggleServerCollapse,
   } = useMcpModal();
-  const { handleAddMcpServer, handleBatchImportMcpServers, handleEditMcpServer, handleDeleteMcpServer } =
-    useMcpServerCRUD(saveMcpServers);
+  const {
+    handleAddMcpServer,
+    handleBatchImportMcpServers,
+    handleEditMcpServer,
+    handleDeleteMcpServer,
+    handleToggleMcpServer,
+    togglingServers,
+  } = useMcpServerCRUD(saveMcpServers);
 
   const handleOAuthLogin = useCallback(
     async (server: IMcpServer) => {
@@ -238,11 +242,13 @@ const ModalMcpManagementSection: React.FC<{
                     isTestingConnection={testingServers[server.mcp_server_id] || false}
                     oauthStatus={oauthStatus[server.mcp_server_id]}
                     isLoggingIn={loggingIn[server.mcp_server_id]}
+                    isTogglingEnabled={togglingServers[server.mcp_server_id] || false}
                     onToggleCollapse={() => toggleServerCollapse(uiKey)}
                     onTestConnection={handleTestMcpConnection}
                     onEditServer={showEditMcpModal}
                     onDeleteServer={showDeleteConfirm}
                     onOAuthLogin={handleOAuthLogin}
+                    onToggleEnabled={handleToggleMcpServer}
                   />
                 );
               })}
@@ -300,10 +306,9 @@ export const ToolsModalContentWithState: React.FC<{
   mcpMessage: MessageInstance;
   mcpMessageContext: React.ReactNode;
   mcpServers: IMcpServer[];
-  setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
   headerActionHost: HTMLDivElement | null;
-}> = ({ mcpMessage, mcpMessageContext, mcpServers, saveMcpServers, setMcpServers, headerActionHost }) => {
+}> = ({ mcpMessage, mcpMessageContext, mcpServers, saveMcpServers, headerActionHost }) => {
   return (
     <div className='flex flex-col h-full w-full'>
       {mcpMessageContext}
@@ -317,7 +322,6 @@ export const ToolsModalContentWithState: React.FC<{
             <ModalMcpManagementSection
               message={mcpMessage}
               mcpServers={mcpServers}
-              setMcpServers={setMcpServers}
               saveMcpServers={saveMcpServers}
               headerActionHost={headerActionHost}
             />

@@ -135,7 +135,8 @@
   },
   "mcpPage": {
     "installedMcpTab": "已安装MCP",
-    "mcpMarketTab": "MCP市场"
+    "mcpMarketTab": "MCP市场",
+    "loadFailed": "加载 MCP 服务失败，请重试。"
   },
   "agentSkillImport": {
     "title": "从 Agent 导入",
@@ -953,6 +954,11 @@
   "mcpJsonStdioCommandRequiredError": "Stdio MCP 服务必须提供非空 \"command\"。",
   "mcpGetApi": "获取 API",
   "mcpTestConnection": "检测MCP可用状态",
+  "mcpEnabled": "已启用",
+  "mcpDisabled": "已停用",
+  "mcpEnableServer": "启用 {{name}}",
+  "mcpDisableServer": "停用 {{name}}",
+  "mcpToggleFailed": "更改 MCP 启用状态失败，请重试。",
   "mcpTestConnectionSuccess": "连接测试成功",
   "mcpConnected": "可用",
   "mcpAuthenticated": "已认证",
