@@ -332,6 +332,98 @@ impl Fixture {
 }
 
 #[test]
+fn session_extension_selection_keeps_frozen_mount_after_evolution_with_old_explicit_role_ref() {
+    let mut fixture = Fixture::new();
+    let mut selection = fixture.environment.installation_role_bindings[&ROLE.into()].selection.clone();
+    selection.provider_mount_id = "builtin".into();
+    fixture.draft.document.system_role_provider_overrides.insert(ROLE.into(), wire_cast(&selection).unwrap());
+    let saved = fixture.save();
+
+    // A bundled manifest edit changes the role digest, while the installation
+    // currently selects another Provider. Session intent retains its old pin.
+    let capability = fixture.registry.capabilities.get_mut(&MEMBER.into()).unwrap();
+    capability.manifest.display.description = "Updated bundled context description".into();
+    capability.schema_digest = digest_payload(&capability.manifest).unwrap();
+    capability.contribution_lock.contract_digest = capability.schema_digest.clone();
+    let capability = capability.clone();
+    fixture.catalog.capabilities = vec![capability.clone()];
+    let entry = CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
+        manifest: capability.manifest.clone(),
+        provenance: CapabilityProvenance {
+            owner: CapabilityOwner::Package { package: capability.manifest.package.clone() },
+            source_kind: capability.contribution_lock.source_kind,
+            source_identity: capability.contribution_lock.source_identity.clone(),
+            mount_id: None, mcp_binding_id: None, artifact_digest: Some(capability.target_artifact_digest.clone()),
+        },
+        publication_state: CapabilityPublicationState::Active,
+        availability: BTreeMap::from([(CapabilityConsumer::Agent, CatalogAvailability::Active)]),
+    }).unwrap();
+    fixture.catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+    let role = fixture.registry.role_contracts.get_mut(&ROLE.into()).unwrap();
+    role.manifest.members[0].capability_manifest_digest = capability.schema_digest;
+    role.contract_digest = digest_payload(&role.manifest).unwrap();
+    let current_role = ExactRoleContractRef { key: role.manifest.key.clone(), contract_digest: role.contract_digest.clone() };
+    for provider in fixture.registry.role_providers.values_mut() {
+        provider.provider.role = current_role.clone();
+        provider.contribution.role = current_role.clone();
+        provider.provider.contribution_digest = digest_payload(&provider.contribution).unwrap();
+    }
+    fixture.catalog.role_contracts = fixture.registry.role_contracts.values().cloned().collect();
+    fixture.catalog.role_providers = fixture.registry.role_providers.values().cloned().collect();
+    fixture.environment.installation_role_bindings.get_mut(&ROLE.into()).unwrap().selection.role = current_role.clone();
+    let compiler = fixture.compiler();
+    let evolved = compiler.evolve_session_contract(&"owner".into(), "evolved-session".into(), &saved.0, &saved.1, &fixture.catalog).unwrap();
+    assert_eq!(evolved.0.payload.system_role_provider_overrides, saved.0.payload.system_role_provider_overrides);
+    assert_ne!(current_role, selection.role);
+    // Explicit extension selection may reach a Role that was absent from the
+    // source Snapshot. It uses the current default while existing Roles stay
+    // pinned to their frozen mounts.
+    const NEW_MEMBER: &str = "agent.tool-discovery";
+    const NEW_ROLE: &str = "system.tool-discovery";
+    fixture.add_context(NEW_MEMBER, true);
+    let capability = &fixture.registry.capabilities[&NEW_MEMBER.into()];
+    let contract = RoleContractManifest {
+        key: RoleContractKey { role_id: NEW_ROLE.into(), contract_version: "1.0.0".into() },
+        members: vec![RoleMemberContract {
+            capability: CapabilityRef { id: NEW_MEMBER.into() }, capability_manifest_digest: capability.schema_digest.clone(),
+            requirement: RoleMemberRequirement::Required,
+        }],
+        serialized_target_resource_kind: None,
+    };
+    let role = ExactRoleContractRef { key: contract.key.clone(), contract_digest: digest_payload(&contract).unwrap() };
+    fixture.registry.capability_roles.insert(NEW_MEMBER.into(), NEW_ROLE.into());
+    fixture.registry.role_contracts.insert(NEW_ROLE.into(), MaterializedRoleContract {
+        manifest: contract, contract_digest: role.contract_digest.clone(), mount_id: "extension-contract".into(),
+    });
+    let mut provider = fixture.registry.role_providers[&(ROLE.into(), "user".into())].clone();
+    provider.provider.role = role.clone();
+    provider.contribution.role = role.clone();
+    provider.contribution.members = BTreeMap::from([(NEW_MEMBER.into(), provider.contribution.members[&MEMBER.into()].clone())]);
+    provider.provider.contribution_digest = digest_payload(&provider.contribution).unwrap();
+    fixture.registry.role_providers.insert((NEW_ROLE.into(), "user".into()), provider);
+    fixture.environment.installation_role_bindings.insert(NEW_ROLE.into(), InstallationRoleBinding {
+        selection: RoleProviderSelection { role, provider_mount_id: "user".into() }, binding_version: 1, updated_at_ms: 1,
+    });
+    fixture.catalog.role_contracts = fixture.registry.role_contracts.values().cloned().collect();
+    fixture.catalog.role_providers = fixture.registry.role_providers.values().cloned().collect();
+    let mut payload = evolved.0.payload.clone();
+    payload.enabled_capabilities.push(CapabilitySelection { capability: CapabilityRef { id: NEW_MEMBER.into() }, action_allowlist: BTreeSet::new() });
+    payload.skill_bindings.push(nomifun_agent_contracts::AgentSkillBinding::library_selected(
+        nomifun_agent_contracts::FrozenLibrarySkill::new("new-guide".into(), "New guide".into(),
+            nomifun_agent_contracts::LibrarySkillSource::Custom, "Explicitly selected Skill".into(), BTreeMap::new()).unwrap(), true,
+    ));
+    let updated = fixture.compiler().derive_session_extensions(&"owner".into(), "extension-session".into(), payload.clone(),
+        &evolved.0, &evolved.1, &fixture.catalog, &BTreeSet::from([NEW_MEMBER.into()]), &BTreeSet::new()).unwrap();
+    assert_eq!(updated.0.payload, payload);
+    let provider = &updated.1.content.resolved_role_providers[&ROLE.into()];
+    assert_eq!(provider.provider.mount_id.as_ref(), "builtin", "the installation's user Provider must not replace the frozen selection");
+    assert_eq!(provider.provider.role, current_role);
+    assert_eq!(updated.1.content.resolved_role_providers[&NEW_ROLE.into()].provider.mount_id.as_ref(), "user",
+        "the newly authorized extension Role must resolve its current default");
+    assert_eq!(updated.1.content.skill_locks.len(), evolved.1.content.skill_locks.len() + 1);
+}
+
+#[test]
 fn consumer_validation_runs_on_new_and_unchanged_plans_without_rewriting_them() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let fixture = Fixture::new();

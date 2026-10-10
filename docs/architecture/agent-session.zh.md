@@ -57,6 +57,24 @@ Creation prompt、Cron notice、AgentExecution summary 使用正式消息事件�
 
 可执行恢复必须满足 native checkpoint 的精确 build 和 binding 条件；只读的已关闭事件历史允许经过明确验证的模型或 Agent transition 边界。不能为了恢复而扩大权限或补造缺失日志。
 
+### 模型派生与内置契约演进
+
+模型切换从 Session 已保存的不可变 Revision/Snapshot 派生，只改变 canonical Chat route 以及由该路由决定的身份与摘要。
+能力描述、贡献锁、角色 Provider、Skill、MCP、资源授权和全部非模型创作配置保持冻结。模型派生不读取当前安装默认值或
+创作目录来重新选择能力；非模型精确相等校验继续作为操作不变量，并用于模型切换后的已关闭历史验证。
+
+内置发布可以产生新的精确 Schema、产物和角色贡献身份。普通本地新 Turn、模型选择与 warmup 之前，同一个 Session owner
+在空闲边界准备新的执行契约。编译器沿用冻结的创作配置、角色合同 key 与 Provider mount，证明 Action 身份与授权、效果类型、
+资源要求、依赖图、Runtime 要求和发布来源没有变化。展示元数据和精确 Schema/产物摘要允许演进；这表示绑定到新发布的
+执行契约，不证明旧参数可以由新工具执行。Managed package、MCP 工具和 Skill 内容仍须精确一致，不设置版本、能力名称或
+摘要的兼容例外。
+
+Owner 将准备与准入串行化，证明旧 Runtime 完整退出且效果已结算，再通过已有 canonical `session/agent-binding-changed`
+事务提交。Session 身份、typed resource 定义和活动能力选择保留；旧 Revision/Snapshot 与历史事件不可改写。转换边界之前的
+已关闭历史作为数据上下文读取，不重放旧执行日志、不继承旧完成账本，不恢复旧 checkpoint、不重试旧工具调用，也不导入退役
+Agent 数据。活动或暂停 Turn、Remote 和 Attempt（包括 Automation Attempt）绑定不获得自动换绑权限；未知效果和未处理的 Patch recovery 继续阻断。
+精确幂等输入重投沿用原准入，不提前生成其他绑定；已使用当前契约的重复准备为无操作。
+
 已关闭回合的模型正文在历史上下文中是明确的 User-role DATA：来源及降权元数据与原始文本分为不同内容块，
 不能把内部包装 JSON 当作 Assistant 回答示例，诱导后继回复照搬包装或转义正文。历史内容不成为当前指令、
 效果回执或交付模板；真实 Assistant 工具调用及 Tool 结果仍保持原协议角色、顺序和配对。
@@ -103,6 +121,10 @@ host 捕获全局技能库，并把选中的 MCP 工具编译到同一 Session-o
 输入框使用 typed `session_capabilities` 和带版本 CAS 的 capability-selection API，不读写 `extra.skills`
 或 MCP 镜像。空闲更新复用 canonical binding transition，保留非 MCP 资源，完成 Runtime teardown
 与效果结算后原子提交 binding、资源定义与 active set。活动或暂停 Turn、Remote 和 Attempt 禁止更新。
+扩展选择与普通执行共用冻结的角色 Provider 解析；选择 Skill 或 MCP 不带入无关的当前安装角色默认值。
+显式更新只编译用户请求的最终配置，证明变化限于已授权的扩展选择和内置发布身份，其余 Agent 权限、依赖闭包与
+Provider mount 保持冻结。不先重编译旧完整扩展选择，因此删除已撤下的 MCP 工具或 Package Skill 不要求旧扩展仍可用。
+Owner 在同一个空闲、清理与效果结算边界提交一次 canonical transition。
 技能正文只从 Session 冻结内容读取，大正文和辅助资源由同一个 native context reader 按需读取，
 不执行 Skill hooks、shell 或 fork，不增加工具权限。工具搜索由 Runtime 自动提供。
 

@@ -26,6 +26,31 @@ Creation prompts, Cron notices and Execution summaries enter context through for
 
 Current-generation history, immutable Snapshots, model changes and explicit Agent transitions remain supported product semantics. They are verified against identity, sequence, binding and content integrity. Executable recovery requires the native checkpoint's exact build and binding. Closed read-only event history may cross an explicitly validated transition without gaining authority.
 
+### Model derivation and bundled contract evolution
+
+A model change derives a new immutable Revision/Snapshot from the Session's saved artifacts. It changes only the
+canonical Chat route and the identities and digests determined by that route. Capability descriptors, contribution
+locks, role Providers, Skills, MCP tools, resource authority and all non-model authorial fields stay frozen. Current
+installation defaults and authoring catalogs do not participate in model derivation. The strict non-model equality
+check remains an invariant and also governs model-only closed history.
+
+Bundled releases may publish new exact schema, artifact and role contribution identities. Before a new local Turn,
+model selection or warmup, the same Session owner can prepare a fresh execution contract at an idle boundary.
+The compiler starts from the saved authorial configuration and the frozen role contract key and Provider mount,
+then proves that action IDs and grants, effect classes, resources, dependencies, runtime requirements and publisher
+identity stay unchanged. Display metadata and exact schema/artifact digests may evolve; this is a forward binding
+to the newly published contract, not evidence that old inputs are compatible. Managed packages, MCP tools and Skill
+content remain exact. There are no per-release, capability-name or digest compatibility exceptions.
+
+The owner serializes preparation with admission, proves teardown of the previous Runtime and settled effects, and
+uses the existing canonical `session/agent-binding-changed` transaction. The Session identity, typed resource
+definitions and active capability selection are preserved; the old Revision/Snapshot and prior events are immutable.
+The transition makes earlier closed history data-only and excludes its executable journal and completion ledger.
+It never resumes a checkpoint, replays an old tool call or imports retired Agent data. Active or paused Turns,
+Remote and Attempt bindings, including automation Attempts, do not acquire automatic rebinding authority; unknown effects and pending patch
+recovery keep their existing fences. Exact-key input redelivery keeps the original admission rather than preparing
+a different binding. Repeated preparation of an already-current binding is a no-op.
+
 Session reasoning uses one native `reasoning_effort` field defined by the shared contract. No lossy mirrors or fallback columns are maintained.
 
 SDK retries of a published terminal acknowledge the existing receipt only when its original root, delivery,
@@ -64,6 +89,12 @@ The composer uses typed `session_capabilities` and versioned capability-selectio
 Skill or MCP `extra` mirrors. Idle updates reuse canonical binding transitions, preserve non-MCP
 resources, prove Runtime teardown and settled effects, then commit binding, resource definitions, and
 active set atomically. Active or paused Turns, Remote Sessions, and Attempts cannot update selection.
+Extension changes use the same frozen role Provider resolution as ordinary execution; selecting Skills or MCP
+does not adopt unrelated installation role defaults. An explicit update compiles the requested final configuration
+once and proves that only its authorized extension selections and forward bundled identities changed. The remaining
+Agent authority, dependency closure and Provider mounts stay frozen. The old complete extension selection is not
+recompiled first, so removing a withdrawn MCP tool or Package Skill does not require that old extension to remain available.
+The owner commits one canonical transition after the same idle, cleanup and effect checks.
 Bodies and resources use the same native frozen context reader; Skill hooks, shell, and forks do not
 execute or grant tools. Tool search is a built-in Runtime facility.
 

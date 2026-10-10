@@ -38,6 +38,9 @@ mod invocation_preflight_tests;
 #[path = "dependency_call_tests.rs"]
 mod dependency_call_tests;
 
+#[path = "binding_evolution_tests.rs"]
+mod binding_evolution_tests;
+
 use crate::{
     AgentPresetCompiler, CapabilityContextContributionFactory,
     CapabilityContextContributionRequest, CapabilityHandler, CapabilityInvocationContext,

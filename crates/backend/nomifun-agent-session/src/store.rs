@@ -1531,6 +1531,18 @@ impl AgentSessionStore {
                 "wait for the active Turn before switching models".to_owned(),
             ));
         }
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects \
+             WHERE session_id = ? AND state IN ('pending', 'unknown'))",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        if unsettled != 0 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession has unsettled effects".to_owned(),
+            ));
+        }
         let result = sqlx::query(
             "UPDATE agent_sessions SET agent_binding_json = ? \
              WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",

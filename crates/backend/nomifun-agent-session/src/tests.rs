@@ -799,6 +799,36 @@ async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_pro
 }
 
 #[tokio::test]
+async fn session_model_binding_replacement_rejects_unsettled_effects_after_turn_closes() {
+    for unknown in [false, true] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let key = if unknown { "unknown-model-effect" } else { "pending-model-effect" };
+        let (session, request, started) = create_pending_effect(
+            &store, key, if unknown { EffectStrategy::ExternalUncertainEffect } else { EffectStrategy::ManagedEffect },
+        ).await;
+        if unknown {
+            store.record_effect_terminal(EffectEventRequest {
+                event_id: format!("model-effect-unknown-{key}").into(),
+                producer_id: "owning-plugin".into(),
+                causation_event_id: Some(started.clone()),
+                ..request
+            }, EffectTerminalState::Uncertain).await.unwrap();
+        }
+        store.append_event(&append(
+            &session.agent_session_id, &format!("model-effect-turn-closed-{key}"),
+            "runtime-supervisor", &format!("model-effect-turn-closed-{key}"), "turn/failed",
+            &format!("effect-turn-{key}"), Some(started), json!({"error":"effect outcome pending"}),
+        )).await.unwrap();
+        let expected = session.agent_binding;
+        let replacement = agent_replacement(&expected, key);
+        assert!(matches!(store.replace_session_model_binding(
+            &owner(), &session.agent_session_id, &expected, replacement,
+        ).await, Err(SessionStoreError::Conflict(message)) if message.contains("unsettled effects")));
+        assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().agent_binding, expected);
+    }
+}
+
+#[tokio::test]
 async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, _) = create_ready(&store, "agent-transition").await;

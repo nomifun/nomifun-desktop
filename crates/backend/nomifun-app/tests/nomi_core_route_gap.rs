@@ -3306,6 +3306,8 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
 mod common;
 #[path = "support/model_management.rs"]
 mod model_management;
+#[path = "support/session_contract_evolution.rs"]
+mod session_contract_evolution;
 
 #[allow(dead_code)]
 #[path = "../src/router/agent_binding_projection.rs"]

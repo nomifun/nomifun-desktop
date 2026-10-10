@@ -198,9 +198,9 @@
       "send_feedback": "Send feedback with logs so the team can investigate."
     },
     "codes": {
-      "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
-        "title": "Conversation Agent configuration is incompatible",
-        "body": "This conversation’s saved agent configuration is incompatible with the current configuration. Confirm a compatible configuration through the conversation’s agent selector, or start a new conversation. Existing records are preserved."
+      "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
+        "title": "Confirm this conversation’s Agent configuration",
+        "body": "The upgrade changes permissions, tool sources, or execution requirements, so this conversation’s Agent configuration cannot be updated automatically. Confirm its configuration through the conversation’s Agent selector to continue. Existing records are preserved."
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "Task interrupted by app exit",

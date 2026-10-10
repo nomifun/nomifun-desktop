@@ -234,6 +234,74 @@ struct CompiledRuntimeProfileDigestInput {
 pub struct AgentPresetCompiler;
 
 impl AgentPresetCompiler {
+    /// Derive a Chat route from the existing frozen plan. This operation cannot
+    /// consult the Registry, reselect a Provider or refresh any capability.
+    pub fn derive_model_snapshot(
+        source_revision: &AgentPresetRevision,
+        source: &ResolvedSnapshotEnvelope,
+        request: CompileRequest,
+    ) -> Result<ResolvedSnapshotEnvelope, KernelError> {
+        nomifun_agent_contracts::validate_model_only_revision_derivation(
+            source_revision, source, &request.revision,
+        ).map_err(|error| KernelError::InvalidPresetRevision { reason: error.message })?;
+        if request.principal != source.actor || request.scene != source.scene
+            || request.surface != source.surface || request.audience != source.audience
+        {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: "model derivation must preserve the frozen consumer identity".into(),
+            });
+        }
+        let mut snapshot = source.clone();
+        snapshot.content.preset_revision_ref = request.revision.reference.clone();
+        snapshot.content.model_route_refs = request.revision.payload.model_route_refs.clone();
+        snapshot.content.chat_route_identity = request.revision.chat_route_identity()
+            .map_err(|error| KernelError::InvalidPresetRevision { reason: error.message })?;
+        let policies = frozen_authority_policies(&snapshot.content);
+        snapshot.content.compiled_runtime_profile_digest =
+            compiled_runtime_profile_digest(&snapshot.content, &policies)?;
+        let digest = digest_payload(&snapshot.content)
+            .map_err(|error| KernelError::Digest { reason: error.to_string() })?;
+        snapshot.snapshot_ref = ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from(format!("resolved:{}", digest.as_ref())),
+            snapshot_digest: digest,
+        };
+        snapshot.created_at_ms = request.created_at_ms;
+        snapshot.resolver_run_id = request.resolver_run_id;
+        snapshot.validate().map_err(|error| KernelError::SnapshotValidation { reason: error.message })?;
+        Ok(snapshot)
+    }
+
+    /// Compile the current artifacts with every existing Session Provider on
+    /// its saved mount. Authorial payload remains immutable, including old
+    /// explicit pins; a resolution-only copy refreshes those same mounts.
+    /// Newly selected roles follow the normal explicit/default resolver, as
+    /// required by an authorized extension selection. Evolution admission
+    /// rejects new roles, and Runtime still requires an exact persisted plan.
+    pub fn compile_with_frozen_role_providers(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        request: CompileRequest,
+        source: &ResolvedSnapshotEnvelope,
+    ) -> Result<CompiledSnapshot, KernelError> {
+        source.validate().map_err(|error| KernelError::SnapshotValidation { reason: error.message })?;
+        let mut resolution_revision = request.revision.clone();
+        for (role_id, frozen) in &source.content.resolved_role_providers {
+            // A removed extension need not resolve its retired Role. Keep the
+            // saved pin unless the same contract generation is published; the
+            // dependency resolver validates it only if the final plan uses it.
+            let role = registry.role_contract(role_id)
+                .filter(|contract| frozen.provider.role.key == contract.manifest.key)
+                .map(|contract| nomifun_agent_contracts::ExactRoleContractRef {
+                    key: contract.manifest.key.clone(), contract_digest: contract.contract_digest.clone(),
+                }).unwrap_or_else(|| frozen.provider.role.clone());
+            resolution_revision.payload.system_role_provider_overrides.insert(role_id.clone(), RoleProviderSelection {
+                role,
+                provider_mount_id: frozen.provider.mount_id.clone(),
+            });
+        }
+        Self::compile_resolved(registry, environment, request, &resolution_revision)
+    }
+
     /// Authoring reuse uses the same Skill resolver as compilation. Artifact
     /// replacement must invalidate reuse even when the body itself is unchanged.
     pub fn skills_unchanged(
@@ -316,6 +384,16 @@ impl AgentPresetCompiler {
         environment: &CompilerEnvironment,
         request: CompileRequest,
     ) -> Result<CompiledSnapshot, KernelError> {
+        let resolution_revision = request.revision.clone();
+        Self::compile_resolved(registry, environment, request, &resolution_revision)
+    }
+
+    fn compile_resolved(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        request: CompileRequest,
+        resolution_revision: &AgentPresetRevision,
+    ) -> Result<CompiledSnapshot, KernelError> {
         request
             .revision
             .validate()
@@ -360,7 +438,7 @@ impl AgentPresetCompiler {
         }
         validate_revision_contribution_locks(registry, &request.revision)?;
 
-        let graph = dependencies::resolve(registry, environment, &request.revision,
+        let graph = dependencies::resolve(registry, environment, resolution_revision,
             &initial_direct.keys().cloned().collect())?;
         let ceiling = graph.edges.keys().cloned().collect::<BTreeSet<_>>();
 
@@ -428,37 +506,13 @@ impl AgentPresetCompiler {
             .values()
             .flat_map(|policy| policy.required_resource_kinds.iter().cloned())
             .collect::<BTreeSet<_>>();
-        let compiled_runtime_profile_digest =
-            digest_payload(&CompiledRuntimeProfileDigestInput {
-                context_order: request.revision.payload.context_order.clone(),
-                middleware_order: request.revision.payload.middleware_order.clone(),
-                profile_kind: environment.required_runtime_profile,
-                required_runtime_features: required_runtime_features.clone(),
-                capability_operation_locks: enabled_capabilities
-                    .iter()
-                    .map(resolved_capability_operation_lock)
-                    .collect(),
-                enabled_capabilities: enabled_capabilities.clone(),
-                required_resource_kinds: required_resource_kinds.clone(),
-                authority_policies: authority_policies.clone(),
-                skill_ids: skill_locks
-                    .iter()
-                    .map(|lock| lock.id().clone())
-                    .collect(),
-                model_route_refs: request.revision.payload.model_route_refs.clone(),
-                resolved_role_providers: resolved_role_providers.clone(),
-            })
-            .map_err(|error| KernelError::Digest {
-                reason: error.to_string(),
-            })?;
-
         let chat_route_identity = request
             .revision
             .chat_route_identity()
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
-        let content = ResolvedSnapshotContent {
+        let mut content = ResolvedSnapshotContent {
             context_order: request.revision.payload.context_order,
             middleware_order: request.revision.payload.middleware_order,
             schema_version: VersionString::from("1.0.0"),
@@ -472,7 +526,7 @@ impl AgentPresetCompiler {
                 .runtime_feature_inventory_digest
                 .clone(),
             required_runtime_features,
-            compiled_runtime_profile_digest,
+            compiled_runtime_profile_digest: DigestHex::from(""),
             model_route_refs: request.revision.payload.model_route_refs,
             chat_route_identity,
             enabled_capabilities,
@@ -489,6 +543,8 @@ impl AgentPresetCompiler {
                 .target_contribution_manifest_digest
                 .clone(),
         };
+        content.compiled_runtime_profile_digest =
+            compiled_runtime_profile_digest(&content, &authority_policies)?;
         let snapshot_digest =
             digest_payload(&content).map_err(|error| KernelError::Digest {
                 reason: error.to_string(),
@@ -525,6 +581,37 @@ impl AgentPresetCompiler {
             registry_digest: registry.registry_digest.clone(),
         })
     }
+}
+
+fn frozen_authority_policies(content: &ResolvedSnapshotContent) -> BTreeMap<CapabilityId, CompiledCapabilityPolicy> {
+    content.enabled_capabilities.iter().map(|capability| (
+        capability.capability.id.clone(),
+        CompiledCapabilityPolicy {
+            allowed_actions: capability.action_allowlist.clone(),
+            resource_binding_ids: BTreeSet::new(),
+            required_resource_kinds: capability.required_resource_kinds.clone(),
+        },
+    )).collect()
+}
+
+fn compiled_runtime_profile_digest(
+    content: &ResolvedSnapshotContent,
+    policies: &BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
+) -> Result<DigestHex, KernelError> {
+    digest_payload(&CompiledRuntimeProfileDigestInput {
+        context_order: content.context_order.clone(),
+        middleware_order: content.middleware_order.clone(),
+        profile_kind: content.required_runtime_profile,
+        required_runtime_features: content.required_runtime_features.clone(),
+        capability_operation_locks: content.enabled_capabilities.iter()
+            .map(resolved_capability_operation_lock).collect(),
+        enabled_capabilities: content.enabled_capabilities.clone(),
+        required_resource_kinds: content.required_resource_kinds.clone(),
+        authority_policies: policies.clone(),
+        skill_ids: content.skill_locks.iter().map(|lock| lock.id().clone()).collect(),
+        model_route_refs: content.model_route_refs.clone(),
+        resolved_role_providers: content.resolved_role_providers.clone(),
+    }).map_err(|error| KernelError::Digest { reason: error.to_string() })
 }
 
 fn direct_selection_map(

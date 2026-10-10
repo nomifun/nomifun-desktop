@@ -5,6 +5,7 @@
 //! runtime crates.
 
 pub mod closure;
+pub mod binding_evolution;
 pub mod catalog;
 pub mod chat_model;
 pub mod chat_provider_reasoning;
@@ -30,6 +31,7 @@ pub mod supervision;
 pub mod validation;
 
 pub use closure::*;
+pub use binding_evolution::*;
 pub use catalog::*;
 pub use chat_model::ReasoningEffort;
 pub use chat_model::{ModelFailureDiagnostic, ModelFailureReason};

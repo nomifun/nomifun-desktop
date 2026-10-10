@@ -198,9 +198,9 @@
       "send_feedback": "请提交反馈并附带日志，方便团队排查。"
     },
     "codes": {
-      "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
-        "title": "会话 Agent 配置不兼容",
-        "body": "当前会话保存的 Agent 配置与当前配置不兼容，无法直接继续。请通过会话的 Agent 切换流程确认兼容配置，或新建会话；已有记录会保留。"
+      "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
+        "title": "需要确认会话 Agent 配置",
+        "body": "升级涉及权限、工具来源或执行要求的变化，无法自动沿用当前会话的 Agent 配置。请通过会话的 Agent 选择器确认配置后继续；已有记录会保留。"
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "任务因应用退出而中断",
