@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
-const sessionListSource = readFileSync(new URL('./SessionList/index.tsx', import.meta.url), 'utf8');
+const batchActionsSource = readFileSync(new URL('./SessionList/hooks/useSessionBatchDelete.ts', import.meta.url), 'utf8');
 const conversationActionsSource = readFileSync(
   new URL('./SessionList/hooks/useConversationActions.ts', import.meta.url),
   'utf8'
@@ -43,7 +43,7 @@ describe('authoritative conversation deletion route handling', () => {
       )
     ).toBe(false);
     expect(
-      sessionListSource.includes('const success = await ipcBridge.conversation.remove.invoke')
+      batchActionsSource.includes('const success = await ipcBridge.conversation.remove.invoke')
     ).toBe(false);
   });
 });

@@ -1403,6 +1403,8 @@ export type I18nKey =
   | 'conversation.editMessage.banner'
   | 'conversation.history.batchDelete'
   | 'conversation.history.batchDeleteConfirm'
+  | 'conversation.history.batchDeleteFailed'
+  | 'conversation.history.batchDeletePartial'
   | 'conversation.history.batchDeleteSuccess'
   | 'conversation.history.batchExport'
   | 'conversation.history.batchExportConfirm'

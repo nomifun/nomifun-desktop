@@ -3413,6 +3413,125 @@ async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
     ));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_session_deletion_waits_for_the_sqlite_writer_and_purges_every_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database(&directory.path().join("parallel-deletes.db"))
+        .await
+        .unwrap();
+    let store = AgentSessionStore::from_pool(database.pool().clone())
+        .await
+        .unwrap();
+    let mut commands = Vec::new();
+    // Exercise a batch larger than the production connection pool.
+    for index in 0..8 {
+        let (session, _) = create_ready(&store, &format!("parallel-delete-{index}")).await;
+        let operation = format!("parallel-delete-turn-{index}");
+        let (_, started) = store
+            .start_turn(
+                &session.agent_session_id,
+                EventProducerId::from("session-api"),
+                IdempotencyKey::from(format!("parallel-delete-input-{index}")),
+                OperationId::from(operation.clone()),
+                StrictJsonValue(json!({"content": format!("History to delete {index}")})),
+            )
+            .await
+            .unwrap();
+        let terminal = append(
+            &session.agent_session_id,
+            &format!("parallel-delete-terminal-{index}"),
+            "runtime-supervisor",
+            &format!("parallel-delete-terminal-{index}"),
+            "turn/completed",
+            &operation,
+            Some(started.ack.unwrap().event_id),
+            json!({}),
+        );
+        store.append_event(&terminal).await.unwrap();
+        assert!(
+            !store.messages_after(&session.agent_session_id, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        commands.push(DeleteAgentSessionCommand {
+            operation_id: OperationId::from(format!("parallel-delete-{index}")),
+            agent_session_id: session.agent_session_id,
+            owner_ref: owner(),
+            requested_at: 1_788_000_002_000,
+        });
+    }
+
+    for completing in [false, true] {
+        // Both deletion phases validate rows before writing. A deferred BEGIN
+        // reads while this writer is held, then fails immediately on upgrade;
+        // BEGIN IMMEDIATE waits for the writer before acquiring its snapshot.
+        let mut writer = database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at = updated_at")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let mut tasks = Vec::new();
+        for command in commands.iter().cloned() {
+            let task_store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                if completing {
+                    task_store.complete_delete(&command, 1_788_000_002_100)
+                        .await
+                        .map(|_| ())
+                } else {
+                    task_store.fence_delete(&command).await.map(|_| ())
+                }
+            }));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            tasks.iter().all(|task| !task.is_finished()),
+            "delete phase completing={completing} must wait for the SQLite writer"
+        );
+        writer.commit().await.unwrap();
+        for task in tasks {
+            tokio::time::timeout(std::time::Duration::from_secs(6), task)
+                .await
+                .expect("Session deletion should honor SQLite busy_timeout")
+                .expect("Session deletion task should not panic")
+                .expect("every Session in the batch should reach the requested delete phase");
+        }
+    }
+
+    for command in commands {
+        let tombstone = store
+            .inspect_tombstone(&command.agent_session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tombstone.owner_ref, owner());
+        assert_eq!(tombstone.deleted_at, 1_788_000_002_100);
+        assert!(matches!(
+            store.get_live_session(&command.agent_session_id).await,
+            Err(SessionStoreError::Deleted(_))
+        ));
+    }
+    assert!(store.list_deleting_sessions().await.unwrap().is_empty());
+    for table in [
+        "agent_turns",
+        "agent_effects",
+        "agent_session_resources",
+        "agent_events",
+        "agent_payloads",
+        "agent_session_heads",
+        "agent_messages",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "batch deletion retained private content in {table}");
+    }
+    database.close().await;
+}
+
 #[tokio::test]
 async fn interrupted_delete_requires_owner_cleanup_before_explicit_completion() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();

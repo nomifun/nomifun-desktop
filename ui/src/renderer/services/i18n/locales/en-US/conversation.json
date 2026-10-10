@@ -55,6 +55,8 @@
     "batchDelete": "Delete ({{count}})",
     "batchDeleteConfirm": "Delete {{count}} selected topics?",
     "batchDeleteSuccess": "{{count}} topics deleted",
+    "batchDeletePartial": "Deleted {{deleted}} sessions; {{failed}} failed. Failed sessions remain selected for retry.",
+    "batchDeleteFailed": "Failed to delete {{count}} sessions. They remain selected for retry.",
     "batchNoSelection": "Please select topics first",
     "export": "Export",
     "exportDialogTitle": "Export Topics",

@@ -4194,7 +4194,10 @@ impl AgentSessionStore {
                 "delete requested_at must not be negative".to_owned(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
+        // Read the deletion state only after obtaining the writer lock. A
+        // deferred transaction can fail its read-to-write upgrade immediately
+        // when another Session deletion or domain owner has written in WAL.
+        let mut tx = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
@@ -4251,7 +4254,9 @@ impl AgentSessionStore {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
+        // Blockers, private-content purge and tombstone validation must share
+        // a writer-owned snapshot even when other Sessions delete in parallel.
+        let mut tx = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
