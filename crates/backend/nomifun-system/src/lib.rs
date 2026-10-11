@@ -12,6 +12,7 @@ mod provider_model_repair;
 pub mod routes;
 pub mod settings;
 pub mod sysinfo;
+mod storage_relocation;
 pub mod version;
 
 pub use bedrock_probe::{ConnectionTestRouterState, ConnectionTestService, connection_test_routes};

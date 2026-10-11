@@ -1122,10 +1122,7 @@ impl ProductResourceAuthority {
             request,
             DEFAULT_WORKSPACE_RESOURCE_ID,
             &["read", "write"],
-            BTreeMap::from([(
-                "workspace_root".to_owned(),
-                self.dependencies.work_dir.to_string_lossy().into_owned(),
-            )]),
+            nomifun_agent_contracts::managed_workspace_parameters(),
         )
     }
 
@@ -1137,10 +1134,7 @@ impl ProductResourceAuthority {
             request,
             MANAGED_PROCESS_SESSION_RESOURCE_ID,
             &["execute", "observe"],
-            BTreeMap::from([(
-                "workspace_root".to_owned(),
-                self.dependencies.work_dir.to_string_lossy().into_owned(),
-            )]),
+            nomifun_agent_contracts::managed_workspace_parameters(),
         )
     }
 

@@ -344,12 +344,12 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 /// The desktop and web hosts share the canonical startup-root resolver. It
 /// rejects ambiguous legacy layouts instead of silently selecting another
 /// architecture-specific sibling.
-fn default_data_dir() -> PathBuf {
+fn default_data_dir() -> anyhow::Result<PathBuf> {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(nomifun_app::cli::default_data_dir);
-    nomifun_app::bootstrap::resolve_startup_data_root(requested)
+    nomifun_app::bootstrap::prepare_startup_storage_root(requested, None)
 }
 
 fn desktop_browser_profile_store(
@@ -368,32 +368,39 @@ fn desktop_browser_profile_store(
 }
 
 #[cfg(target_os = "macos")]
-struct ExplicitDesktopDataRoot(bool);
-
-#[cfg(target_os = "macos")]
 struct MacosWebviewDataStore(Option<[u8; 16]>);
 
 /// WKWebView ignores data_directory and otherwise shares defaultDataStore.
-/// Only custom explicit backend roots receive a separate persistent store.
-/// Preserve the channel default even when a restart inherits its exported root.
+/// The original storage identity owns the persistent profile across relocation.
 #[cfg(target_os = "macos")]
 fn macos_webview_data_store(
-    explicit_root: bool,
     data_root: &Path,
+    channel_default: &Path,
+    custom_store_available: bool,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    let canonical_root = std::fs::canonicalize(data_root)
+        .context("cannot resolve WebView data root")?;
+    let origin = match nomifun_common::storage_relocation::resolve_control_dir(&canonical_root)? {
+        Some(control) => nomifun_common::storage_relocation::resolve_storage_location(&control)?
+            .map(|location| location.origin_data_dir)
+            .unwrap_or(canonical_root),
+        None => canonical_root,
+    };
+    let default_root = std::fs::canonicalize(channel_default)
+        .unwrap_or_else(|_| channel_default.to_path_buf());
+    macos_webview_store_for_origin(&origin, &default_root, custom_store_available)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_webview_store_for_origin(
+    origin: &Path,
     channel_default: &Path,
     custom_store_available: bool,
 ) -> anyhow::Result<Option<[u8; 16]>> {
     use std::os::unix::ffi::OsStrExt;
     use sha2::{Digest, Sha256};
 
-    if !explicit_root {
-        return Ok(None);
-    }
-    let canonical_root = std::fs::canonicalize(data_root)
-        .context("cannot resolve explicit WebView data root")?;
-    let default_root = std::fs::canonicalize(channel_default)
-        .unwrap_or_else(|_| channel_default.to_path_buf());
-    if canonical_root == default_root {
+    if origin == channel_default {
         return Ok(None);
     }
     anyhow::ensure!(
@@ -402,7 +409,7 @@ fn macos_webview_data_store(
     );
     let mut digest = Sha256::new();
     digest.update(b"NomiFun WKWebView explicit data root v1\0");
-    digest.update(canonical_root.as_os_str().as_bytes());
+    digest.update(origin.as_os_str().as_bytes());
     let mut identifier = [0u8; 16];
     identifier.copy_from_slice(&digest.finalize()[..16]);
     Ok(Some(identifier))
@@ -2352,11 +2359,8 @@ fn complete_main_thread_setup(
     let loopback_port = server.loopback_port();
     #[cfg(target_os = "macos")]
     {
-        let channel_default = nomifun_app::bootstrap::resolve_startup_data_root(
-            nomifun_app::cli::default_data_dir(),
-        );
+        let channel_default = nomifun_app::cli::default_data_dir();
         let store = macos_webview_data_store(
-            app.state::<ExplicitDesktopDataRoot>().0,
             &pairing_data_dir,
             &channel_default,
             objc2::available!(macos = 14.0),
@@ -2908,15 +2912,15 @@ fn main() -> std::process::ExitCode {
     // Env mutation + runtime init BEFORE Tauri builds its runtime/threads,
     // mirroring the nomicore bin's ordering. `default_data_dir` resolves the
     // effective root (literal NOMIFUN_DATA_DIR or the channel default) and
-    // runs the one-shot legacy layout migration (`NomiFun/Nomi` → `NomiFun`,
-    // see nomifun_app::bootstrap::resolve_startup_data_root). v3 remains a
-    // hard dataset cut for the historical pre-v3 temp-rooted dataset: the
-    // backend quarantines any incompatible dataset found at the current root.
-    // Capture caller intent before the backend exports its effective root.
-    #[cfg(target_os = "macos")]
-    let explicit_desktop_data_root = std::env::var_os("NOMIFUN_DATA_DIR")
-        .is_some_and(|value| !value.is_empty());
-    let data_dir = default_data_dir();
+    // completes an armed storage relocation before native profiles are opened.
+    // Incompatible database startup remains a separate dataset policy.
+    let data_dir = match default_data_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Cannot prepare NomiFun storage: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
@@ -2998,8 +3002,6 @@ fn main() -> std::process::ExitCode {
             #[cfg(not(any(windows, target_os = "macos")))]
             let attached_chrome = None;
             app.manage(browser_resources.clone());
-            #[cfg(target_os = "macos")]
-            app.manage(ExplicitDesktopDataRoot(explicit_desktop_data_root));
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
             #[cfg(target_os = "macos")]
             install_macos_exit_observers(&app_handle)?;
@@ -3447,22 +3449,46 @@ mod tests {
         for path in [&first, &second, &default] {
             fs::create_dir_all(path).unwrap();
         }
-        let resolve = |explicit, path: &Path, available| {
-            macos_webview_data_store(explicit, path, &default, available)
+        let resolve = |path: &Path, available| {
+            macos_webview_data_store(path, &default, available)
         };
-        assert_eq!(resolve(false, &first, false).unwrap(), None);
-        assert_eq!(resolve(true, &default, false).unwrap(), None);
-        let first_id = resolve(true, &first, true).unwrap().unwrap();
-        assert_eq!(resolve(true, &first, true).unwrap(), Some(first_id));
-        assert_ne!(resolve(true, &second, true).unwrap(), Some(first_id));
-        assert!(resolve(true, &first, false).is_err());
+        assert_eq!(resolve(&default, false).unwrap(), None);
+        let first_id = resolve(&first, true).unwrap().unwrap();
+        assert_eq!(resolve(&first, true).unwrap(), Some(first_id));
+        assert_ne!(resolve(&second, true).unwrap(), Some(first_id));
+        assert!(resolve(&first, false).is_err());
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&first, &alias).unwrap();
-        assert_eq!(resolve(true, &alias, true).unwrap(), Some(first_id));
+        assert_eq!(resolve(&alias, true).unwrap(), Some(first_id));
         let default_alias = root.path().join("default-alias");
         std::os::unix::fs::symlink(&default, &default_alias).unwrap();
-        assert_eq!(resolve(true, &default_alias, false).unwrap(), None);
+        assert_eq!(resolve(&default_alias, false).unwrap(), None);
         assert_eq!(fs::read_dir(&default).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_relocation_preserves_original_profile_identity() {
+        use nomifun_common::{factory_reset, storage_relocation as storage};
+        // Move both a default root out and a custom root into the default path.
+        for custom_origin in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let default = root.path().join("default");
+            let origin = if custom_origin { root.path().join("custom") } else { default.clone() };
+            let target = if custom_origin { default.clone() } else { root.path().join("moved") };
+            let control = root.path().join("control");
+            let generation = "0190f5fe-7c00-7a00-8000-0000000000f0";
+            fs::create_dir_all(&origin).unwrap();
+            fs::write(origin.join("storage-generation"), generation).unwrap();
+            factory_reset::write_v3_dataset_receipt_for_work_dir(&origin, &origin, generation).unwrap();
+            let before = macos_webview_data_store(&origin, &default, true).unwrap();
+            assert_eq!(before.is_some(), custom_origin);
+            let plan = storage::request_storage_relocation(&control, &origin, &origin, &target).unwrap();
+            storage::start_storage_relocation(&control, &plan.operation_id).unwrap();
+            let prepared = storage::prepare_pending_storage_relocation(&control).unwrap().unwrap();
+            storage::commit_storage_relocation(&control, &prepared).unwrap();
+            assert_eq!(macos_webview_data_store(&target, &default, true).unwrap(), before);
+        }
     }
 
     #[test]

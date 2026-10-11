@@ -26,7 +26,37 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 └── companion/                 companion file domain (install-wide memory database + per-companion profiles, see below)
 ```
 
-三个宿主的缺省默认值都经由同一个共享辅助函数解析：[`nomifun_app::cli::default_data_dir()`](../../crates/backend/nomifun-app/src/cli.rs) —— `dirs::data_local_dir()/NomiFun<channel-suffix>`（按用户的 application-data 位置）。stable 使用 `NomiFun`，非 stable channel 使用 `NomiFun-dev`、`NomiFun-beta` 等**同级目录**——channel 目录永远不嵌套在 stable 根之内；仅当操作系统报告不出用户目录时才极端回退到系统临时目录（`<system temp>/nomifun-data<channel-suffix>`，如 dev 为 `nomifun-data-dev`）。环境变量语义在所有宿主上统一：包括桌面外壳在内（见 [`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)），`NOMIFUN_DATA_DIR` 都按**字面值**作为最终数据根（外壳不再追加 `"Nomi"`；clap `env` 绑定与 `nomicore` 共享——它以前不读这个变量）。位于 `NomiFun/Nomi<suffix>` 的遗留数据集会在升级后首次启动时由一次性自动迁移搬入 `NomiFun<suffix>`（抗崩溃、中断后下次启动续跑；旧应用实例仍在运行时推迟到下次启动），数据库中持久化的绝对路径会在搬迁后一次性改写。Windows 上展示或持久化的路径不再带 `\\?\` 扩展长度前缀。v3 不会把 `<system temp>/nomifun-data` 或其他旧根目录中的产品数据复制到 active dataset；检测到历史受管数据集时，reset 状态机会将其完整移动到 retired/quarantine 位置，然后创建全新的 v3 数据集，不改写历史数据库路径。
+三个宿主的缺省默认值都经由同一个共享辅助函数解析：[`nomifun_app::cli::default_data_dir()`](../../crates/backend/nomifun-app/src/cli.rs) —— `dirs::data_local_dir()/NomiFun<channel-suffix>`（按用户的 application-data 位置）。stable 使用 `NomiFun`，非 stable channel 使用 `NomiFun-dev`、`NomiFun-beta` 等**同级目录**——channel 目录永远不嵌套在 stable 根之内；仅当操作系统报告不出用户目录时才极端回退到系统临时目录（`<system temp>/nomifun-data<channel-suffix>`，如 dev 为 `nomifun-data-dev`）。环境变量语义在所有宿主上统一：包括桌面外壳在内（见 [`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)），`NOMIFUN_DATA_DIR` 都按**字面值**作为最终数据根（外壳不再追加 `"Nomi"`；clap `env` 绑定与 `nomicore` 共享——它以前不读这个变量）。历史自导出路径仅归一到当前 channel 默认根，不导入退役数据集。设置中的当前数据集迁移使用独立的离线复制、校验和原子位置切换流程。Windows 上展示或持久化的路径不再带 `\\?\` 扩展长度前缀。v3 不会把 `<system temp>/nomifun-data` 或其他旧根目录中的产品数据复制到 active dataset；检测到历史受管数据集时，reset 状态机会将其完整移动到 retired/quarantine 位置，然后创建全新的 v3 数据集，不改写历史数据库路径。
+
+### 更换存储位置
+
+设置中的更换目录会在重启时迁移整个当前数据集，保留历史会话、附件、配置、
+加密密钥、浏览器资料及托管工作区。旧版单独 work-dir 中的 `conversations/`
+也会迁入新根；外部项目和外部知识库的路径保持原样。数据集 generation 与业务
+身份不变，这个操作不再创建空数据集。
+
+`/api/system/storage-relocation/{prepare,start,status,cancel}` 负责预检、安排、
+查询和取消一个持久操作。运行中的 Turn、未完成的 Effect、原生 checkpoint 和
+未解决的 Patch 恢复会阻止安排。安排后关闭 HTTP 写入入口；所有宿主在打开
+运行时缓存、日志及原生浏览器资料前，持有源数据根和工作根的排他锁完成离线迁移。
+文件先复制到目标同级暂存目录，逐一核验大小和校验值，再检查当前数据库 schema、
+逻辑关联及 SQLite 完整性。
+
+仅有明确托管归属的当前路径会更新。当前 Session 资源通过规范的
+`session/agent-binding-changed` 事件及仅改变位置的证明转换，历史 Event、Payload、
+Snapshot 保持不可变。默认工作区采用 `managed-session` 逻辑引用，由宿主解析
+实际位置。`.nomi/knowledge` 挂载从类型化绑定重新生成；其他链接或重解析点会
+阻止预检，不跟随它们指向的目录。
+
+历史消息中的托管附件绝对路径通过同一 Session 的迁移证明链解析到当前位置，
+解析结果仅属于读取投影，历史原文不改写。每次更换目录都会记录位置变化，即使
+资源已经使用逻辑引用；新消息中的工作区内附件使用相对路径，外部文件仍保留原路径。
+
+根目录外固定控制目录保存计划和唯一原子位置指针。旧 CLI/环境变量路径经根描述符
+定位到已提交的新根。成功发布后旧根封存且原数据保留；中断则依据该操作的精确回执
+恢复。发布前失败时原根仍可使用，界面显示可重试或取消的失败。目标必须为空，
+既有数据集不覆盖、不合并。此流程与备份、恢复、破坏性启动重建相互独立，不获得
+转换旧 schema 或清空数据的权限。
 
 ### 每个 channel 一个目录、一份状态
 
@@ -167,7 +197,7 @@ SQLite cascade 或 trigger。例外表使用基线中冻结的物理 `FOREIGN KE
 {work_dir}/conversations/{workspace_id}/
 ```
 
-- `work_dir` —— 运行时工作目录；未显式设置时回退至数据目录。来源依次为：`--work-dir` flag → UI 中选择并持久化在 `dir-config.json` 的工作区 → 环境变量 `NOMIFUN_WORK_DIR` → `<data_dir>`。继承到的 `NOMIFUN_WORK_DIR` 若指向默认数据根位置或已不存在的目录会被忽略（防止自动更新重启时残留的自导出值）。
+- `work_dir` —— 运行时工作目录；未显式设置时回退至数据目录。来源依次为：`--work-dir` flag → `dir-config.json` 中持久化的工作根绑定 → 环境变量 `NOMIFUN_WORK_DIR` → `<data_dir>`。继承到的 `NOMIFUN_WORK_DIR` 若指向默认数据根位置或已不存在的目录会被忽略（防止自动更新重启时残留的自导出值）。设置迁移会在暂存副本中把新数据根写为工作根绑定，不再创建独立的空工作区数据集。
 - `workspace_id` —— canonical AgentSession 的裸小写 UUIDv7；临时工作区投影也把
   同一值放入 `extra.temp_workspace_id`。它固定 36 字符，目录名不包含类型前缀、
   标题 slug 或 `temp` 标记。
@@ -244,10 +274,12 @@ NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进
 全新安装的启动顺序如下：
 
 ```
-1. nomifun-runtime::init           extract bun into OS cache
+0. bootstrap::prepare_startup_storage_root
+                                    读取固定位置指针；完成已确认的离线迁移
+1. nomifun-runtime::init           将 bun 解压至当前数据根的 runtime 缓存
 2. enhance_process_path             prepend cache bin dir to PATH
-3. bootstrap::init_environment      resolve work_dir / log_dir, init tracing,
-                                    take the exclusive {data_dir}/server.lock
+3. bootstrap::init_environment      解析 work_dir，获取数据根与工作根排他锁，
+                                    随后创建 log_dir 并初始化 tracing
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
 5. bootstrap::init_data_layer       initialize/open the v3 database baseline
 6. AppServices::from_config         initialize services and managed side stores

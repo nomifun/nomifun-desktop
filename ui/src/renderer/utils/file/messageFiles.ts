@@ -1,5 +1,6 @@
 import { NOMIFUN_FILES_MARKER, NOMIFUN_TIMESTAMP_REGEX } from '@/common/config/constants';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
+import { isAbsoluteLocalPath } from '@/common/utils/localPath';
 
 export const collectSelectedFiles = (uploadFile: string[], atPath: Array<string | FileOrFolderItem>): string[] => {
   const atPathFiles = atPath.map((item) => (typeof item === 'string' ? item : item.path)).filter(Boolean);
@@ -15,20 +16,20 @@ export const buildDisplayMessage = (input: string, files: string[], workspacePat
       return sanitizedPath;
     }
 
-    const isAbsolute = file_path.startsWith('/') || /^[A-Za-z]:/.test(file_path);
+    const isAbsolute = isAbsoluteLocalPath(file_path) || /^[A-Za-z]:/.test(file_path);
     if (isAbsolute) {
       // If file is inside workspace, preserve relative path (including subdirectories like uploads/)
       const normalizedFile = file_path.replace(/\\/g, '/');
       const normalizedWorkspaceWithForwardSlash = normalizedWorkspace.replace(/\\/g, '/');
-      if (normalizedFile.startsWith(normalizedWorkspaceWithForwardSlash + '/')) {
+      if (normalizedFile.startsWith(normalizedWorkspaceWithForwardSlash + '/') && !normalizedFile.split('/').includes('..')) {
         const relativePath = normalizedFile.slice(normalizedWorkspaceWithForwardSlash.length + 1);
-        return `${normalizedWorkspace}/${relativePath.replace(NOMIFUN_TIMESTAMP_REGEX, '$1')}`;
+        return relativePath.replace(NOMIFUN_TIMESTAMP_REGEX, '$1');
       }
       // Keep external absolute paths unchanged so preview and metadata lookups
       // continue to read the real file instead of a non-existent workspace path.
       return sanitizedPath;
     }
-    return `${normalizedWorkspace}/${sanitizedPath}`;
+    return sanitizedPath.split(/[\\/]/).includes('..') ? `${normalizedWorkspace}/${sanitizedPath}` : sanitizedPath;
   });
   return `${input}\n\n${NOMIFUN_FILES_MARKER}\n${displayPaths.join('\n')}`;
 };

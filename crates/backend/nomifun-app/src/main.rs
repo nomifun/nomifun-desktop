@@ -27,7 +27,9 @@ fn main() -> Result<ExitCode> {
         None | Some(Command::Doctor) | Some(Command::Backup { .. })
     );
     if owns_data_root {
-        cli.data_dir = bootstrap::resolve_startup_data_root(cli.data_dir.clone());
+        cli.data_dir = if cli.command.is_none() {
+            bootstrap::prepare_startup_storage_root(cli.data_dir.clone(), cli.work_dir.as_deref())?
+        } else { bootstrap::resolve_startup_data_root(cli.data_dir.clone())? };
     }
     let needs_runtime = matches!(cli.command, None | Some(Command::Doctor));
     if needs_runtime {

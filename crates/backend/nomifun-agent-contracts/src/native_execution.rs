@@ -7,6 +7,34 @@ pub const MAX_NATIVE_APPROVED_JOURNAL_RECORDS: u64 = 240_000;
 pub const MAX_NATIVE_APPROVED_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_NATIVE_APPROVED_REPLAY_BYTES: usize = 80 * 1024 * 1024;
 
+/// Canonical owner-authored process-tree barriers. A quiescent receipt proves
+/// retained tree cleanup, never command success or effect rollback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", deny_unknown_fields)]
+pub enum NativeProcessWitness {
+    #[serde(rename = "host_process_dispatch")]
+    Dispatch { operation_id: String, ordinal: u16 },
+    #[serde(rename = "host_process_quiescent")]
+    Quiescent { operation_id: String, ordinal: u16, process_count: usize },
+}
+
+impl NativeProcessWitness {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let (operation, ordinal) = match self {
+            Self::Dispatch { operation_id, ordinal } => (operation_id, *ordinal),
+            Self::Quiescent { operation_id, ordinal, process_count } => {
+                if *process_count > 512 { return Err("native process barrier exceeds the scope budget"); }
+                (operation_id, *ordinal)
+            }
+        };
+        if operation.is_empty() || operation.len() > 1024 || operation.chars().any(char::is_control)
+            || ordinal == 0 || ordinal > 512 {
+            return Err("invalid native process barrier identity");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeExecutionBudget {

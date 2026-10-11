@@ -29,6 +29,8 @@ import AssistantProtocolNotice from './AssistantProtocolNotice';
 import { projectCompletionOutcomes } from '../completionOutcomeDisplayModel';
 import { IdmmDecisionExplanation } from './IdmmDecisionExplanation';
 import decisionStyles from './IdmmDecisionExplanation.module.css';
+import { resolveMessageFilePath } from './messageFilePath';
+export { resolveMessageFilePath } from './messageFilePath';
 
 /**
  * Format a timestamp for message display.
@@ -57,19 +59,6 @@ import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import AgentMessageAvatar from './AgentMessageAvatar';
 
 const CODE_STYLE = { marginTop: 4, marginBlock: 4 };
-
-const isAbsoluteMessageFilePath = (file_path: string): boolean =>
-  file_path.startsWith('/') || /^[A-Za-z]:/.test(file_path);
-
-export const resolveMessageFilePath = (file_path: string, workspace?: string): string => {
-  if (!file_path || isAbsoluteMessageFilePath(file_path) || !workspace) {
-    return file_path;
-  }
-
-  const normalizedWorkspace = workspace.replace(/[\\/]+$/, '').replace(/\\/g, '/');
-  const normalizedFilePath = file_path.replace(/^\.?[\\/]+/, '').replace(/\\/g, '/');
-  return `${normalizedWorkspace}/${normalizedFilePath}`.replace(/\/+/g, '/');
-};
 
 const useFormatContent = (content: string) => {
   return useMemo(() => {
@@ -132,8 +121,8 @@ const MessageText: React.FC<{
   const conversationContext = useConversationContextSafe();
   const shouldShowActions = !hideActions && Boolean(contentToRender.trim());
   const resolvedFiles = useMemo(
-    () => files.map((file_path) => resolveMessageFilePath(file_path, conversationContext?.workspace)),
-    [conversationContext?.workspace, files]
+    () => files.map((file_path) => resolveMessageFilePath(file_path, conversationContext?.workspace, message.content.managed_file_paths)),
+    [conversationContext?.workspace, files, message.content.managed_file_paths]
   );
 
   // 仅 Nomi、且为最近一条用户文本消息时可编辑（与后端"仅最近一条"对齐）。
@@ -334,7 +323,7 @@ const MessageText: React.FC<{
         {message.content.observations?.map((observation) => (
           <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
             <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>
-            <FilePreview path={observation.image.path} readonly />
+            <FilePreview path={resolveMessageFilePath(observation.image.path, conversationContext?.workspace, message.content.managed_file_paths)} readonly />
             <span className='text-13px whitespace-pre-wrap break-words'>{observation.answer}</span>
           </div>
         ))}

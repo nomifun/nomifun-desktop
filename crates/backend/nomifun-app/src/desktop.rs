@@ -744,7 +744,7 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = bootstrap::init_nomi_core_environment(cli, merged_path)
+        let env = bootstrap::init_nomi_core_environment(cli, merged_path).await
             .map_err(DesktopStartError::verified)?;
 
         // Override the CLI-derived policy: the desktop trusts its own webview via

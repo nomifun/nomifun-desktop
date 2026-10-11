@@ -3,14 +3,14 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Priority: `--work-dir` CLI flag → pending atomic work-root reset → pending
-/// immutable reset plan → persisted UI choice (`dir-config.json` in
+/// Priority: `--work-dir` CLI flag → published work-root reset request → pending
+/// immutable reset plan → persisted work-root binding (`dir-config.json` in
 /// `data_dir`) → strictly verified legacy-v1 repair → `NOMIFUN_WORK_DIR` env
 /// (when non-empty) → `--data-dir` fallback.
 ///
-/// The persisted choice sits **above** the env var on purpose: `relaunch()`
+/// The persisted binding sits **above** the env var on purpose: `relaunch()`
 /// restarts the whole process and the child can inherit the `NOMIFUN_WORK_DIR`
-/// the previous boot exported (see `environment.rs`), so a UI change must win
+/// the previous boot exported (see `environment.rs`), so the committed root wins
 /// over that stale inherited value.
 pub(crate) fn resolve_work_dir(
     cli_work_dir: Option<PathBuf>,
@@ -112,6 +112,22 @@ mod tests {
     use super::*;
     use nomifun_common::{dir_config, now_ms};
 
+    // Published control-file fixture: Settings no longer creates destructive
+    // WorkDirChange requests, but startup must still reconcile released bytes.
+    fn write_released_work_dir_request(data_dir: &Path, work_dir: &Path) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        std::fs::write(
+            data_dir.join(nomifun_common::factory_reset::V3_DATASET_RESET_REQUEST_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "operation_id": uuid::Uuid::now_v7().to_string(),
+                "requested_at": now_ms(),
+                "origin": "work_dir_change",
+                "work_dir": nomifun_common::paths::canonicalize_simplified(work_dir).unwrap(),
+            })).unwrap(),
+        ).unwrap();
+    }
+
     fn temp_data_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nomifun-wdres-{tag}-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -136,6 +152,7 @@ mod tests {
         plan.roots.retain(|root| {
             root.relative_path != WORK_ROOT_BINDING_FILE
                 && root.relative_path != AGENT_PROCESS_REGISTRY_FILE
+                && root.relative_path != "browser-v4"
         });
         let insertion_index = plan
             .roots
@@ -303,11 +320,10 @@ mod tests {
         std::fs::write(data.path().join("nomifun-backend.db"), b"old")
             .unwrap();
 
-        nomifun_common::factory_reset::request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request(
             data.path(),
             &first_work_path,
-        )
-        .unwrap();
+        );
         let first_request = std::fs::read(
             data.path().join(
                 nomifun_common::factory_reset::V3_DATASET_RESET_REQUEST_FILE,
@@ -340,11 +356,10 @@ mod tests {
         )
         .unwrap();
 
-        nomifun_common::factory_reset::request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request(
             data.path(),
             &second_work_path,
-        )
-        .unwrap();
+        );
         nomifun_common::factory_reset::prepare_v3_dataset(
             data.path(),
             &second_work_path,
@@ -461,11 +476,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        nomifun_common::factory_reset::request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request(
             data.path(),
             &second_work_path,
-        )
-        .unwrap();
+        );
         assert_eq!(
             nomifun_common::factory_reset::prepare_v3_dataset(
                 data.path(),

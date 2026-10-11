@@ -4926,12 +4926,11 @@ pub fn request_v3_dataset_reset(
     )
 }
 
-/// Atomically request a reset that rebinds the fresh dataset to `work_dir`.
-///
-/// The target lives in the same durable request as the destructive intent so a
-/// crash can never persist only half of a work-root change. The boot resolver
-/// reads this target before the request is consumed.
-pub fn request_v3_dataset_reset_for_work_dir(
+// Fixture writer for published restart-time WorkDirChange requests. Production
+// callers relocate the current dataset through storage_relocation; only the
+// recovery reader above retains authority for requests already on disk.
+#[cfg(test)]
+fn write_released_work_dir_request_fixture(
     data_dir: &Path,
     work_dir: &Path,
 ) -> Result<(), AppError> {
@@ -6562,7 +6561,7 @@ mod tests {
                 .join(MANAGED_WORKSPACES_DIR)
                 .join("old-root.txt"),
         );
-        request_v3_dataset_reset_for_work_dir(data.path(), new_work.path())
+        write_released_work_dir_request_fixture(data.path(), new_work.path())
             .unwrap();
         assert_eq!(
             requested_v3_reset_work_dir(data.path())
@@ -6677,7 +6676,7 @@ mod tests {
         touch(&conversations.join("personal-file.txt"));
 
         let error =
-            request_v3_dataset_reset_for_work_dir(data.path(), target.path())
+            write_released_work_dir_request_fixture(data.path(), target.path())
                 .unwrap_err();
         assert!(matches!(error, AppError::BadRequest(_)));
         assert!(conversations.join("personal-file.txt").is_file());
@@ -6825,7 +6824,7 @@ mod tests {
         )
         .unwrap();
         crate::dir_config::set_work_dir(data.path(), old_work.path()).unwrap();
-        request_v3_dataset_reset_for_work_dir(data.path(), target.path())
+        write_released_work_dir_request_fixture(data.path(), target.path())
             .unwrap();
         fs::create_dir_all(target.path().join(MANAGED_WORKSPACES_DIR))
             .unwrap();
@@ -6882,7 +6881,7 @@ mod tests {
             current_work.path(),
         )
         .unwrap();
-        request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request_fixture(
             data.path(),
             cancelled_target.path(),
         )
@@ -6960,7 +6959,7 @@ mod tests {
             &generation,
         )
         .unwrap();
-        request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request_fixture(
             data.path(),
             cancelled_target.path(),
         )
@@ -6983,7 +6982,7 @@ mod tests {
         )
         .unwrap();
 
-        request_v3_dataset_reset_for_work_dir(
+        write_released_work_dir_request_fixture(
             data.path(),
             new_target.path(),
         )
@@ -7606,7 +7605,7 @@ mod tests {
         let target_data = data_path.clone();
         let targeted = std::thread::spawn(move || {
             target_barrier.wait();
-            request_v3_dataset_reset_for_work_dir(
+            write_released_work_dir_request_fixture(
                 &target_data,
                 &target_path,
             )
@@ -8419,7 +8418,7 @@ mod tests {
         )
         .unwrap();
 
-        let request_error = request_v3_dataset_reset_for_work_dir(
+        let request_error = write_released_work_dir_request_fixture(
             second_data.path(),
             work.path(),
         )
@@ -8468,7 +8467,7 @@ mod tests {
         let target_data_root = tempfile::tempdir().unwrap();
         touch(&target_data_root.path().join("server.lock"));
 
-        let error = request_v3_dataset_reset_for_work_dir(
+        let error = write_released_work_dir_request_fixture(
             data.path(),
             target_data_root.path(),
         )

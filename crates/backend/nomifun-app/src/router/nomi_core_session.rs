@@ -110,6 +110,8 @@ use nomifun_agent_session::{MessageProjection, SessionObservation};
 use super::history_process_display::{HistoricalToolObservation, load_historical_tool_observations};
 #[path = "history_text_continuation.rs"]
 mod history_text_continuation;
+#[path = "history_workspace_paths.rs"]
+mod history_workspace_paths;
 use nomifun_realtime::UserEventSink;
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CompileRequest, CompiledSnapshot,
@@ -3545,6 +3547,7 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
                 items.push(message);
             }
         }
+        history_workspace_paths::hydrate(self, &session_id, created_at, &mut items).await?;
         Ok(PaginatedResult {
             items,
             total,
@@ -4504,11 +4507,13 @@ fn freeze_selected_workspace(
             "workspace" => {
                 has_workspace_resource = true;
                 resource.resource_id = resource_id.clone();
+                resource.typed_parameters.remove(nomifun_agent_contracts::MANAGED_WORKSPACE_LOCATION_PARAMETER);
                 resource
                     .typed_parameters
                     .insert("workspace_root".to_owned(), canonical.to_owned());
             }
             "process_session" => {
+                resource.typed_parameters.remove(nomifun_agent_contracts::MANAGED_WORKSPACE_LOCATION_PARAMETER);
                 resource
                     .typed_parameters
                     .insert("workspace_root".to_owned(), canonical.to_owned());
@@ -6046,6 +6051,62 @@ mod session_boundary_tests {
             }],
             binding_version: 1,
         }
+    }
+
+    #[test]
+    fn storage_relocation_projection_keeps_agent_switch_markers_only_for_agent_changes() {
+        use nomifun_agent_contracts::{
+            AgentBindingChangedPayloadV1, AgentHandoffBindingRefV1, AgentHandoffMode,
+            ManagedStorageRelocationV1, OperationId, digest_payload,
+            managed_workspace_parameters, resource_definition_id,
+        };
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_root = source.path().to_string_lossy().into_owned();
+        let mut previous = frozen_binding(&source_root, OWNER_ID);
+        previous.typed_resource_bindings[0].binding_id = resource_definition_id(
+            &previous.typed_resource_bindings[0]).unwrap();
+        let mut next = previous.clone();
+        next.binding_version += 1;
+        next.typed_resource_bindings[0].typed_parameters = managed_workspace_parameters();
+        next.typed_resource_bindings[0].binding_id = resource_definition_id(
+            &next.typed_resource_bindings[0]).unwrap();
+        let proof = ManagedStorageRelocationV1 {
+            managed_session_namespace: None,
+            source_data_root: source_root.clone(), source_work_root: source_root,
+            target_data_root: target.path().to_string_lossy().into_owned(),
+            managed_knowledge_ids: BTreeSet::new(),
+            previous_resources: previous.typed_resource_bindings.clone(),
+            next_resources: next.typed_resource_bindings.clone(),
+        };
+        let transition = AgentBindingChangedPayloadV1 {
+            transition_id: OperationId::from(uuid::Uuid::now_v7().to_string()),
+            request_digest: digest_payload(&proof).unwrap(),
+            previous_binding_ref: AgentHandoffBindingRefV1::from(&previous),
+            next_binding_ref: AgentHandoffBindingRefV1::from(&next),
+            previous_agent_label: "Agent".into(), next_agent_label: "Agent".into(),
+            handoff_mode: AgentHandoffMode::ContextOnly, handoff_payload_id: None,
+            handoff_payload_digest: None, completion_gate_inherited: false,
+            effective_after_seq: 1, workspace_relocation: Some(proof),
+        };
+        let session = AgentSessionId::from(SESSION_ID);
+        let project = |reference: &AgentBindingChangedPayloadV1| canonical_message_response(
+            &session, 1_000, MessageProjection {
+                session_id: session.clone(), projection_id: "agent-transition:test".into(),
+                first_seq: 2, last_seq: 2, presentation_intent: "agent_transition".into(),
+                message_type: None, message_status: None,
+                projection: json!({"state":"completed", "correlation_id":reference.transition_id, "reference":reference}),
+                semantic_digest: "digest".into(),
+            });
+        assert!(project(&transition).unwrap().is_none(), "storage metadata must not claim an Agent switch");
+        let mut corrupted = transition.clone();
+        corrupted.request_digest = DigestHex::from("0".repeat(64));
+        assert!(project(&corrupted).is_err(), "unproven metadata must fail closed");
+        let mut switched = transition;
+        switched.workspace_relocation = None;
+        switched.next_agent_label = "Next Agent".into();
+        let message = project(&switched).unwrap().unwrap();
+        assert_eq!(message.content["agent_transition"]["next_agent_label"], "Next Agent");
     }
 
     #[test]
@@ -13160,6 +13221,21 @@ fn canonical_message_response_with_observation(
                         "Agent transition projection lost its canonical reference",
                     )
                 })?;
+            if reference.get("workspace_relocation").is_some_and(|value| !value.is_null()) {
+                let transition: nomifun_agent_contracts::AgentBindingChangedPayloadV1 =
+                    serde_json::from_value(Value::Object(reference.clone())).map_err(|error| {
+                        NomiCoreApiError::new(StatusCode::CONFLICT,
+                            "AGENT_SESSION_MESSAGE_PROJECTION_INVALID", error.to_string())
+                    })?;
+                transition.validate_storage_relocation().map_err(|error| {
+                    NomiCoreApiError::new(StatusCode::CONFLICT,
+                        "AGENT_SESSION_MESSAGE_PROJECTION_INVALID", error)
+                })?;
+                // Physical storage relocation preserves the Agent identity.
+                // Its canonical proof remains available without presenting an
+                // Agent switch marker in the conversation.
+                return Ok(None);
+            }
             (
                 MessageType::Tips,
                 json!({
@@ -13345,6 +13421,7 @@ async fn get_nomi_core_agent_session_message_history(
             items.push(message);
         }
     }
+    history_workspace_paths::hydrate(&state.session_owner, &session_id, created_at, &mut items).await?;
     Ok(Json(ApiResponse::ok(PaginatedResult {
         items,
         total,
@@ -13430,6 +13507,7 @@ async fn get_nomi_core_agent_session_message(
     if let Some(previous)=continuations.get(&message.message_id) {
         message.content["continuation_of_message_id"]=json!(previous);
     }
+    history_workspace_paths::hydrate(&state.session_owner, &session_id, created_at, std::slice::from_mut(&mut message)).await?;
     Ok(Json(ApiResponse::ok(message)))
 }
 

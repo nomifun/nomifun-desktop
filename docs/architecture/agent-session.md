@@ -53,6 +53,48 @@ a different binding. Repeated preparation of an already-current binding is a no-
 
 Session reasoning uses one native `reasoning_effort` field defined by the shared contract. No lossy mirrors or fallback columns are maintained.
 
+### Relocating the same current dataset
+
+A storage-location change preserves the installation owner, storage generation, Session/Turn identities, encryption
+key and current history. The dataset coordinator copies and validates offline after the old services exit and while
+holding the source and destination locks. Location revision is distinct from data generation; relocation grants no
+clean-cut, destructive-startup rebuild or retired Agent import authority.
+
+New default Workspace and Process Session resources use the typed `workspace_location=managed-session` reference.
+The host resolves it only from the active work root and exact canonical Session UUID to `conversations/<Session ID>`.
+Explicit external projects retain their absolute roots; a path prefix cannot establish managed ownership. Existing
+current bindings become logical references only when the exact `default-workspace`/`managed-process-session` identity
+and sole `workspace_root` parameter match the source work root. Managed knowledge roots require the current
+`knowledge_bases.managed` flag and exact registered root before their frozen `knowledge_root` changes; external
+knowledge roots remain unchanged.
+
+One canonical Store write transaction updates the complete affected Session resource sets, derives new definition
+IDs and appends `session/agent-binding-changed` with a typed `workspace_relocation` proof. The proof contains the source
+data/work roots, target data root, managed knowledge IDs and complete before/after resource definitions. Only managed
+location parameters may change; owner, resource identity, grants, connection and all other parameters remain exact.
+This explicit location transition retains the same Revision/Snapshot and increments binding version. A same-Snapshot
+transition requires its exact proof and request digest; ordinary Agent/capability changes receive no such exception.
+Every location change records the Session-owned `conversations/<Session ID>` namespace, including unchanged logical
+resources and Sessions whose current Agent uses an external project. Optional `managed_session_namespace` references
+only the exact default Workspace definition in this Session's opening event; the writer and reader verify that origin
+and the complete location chain. A selected Workspace/Process root changes only when it exactly names that owned
+Session directory, preserving resource identity, grants and connection. The entire source work root or adjacent paths
+cannot be adopted. Authenticated canonical history responses attach transient `managed_file_paths` using the original
+source sequence, managed interval, exact Session root and canonical relative components. New explicit references to
+old locations, other Sessions and external projects remain unchanged. Timestamp-cleaned attachment names resolve
+only through the same accepted input's exact `files` receipts, without disk searches or historical text rewrites.
+Image, attachment and tool-file previews/opening share this map and remain usable after the old location is offline.
+Existing events, payloads, immutable Snapshots and historical resource definitions stay unchanged. There is no second
+binding ledger; a retry verifies the original canonical transition and current binding directly.
+
+Pre-copy source and pre-publication destination checks reject active/paused Turns, Attempts, recoverable native
+checkpoints, pending/unknown effects and patch recovery. A server lock or terminal Turn does not prove descendant
+exit. Offline checks also read exact-Turn canonical dispatch, owner settlement, `host_process_quiescent` and
+`host_cleanup_proven` receipts. Missing cleanup proof rejects relocation without guessed PID kills or authority from
+the retired process registry. History readers treat a verified location transition as a data-history boundary, retaining
+closed content without native replay or completion-ledger inheritance. After target validation the coordinator commits
+one active-root pointer; post-commit recovery finishes that target rather than reopening the old copy automatically.
+
 SDK retries of a published terminal acknowledge the existing receipt only when its original root, delivery,
 Snapshot/route and canonical Runtime terminal match, then continue native final release without another terminal or
 an altered outcome. Generation-zero unstarted cancellation uses its independent exact witness. Native `turn/paused`

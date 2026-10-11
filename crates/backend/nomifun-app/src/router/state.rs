@@ -902,6 +902,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     });
 
     SystemRouterState {
+        database_pool: pool.clone(),
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool.clone()))),
         provider_service: ProviderService::new(

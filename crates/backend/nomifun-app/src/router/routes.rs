@@ -43,6 +43,27 @@ use nomifun_webhook::webhook_routes;
 
 use crate::services::AppServices;
 
+/// Scheduling maintenance closes HTTP mutation admission. Existing writers
+/// finish on the old root; the offline coordinator validates them again after
+/// process shutdown before copying or committing any data.
+async fn storage_maintenance_admission(
+    axum::extract::State(root): axum::extract::State<std::path::PathBuf>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, nomifun_common::AppError> {
+    use nomifun_common::storage_relocation::{self as storage, RelocationPhase};
+    let path = request.uri().path();
+    if !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !matches!(path, "/api/system/storage-relocation/start" | "/api/system/storage-relocation/cancel")
+        && let Some(control) = storage::resolve_control_dir(&root)?
+        && let Some(plan) = storage::pending_storage_relocation(&control)?
+        && (matches!(plan.phase, RelocationPhase::AwaitingRestart | RelocationPhase::Copying | RelocationPhase::Verifying)
+            || (plan.phase == RelocationPhase::Failed && !plan.cancellable)) {
+        return Err(nomifun_common::AppError::Conflict("storage relocation is awaiting restart; restart or cancel it before changing dataset data".into()));
+    }
+    Ok(next.run(request).await)
+}
+
 use super::computer_permissions::{
     computer_permission_status, open_permission_settings, request_computer_permission,
     request_system_permission, system_permission_status,
@@ -1170,6 +1191,7 @@ fn create_nomi_core_router_with_all_state(
         None => router,
     };
 
+    let router = router.layer(middleware::from_fn_with_state(services.data_dir.clone(), storage_maintenance_admission));
     let router = router.layer(middleware::from_fn(security_headers_middleware));
 
     // Raise the default request body limit from axum's 2MB default to
@@ -1223,5 +1245,43 @@ fn create_nomi_core_router_with_all_state(
         router.layer(cors)
     } else {
         router
+    }
+}
+
+#[cfg(test)]
+mod storage_relocation_tests {
+    use super::*;
+    use axum::{body::Body, http::{Request, StatusCode}};
+    use nomifun_common::{factory_reset, storage_relocation as storage};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn storage_relocation_admission_blocks_writes_until_restart_or_cancel() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = nomifun_common::paths::canonicalize_simplified(fixture.path()).unwrap();
+        let source = root.join("source");
+        let control = root.join("control");
+        let target = root.join("target");
+        let generation = "0190f5fe-7c00-7a00-8000-0000000000f0";
+        std::fs::create_dir(&source).unwrap();
+        let database = nomifun_db::init_database(&source.join("nomifun-backend.db")).await.unwrap();
+        database.close().await;
+        std::fs::write(source.join("storage-generation"), generation).unwrap();
+        factory_reset::write_v3_dataset_receipt_for_work_dir(&source, &source, generation).unwrap();
+        let plan = storage::request_storage_relocation(&control, &source, &source, &target).unwrap();
+        let router = Router::new()
+            .route("/dataset", get(|| async { StatusCode::OK }).post(|| async { StatusCode::OK }))
+            .route("/api/system/storage-relocation/cancel", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(source, storage_maintenance_admission));
+
+        let request = |method, uri| Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        storage::start_storage_relocation(&control, &plan.operation_id).unwrap();
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(router.clone().oneshot(request(Method::GET, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/api/system/storage-relocation/cancel")).await.unwrap().status(), StatusCode::OK);
+        storage::cancel_storage_relocation(&control, &plan.operation_id).unwrap();
+        assert_eq!(router.oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        assert!(!target.exists());
     }
 }

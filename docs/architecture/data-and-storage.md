@@ -42,18 +42,52 @@ every host — the desktop shell included (see
 [`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)) — takes the
 `NOMIFUN_DATA_DIR` value literally as the final data root (the shell no
 longer appends `Nomi`; the clap `env` binding is shared with `nomicore`,
-which previously ignored the variable). A legacy dataset at
-`NomiFun/Nomi<suffix>` is moved into `NomiFun<suffix>` by a one-shot
-automatic migration on the first boot after upgrading (crash-safe,
-resume-on-next-boot; deferred to the next launch if the old app instance
-is still running), and absolute paths persisted in the database are
-rewritten once after the move. Paths shown or persisted on Windows no
+which previously ignored the variable). Historical self-export paths normalize
+to the current channel default; retired datasets are not imported. Paths shown or persisted on Windows no
 longer carry the `\\?\` extended-length prefix.
 The v3 contract does not copy a pre-existing product dataset from
 `<system temp>/nomifun-data` or any other legacy root into the active
 data directory. A detected historical managed dataset is moved intact to a
 retired/quarantine location by the dataset reset state machine. NomiFun then
 creates a new v3 dataset rather than rewriting historical database paths.
+
+### Relocating the current dataset
+
+Settings moves the entire current dataset to an empty folder on restart. This
+preserves Session history, attachments, configuration, encryption keys, browser
+profiles and managed workspaces, including `conversations/` held by an older
+separate work root. External projects and external knowledge-base roots retain
+their exact paths. The dataset generation and entity identities stay unchanged.
+
+The four `/api/system/storage-relocation/{prepare,start,status,cancel}` routes
+preflight and schedule one durable operation. Active Turns, unresolved Effects,
+native checkpoints and unfinished Patch recovery block scheduling. HTTP writes
+close after scheduling. Hosts complete the offline operation before opening
+runtime caches, logs or native browser profiles, while holding the source data
+and work-root locks. A copied sibling staging directory receives full size and
+checksum verification plus current-schema, reference and SQLite validation.
+
+Only typed, owned mutable paths change in the copied database. Current managed
+Session resources transition through canonical `session/agent-binding-changed`
+events with location-only proof; historical Events, Payloads and Snapshots stay
+immutable. Default workspaces use logical `managed-session` references resolved
+by the host. Knowledge mounts under `.nomi/knowledge` are regenerated from typed
+bindings; other links/reparse points fail preflight without following targets.
+
+Historical managed attachment paths resolve through the same Session's typed
+relocation proof chain to the current root. Resolution belongs only to the read
+projection; original message text remains immutable. Every move records its
+location change even when resources already use logical references. New
+workspace attachment markers use relative paths; external file paths stay exact.
+
+A fixed control directory outside the movable roots stores the plan and sole
+atomic active-location pointer. Root descriptors make old CLI/env roots resolve
+that committed location. Publication seals the old root against reopening it;
+the original data is retained. Interrupted publication resumes from exact
+operation receipts. Failure before publication leaves the old root usable and
+records a retryable/cancellable failure. Existing datasets are never overwritten
+or merged. Relocation is separate from backup, restore and destructive startup
+reset and grants no schema conversion or reset authority.
 
 ### One directory per channel, one state
 
@@ -254,11 +288,12 @@ Each conversation owns a directory the agent can freely read and write:
 
 - `work_dir` — the runtime work directory; falls back to the data dir when
   not set explicitly. Sources, in order: `--work-dir` flag → the
-  UI-selected workspace persisted in `dir-config.json` → env
+  work-root binding persisted in `dir-config.json` → env
   `NOMIFUN_WORK_DIR` → `<data_dir>`. An inherited `NOMIFUN_WORK_DIR` that
   names a default data-root location or a directory that no longer exists
   is ignored (protection against stale self-exports across auto-update
-  restarts).
+  restarts). Settings relocation writes the new data root as the staged
+  work-root binding; it does not create a separate empty workspace dataset.
 - `workspace_id` — the canonical AgentSession's bare lowercase UUIDv7. A
   temporary-workspace projection also exposes the same value as
   `extra.temp_workspace_id`. It is always 36 characters. Directory names do
@@ -411,10 +446,12 @@ backend reaches them through the seam: `nomifun_ai_agent::nomi_config::logging::
 On a brand-new install the boot sequence is:
 
 ```
-1. nomifun-runtime::init           extract bun into OS cache
+0. bootstrap::prepare_startup_storage_root
+                                    resolve the fixed locator; finish any armed offline relocation
+1. nomifun-runtime::init           extract bun into the selected data root's runtime cache
 2. enhance_process_path             prepend cache bin dir to PATH
-3. bootstrap::init_environment      resolve work_dir / log_dir, init tracing,
-                                    take the exclusive {data_dir}/server.lock
+3. bootstrap::init_environment      resolve work_dir, take exclusive data/work-root locks,
+                                    then create log_dir and initialize tracing
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
 5. bootstrap::init_data_layer       initialize/open the v3 database baseline
 6. AppServices::from_config         initialize services and managed side stores

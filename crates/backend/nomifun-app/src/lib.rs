@@ -56,7 +56,7 @@ pub mod compatibility {
 /// default path. The product uses one Conversation owner with source-registered
 /// Engines (official Nomi and Coding), selected by immutable Agent revisions.
 pub async fn run_embedded_server(cli: &cli::Cli, merged_path: &str) -> anyhow::Result<std::process::ExitCode> {
-    let env = bootstrap::init_nomi_core_environment(cli, merged_path)?;
+    let env = bootstrap::init_nomi_core_environment(cli, merged_path).await?;
     let application = bootstrap::NomiCoreApplication::compose(&env).await?;
     commands::run_nomi_core_server(env, application).await
 }

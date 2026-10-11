@@ -42,7 +42,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `--host` | `127.0.0.1`（`DEFAULT_HOST`） | 监听的主机地址。 |
 | `--port` | `25808`（`DEFAULT_PORT`） | 监听端口。 |
 | `--data-dir` | 按用户的应用数据目录 | 数据库 + 文件存储根目录。通过 clap 绑定 `NOMIFUN_DATA_DIR` 环境变量（按字面值）；两者都未设置时解析 `default_data_dir()`——当前 build channel 的宿主共享的按用户位置。 |
-| `--work-dir` | （无） | 会话工作区目录。回退顺序：UI 中选择并持久化在 `dir-config.json` 的工作区 → `NOMIFUN_WORK_DIR` 环境变量 → 数据目录本身。 |
+| `--work-dir` | （无） | 会话工作区目录。回退顺序：`dir-config.json` 中持久化的工作根绑定 → `NOMIFUN_WORK_DIR` 环境变量 → 数据目录本身。 |
 | `--app-version` | crate 版本 | 报告给扩展引擎用于做兼容性检查的宿主应用版本。 |
 | `--local` | `false` | 独立 `nomicore` 的无鉴权本地模式。`nomifun-web --insecure-no-auth` 映射到同一策略。桌面外壳不使用该 flag，而是使用 `TrustLocalToken`。 |
 | `--log-dir` | `<data-dir>/logs` | 滚动日志的目录。 |
@@ -71,7 +71,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 |---|---|---|
 | `NOMIFUN_DATA_DIR` | 所有宿主 | 当宿主选择遵循该值时，作为后端数据目录的真值来源。在**每个**宿主上——桌面外壳、独立 Web 宿主与 `nomicore` 二进制——都按**字面值**作为最终数据根（桌面外壳不再附加 `/Nomi`）。未设置时目录为按用户的应用数据默认值（见[下文](#数据目录与工作目录的语义)）。 |
 | `NOMIFUN_NFAGENT_PATH` | 桌面外壳 | 开发/离线调试覆盖：指定一个已存在的 `nfagent` **绝对路径**，跳过 NomiRelay 按需下载。显式文件由设置者负责信任与版本管理；普通用户应使用受 SHA-256 校验的托管运行时。 |
-| `NOMIFUN_WORK_DIR` | `nomicore` | `--work-dir`（按会话区分的工作区根）的回退值。优先级低于 UI 中选择并持久化在 `dir-config.json` 的工作区；若继承到的值指向默认数据根位置或已不存在的目录，会被忽略（防止自动更新重启时残留的自导出值）。 |
+| `NOMIFUN_WORK_DIR` | `nomicore` | `--work-dir`（按会话区分的工作区根）的回退值。优先级低于 `dir-config.json` 中持久化的工作根绑定；若继承到的值指向默认数据根位置或已不存在的目录，会被忽略（防止自动更新重启时残留的自导出值）。 |
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
 | `SHELL` | 智能体引擎（Linux/macOS） | 智能体引擎派生子进程时使用的 shell。在 systemd 下的 Linux 服务器上请显式设置（系统账户通常没有 `$SHELL`）。 |
@@ -125,7 +125,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
   `nomicore doctor` 与 `mcp-*` stdio 子命令不取这把锁（doctor 设计上
   就允许与运行中的服务器并存）。
 - `work-dir` 存放按会话区分的工作区。未设置时按以下顺序解析：
-  `--work-dir` → UI 中选择并持久化在 `dir-config.json` 的工作区 →
+  `--work-dir` → `dir-config.json` 中持久化的工作根绑定 →
   非空的 `NOMIFUN_WORK_DIR` 环境变量 → 数据目录本身。继承到的
   `NOMIFUN_WORK_DIR` 若指向默认数据根位置或已不存在的目录会被忽略——
   以防自动更新重启时残留的自导出值。
@@ -135,12 +135,11 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
   数据根**，按字面值生效、不附加 `/Nomi` 后缀，因此 Docker
   （`/data`）与 systemd（`/var/lib/nomifun`）部署不受影响。环境变量
   与 `--data-dir` 都未设置时，回退到上述共享的按用户默认目录；旧的
-  相对 `data` 默认值已不复存在。旧版构建使用
-  `NomiFun/Nomi<suffix>`（更早为 `<system temp>/nomifun-data/Nomi`）；
-  升级后首次启动时，既有的遗留数据集会被自动迁移到
-  `NomiFun<suffix>`（一次性、抗崩溃、中断后下次启动续跑；若旧应用
-  实例仍在运行则推迟到下次启动）。数据库中持久化的绝对路径——
-  知识库根目录、终端 cwd、自定义工作区——会在搬迁后一次性改写。
+  相对 `data` 默认值已不复存在。设置中完成存储迁移后，固定位置指针会把旧的
+  启动路径解析到已提交的新根。迁移保留当前健康数据集的会话、附件、配置和托管
+  工作区；原目录封存保留，外部项目路径不变。使用此操作前应移除显式
+  `--work-dir`。历史自导出路径只归一到当前 channel 默认根，不导入退役数据集。
+  详见[更换存储位置](../architecture/data-and-storage.zh.md#更换存储位置)。
 
 ## 鉴权密钥解析
 

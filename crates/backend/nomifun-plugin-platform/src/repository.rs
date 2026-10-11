@@ -269,7 +269,9 @@ impl PluginRepository for SqlitePluginRepository {
             .get_artifact(&artifact.artifact.artifact_digest)
             .await?
             .ok_or_else(|| PluginRepositoryError::InvalidData("stored Artifact disappeared".into()))?;
-        if stored.artifact != artifact.artifact || stored.artifact_root != artifact.artifact_root {
+        // Content is immutable; its historical physical location is not an
+        // identity or a permission to load files outside the current store.
+        if stored.artifact != artifact.artifact {
             return Err(PluginRepositoryError::InvalidData(
                 "Artifact digest is already bound to different content".into(),
             ));

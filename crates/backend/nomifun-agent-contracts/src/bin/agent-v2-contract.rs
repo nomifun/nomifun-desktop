@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
+    AgentBindingChangedPayloadV1, AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice,
@@ -509,6 +509,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<CapabilityCatalogEntry>(&mut schemas, "capability_catalog_entry")?;
     add_schema::<ResolvedSnapshotEnvelope>(&mut schemas, "agent_snapshot")?;
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
+    add_schema::<AgentBindingChangedPayloadV1>(&mut schemas, "agent_binding_changed_payload")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
@@ -547,6 +548,7 @@ fn validate_generated_schemas(
         "agent_preset_revision",
         "capability_catalog_entry",
         "agent_snapshot",
+        "agent_binding_changed_payload",
         "unified_plugin_contract_manifest",
         "plugin_manifest",
         "plugin_artifact",

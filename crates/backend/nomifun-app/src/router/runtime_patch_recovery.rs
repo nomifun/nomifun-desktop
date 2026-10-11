@@ -259,6 +259,7 @@ mod tests {
 
     fn transition(seq: u64, target: &AgentBindingValue) -> Value {
         serde_json::to_value(AgentBindingChangedPayloadV1 {
+            workspace_relocation: None,
             transition_id: format!("correlation-{seq}").into(), request_digest: "c".repeat(64).into(),
             previous_binding_ref: AgentHandoffBindingRefV1::from(&binding(target.binding_version - 1)),
             next_binding_ref: AgentHandoffBindingRefV1::from(target),

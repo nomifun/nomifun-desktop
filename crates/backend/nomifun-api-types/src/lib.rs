@@ -138,8 +138,9 @@ pub use knowledge::{
     UpdateKnowledgeTagRequest,
 };
 pub use lifecycle::{
-    GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult,
-    UpdateReleaseInfo, UpdateWorkDirRequest,
+    GitHubReleaseAsset, PrepareStorageRelocationRequest, StorageRelocationBlocker,
+    StorageRelocationOperationRequest, StorageRelocationResponse, SystemInfoResponse,
+    UpdateCheckRequest, UpdateCheckResult, UpdateReleaseInfo,
 };
 pub use model_failover::ModelFailoverConfig;
 pub use mcp::{

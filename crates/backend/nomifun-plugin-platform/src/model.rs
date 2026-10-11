@@ -31,6 +31,8 @@ impl PluginRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredArtifactRecord {
     pub artifact: PluginArtifact,
+    /// Immutable import provenance. Resolve live files through the current
+    /// ArtifactStore by digest; this path grants no filesystem authority.
     pub artifact_root: String,
     pub created_at_ms: i64,
 }

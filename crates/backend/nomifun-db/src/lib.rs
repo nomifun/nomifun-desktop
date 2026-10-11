@@ -3,6 +3,8 @@ pub mod backup_bundle;
 mod agent_store_reset;
 mod agent_store_clean_cut;
 mod database;
+mod storage_relocation;
+pub use storage_relocation::{relocate_storage_domain_paths, validate_storage_relocation_paths};
 mod error;
 mod id_schema_contract;
 pub mod models;

@@ -45,6 +45,32 @@ describe('structured error diagnosis', () => {
 const MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000001');
 const SECOND_MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000002');
 
+test('durable history owns managed file paths when a longer live fragment wins the body', () => {
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
+  const saved = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: MESSAGE_ID,
+    content: 'Saved', position: 'right', status: 'finish', created_at: 1,
+  }, conversationId)!;
+  saved.content.managed_file_paths = { '/old/session/image.png': '/current/session/image.png' };
+  const live = { ...saved, content: { content: 'A longer live message fragment',
+    managed_file_paths: { '/old/session/image.png': '/stale/session/image.png' } } };
+  const merged = preferTextMessageVersion(saved, live);
+  expect(merged.content.content).toBe(live.content.content);
+  expect(merged.content.managed_file_paths).toEqual(saved.content.managed_file_paths);
+});
+
+test('an empty durable path map clears a stale live mapping without changing text merging', () => {
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
+  const saved = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: MESSAGE_ID,
+    content: 'Saved', position: 'right', status: 'finish', created_at: 1,
+  }, conversationId)!;
+  saved.content.managed_file_paths = {};
+  const live = { ...saved, content: { content: 'A longer live message fragment',
+    managed_file_paths: { '/external/image.png': '/stale/image.png' } } };
+  const merged = preferTextMessageVersion(saved, live);
+  expect(merged.content.content).toBe(live.content.content);
+  expect(merged.content.managed_file_paths).toEqual({});
+});
+
 test('late user-message acknowledgements retain persisted camera observations and device provenance', () => {
   const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
   const live = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: MESSAGE_ID,

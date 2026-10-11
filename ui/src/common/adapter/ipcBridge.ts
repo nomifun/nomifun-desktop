@@ -13,6 +13,10 @@
  */
 
 import { bridge } from '@/platform';
+import type { PrepareStorageRelocationRequest } from '@/common/protocolBindings/PrepareStorageRelocationRequest';
+import type { StorageRelocationOperationRequest } from '@/common/protocolBindings/StorageRelocationOperationRequest';
+import type { StorageRelocationResponse } from '@/common/protocolBindings/StorageRelocationResponse';
+import type { SystemInfoResponse } from '@/common/protocolBindings/SystemInfoResponse';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import type { McpConnectionTestRequest } from './mcpRequest';
 import {
@@ -1217,20 +1221,10 @@ export const application = {
   // (application.restart) right after this resolves.
   factoryReset: httpPost<void, void>('/api/system/factory-reset'),
   systemInfo: withResponseMap(
-    httpGet<
-      {
-        cache_dir: string;
-        work_dir: string;
-        log_dir: string;
-        storage_generation: string;
-        agent_data_generation: number;
-        platform: string;
-        arch: string;
-      },
-      void
-    >('/api/system/info'),
+    httpGet<SystemInfoResponse, void>('/api/system/info'),
     (raw) => ({
       cacheDir: raw.cache_dir,
+      dataDir: raw.data_dir,
       workDir: raw.work_dir,
       logDir: raw.log_dir,
       storageGeneration: raw.storage_generation,
@@ -1240,15 +1234,6 @@ export const application = {
     })
   ),
   getPath: shellProvider<string, { name: 'desktop' | 'home' | 'downloads' }>(({ name }) => tauriGetPath(name), ''),
-  // Persist the user-chosen work dir to a pre-boot config file that the next
-  // boot reads before resolving work_dir (Rust `nomifun_common::dir_config`).
-  // The caller restarts right after this resolves; the new dir applies then.
-  // `cacheDir` is accepted for back-compat but ignored — it is no longer
-  // user-editable (removed from the settings UI), only `workDir` is sent.
-  updateSystemInfo: httpPost<void, { cacheDir: string; workDir: string }>(
-    '/api/system/work-dir',
-    ({ workDir }) => ({ work_dir: workDir })
-  ),
   getZoomFactor: shellProvider<number, void>(async () => tauriGetZoom(), 1),
   setZoomFactor: shellProvider<number, { factor: number }>(({ factor }) => tauriSetZoom(factor), 1),
   applyKeepAwake: shellProvider<void, { enabled: boolean }>(({ enabled }) => tauriSetKeepAwake(enabled), undefined),
@@ -1280,6 +1265,14 @@ export const application = {
     },
     { success: false }
   ),
+};
+
+/** Installation-owned storage relocation; never a Session import or reset. */
+export const storageRelocation = {
+  prepare: httpPost<StorageRelocationResponse, PrepareStorageRelocationRequest>('/api/system/storage-relocation/prepare'),
+  start: httpPost<StorageRelocationResponse, StorageRelocationOperationRequest>('/api/system/storage-relocation/start'),
+  status: httpGet<StorageRelocationResponse, void>('/api/system/storage-relocation/status'),
+  cancel: httpPost<StorageRelocationResponse, StorageRelocationOperationRequest>('/api/system/storage-relocation/cancel'),
 };
 
 // ---------------------------------------------------------------------------

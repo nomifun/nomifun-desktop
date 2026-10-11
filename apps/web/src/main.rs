@@ -237,7 +237,7 @@ fn main() -> Result<ExitCode> {
     // locations to the one canonical channel root. Explicit Web deployments
     // (for example /data) remain literal and no parallel Agent root is probed.
     cli.data_dir =
-        nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
+        nomifun_app::bootstrap::prepare_startup_storage_root(args.data_dir.clone(), cli.work_dir.as_deref())?;
     cli.local = insecure_no_auth;
 
     // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
@@ -286,7 +286,7 @@ async fn serve(
 
     // Boot the backend in-process (env → data layer → services), then mount the
     // real API router with the SPA as the fallback for non-/api routes.
-    let env = nomifun_app::bootstrap::init_nomi_core_environment(&cli, &merged_path)?;
+    let env = nomifun_app::bootstrap::init_nomi_core_environment(&cli, &merged_path).await?;
     let application =
         nomifun_app::bootstrap::NomiCoreApplication::compose(&env).await?;
 

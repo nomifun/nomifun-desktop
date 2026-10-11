@@ -57,6 +57,9 @@ pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_
 mod runtime_state;
 pub use runtime_state::RuntimeStateObservation;
 
+#[path = "storage_relocation.rs"]
+mod storage_relocation;
+
 #[path = "native_execution.rs"]
 mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
@@ -1939,6 +1942,7 @@ impl AgentSessionStore {
                 .map(|payload| payload.digest.clone()),
             completion_gate_inherited: false,
             effective_after_seq: head.last_seq,
+            workspace_relocation: None,
         };
 
         let replacement_json = serde_json::to_string(&request.replacement)?;
@@ -5568,6 +5572,20 @@ async fn validate_semantic_event_tx(
 ) -> Result<(), SessionStoreError> {
     if event.kind.0 == "compaction/completed" {
         validate_compaction_payload_tx(tx, event, payload).await?;
+    }
+    if event.kind.0 == "session/agent-binding-changed"
+        && payload.get("workspace_relocation").is_some_and(|proof| !proof.is_null()) {
+        let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload.clone())?;
+        transition.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+        let session = live_session_by_id_tx(tx, event.agent_session_id.as_ref()).await?;
+        storage_relocation::validate_namespace_proof_tx(tx, &session, transition.workspace_relocation.as_ref().expect("validated proof")).await?;
+        if transition.transition_id.as_ref() != event.correlation_id.as_ref()
+            || transition.effective_after_seq.checked_add(1) != Some(event.seq)
+            || transition.next_binding_ref != AgentHandoffBindingRefV1::from(&session.agent_binding)
+            || transition.workspace_relocation.as_ref().expect("validated proof").next_resources
+                != session.agent_binding.typed_resource_bindings {
+            return Err(SessionStoreError::InvalidEvent("storage relocation event differs from its atomic binding boundary".into()));
+        }
     }
     Ok(())
 }

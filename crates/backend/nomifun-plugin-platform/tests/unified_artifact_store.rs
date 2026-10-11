@@ -8,6 +8,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_plugin_platform::{
     ArtifactStoreLimits, NeverCancel, PluginArtifactStore, PluginArtifactStoreError,
+    PluginRepository, PluginRepositoryError, SqlitePluginRepository, StoredArtifactRecord,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -137,6 +138,73 @@ fn store(temp: &TempDir) -> PluginArtifactStore {
         ArtifactStoreLimits::default(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn artifact_reentry_after_storage_relocation_preserves_historical_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let repository = SqlitePluginRepository::new(database.pool().clone());
+    let old_store = PluginArtifactStore::new(
+        temp.path().join("old/plugin-core"), ArtifactStoreLimits::default(),
+    ).unwrap();
+    let current_store = PluginArtifactStore::new(
+        temp.path().join("current/plugin-core"), ArtifactStoreLimits::default(),
+    ).unwrap();
+    let files = package_files("local.relocated", Shape::Mixed);
+    let original = old_store.import_files(&files, &NeverCancel).unwrap().stored;
+    let historical = StoredArtifactRecord {
+        artifact: original.artifact.clone(),
+        artifact_root: original.artifact_root.to_string_lossy().into_owned(),
+        created_at_ms: 1,
+    };
+    repository.put_artifact(&historical).await.unwrap();
+
+    let relocated = current_store.import_files(&files, &NeverCancel).unwrap().stored;
+    assert_ne!(relocated.artifact_root, original.artifact_root);
+    assert_eq!(relocated.artifact, original.artifact);
+    repository.put_artifact(&StoredArtifactRecord {
+        artifact: relocated.artifact.clone(),
+        artifact_root: relocated.artifact_root.to_string_lossy().into_owned(),
+        created_at_ms: 2,
+    }).await.unwrap();
+    assert_eq!(repository.get_artifact(&original.artifact.artifact_digest).await.unwrap(), Some(historical));
+    let loaded = current_store.load(&original.artifact.artifact_digest).unwrap();
+    assert_eq!(loaded.package_root, relocated.package_root);
+
+    // Even a valid old copy and its recorded path cannot supply live files if
+    // the artifact is absent from the current managed store.
+    assert!(relocated.artifact_root.starts_with(fs::canonicalize(temp.path()).unwrap()));
+    assert_eq!(relocated.artifact_root.parent(), Some(current_store.managed_root().join("artifacts").as_path()));
+    fs::remove_dir_all(&relocated.artifact_root).unwrap();
+    assert!(original.artifact_root.exists());
+    assert!(matches!(current_store.load(&original.artifact.artifact_digest),
+        Err(PluginArtifactStoreError::PublishedArtifactMismatch { .. })));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn artifact_reentry_rejects_changed_manifest_or_files_under_the_same_digest() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let repository = SqlitePluginRepository::new(database.pool().clone());
+    let original = store(&temp).import_files(&package_files("local.immutable", Shape::Mixed), &NeverCancel).unwrap().stored;
+    let historical = StoredArtifactRecord {
+        artifact: original.artifact,
+        artifact_root: original.artifact_root.to_string_lossy().into_owned(),
+        created_at_ms: 1,
+    };
+    repository.put_artifact(&historical).await.unwrap();
+    let mut changed_manifest = historical.clone();
+    changed_manifest.artifact.manifest.description = "Different content".into();
+    let mut changed_files = historical.clone();
+    changed_files.artifact.files[0].size_bytes += 1;
+    for changed in [changed_manifest, changed_files] {
+        assert!(matches!(repository.put_artifact(&changed).await,
+            Err(PluginRepositoryError::InvalidData(_))));
+    }
+    assert_eq!(repository.get_artifact(&historical.artifact.artifact_digest).await.unwrap(), Some(historical));
+    database.close().await;
 }
 
 #[test]

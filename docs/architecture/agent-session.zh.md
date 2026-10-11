@@ -87,6 +87,41 @@ Agent 或资源切换不能删除已结算效果引用的资源定义，也不�
 
 Store 在同一事务中更新当前 binding 并保留必要的历史引用；资源查询、知识库挂载和删除保护只按当前 binding 选取资源。历史定义用于回执追溯，不赋予新 Agent 权限，不形成第二份活动资源账本。
 
+### 同一现役数据集的位置迁移
+
+数据存储位置变更保留 installation owner、storage generation、Session/Turn 身份、密钥及现役历史，
+由数据集协调器在旧服务退出、源目录与目标目录受锁保护后离线复制和校验。位置修订独立于数据代际，
+此操作不具有 clean cut、破坏性启动重建或导入退役 Agent 数据的权限。
+
+新建默认 Workspace 与 Process Session 使用 `workspace_location=managed-session` 的 typed 参数，
+宿主只按当前有效工作根和精确 canonical Session UUID 解析为 `conversations/<Session ID>`。
+明确选择的外部项目保持原绝对路径；不能通过路径前缀判断它属于产品托管空间。现役旧绑定仅在
+`default-workspace`/`managed-process-session` 身份、完整单一 `workspace_root` 参数与源工作根精确一致时转换为逻辑引用。
+产品托管知识库由当前 `knowledge_bases.managed` 与精确注册根证明所有权，再转换当前冻结的 `knowledge_root`；
+外部知识库保持原路径。
+
+转换使用原 canonical Store 的单一写事务，将所有受影响 Session 的完整资源集合成组更新，重新计算资源定义 ID，
+并追加 `session/agent-binding-changed` 的 `workspace_relocation` typed proof。proof 记录源数据根、源工作根、
+目标数据根、托管知识库 ID 及完整前后资源定义；只允许托管位置参数变化，owner、资源身份、权限、连接与其他参数精确不变。
+此明确的位置转换保留同一 Revision/Snapshot，只增加 binding version；同 Snapshot 转换必须验证 proof 和 request digest，
+不能成为普通 Agent 或能力切换的例外。原 Event/Payload、不可变 Snapshot 和历史资源定义不改写，也不建立第二份 binding 账本。
+重试直接验证原转换事件的精确操作和当前绑定，不依据额外幂等日志猜测完成状态。
+
+每次位置变化都记录 Session-owned `conversations/<Session ID>` 命名空间，即使逻辑资源定义没有变化，
+或当前 Agent 已选择外部项目。可选 `managed_session_namespace` 只引用该 Session opening 中精确的默认 Workspace 定义，
+原 writer 和 reader 都核验原始归属与连续的位置证明链。当前 selected Workspace/Process 的根只有精确等于该 Session
+托管子目录时才更新位置参数；资源 ID、权限与连接保持原值，整个源工作根或其他相似路径不能被自动收编。
+历史消息只在已鉴权的 canonical 投影出口附加临时 `managed_file_paths`，按原始来源 seq、当时托管阶段、
+精确 Session 根和规范相对路径解析到当前根；用户在迁移后明确引用旧目录、其他 Session 或外部项目不会被重解释。
+原附件展示名的时间戳去除只通过同一 accepted 输入中的精确 `files` 回执消歧，不搜索磁盘或改写历史原文。
+图片、附件与工具文件打开共用此投影映射；旧盘不可用不影响已迁移文件访问。
+
+源库复制前和目标发布前都校验活动/暂停 Turn、Attempt、可恢复 native checkpoint、pending/unknown 效果和 Patch recovery。
+服务器锁与 Turn 终态不证明子进程退出；离线校验还读取同一 canonical Turn 的 native dispatch、owner settlement、
+`host_process_quiescent` 与 `host_cleanup_proven`，缺少精确清理证明时拒绝迁移，不猜 PID，也不从旧进程 registry 获取恢复权限。
+历史 reader 将经过验证的位置转换作为普通数据历史边界，保留已关闭内容而不跨边界重放 native 日志或继承完成账本。
+目标校验通过后协调器只提交一个活动目录指针；提交后的恢复继续完成该目标，不自动重新启用旧副本。
+
 ### 内置浏览器与 Agent Browser 授权
 
 用户侧栏浏览器是 Browser domain 的同 Session 实体：认证 owner 可以直接导航网页，不以 Agent Module grant

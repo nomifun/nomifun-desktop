@@ -119,26 +119,48 @@ impl WorkRootLock {
 
 /// Layer 1: canonical data-root resolution + logging + config resolution.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
-    init_environment_inner(cli, merged_path)
+    init_environment_inner(cli, merged_path, super::resolve_startup_data_root(cli.data_dir.clone())?)
 }
 
 /// Initialize the current in-process Nomi-core host against the same canonical
 /// root used by every other database-owning command.
-pub fn init_nomi_core_environment(
+pub async fn init_nomi_core_environment(
     cli: &Cli,
     merged_path: &str,
 ) -> Result<ServerEnvironment> {
-    init_environment_inner(cli, merged_path)
+    let root = super::prepare_startup_storage_root_async(cli.data_dir.clone(), cli.work_dir.as_deref()).await?;
+    init_environment_inner(cli, merged_path, root)
 }
 
 fn init_environment_inner(
     cli: &Cli,
     merged_path: &str,
+    startup_data_dir: PathBuf,
 ) -> Result<ServerEnvironment> {
-    let startup_data_dir =
-        super::data_root::normalize_requested_startup_data_root(
-            cli.data_dir.clone(),
-        );
+    nomifun_common::storage_relocation::require_storage_root_not_sealed(&startup_data_dir)?;
+    // Take data-dir authority before resolving any pending reset or legacy
+    // work-root recovery hint from its control files.
+    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
+    let data_dir = server_lock.protected_data_dir().to_path_buf();
+    nomifun_common::storage_relocation::require_storage_root_not_sealed(&data_dir)?;
+    anyhow::ensure!(nomifun_common::paths::paths_equivalent(&super::resolve_startup_data_root(cli.data_dir.clone())?, &data_dir),
+        "active storage location changed while acquiring the server lock; restart against the committed root");
+    let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
+    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
+        &data_dir,
+    )?;
+    let requested_work_dir =
+        resolve_work_dir(cli.work_dir.clone(), &data_dir)?;
+    let external_work_root_lock =
+        acquire_distinct_work_root_lock(
+            &data_root_work_lock,
+            &requested_work_dir,
+        )?;
+    let work_dir = external_work_root_lock
+        .as_ref()
+        .map(|lock| lock.protected_root().to_path_buf())
+        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
+
     let log_dir = cli
         .log_dir
         .clone()
@@ -170,26 +192,6 @@ fn init_environment_inner(
         path_len = merged_path.len(),
         "startup: PATH ready"
     );
-
-    // Take data-dir authority before resolving any pending reset or legacy
-    // work-root recovery hint from its control files.
-    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
-    let data_dir = server_lock.protected_data_dir().to_path_buf();
-    let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
-    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
-        &data_dir,
-    )?;
-    let requested_work_dir =
-        resolve_work_dir(cli.work_dir.clone(), &data_dir)?;
-    let external_work_root_lock =
-        acquire_distinct_work_root_lock(
-            &data_root_work_lock,
-            &requested_work_dir,
-        )?;
-    let work_dir = external_work_root_lock
-        .as_ref()
-        .map(|lock| lock.protected_root().to_path_buf())
-        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
 
     // SAFETY: called before any service initialization; no concurrent reads.
     unsafe {
@@ -236,7 +238,7 @@ fn init_environment_inner(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ExistingV3DatabaseProbe {
+pub(super) enum ExistingV3DatabaseProbe {
     Missing,
     Current,
     /// A pre-v3 dataset without canonical v3 identity tables/columns.
@@ -419,7 +421,7 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
     Ok(ExistingV3DatabaseProbe::Current)
 }
 
-async fn probe_existing_v3_database(path: &Path) -> Result<ExistingV3DatabaseProbe> {
+pub(super) async fn probe_existing_v3_database(path: &Path) -> Result<ExistingV3DatabaseProbe> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -759,11 +761,6 @@ pub async fn init_data_layer_with_browser(
     let database = nomifun_db::init_database(&db_path).await?;
     info!(elapsed_ms = boot.elapsed().as_millis(), "startup: database initialized");
 
-    // One-shot absolute-path rewrite after a data-root relocation (layout
-    // migration). Idempotent and never fails the boot; see
-    // `bootstrap::relocation`.
-    super::relocation::rewrite_relocated_paths(&database, &config.data_dir).await;
-
     Ok(database)
 }
 
@@ -786,6 +783,9 @@ pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
         &config.data_dir,
         &config.work_dir,
     )?;
+    if let Some(control) = nomifun_common::storage_relocation::resolve_control_dir(&config.data_dir)? {
+        nomifun_common::storage_relocation::refresh_current_storage_location(&control, &config.data_dir)?;
+    }
     Ok(())
 }
 

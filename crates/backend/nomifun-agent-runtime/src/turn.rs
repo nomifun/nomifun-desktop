@@ -229,7 +229,7 @@ impl AgentTurnRequest {
         if let Some(prior) = &self.prior_task {
             prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
         }
-        self.patch_recovery.validate()?;
+        self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
         if let Some(recovery) = &self.recovery {
             recovery.validate_for(binding, &self.model_request.causality.turn_operation_id, self.active_set_generation)?;
             if let Some(segments) = &recovery.checkpoint.segments {

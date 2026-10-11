@@ -11,22 +11,22 @@ import type {
   ThinkingContentDisplayLength,
   ThinkingSummaryDisplayLength,
 } from '@/common/config/thinkingDisplay';
-import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
-import { Alert, Button, Message, Modal } from '@arco-design/web-react';
+import { Alert, Button, Message } from '@arco-design/web-react';
 import { FolderOpen, FolderSearch, Search } from '@icon-park/react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 import { useSearchParams } from 'react-router-dom';
 import { VisualChoice, VisualEmpty, VisualListRow, VisualPanel, VisualRow, VisualSearch, VisualSwitch, VisualTabs } from '@/renderer/pages/settings/components/CodeVisualPrimitives';
 import PageHeader from '@/renderer/components/layout/PageHeader';
 import FactoryResetModal from './FactoryResetModal';
+import StorageRelocationModal from './StorageRelocationModal';
 
 /**
  * System settings content component
@@ -37,15 +37,7 @@ const SystemModalContent: React.FC = () => {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
-  const [changingDirectory, setChangingDirectory] = useState(false);
-  const [committedWorkDir, setCommittedWorkDir] = useState<string>();
-  // arco types Modal.useModal() methods (confirm/info/...) as optional even
-  // though the hook always supplies them; assert the non-optional shape so
-  // `modal.confirm(...)` doesn't trip TS2722.
-  const [modalRaw, modalContextHolder] = Modal.useModal();
-  const modal = modalRaw as Required<typeof modalRaw>;
-  const [error, setError] = useState<string | null>(null);
-  const savingRef = useRef(false);
+  const [relocationVisible, setRelocationVisible] = useState(false);
 
   const [startOnBoot, setStartOnBoot] = useState<IStartOnBootStatus>({
     supported: false,
@@ -224,7 +216,8 @@ const SystemModalContent: React.FC = () => {
   }, [applyKeepAwake]);
 
   // Get system directory info
-  const { data: systemInfo } = useSWR('system.dir.info', () => ipcBridge.application.systemInfo.invoke());
+  const { data: systemInfo, mutate: refreshSystemInfo } = useSWR('system.dir.info', () => ipcBridge.application.systemInfo.invoke());
+  const { data: relocationStatus, mutate: setRelocationStatus } = useSWR('system.storage-relocation', () => ipcBridge.storageRelocation.status.invoke());
 
   const handleOpenLogDir = useCallback(() => {
     if (!systemInfo?.logDir) return;
@@ -234,39 +227,6 @@ const SystemModalContent: React.FC = () => {
         console.error('[SystemModalContent] Failed to open log directory:', caughtError);
       });
   }, [systemInfo?.logDir]);
-
-  const handlePickWorkDir = useCallback(async () => {
-    if (!systemInfo || savingRef.current) return;
-    savingRef.current = true;
-    setChangingDirectory(true);
-    setError(null);
-    try {
-      const selected = await ipcBridge.dialog.showOpen.invoke({
-        defaultPath: committedWorkDir ?? systemInfo.workDir,
-        properties: ['openDirectory', 'createDirectory'],
-      });
-      const workDir = selected?.[0];
-      if (!workDir || workDir === (committedWorkDir ?? systemInfo.workDir)) return;
-      const confirmed = await new Promise<boolean>((resolve) => {
-        modal.confirm({
-          title: t('settings.workDirChangeConfirmTitle'),
-          content: t('settings.workDirChangeConfirmContent'),
-          onOk: () => resolve(true),
-          onCancel: () => resolve(false),
-        });
-      });
-      if (!confirmed) return;
-      await ipcBridge.application.updateSystemInfo.invoke({ cacheDir: systemInfo.cacheDir, workDir });
-      // Once persisted, show the committed directory even if relaunch fails.
-      setCommittedWorkDir(workDir);
-      await ipcBridge.application.restart.invoke();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      savingRef.current = false;
-      setChangingDirectory(false);
-    }
-  }, [committedWorkDir, modal, systemInfo, t]);
 
   const switchControl = (label: string, checked: boolean, onChange: (checked: boolean) => void | Promise<void>, disabled = false) =>
     <VisualSwitch label={label} checked={checked} onChange={onChange} disabled={disabled} />;
@@ -310,8 +270,8 @@ const SystemModalContent: React.FC = () => {
         { key: 'autoPreviewOfficeFiles', label: t('settings.autoPreviewOfficeFiles'), description: t('settings.autoPreviewOfficeFilesDesc'), control: switchControl(t('settings.autoPreviewOfficeFiles'), autoPreviewOfficeFiles, handleAutoPreviewOfficeFilesChange) },
       ],
       directories: [
-        { key: 'workDir', label: t('settings.workDir'), path: committedWorkDir ?? systemInfo?.workDir, icon: <FolderOpen theme='outline' size={17} />, action:
-          <Button size='small' loading={changingDirectory} disabled={!systemInfo} onClick={() => void handlePickWorkDir()}>{t('settings.workspace.changeDirectory')}</Button> },
+        { key: 'dataDir', label: t('settings.storageRelocation.location'), path: relocationStatus?.current_dir || systemInfo?.dataDir, icon: <FolderOpen theme='outline' size={17} />, action:
+          <Button size='small' disabled={!systemInfo} onClick={() => setRelocationVisible(true)}>{t('settings.workspace.changeDirectory')}</Button> },
         { key: 'logDir', label: t('settings.logDir'), path: systemInfo?.logDir, icon: <FolderSearch theme='outline' size={17} />, action:
           <Button size='small' disabled={!systemInfo?.logDir} onClick={handleOpenLogDir}>{t('settings.workspace.openDirectory')}</Button> },
       ],
@@ -341,7 +301,6 @@ const SystemModalContent: React.FC = () => {
 
   return (
     <div>
-      {modalContextHolder}
       <PageHeader title={t('settings.workspace.generalTitle')} />
       <div className='cv-toolbar'>
         <VisualSearch value={query} onChange={setQuery} label={t('settings.workspace.search')} clearLabel={t('settings.workspace.clearSearch')} />
@@ -363,9 +322,19 @@ const SystemModalContent: React.FC = () => {
         </VisualPanel>)}
         {!visibleGroups.length && <VisualEmpty icon={<Search theme='outline' size={22} />} title={t('settings.workspace.noResults')}
           description={t('settings.workspace.noResultsDesc')} action={<Button onClick={() => setQuery('')}>{t('settings.workspace.clearSearch')}</Button>} />}
-        {error && <Alert type='error' content={<span>{error}<FeedbackButton className='ml-6px' /></span>} />}
+        {relocationStatus?.restart_required && <Alert type='info' content={<div className='flex items-center justify-between gap-12px'>
+          <span>{relocationStatus.cancellable
+            ? t('settings.storageRelocation.pending', { path: relocationStatus.target_dir })
+            : t('settings.storageRelocation.recoveryRequired')}</span>
+          <Button size='small' onClick={() => setRelocationVisible(true)}>{t('settings.storageRelocation.manage')}</Button>
+        </div>} />}
       </div>
       <FactoryResetModal visible={factoryResetVisible} onClose={() => setFactoryResetVisible(false)} />
+      <StorageRelocationModal visible={relocationVisible} currentDir={systemInfo?.dataDir ?? ''} status={relocationStatus}
+        onStatusChange={(next) => {
+          void setRelocationStatus(next, false);
+          if (next.phase === 'completed') void refreshSystemInfo();
+        }} onClose={() => setRelocationVisible(false)} />
     </div>
   );
 };

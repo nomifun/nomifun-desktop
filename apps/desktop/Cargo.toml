@@ -20,6 +20,7 @@ serde_json.workspace = true
 # (WebView2 on Windows, system WKWebView on macOS).
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
 nomifun-runtime.workspace = true
+nomifun-common.workspace = true
 nomifun-browser-platform.workspace = true
 nomi-browser-engine.workspace = true
 async-trait.workspace = true

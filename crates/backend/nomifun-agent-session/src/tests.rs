@@ -38,6 +38,8 @@ mod runtime_state_tests;
 mod native_mutation_fence_tests;
 #[path = "idmm_tests.rs"]
 mod idmm_tests;
+#[path = "storage_relocation_tests.rs"]
+mod storage_relocation_tests;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())

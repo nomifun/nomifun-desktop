@@ -1,25 +1,17 @@
-//! Pre-boot directory configuration: persist the user's chosen working
-//! directory so it survives a restart and is readable *before* the in-process
-//! backend resolves `work_dir`.
+//! Pre-boot working-root configuration inside the active dataset root.
 //!
-//! Why a file (not the database): under Tauri the backend is linked in-process,
-//! and `work_dir` is resolved early in `bootstrap::init_environment` — before
-//! the SQLite pool is opened. A config written by the running backend therefore
-//! has to land somewhere that the *next* boot can read before any service
-//! exists. A small JSON file under `data_dir` fits: `data_dir` is fixed for the
-//! lifetime of the install (it does not change when `work_dir` does) and is
-//! resolved at the very start of boot.
+//! The fixed storage locator selects data_dir before this file is read and
+//! before SQLite or dataset services open. Existing split-root layouts and
+//! already-published reset requests still use the persistent work-root binding.
 //!
-//! Unlike [`crate::factory_reset`]'s one-shot reset request,
-//! this config is *persistent*: it is kept until the user changes the directory
-//! again, so every subsequent boot honors the choice.
+//! Settings creates and explicitly starts a storage relocation through
+//! [`crate::storage_relocation`]. Offline preparation copies the whole current
+//! dataset without changing its generation, writes this configuration in the
+//! staged root, and commits the fixed locator only after verification. This
+//! file does not independently switch a running dataset or request a reset.
 //!
-//! Flow for a changed work root:
-//!   1. `POST /api/system/work-dir` writes a bound one-shot reset request.
-//!   2. Frontend relaunches the desktop shell.
-//!   3. Locked pre-boot reset preparation creates a fresh generation and calls
-//!      [`set_work_dir`] only after the target is accepted.
-//!   4. Later boots call [`checked_persisted_work_dir`] and reuse that path.
+//! Recovery of an already-published reset may still call [`set_work_dir`]. New
+//! directory changes use relocation rather than minting an empty generation.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
