@@ -58,6 +58,26 @@ docs or examples.
 Every `.html` / `.htm` file uses the ordinary `html` content type and HTML
 viewer; filenames do not create special preview branches.
 
+## Office previews
+
+PPT, Word, and Excel share `OfficeArtifactViewer` and the `officePreview` request API.
+The backend caches read-only HTML by document content and managed engine version.
+The renderer does not install global tools, launch port servers, or store binary
+Office content or generated HTML in React state or localStorage.
+
+Each request starts with a UUIDv7. Only its own `queued` / `rendering` request is
+polled. Leaving immediately cancels by request ID, including before start replies.
+HTML runs in an `allow-scripts` sandbox. First-screen messages must match the iframe
+source, opaque origin, request ID, capability, and nonce. HTTP ready and iframe load
+alone do not establish a displayed preview.
+
+Existing file events and active-tab metadata polling advance `fileRevision` to
+reconcile cached versions. Updates retain the painted iframe and its lease until
+the next frame confirms first-screen rendering, then restore scroll position and
+release the prior lease. Failed updates retain the previous version. Retry appears
+only for recoverable errors. Auto-open coalesces creation/write events; the backend
+verifies document stability and completeness.
+
 ## Persistence
 
 `PreviewProvider` persists only lightweight text tabs:

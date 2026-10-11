@@ -27,7 +27,7 @@ exact requirements:
 | Tool | Minimum | Why | Notes |
 | --- | --- | --- | --- |
 | **Rust** | stable, edition 2024 | Compile the backend (and the Tauri shell, for desktop). | Install via [`rustup`](https://rustup.rs/). The workspace pins `edition = "2024"` and `resolver = "3"`. |
-| **Bun** | **≥ 1.3.13** | Frontend package manager + build (and a hard runtime dependency of the agent engine). | `1.1.38` has a stdin bug — do not use it. |
+| **Bun** | **≥ 1.3.13** | Frontend package manager and build runner; application runtime tools are supplied separately through managed preparation. | `1.1.38` has a stdin bug — do not use it. |
 | **Tauri CLI** | v2 | Build the desktop shell. | Pulled in as a `devDependency`; no global install needed. |
 | **Git** | any recent | Clone, plus skill discovery and some built-in tools. | |
 | **C/C++ build tools** | platform-specific | `rusqlite` (bundled), `aws-lc-rs`, `libgit2-sys`. | Windows: MSVC + WebView2 runtime. macOS: Xcode CLT. Linux: `build-essential cmake clang pkg-config perl`. |
@@ -179,7 +179,7 @@ environment variables:
 | --- | --- | --- | --- |
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only when you intend LAN/VPN/public access; pre-seed or complete admin setup first. |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | Port for both `/api` and the SPA. |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | _per-user app-data dir, same as the [desktop default](#where-data-lives-desktop)_ | Backend data dir (db / logs / bun cache / agent state). The env value is taken literally (no `/Nomi` suffix). Use an absolute path in production. |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | _per-user app-data dir, same as the [desktop default](#where-data-lives-desktop)_ | Backend data dir (db / logs / runtime cache / agent state). The env value is taken literally (no `/Nomi` suffix). Use an absolute path in production. |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | SPA static directory. **Set this explicitly when running outside the repo root.** |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | Username for pre-seeded admin (only honoured before the admin exists). |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | _(none — interactive first-run setup)_ | Pre-seed the admin password and skip interactive first-run. |

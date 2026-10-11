@@ -60,7 +60,7 @@ This document is the map. The sibling documents drill into the parts:
                           ├─▶ SQLite (sqlx)          see data-and-storage.md
                           ├─▶ MCP stdio bridges      see communication.md
                           ├─▶ PTY terminal sessions  see ../guides/terminal.md
-                          └─▶ bundled bun runtime    see data-and-storage.md
+                          └─▶ managed tool suite     see external-tools.md
 ```
 
 ## How a request flows

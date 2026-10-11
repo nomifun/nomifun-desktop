@@ -22,6 +22,7 @@ not retained; use Git history.
 | Create with the infinite canvas, assets, prompts, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
 | Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
+| Understand managed tools and attachment previews | [architecture/external-tools.md](architecture/external-tools.md) |
 | Build or package the project | [contributing/building-and-packaging.md](contributing/building-and-packaging.md) |
 | Look up flags, env vars, or API groups | [reference/](reference/) |
 | Contribute to the project | [../CONTRIBUTING.md](../CONTRIBUTING.md) |

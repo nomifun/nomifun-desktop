@@ -55,6 +55,22 @@ metadata 使用 snake_case（`file_name`、`file_path`），因为 stream / IPC 
 所有 `.html` / `.htm` 文件都走普通 `html` 内容类型和 HTML viewer，不按文件名
 建立特殊预览分支。
 
+## Office 预览
+
+PPT、Word 和 Excel 使用同一个 `OfficeArtifactViewer` 与 `officePreview` 请求接口。
+后端按文件内容版本和受管引擎版本缓存只读 HTML；renderer 不安装全局工具、
+不启动端口服务，也不把二进制文档或 HTML 产物放进 React / localStorage。
+
+每次请求先生成 UUIDv7。`queued` / `rendering` 状态仅轮询自身请求，离开时立即按
+请求 ID 取消，包括 start 尚未返回的情况。HTML 在 `allow-scripts` 沙箱中显示；
+首屏完成消息必须匹配 iframe 来源、opaque origin、请求 ID、capability 和 nonce。
+HTTP ready 或 iframe load 不能单独把界面标为显示成功。
+
+已有文件监听和活动标签 metadata 轮询推进 `fileRevision`，触发缓存版本确认。
+更新期间保留已显示的 iframe 和租约；新首屏确认后恢复滚动位置并释放旧租约。
+生成失败继续显示上一版，只有可恢复错误提供重试。自动打开合并创建 / 写入事件，
+文档包是否稳定、完整由后端验证。
+
 ## 持久化
 
 `PreviewProvider` 只持久化小体积文本 tab：

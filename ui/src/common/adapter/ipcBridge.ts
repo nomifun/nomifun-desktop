@@ -72,7 +72,7 @@ import type {
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
-import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
+import type { OfficePreviewRequest, OfficePreviewStatus, PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
 import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
 import {
   parsePreviewSnapshotId,
@@ -1871,6 +1871,7 @@ export const mcpService = {
     Array<{
       source: string;
       servers: DetectedMcpServer[];
+      detection_error?: string;
     }>,
     Array<{
       agent_type: string;
@@ -2397,34 +2398,16 @@ export const preview = {
 };
 
 // ---------------------------------------------------------------------------
-// Office Previews — routed to /api/*-preview/*
+// Office artifact previews — a request owns a cancellable lease, not a server.
 // ---------------------------------------------------------------------------
 
-export const pptPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/ppt-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/ppt-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('ppt-preview.status'),
-};
-
-export const wordPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/word-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/word-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('word-preview.status'),
-};
-
-export const excelPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/excel-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/excel-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('excel-preview.status'),
+export const officePreview = {
+  start: httpPost<OfficePreviewStatus, OfficePreviewRequest>('/api/office-preview/start', undefined, { timeoutMs: 8_000 }),
+  status: httpGet<OfficePreviewStatus, { request_id: string }>(
+    (p) => `/api/office-preview/status/${encodeURIComponent(p.request_id)}`,
+    { timeoutMs: 5_000 }
+  ),
+  stop: httpPost<void, { request_id: string }>('/api/office-preview/stop', undefined, { timeoutMs: 5_000 }),
 };
 
 // ---------------------------------------------------------------------------

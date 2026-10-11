@@ -86,6 +86,7 @@ pub(crate) mod browser_workspace;
 mod computer_permissions;
 mod health;
 mod javascript_runtime;
+mod runtime_tools;
 mod knowledge_registration;
 mod model_failover;
 mod routes;

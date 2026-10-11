@@ -29,6 +29,8 @@
 # 注:macOS 包用 build:mac,Windows 包用 build:win,且都需在对应系统上构建。
 # ============================================================================
 set -euo pipefail
+# Every distributed Host carries its manifest-approved external components.
+export NOMIFUN_EMBED_OFFICECLI=1
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "❌ build:linux 只能在 Linux 上运行(当前: $(uname -s))。" >&2

@@ -438,7 +438,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     for (uri, body) in [
         ("/api/shell/open-external", r#"{"url":"https://example.com"}"#),
         (
-            "/api/word-preview/start",
+        "/api/office-preview/start",
             r#"{"file_path":"/etc/passwd"}"#,
         ),
     ] {

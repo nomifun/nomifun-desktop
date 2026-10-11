@@ -1985,5 +1985,7 @@
     "hostsLoading": "Loading hosts…",
     "hostsLoadFailed": "Could not load hosts. Try again.",
     "retry": "Retry"
-  }
+  },
+  "mcpAgentUnavailable": "The selected tool is unavailable. Check its installation and retry.",
+  "mcpDetectionFailed": "Could not read the tool configuration. Retry."
 }

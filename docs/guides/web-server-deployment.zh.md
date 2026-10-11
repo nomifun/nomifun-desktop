@@ -50,7 +50,7 @@ cargo run -p nomifun-web      # 会自动使用默认 --dist=../../ui/dist
 |---|---|---|---|
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | 绑定的 IP。`0.0.0.0` 会接收 LAN/VPN/公网流量；大范围暴露前请先预置管理员或完成首次设置。 |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP 端口。提供 API、`/ws` 处的 WebSocket，以及 SPA。 |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户目录 | 后端数据目录 (SQLite 数据库、agent 状态、日志、Bun 缓存)。默认是与桌面应用共享的按用户位置 (`%LOCALAPPDATA%\NomiFun`、`~/Library/Application Support/NomiFun`、`$XDG_DATA_HOME/NomiFun`)。**生产环境请仍显式指定绝对路径。** |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户目录 | 后端数据目录 (SQLite 数据库、agent 状态、日志、受管 runtime 缓存)。默认是与桌面应用共享的按用户位置 (`%LOCALAPPDATA%\NomiFun`、`~/Library/Application Support/NomiFun`、`$XDG_DATA_HOME/NomiFun`)。**生产环境请仍显式指定绝对路径。** |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | 构建好的 SPA 所在目录。**部署时请显式设置。** |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置首个管理员时使用的用户名。一旦管理员存在则被忽略。 |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | 在启动时预置首个管理员密码，跳过交互式设置。一旦管理员存在则被忽略。 |
@@ -108,8 +108,9 @@ digest。镜像会：
 
 1. 用 Bun 构建 SPA。
 2. 从 workspace 编译 `nomifun-web`。
-3. 组装一个精简的 `debian:trixie-slim` 运行时，包含 Bun、带 npm/npx
-   的 Node.js 22、带 PyYAML 的 Python 3、Git 和 ripgrep。
+3. 组装精简的 `debian:trixie-slim` 运行时，包含受管执行组件、供用户命令使用的
+   清单固定 Node/npm 镜像、带 PyYAML 的 Python 3、Git 和 ripgrep。Bun 构建镜像
+   与 Node 镜像的版本／digest 均来自组件清单。
 
 它暴露端口 `8787`，并使用 `/data` 作为数据卷。
 
@@ -154,7 +155,7 @@ docker compose logs -f nomifun
 # 查找：“nomifun-web: embedded backend + SPA on one port”
 ```
 
-compose 文件挂载了一个名为 `nomifun-data:/data` 的具名卷，其中保存着 SQLite DB、日志、Bun 运行时缓存以及每个 agent 的状态。请像对待其他数据库一样仔细备份。
+compose 文件挂载了一个名为 `nomifun-data:/data` 的具名卷，其中保存着 SQLite DB、日志、受管 runtime 缓存以及每个 agent 的状态。请像对待其他数据库一样仔细备份。
 
 ### 在 Compose 中预置管理员
 
@@ -334,14 +335,28 @@ sudo cp target/release/nomifun-web /opt/nomifun/
 sudo cp -r ui/dist/. /opt/nomifun/web/
 ```
 
-### Bun 必须在系统 `PATH` 上
+### 受管执行组件
 
-Agent 引擎需要 **`bun ≥ 1.3.13`** 作为运行时依赖。由于服务以一个 `nologin` 系统账户运行，安装在某个用户 `~/.bun/bin/` 下对它来说是不可见的。请二选一：
+Release 构建内嵌 OfficeCLI。Node 在后端启动前受管下载固定版本并验证摘要，
+Bun 按功能需要准备；已准备制品在 `<data_dir>/runtime` 离线复用，使用经验证的绝对路径。服务账户需要数据目录写权限，
+以及 runtime 缓存的读取与执行权限；无需另装系统级产品组件。
 
-- **系统级安装**：`curl -fsSL https://bun.sh/install | bash`，然后 `sudo install ~/.bun/bin/bun /usr/local/bin/bun`。
-- **嵌入二进制**：使用 `NOMIFUN_EMBED_BUN=1 cargo build --release -p nomifun-web` 构建。Bun 会被打包进二进制中，并在首次运行时自解压到数据目录。
+诊断子命令属于 `nomicore`，不属于 WebUI 宿主 CLI。若部署可选诊断程序，
+先构建并复制：
 
-验证：`sudo -u nomifun -s -- which bun` 必须返回一个路径。否则首次 agent 派生会以一个晦涩的错误失败。
+```bash
+cargo build --release -p nomifun-app --bin nomicore
+sudo cp target/release/nomicore /opt/nomifun/
+```
+
+```bash
+sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
+```
+
+在服务数据目录已创建后运行。`--verify` 可能下载 Node/Bun、解压并执行私有能力探测；不带
+该标记的 `tool-doctor` 是只读清单。源码 debug 构建可使用
+`NOMIFUN_EMBED_OFFICECLI=1` 或显式、经验证的绝对开发路径。首次 Node
+准备需要服务账户能访问网络；首次离线部署前先完成准备。详见[外部工具](../architecture/external-tools.zh.md)。
 
 ### 安装 unit
 
@@ -391,8 +406,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 | 依赖 | 是否必需 | 说明 |
 |---|---|---|
 | `glibc` + `ca-certificates` | 是 | sqlite 是静态链接的，TLS 使用 rustls —— **不需要 openssl，不需要 libsqlite**。 |
-| `bun` ≥ 1.3.13 | **是** | Agent 执行运行时。1.1.38 有 stdin bug；不要使用。Docker 镜像里已包含。 |
-| Node.js 22 + `npm` / `npx` | 推荐 | 许多 MCP stdio 服务器以及 OfficeCLI 自动安装链路会使用。Docker 镜像里已包含。 |
+| Bun、真实 Node、OfficeCLI | 随 release 交付 | 固定版本与制品由组件清单管理，按需解压到受管缓存；不依赖环境中的同名工具。 |
+| `npm` / `npx` 等用户工具 | 按配置需要 | 用户配置的 MCP stdio 命令使用；Docker 的独立 Node/npm 镜像来源固定在组件清单中。Office 预览不安装全局 npm 包。 |
 | Python 3 + PyYAML | 推荐 | 支持 Agent 的 Python 脚本模式和随附的 Python 内置技能。Docker 镜像里已包含。 |
 | `git` | 推荐 | 技能发现和一些内置工具会使用。 |
 | `ripgrep` (`rg`) | 推荐 | 代码搜索后端。缺失时回退到 `grep`。 |
@@ -414,7 +429,7 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 
 **回复/任务状态只有刷新页面后才更新 (WebUI 一直显示"执行中")。** `/ws` WebSocket 握手被拒绝了 —— 在服务端日志中查找 `rejected websocket upgrade` (WARN，包含具体的 `origin`/`host`/`forwarded_host` 值) 或 `GET /ws` → `403`。几乎总是因为反向代理改写了 `Host`：参见[其他反向代理：必须保留原始 Host](#其他反向代理必须保留原始-host)。
 
-**在 systemd 下 agent 命令失败并报 `bun: command not found`。** 请系统级安装 bun (参见上面的 bun-on-PATH 一节) 或使用 `NOMIFUN_EMBED_BUN=1` 重新构建。
+**受管执行组件不可用。** 以服务用户运行 `tool-doctor --verify`，检查所用二进制是否为完整 release，以及数据目录的读写和执行权限。参见[受管执行组件](#受管执行组件)。
 
 **机器人始终连不上 (固件的 OTA 检查成功，但看不到会话)。** 服务端没有发布出可达地址，于是 OTA 响应里的 websocket URL 是空的。先看 `/api/robots/endpoints`；Docker 下请把 `NOMIFUN_ROBOT_ADVERTISE` 设为**宿主机**的局域网 IP —— 参见[局域网机器人 (ESP32)](#局域网机器人-esp32)。
 

@@ -249,19 +249,17 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 
 伙伴绑定的知识库不在 `companion/` 域内：绑定关系存主库 `knowledge_bindings('companion', companion_id)`，知识库内容在知识库自己的托管目录（URL 源知识库抓取的 markdown 快照存于其 `snapshots/` 子目录）。
 
-## 内置 bun 运行时
+## 受管执行组件
 
-NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进程不需要系统级 Node.js 安装：
+Release 二进制仅内嵌 OfficeCLI；Node/Bun 按清单受管下载，已准备批准制品可离线复用。
+`nomifun_runtime::init(&data_dir)` 把缓存根锚定到 `<data_dir>/runtime`；
+`resolve_tool` 统一下载、本地解压与能力准入，消费者使用返回的绝对路径，
+不猜测缓存目录名称。Bun 同步发现只读已准备缓存，不改系统 PATH，也不冒充 Node；进程树仍由
+`nomi-process-runtime` 持有并回收。
 
-| 步骤 | 发生了什么 |
-| --- | --- |
-| 编译期 | 目标 OS/arch 的 bun 二进制经过 **zstd 压缩** 并通过 `include_dir!` 内嵌进 `nomifun-runtime`。 |
-| 首次运行 | `nomifun_runtime::init(&data_dir)` 把二进制解压到 **`<data_dir>/runtime/`** 子树（详见下文运行时缓存说明）。 |
-| 启动 | `enhance_process_path()` 把 bun 的 bin 目录前置到进程 `PATH`，**且早于任何 tokio 线程被构建**（顺序在两个宿主的 `main.rs` 中都得到强制）。 |
-| 派生 | `nomi_process_runtime::ChildProcessBuilder` 继承启动期合并后的 `PATH`，使 `npx`、`bun` 与其他 JS 工具能正确解析。 |
-| 清理 | `nomi_process_runtime::ProcessSupervisor` 或 `kill_process_tree` 统一持有并回收 Agent / MCP 子进程树。 |
-
-运行时缓存锚定在后端的 `data_dir` 上：[`nomifun_runtime::init(&data_dir)`](../../crates/backend/nomifun-runtime/src/cache.rs) 把 `<data_dir>/runtime` 记为缓存根，因此在桌面上 bun 二进制会解压到 `<data_dir>/runtime/bun-<version>-<sha12>/` —— 即 Windows 上默认的 `%LOCALAPPDATA%\NomiFun\runtime\bun-…\`（macOS/Linux 为对应的按用户 app-data 位置），或设置了 env var 时的 `$NOMIFUN_DATA_DIR/runtime/bun-…/`。当 `init` 未被调用时（`mcp-*` 子命令、单元测试、`build.rs`），缓存通过 `dirs::cache_dir()` 回退到平台缓存目录：Windows 上的 `%LOCALAPPDATA%\nomifun\runtime\`、macOS 上的 `~/Library/Caches/nomifun/runtime/`、Linux 上的 `$XDG_CACHE_HOME/nomifun/runtime/`（或 `~/.cache/nomifun/runtime/`）。
+未初始化数据根的独立库消费者通过 `dirs::cache_dir()` 使用平台缓存目录。
+runtime 二进制与 Office HTML 产物均为可丢弃缓存。供应、身份、开发覆盖、
+第三方说明、诊断和有界预览缓存生命周期详见[外部工具](external-tools.zh.md)。
 
 ## 日志
 
@@ -276,8 +274,8 @@ NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进
 ```
 0. bootstrap::prepare_startup_storage_root
                                     读取固定位置指针；完成已确认的离线迁移
-1. nomifun-runtime::init           将 bun 解压至当前数据根的 runtime 缓存
-2. enhance_process_path             prepend cache bin dir to PATH
+1. nomifun-runtime::init           将受管 runtime 缓存绑定到当前数据根
+2. enhance_process_path             发现用户命令路径
 3. bootstrap::init_environment      解析 work_dir，获取数据根与工作根排他锁，
                                     随后创建 log_dir 并初始化 tracing
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
@@ -310,7 +308,7 @@ NomiFun 自带其 `bun` 运行时（1.3.13），使 MCP 服务器与工具子进
   用户项目，绝不会被隐式复制。
 - **伙伴数据** —— bundle 递归纳入 `<data_dir>/companion/`（整机一份的记忆数据库 +
   每宠配置，见[伙伴指南](../guides/companions.zh.md)）。
-- **bun 运行时缓存** —— 可丢弃；下次启动时会重新解压。
+- **受管 runtime 与 Office 预览缓存** —— 可丢弃；下次需要时重新解压／生成。
 
 `nomicore` 提供离线 CLI 命令：
 
@@ -325,7 +323,7 @@ nomicore restore --bundle <备份目录> --destination-data-dir <新数据目录
 v3 数据集；不会迁移、恢复或 quarantine 历史数据集，历史数据源直接失败。
 完整 bundle 包含 WAL 安全的数据库快照、
 存在时的持久加密密钥、伙伴文件域和托管会话工作区。日志、`server.lock`、
-数据库 WAL/SHM sidecar、runtime/Bun 缓存、浏览器 profile、进程/会话临时
+数据库 WAL/SHM sidecar、runtime/受管 runtime 缓存、浏览器 profile、进程/会话临时
 文件和自定义外部工作区均排除。
 
 清单为每个 payload 文件记录可移植相对路径、字节数和 SHA-256，并以目录条目

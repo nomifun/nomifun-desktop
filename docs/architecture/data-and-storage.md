@@ -404,31 +404,21 @@ bindings are stored in the main database as
 knowledge bases' own managed directories (URL-sourced bases keep their
 fetched markdown snapshots in a `snapshots/` subdirectory there).
 
-## Bundled bun runtime
+## Managed execution components
 
-NomiFun ships its own `bun` runtime (1.3.13) so MCP servers and tool
-subprocesses do not require a system Node.js install:
+Release binaries contain OfficeCLI only. Node/Bun use fixed-version, hash-verified
+managed downloads and reuse prepared approved artifacts offline. `nomifun_runtime::init(&data_dir)` anchors its cache at
+`<data_dir>/runtime`; downloads, local extraction, and admission all use
+`resolve_tool`. Consumers read the verified path instead of guessing cache names. Consumers use returned
+absolute paths and capability admission; synchronous Bun discovery is cache-only
+and never impersonates Node or modifies system PATH. Process trees remain owned by
+`nomi-process-runtime`.
 
-| Step | What happens |
-| --- | --- |
-| Build time | The bun binary for the target OS/arch is **zstd-compressed** and embedded into `nomifun-runtime` via `include_dir!`. |
-| First run | `nomifun_runtime::init(&data_dir)` extracts the binary into a **`<data_dir>/runtime/`** subtree (see the runtime-cache details below). |
-| Boot | `enhance_process_path()` prepends the bun bin dir to the process `PATH` **before any tokio thread is built** (the order is enforced in both host `main.rs` files). |
-| Spawn | `nomi_process_runtime::ChildProcessBuilder` inherits the boot-time merged `PATH`, so `npx`, `bun`, and other JS tools resolve correctly. |
-| Cleanup | `nomi_process_runtime::ProcessSupervisor` or `kill_process_tree` owns and reaps Agent / MCP child-process trees. |
-
-The runtime cache is anchored to the backend's `data_dir`:
-[`nomifun_runtime::init(&data_dir)`](../../crates/backend/nomifun-runtime/src/cache.rs)
-records `<data_dir>/runtime` as the cache root, so on the desktop the bun
-binary extracts under `<data_dir>/runtime/bun-<version>-<sha12>/` —
-i.e. `%LOCALAPPDATA%\NomiFun\runtime\bun-…\` by default on Windows
-(the per-user app-data equivalents on macOS/Linux), or
-`$NOMIFUN_DATA_DIR/runtime/bun-…/` when the env var is set. When
-`init` has not been called (the `mcp-*` subcommands, unit tests, `build.rs`)
-the cache falls back to the platform cache dir via `dirs::cache_dir()`:
-`%LOCALAPPDATA%\nomifun\runtime\` on Windows, `~/Library/Caches/nomifun/runtime/`
-on macOS, `$XDG_CACHE_HOME/nomifun/runtime/` (or `~/.cache/nomifun/runtime/`)
-on Linux.
+Uninitialized library consumers use the platform cache root through
+`dirs::cache_dir()`. Both runtime binaries and Office HTML artifacts are
+disposable cache data. See [External tools](external-tools.md) for supply,
+identity, developer overrides, notices, diagnostics, and the bounded preview
+cache lifecycle.
 
 ## Logs
 
@@ -448,8 +438,8 @@ On a brand-new install the boot sequence is:
 ```
 0. bootstrap::prepare_startup_storage_root
                                     resolve the fixed locator; finish any armed offline relocation
-1. nomifun-runtime::init           extract bun into the selected data root's runtime cache
-2. enhance_process_path             prepend cache bin dir to PATH
+1. nomifun-runtime::init           anchor managed runtime cache under the selected data root
+2. enhance_process_path             discover user command paths
 3. bootstrap::init_environment      resolve work_dir, take exclusive data/work-root locks,
                                     then create log_dir and initialize tracing
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
@@ -492,7 +482,7 @@ non-loopback bind address.
 - **Companion data** — the bundle recursively includes
   `<data_dir>/companion/` (the install-wide memory database + per-companion
   profiles; see the [Companions guide](../guides/companions.md)).
-- **Bun runtime cache** — disposable; will be re-extracted on next boot.
+- **managed runtime cache** — disposable; will be re-extracted on next boot.
 
 Offline CLI commands are provided by `nomicore`:
 
@@ -510,7 +500,7 @@ invalid or historical source fails closed. A complete bundle contains the
 WAL-safe database snapshot,
 the persistent encryption key when present, the companion file domain, and
 managed conversation workspaces. Logs, `server.lock`, database WAL/SHM
-sidecars, runtime/Bun caches, browser profiles, process/session scratch data,
+sidecars, runtime/managed runtime caches, browser profiles, process/session scratch data,
 and custom external workspaces are excluded.
 
 Every payload file has a portable relative path, byte size, and SHA-256 digest

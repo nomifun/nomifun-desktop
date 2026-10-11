@@ -16,8 +16,9 @@ export function previewFileKey(path?: string): string {
   return value.replace(/^[a-z]:/i, (drive) => drive.toUpperCase());
 }
 
+const office = (tab: PreviewTab) => ['ppt', 'word', 'excel'].includes(tab.content_type);
 const readable = (tab: PreviewTab) => !tab.metadata?.knowledge_resource
-  && ['markdown', 'html', 'code', 'image'].includes(tab.content_type);
+  && (office(tab) || ['markdown', 'html', 'code', 'image'].includes(tab.content_type));
 
 export function usePreviewFileRefresh({ tabs, setTabs, saving, mtimes, closeTab, io }: {
   tabs: PreviewTab[];
@@ -76,6 +77,16 @@ export function usePreviewFileRefresh({ tabs, setTabs, saving, mtimes, closeTab,
         if (previous === metadata.lastModified) return;
         nextMtime = metadata.lastModified;
       }
+      // Office content remains outside React state. Its reader requests a cached
+      // artifact for the changed version; the same watcher and metadata poll drive it.
+      if (office(tab)) {
+        setTabs((latest) => latest.map((item) => {
+          if (!accepts(ticket, item)) return item;
+          if (nextMtime !== undefined) mtimes.current.set(path, nextMtime);
+          return { ...item, fileRevision: (item.fileRevision ?? 0) + 1, fileReadError: false, fileRefreshing: false };
+        }));
+        return;
+      }
       setTabs((latest) => latest.map((item) => accepts(ticket, item) ? { ...item, fileRefreshing: true } : item));
       const content = tab.content_type === 'image'
         ? await io.image(path, tab.metadata?.workspace)
@@ -127,7 +138,7 @@ export function usePreviewFileRefresh({ tabs, setTabs, saving, mtimes, closeTab,
           } else { closeTab.current(tab.id); }
           continue;
         }
-        // Office/PDF and managed knowledge previews keep their own readers.
+        // PDF and managed knowledge previews keep their own readers.
         if (!readable(tab) || tab.isDirty || saving.current.has(tab.metadata?.file_path ?? '')) continue;
         const ticket = { tab };
         tickets.current.set(tab.id, ticket);

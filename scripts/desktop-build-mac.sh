@@ -29,6 +29,8 @@
 #     bun run build:win / build:linux。
 # ============================================================================
 set -euo pipefail
+# Every distributed Host carries its manifest-approved external components.
+export NOMIFUN_EMBED_OFFICECLI=1
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "❌ build:mac 只能在 macOS 上运行(当前: $(uname -s))。" >&2

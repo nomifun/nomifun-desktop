@@ -23,7 +23,7 @@ docker compose up -d --build
 # 默认发布 8787；首次访问会创建管理员。公开暴露前建议预置管理员或先在可信网络完成 setup。
 ```
 
-`restart: unless-stopped` 已让它**开机自启 + 崩溃自拉**——装好就等于"自动开启 webui"。数据(SQLite、日志、bun 运行时缓存、agent 状态)落在命名卷 `nomifun-data:/data`。
+`restart: unless-stopped` 已让它**开机自启 + 崩溃自拉**——装好就等于"自动开启 webui"。数据(SQLite、日志、受管工具 runtime 缓存、agent 状态)落在命名卷 `nomifun-data:/data`。
 
 查看启动是否就绪:
 
@@ -71,11 +71,24 @@ sudo cp target/release/nomifun-web /opt/nomifun/
 sudo cp -r ui/dist/.            /opt/nomifun/web/
 ```
 
-> ⚠️ **bun ≥ 1.3.13 必须在「系统」PATH 上**。`nomifun` 是 nologin 账户,装到某人 `~/.bun/bin/` 里它读不到(systemd 服务也不会用你的 `~/.bun`)。可靠做法二选一:
-> - **系统级安装**:`curl -fsSL https://bun.sh/install | bash`,然后 `sudo install ~/.bun/bin/bun /usr/local/bin/bun`(或用包管理器 / `npm i -g bun`);
-> - **编进二进制**(免 PATH 依赖):构建时 `NOMIFUN_EMBED_BUN=1 cargo build --release -p nomifun-web`,bun 会嵌入并在 data 目录自解压(需构建环境能取到 bun)。
->
-> 校验:`sudo -u nomifun -s -- which bun` 必须返回路径,否则 agent 首次 spawn 才暴露失败、错误隐晦。
+Release 构建内嵌 OfficeCLI；Node 在后端启动前受管下载准备，Bun 按功能准备，
+在 `/var/lib/nomifun/runtime` 复用已验证缓存，不依赖服务账户的系统 PATH。首次
+Node 准备需要网络，离线部署须预先完成准备。数据目录由 systemd
+创建后，可显式验证组件（可能下载、解压并执行私有探测，不打开数据库）：
+
+诊断子命令使用可选 `nomicore` 程序，`nomifun-web` 不接受该子命令。先构建并复制：
+
+```bash
+cargo build --release -p nomifun-app --bin nomicore
+sudo cp target/release/nomicore /opt/nomifun/
+```
+
+```bash
+sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
+```
+
+只查看供应清单使用 `tool-doctor`。组件不可用时检查完整 release 和缓存读写／
+执行权限，参见[外部工具契约](../../docs/architecture/external-tools.zh.md)。
 
 ### 3) 安装并开机自启
 
@@ -98,7 +111,7 @@ sudo systemctl status nomifun-web
 |---|---|---|---|
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | 监听地址。`0.0.0.0` 会对 LAN/VPN/公网可达；请先完成管理员设置或预置密码，公网必须放在 TLS 之后 |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | 同时服务 API、`/ws`、SPA 的端口 |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户目录 | 数据目录(db / 日志 / bun 缓存 / agent 状态)。默认是服务用户的按用户目录(Linux 为 `$XDG_DATA_HOME/NomiFun`);生产请显式指定绝对路径 |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户目录 | 数据目录(db / 日志 / runtime 缓存 / agent 状态)。默认是服务用户的按用户目录(Linux 为 `$XDG_DATA_HOME/NomiFun`);生产请显式指定绝对路径 |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | SPA 静态目录。部署时**必须**显式指定 |
 | — | `NOMIFUN_HTTPS` | `false` | 设 `true` 时会话/CSRF cookie 带 `Secure`(仅在 TLS 后用) |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置管理员用户名(仅预置时用) |
@@ -119,8 +132,8 @@ nomifun-web --host 127.0.0.1 --port 8787 \
 | 依赖 | 必需性 | 说明 |
 |---|---|---|
 | glibc + ca-certificates | 必需 | sqlite 静态链接、TLS 用 rustls,**无需 openssl / libsqlite** |
-| `bun` ≥ 1.3.13 | **必需** | agent 执行;1.1.38 有 stdin bug。Docker 镜像里已含 |
-| `node` / `npm` / `npx` | 推荐 | 用户启用的 MCP stdio server(`npx -y …`) |
+| Bun、真实 Node、OfficeCLI | 随 release 交付 | 固定版本和制品由组件清单管理，使用受管绝对路径 |
+| `npm` / `npx` 等用户工具 | 按配置需要 | 用户配置的 MCP stdio 命令；不参与 Office 预览自动安装 |
 | `git` | 推荐 | skill 发现、部分内置工具 |
 | `ripgrep`(`rg`) | 推荐 | 代码搜索后端(缺则退化到 `grep`) |
 | DISPLAY / X11 / WebView | ❌ 不需要 | `nomifun-web` 零 GUI 依赖,纯 headless |

@@ -4,7 +4,7 @@
 //! is spawned** (including the tokio runtime). It rewrites
 //! `std::env::var("PATH")` to include:
 //!
-//! 1. The bundled bun directory (highest priority).
+//! 1. An already-admitted managed Bun directory, when available (cache-only).
 //! 2. Platform extra bins (`~/.bun/bin`, `~/.cargo/bin`, homebrew,
 //!    asdf/mise/fnm, env-var-driven roots like `PNPM_HOME`, …).
 //! 3. The current `PATH` (inherited from the launching process).
@@ -38,6 +38,7 @@ pub unsafe fn enhance_process_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let login = login_shell_path();
     let extras = platform_extra_bins();
+    // Cache-only: PATH discovery must never trigger a first-start download.
     let bun_dir = crate::bun_bin_dir();
 
     let merged = merge_process_path(bun_dir.as_deref(), &extras, &current, login.as_deref());

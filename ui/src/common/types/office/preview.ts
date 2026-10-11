@@ -37,8 +37,25 @@ export interface PreviewSnapshotInfo {
   file_path?: string;
 }
 
-export interface PreviewUrlResponse {
-  url: string;
+export type OfficePreviewDocType = 'ppt' | 'word' | 'excel';
+
+export interface OfficePreviewError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface OfficePreviewRequest {
+  request_id: string;
+  file_path: string;
+  workspace?: string;
+  doc_type: OfficePreviewDocType;
+}
+
+export interface OfficePreviewStatus {
+  request_id: string;
+  state: 'queued' | 'rendering' | 'ready' | 'error';
+  url?: string;
   capability?: string;
-  error?: string;
+  error?: OfficePreviewError;
 }

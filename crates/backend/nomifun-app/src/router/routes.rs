@@ -31,7 +31,7 @@ use nomifun_cron::cron_routes;
 use nomifun_file::file_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
-use nomifun_office::{office_proxy_routes, office_routes};
+use nomifun_office::{office_artifact_routes, office_routes};
 use nomifun_skill_library::skill_routes;
 use nomifun_agent_execution::{agent_execution_routes, agent_execution_template_routes};
 use nomifun_realtime::{UserEventEnvelope, WebSocketManager, WsHandlerState, ws_upgrade_handler};
@@ -1017,6 +1017,14 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
+    // Fixed host components are instance-owned; GET observes only, while POST
+    // starts the supplier's single shared preparation without waiting for I/O.
+    let runtime_tools_authenticated = protect_instance_owner(
+        super::runtime_tools::runtime_tool_routes(),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Shell + STT routes protected by auth middleware
     let shell_authenticated = protect_instance_owner(
         shell_routes(states.shell),
@@ -1098,10 +1106,9 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Office iframe GETs cannot carry the app auth header. Authenticated start
-    // mints a high-entropy, in-memory session capability in the URL path; these
-    // routes accept only that revocable capability and never a caller-owned port.
-    let office_proxy = office_proxy_routes(states.office);
+    // Immutable Office artifacts use an owner-minted revocable capability:
+    // iframe requests cannot carry the application's authentication header.
+    let office_artifacts = office_artifact_routes(states.office);
     let public_assets = asset_routes();
     // Figure-image serving — exempt from auth: `<img>`/`new Image()` can't carry
     // the local-trust header, so the desktop webview would 403 every figure
@@ -1175,6 +1182,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(agent_execution_template_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
+        .merge(runtime_tools_authenticated)
         .merge(shell_authenticated);
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.
@@ -1204,7 +1212,7 @@ fn create_nomi_core_router_with_all_state(
     };
     let router = router
     .merge(ws_routes)
-    .merge(office_proxy)
+        .merge(office_artifacts)
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public);

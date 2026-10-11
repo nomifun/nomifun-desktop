@@ -13,7 +13,7 @@ Tauri 桌面壳。如果只是安装或部署，请先看
 | 工具 | 最低要求 | 用途 |
 | --- | --- | --- |
 | Rust | stable，edition 2024 | Workspace 使用 resolver `3` 和 edition `2024`。 |
-| Bun | >= 1.3.13 | 前端包管理、Vite runner，也被 agent 运行时使用。 |
+| Bun | >= 1.3.13 | 前端包管理与 Vite runner；应用为明确需要 Bun 的功能供应独立的批准组件。 |
 | Tauri CLI v2 | 来自 `devDependencies` | 通过 `bun run dev` / `bun run build` 调用，无需全局安装。 |
 | Git | 较新版本 | 开发流程和部分内置工具需要。 |
 | CMake | >= 3.16 | `opusic-sys` 在干净构建时现场编译内置的 libopus（约 25 秒）。 |
@@ -146,7 +146,7 @@ cargo run -p nomifun-app --bin nomicore -- doctor
 - macOS：`~/Library/Application Support/NomiFun`
 - Linux：`$XDG_DATA_HOME/NomiFun` 或 `~/.local/share/NomiFun`
 
-数据目录包含 SQLite、日志、Bun runtime cache、extension 数据和 agent 状态。
+数据目录包含 SQLite、日志、managed runtime cache、extension 数据和 agent 状态。
 后端启动时会先拿 `{data_dir}/server.lock` 独占锁，避免两个活跃后端同时写同一
 目录。
 

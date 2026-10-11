@@ -2090,15 +2090,26 @@ fn explicit_nfagent_path() -> Result<Option<PathBuf>> {
     let Some(raw) = std::env::var_os("NOMIFUN_NFAGENT_PATH") else {
         return Ok(None);
     };
-    Ok(Some(validate_explicit_nfagent_path(&PathBuf::from(raw))?))
+    let spec = configured_nfagent_download_spec()?;
+    Ok(Some(validate_explicit_nfagent_path(
+        &PathBuf::from(raw),
+        &spec,
+    )?))
 }
 
-fn validate_explicit_nfagent_path(path: &Path) -> Result<PathBuf> {
+fn validate_explicit_nfagent_path(path: &Path, spec: &NfagentDownloadSpec) -> Result<PathBuf> {
     if !path.is_absolute() || !path.is_file() {
         anyhow::bail!("NOMIFUN_NFAGENT_PATH 必须是存在的绝对路径");
     }
-    ensure_executable(path)?;
-    Ok(path.to_path_buf())
+    let canonical = dunce::canonicalize(path).context("canonicalize explicit nfagent path")?;
+    if !is_sha256_hex(&spec.sha256) || !verify_file_sha256(&canonical, &spec.sha256)? {
+        anyhow::bail!(
+            "NOMIFUN_NFAGENT_PATH 与当前平台批准的 nfagent {} SHA-256 不匹配",
+            spec.version
+        );
+    }
+    ensure_executable(&canonical)?;
+    Ok(canonical)
 }
 
 fn configured_nfagent_download_spec() -> Result<NfagentDownloadSpec> {
@@ -2725,18 +2736,43 @@ mod tests {
     }
 
     #[test]
-    fn explicit_nfagent_override_requires_an_existing_absolute_file() {
-        let root = tempfile::tempdir().unwrap();
-        let explicit = root.path().join("nfagent.exe");
-        fs::write(&explicit, b"explicit").unwrap();
-        assert_eq!(
-            validate_explicit_nfagent_path(&explicit).unwrap(),
-            explicit
+    fn explicit_nfagent_override_requires_approved_bytes_and_canonical_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let explicit = tmp.path().join("nfagent.exe");
+        let bytes = b"approved fixture executable";
+        fs::write(&explicit, bytes).unwrap();
+        let spec = test_download_spec(
+            "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-windows-amd64.exe",
+            bytes,
         );
+        assert_eq!(
+            validate_explicit_nfagent_path(&explicit, &spec).unwrap(),
+            dunce::canonicalize(&explicit).unwrap()
+        );
+        assert!(validate_explicit_nfagent_path(&tmp.path().join("missing.exe"), &spec).is_err());
+        assert!(validate_explicit_nfagent_path(Path::new("nfagent.exe"), &spec).is_err());
+        fs::write(&explicit, b"unrelated same-name executable").unwrap();
+        let error = validate_explicit_nfagent_path(&explicit, &spec).unwrap_err();
+        assert!(error.to_string().contains("SHA-256"));
+    }
 
-        let missing = root.path().join("missing.exe");
-        assert!(validate_explicit_nfagent_path(&missing).is_err());
-        assert!(validate_explicit_nfagent_path(Path::new("nfagent.exe")).is_err());
+    #[cfg(unix)]
+    #[test]
+    fn explicit_nfagent_symlink_preserves_only_the_approved_canonical_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"approved fixture executable";
+        let executable = tmp.path().join("approved-agent");
+        fs::write(&executable, bytes).unwrap();
+        let alias = tmp.path().join("nfagent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        let spec = test_download_spec(
+            "https://github.com/nomifun/nomifun-net-infra/releases/download/nfagent-v0.1.0/nfagent-windows-amd64.exe",
+            bytes,
+        );
+        assert_eq!(
+            validate_explicit_nfagent_path(&alias, &spec).unwrap(),
+            dunce::canonicalize(executable).unwrap()
+        );
     }
 
     #[tokio::test]

@@ -10,7 +10,6 @@ fn user_owned_producers_cannot_depend_on_instance_event_broadcaster() {
         ("cron/events", include_str!("../../nomifun-cron/src/events.rs")),
         ("file/service", include_str!("../../nomifun-file/src/service.rs")),
         ("file/watch_service", include_str!("../../nomifun-file/src/watch_service.rs")),
-        ("office/watch_manager", include_str!("../../nomifun-office/src/watch_manager.rs")),
         ("ssh/events", include_str!("../../nomifun-ssh/src/events.rs")),
         ("terminal/events", include_str!("../../nomifun-terminal/src/events.rs")),
     ];

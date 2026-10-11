@@ -134,11 +134,11 @@ covered in [`../architecture/backend-crates.md`](../architecture/backend-crates.
 | [`nomifun-db`](../../crates/backend/nomifun-db) | SQLite layer: `init_database`, embedded migrations, models, repository traits + sqlx implementations. |
 | [`nomifun-api-types`](../../crates/backend/nomifun-api-types) | Every HTTP request/response DTO and the `WebSocketMessage` envelope; the renderer's TS types mirror this crate. |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime) | WebSocket connection manager, broadcaster, token-validated upgrade handler, message router. |
-| [`nomifun-runtime`](../../crates/backend/nomifun-runtime) | Embeds bun (zstd-compressed) at build time, extracts to OS cache on first run; `enhance_process_path` merge for child processes. |
+| [`nomifun-runtime`](../../crates/backend/nomifun-runtime) | Manifest-approved Bun, genuine Node, and OfficeCLI supply with on-demand extraction and identity/capability admission; user CLI discovery remains separate. |
 | [`nomifun-auth`](../../crates/backend/nomifun-auth) | JWT auth, bcrypt, login / refresh / setup routes, CSRF double-submit, security headers, rate limiting, `CurrentUser` extractor. |
 | [`nomifun-system`](../../crates/backend/nomifun-system) | System services: provider management, model fetching, settings, version checks, Bedrock probe. |
 | [`nomifun-file`](../../crates/backend/nomifun-file) | Filesystem operations: read/write, path safety, file watching, snapshots, zip. |
-| [`nomifun-office`](../../crates/backend/nomifun-office) | Office-document preview, format conversion, proxy, snapshot management. |
+| [`nomifun-office`](../../crates/backend/nomifun-office) | Bounded Office HTML artifacts, cancellable owner-scoped leases, content-version cache, and preview snapshots. |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell) | OS shell integration: opener, tool detection, speech-to-text. |
 | [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent) | **The single bridge to `crates/agent/`.** Built-in `nomi` Agent factory, runtime registry, and runtime handles; re-exports `nomi_config` / `nomi_types`. |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp) | MCP server config, multi-agent sync adapters, OAuth, connection testing. |

@@ -1,14 +1,9 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use crate::proxy::ProxyService;
-use crate::snapshot::SnapshotService;
-use crate::watch_manager::OfficecliWatchManager;
+use crate::{OfficePreviewService, SnapshotService};
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone)]
 pub struct OfficeRouterState {
-    pub watch_manager: Arc<OfficecliWatchManager>,
+    pub preview_service: Arc<OfficePreviewService>,
     pub snapshot_service: Arc<SnapshotService>,
-    pub proxy_service: Arc<ProxyService>,
     pub allowed_roots: Vec<PathBuf>,
 }

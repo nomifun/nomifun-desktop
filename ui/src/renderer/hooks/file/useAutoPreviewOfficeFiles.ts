@@ -11,7 +11,8 @@ import { useAutoPreviewOfficeFilesEnabled } from '@/renderer/hooks/system/useAut
 import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
 import { useCallback, useEffect, useRef } from 'react';
 
-const OFFICE_OPEN_DELAY_MS = 1000;
+// Coalesce creation/write bursts; backend validates the completed Office package.
+const OFFICE_EVENT_DEBOUNCE_MS = 500;
 const OFFICE_CONTENT_TYPES = new Set(['ppt', 'word', 'excel']);
 
 const normalizeWatchPath = (value: string): string => {
@@ -54,7 +55,8 @@ export const useAutoPreviewOfficeFiles = (
     (file_path: string) => {
       if (!workspace) return;
       const normalizedFilePath = normalizeWatchPath(file_path);
-      if (openTimersRef.current.has(normalizedFilePath)) return;
+      const previousTimer = openTimersRef.current.get(normalizedFilePath);
+      if (previousTimer) clearTimeout(previousTimer);
 
       const { contentType } = getFileTypeInfo(file_path);
       if (!OFFICE_CONTENT_TYPES.has(contentType)) return;
@@ -66,7 +68,7 @@ export const useAutoPreviewOfficeFiles = (
         if (!findPreviewTab(contentType, '', { file_path, file_name })) {
           openPreview('', contentType, { file_path, file_name, title: file_name, workspace, editable: false });
         }
-      }, OFFICE_OPEN_DELAY_MS);
+      }, OFFICE_EVENT_DEBOUNCE_MS);
 
       openTimersRef.current.set(normalizedFilePath, timer);
     },
@@ -87,12 +89,13 @@ export const useAutoPreviewOfficeFiles = (
         await ipcBridge.workspaceOfficeWatch.start.invoke({ workspace });
         const currentFiles = await ipcBridge.fs.listWorkspaceFiles.invoke({ root: workspace });
         if (cancelled) return;
-        knownOfficeFilesRef.current = new Set(
-          currentFiles
+        knownOfficeFilesRef.current = new Set([
+          ...knownOfficeFilesRef.current,
+          ...currentFiles
             .map((file) => file.fullPath)
             .map((file_path) => normalizeWatchPath(file_path))
-            .filter((file_path) => OFFICE_CONTENT_TYPES.has(getFileTypeInfo(file_path).contentType))
-        );
+            .filter((file_path) => OFFICE_CONTENT_TYPES.has(getFileTypeInfo(file_path).contentType)),
+        ]);
       } catch {
         // Ignore watcher/bootstrap failures; the hook should stay inert rather than noisy.
       }
@@ -115,9 +118,23 @@ export const useAutoPreviewOfficeFiles = (
       }
     });
 
+    const unsubscribeWrites = ipcBridge.fileStream.contentUpdate.on((event) => {
+      if (normalizeWatchPath(event.workspace) !== normalizedWorkspace) return;
+      const key = normalizeWatchPath(event.file_path);
+      if (event.operation === 'delete') {
+        const timer = openTimersRef.current.get(key);
+        if (timer) clearTimeout(timer);
+        openTimersRef.current.delete(key);
+        knownOfficeFilesRef.current.delete(key);
+      } else if (openTimersRef.current.has(key)) {
+        openOfficePreview(event.file_path);
+      }
+    });
+
     return () => {
       cancelled = true;
       unsubscribeFileAdded();
+      unsubscribeWrites();
       clearPendingOpenTimers();
       knownOfficeFilesRef.current.clear();
       void ipcBridge.workspaceOfficeWatch.stop.invoke({ workspace }).catch(() => {});

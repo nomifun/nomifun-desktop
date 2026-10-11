@@ -117,7 +117,7 @@ $ bun run build
 
 ## 数据存储位置
 
-已安装桌面应用将 SQLite 数据库、agent 状态、日志和 Bun 运行时缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun`**，macOS 上是 **`~/Library/Application Support/NomiFun`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `NomiFun-dev`，不会从 stable 数据集导入历史 Agent 状态。
+已安装桌面应用将 SQLite 数据库、agent 状态、日志和 受管 runtime 缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun`**，macOS 上是 **`~/Library/Application Support/NomiFun`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `NomiFun-dev`，不会从 stable 数据集导入历史 Agent 状态。
 
 在启动应用前设置 `NOMIFUN_DATA_DIR=<absolute path>`，该路径**就是**数据目录——所有宿主都按字面值使用，不附加 `/Nomi` 后缀。后端启动时会对数据目录取排他的 `server.lock`；若启动失败 (例如该目录已被另一个实例占用)，桌面外壳会弹出原生错误对话框并退出。
 
@@ -131,7 +131,7 @@ $ bun run build
 ├── logs/                     # nomicore.log
 ├── companion/                # 伙伴 + 记忆数据库（整机一个文件，每行记忆各归其主）
 ├── knowledge/                # 受管理的知识库
-├── runtime/                  # 可再生运行时缓存（Bun、按需下载的 nfagent）
+├── runtime/                  # 受管 Bun／Node／OfficeCLI 与按需 nfagent 缓存
 └── server.lock               # 后端运行期间持有的排他锁
 ```
 
@@ -177,8 +177,8 @@ Developer ID 签名与公证已通过 `bun run build:signed` 和
 **"Failed to bind backend port"。**
 另一个进程占用了 `127.0.0.1` 临时端口。后端会尝试 `pick_free_port()`，失败时回退到 `8799` —— 退出任何其他 NomiFun 实例后再试。
 
-**Agent 命令失败并报 `bun: command not found`。**
-Agent 引擎会派生 Bun 作为子进程来执行工具。请安装 Bun (`curl -fsSL https://bun.sh/install | bash`) 并确保它在系统 `PATH` 上，或者使用 `NOMIFUN_EMBED_BUN=1` 构建桌面包以将其嵌入。
+**受管执行组件不可用。**
+正式桌面包内嵌 OfficeCLI。后端启动前，准备窗口受管下载固定版本的真实 Node，验证摘要并显示阶段、字节进度和可重试错误；Bun 按功能需要准备。批准版本不变时，已准备组件可离线复用。请检查缓存访问／执行权限及组件诊断。Debug 构建可内嵌 OfficeCLI 或使用经验证的显式开发路径。参见[外部工具](../architecture/external-tools.zh.md)。
 
 ## 另请参阅
 

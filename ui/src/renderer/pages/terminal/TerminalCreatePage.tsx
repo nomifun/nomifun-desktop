@@ -10,6 +10,7 @@ import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
+import { ensureManagedBun, formatRuntimePreparation, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
 import { emitter } from '@/renderer/utils/emitter';
 import {
   WorkspaceDirectoryUnavailableError,
@@ -39,6 +40,7 @@ const TerminalCreatePage: React.FC = () => {
   );
   const commandPreset = useRef<TerminalPresetId>('shell');
   const [creating, setCreating] = useState(false);
+  const [preparation, setPreparation] = useState<RuntimeToolSnapshot | null>(null);
   const launchOwner = useRef<{ busy: boolean } | null>(null);
   // Recent custom launch commands (read once on mount; the page unmounts on launch).
   const [recentCommands] = useState<string[]>(() => getRecentLaunchCommands());
@@ -52,6 +54,7 @@ const TerminalCreatePage: React.FC = () => {
   useLayoutEffect(() => {
     launchOwner.current = { busy: false };
     setCreating(false);
+    setPreparation(null);
     const presetCwd = (location.state as { cwd?: string } | null)?.cwd;
     setCwd(typeof presetCwd === 'string' ? presetCwd : '');
     return () => { launchOwner.current = null; };
@@ -98,6 +101,11 @@ const TerminalCreatePage: React.FC = () => {
         : '';
       if (!isCurrent()) return;
       if (launchCwd !== cwd) setCwd(launchCwd);
+      if (!await ensureManagedBun(command, { isCurrent, onProgress: (snapshot) => {
+        if (isCurrent()) setPreparation(snapshot);
+      } })) return;
+      if (!isCurrent()) return;
+      setPreparation(null);
       const session = await ipcBridge.terminal.create.invoke({
         cwd: launchCwd,
         command,
@@ -127,6 +135,7 @@ const TerminalCreatePage: React.FC = () => {
       if (isCurrent()) {
         owner.busy = false;
         setCreating(false);
+        setPreparation(null);
       }
     }
   };
@@ -184,6 +193,7 @@ const TerminalCreatePage: React.FC = () => {
           </div>
         )}
 
+        {preparation && <div role='status' className='mb-12px text-13px text-t-secondary'>{formatRuntimePreparation(preparation, t)}</div>}
         <div className='flex justify-end gap-8px'>
           <Button onClick={() => navigate(-1)}>{t('common.cancel')}</Button>
           <Button type='primary' loading={creating} onClick={handleLaunch}>

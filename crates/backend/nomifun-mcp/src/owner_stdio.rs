@@ -80,8 +80,7 @@ impl StdioTransport {
         deadline: Instant,
     ) -> Result<Self, McpOwnerError> {
         validate_config(command, args, env)?;
-        let command = command.to_owned();
-        let args = args.to_vec();
+        let (command, args) = prepare_managed_stdio_command(command, args, deadline).await?;
         let configured_env = env.clone();
         // Resolution and platform spawn can block. If the waiter is cancelled
         // or times out, the task's result is dropped and ManagedChildProcess
@@ -548,6 +547,31 @@ fn child_environment(configured: &HashMap<String, String>) -> HashMap<OsString, 
     env
 }
 
+async fn prepare_managed_stdio_command(
+    command: &str,
+    args: &[String],
+    deadline: Instant,
+) -> Result<(String, Vec<String>), McpOwnerError> {
+    if nomifun_runtime::managed_command_tool(command).is_none() {
+        return Ok((command.to_owned(), args.to_vec()));
+    }
+    tracing::info!(
+        component = "bun",
+        "Preparing the managed Bun runtime for MCP stdio launch"
+    );
+    let prepared = timeout_at(deadline, nomifun_runtime::prepare_managed_command(command, args)).await
+        .map_err(|_| McpOwnerError::new("MCP_RUNTIME_PREPARATION_TIMEOUT","Managed Bun preparation timed out. Check component preparation progress and retry; the shared preparation may still complete."))?
+        .map_err(|_| {
+            let snapshot = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
+            let detail = snapshot.error.map(|error| format!("{}: {}",error.code,error.message)).unwrap_or_else(|| "Check managed component preparation status and retry.".into());
+            McpOwnerError::new("MCP_RUNTIME_PREPARATION_FAILED",format!("Managed Bun preparation failed: {detail}"))
+        })?.expect("recognized managed launch command");
+    Ok((
+        prepared.executable_path.to_string_lossy().into_owned(),
+        prepared.args,
+    ))
+}
+
 fn resolve_program(
     command: &str,
     env: &HashMap<OsString, OsString>,
@@ -591,6 +615,18 @@ fn resolve_program(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn managed_preparation_does_not_replace_explicit_user_stdio_paths() {
+        let command = "/user/chosen/bun";
+        let args = vec!["server.js".to_owned()];
+        let (actual, arguments) =
+            prepare_managed_stdio_command(command, &args, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+        assert_eq!(actual, command);
+        assert_eq!(arguments, args);
+    }
 
     #[test]
     fn stderr_is_reduced_to_non_secret_failure_categories() {

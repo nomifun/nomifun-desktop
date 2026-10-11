@@ -7,6 +7,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
+import { runtimeTools, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
 import type { IMcpServer } from '@/common/config/storage';
 import { parseMcpServerId } from '@/common/types/ids';
 import { useSessionCapabilityCatalog } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilityCatalog';
@@ -37,6 +38,30 @@ const deferred = <T,>() => {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 };
+
+test('Bun preparation gates the MCP probe and its ordinary timeout', async () => {
+  const prepared = deferred<RuntimeToolSnapshot>();
+  track(spyOn(runtimeTools.prepare, 'invoke').mockImplementation(() => prepared.promise));
+  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke').mockResolvedValue({ success: true, tools: [] }));
+  const hook = renderHook(() => useMcpConnection(), { wrapper });
+  let probe!: Promise<void>;
+  act(() => { probe = hook.result.current.handleTestMcpConnection({ ...server, transport: { type: 'stdio', command: 'bunx', args: ['server'] } }, { notify: false }); });
+  expect(testing).not.toHaveBeenCalled();
+  await act(async () => { prepared.resolve({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'ready', received_bytes: 0 }); await probe; });
+  expect(testing).toHaveBeenCalledTimes(1);
+});
+
+test('a component failure never becomes a saved MCP connection result', async () => {
+  track(spyOn(runtimeTools.prepare, 'invoke').mockResolvedValue({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'error', received_bytes: 0,
+    error: { code: 'DOWNLOAD_FAILED', message: 'Component download failed', retryable: true } }));
+  const testing = track(spyOn(mcpService.testMcpConnection, 'invoke'));
+  const changed = mock(); restores.push(subscribeMcpCatalogChanged(changed));
+  const hook = renderHook(() => useMcpConnection(), { wrapper });
+  await act(async () => { await hook.result.current.handleTestMcpConnection({ ...server, transport: { type: 'stdio', command: 'bun' } }, { notify: false }); });
+  expect(testing).not.toHaveBeenCalled();
+  expect(changed).not.toHaveBeenCalled();
+  expect(hook.result.current.testingServers[server.mcp_server_id]).toBe(false);
+});
 
 for (const outcome of [
   { label: 'success', result: { success: true, tools: [{ name: 'lookup' }] } },

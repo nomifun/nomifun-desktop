@@ -23,7 +23,7 @@ NomiFun 有两种宿主模式，共享同一个 Rust 后端（参见
 | 工具 | 最低版本 | 用途 | 备注 |
 | --- | --- | --- | --- |
 | **Rust** | stable，edition 2024 | 编译后端（桌面端还需编译 Tauri 外壳）。 | 通过 [`rustup`](https://rustup.rs/) 安装。工作区固定使用 `edition = "2024"` 与 `resolver = "3"`。 |
-| **Bun** | **≥ 1.3.13** | 前端包管理器与构建（同时也是智能体引擎的硬运行时依赖）。 | `1.1.38` 存在 stdin 缺陷——请勿使用。 |
+| **Bun** | **≥ 1.3.13** | 前端包管理器与构建工具；应用运行所需工具另由受管准备供应。 | `1.1.38` 存在 stdin 缺陷——请勿使用。 |
 | **Tauri CLI** | v2 | 构建桌面外壳。 | 作为 `devDependency` 引入；无需全局安装。 |
 | **Git** | 任何近期版本 | 克隆仓库，以及技能发现与若干内置工具会用到。 | |
 | **C/C++ 构建工具** | 因平台而异 | `rusqlite`（bundled）、`aws-lc-rs`、`libgit2-sys` 需要。 | Windows：MSVC + WebView2 运行时。macOS：Xcode CLT。Linux：`build-essential cmake clang pkg-config perl`。 |
@@ -163,7 +163,7 @@ listening on 127.0.0.1:8787  auth=required  dist=../../ui/dist
 | --- | --- | --- | --- |
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | 绑定地址。仅在确实需要 LAN/VPN/公网访问时使用 `0.0.0.0`；请先预置或完成管理员设置。 |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | `/api` 与 SPA 共用的端口。 |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | _按用户应用数据目录，与[桌面端默认](#数据存放位置桌面端)相同_ | 后端数据目录（数据库 / 日志 / bun 缓存 / 智能体状态）。环境变量取字面值（不附加 `/Nomi`）。生产环境请使用绝对路径。 |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | _按用户应用数据目录，与[桌面端默认](#数据存放位置桌面端)相同_ | 后端数据目录（数据库 / 日志 / runtime 缓存 / 智能体状态）。环境变量取字面值（不附加 `/Nomi`）。生产环境请使用绝对路径。 |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | SPA 静态目录。**在仓库根目录之外运行时务必显式指定。** |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置管理员的用户名（仅在管理员尚未存在时生效）。 |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | _（无 —— 交互式首次设置）_ | 预置管理员密码并跳过交互式首次启动。 |
@@ -228,7 +228,7 @@ docker compose up -d --build
 ```
 
 服务配置了 `restart: unless-stopped`，所以**安装即等同于开机自启**。
-持久化状态（SQLite 数据库、日志、bun 缓存、智能体状态）存放在挂载到容器
+持久化状态（SQLite 数据库、日志、runtime 缓存、智能体状态）存放在挂载到容器
 内 `/data` 的命名卷 `nomifun-data` 中。
 
 镜像默认值已针对容器生命周期进行了调优：

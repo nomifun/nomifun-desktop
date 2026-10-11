@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "bun",
+      "version": "1.3.13",
+      "files": [
+        {
+          "filename": "bun-1.3.13-LICENSE.md",
+          "source": "https://raw.githubusercontent.com/oven-sh/bun/bun-v1.3.13/LICENSE.md",
+          "sha256": "b0e163c004bffb092b08f657a1f6e65b6af64cf62765230717a0ed48a3e562de"
+        }
+      ]
+    },
+    {
+      "id": "node",
+      "version": "22.22.0",
+      "files": [
+        {
+          "filename": "node-22.22.0-LICENSE.txt",
+          "source": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz#node-v22.22.0-darwin-arm64/LICENSE",
+          "sha256": "e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
+        }
+      ]
+    },
+    {
+      "id": "officecli",
+      "version": "1.0.156",
+      "files": [
+        {
+          "filename": "officecli-1.0.156-LICENSE.txt",
+          "source": "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/v1.0.156/LICENSE",
+          "sha256": "7e282402a5a6db33995fe638bb3fe79013f9884d8f7d15a42e481c1e86aadda1"
+        },
+        {
+          "filename": "officecli-1.0.156-NOTICE.txt",
+          "source": "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/v1.0.156/NOTICE",
+          "sha256": "3a4715b268e148a8e9566f5e835f766f5c95c3da4d6e5ddd908806a258a2f07b"
+        }
+      ]
+    }
+  ]
+}

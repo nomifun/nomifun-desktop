@@ -48,7 +48,7 @@
 | [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | HTTP 请求 / 响应 DTO、`WebSocketMessage` 信封，以及 AgentPreset、Capability Catalog、Agent Session、`agent_snapshot` 和 Nomi build-extras。前端 TypeScript 类型镜像该 crate。 |
 | [`nomifun-db`](../../crates/backend/nomifun-db/) | 通过 `sqlx` 操作 canonical SQLite 数据集，维护 schema contract 与逻辑关联 registry，并为用户、会话、MCP、需求、cron、Agent execution、AgentPreset revision、安装访问令牌、知识库、渠道、连接器凭据、IDMM 介入、webhook 等提供仓储 trait 与 Sqlite 实现。Agent Session、Turn、Event、Effect 与 Message projection 由唯一 canonical Store 管理。 |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime/) | `WebSocketManager`、`BroadcastEventBus`，带 token 校验的 `/ws` 升级处理器，消息路由 trait，心跳计时，每连接缓冲常量。 |
-| [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | 内嵌 Bun 的解压、缓存、命令发现与启动期 `PATH` 增强。子进程所有权统一属于 shared 层的 `nomi-process-runtime`。 |
+| [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | 清单批准的 Bun、真实 Node、OfficeCLI 供应、解压与身份／能力准入，以及用户 CLI 发现。子进程所有权仍由 `nomi-process-runtime` 管理，详见[外部工具](external-tools.zh.md)。 |
 | [`nomifun-assets`](../../crates/backend/nomifun-assets/) | 随服务器一同发布的内嵌静态资源（`include_dir!`）。 |
 
 ## 认证与会话
@@ -98,7 +98,7 @@
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Canonical 创作域：持有带版本项目文档、素材、提示词、模板/运行、严格 one-shot 模板草稿、Canvas ZIP 归档，以及大部分 owner-only `/api/creative-studio/*` 路由。项目文档、模板状态与素材 metadata 在 SQLite；二进制原件/缩略图在 `{data_dir}/workshop/assets/`。唯一公开面是供浏览器媒体元素使用的只读 `GET /api/creative-studio/files/{asset_id}`。 |
 | [`nomifun-plugin-platform`](../../crates/backend/nomifun-plugin-platform/) | Unified Plugin Core：一种 Manifest/Package/Plugin 身份、内容寻址 Artifact、Draft、generation DataRoot、Action/Binding registry、独立 Service 进程、Surface Bridge、Package/Backup、回退，以及唯一 `/api/plugins` + `/api/plugin-drafts` HTTP 面。 |
 | [`nomifun-plugin-development`](../../crates/backend/nomifun-plugin-development/) | 可选 Agent 模块：通过普通会话工具开发一个 Unified Plugin；Plugin 实例与运行时仍归 Plugin Core 所有。 |
-| [`nomifun-js-runtime`](../../crates/backend/nomifun-js-runtime/) | Unified Plugin Core 唯一不可变的进程级 JavaScript Runtime 权威。 |
+| [`nomifun-js-runtime`](../../crates/backend/nomifun-js-runtime/) | Unified Plugin Core 唯一不可变的进程级真实 Node 权威，由受管组件 resolver 供应。 |
 | [`nomifun-robot`](../../crates/backend/nomifun-robot/) | 机器人网关：LAN 接入的实体机器人（小智固件）作为桌面伙伴的物理化身。 |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创作画布节点与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
@@ -114,7 +114,7 @@
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | 统一多模态模型调用层：类型化任务请求 / 结果、声明式鉴权方案、共享 HTTP 传输、协议适配器接缝 + 注册表与模型目录解析管线；被 `nomifun-shell` STT/TTS、`nomifun-creation` 等模型调用方消费。 |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | 在会话工作目录下的沙箱化文件系统（`browse`、`path_safety`、`watch_service`、`snapshot_service`），zip 辅助。 |
-| [`nomifun-office`](../../crates/backend/nomifun-office/) | LibreOffice 转换 / 预览管线（Office 文档 → 预览）。 |
+| [`nomifun-office`](../../crates/backend/nomifun-office/) | 受管 OfficeCLI HTML 产物：稳定源快照、有界共享渲染／缓存、按用户归属的可取消租约、沙箱交付及预览历史。 |
 | [`nomifun-system`](../../crates/backend/nomifun-system/) | LLM provider / 模型查询、应用级设置、sysinfo、应用版本检查 / 自更新框架。 |
 
 ## 组合根：`nomifun-app`

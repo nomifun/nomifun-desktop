@@ -138,46 +138,49 @@ nomicore doctor
 的 bin 目录加入 `PATH` 后重启。注意会话本身不依赖这些：内置
 `nomi` 引擎已编译进二进制。
 
-### 在 systemd 下：`bun: command not found`
+### systemd 下的受管工具
 
-NomiFun 内置 **`bun ≥ 1.3.13`** 用于启动 MCP stdio server 等 Node 风格
-子进程。一个 `nologin` 的系统账户看不到
-`~/.bun/bin/`；请把 bun 装到系统级（`sudo install ~/.bun/bin/bun
-/usr/local/bin/bun`），或用 `NOMIFUN_EMBED_BUN=1` 构建以将 bun 打包
-进二进制——它会在首次运行时把自己解压到数据目录。已写好的食谱见
-[Web 服务部署](../guides/web-server-deployment.md#bun-must-be-on-the-system-path)。
+Release 二进制内嵌 OfficeCLI；Node 在后端启动前受管下载准备，Bun 按功能
+准备。已准备制品在配置的数据目录离线复用，使用已验证的绝对路径；服务账户不需要其他用户的 Bun 安装。以服务
+账户检查数据目录访问与实际组件：
 
-安装后用 `sudo -u nomifun -s -- which bun` 验证。
+使用从 `nomifun-app` 构建的可选 `nomicore` 诊断程序
+（`cargo build --release -p nomifun-app --bin nomicore`）。WebUI 宿主 CLI
+不接受 `tool-doctor`，部署参见[受管执行组件](../guides/web-server-deployment.zh.md#受管执行组件)。
 
-### 看到 "bun runtime extraction" 日志后再无 MCP 活动
+```bash
+sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
+```
 
-嵌入式 bun 构建会在首次运行时把 bun 解压到数据目录。若解压失败
-（通常是权限问题），stdio MCP server 就没有可用的运行时。请检查数据目录中是否
-存在 bun 二进制，确认服务用户拥有数据目录，并在日志里查看真实的
-解压错误。
+不带 `--verify` 的 `tool-doctor` 只输出供应清单；显式验证可能下载 Node/Bun、解压与运行私有
+探测，但不会打开数据库。首次准备应检查网络访问，之后检查缓存读写／执行
+权限。未内嵌 OfficeCLI 的 debug 构建需要它的显式、经验证的开发路径覆盖。
+详见[外部工具](../architecture/external-tools.zh.md)。
 
 ## Office 预览
 
-### Word/Excel/PPT 预览启动失败
+### Word／Excel／PPT 无法预览
 
-Office 预览功能（`/api/word-preview/*`、`/api/excel-preview/*`、
-`/api/ppt-preview/*`）会派生 `officecli` 辅助进程来渲染并监视文档。
-若它没有安装，start 调用会返回 "officecli not found" 错误。
+三类文档共用 `/api/office-preview/*` 与受管 `iOfficeAI/OfficeCLI` 组件。
+在相同数据根运行 `tool-doctor --verify`，检查实际可执行文件、版本、摘要及
+能力探测错误。组件准入失败时修复或更新应用；debug 覆盖必须是满足组件清单
+开发要求的绝对路径。
 
-请用 `npm install -g officecli` 安装（后端也可以替你执行这次安装），
-确认 `npm` 与安装出的 `officecli` 二进制都在**进程** `PATH` 上，然后
-重启后端。
+界面区分准备、渲染和显示。进程提前退出属于渲染失败，不是端口就绪超时。
+不支持的格式、不完整／加密文档、资源上限和仍在写入的文件均有明确错误；
+仅可恢复失败提供重试。刷新失败保留上一版，系统打开和下载仍可用。
 
-> 旧的 `POST /api/star-office/detect` 路由及其背后的 Star Office 集成
-> 已退役，不再存在。
+### iframe 被阻止或空白
 
-### 预览 iframe 一直空白
+活跃请求返回 `/api/office-preview-artifacts/{capability}/`，iframe 在查询参数
+加入 UUIDv7 request ID 和 nonce。反向代理须保留完整路径和查询参数。
+产物由随机、可撤销的 capability 授权；start／status／stop 仍要求鉴权。
+不要放开任意 `/api/*`，也不要削弱产物的 CSP 和 sandbox。
 
-Office 预览路由会派生 `officecli` 子进程，并通过
-`/api/ppt-proxy/*` 与 `/api/office-watch-proxy/*` 代理它们。这些代理
-路由是有意**公共**（不鉴权）的——iframe 内容必须在不带 SPA 会话
-cookie 的情况下加载。如果你的反向代理剥掉了 URL 路径段，或在边缘对
-`/api/*` 全部加了鉴权，请把这些 proxy 路径豁免出去。
+HTTP ready 与 iframe load 不能单独标为显示成功。生成的 frame 必须发送首屏
+完成消息，且匹配来源、opaque origin、request ID、capability 和 nonce。
+检查浏览器策略／连接错误及后端有界渲染诊断。详见
+[外部工具与 Office 产物](../architecture/external-tools.zh.md)。
 
 ## 数据目录权限
 

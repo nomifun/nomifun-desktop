@@ -54,7 +54,7 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
                           ├─▶ SQLite (sqlx)          see data-and-storage.md
                           ├─▶ MCP stdio bridges      see communication.md
                           ├─▶ PTY terminal sessions  see ../guides/terminal.zh.md
-                          └─▶ bundled bun runtime    see data-and-storage.md
+                          └─▶ managed tool suite     see external-tools.md
 ```
 
 ## 一次请求的流转

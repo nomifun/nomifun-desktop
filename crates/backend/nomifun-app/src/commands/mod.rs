@@ -5,6 +5,7 @@
 
 mod backup;
 mod doctor;
+mod tool_doctor;
 mod gateway_stdio;
 mod knowledge_stdio;
 mod mcp_stdio;
@@ -17,6 +18,7 @@ mod terminal_hook;
 
 pub use backup::{run_backup, run_restore};
 pub use doctor::run_doctor;
+pub use tool_doctor::run_tool_doctor;
 pub use gateway_stdio::run_gateway_stdio;
 pub use knowledge_stdio::run_knowledge_stdio;
 pub use mcp_stdio::{

@@ -1,10 +1,10 @@
-//! Cross-platform cache directory resolution for the bundled bun runtime.
+//! Cross-platform cache directory resolution for the managed tool suite.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Override for [`runtime_root`], set by [`init`] from the backend
-/// startup path so cached bun binaries land under `AppConfig.data_dir`
+/// startup path so cached tool binaries land under `AppConfig.data_dir`
 /// instead of the OS-default cache location.
 ///
 /// Lifecycle: written once by `nomifun-app`'s `main()` before
@@ -47,36 +47,4 @@ pub fn runtime_root() -> Option<PathBuf> {
         return Some(p.clone());
     }
     dirs::cache_dir().map(|d| d.join("nomifun").join("runtime"))
-}
-
-/// Per-version cache directory name: `bun-<version>-<sha12>`.
-///
-/// `sha12` is the first 12 hex chars of the bun binary sha256 — embedding
-/// it means version bumps and content-level bumps both produce a new dir
-/// so stale bytes never shadow a new build.
-pub fn bun_dir_name(version: &str, sha256: &str) -> String {
-    let sha12 = &sha256[..12.min(sha256.len())];
-    format!("bun-{version}-{sha12}")
-}
-
-/// Full path for a specific (version, sha) cache directory.
-pub fn bun_dir(version: &str, sha256: &str) -> Option<PathBuf> {
-    runtime_root().map(|root| root.join(bun_dir_name(version, sha256)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bun_dir_name_format() {
-        assert_eq!(bun_dir_name("1.1.38", "abc1234567890def"), "bun-1.1.38-abc123456789");
-    }
-
-    #[test]
-    fn bun_dir_name_short_sha_does_not_panic() {
-        // Defensive: if upstream ever passes <12 chars, don't panic.
-        assert_eq!(bun_dir_name("1.0", "abc"), "bun-1.0-abc");
-    }
-
 }

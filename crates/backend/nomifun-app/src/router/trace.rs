@@ -36,7 +36,7 @@ fn access_log_path(path: &str) -> Cow<'_, str> {
     else {
         return Cow::Borrowed(path);
     };
-    if !matches!(prefix, "ppt-proxy" | "office-watch-proxy")
+    if !matches!(prefix, "office-preview-artifacts")
         || !is_preview_capability(capability)
     {
         return Cow::Borrowed(path);
@@ -50,12 +50,13 @@ fn access_log_path(path: &str) -> Cow<'_, str> {
     }
 }
 
-/// Returns true if a request path is high-frequency terminal I/O whose access
-/// log would flood the console (per-keystroke input, per-frame resize). These
+/// Returns true for high-frequency terminal I/O or preview status polling.
+/// Per-keystroke input, per-frame resize and render polling
 /// are logged at TRACE so they are silent at the normal dev `debug` level, while
 /// lifecycle routes (create/get/kill/relaunch/list) keep INFO logging.
-fn is_noisy_terminal_path(path: &str) -> bool {
-    path.starts_with("/api/terminals/") && (path.ends_with("/input") || path.ends_with("/resize"))
+fn is_noisy_io_path(path: &str) -> bool {
+    (path.starts_with("/api/terminals/") && (path.ends_with("/input") || path.ends_with("/resize")))
+        || path.strip_prefix("/api/office-preview/status/").is_some_and(|id| nomifun_common::validate_uuidv7(id).is_ok())
 }
 
 pub(super) fn with_access_log(router: Router) -> Router {
@@ -64,9 +65,9 @@ pub(super) fn with_access_log(router: Router) -> Router {
             .make_span_with(|req: &axum::http::Request<_>| {
                 let path = access_log_path(req.uri().path());
                 let method = req.method().clone();
-                // Noisy terminal I/O gets a TRACE-level span (filtered out at the
+                // Terminal I/O and preview polling get a TRACE-level span (filtered out at the
                 // dev `debug` level); everything else keeps the INFO access span.
-                if is_noisy_terminal_path(path.as_ref()) {
+                if is_noisy_io_path(path.as_ref()) {
                     tracing::trace_span!("http.io", method = %method, path = %path)
                 } else {
                     tracing::info_span!("http", method = %method, path = %path)
@@ -111,7 +112,7 @@ pub(super) fn with_access_log(router: Router) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_log_path, is_noisy_terminal_path};
+    use super::{access_log_path, is_noisy_io_path};
 
     const CAPABILITY: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -119,18 +120,18 @@ mod tests {
     #[test]
     fn redacts_only_structural_office_preview_capabilities() {
         assert_eq!(
-            access_log_path(&format!("/api/ppt-proxy/{CAPABILITY}")),
-            "/api/ppt-proxy/[REDACTED]"
+            access_log_path(&format!("/api/office-preview-artifacts/{CAPABILITY}")),
+            "/api/office-preview-artifacts/[REDACTED]"
         );
         assert_eq!(
             access_log_path(&format!(
-                "/api/office-watch-proxy/{CAPABILITY}/assets/app.js"
+                "/api/office-preview-artifacts/{CAPABILITY}/assets/app.js"
             )),
-            "/api/office-watch-proxy/[REDACTED]/assets/app.js"
+            "/api/office-preview-artifacts/[REDACTED]/assets/app.js"
         );
         assert_eq!(
-            access_log_path(&format!("/api/office-watch-proxy/{CAPABILITY}/")),
-            "/api/office-watch-proxy/[REDACTED]/"
+            access_log_path(&format!("/api/office-preview-artifacts/{CAPABILITY}/")),
+            "/api/office-preview-artifacts/[REDACTED]/"
         );
     }
 
@@ -150,10 +151,10 @@ mod tests {
     #[test]
     fn does_not_broaden_redaction_to_similar_or_legacy_paths() {
         for path in [
-            "/api/ppt-proxy/43210/",
-            "/api/office-watch-proxy/not-a-capability/",
-            "/api/not-ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
-            "/other/ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
+            "/api/office-preview-artifacts/43210/",
+            "/api/office-preview-artifacts/not-a-capability/",
+            "/api/not-office-preview-artifacts/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
+            "/other/office-preview-artifacts/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
         ] {
             assert_eq!(access_log_path(path), path);
         }
@@ -161,16 +162,18 @@ mod tests {
 
     #[test]
     fn filters_terminal_input_and_resize() {
-        assert!(is_noisy_terminal_path("/api/terminals/abc123/input"));
-        assert!(is_noisy_terminal_path("/api/terminals/abc123/resize"));
+        assert!(is_noisy_io_path("/api/terminals/abc123/input"));
+        assert!(is_noisy_io_path("/api/terminals/abc123/resize"));
+        assert!(is_noisy_io_path("/api/office-preview/status/0190f5fe-7c00-7a00-8000-000000000001"));
+        assert!(!is_noisy_io_path("/api/office-preview/status/not-a-request"));
     }
 
     #[test]
     fn keeps_lifecycle_and_unrelated_paths() {
-        assert!(!is_noisy_terminal_path("/api/terminals")); // list/create
-        assert!(!is_noisy_terminal_path("/api/terminals/abc123")); // get/delete
-        assert!(!is_noisy_terminal_path("/api/terminals/abc123/kill"));
-        assert!(!is_noisy_terminal_path("/api/terminals/abc123/relaunch"));
-        assert!(!is_noisy_terminal_path("/api/conversations/x/input"));
+        assert!(!is_noisy_io_path("/api/terminals")); // list/create
+        assert!(!is_noisy_io_path("/api/terminals/abc123")); // get/delete
+        assert!(!is_noisy_io_path("/api/terminals/abc123/kill"));
+        assert!(!is_noisy_io_path("/api/terminals/abc123/relaunch"));
+        assert!(!is_noisy_io_path("/api/conversations/x/input"));
     }
 }

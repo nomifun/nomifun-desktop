@@ -70,7 +70,7 @@ Web 宿主与之相反：默认要求登录。两者的差异是有意的——�
 - **Docker**：你挂载到 `/data` 的命名卷（例如 `nomifun-data:/data`）。
 
 数据目录里有 SQLite 数据库（`nomifun-backend.db*`）、各智能体状态、
-Bun 缓存、日志文件，以及任何嵌入式扩展数据。请像对待数据库一样备份
+受管 runtime 缓存、日志文件，以及任何嵌入式扩展数据。请像对待数据库一样备份
 它。由于所有宿主默认指向同一个目录，后端用一把排他的 `server.lock`
 守住它——同一数据目录上的第二个后端实例会快速失败，而不是悄悄破坏
 状态。
@@ -180,10 +180,10 @@ Apache-2.0 条款下使用、修改、再分发，并将代码打包——包括
 运行时没有 `libsqlite`、也没有 `openssl` 依赖。用
 `cargo build --release -p nomifun-web` 即可构建。
 
-智能体运行时（bun）默认*不*嵌入；请把它装到系统级，或者用
-`NOMIFUN_EMBED_BUN=1` 构建标记把它打包进二进制。参见
-[bun-on-PATH](../guides/web-server-deployment.md#bun-must-be-on-the-system-path)
-小节。
+Release 二进制内嵌 OfficeCLI。Node 在后端启动前经受管下载准备，Bun 按功能
+需要准备；批准版本不变时，已准备组件跨应用更新复用并可离线使用。首次 Node
+准备需要网络。Debug 构建可用 `NOMIFUN_EMBED_OFFICECLI=1` 内嵌 OfficeCLI，
+或使用经验证的显式开发路径覆盖。参见[外部工具](../architecture/external-tools.zh.md)。
 
 桌面外壳同样可以产出单一二进制（`nomifun-desktop`），但用于分发时，
 通常你想要的是 `bun run build` 通过平台原生打包流程产出的

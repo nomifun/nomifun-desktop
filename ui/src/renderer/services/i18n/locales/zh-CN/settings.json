@@ -1985,5 +1985,7 @@
     "hostsLoading": "正在读取主机…",
     "hostsLoadFailed": "无法读取主机列表，请重试。",
     "retry": "重试"
-  }
+  },
+  "mcpAgentUnavailable": "未找到所选工具，请检查安装位置后重试。",
+  "mcpDetectionFailed": "读取工具配置失败，请重试。"
 }

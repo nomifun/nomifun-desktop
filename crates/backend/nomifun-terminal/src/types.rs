@@ -105,6 +105,22 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
     (resolve_program(&program), resolved_args)
 }
 
+/// Actual terminal launches only consume committed components. Preparation
+/// happens through the host component API before this operation's effect
+/// window, so a raw/old HTTP caller cannot leave a delayed PTY after timeout.
+pub(crate) fn resolve_command_for_spawn(
+    command: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), crate::error::TerminalError> {
+    if nomifun_runtime::managed_command_tool(command).is_some() {
+        let prepared = nomifun_runtime::resolve_cached_managed_command(command, args)
+            .map_err(|error| crate::error::TerminalError::Spawn(format!("Managed Bun is unavailable: {error}")))?
+            .ok_or_else(|| nomifun_common::AppError::ComponentPreparationRequired("bun".into()))?;
+        return Ok((prepared.executable_path.to_string_lossy().into_owned(), prepared.args));
+    }
+    Ok(resolve_command(command, args))
+}
+
 /// Resolve a bare command name to its absolute executable path so the PTY
 /// process runtime launches the intended file.
 ///
@@ -227,6 +243,15 @@ mod tests {
             autowork: None,
             idmm: None,
         }
+    }
+
+    #[test]
+    fn user_supplied_paths_are_not_download_requests() {
+        let source = "/configured/private/runtime";
+        let arguments = vec!["user-script.js".to_owned()];
+        let (program, args) = resolve_command_for_spawn(source, &arguments).unwrap();
+        assert_eq!(program, source);
+        assert_eq!(args, arguments);
     }
 
     #[test]

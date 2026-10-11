@@ -170,6 +170,9 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::Conflict(_) => {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }
+        AppError::ComponentPreparationRequired(_) => {
+            "A required host component must be prepared before the Creative Studio Canvas operation".to_owned()
+        }
         AppError::RevisionConflict(_) => "Creative Studio Canvas revision conflict".to_owned(),
         AppError::ProviderInUse(_) => {
             "Creative Studio Canvas still references the selected provider".to_owned()

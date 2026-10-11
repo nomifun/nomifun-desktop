@@ -35,7 +35,16 @@ impl McpSyncService {
 
         let mut results = Vec::new();
         for adapter in self.adapters.iter() {
-            let installed = adapter.is_installed().await.unwrap_or(false);
+            let installed = match adapter.is_installed().await {
+                Ok(installed) => installed,
+                Err(error) => {
+                    results.push(DetectedMcpServerResponse {
+                        source: adapter.source(), servers: vec![],
+                        detection_error: Some(error.to_string()),
+                    });
+                    continue;
+                }
+            };
             if !installed {
                 continue;
             }
@@ -46,6 +55,7 @@ impl McpSyncService {
                     results.push(DetectedMcpServerResponse {
                         source: adapter.source(),
                         servers,
+                        detection_error: None,
                     });
                 }
                 Err(e) => {
@@ -54,6 +64,10 @@ impl McpSyncService {
                         error = %e,
                         "failed to detect existing MCP servers"
                     );
+                    results.push(DetectedMcpServerResponse {
+                        source: adapter.source(), servers: vec![],
+                        detection_error: Some(e.to_string()),
+                    });
                 }
             }
         }
@@ -88,6 +102,7 @@ mod tests {
         source: McpSource,
         installed: bool,
         servers: Arc<StdMutex<Vec<DetectedServer>>>,
+        failed: bool,
     }
 
     impl MockAdapter {
@@ -96,6 +111,7 @@ mod tests {
                 source,
                 installed,
                 servers: Arc::new(StdMutex::new(Vec::new())),
+                failed: false,
             }
         }
 
@@ -116,6 +132,9 @@ mod tests {
         }
 
         async fn detect_existing(&self) -> Result<Vec<DetectedServer>, McpError> {
+            if self.failed {
+                return Err(McpError::AgentOperationFailed("unsupported CLI capability".into()));
+            }
             if !self.installed {
                 return Err(McpError::AgentNotInstalled(format!("{:?}", self.source)));
             }
@@ -129,6 +148,17 @@ mod tests {
             args: vec!["-y".into(), "@test/server".into()],
             env: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn failed_scan_remains_visible_alongside_successful_empty_catalog() {
+        let mut failed = MockAdapter::new(McpSource::Claude, true);
+        failed.failed = true;
+        let service = McpSyncService::new(vec![Arc::new(failed), Arc::new(MockAdapter::new(McpSource::Qwen, true))]);
+        let results = service.get_agent_configs().await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].detection_error.is_some());
+        assert!(results[1].detection_error.is_none());
     }
 
     #[tokio::test]

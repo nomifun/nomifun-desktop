@@ -302,3 +302,42 @@ test('a failed poll retains its mtime so the next poll can recover', async () =>
     expect(hook.result.current.mtimes.current.get(path)).toBe(2);
   } finally { errors.mockRestore(); }
 });
+
+
+test('Office writes reconcile the artifact revision without reading binary content into React state', async () => {
+  const hook = renderHook(usePreviewContext, { wrapper });
+  act(() => hook.result.current.openPreview('', 'ppt', { file_path: path, workspace: '/workspace' }));
+  await flushOfficeEvents();
+  expect(hook.result.current.activeTab?.fileRevision ?? 0).toBe(0);
+  await deliverChange('binary data must not become text content');
+  expect(hook.result.current.activeTab?.fileRevision).toBe(1);
+  expect(hook.result.current.activeTab?.content).toBe('');
+  expect(readFile).not.toHaveBeenCalled();
+  expect(getImage).not.toHaveBeenCalled();
+  await act(async () => { await hook.result.current.refreshFile(); });
+  expect(hook.result.current.activeTab?.fileRevision).toBe(2);
+});
+
+const flushOfficeEvents = () => act(async () => {});
+
+test('Office metadata polling reconciles only a changed source version', async () => {
+  const text = mock(async () => 'must not read');
+  let mtime = 1;
+  const io = { subscribe: () => () => {}, text, image: text, metadata: async () => ({ lastModified: mtime }) };
+  const hook = renderHook(() => {
+    const [tabs, setTabs] = useState<PreviewTab[]>([{ id: 'office-tab', title: 'report', content: '', content_type: 'excel', metadata }]);
+    const mtimes = useRef(new Map<string, number>());
+    const refresh = usePreviewFileRefresh({ tabs, setTabs, io, mtimes, saving: useRef(new Set<string>()), closeTab: useRef(() => {}) });
+    return { tabs, refresh };
+  });
+  await act(async () => { await hook.result.current.refresh.refresh('office-tab', true); });
+  expect(hook.result.current.tabs[0].fileRevision ?? 0).toBe(0);
+  await act(async () => { await hook.result.current.refresh.refresh('office-tab', true); });
+  expect(hook.result.current.tabs[0].fileRevision ?? 0).toBe(0);
+  mtime = 2;
+  await act(async () => { await hook.result.current.refresh.refresh('office-tab', true); });
+  expect(hook.result.current.tabs[0].fileRevision).toBe(1);
+  await act(async () => { await hook.result.current.refresh.refresh('office-tab', true); });
+  expect(hook.result.current.tabs[0].fileRevision).toBe(1);
+  expect(text).not.toHaveBeenCalled();
+});

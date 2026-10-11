@@ -2,7 +2,7 @@ import type { IMcpServer } from '@/common/config/storage';
 import { mcpService, type DetectedMcpServer } from '@/common/adapter/ipcBridge';
 import { getAgents } from '@/renderer/hooks/agent/useAgents';
 import { Button, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check } from '@icon-park/react';
 import { iconColors } from '@/renderer/styles/colors';
@@ -69,8 +69,16 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
   const [fetchedServers, setFetchedServers] = useState<DetectedMcpServer[]>([]);
   const [importedServers, setImportedServers] = useState<IMcpServer[]>([]);
   const [loadingImport, setLoadingImport] = useState(false);
+  const [detectionError, setDetectionError] = useState<string | null>(null);
   const [submittingImport, setSubmittingImport] = useState(false);
   const [currentStep, setCurrentStep] = useState<number>(1);
+  const scanGeneration = useRef(0);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  useEffect(() => {
+    ++scanGeneration.current;
+    return () => { ++scanGeneration.current; };
+  }, [visible, selectedAgent]);
   const existingNameSet = React.useMemo(() => new Set(existingServerNames), [existingServerNames]);
   const isEffectivelyImportable = React.useCallback(
     (server: DetectedMcpServer) =>
@@ -162,6 +170,7 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
       // 重置状态
       setCurrentStep(1);
       setSelectedAgent(IMPORTABLE_AGENTS[0].backend);
+      setDetectionError(null);
       setFetchedServers([]);
       setImportedServers([]);
       setDetectedAgents([...IMPORTABLE_AGENTS]);
@@ -197,24 +206,35 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
 
   const handlePrevStep = () => {
     if (currentStep === 2) {
+      ++scanGeneration.current;
       setCurrentStep(1);
       setFetchedServers([]);
+      setDetectionError(null);
       setLoadingImport(false);
     }
   };
 
   const handleImportFromCLI = async () => {
+    const generation = ++scanGeneration.current;
+    const accepts = () => visibleRef.current && scanGeneration.current === generation;
     setLoadingImport(true);
+    setDetectionError(null);
     try {
       const agents = await getAgents();
+      if (!accepts()) return;
       const mcpConfigs = await mcpService.getAgentMcpConfigs.invoke(agents);
+      if (!accepts()) return;
       const selectedConfig = mcpConfigs.find((agentConfig) => agentConfig.source === selectedAgent);
-      setFetchedServers(selectedConfig?.servers ?? []);
+      if (selectedConfig?.detection_error) throw new Error(selectedConfig.detection_error);
+      if (!selectedConfig) throw new Error(t('settings.mcpAgentUnavailable'));
+      setFetchedServers(selectedConfig.servers);
     } catch (error) {
+      if (!accepts()) return;
       console.error('Failed to import from CLI:', error);
+      setDetectionError(error instanceof Error ? error.message : t('settings.mcpDetectionFailed'));
       setFetchedServers([]);
     } finally {
-      setLoadingImport(false);
+      if (accepts()) setLoadingImport(false);
     }
   };
 
@@ -288,6 +308,11 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
             <Spin size={20} />
             <div className='text-t-secondary text-sm'>{t('settings.mcpLoadingTools')}</div>
           </div>
+        </div>
+      ) : detectionError ? (
+        <div className='py-8 text-center'>
+          <div role='alert' className='text-danger mb-12px'>{detectionError}</div>
+          <Button onClick={() => void handleImportFromCLI()}>{t('common.retry')}</Button>
         </div>
       ) : fetchedServers.length > 0 ? (
         <div>

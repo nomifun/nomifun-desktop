@@ -33,6 +33,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod browser_surface;
+mod desktop_startup;
 mod native_api_plugins;
 #[cfg(windows)]
 mod headless_browser_runtime;
@@ -1377,10 +1378,10 @@ enum StartupCleanup {
     /// the only state in which the shell can prove that no backend-owned
     /// resource exists.
     NotStarted,
-    /// `DesktopServer::start` has been entered, but it has not returned the
-    /// authoritative server handle yet.  A failure in this window must not be
-    /// treated as an already-verified cleanup: the start routine may have
-    /// acquired services, listeners, or browser ownership before failing.
+    /// Managed startup work has begun without published cleanup proof. This
+    /// includes an unproven component probe handed to the existing process
+    /// reaper, or DesktopServer startup before its authoritative handle returns.
+    /// Neither case can be treated as already-verified cleanup.
     StartingUnverified,
     /// `DesktopServer::start` returned a normal error after completing its
     /// internal startup-failure cleanup. Unlike a panic, this is a positive
@@ -1399,7 +1400,7 @@ impl StartupCleanup {
         match self {
             Self::NotStarted | Self::FailedVerified => Ok(()),
             Self::StartingUnverified => Err(anyhow::anyhow!(
-                "embedded backend startup entered before a cleanup authority was published"
+                "startup resource cleanup is unverified without a published authority"
             )),
             Self::RetainedKeepAlive(keep_alive) => {
                 keep_alive.shutdown_after_startup_failure_blocking(runtime)
@@ -2369,6 +2370,21 @@ where
     }
 }
 
+#[cfg(target_os = "macos")]
+fn prepare_macos_webview_store(app: &tauri::AppHandle, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if app.try_state::<MacosWebviewDataStore>().is_some() {
+        return Ok(());
+    }
+    let channel_default = nomifun_app::cli::default_data_dir();
+    let store = macos_webview_data_store(
+        data_dir,
+        &channel_default,
+        objc2::available!(macos = 14.0),
+    )?;
+    app.manage(MacosWebviewDataStore(store));
+    Ok(())
+}
+
 fn complete_main_thread_setup(
     app: tauri::AppHandle,
     server: Arc<DesktopServer>,
@@ -2381,15 +2397,7 @@ fn complete_main_thread_setup(
 
     let loopback_port = server.loopback_port();
     #[cfg(target_os = "macos")]
-    {
-        let channel_default = nomifun_app::cli::default_data_dir();
-        let store = macos_webview_data_store(
-            &pairing_data_dir,
-            &channel_default,
-            objc2::available!(macos = 14.0),
-        )?;
-        app.manage(MacosWebviewDataStore(store));
-    }
+    prepare_macos_webview_store(&app, &pairing_data_dir)?;
 
     // Build the main window programmatically so we can inject the backend
     // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
@@ -2462,6 +2470,12 @@ fn complete_main_thread_setup(
             .title("NomiFun")
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
+            .visible(app.get_webview_window("startup").is_none())
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    desktop_startup::main_loaded(window.app_handle());
+                }
+            })
             .initialization_script(&init_script);
     #[cfg(target_os = "macos")]
     let win_builder = match app.state::<MacosWebviewDataStore>().0 {
@@ -2695,6 +2709,11 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 return;
             };
 
+            if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
+                if startup.preparing() {
+                    desktop_startup::begin_quit(app);
+                }
+            }
             if code == Some(tauri::RESTART_EXIT_CODE) {
                 // Tauri documents that prevent_exit() is ignored for the
                 // restart sentinel. Mark the window as explicitly quitting
@@ -3034,6 +3053,10 @@ fn main() -> std::process::ExitCode {
             #[cfg(target_os = "macos")]
             install_macos_exit_observers(&app_handle)?;
 
+            #[cfg(target_os = "macos")]
+            prepare_macos_webview_store(&app_handle, &data_dir)?;
+            desktop_startup::install_window(&app_handle)?;
+
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
             // In production, the embedded assets below are canonical.
@@ -3132,10 +3155,40 @@ fn main() -> std::process::ExitCode {
                             return;
                         }
                     };
-                    mark_startup_cleanup_entered(&startup_cleanup);
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
+                                let startup = setup_app_handle
+                                    .state::<Arc<desktop_startup::StartupState>>()
+                                    .inner()
+                                    .clone();
+                                // Fail closed if the host preparation controller itself
+                                // panics before the supplier returns its cleanup proof.
+                                mark_startup_cleanup_entered(&startup_cleanup_for_run);
+                                match desktop_startup::prepare_node(setup_app_handle.clone(), startup)
+                                    .await
+                                {
+                                    desktop_startup::PreparationOutcome::Prepared => {}
+                                    desktop_startup::PreparationOutcome::Cancelled => {
+                                        mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
+                                        supervisor_coordinator.mark_backend_not_started();
+                                        setup_app_handle.exit(supervisor_coordinator.final_exit_code());
+                                        return Ok(());
+                                    }
+                                    desktop_startup::PreparationOutcome::CleanupUnproven => {
+                                        // The supplier's exact child authority is retained by
+                                        // the existing cleanup relay/platform reaper. Reuse the
+                                        // unverified startup + bounded deferred-exit path; never
+                                        // call backend-not-started as component cleanup proof.
+                                        return Err(anyhow::anyhow!("managed startup component cleanup remains unverified"));
+                                    }
+                                }
+                                if supervisor_coordinator.has_pending_shutdown() {
+                                    mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
+                                    supervisor_coordinator.mark_backend_not_started();
+                                    setup_app_handle.exit(supervisor_coordinator.final_exit_code());
+                                    return Ok(());
+                                }
                                 let host_services=nomifun_app::DesktopHostServices {
                                     browser_resources,
                                     attached_chrome,
@@ -3224,6 +3277,8 @@ fn main() -> std::process::ExitCode {
                                                 "NomiFun could not initialize its desktop window: {error:#}"
                                             ),
                                         );
+                                    } else {
+                                        desktop_startup::backend_ready(&setup_app);
                                     }
                                 }) {
                                     shutdown_then_show_fatal(
@@ -3359,7 +3414,11 @@ fn main() -> std::process::ExitCode {
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
+        .manage(Arc::new(desktop_startup::StartupState::new()))
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
+            desktop_startup::desktop_startup_status,
+            desktop_startup::desktop_startup_retry,
+            desktop_startup::desktop_startup_quit,
             browser_surface::commands::browser_surface_attach,
             browser_surface::commands::browser_surface_update,
             browser_surface::commands::browser_surface_detach,
@@ -3391,6 +3450,19 @@ fn main() -> std::process::ExitCode {
         // `ExitRequested`, so window destruction cannot overwrite a restart
         // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
+            if window.label() == "startup" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let state = window
+                        .app_handle()
+                        .state::<Arc<desktop_startup::StartupState>>();
+                    if state.snapshot().stage != desktop_startup::StartupStage::Ready {
+                        api.prevent_close();
+                        desktop_startup::begin_quit(window.app_handle());
+                        window.app_handle().exit(0);
+                    }
+                }
+                return;
+            }
             if window.label() != "main" {
                 return;
             }
@@ -4162,7 +4234,7 @@ mod tests {
         let error = cleanup
             .cleanup(&runtime)
             .expect_err("startup without published cleanup authority must fail closed");
-        assert!(format!("{error:#}").contains("cleanup authority"));
+        assert!(format!("{error:#}").contains("without a published authority"));
         assert!(!cleanup.is_verified());
         assert!(cleanup.server().is_none());
     }

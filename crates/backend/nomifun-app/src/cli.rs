@@ -180,6 +180,12 @@ pub enum Command {
     /// app launched from confirms whether each backend is detectable
     /// before involving server logs.
     Doctor,
+    /// Inspect the external component catalogue without opening application data.
+    ToolDoctor {
+        /// Admit and verify product components; may extract approved bundled tools.
+        #[arg(long)]
+        verify: bool,
+    },
     /// Use the canonical installation-owner Remote API. Every operation is
     /// explicit and session-bound; there is no generic capability/Registry
     /// dispatch or implicit recent-session state.

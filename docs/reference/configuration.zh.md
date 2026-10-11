@@ -22,7 +22,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 |---|---|---|---|
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | 绑定的 IP。`0.0.0.0` 会接受 LAN/VPN/公网流量；大范围暴露前请先预置或完成首次设置。不解析主机名；非法输入将在启动阶段直接失败。 |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP 端口。在同一个 socket 上提供 API、`/ws` WebSocket 与 SPA。 |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户的应用数据目录 | 后端数据目录（SQLite 数据库、智能体状态、日志、Bun 缓存）。默认是当前 channel 的宿主共享的按用户位置；stable 使用 `NomiFun`，dev 使用同级的 `NomiFun-dev`。可用本参数或 `NOMIFUN_DATA_DIR`（按字面值，不附加后缀）覆盖；生产环境请使用绝对路径。 |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | 按用户的应用数据目录 | 后端数据目录（SQLite 数据库、智能体状态、日志、受管 runtime 缓存）。默认是当前 channel 的宿主共享的按用户位置；stable 使用 `NomiFun`，dev 使用同级的 `NomiFun-dev`。可用本参数或 `NOMIFUN_DATA_DIR`（按字面值，不附加后缀）覆盖；生产环境请使用绝对路径。 |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | 已构建 SPA 所在目录。在仓库之外部署时务必显式指定。 |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | 预置首位管理员时使用的用户名。管理员存在后将被忽略。 |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | 在启动时预置首位管理员密码，跳过交互式设置。管理员存在后将被忽略。 |
@@ -48,7 +48,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `--log-dir` | `<data-dir>/logs` | 滚动日志的目录。 |
 | `--log-level` | `info` | 日志级别过滤。支持按 target 覆盖——例如 `info,nomifun_mcp=trace`。 |
 
-子命令（供智能体 CLI 桥与诊断使用）：
+`nomicore` 子命令（供智能体 CLI 桥与诊断使用；独立的 `nomifun-web` 宿主不接受这些子命令）：
 
 | 子命令 | 用途 |
 |---|---|
@@ -58,6 +58,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `mcp-open-stdio` | 暴露可靠 OS `open` 工具的 MCP stdio server。 |
 | `terminal-hook --event <kind>` | 一次性 terminal 生命周期 hook relay。 |
 | `doctor` | 自检：填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按智能体维度的可用性表格。 |
+| `tool-doctor [--verify]` | 只读组件／notice 清单；`--verify` 显式解压与能力探测，不初始化数据库或 Agent 数据。见[外部工具](../architecture/external-tools.zh.md)。 |
 | `remote open <binding_id>` | 打开 canonical Remote AgentSession。 |
 | `remote turn <agent_session_id> <json-input>` | 在显式 Remote AgentSession 上启动一轮。 |
 | `remote observe <agent_session_id>` | 从 `--after-seq` 后读取 Remote Session Event/消息。 |
@@ -70,7 +71,9 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | 环境变量 | 读取方 | 作用 |
 |---|---|---|
 | `NOMIFUN_DATA_DIR` | 所有宿主 | 当宿主选择遵循该值时，作为后端数据目录的真值来源。在**每个**宿主上——桌面外壳、独立 Web 宿主与 `nomicore` 二进制——都按**字面值**作为最终数据根（桌面外壳不再附加 `/Nomi`）。未设置时目录为按用户的应用数据默认值（见[下文](#数据目录与工作目录的语义)）。 |
-| `NOMIFUN_NFAGENT_PATH` | 桌面外壳 | 开发/离线调试覆盖：指定一个已存在的 `nfagent` **绝对路径**，跳过 NomiRelay 按需下载。显式文件由设置者负责信任与版本管理；普通用户应使用受 SHA-256 校验的托管运行时。 |
+| `NOMIFUN_NFAGENT_PATH` | 桌面外壳 | 离线覆盖：指定一个已存在的批准版本 `nfagent` **绝对路径**，跳过 NomiRelay 按需下载。文件必须匹配清单中当前平台的批准 SHA-256；不匹配时拒绝使用。 |
+| `NOMIFUN_BUN_PATH` / `NOMIFUN_NODE_PATH` / `NOMIFUN_OFFICECLI_PATH` | 受管 runtime（仅 debug） | 显式绝对可执行路径，仍须符合清单开发版本范围、真实引擎和能力探测；release 忽略，不从 PATH 回退。 |
+| `NOMIFUN_EMBED_OFFICECLI` | 构建期 | debug 的 `1` 内嵌批准的 OfficeCLI；release 始终内嵌 OfficeCLI。Node/Bun 受管下载，不进入应用载荷。 |
 | `NOMIFUN_WORK_DIR` | `nomicore` | `--work-dir`（按会话区分的工作区根）的回退值。优先级低于 `dir-config.json` 中持久化的工作根绑定；若继承到的值指向默认数据根位置或已不存在的目录，会被忽略（防止自动更新重启时残留的自导出值）。 |
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
@@ -102,7 +105,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 ## 数据目录与工作目录的语义
 
 - `data-dir` 存放 SQLite 数据库（`nomifun-backend.db*`）、各智能体状态、
-  Bun 缓存、日志文件，以及任何嵌入式扩展数据。把它当成普通数据库来
+  受管 runtime 缓存、日志文件，以及任何嵌入式扩展数据。把它当成普通数据库来
   对待——做好备份、限制权限。两个同时运行的后端共享它的情况已被机制
   性地阻止（见下面的服务器锁）。
 - 三个宿主（`nomifun-desktop`、`nomifun-web`、独立的 `nomicore`

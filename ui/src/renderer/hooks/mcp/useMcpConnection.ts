@@ -4,6 +4,8 @@ import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
+import { ensureManagedBun, formatRuntimePreparation } from '@/common/adapter/runtimeTools';
+import { uuidv7 } from '@/common/utils/uuidv7';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
 import { getMcpConfigurationFields, supportsMcpOAuthLogin } from './mcpAuthConfig';
@@ -233,8 +235,23 @@ export const useMcpConnection = (
       pendingTests.current.set(server.mcp_server_id, (pendingTests.current.get(server.mcp_server_id) ?? 0) + 1);
       if (active.current) setTestingServers((prev) => ({ ...prev, [server.mcp_server_id]: true }));
 
+      let closePreparation: (() => void) | undefined;
+      let probeEntered = false;
+      const preparationId = `mcp-runtime-${uuidv7()}`;
       try {
+        if (server.transport.type === 'stdio' && !await ensureManagedBun(server.transport.command, {
+          isCurrent: () => active.current,
+          onProgress: (snapshot) => {
+            if (notify && active.current) closePreparation = Message.loading({ id: preparationId,
+              content: `${server.name}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
+          },
+        })) return;
+        closePreparation?.();
+        closePreparation = undefined;
+        if (!active.current) return;
+        probeEntered = true;
         const result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
+        if (!active.current) return;
         const needsAuth = result.needsAuth ?? result.needs_auth;
         const authMethod = result.authMethod ?? result.auth_method;
 
@@ -287,6 +304,7 @@ export const useMcpConnection = (
           }
         }
       } catch (error) {
+        if (!active.current) return;
         const errorMsg = truncateErrorMessage(formatThrownMcpErrorMessage(t, error));
         if (notify) {
           Message.error({
@@ -299,6 +317,7 @@ export const useMcpConnection = (
           });
         }
       } finally {
+        closePreparation?.();
         const remaining = (pendingTests.current.get(server.mcp_server_id) ?? 1) - 1;
         if (remaining > 0) pendingTests.current.set(server.mcp_server_id, remaining);
         else pendingTests.current.delete(server.mcp_server_id);
@@ -308,7 +327,7 @@ export const useMcpConnection = (
         // The backend persists success, failure, and authentication outcomes
         // before the response settles. Reload that row, including after errors
         // such as a stale probe, instead of inventing a local catalog result.
-        notifyMcpCatalogChanged();
+        if (probeEntered) notifyMcpCatalogChanged();
       }
     },
     [t, onAuthRequired, onAuthResolved]

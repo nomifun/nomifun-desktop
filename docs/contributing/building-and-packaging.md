@@ -47,7 +47,7 @@ Runtime requirements:
 
 - built SPA directory;
 - writable data directory;
-- Bun on `PATH`, unless the binary was built with `NOMIFUN_EMBED_BUN=1`;
+- OfficeCLI embedded automatically in release; Node prepared by verified managed download before backend startup, Bun on feature use; writable/executable runtime cache ([component contract](../architecture/external-tools.md));
 - configured auth/admin flow, or explicit `--insecure-no-auth` for trusted
   loopback-only development.
 

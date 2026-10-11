@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Managed component {0} must be prepared before this operation. Prepare it and retry.")]
+    ComponentPreparationRequired(String),
+
     #[error("Session configuration changed: {0}")]
     SessionConfigurationChanged(String),
 
@@ -93,6 +96,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::ComponentPreparationRequired(_) => StatusCode::CONFLICT,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
@@ -123,6 +127,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::ComponentPreparationRequired(_) => "COMPONENT_PREPARATION_REQUIRED",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
@@ -158,6 +163,9 @@ impl AppError {
                 Some(workspace_directory_details(path, "runtime"))
             }
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
+            Self::ComponentPreparationRequired(component) => {
+                Some(json!({ "component": component, "phase": "runtime_preparation" }))
+            }
             _ => None,
         }
     }
@@ -263,6 +271,17 @@ impl std::fmt::Display for ErrorChain<'_> {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn component_preparation_required_has_a_typed_conflict_response() {
+        let response = AppError::ComponentPreparationRequired("bun".into()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "COMPONENT_PREPARATION_REQUIRED");
+        assert_eq!(body["details"]["component"], "bun");
+        assert_eq!(body["details"]["phase"], "runtime_preparation");
+    }
 
     #[test]
     fn test_status_codes() {

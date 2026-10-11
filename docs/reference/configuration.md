@@ -17,7 +17,7 @@ Source: [`apps/web/src/main.rs`](../../apps/web/src/main.rs).
 |---|---|---|---|
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | IP to bind on. `0.0.0.0` accepts LAN/VPN/public traffic; pre-seed or complete first-run setup before broad exposure. Hostnames are not parsed; bad input fails fast at startup. |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP port. Serves the API, the WebSocket at `/ws`, and the SPA from one socket. |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | per-user app-data dir | Backend data directory (SQLite database, agent state, logs, Bun cache). Defaults to the active channel's per-user location shared by every host; stable uses `NomiFun`, while dev uses the `NomiFun-dev` sibling. Override with the flag or `NOMIFUN_DATA_DIR` (taken literally, no suffix); use an absolute path in production. |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | per-user app-data dir | Backend data directory (SQLite database, agent state, logs, managed runtime cache). Defaults to the active channel's per-user location shared by every host; stable uses `NomiFun`, while dev uses the `NomiFun-dev` sibling. Override with the flag or `NOMIFUN_DATA_DIR` (taken literally, no suffix); use an absolute path in production. |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | Directory containing the built SPA. Set this explicitly when deploying outside the repo. |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | Username used when pre-seeding the first admin. Ignored once an admin exists. |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | Pre-seeds the first admin password at boot, skipping interactive setup. Ignored once an admin exists. |
@@ -42,7 +42,7 @@ These are the flags exposed by the standalone `nomicore` binary. The two hosts c
 | `--log-dir` | `<data-dir>/logs` | Directory for rolling daily log files. |
 | `--log-level` | `info` | Log level filter. Supports per-target overrides — e.g. `info,nomifun_mcp=trace`. |
 
-Subcommands (used internally by the agent CLI bridge and for diagnostics):
+`nomicore` subcommands (used internally by the agent CLI bridge and for diagnostics; the separate `nomifun-web` host does not accept them):
 
 | Subcommand | Purpose |
 |---|---|
@@ -52,6 +52,7 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `mcp-open-stdio` | MCP stdio server exposing a reliable OS `open` tool. |
 | `terminal-hook --event <kind>` | One-shot terminal lifecycle hook relay. |
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
+| `tool-doctor [--verify]` | Read-only component/notice catalogue; `--verify` explicitly extracts and probes without initializing database or Agent data. See [external tools](../architecture/external-tools.md). |
 | `remote open <binding_id>` | Open a canonical Remote AgentSession. |
 | `remote turn <agent_session_id> <json-input>` | Start a turn on an explicit Remote AgentSession. |
 | `remote observe <agent_session_id>` | Read Remote Session events/messages after `--after-seq`. |
@@ -64,7 +65,9 @@ These are read by the backend regardless of which host embeds it.
 | Env var | Read by | Effect |
 |---|---|---|
 | `NOMIFUN_DATA_DIR` | all hosts | Source of truth for the backend data directory when the host wants to honour it. The value is taken **literally** as the data root on every host — desktop shell, standalone web host, and the `nomicore` binary alike (the desktop shell no longer appends `/Nomi`). With it unset the dir is the per-user app-data default (see [below](#data-directory-and-work-directory-semantics)). |
-| `NOMIFUN_NFAGENT_PATH` | desktop shell | Development/offline-debug override pointing to an existing `nfagent` **absolute path**, bypassing the NomiRelay on-demand download. The person setting it owns trust and version management for that file; normal users should use the SHA-256-verified managed runtime. |
+| `NOMIFUN_NFAGENT_PATH` | desktop shell | Offline override pointing to an existing approved `nfagent` **absolute path**, bypassing the NomiRelay on-demand download. The file must match the current platform's approved manifest SHA-256; a mismatch is rejected. |
+| `NOMIFUN_BUN_PATH` / `NOMIFUN_NODE_PATH` / `NOMIFUN_OFFICECLI_PATH` | managed runtime, debug only | Explicit absolute executables still satisfy manifest development ranges and genuine engine/capability probes; release ignores them and never falls back to PATH. |
+| `NOMIFUN_EMBED_OFFICECLI` | build time | Debug `1` embeds approved OfficeCLI; release always embeds OfficeCLI. Node/Bun are managed downloads, never application payloads. |
 | `NOMIFUN_WORK_DIR` | `nomicore` | Fallback for `--work-dir` (per-conversation workspace root). Ranked below the work-root binding persisted in `dir-config.json`; inherited values that name a default data-root location or a directory that no longer exists are ignored (protection against stale self-exports across auto-update restarts). |
 | `JWT_SECRET` | `nomifun-app` | Secret used to sign session JWTs. See [Auth secret resolution](#auth-secret-resolution) for the resolution order. |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
@@ -94,7 +97,7 @@ Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/
 
 ## Data directory and work directory semantics
 
-- `data-dir` holds the SQLite database (`nomifun-backend.db*`), per-agent state, the Bun cache, log files, and any embedded extension data. Treat it like any other database — back it up and restrict permissions. Sharing it between two running backends is prevented mechanically (see the server lock below).
+- `data-dir` holds the SQLite database (`nomifun-backend.db*`), per-agent state, the managed runtime cache, log files, and any embedded extension data. Treat it like any other database — back it up and restrict permissions. Sharing it between two running backends is prevented mechanically (see the server lock below).
 - All three hosts (`nomifun-desktop`, `nomifun-web`, the standalone `nomicore` binary) resolve a default through `nomifun_app::cli::default_data_dir()`. Hosts built for the same channel share it: stable uses the per-user `NomiFun` directory (`%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` on Linux); non-stable channels use a **sibling** such as `NomiFun-dev` or `NomiFun-beta` — channel dirs are never nested inside the stable root. The root `dev`, `dev:web`, and `build:fast` commands select dev, while the installed app, `serve:web`, and release builds remain stable. For an explicit location, point `NOMIFUN_DATA_DIR` or `--data-dir` somewhere else; development startup does not import historical Agent state from the stable dataset.
 - At startup (before the database is opened) the backend takes an OS-level **exclusive lock** on `{data_dir}/server.lock`. A second backend process on the same data dir fails fast with an error naming the holder (pid + executable) and the two ways out: close the other instance, or give this one its own directory via `NOMIFUN_DATA_DIR` / `--data-dir`. The lock is advisory (`flock` / `LockFileEx` via `fs2`) and is released by the OS when the process exits or crashes — a leftover `server.lock` file is harmless. `nomicore doctor` and the `mcp-*` stdio subcommands do not take the lock (doctor is designed to run alongside a live server).
 - `work-dir` holds per-conversation workspaces. When unset, it resolves in this order: `--work-dir` → the work-root binding persisted in `dir-config.json` → non-empty `NOMIFUN_WORK_DIR` env → the data dir itself. An inherited `NOMIFUN_WORK_DIR` that names a default data-root location or a directory that no longer exists is ignored — this guards against stale self-exports across auto-update restarts. Conversations create subdirectories under `<work-dir>/conversations/`; deleting a conversation deletes its workspace.

@@ -160,6 +160,9 @@ pub struct DetectedMcpServerEntry {
 pub struct DetectedMcpServerResponse {
     pub source: McpSource,
     pub servers: Vec<DetectedMcpServerEntry>,
+    /// A failed scan is distinct from a successfully read empty catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +638,7 @@ mod tests {
         let resp = DetectedMcpServerResponse {
             source: McpSource::Claude,
             servers: vec![],
+            detection_error: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["source"], "claude");

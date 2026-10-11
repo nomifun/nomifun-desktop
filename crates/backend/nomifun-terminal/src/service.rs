@@ -30,7 +30,7 @@ use crate::error::TerminalError;
 use crate::events::TerminalEventEmitter;
 use crate::pty::{PtyExit, PtyHandle, SpawnParams};
 use crate::types::{
-    TerminalOwnerScope, persisted_terminal_env, process_env_from_persisted, resolve_command,
+    TerminalOwnerScope, persisted_terminal_env, process_env_from_persisted,
     row_to_response, strip_internal_terminal_env, terminal_owner_scope,
 };
 
@@ -684,6 +684,9 @@ impl TerminalService {
                 WorkspaceDirectoryCheck::Create,
             )?;
         }
+        // Verify prerequisite readiness before minting/persisting any terminal
+        // row or materializing its workspace knowledge/PTY side effects.
+        crate::types::resolve_command_for_spawn(&req.command, &req.args)?;
         let name = req
             .name
             .clone()
@@ -810,7 +813,7 @@ impl TerminalService {
         knowledge_scope: TerminalKnowledgeScope,
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
-        let (program, resolved_args) = resolve_command(command, args);
+        let (program, resolved_args) = crate::types::resolve_command_for_spawn(command, args)?;
         #[cfg(all(test, windows))]
         let program = resolve_windows_test_program(&program);
         // Mint the PTY generation before issuing child capabilities so their
@@ -2249,6 +2252,9 @@ impl TerminalService {
         };
         let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
         let args = crate::types::parse_args(&row.args);
+        if matches!(target, RelaunchTarget::Stored) {
+            crate::types::resolve_command_for_spawn(&row.command, &args)?;
+        }
 
         // Re-sync knowledge mounts + README on every relaunch. Binding
         // changes already reach a LIVE terminal through the binding-change
@@ -3844,6 +3850,50 @@ mod tests {
             defer_spawn: false,
             knowledge_base_ids: None,
         }
+    }
+
+    #[tokio::test]
+    async fn unprepared_bun_rejects_before_persisting_a_terminal_or_workspace_effects() {
+        assert!(
+            nomifun_runtime::resolve_cached_managed_command("bun", &[]).unwrap().is_none(),
+            "this process has not requested Bun preparation"
+        );
+        let (svc, events, repo) = service_with_repo();
+        let mut request = req("bun", &["-e", "process.stdout.write('unexpected')"]);
+        request.defer_spawn = true;
+        let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
+        let app: nomifun_common::AppError = error.into();
+        assert_eq!(app.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(app.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+        assert!(repo.rows.lock().unwrap().is_empty());
+        assert!(svc.live.is_empty());
+        assert!(events.events.lock().unwrap().is_empty());
+        assert_eq!(
+            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun).phase,
+            nomifun_runtime::ToolPreparationPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "opt-in native managed Bun preparation and PTY smoke"]
+    async fn prepared_bun_starts_a_terminal_after_required_component_gate() {
+        let root = tempfile::tempdir().unwrap();
+        nomifun_runtime::init(root.path());
+        let (svc, events, repo) = service_with_repo();
+        let script = "process.stdout.write('managed-bun-ready'); setInterval(()=>{},1000)";
+        let request = req("bun", &["-e", script]);
+        let error: nomifun_common::AppError = svc.create(TEST_USER_ID, request.clone()).await.unwrap_err().into();
+        assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+        assert!(repo.rows.lock().unwrap().is_empty());
+        nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::Bun).await
+            .expect("explicitly prepare the approved native Bun");
+        let response = svc.create(TEST_USER_ID, request).await.unwrap();
+        assert!(svc.live.contains_key(response.terminal_id.as_str()));
+        assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        let observed = wait_for(|| collect_output(&events).contains("managed-bun-ready"), 4000).await;
+        svc.kill(response.terminal_id.as_str()).await.unwrap();
+        assert!(observed, "prepared Bun must execute the PTY script and deliver output");
+        assert!(svc.live.is_empty());
     }
 
     #[tokio::test]

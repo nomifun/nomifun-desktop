@@ -49,7 +49,7 @@ use nomifun_mcp::{
     QwenAdapter,
 };
 use nomifun_office::{
-    OfficeRouterState, OfficecliWatchManager, ProxyService,
+    OfficeRouterState, OfficePreviewService,
     SnapshotService as OfficeSnapshotService,
 };
 use nomifun_skill_library::{ExternalPathsManager, SkillRouterState};
@@ -208,10 +208,7 @@ pub(crate) async fn try_build_module_states(
     conversation_owner.install_idmm(Arc::downgrade(&idmm_service))?;
     let idmm_state = IdmmRouterState::new(idmm_service.clone(), conversation_owner.clone());
     let javascript_runtime_foundation =
-        super::javascript_runtime::build_javascript_runtime_foundation(
-            services.database.pool().clone(),
-            services.data_dir.clone(),
-        )
+        super::javascript_runtime::build_javascript_runtime_foundation()
         .await
         .map_err(|error| anyhow::anyhow!("JavaScript Runtime foundation composition failed: {error:#}"))?;
     let plugin_action_dispatcher = Arc::new(
@@ -1811,19 +1808,10 @@ pub fn build_cron_state(
 /// Build the default `OfficeRouterState` from application services.
 pub fn build_office_state(services: &AppServices) -> OfficeRouterState {
     let data_dir = services.data_dir.as_path();
-    let allowed_roots = default_allowed_roots(Some(services.work_dir.as_path()));
-
-    let spawner: Arc<dyn nomifun_office::ProcessSpawner> = Arc::new(nomifun_office::DefaultProcessSpawner);
-    let watch_manager = Arc::new(OfficecliWatchManager::new(spawner, services.event_bus.clone()));
-
-    let snapshot_service = Arc::new(OfficeSnapshotService::new(data_dir));
-    let proxy_service = Arc::new(ProxyService::new(watch_manager.clone()));
-
     OfficeRouterState {
-        watch_manager,
-        snapshot_service,
-        proxy_service,
-        allowed_roots,
+        preview_service: Arc::new(OfficePreviewService::new(data_dir)),
+        snapshot_service: Arc::new(OfficeSnapshotService::new(data_dir)),
+        allowed_roots: default_allowed_roots(Some(services.work_dir.as_path())),
     }
 }
 

@@ -176,9 +176,9 @@ pub use model_task::{
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,
-    PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent, PreviewUrlResponse,
-    SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
-    StopPreviewRequest, is_preview_capability,
+    PreviewSnapshotInfoDto, OfficePreviewState, OfficePreviewResponse, OfficePreviewError,
+    OfficePreviewDocType, StartOfficePreviewRequest, StopOfficePreviewRequest,
+    SaveSnapshotRequest, SnapshotContentResponse, is_preview_capability,
 };
 pub use plugin_platform::*;
 pub use provider::{

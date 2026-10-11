@@ -12,7 +12,7 @@ export function desktopBuildCommand(platform, args) {
 if (import.meta.main) {
   const forwarded = process.argv.slice(2).filter(argument => argument !== '--');
   const invocation = desktopBuildCommand(process.platform, forwarded);
-  const built = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', env: { ...process.env, CI: 'true' } });
+  const built = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', env: { ...process.env, CI: 'true', NOMIFUN_EMBED_OFFICECLI: '1' } });
   if (built.error) throw built.error;
   if (built.status !== 0) process.exit(built.status ?? 1);
   if (invocation.prune) {

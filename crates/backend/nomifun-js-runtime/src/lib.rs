@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nomi_process_runtime::ChildProcessBuilder;
 use semver::Version;
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::process::Command;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MINIMUM_NODE_MAJOR: u64 = 22;
@@ -23,6 +23,7 @@ const PROBE_SCRIPT: &str = concat!(
     "process.stdout.write(JSON.stringify({",
     "name:process.release&&process.release.name,",
     "version:process.versions&&process.versions.node,",
+    "bun:process.versions&&process.versions.bun,",
     "execPath:process.execPath",
     "}))"
 );
@@ -60,8 +61,10 @@ impl RuntimeUseLease {
 
 #[derive(Debug, Error)]
 pub enum JavaScriptRuntimeError {
-    #[error("no compatible Node Runtime is available on PATH")]
+    #[error("no verified managed Node Runtime is available")]
     Unavailable,
+    #[error("managed Node Runtime supply failed: {0}")]
+    SupplyFailed(String),
     #[error("Node Runtime probe timed out: {0}")]
     ProbeTimeout(String),
     #[error("Node Runtime probe failed: {0}")]
@@ -85,8 +88,15 @@ pub struct RuntimeAuthority {
 
 impl RuntimeAuthority {
     pub async fn discover() -> Result<Arc<Self>, JavaScriptRuntimeError> {
-        let executable = which::which("node").map_err(|_| JavaScriptRuntimeError::Unavailable)?;
-        Self::from_executable(executable).await
+        let verified = nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::Node)
+            .await
+            .map_err(|error| JavaScriptRuntimeError::SupplyFailed(error.to_string()))?;
+        Ok(Arc::new(Self {
+            runtime: Arc::new(ResolvedNodeRuntime {
+                executable_path: verified.executable_path,
+                node_version: verified.version,
+            }),
+        }))
     }
 
     pub async fn from_executable(
@@ -112,14 +122,19 @@ impl CommittedRuntimeProvider for RuntimeAuthority {
 struct ProbeIdentity {
     name: Option<String>,
     version: Option<String>,
+    bun: Option<String>,
     #[serde(rename = "execPath")]
     exec_path: String,
 }
 
 async fn probe(executable: &Path) -> Result<ResolvedNodeRuntime, JavaScriptRuntimeError> {
     let output = tokio::time::timeout(PROBE_TIMEOUT, async {
-        let mut command = Command::new(executable);
-        command.arg("-e").arg(PROBE_SCRIPT).kill_on_drop(true);
+        let mut command = ChildProcessBuilder::clean_cli(executable);
+        command
+            .arg("-e")
+            .arg(PROBE_SCRIPT)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("BUN_OPTIONS");
         command.output().await
     })
     .await
@@ -136,9 +151,9 @@ async fn probe(executable: &Path) -> Result<ResolvedNodeRuntime, JavaScriptRunti
     }
     let identity: ProbeIdentity = serde_json::from_slice(&output.stdout)
         .map_err(|error| JavaScriptRuntimeError::InvalidIdentity(error.to_string()))?;
-    if identity.name.as_deref() != Some("node") {
+    if identity.name.as_deref() != Some("node") || identity.bun.is_some() {
         return Err(JavaScriptRuntimeError::InvalidIdentity(
-            "process.release.name is not node".into(),
+            "executable is not genuine Node; Bun compatibility identity is not accepted".into(),
         ));
     }
     let version = identity.version.ok_or_else(|| {
@@ -178,15 +193,24 @@ mod tests {
             // startup intentionally rejects the unavailable environment.
             return;
         };
-        let first = authority
-            .acquire_use()
-            .await
-            .unwrap();
-        let second = authority
-            .acquire_use()
-            .await
-            .unwrap();
+        let first = authority.acquire_use().await.unwrap();
+        let second = authority.acquire_use().await.unwrap();
         assert_eq!(first.runtime(), second.runtime());
         assert!(first.executable_path().is_absolute());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bun_cannot_claim_node_authority_through_a_node_alias() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = tmp.path().join("node");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s' '{\"name\":\"node\",\"version\":\"24.3.0\",\"bun\":\"1.3.14\",\"execPath\":\"/fixture/bun\"}'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = RuntimeAuthority::from_executable(executable)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, JavaScriptRuntimeError::InvalidIdentity(_)));
+        assert!(error.to_string().contains("Bun compatibility identity"));
     }
 }

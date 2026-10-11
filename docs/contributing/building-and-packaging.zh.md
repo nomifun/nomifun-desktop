@@ -45,7 +45,7 @@ cargo build --release -p nomifun-web
 
 - 已构建的 SPA 目录；
 - 可写数据目录；
-- `PATH` 上有 Bun，除非构建时使用 `NOMIFUN_EMBED_BUN=1`；
+- release 自动内嵌 OfficeCLI；Node 在后端启动前受管下载准备，Bun 按功能需要准备；runtime 缓存须可写、可执行（见[组件契约](../architecture/external-tools.zh.md)）；
 - 默认鉴权/admin 初始化流程，或仅在可信本地开发中显式使用 `--insecure-no-auth`。
 
 示例：

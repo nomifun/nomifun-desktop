@@ -15,7 +15,7 @@ background.
 | Tool | Minimum | Why |
 | --- | --- | --- |
 | Rust | stable, edition 2024 | Workspace uses resolver `3` and edition `2024`. |
-| Bun | >= 1.3.13 | Frontend package manager, Vite runner, and runtime dependency for agent tooling. |
+| Bun | >= 1.3.13 | Frontend package manager and Vite runner; the application supplies its own approved Bun for features explicitly requiring it. |
 | Tauri CLI v2 | from `devDependencies` | Invoked through `bun run dev`, `bun run build`, and related scripts. |
 | Git | recent | Required by development workflows and several built-in tools. |
 | CMake | >= 3.16 | `opusic-sys` compiles a vendored libopus during a clean build (~25 s). |
@@ -158,7 +158,7 @@ All hosts share the same unset default data directory:
 - macOS: `~/Library/Application Support/NomiFun`
 - Linux: `$XDG_DATA_HOME/NomiFun` or `~/.local/share/NomiFun`
 
-The data dir contains SQLite state, logs, Bun runtime cache, extension data,
+The data dir contains SQLite state, logs, managed runtime cache, extension data,
 agent state, and other persistent local state. The backend takes an exclusive
 `server.lock` before opening the database, so two live backends cannot use the
 same data directory at the same time.

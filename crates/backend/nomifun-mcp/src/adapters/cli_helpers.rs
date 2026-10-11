@@ -11,51 +11,25 @@ use crate::types::McpServerTransport;
 /// Timeout for detect/list operations (30 seconds).
 pub const DETECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Check whether a CLI binary is available on `$PATH`.
+/// Observe whether an external CLI is available without preparing components.
 ///
-/// Uses `nomifun_runtime::resolve_command_path` so the lookup respects
-/// the bundled-bun shim and Windows `PATHEXT` rules. Previously this
-/// shelled out to `which`, which does not exist on Windows and made
-/// every MCP adapter report "not installed" there.
+/// The shared command resolver respects Windows `PATHEXT` rules and returns
+/// only committed managed components for product-owned names.
 pub async fn is_cli_installed(name: &str) -> Result<bool, McpError> {
     Ok(resolve_command_path(name).is_some())
 }
 
-/// Run a CLI command with a timeout and clean environment variables.
-///
-/// Returns `(stdout, stderr)` on success. Returns an error if the command
-/// fails to start, times out, or exits with a non-zero status.
-pub async fn run_cli(program: &str, args: &[&str], timeout: Duration) -> Result<(String, String), McpError> {
-    let mut builder = CmdBuilder::clean_cli(program);
-    builder.args(args);
-    let result = tokio::time::timeout(timeout, builder.output()).await;
-
-    let output = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            return Err(McpError::AgentOperationFailed(format!(
-                "`{program}` failed to start: {e}"
-            )));
-        }
-        Err(_) => {
-            return Err(McpError::AgentOperationFailed(format!(
-                "`{program} {}` timed out after {}s",
-                args.join(" "),
-                timeout.as_secs()
-            )));
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    // Non-zero exit is not always fatal — callers inspect stdout/stderr.
-    Ok((stdout, stderr))
-}
-
-/// Run a CLI command and require zero exit status.
+/// Run the exact resolved external CLI and require successful execution.
+/// External user tools retain their own installation; output is capability
+/// evidence only after a zero exit and the adapter's format validation.
 pub async fn run_cli_strict(program: &str, args: &[&str], timeout: Duration) -> Result<String, McpError> {
-    let mut builder = CmdBuilder::clean_cli(program);
+    let explicit = std::path::Path::new(program);
+    let executable = if explicit.is_absolute() {
+        explicit.to_path_buf()
+    } else {
+        resolve_command_path(program).ok_or_else(|| McpError::AgentNotInstalled(program.into()))?
+    };
+    let mut builder = CmdBuilder::clean_cli(&executable);
     builder.args(args);
     let result = tokio::time::timeout(timeout, builder.output()).await;
 
@@ -78,16 +52,39 @@ pub async fn run_cli_strict(program: &str, args: &[&str], timeout: Duration) -> 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // MCP listing diagnostics may contain configuration secrets. Keep
+        // raw stdout/stderr private and report only a fixed failure category.
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        let category = if stderr.contains("tty") {
+            "requires an interactive terminal"
+        } else if stderr.contains("unknown command") || stderr.contains("unrecognized") {
+            "does not support the requested capability"
+        } else {
+            "command failed"
+        };
         return Err(McpError::AgentOperationFailed(format!(
-            "`{program} {}` exited with {}: {}",
-            args.join(" "),
-            output.status,
-            if stderr.is_empty() { &stdout } else { stderr.as_ref() }
+            "external CLI `{program}` exited with {}: {category}", output.status
         )));
     }
 
     Ok(stdout)
+}
+
+/// A successful unrelated CLI/help response is not an empty MCP catalog.
+pub fn validate_list_output(output: &str, servers: Vec<DetectedServer>) -> Result<Vec<DetectedServer>, McpError> {
+    if !servers.is_empty() {
+        return Ok(servers);
+    }
+    let cleaned = strip_ansi(output);
+    if cleaned.lines().any(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        line.starts_with("no mcp servers") || line.starts_with("no servers configured")
+    }) {
+        return Ok(servers);
+    }
+    Err(McpError::AgentOperationFailed(
+        "external CLI returned an unsupported MCP catalog format; verify the selected tool and version".into(),
+    ))
 }
 
 /// Strip ANSI escape codes from CLI output.
@@ -205,6 +202,22 @@ fn parse_standard_list_line_rest(rest: &str) -> Option<DetectedServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn unsuccessful_external_tool_does_not_expose_configuration_or_become_empty_catalog() {
+        let error = run_cli_strict("sh", &["-c", "printf 'private-config-value' >&2; exit 42"], Duration::from_secs(5))
+            .await.unwrap_err().to_string();
+        assert!(error.contains("42"));
+        assert!(!error.contains("private-config-value"));
+    }
+
+    #[test]
+    fn unrelated_success_output_cannot_be_imported_as_empty_mcp_configuration() {
+        assert!(validate_list_output("Welcome to a different application", vec![]).is_err());
+        assert!(validate_list_output("", vec![]).is_err());
+        assert!(validate_list_output("No MCP servers configured.", vec![]).unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn is_cli_installed_finds_known_binary() {

@@ -399,26 +399,6 @@
       "target_action": "Keep connection status best-effort; command Effects use typed receipts and Session/resource identity."
     },
     {
-      "entry_id": "office.watch-status",
-      "domain": "office",
-      "current_event_names": [
-        "office watch lifecycle"
-      ],
-      "current_refs": [
-        {
-          "path": "crates/backend/nomifun-office/src/watch_manager.rs",
-          "symbols": [
-            "OfficecliWatchManager"
-          ]
-        }
-      ],
-      "current_delivery": "process lifecycle state with direct realtime projection",
-      "target_class": "best_effort_projection_wakeup",
-      "canonical_owner": "domain.office",
-      "requires_domain_outbox": false,
-      "target_action": "Keep watch status best-effort; document changes and external Effects remain Office/File domain facts."
-    },
-    {
       "entry_id": "creative.task-state",
       "domain": "creative",
       "current_event_names": [

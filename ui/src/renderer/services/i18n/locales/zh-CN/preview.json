@@ -66,42 +66,33 @@
     "emptySnapshot": "快照内容为空"
   },
   "office": {
-    "installLinkText": "打开 officecli 安装说明",
+    "queued": "正在准备预览…",
+    "rendering": "正在处理文档…",
+    "displaying": "正在显示预览…",
+    "updating": "文件已更新，正在刷新预览…",
+    "updateFailed": "预览更新失败，继续显示上一版。{{message}}",
     "errors": {
-      "officecliNotFound": "未安装 officecli。",
-      "installFailed": "自动安装 officecli 失败，请检查后端日志后重试。",
-      "portTimeout": "预览服务启动后未在预期时间内就绪，请重试。",
-      "startFailed": "启动 Office 预览服务失败。",
-      "outsideSandbox": "该文件不在当前项目沙箱范围内。"
-    }
-  },
-  "word": {
-    "title": "Word 文档",
-    "loading": "加载 Word 文档中...",
-    "invalid": "请检查文件是否为有效的 Word 文档",
-    "loadFailed": "加载 Word 文档失败",
-    "watch": {
-      "loading": "正在加载 Word 文档...",
-      "installing": "正在安装 officecli...",
-      "startFailed": "启动 Word 预览失败",
-      "installHint": "需要 officecli，将自动安装。"
-    }
-  },
-  "excel": {
-    "title": "Excel 表格",
-    "loading": "加载 Excel 文档中...",
-    "invalid": "请检查文件是否为有效的 Excel 文档",
-    "noSheets": "Excel 文件中没有工作表",
-    "sheetCount": "{{count}} 个工作表",
-    "convertFailed": "Excel 转换失败",
-    "loadFailed": "加载 Excel 文档失败",
-    "emptySheet": "此工作表无数据",
-    "emptySheetHint": "请检查 Excel 文件是否包含数据或图片",
-    "watch": {
-      "loading": "正在加载 Excel 文件...",
-      "installing": "正在安装 officecli...",
-      "startFailed": "启动 Excel 预览失败",
-      "installHint": "需要 officecli，将自动安装。"
+      "componentUnavailable": "预览组件不可用，请检查应用安装或更新应用。",
+      "unsupportedFormat": "暂不支持此文件格式，请使用系统应用打开。",
+      "fileUnstable": "文件仍在写入，请稍后重试。",
+      "renderFailed": "文档预览生成失败，请使用系统应用打开。",
+      "renderTimeout": "文档处理时间过长，请重试或使用系统应用打开。",
+      "invalidArtifact": "生成的预览未通过验证，请检查应用更新。",
+      "displayFailed": "预览内容未能显示，请重试或使用系统应用打开。",
+      "connectionFailed": "无法连接预览功能，请重试。",
+      "fileNotFound": "文件不存在或已被移动。",
+      "outsideSandbox": "该文件不在当前项目沙箱范围内。",
+      "failed": "无法生成文档预览，请使用系统应用打开。",
+      "fileUnavailable": "无法读取文档或保存预览，请检查文件是否可访问。",
+      "documentInvalid": "文档不完整、已加密或已损坏，请检查文件或使用系统应用打开。",
+      "preparationTimeout": "文档准备时间过长，请稍后重试。",
+      "resourceLimit": "文档内容超过内置预览限制，请使用系统应用打开。",
+      "cacheBusy": "预览缓存正被其他文档占用，请关闭部分预览后重试。",
+      "cleanupFailed": "预览任务无法安全结束，请重新启动应用后再打开。",
+      "cancelled": "预览任务已取消。",
+      "requestUnavailable": "该预览请求已失效，请重新打开文件。",
+      "permissionDenied": "无权预览此文件，请检查项目路径与访问权限。",
+      "invalidRequest": "无法准备该文件预览，请检查文件路径和格式。"
     }
   },
   "pdf": {
@@ -122,11 +113,5 @@
     "copyElementHtml": "复制元素 HTML",
     "viewElementInfo": "查看元素信息",
     "printedToConsole": "已在控制台打印元素信息"
-  },
-  "ppt": {
-    "loading": "正在启动 PPT 预览...",
-    "installing": "正在安装预览组件...",
-    "startFailed": "启动 PPT 预览失败",
-    "installHint": "请确保已安装 officecli：npm run postinstall"
   }
 }

@@ -3,8 +3,8 @@
 # All base images are overrideable so installations behind a Docker Hub proxy
 # can point at registry-compatible mirrors without editing this file. The slim
 # Rust image avoids downloading the full buildpack image on first install.
-ARG BUN_IMAGE="oven/bun:1"
-ARG NODE_IMAGE="node:22-bookworm-slim"
+ARG BUN_IMAGE="oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e"
+ARG NODE_IMAGE="node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
 # The bundled ONNX Runtime archive requires the newer glibc/C++ ABI in Trixie.
 # Keep the source-build and runtime distributions aligned.
 ARG RUST_IMAGE="rust:1-slim-trixie"
@@ -100,10 +100,8 @@ RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         ca-certificates git python3 python3-yaml ripgrep tini \
     && rm -rf /var/lib/apt/lists/*
-# bun is a hard runtime dependency of the agent engine (>= 1.3.13).
-COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
-# Node/npm/npx power stdio MCP servers and the OfficeCLI install path. Copying
-# the LTS runtime avoids Debian bookworm's older Node package.
+# Node/npm/npx serve user-configured external MCP launchers. Product-owned
+# Node/Bun use verified managed preparation; Office rendering is Host-embedded.
 COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -116,6 +114,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 COPY --from=rust /usr/local/bin/nomifun-web /usr/local/bin/nomifun-web
 COPY --from=ui   /app/ui/dist                    /opt/nomifun/web
+COPY crates/backend/nomifun-runtime/notices/ /opt/nomifun/component-notices/
 
 ENV NOMIFUN_WEB_HOST=0.0.0.0 \
     NOMIFUN_WEB_PORT=8787 \

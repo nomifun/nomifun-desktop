@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 5173 && bun scripts/kill-stale-dev.mjs && bun scripts/run-dev.mjs",
-    "dev:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 5173 8787 && NOMI_CHANNEL=dev concurrently -k -n api,ui -c blue,magenta \"cargo run -p nomifun-web -- --port 8787 --api-only --insecure-no-auth\" \"bun run --filter=./ui dev:web\"",
+    "dev:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 5173 8787 && NOMIFUN_EMBED_OFFICECLI=1 NOMI_CHANNEL=dev concurrently -k -n api,ui -c blue,magenta \"cargo run -p nomifun-web -- --port 8787 --api-only --insecure-no-auth\" \"bun run --filter=./ui dev:web\"",
     "dev:ui": "bun run --filter=./ui dev",
     "build": "bun scripts/run-desktop-build.mjs",
     "build:fast": "bun scripts/run-fast-build.mjs",
@@ -25,7 +25,7 @@
     "release:cloud": "bun scripts/crabnebula-release.mjs",
     "build:ui": "bun run --filter=./ui build",
     "docker:prebuilt": "bun scripts/build-docker-prebuilt.mjs",
-    "serve:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 8787 && bun run build:ui && cargo run -p nomifun-web --features static-webui -- --dist ui/dist",
+    "serve:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 8787 && bun run build:ui && NOMIFUN_EMBED_OFFICECLI=1 cargo run -p nomifun-web --features static-webui -- --dist ui/dist",
     "test": "bun scripts/prune-build.mjs && bun scripts/ensure-ui-dist.mjs && cargo test",
     "test:fast": "bun scripts/prune-build.mjs && bun scripts/ensure-ui-dist.mjs && cargo nextest run",
     "test:crate": "bun scripts/test-rust.mjs crate",
@@ -39,7 +39,7 @@
     "demo:idmm": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json",
     "test:agent-reliability-report": "node --test scripts/validation/agent-reliability-report.test.mjs",
     "check:agent-reliability": "node scripts/validation/agent-reliability-report.mjs",
-    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:unified-plugin-boundary && bun run check:agent-vocabulary && bun run help --check",
+    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:external-tools && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:unified-plugin-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
     "check:desktop-ui-boundary": "bun scripts/check-desktop-ui-boundary.mjs",
     "check:i18n": "bun scripts/generate-i18n-types.mjs --self-test && bun scripts/generate-i18n-types.mjs --check",
@@ -65,7 +65,8 @@
     "check:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- check && bun scripts/check-voice-contracts.mjs",
     "gen:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- write && bun scripts/check-voice-contracts.mjs --write",
     "test:voice-smoke-runner": "node --test ./scripts/validation/run-agent-voice-smoke.test.mjs",
-    "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs"
+    "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs",
+    "check:external-tools": "bun scripts/check-external-tools.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.2",
