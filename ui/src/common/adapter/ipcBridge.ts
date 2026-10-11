@@ -43,8 +43,10 @@ import {
   tauriWebuiStop,
   tauriRelayPairingBootstrap,
   tauriRelayPairingDisconnect,
+  tauriRelayPairingForgetLocal,
   tauriRelayPairingGetStatus,
   tauriRelayPairingRestart,
+  tauriRelayPairingRefreshQr,
   tauriRelayPairingStop,
   type TauriRelayPairingBootstrapRequest,
   type TauriRelayPairingStatus,
@@ -2673,6 +2675,10 @@ export type IRelayPairingStatus = TauriRelayPairingStatus;
 export type IRelayPairingBootstrapRequest = TauriRelayPairingBootstrapRequest;
 
 export const relayPairing = {
+  refreshQr: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingRefreshQr(),
+    { state: 'disconnected' }
+  ),
   bootstrap: shellProvider<IRelayPairingStatus, IRelayPairingBootstrapRequest>(
     (request) => tauriRelayPairingBootstrap(request),
     { state: 'disconnected' }
@@ -2691,6 +2697,10 @@ export const relayPairing = {
   ),
   disconnect: shellProvider<IRelayPairingStatus, void>(
     () => tauriRelayPairingDisconnect(),
+    { state: 'disconnected' }
+  ),
+  forgetLocal: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingForgetLocal(),
     { state: 'disconnected' }
   ),
 };

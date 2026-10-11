@@ -70,7 +70,7 @@ becoming an isolated demo.
 | Project | Role | Start here |
 |---|---|---|
 | **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Unified Plugins, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
-| NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile guide](https://www.nomifun.com/docs/guides/mobile-bridge/) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
+| NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Connections & Devices guide](docs/guides/webui-remote-access.md) · Open **Connections & Devices → Connect a phone**, choose LAN or relay, then pair |
 | NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi guide](https://www.nomifun.com/docs/guides/xiaozhi-robot/) · Firmware source: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 | **NomiFun Portal** ([GitHub](https://github.com/nomifun/nomifun-protal)) | Canonical product-use documentation, onboarding, screenshots, walkthroughs, and end-user troubleshooting for the ecosystem | [English docs](https://www.nomifun.com/docs/) · [中文文档](https://www.nomifun.com/zh/docs/) |
@@ -79,15 +79,19 @@ becoming an isolated demo.
 
 1. Run Desktop, configure the models/companions you need, and keep all data on
    that machine.
-2. For Mobile, open **Remote & Open → WebUI access**, start the listener, and
-   scan the short-lived, one-time QR code from the Mobile app. On a LAN, Mobile
+2. Open **Connections & Devices → Connect a phone → Same network**, enable access,
+   and generate a phone pairing code. In Mobile, select **Add Desktop** and scan
+   the code or paste the link. On a LAN, Mobile
    connects directly to Desktop with **no NomiFun cloud relay**. Desktop remains
    the authority and server; the phone is an authenticated client, so model
    credentials and the durable data set do not need to be copied to the phone.
 3. For Xiaozhi, build and flash the Yuntai firmware, then follow the companion
-   **Remote control → Robot connection** flow in Desktop to bind the device.
-4. When access must cross networks, self-host NomiRelay and `nfagent`, then
-   point Mobile at the relay business endpoint. Mobile never receives relay
+   **Channels & Robots → Robot connection** flow in Desktop to bind the device.
+4. For other networks, open **Connections & Devices → Connect a phone → Across networks (relay)**,
+   connect using a one-time enrollment code from your self-hosted Relay Console,
+   then generate a phone pairing code. Manage individual phones and revoke them
+   from the same page. Pausing cross-network access persists after Desktop restarts.
+   Mobile never receives relay
    admin credentials, and Desktop remains the application-data authority.
 
 Only enable remote interfaces on networks you trust. The Desktop guides above
@@ -438,9 +442,10 @@ Run agent CLIs inside in-app PTY sessions. This is how **Claude Code, Codex, and
 > Product guide: [`docs/guides/webui-remote-access.md`](docs/guides/webui-remote-access.md) · [Portal mirror](https://www.nomifun.com/docs/guides/webui-remote/)
 > · App: [nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
-No social platform or NomiFun cloud relay is required on a LAN. One-tap **QR
-pairing** gives the phone a short-lived, one-time login credential and connects
-it directly to the authenticated listener inside Desktop. Mobile then uses the
+No social platform or NomiFun cloud relay is required on a LAN. Open **Connections
+& Devices → Connect a phone** and generate a short-lived, one-time pairing code.
+Every paired phone gets an independent, revocable credential and connects
+directly to the authenticated listener inside Desktop. Mobile then uses the
 same sessions, tasks, requirements, companions, models, and tools in real time;
 Desktop remains the data and execution authority. The phone is a connected,
 authenticated client, so it does not need a duplicate database or a second copy
@@ -448,7 +453,7 @@ of your model credentials.
 
 ### ⚙️ Config once, use anywhere
 
-Central hubs for **Knowledge**, **Agent workbench & Skills**, **MCP**, **Models**, and **Open Capabilities** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
+Central hubs for **Knowledge**, **Agent workbench & Skills**, **MCP**, **Models**, and **Connections & Devices** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
 
 ### 💬 11 IM channels
 

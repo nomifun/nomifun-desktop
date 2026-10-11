@@ -53,6 +53,9 @@ pub async fn csrf_middleware(
     let is_mcp_transport = path == "/mcp" || path.starts_with("/mcp/");
     let is_exempt = path == "/login"
         || path == "/api/auth/qr-login"
+        || path == "/api/auth/device-pair"
+        || path == "/api/auth/device-login"
+        || path == "/api/auth/device-setup"
         || path == "/api/auth/setup"
         || path == "/logout"
         // Remote lifecycle requests authenticate with a non-ambient Bearer

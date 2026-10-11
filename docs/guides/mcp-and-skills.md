@@ -14,7 +14,7 @@ Current pages:
 | MCP servers | `/mcp` |
 | Skills | `/skills` |
 | Agent workbench | `/agent` |
-| Public/remote capability exposure | `/open-capabilities` |
+| External tool access (MCP / REST) | `/connections?task=tools` |
 
 Legacy settings URLs redirect to these pages.
 

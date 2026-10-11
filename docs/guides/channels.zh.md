@@ -14,7 +14,7 @@ Channel 适用于以下场景：
 
 ## 在哪里找
 
-打开 Nomi 页面（`/nomi`），选择一只伙伴，然后进入 **Remote** tab（`/nomi?companion=<id>&tab=remote`）。这个 tab 会列出该伙伴可用的远程连接器，包括 Telegram、飞书（Lark）、钉钉、微信、企业微信（WeCom）、QQ Bot、Slack、Discord、Matrix、Mattermost、Twitch、Nostr 与扩展。每个已连接的机器人会显示：
+打开 Nomi 页面（`/nomi`），选择一只伙伴，然后进入 **渠道与机器人** tab（`/nomi?companion=<id>&tab=remote`）。这个 tab 会列出该伙伴可用的远程连接器，包括 Telegram、飞书（Lark）、钉钉、微信、企业微信（WeCom）、QQ Bot、Slack、Discord、Matrix、Mattermost、Twitch、Nostr 与扩展。每个已连接的机器人会显示：
 
 - 一个状态药丸（`stopped` / `connected`）；
 - 连接成功后的 bot 用户名；
@@ -174,7 +174,7 @@ external IM ──▶ plugin (long-poll / WebSocket)
 `app_id`、Telegram bot id、钉钉 `client_id`……）。绑定 / 解绑走
 `POST /api/channel/settings/companion`（带 `plugin_id`），一步完成持久化与
 **该渠道** session 的重置——下一条进来的消息由新宠的人格、模型与知识
-库挂载接待（会话带 `extra.companionId`）。在伙伴面板的 **远程连接** tab 里
+库挂载接待（会话带 `extra.companionId`）。在伙伴面板的 **渠道与机器人** tab 里
 为某只伙伴连接机器人，就是「新建渠道行 + 绑定该宠」一步完成。未绑定
 伙伴的渠道行回退到平台级偏好 `channels.<platform>.companionId`。系统不会
 隐式回退默认伙伴：若两级绑定都未解析到存活伙伴，该渠道保持未绑定，

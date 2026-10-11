@@ -15,7 +15,7 @@ NomiFun 有两种容易混淆的扩展机制：
 | MCP server 管理 | `/mcp` |
 | 技能管理 | `/skills` |
 | Agent 能力设计与试用 | `/agent` |
-| 对外能力暴露 | `/open-capabilities` |
+| 外部工具接入（MCP / REST） | `/connections?task=tools` |
 
 旧 Settings URL 会重定向到这些页面。
 

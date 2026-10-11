@@ -26,7 +26,7 @@ Channels are useful when:
 ## Where to find it
 
 Open the Nomi page (`/nomi`), select a companion, and switch to the
-**Remote** tab (`/nomi?companion=<id>&tab=remote`). That tab lists the
+**Channels & Robots** tab (`/nomi?companion=<id>&tab=remote`). That tab lists the
 remote connectors for the selected companion — including Telegram, Feishu
 (Lark), DingTalk, WeChat, WeCom, QQ Bot, Slack, Discord, Matrix, Mattermost,
 Twitch, Nostr, and extensions. For each connected bot you'll see:
@@ -302,7 +302,7 @@ unbinding calls `POST /api/channel/settings/companion` with a `plugin_id`,
 which persists the row and resets **that channel's** active sessions in
 one step — the next inbound message is greeted by the new companion's persona,
 model, and knowledge mounts (the conversation carries `extra.companionId`).
-Connecting a bot from a companion's **Remote** tab creates the channel row and
+Connecting a bot from a companion's **Channels & Robots** tab creates the channel row and
 binds it to that companion in one go. A row without a companion binding falls back
 to the per-platform preference `channels.<platform>.companionId`. There is no
 implicit default-companion fallback: if neither binding resolves to a live

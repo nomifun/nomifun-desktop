@@ -61,6 +61,7 @@ url.workspace = true
 dunce.workspace = true
 sha2.workspace = true
 hex.workspace = true
+getrandom.workspace = true
 open.workspace = true
 # Required at compile time by `tauri::generate_context!` — the codegen emits
 # `serde_json::...` tokens into this crate (verified: removing it breaks the
@@ -114,6 +115,7 @@ tauri = { version = "2", features = ["test"] }
 image.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 # Tests build a real NTFS junction inside the fake legacy tree to prove the
 # data relocation skips links instead of failing.

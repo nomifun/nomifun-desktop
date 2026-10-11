@@ -1,111 +1,147 @@
-# WebUI Remote Access
+# Connections & Devices
 
-The desktop app already runs a backend on a localhost port for its own webview — why not just expose it? Because exposing an unauthenticated backend on a LAN would hand every device on that network full shell, file, and agent access.
+Open **Connections & Devices** (`/connections`) in the primary navigation and choose your task:
 
-**WebUI remote access** solves that. The desktop backend runs under a *trust-local-token* policy: the desktop's own webview is trusted via a per-boot secret it presents on every request (so you never log in locally), while any other client must authenticate. With one switch, an additional listener is bound on a stable LAN port that serves the app to remote browsers behind a login (password + QR), so you can use Nomi from your phone or another browser without giving up local-mode convenience.
-
-This is **per-instance** — it lives inside your already-running desktop app — and is distinct from the dedicated [Web Server Deployment](./web-server-deployment.md). Use this when you have an existing desktop install and just want to reach it from another device on the same network. Use the dedicated server when you want a long-lived headless deployment.
-
-![Open Capabilities WebUI panel](../images/webui-01-settings-overview.png)
-
-## Where to find it
-
-Open **Open Capabilities** (route `/open-capabilities`) and use the WebUI
-remote-access panel. The legacy `/settings/webui` route redirects there.
-
-- **WebUI remote access** controls the desktop LAN listener described in this guide.
-- Other cards on the page manage public/remote capability exposure and should be
-  reviewed separately before enabling them.
-
-> The WebUI remote-access controls are meaningful inside the desktop shell. In a
-> browser tab against `nomifun-web`, you are already using the dedicated Web host;
-> use [Web Server Deployment](./web-server-deployment.md) settings instead.
-
-## What enabling it does
-
-Toggling **Enable WebUI** on starts an additional authenticated server inside the desktop process:
-
-- **Default port `25808`** (`25809` in dev mode, `25810` when `NOMIFUN_MULTI_INSTANCE=1`).
-- An admin user (default name `admin`) is provisioned with a freshly generated random password — shown in plaintext **once**, on this first start, so you can copy it.
-- The server's lifetime is tracked by the desktop main process; the toggle reflects the *real* server state, not a remembered preference, so a silent failure (port conflict, etc.) leaves the switch off rather than misleading you into thinking it is up.
-
-## Architecture: two listeners, one backend
-
-The desktop process serves its backend on **two** sockets that share one in-process router (built once):
-
-- A **permanent loopback listener** on an ephemeral port — the desktop's own webview, trusted via the per-boot secret. Always up; never disturbed by toggling remote access.
-- An **on-demand LAN listener** on `0.0.0.0:25808` — bound only when you enable remote access, torn down when you disable it. Remote browsers reach this one and must log in. Trust is the secret (which only the desktop webview holds), *not* "arrived on loopback", so other OS accounts on a shared workstation and same-host reverse proxies are **not** auto-trusted. The LAN listener additionally enforces a Host/Origin allow-list (IP/localhost only, blocking DNS-rebinding) and rate-limits by real peer address.
-
-Because of the exclusive data-dir lock, the desktop process is the only backend on its data directory — so the LAN listener lives *inside* the desktop app, it is not a co-running `nomifun-web`.
-
-## Binding and the access URL
-
-Enabling remote access binds **`0.0.0.0:25808`** (`25809` in dev; falls back to an ephemeral port if `25808` is taken) so other devices on your network can reach it. The displayed URL adapts:
-
-- **The desktop's own machine**: `http://localhost:<port>`.
-- **Remote (LAN/VPN)**: `http://<your-LAN-IP>:<port>` (e.g. `http://192.168.1.42:25808`). The candidate interface addresses are detected from the host's network interfaces; on a VPN host with multiple adapters, confirm the advertised address is the one your phone can actually reach.
-
-A copy button copies the URL; clicking it opens it in your default external browser. The QR-code login is shown while the LAN listener is running.
-
-## Login: username and password
-
-The credentials panel shows:
-
-- **Username** — defaults to `admin`. Editable via the pencil icon (server-side validation: 3–32 chars, `[a-zA-Z0-9_-]`, must not start or end with `-` / `_`).
-- **Initial password** — shown in plaintext on the *very first* start, masked as `******` after that. The plaintext can be copied while it is visible. Once you copy it (or the first session ends), it switches to masked permanently.
-  - The plaintext is only shown once because the backend stores a bcrypt hash, not the plaintext. After the first display, even the desktop UI cannot recover the original.
-
-To change the password later, click the pencil icon next to the masked field. The form requires the new password and a confirmation; on success the new value is hashed and persisted, and the cached plaintext is cleared. The password validator rejects values shorter than 8 characters and a small list of common passwords (`password`, `12345678`, …).
-
-The "reset password" path (when you forget it) generates a fresh 16-character random password server-side; a one-time displayed value, like the initial one.
-
-![Login screen on the remote browser](../images/webui-03-login-screen.png)
-
-## QR-code login
-
-While WebUI is enabled (the LAN listener is running), a QR code appears in the credentials card.
-
-- Scanning it from your phone opens `http://<host>:<port>/qr-login?token=<one-time>` in the phone's default browser.
-- That URL hits a static page that calls `POST /api/auth/qr-login` with the token. The token is single-use and validated atomically; the server returns a session cookie + JWT and the page redirects to `/`.
-- Tokens **expire after 5 minutes**; the UI auto-refreshes the QR every 4 minutes so a panel left open does not invalidate.
-- A copy button next to the QR copies the full login URL (useful if your phone cannot scan), and a refresh button regenerates the token on demand.
-
-QR login always logs you in as the configured WebUI admin (the primary admin user), regardless of how many users exist in the database — it is the per-instance "skip the password form" shortcut, not a multi-user feature.
-
-![Current NomiFun remote workspace](../images/webui-04-cross-device.png)
-
-## How this differs from `nomifun-web`
-
-| | WebUI remote access | `nomifun-web` (Web Server Deployment) |
+| Task | Entry | Access provided |
 |---|---|---|
-| Where it runs | Inside your already-running desktop app | A separate, headless binary |
-| GUI required to start | Yes (the Settings toggle) | No |
-| Admin provisioning | Auto-generated password on first enable | Interactive first-run setup, or `NOMIFUN_ADMIN_PASSWORD` |
-| Default port | `25808` (prod), `25809` (dev) | `8787` |
-| Survives reboot | Only if your desktop app is running | Yes, with systemd / Docker `restart: unless-stopped` |
-| TLS | None built in (LAN-oriented) | Caddy / nginx in front; `NOMIFUN_HTTPS=true` |
-| Use case | Quick remote access from a phone on the same network | A real always-on server |
+| Use Desktop from a phone | **Connect a phone** | A one-time NomiFun Mobile pairing code and an independent device credential |
+| Use Desktop from another computer | **Other computer browsers** | WebUI address, administrator login, or a one-time browser login link |
+| Call Desktop from an external Agent or tool | **External tools** | MCP / REST configuration and an installation access token |
 
-If you find yourself leaving the desktop app running on a server-like box just so the WebUI server stays up, that is the cue to switch to a dedicated [Web Server Deployment](./web-server-deployment.md).
+Desktop owns the business data and execution. Mobile is a connected client; NomiRelay is optional transport.
+Configure IM channels and physical robots under each companion's **Channels & Robots**. Both destinations link to each other.
 
-## Security notes
+The shared WebUI renderer supports desktop windows and browsers of at least 880×600.
+Phones use the separate NomiFun Mobile app.
 
-- The server listens on plain HTTP. Use it on a **trusted local network** (your home Wi-Fi, a VPN, Tailscale, etc.). For exposure beyond that, deploy `nomifun-web` behind a TLS reverse proxy instead.
-- The admin user has the same capabilities as the local desktop user: shell access, file access, agent execution. Treat the admin password and QR tokens accordingly.
-- Changing the password (in-app or via reset) invalidates all existing sessions because the JWT signing secret rotates atomically with the password update.
-- The QR token is one-shot — once scanned and consumed it cannot be reused. A leaked token is therefore self-limiting, but a leaked URL **before** scanning still grants login. Don't post screenshots of the QR.
+Legacy `/open-capabilities` and `/settings/webui` links redirect to the browser task;
+`/settings/tools` redirects to external tools.
+
+## Pair a phone on the same network
+
+1. Start Desktop, open **Connections & Devices → Connect a phone**, and confirm the displayed Desktop identity.
+2. Select **Same network** and **Enable network access**.
+3. Choose a Desktop address your phone can reach. With several adapters or a VPN, choose a connected network.
+4. Select **Generate phone pairing code**.
+5. In NomiFun Mobile, select **Add Desktop**, then scan the code or paste the phone pairing link.
+6. Wait for Desktop's pairing receipt and verify the phone name under **Paired phones**.
+   The receipt means a device credential was issued. Mobile then completes the Desktop identity and protocol handshake for its business connection.
+
+Codes expire shortly and can be redeemed once. The page shows remaining time and hides used or expired codes.
+Generating a new code cancels any earlier code that has not been used. If Desktop cannot finish pairing (for example, when it already has the maximum number of paired phones), the page says so instead of showing a receipt.
+Select **Generate a new pairing code** for another phone. Every phone receives its own credential;
+model keys and the database stay on Desktop.
+
+The phone and Desktop must share a reachable LAN or VPN. To use Desktop after leaving this network,
+configure relay access and add its endpoint in Mobile.
+
+## Pair across networks through a relay
+
+Use your self-hosted NomiRelay, or obtain a Console address and enrollment code from your administrator.
+
+1. Select **Across networks (relay)** in **Connect a phone**.
+2. Enter the Relay Console address and select **Open console**. A deployment guide is available if no relay exists yet.
+3. Create a v2 Desktop enrollment code in Console, paste it into Desktop, and select **Connect relay**.
+4. Verify **Relay online**, Desktop API availability, and cross-network endpoint availability.
+5. Generate a phone pairing code, scan or paste it in Mobile, confirm the Desktop identity, and finish pairing.
+
+The relay enrollment code is for Desktop; the phone pairing code is for Mobile.
+Mobile does not need relay administrator credentials or an `nfagent` enrollment secret.
+Older v1 enrollments prompt an upgrade and reconnection before using the new device credential flow.
+Desktop keeps one relay connection at a time. To use a different relay or a new enrollment code, disconnect the current one first.
+
+Phone pairing codes are generated only when you select **Generate**; connecting or restarting the
+relay never creates a pairing code.
+
+- **Pause cross-network access** stops the relay connection and saves this choice across Desktop restarts.
+  Phone credentials and any enabled same-network access remain.
+- **Reconnect** resumes the saved enrollment. If enrollment was not confirmed, use this action to confirm it rather than repeatedly creating new enrollments.
+- **Disconnect relay** revokes a v2 enrollment on the server before clearing local configuration.
+  If the relay cannot confirm removal, the configuration is kept so the operation can be retried;
+  **Forget on this Desktop only** then removes it locally without contacting the relay, and the old
+  relay-side connection must be revoked in Relay Console. It does not delete Desktop business data or revoke individual phones.
+- **Forget on this Desktop only** is also offered when Desktop cannot read its saved relay
+  configuration, for example after the data folder moved to another Windows account.
+  Phone credentials and same-network access remain.
+- Older v1 enrollment can only be forgotten locally. Revoke its old Agent credential in Console as well.
+
+## Manage paired phones
+
+**Paired phones** lists authorized devices and their last use. It is not a real-time online list.
+
+Select a phone's **Remove phone** action and confirm to revoke that phone's credential and current connections.
+Other phones remain authorized, and Desktop conversations, tasks, and files remain.
+The removed phone must pair again to restore access.
+
+Changing the owner password from a browser session (including the dedicated Web host) signs out every
+browser session and all paired phones; pair the phones again afterwards. A password change made in the
+Desktop app keeps paired phones.
+
+A phone credential grants owner-level access to this Desktop's tasks, conversations, and tools.
+Only pair trusted phones you own, and protect the QR code and pairing link.
+
+## Access from another computer's browser
+
+Open **Other computer browsers**, enable WebUI in the Desktop app, and copy its access address to a desktop browser on another computer.
+Sign in with the administrator account, or copy the one-time **QR-code login** link in this task.
+
+Browser login codes and Mobile pairing codes have different purposes.
+Browser links enter through `/qr-login?token=…`; Mobile uses a `nomifun://pair` link wrapping `/device-pair?token=…`.
+
+The default LAN WebUI port is `25808` (usually `25809` in a development channel, or `25810` in multi-instance mode).
+Use the actual address shown in the UI. Initial administrator passwords may be shown only once;
+the account panel can change the password or username afterward. If cross-network access was
+configured before WebUI, the browser task shows the password as already set; use the password
+action in the account panel to choose one before signing in from a browser.
+
+Only the trusted in-app client can initialize Desktop credentials. A loopback connection,
+browser or phone token, or forged page Origin cannot initialize the owner's password.
+The LAN and relay listeners provision an access password before they open.
+
+The WebUI switch controls the LAN listener. Relay access has an independent loopback endpoint and enabled state;
+pausing it does not disable WebUI. Desktop cannot execute requests while it is closed or the machine is asleep.
+
+## Already using a dedicated Web host
+
+An installation owner signed into `nomifun-web` from a desktop browser can create phone pairing codes,
+read paired devices, and revoke each device independently from **Connect a phone**.
+
+The pairing link uses the current site's address. The phone must reach it. If the page was opened through
+localhost or 127.0.0.1, reopen it through a reachable LAN IP or deployment domain before generating a code.
+
+A browser cannot manage Tauri listeners or relay processes. Configure a dedicated host's ports, TLS,
+and process lifecycle through [Web Server Deployment](./web-server-deployment.md).
+Authenticated `nomifun-web` retains its first-run setup flow. Complete owner setup before
+opening a dedicated deployment to untrusted visitors.
+Device credentials cannot issue or revoke credentials for other devices; use an owner account or the Desktop app for management.
+
+## External tools
+
+Select the needed MCP / REST capability domains under **External tools** and copy the generated configuration.
+Issue the installation access token in the Desktop app. Its plaintext appears once and it can be revoked independently.
+This token belongs to the installation and is separate from phone credentials and browser sessions;
+it does not select or impersonate a companion.
 
 ## Troubleshooting
 
-**Toggle flips back to off immediately.** Another process is bound to the WebUI port. Pick a different port if you can configure it from the UI; otherwise stop whatever is holding `25808`.
+- **Cannot find the entry:** global **Connections & Devices** manages phones, browsers, and external tools.
+  Companion **Channels & Robots** manages IM and physical robots.
+- **The phone cannot reach a LAN address:** check network connectivity, the selected adapter, VPN routing, and the host firewall.
+  localhost and 127.0.0.1 are reachable only on the host itself.
+- **Relay online but the phone does not work:** check endpoint health, then Mobile's Desktop identity, protocol version, and device authorization.
+  Relay status alone does not mean a phone is paired.
+- **A pairing code expired or was used:** generate a new phone pairing code rather than redeeming the old code again.
+- **Protocol mismatch after upgrading Desktop:** upgrade Mobile to a compatible version.
+  Desktop's canonical Agent Session remains the authority for conversation history.
+- **A phone was removed:** pair it again using a new Desktop code. Restarting the relay or removing another phone does not restore its authorization.
+- **Relay removal could not be confirmed, or the saved relay configuration cannot be read** (for
+  example after the data folder moved to another Windows account): select **Forget on this Desktop
+  only** to clear the local state, then connect again and revoke the old connection in Relay Console.
+- **The UI differs from the installed version:** force-refresh the desktop browser to load the UI served by the current installation.
 
-**The QR code shows but my phone gets a connection error.** Check the LAN IP shown in the access URL — if your machine has multiple interfaces (Wi-Fi + Ethernet, VPN adapters), the auto-detected address may not be the one your phone can reach. Confirm your phone is on the same network/subnet, and that the firewall allowed Nomi when prompted.
-
-**`./qr-login?token=…` says "Login failed: …".** The token expired (5-minute TTL) or has already been consumed. Click the refresh button next to the QR to mint a new one.
-
-**I forgot the admin password.** Use the reset button (the pencil + reset icon next to the masked password), then sign in with the freshly generated value — it is shown once.
-
-## See also
-
-- [Running NomiFun as a Desktop App](./desktop-app.md)
-- [Web Server Deployment](./web-server-deployment.md) — when you want a real always-on server, not a desktop side-channel.
+Authenticated endpoints expose file, tool, and Agent execution capabilities. Use LAN HTTP on a trusted network;
+use a correctly configured TLS relay or dedicated Web deployment across public networks.
+Anyone able to reach the address can read its installation identifier and the protocol version used for
+pairing checks. On the same network it also shows the computer name; through a relay it shows
+"NomiFun Desktop" unless `NOMIFUN_DESKTOP_NAME` sets a name for every address.
+Do not publish screenshots containing active pairing codes, installation tokens, or passwords.

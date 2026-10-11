@@ -67,7 +67,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 | 项目 | 定位 | 文档与入口 |
 |---|---|---|
 | **NomiFun Desktop**（本仓库；[GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [产品文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](https://www.nomifun.com/zh/docs/guides/webui-remote/) |
-| NomiFun Mobile（[GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)） | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [Mobile 使用指南](https://www.nomifun.com/zh/docs/guides/mobile-bridge/) · 在 Desktop 开启**远程与开放 → WebUI 访问**后扫描一次性二维码 |
+| NomiFun Mobile（[GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)） | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [连接与设备指南](docs/guides/webui-remote-access.zh.md) · 在 Desktop 打开**连接与设备 → 连接手机**，选择同网或中继后扫码 |
 | NomiFun 小智云台（[GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)） | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智接入指南](https://www.nomifun.com/zh/docs/guides/xiaozhi-robot/) · 固件源码：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra（[GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)） | 自托管的 NomiRelay 网络中继，把 NAT 后的 Desktop 或其他 HTTP/WebSocket/TCP/UDP 服务提供给跨网络手机与 IoT 设备 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 | **NomiFun Portal**（[GitHub](https://github.com/nomifun/nomifun-protal)） | 统一管理产品使用文档、首次使用、截图、功能教程和用户排障 | [中文文档](https://www.nomifun.com/zh/docs/) · [English docs](https://www.nomifun.com/docs/) |
@@ -75,12 +75,13 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 ### 四个项目如何接入
 
 1. 运行 Desktop，配置需要的模型和伙伴；Desktop 保留主数据集并实际执行任务。
-2. Mobile 在 Desktop 的**远程与开放 → WebUI 访问**页面开启监听，然后扫描短时效、
-   一次性的二维码。局域网内 Mobile **直连 Desktop，不经过 NomiFun 云中转**；手机是
+2. 在 Desktop 的**连接与设备 → 连接手机**中选择同一网络，开启访问并生成手机配对码。
+   打开 Mobile 的**添加 Desktop**扫码或粘贴链接。局域网内 Mobile **直连 Desktop，不经过 NomiFun 云中转**；手机是
    已认证客户端，Desktop 是权威服务器，所以无需把模型密钥和持久数据复制到手机。
-3. 小智云台刷入固件后，在伙伴的**远程控制 → 机器人连接**页面完成绑定。
-4. 需要跨网络访问时，自行部署 NomiRelay 与 `nfagent`，再让 Mobile 连接 Relay 的
-   业务入口。Mobile 不持有中继管理员凭据，Desktop 仍然是业务数据与执行权威端。
+3. 小智云台刷入固件后，在伙伴的**渠道与机器人 → 机器人连接**页面完成绑定。
+4. 跨网络时，在**连接与设备 → 连接手机 → 跨网络（中继）**中使用自托管 Relay Console
+   签发的一次性接入串连接 NomiRelay，再生成手机配对码。Mobile 不持有中继管理员凭据。
+   配对结果与独立手机撤销都在同一页管理；暂停跨网访问经 Desktop 重启后仍保持暂停。
 
 请仅在可信网络中开启远程接口。认证、局域网暴露和部署边界以相应指南为准。
 
@@ -236,7 +237,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 
 通过局域网把兼容的小智 ESP32 机器人直接连接到 NomiFun。机器人提供麦克风、
 扬声器、显示屏、舵机和设备端 MCP 工具；NomiFun 提供伙伴人格、模型、记忆、
-ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控制 → 机器人连接**：
+ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**渠道与机器人 → 机器人连接**：
 复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
 
 ### 🧩 插件与小程序（Unified Plugins）—— 创建并运行受治理的本地软件
@@ -392,14 +393,15 @@ URL、协议或鉴权方式。
 > 产品使用文档：[`docs/guides/webui-remote-access.zh.md`](docs/guides/webui-remote-access.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/webui-remote/)
 > · 应用：[nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
-局域网内无需社交平台，也无需 NomiFun 云中转。一键**扫码配对**会给手机签发短时效、
-一次性的登录凭证，让 Mobile 直连 Desktop 进程内的认证监听器。Mobile 随即实时使用
+局域网内无需社交平台，也无需 NomiFun 云中转。打开**连接与设备 → 连接手机**，
+生成短时效、一次性的手机配对码。扫码后，每台手机获得独立可撤销的设备凭据，
+Mobile 直连 Desktop 进程内的认证监听器，并实时使用
 Desktop 中同一套会话、任务、需求、伙伴、模型和工具；Desktop 始终是数据与执行权威端。
 手机只是经过认证的连接客户端，因此不需要复制一套数据库，也不需要再保存一份模型密钥。
 
 ### ⚙️ config one，use anywhere
 
-**知识库**、**Agent 工作台 & Skills**、**MCP**、**模型**、**开放能力**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
+**知识库**、**Agent 工作台 & Skills**、**MCP**、**模型**、**连接与设备**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
 
 ### 💬 11 个 IM 渠道
 

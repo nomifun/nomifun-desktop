@@ -29,7 +29,7 @@ Session tree. The selected companion then has two first-level modes:
 | Cohabit | Dedicated companion conversation | One continuous history across desktop, IM and robot inputs, plus a concise status / memory / connection summary |
 | Manage | Overview | Name, figure, desktop visibility, level, persona, Agent and model / voice / vision slots |
 | Manage | Memory & knowledge | Only this companion's memories and knowledge bindings |
-| Manage | Connections & devices | IM channels, physical robots and companion-scoped MCP connections |
+| Manage | Channels & Robots | IM channels, physical robots and companion-scoped MCP connections |
 | Manage | Evolution / Skills | Learning cadence, collection inputs, retention, quiet hours and generated / configured skills |
 | Manage | History / Migration & deletion | Day-based chat reading, package transfer and irreversible deletion |
 

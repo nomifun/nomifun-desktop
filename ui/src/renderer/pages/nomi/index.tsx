@@ -64,7 +64,7 @@ const MANAGE_NAV: Array<{ labelKey: string; fallback: string; tabs: WorkspaceTab
 const MANAGE_LABELS: Record<WorkspaceTabKey, { key: string; fallback: string }> = {
   overview: { key: 'nomi.tabs.overview', fallback: '总览' },
   memory: { key: 'nomi.tabs.memory', fallback: '记忆与知识' },
-  remote: { key: 'nomi.tabs.remote', fallback: '连接与设备' },
+  remote: { key: 'nomi.tabs.remote', fallback: '渠道与机器人' },
   evolution: { key: 'nomi.tabs.evolution', fallback: '进化' },
   skills: { key: 'nomi.tabs.skills', fallback: '技能' },
   history: { key: 'nomi.tabs.history', fallback: '聊天历史' },

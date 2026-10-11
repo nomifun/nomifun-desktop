@@ -38,8 +38,13 @@ Agent 配置，约束工具与知识库范围，并真正执行任务。其他�
 
 ### Mobile 与 Desktop 局域网直连
 
+用户从 Desktop 全局 **连接与设备 → 连接手机** 开始接入，在 Mobile 的 **添加 Desktop**
+中扫码或粘贴配对链接。Mobile 的 **连接与设备** 页面显示所连接的 Desktop 身份、
+连接状态与修复入口。
+
 在局域网场景中，Mobile 直接连接 Desktop 进程内的认证监听器。配对使用短时效、
-一次性的二维码登录凭证：凭证 5 分钟后过期，而且成功消费后不能再次使用。认证后，
+一次性的手机配对码，兑换后为该手机签发独立设备凭据。配对码过期或成功消费后不能
+再次使用；它与其他电脑浏览器的一次性登录码不同。认证后，
 实时通信发生在手机与所选 Desktop 实例之间，**不经过 NomiFun 云中转服务器**。
 因此，手机承担交互与控制职责；Desktop 仍然是数据、凭据、模型、Agent、任务和
 工具的权威端。
@@ -50,7 +55,7 @@ Agent 配置，约束工具与知识库范围，并真正执行任务。其他�
 - 伙伴、模型、Skill、知识库、需求或任务在 Desktop 中更新后，Mobile 看到的就是
   同一份状态；
 - Desktop 所有者显式开启或关闭局域网边界，首次连接使用一次性凭证，而不是公开一个
-  长期有效的 bearer URL。
+  长期有效的 bearer URL；每台手机的授权可以独立撤销，而不影响其他手机。
 
 局域网监听器本身不内置 TLS。请仅在可信局域网或可信专用 VPN 中使用，保持操作系统
 防火墙开启，也不要把端口直接暴露到公网。完整威胁模型与操作步骤见
@@ -58,10 +63,17 @@ Agent 配置，约束工具与知识库范围，并真正执行任务。其他�
 
 ### Net Infra 是可选网络承载层，不是另一套业务后端
 
-Mobile 无法通过可信局域网访问 Desktop 时，部署者可以自行运行 NomiRelay，并在能访问
-Desktop WebUI 监听器的机器上运行 `nfagent`。Mobile 随后只连接 Relay 的业务入口，
+Mobile 无法通过可信局域网访问 Desktop 时，部署者可以自行运行 NomiRelay。默认用户
+流程是在 Relay Console 的 **连接 Desktop**（`/desktop-connect`）中创建 v2 接入配对串，再到 Desktop 的
+**连接与设备 → 连接手机 → 跨网络（中继）** 粘贴配对串。原生 Desktop 管理 `nfagent`
+的安装、启动、暂停、重连与解除接入，并通过独立回环入口承载中继访问；无需用户
+手工运行 Agent，也不依赖启用局域网 WebUI。
+
+确认中继与业务入口可用后，Desktop 为 Mobile 生成手机配对码。Mobile 只连接 Relay 的业务入口，
 不会持有中继管理员凭据或调用控制台 API。Relay 负责承载 HTTP/WebSocket 字节流和执行
-网络策略，Desktop 仍然是应用数据与执行权威端。准确的部署和公网验收边界请以
+网络策略，Desktop 仍然是应用数据与执行权威端。暂停或解除中继与独立撤销手机是不同操作。
+手工运行 `nfagent` 仍适用于高级 CLI 部署，但不是默认的 Desktop 用户接入流程。
+准确的部署和公网验收边界请以
 [NomiRelay 接入文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration)和
 [Mobile Relay 指南](https://github.com/nomifun/nomifun-mobile/blob/main/docs/RELAY-INTEGRATION.md)
 为准。

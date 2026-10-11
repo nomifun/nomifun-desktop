@@ -31,7 +31,7 @@ The current frontend route map lives in
 - `/terminal-new` and `/terminal/:id`
 - `/models`
 - `/mcp`
-- `/open-capabilities`
+- `/connections` (Connections & Devices; legacy `/open-capabilities` redirects here)
 - `/skills`
 - `/agent` and `/agent-sessions/:agentSessionId`
 - `/requirements`, `/requirements/extensions`, `/requirements/sources`

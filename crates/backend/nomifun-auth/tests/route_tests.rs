@@ -13,8 +13,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use nomifun_auth::{
-    AuthPolicy, AuthRouterState, CookieConfig, JwtService, QrTokenStore, TrustState, auth_routes, hash_password,
-    trust_resolve_middleware,
+    AuthPolicy, AuthRouterState, CookieConfig, DeviceStore, JwtService, QrTokenStore, TrustState, auth_routes,
+    hash_password, trust_resolve_middleware,
 };
 use nomifun_db::{IUserRepository, SqliteUserRepository, init_database_memory};
 
@@ -28,10 +28,17 @@ async fn test_app() -> (Router, TestContext) {
 }
 
 async fn test_app_with_local(local: bool) -> (Router, TestContext) {
+    test_app_with_policy(if local { AuthPolicy::NoAuth } else { AuthPolicy::Required }).await
+}
+
+const LOCAL_SETUP_SECRET: &str = "isolated-first-run-local-trust";
+
+async fn test_app_with_policy(policy: AuthPolicy) -> (Router, TestContext) {
     let db = init_database_memory().await.unwrap();
     let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let user_repo = Arc::new(SqliteUserRepository::new(db.pool().clone())) as Arc<dyn IUserRepository>;
-    let jwt_service = Arc::new(JwtService::new("test_secret_for_routes".into()));
+    let devices = Arc::new(DeviceStore::default());
+    let jwt_service = Arc::new(JwtService::with_devices("test_secret_for_routes".into(), devices.clone()));
     let cookie_config = Arc::new(CookieConfig {
         secure: false,
         same_site: "Lax",
@@ -39,6 +46,7 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
     let qr_token_store = Arc::new(QrTokenStore::new());
 
     let state = AuthRouterState {
+        auth_policy: policy,
         jwt_service: jwt_service.clone(),
         user_repo: user_repo.clone(),
         cookie_config,
@@ -47,11 +55,10 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
 
     // Mirror `create_router`: the global trust middleware resolves local trust
     // (and injects the installation owner / `LocalTrusted` marker) before the per-route
-    // auth + local-only gates run. `local` maps to NoAuth (everything trusted),
-    // otherwise Required (JWT enforced).
+    // auth + local-only gates run. State and middleware use the same policy.
     let trust_state = TrustState {
-        policy: if local { AuthPolicy::NoAuth } else { AuthPolicy::Required },
-        local_trust_secret: None,
+        policy,
+        local_trust_secret: (policy == AuthPolicy::TrustLocalToken).then(|| Arc::from(LOCAL_SETUP_SECRET)),
         authoritative_user_id: Arc::from(installation_owner.as_str()),
     };
     let app = auth_routes(state).layer(axum::middleware::from_fn_with_state(trust_state, trust_resolve_middleware));
@@ -59,6 +66,7 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
         jwt_service,
         user_repo,
         qr_token_store,
+        devices,
         _db: db,
     };
     (app, ctx)
@@ -69,6 +77,7 @@ struct TestContext {
     jwt_service: Arc<JwtService>,
     user_repo: Arc<dyn IUserRepository>,
     qr_token_store: Arc<QrTokenStore>,
+    devices: Arc<DeviceStore>,
     _db: nomifun_db::Database,
 }
 
@@ -98,6 +107,15 @@ fn json_post(uri: &str, body: &str) -> Request<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_owned()))
         .unwrap()
+}
+
+fn setup_request(path: &str, username: &str) -> Request<Body> {
+    let mut body = serde_json::json!({"username":username,"password":"SecurePass123!"});
+    if path.ends_with("device-setup") {
+        body["device_name"] = serde_json::json!("Setup phone");
+        body["protocol_version"] = serde_json::json!(1);
+    }
+    json_post(path, &body.to_string())
 }
 
 /// Helper: perform a JSON POST request with auth token.
@@ -148,6 +166,290 @@ async fn login(app: &mut Router, username: &str, password: &str) -> (String, Str
 
 // ===========================================================================
 // T4. Login (POST /login)
+
+#[tokio::test]
+async fn mobile_pairing_is_distinct_one_time_and_individually_revocable() {
+    let (mut app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let (owner, _) = login(&mut app, "admin", "secure_pass123").await;
+    let info = app.clone().oneshot(get_anonymous("/api/connections/info")).await.unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+    let info = body_json(info).await;
+    assert_eq!(info["data"]["protocol_version"], 1);
+    assert_eq!(info["data"]["desktop_id"], ctx.user_repo.get_system_user().await.unwrap().unwrap().user_id.as_str());
+
+    let browser_qr = ctx.qr_token_store.generate();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":browser_qr,"device_name":"Phone","protocol_version":1}).to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(response).await["code"], "DEVICE_PAIRING_INVALID");
+
+    let mut paired = Vec::new();
+    for name in ["Phone A", "Phone B"] {
+        let response = app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ticket = body_json(response).await["data"].clone();
+        let qr = ticket["qr_token"].as_str().unwrap();
+        let body = serde_json::json!({"qr_token":qr,"device_name":name,"protocol_version":1}).to_string();
+        let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::SET_COOKIE).is_none(), "pairing must not create a browser session");
+        let device = body_json(response).await;
+        let token = device["token"].as_str().unwrap().to_owned();
+        let id = device["device"]["device_id"].as_str().unwrap().to_owned();
+        assert_eq!(ctx.jwt_service.verify(&token).unwrap().device_id.as_deref(), Some(id.as_str()));
+        let status = app.clone().oneshot(get_with_token(&format!("/api/connections/pairing/{}", ticket["ticket_id"].as_str().unwrap()), &owner)).await.unwrap();
+        let status = body_json(status).await;
+        assert_eq!(status["data"]["state"], "used");
+        assert_eq!(status["data"]["device_id"], id);
+        let again = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
+        assert_eq!(body_json(again).await["code"], "DEVICE_PAIRING_USED");
+        paired.push((id, token));
+    }
+    let (a_id, a_token) = &paired[0];
+    let (_, b_token) = &paired[1];
+    let response = app.clone().oneshot(get_with_token("/api/connections/devices", a_token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "paired phones cannot manage each other");
+    let response = app.clone().oneshot(json_post("/api/auth/refresh", &serde_json::json!({"token":a_token}).to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let refreshed = body_json(response).await["token"].as_str().unwrap().to_owned();
+    assert_eq!(ctx.jwt_service.verify(&refreshed).unwrap().device_id.as_deref(), Some(a_id.as_str()));
+    let response = app.clone().oneshot(Request::builder().method("DELETE").uri(format!("/api/connections/devices/{a_id}")).header("authorization", format!("Bearer {owner}")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for token in [a_token, &refreshed] {
+        assert!(ctx.jwt_service.verify(token).is_err());
+        let response = app.clone().oneshot(get_with_token("/api/auth/user", token)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_json(response).await["code"], "DEVICE_REVOKED");
+        let response = app.clone().oneshot(json_post("/api/auth/refresh", &serde_json::json!({"token":token}).to_string())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(response).await["code"], "DEVICE_REVOKED");
+    }
+    assert!(ctx.jwt_service.verify(b_token).is_ok());
+    assert!(ctx.jwt_service.verify(&owner).is_ok());
+    let self_remove = app.clone().oneshot(Request::builder().method("DELETE").uri("/api/connections/device").header("authorization", format!("Bearer {b_token}")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(self_remove.status(), StatusCode::OK);
+    assert!(ctx.jwt_service.verify(b_token).is_err());
+}
+
+#[tokio::test]
+async fn pair_device_failure_at_the_device_cap_reports_failed_not_used() {
+    let (mut app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let (owner, owner_id) = login(&mut app, "admin", "secure_pass123").await;
+    for i in 0..128 {
+        ctx.devices.register(&owner_id, &format!("Phone {i}")).await.unwrap();
+    }
+    let response = app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ticket = body_json(response).await["data"].clone();
+    let body = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone 129","protocol_version":1}).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let status = app.clone().oneshot(get_with_token(&format!("/api/connections/pairing/{}", ticket["ticket_id"].as_str().unwrap()), &owner)).await.unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = body_json(status).await;
+    assert_eq!(status["data"]["state"], "failed");
+    assert_eq!(status["data"]["failure_code"], "DEVICE_LIMIT_REACHED");
+    assert!(status["data"]["device_id"].is_null());
+}
+
+#[tokio::test]
+async fn a_fresh_pairing_code_supersedes_an_unused_earlier_code() {
+    let (mut app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let (owner, _) = login(&mut app, "admin", "secure_pass123").await;
+    let ticket_a = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
+    let ticket_b = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
+    let pair = |qr: &str| app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":qr,"device_name":"Phone","protocol_version":1}).to_string()));
+    let response = pair(ticket_a["qr_token"].as_str().unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(response).await["code"], "DEVICE_PAIRING_INVALID");
+    let status = app.clone().oneshot(get_with_token(&format!("/api/connections/pairing/{}", ticket_a["ticket_id"].as_str().unwrap()), &owner)).await.unwrap();
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+    let response = pair(ticket_b["qr_token"].as_str().unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn browser_password_change_signs_out_every_paired_phone() {
+    let (mut app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let (owner, _) = login(&mut app, "admin", "secure_pass123").await;
+    let ticket = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":1}).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let device = body_json(response).await;
+    let device_token = device["token"].as_str().unwrap().to_owned();
+    let device_id = device["device"]["device_id"].as_str().unwrap().to_owned();
+
+    let request = json_post_with_token("/api/auth/change-password", r#"{"current_password":"secure_pass123","new_password":"NewP@ssword2"}"#, &owner);
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The rotated secret plus the matching revoked record kill the credential.
+    let response = app.clone().oneshot(get_with_token("/api/auth/user", &device_token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let (owner, _) = login(&mut app, "admin", "NewP@ssword2").await;
+    let response = app.clone().oneshot(get_with_token("/api/connections/devices", &owner)).await.unwrap();
+    let devices = body_json(response).await["data"].clone();
+    let row = devices.as_array().unwrap().iter().find(|d| d["device_id"] == device_id).unwrap();
+    assert!(row["revoked_at_ms"].is_number(), "registry must match the dead token: {row}");
+
+    let ticket = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone again","protocol_version":1}).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn desktop_local_password_change_keeps_paired_phones() {
+    let (app, ctx) = test_app_with_local(true).await;
+    let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap().user_id;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let ticket = body_json(app.clone().oneshot(json_post("/api/connections/pairing", "{}")).await.unwrap()).await["data"].clone();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":1}).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let device = body_json(response).await;
+    let device_token = device["token"].as_str().unwrap().to_owned();
+    assert!(ctx.jwt_service.verify(&device_token).is_ok());
+
+    let response = app.clone().oneshot(json_post("/api/webui/change-password", r#"{"new_password":"NewP@ssword2"}"#)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(ctx.jwt_service.verify(&device_token).is_ok(), "Desktop-local password change must not sign out paired phones");
+    assert!(ctx.devices.is_active(device["device"]["device_id"].as_str().unwrap(), owner.as_str()));
+}
+
+#[tokio::test]
+async fn protocol_and_device_name_rejection_do_not_consume_invitation() {
+    let (app, ctx) = test_app().await;
+    let ticket = ctx.qr_token_store.generate_device_ticket();
+    for (name, protocol, expected) in [("Phone", 2, StatusCode::UPGRADE_REQUIRED), ("  ", 1, StatusCode::BAD_REQUEST)] {
+        let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":ticket.qr_token,"device_name":name,"protocol_version":protocol}).to_string())).await.unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(ctx.qr_token_store.device_ticket_status(&ticket.ticket_id).unwrap().state, "ready");
+    }
+}
+
+#[tokio::test]
+async fn mobile_password_login_issues_only_individually_revocable_credentials() {
+    let (app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let request = serde_json::json!({"username":"admin","password":"secure_pass123","device_name":"Manual phone","protocol_version":1}).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-login", &request)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let response = body_json(response).await;
+    let token = response["token"].as_str().unwrap();
+    let id = response["device"]["device_id"].as_str().unwrap();
+    assert_eq!(ctx.jwt_service.verify(token).unwrap().device_id.as_deref(), Some(id));
+    let response = app.clone().oneshot(get_with_token("/api/connections/devices", token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app.clone().oneshot(Request::builder().method("DELETE").uri("/api/connections/device").header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(ctx.jwt_service.verify(token).is_err());
+    let wrong = serde_json::json!({"username":"admin","password":"wrong","device_name":"Manual phone","protocol_version":1}).to_string();
+    assert_eq!(app.oneshot(json_post("/api/auth/device-login", &wrong)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mobile_first_setup_retains_the_atomic_single_claim_and_device_identity() {
+    let (app, ctx) = test_app().await;
+    let wrong_version = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":2}).to_string();
+    assert_eq!(app.clone().oneshot(json_post("/api/auth/device-setup", &wrong_version)).await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
+    assert!(!ctx.user_repo.has_users().await.unwrap());
+    let request = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":1}).to_string();
+    let (a, b) = tokio::join!(app.clone().oneshot(json_post("/api/auth/device-setup", &request)), app.clone().oneshot(json_post("/api/auth/device-setup", &request)));
+    let a = a.unwrap(); let b = b.unwrap();
+    let response = match (a.status(), b.status()) {
+        (StatusCode::OK, StatusCode::CONFLICT) => a,
+        (StatusCode::CONFLICT, StatusCode::OK) => b,
+        states => panic!("setup must have exactly one winner: {states:?}"),
+    };
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let response = body_json(response).await;
+    let token = response["token"].as_str().unwrap();
+    assert_eq!(ctx.jwt_service.verify(token).unwrap().device_id.as_deref(), response["device"]["device_id"].as_str());
+    assert_eq!(response["user"]["username"], "mobile_admin");
+}
+
+#[tokio::test]
+async fn desktop_setup_requires_local_trust_even_with_owner_or_device_credentials() {
+    for path in ["/api/auth/setup", "/api/auth/device-setup"] {
+        for (credential, origin) in [
+            ("none", Some("https://attacker.example")),
+            ("wrong-trust", Some("null")),
+            ("owner", Some("tauri://localhost")),
+            ("device", None),
+        ] {
+            let (app, ctx) = test_app_with_policy(AuthPolicy::TrustLocalToken).await;
+            let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap();
+            let device = ctx.devices.register(owner.user_id.as_str(), "Existing phone").await.unwrap();
+            let original_devices = ctx.devices.list(owner.user_id.as_str()).unwrap();
+            let mut request = setup_request(path, "claimed");
+            if let Some(origin) = origin { request.headers_mut().insert(header::ORIGIN, origin.parse().unwrap()); }
+            match credential {
+                "wrong-trust" => { request.headers_mut().insert(nomifun_auth::LOCAL_TRUST_HEADER, "wrong-secret".parse().unwrap()); }
+                "owner" | "device" => {
+                    let token = if credential == "owner" {
+                        ctx.jwt_service.sign(owner.user_id.as_str(), &owner.username).unwrap()
+                    } else {
+                        ctx.jwt_service.sign_for_device(owner.user_id.as_str(), &owner.username, &device.device_id).unwrap()
+                    };
+                    request.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+                }
+                _ => {}
+            }
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} / {credential}");
+            assert!(response.headers().get(header::SET_COOKIE).is_none());
+            let body = body_json(response).await;
+            assert!(body.get("token").is_none());
+            let unchanged = ctx.user_repo.get_system_user().await.unwrap().unwrap();
+            assert_eq!(unchanged.username, owner.username);
+            assert!(unchanged.password_hash.is_empty());
+            assert_eq!(serde_json::to_value(ctx.devices.list(owner.user_id.as_str()).unwrap()).unwrap(), serde_json::to_value(original_devices).unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn locally_trusted_desktop_can_initialize_each_setup_route() {
+    for path in ["/api/auth/setup", "/api/auth/device-setup"] {
+        let (app, ctx) = test_app_with_policy(AuthPolicy::TrustLocalToken).await;
+        let mut request = setup_request(path, "chosen_owner");
+        // Origin is never the authority: valid local trust also works with an
+        // opaque origin or a headless caller, independently of CORS.
+        request.headers_mut().insert(header::ORIGIN, "null".parse().unwrap());
+        request.headers_mut().insert(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_SETUP_SECRET.parse().unwrap());
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = body_json(response).await;
+        let claims = ctx.jwt_service.verify(body["token"].as_str().unwrap()).unwrap();
+        let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap();
+        assert_eq!(owner.username, "chosen_owner");
+        assert!(!owner.password_hash.is_empty());
+        assert_eq!(claims.user_id, owner.user_id);
+        assert_eq!(claims.device_id.is_some(), path.ends_with("device-setup"));
+        assert_eq!(ctx.devices.list(owner.user_id.as_str()).unwrap().len(), usize::from(path.ends_with("device-setup")));
+    }
+}
+
+#[tokio::test]
+async fn standalone_and_explicit_no_auth_preserve_first_run_setup() {
+    for policy in [AuthPolicy::Required, AuthPolicy::NoAuth] {
+        for path in ["/api/auth/setup", "/api/auth/device-setup"] {
+            let (app, ctx) = test_app_with_policy(policy).await;
+            let response = app.oneshot(setup_request(path, "web_owner")).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{policy:?} / {path}");
+            let body = body_json(response).await;
+            assert!(ctx.jwt_service.verify(body["token"].as_str().unwrap()).is_ok());
+            assert!(ctx.user_repo.has_users().await.unwrap());
+        }
+    }
+}
 // ===========================================================================
 
 #[tokio::test]

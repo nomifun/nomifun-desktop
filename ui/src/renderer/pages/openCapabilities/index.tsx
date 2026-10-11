@@ -5,8 +5,9 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Button, Checkbox, Message, Tabs } from '@arco-design/web-react';
+import { Alert, Button, Checkbox, Message, Tabs } from '@arco-design/web-react';
 import { ApiApp, Terminal, WebPage } from '@icon-park/react';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -21,10 +22,11 @@ import type {
   KnowledgeCliFamily,
 } from '@/common/adapter/ipcBridge';
 import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
+import PhoneConnectionPanel from './PhoneConnectionPanel';
 
 const formatJson = (value: unknown) => JSON.stringify(value, null, 2);
 
-type OpenCapabilityTab = 'webui' | 'mcp';
+type OpenCapabilityTab = 'phone' | 'browser' | 'tools';
 
 type McpDomainOption = {
   id: string;
@@ -163,17 +165,21 @@ const normalizeMcpDomains = (domains: string[]): string[] =>
 
 const OpenCapabilitiesPage: React.FC = () => {
   const { t } = useTranslation();
-  const { accessUrls, lifecycleSupported, status } = useWebuiServer();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { accessUrls, lifecycleSupported, status, running, starting, start } = useWebuiServer();
   const [cwd, setCwd] = useState('');
-  const [activeOpenCapabilityTab, setActiveOpenCapabilityTab] = useState<OpenCapabilityTab>('webui');
+  const task = searchParams.get('task');
+  const activeOpenCapabilityTab: OpenCapabilityTab = task === 'browser' || task === 'tools' ? task : 'phone';
   const [selectedMcpDomains, setSelectedMcpDomains] = useState<string[]>([...RECOMMENDED_MCP_DOMAINS]);
 
   const baseUrl = useMemo(() => {
+    if (!lifecycleSupported && typeof window !== 'undefined') return window.location.origin;
     const preferred = accessUrls[0];
     if (preferred) return preferred.replace(/\/$/, '');
     const port = status?.port ?? WEBUI_DEFAULT_PORT;
     return `http://127.0.0.1:${port}`;
-  }, [accessUrls, status?.port]);
+  }, [accessUrls, status?.port, lifecycleSupported]);
 
   const mcpUrl = `${baseUrl}/mcp`;
   const restUrl = `${baseUrl}/v1`;
@@ -212,20 +218,25 @@ const OpenCapabilitiesPage: React.FC = () => {
 
   return (
     <HubPageShell
-      title={t('settings.openCapabilities.title', { defaultValue: '远程&开放能力' })}
-      subtitle={t('settings.openCapabilities.subtitle', {
-        defaultValue: '分开管理 WebUI 访问入口，以及 NomiFun Remote MCP / REST 对外开放能力。',
-      })}
+      title={t('settings.deviceConnections.title')}
+      subtitle={t('settings.deviceConnections.subtitle')}
       maxWidthClass='md:max-w-1180px'
       className='open-capabilities-page'
     >
       <Tabs
         activeTab={activeOpenCapabilityTab}
-        onChange={(key) => setActiveOpenCapabilityTab(key as OpenCapabilityTab)}
+        onChange={(key) => setSearchParams({ task: key })}
         type='line'
         className='[&>.arco-tabs-content]:pt-16px'
       >
-        <Tabs.TabPane key='webui' title={t('settings.openCapabilities.webuiTab', { defaultValue: 'WebUI 访问' })}>
+        <Tabs.TabPane key='phone' title={t('settings.deviceConnections.phoneTask')}>
+          <PhoneConnectionPanel />
+          <div className='mt-16px flex items-center justify-between gap-12px rd-10px bg-fill-1 px-14px py-12px'>
+            <span className='text-13px text-t-secondary'>{t('settings.deviceConnections.companionHint')}</span>
+            <Button size='small' onClick={() => navigate('/nomi?mode=manage&tab=remote')}>{t('settings.deviceConnections.companionAction')}</Button>
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane key='browser' title={t('settings.deviceConnections.browserTask')}>
           <section className='grid grid-cols-1 gap-16px lg:grid-cols-[minmax(0,1fr)_360px]'>
             <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-16px'>
               <SectionHeader
@@ -241,31 +252,28 @@ const OpenCapabilitiesPage: React.FC = () => {
             </div>
 
             <div className='flex flex-col gap-12px'>
-              <InfoPanel
-                icon={<ApiApp theme='outline' size='17' fill='currentColor' />}
-                title={t('settings.openCapabilities.addressStrategyTitle', { defaultValue: '访问地址策略' })}
-                body={t('settings.openCapabilities.addressStrategyDesc', {
-                  defaultValue:
-                    'NomiFun 只展示更可能被局域网电脑访问的地址；回环、链路本地、基准测试网段等地址不会进入登录链接候选。',
-                })}
-              />
+              <InfoPanel icon={<WebPage theme='outline' size='17' fill='currentColor' />} title={t('settings.deviceConnections.browserStepsTitle')} body={t('settings.deviceConnections.browserSteps')} />
               <EndpointBlock
                 label={t('settings.openCapabilities.currentAccessBase', { defaultValue: '当前访问基址' })}
                 value={baseUrl}
               />
-              <CapabilityNote
+              <details className='rd-12px border border-solid border-arco-2 p-12px'>
+                <summary className='cursor-pointer text-13px text-t-secondary'>{t('settings.deviceConnections.addressAdvanced')}</summary>
+                <CapabilityNote
                 title={t('settings.openCapabilities.ipFilterTitle', { defaultValue: '会隐藏哪些 IP' })}
                 body={t('settings.openCapabilities.ipFilterDesc', {
                   defaultValue:
                     '隐藏 127.0.0.1、0.0.0.0、169.254.*、198.18.* / 198.19.*、组播和文档保留地址；保留 192.168.*、10.*、172.16-31.* 等可用 LAN/VPN 候选。',
                 })}
-              />
+                />
+              </details>
             </div>
           </section>
         </Tabs.TabPane>
 
-        <Tabs.TabPane key='mcp' title={t('settings.openCapabilities.mcpTab', { defaultValue: 'MCP 能力' })}>
+        <Tabs.TabPane key='tools' title={t('settings.deviceConnections.toolsTask')}>
           <div className='flex flex-col gap-16px'>
+            {lifecycleSupported && !running && <Alert type='info' content={t('settings.deviceConnections.toolsListenerHint')} action={<Button loading={starting} onClick={() => void start()}>{t('settings.deviceConnections.lanEnable')}</Button>} />}
             <section className='grid grid-cols-1 gap-16px lg:grid-cols-[minmax(0,1fr)_360px]'>
               <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-16px'>
                 <SectionHeader

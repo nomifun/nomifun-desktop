@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -264,6 +264,75 @@ async fn same_origin_browser_cookie_connects_successfully() {
     assert_eq!(response.status().as_u16(), 101);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(manager.client_count(), 1);
+}
+
+#[tokio::test]
+async fn same_origin_device_jwt_binds_socket_despite_valid_owner_cookie() {
+    let (mut state, manager) = all_auth_sources_state();
+    let revoked = Arc::new(AtomicBool::new(false));
+    state.token_authenticator = {
+        let revoked = revoked.clone();
+        Arc::new(move |token| {
+            (token == "valid-token" || (token == "device.payload.signature" && !revoked.load(Ordering::Acquire)))
+                .then(|| "user".to_owned())
+        })
+    };
+    let (invalidations, receiver) = tokio::sync::watch::channel(0);
+    assert!(manager.ensure_auth_watch(state.token_authenticator.clone(), receiver));
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(header::ORIGIN, format!("http://{addr}").parse().unwrap());
+    request.headers_mut().insert(header::COOKIE, HeaderValue::from_static("nomifun-session=valid-token"));
+    request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("device.payload.signature"));
+    let (device_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.headers()[header::SEC_WEBSOCKET_PROTOCOL], "device.payload.signature");
+    let (_device_writer, mut device_reader) = device_socket.split();
+
+    let mut cookie_request = upgrade_request(addr);
+    cookie_request.headers_mut().insert(header::ORIGIN, format!("http://{addr}").parse().unwrap());
+    cookie_request.headers_mut().insert(header::COOKIE, HeaderValue::from_static("nomifun-session=valid-token"));
+    let (cookie_socket, _) = tokio_tungstenite::connect_async(cookie_request).await.unwrap();
+    let (_cookie_writer, mut cookie_reader) = cookie_socket.split();
+    wait_for_client_count(&manager, 2).await;
+
+    revoked.store(true, Ordering::Release);
+    invalidations.send_replace(1);
+    assert_eq!(read_close(&mut device_reader).await, Some(1000));
+    wait_for_client_count(&manager, 1).await;
+    manager.broadcast_to_user("user", WebSocketMessage::new("private", json!({"owner": "still-connected"})));
+    assert_eq!(read_text(&mut cookie_reader).await["data"]["owner"], "still-connected");
+}
+
+#[tokio::test]
+async fn invalid_explicit_device_jwt_never_falls_back_to_valid_cookie_or_bearer() {
+    let (state, manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+    for invalid in ["invalid.payload.signature", "header..signature"] {
+        let mut request = upgrade_request(addr);
+        request.headers_mut().insert(header::ORIGIN, format!("http://{addr}").parse().unwrap());
+        request.headers_mut().insert(header::COOKIE, HeaderValue::from_static("nomifun-session=valid-token"));
+        request.headers_mut().insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer valid-token"));
+        request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, invalid.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(read_text(&mut socket).await["name"], "auth-expired");
+        assert_eq!(read_close(&mut socket).await, Some(1008));
+        wait_for_client_count(&manager, 0).await;
+    }
+}
+
+#[tokio::test]
+async fn same_origin_application_subprotocol_retains_cookie_authentication() {
+    let (state, manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(header::ORIGIN, format!("http://{addr}").parse().unwrap());
+    request.headers_mut().insert(header::COOKIE, HeaderValue::from_static("nomifun-session=valid-token"));
+    request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("graphql-ws"));
+    let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.headers()[header::SEC_WEBSOCKET_PROTOCOL], "graphql-ws");
+    wait_for_client_count(&manager, 1).await;
+    manager.broadcast_to_user("user", WebSocketMessage::new("private", json!({"cookie": "authenticated"})));
+    assert_eq!(read_text(&mut socket).await["data"]["cookie"], "authenticated");
 }
 
 /// The Docker WebUI regression: a reverse proxy that rewrites `Host` to its
@@ -690,6 +759,59 @@ async fn outbound_overflow_closes_real_socket_for_resync() {
 
     assert_eq!(manager.client_count(), 0);
     assert_eq!(read_close(&mut rx).await, Some(1000));
+}
+
+#[tokio::test]
+async fn device_revocation_closes_idle_socket_and_preserves_other_device() {
+    let (mut state, manager) = default_state();
+    let revoked = Arc::new(AtomicBool::new(false));
+    state.token_authenticator = {
+        let revoked = revoked.clone();
+        Arc::new(move |token| {
+            (token == "device-b" || (token == "device-a" && !revoked.load(Ordering::Acquire)))
+                .then(|| "user".to_owned())
+        })
+    };
+    let (invalidations, receiver) = tokio::sync::watch::channel(0);
+    assert!(manager.ensure_auth_watch(state.token_authenticator.clone(), receiver));
+    let addr = start_server(state).await;
+    let (_tx_a, mut rx_a) = connect_with_token(addr, "device-a").await;
+    let (_tx_b, mut rx_b) = connect_with_token(addr, "device-b").await;
+    wait_for_client_count(&manager, 2).await;
+
+    revoked.store(true, Ordering::Release);
+    invalidations.send_replace(1);
+    assert_eq!(read_close(&mut rx_a).await, Some(1000));
+    wait_for_client_count(&manager, 1).await;
+    manager.broadcast_to_user("user", WebSocketMessage::new("private", json!({"value": "b-only"})));
+    assert_eq!(read_text(&mut rx_b).await["data"]["value"], "b-only");
+}
+
+#[tokio::test]
+async fn queued_business_frame_is_rejected_before_auth_notification_is_processed() {
+    let (mut state, manager) = default_state();
+    let revoked = Arc::new(AtomicBool::new(false));
+    state.token_authenticator = {
+        let revoked = revoked.clone();
+        Arc::new(move |token| {
+            (token == "valid-token" && !revoked.load(Ordering::Acquire))
+                .then(|| "user".to_owned())
+        })
+    };
+    let addr = start_server(state).await;
+    let (_tx, mut rx) = connect_with_token(addr, "valid-token").await;
+    wait_for_client_count(&manager, 1).await;
+
+    // Do not yield between queuing and revoke. No watcher is installed: the
+    // outbound validity gate must independently discard this business frame.
+    manager.broadcast_to_user("user", WebSocketMessage::new("private", json!({"secret": "queued"})));
+    revoked.store(true, Ordering::Release);
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.next()).await
+        .expect("revoked socket must close")
+        .expect("close frame expected")
+        .unwrap();
+    assert!(matches!(first, tungstenite::Message::Close(Some(frame)) if u16::from(frame.code) == 4409));
+    wait_for_client_count(&manager, 0).await;
 }
 
 #[tokio::test]

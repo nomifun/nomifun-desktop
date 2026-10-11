@@ -102,10 +102,12 @@ async fn availability(State(state):State<VoiceRouterState>,Extension(user):Exten
 async fn activate(State(state):State<VoiceRouterState>,Extension(user):Extension<CurrentUser>,local:Option<Extension<nomifun_auth::trust::LocalTrusted>>,headers:HeaderMap,Json(request):Json<VoiceActivationRequest>)->Result<Json<ApiResponse<VoiceActivationResponse>>,AppError>{
     let access=auth_lease(&state,&headers,user.id.as_ref(),local.is_some())?;
     if state.cleanup_registered.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).is_ok(){
-        let service=state.service.clone();let shutdown=state.shutdown.clone();let authority=state.authority.clone();let owner=user.id.as_ref().to_owned();
+        let service=state.service.clone();let shutdown=state.shutdown.clone();let authority=state.authority.clone();let owner=user.id.as_ref().to_owned();let mut invalidations=state.jwt.subscribe_invalidations();
         if !state.authority.sessions.voice_register_task(Box::pin(async move{
             let mut interval=tokio::time::interval(Duration::from_secs(30));interval.tick().await;
-            loop{tokio::select!{biased;_=shutdown.cancelled()=>break,_=interval.tick()=>{
+            loop{tokio::select!{biased;_=shutdown.cancelled()=>break,
+                changed=invalidations.changed()=>{if changed.is_err(){break;}invalidations.borrow_and_update();service.revoke_invalid_access().await;},
+                _=interval.tick()=>{
                 let Some(journal)=authority.journal.opened().await else{continue;};
                 if let Ok(sessions)=journal.referenced_sessions(owner.clone()).await{for session in sessions{
                     if shutdown.is_cancelled(){break;}
@@ -142,7 +144,8 @@ async fn media(State(state):State<VoiceRouterState>,Path(id):Path<String>,header
     let ticket=headers.get("sec-websocket-protocol").and_then(|header|header.to_str().ok()).and_then(|value|value.split(',').map(str::trim).find_map(|value|value.strip_prefix("nomifun.voice.ticket."))).ok_or_else(||AppError::Forbidden("voice media attachment capability missing".into()))?;
     let owner=state.service.capability_owner(&id,ticket).await.map_err(error)?;
     let attachment=state.service.attach_media(&owner,&id,ticket).await.map_err(error)?;
-    Ok(ws.protocols(["nomifun.voice.v1"]).max_message_size(512*1024+4096+8).max_frame_size(512*1024+4096+8).on_upgrade(move|socket|media_socket(socket,state.service,owner,id,attachment)))
+    let invalidations=state.jwt.subscribe_invalidations();
+    Ok(ws.protocols(["nomifun.voice.v1"]).max_message_size(512*1024+4096+8).max_frame_size(512*1024+4096+8).on_upgrade(move|socket|media_socket(socket,state.service,owner,id,attachment,invalidations)))
 }
 #[derive(Serialize,Deserialize)]#[serde(deny_unknown_fields)]struct AudioMetadata{
     #[serde(default,skip_serializing_if="Option::is_none")]segment_id:Option<String>,
@@ -163,23 +166,32 @@ fn encode_audio(segment_id:String,frame:AudioFrame)->Result<Vec<u8>,AppError>{
     let mut packet=Vec::with_capacity(8+metadata.len()+frame.payload.len());packet.extend_from_slice(b"NFV1");packet.extend_from_slice(&(metadata.len()as u32).to_le_bytes());packet.extend(metadata);packet.extend(frame.payload);Ok(packet)
 }
 #[derive(Deserialize)]#[serde(deny_unknown_fields)]struct ForegroundHeartbeat{kind:String,activation_epoch:u64,sequence:u64}
-async fn media_socket(socket:WebSocket,service:Arc<VoiceSessionService>,owner:String,id:String,mut attachment:VoiceMediaAttachment){
+async fn media_socket(socket:WebSocket,service:Arc<VoiceSessionService>,owner:String,id:String,mut attachment:VoiceMediaAttachment,mut invalidations:tokio::sync::watch::Receiver<u64>){
     let epoch=attachment.state.activation_epoch;let(sink,mut stream)=socket.split();let cancel=tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop=cancel.clone().drop_guard();
     let final_reason=Arc::new(std::sync::Mutex::new(VoiceCloseReason::NetworkLost));let writer_reason=final_reason.clone();
     let writer_cancel=cancel.clone();let writer_service=service.clone();let writer_owner=owner.clone();let writer_id=id.clone();
-    let mut writer=tokio::spawn(async move{
+    let mut writer_invalidations=invalidations.clone();
+    // Upgrade cancellation must also drop the sole socket writer and its
+    // credential watcher rather than detach either from this media owner.
+    let mut writer=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{
         let mut sink=sink;
         let initial=VoiceProductEvent::State{state:attachment.state};
-        if let Err(reason)=send_media_message(&mut sink,Message::Text(serde_json::to_string(&initial).unwrap_or_default().into())).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;writer_cancel.cancel();return;}
+        if let Err(reason)=send_authenticated_media_message(&mut sink,Message::Text(serde_json::to_string(&initial).unwrap_or_default().into()),&writer_service,&writer_owner,&writer_id,epoch,&writer_cancel).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;writer_cancel.cancel();return;}
         loop{tokio::select!{biased;
             _=writer_cancel.cancelled()=>break,
+            changed=writer_invalidations.changed()=>{
+                if changed.is_err(){break;}
+                writer_invalidations.borrow_and_update();
+                if writer_service.validate_access(&writer_owner,&writer_id,epoch).await.is_err(){*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=VoiceCloseReason::PermissionRevoked;writer_cancel.cancel();break;}
+            },
             changed=attachment.controls.changed()=>{
                 if changed.is_err(){break;}
                 attachment.controls.borrow_and_update();
                 for event in attachment.endpoint.control_snapshot(){
                     let closed=matches!(&event,VoiceProductEvent::EndpointControl{control:VoiceControl::Close{..},..});
                     let encoded=serde_json::to_string(&event).unwrap_or_default();
-                    if let Err(reason)=send_media_message(&mut sink,Message::Text(encoded.into())).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;writer_cancel.cancel();break;}
+                    if let Err(reason)=send_authenticated_media_message(&mut sink,Message::Text(encoded.into()),&writer_service,&writer_owner,&writer_id,epoch,&writer_cancel).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;writer_cancel.cancel();break;}
                     if closed{writer_cancel.cancel();break;}
                 }
             },
@@ -188,7 +200,7 @@ async fn media_socket(socket:WebSocket,service:Arc<VoiceSessionService>,owner:St
                 let closed=matches!(&event,VoiceProductEvent::Model{event:VoiceModelEvent::Closed{..}});
                 let encoded=serde_json::to_string(&event).unwrap_or_default();
                 if encoded.len()>256*1024{break;}
-                if let Err(reason)=send_media_message(&mut sink,Message::Text(encoded.into())).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;break;}
+                if let Err(reason)=send_authenticated_media_message(&mut sink,Message::Text(encoded.into()),&writer_service,&writer_owner,&writer_id,epoch,&writer_cancel).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;break;}
                 if closed{break;}
             },
             frame=attachment.frames.recv()=>{
@@ -198,13 +210,18 @@ async fn media_socket(socket:WebSocket,service:Arc<VoiceSessionService>,owner:St
                 let current=writer_service.state(&writer_owner,&writer_id,epoch).await;
                 if !current.is_ok_and(|s|s.output_generation==frame.frame.output_generation){continue;}
                 let Ok(packet)=encode_audio(frame.segment_id,frame.frame)else{break;};
-                if let Err(reason)=send_media_message(&mut sink,Message::Binary(packet.into())).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;break;}
+                if let Err(reason)=send_authenticated_media_message(&mut sink,Message::Binary(packet.into()),&writer_service,&writer_owner,&writer_id,epoch,&writer_cancel).await{*writer_reason.lock().unwrap_or_else(|p|p.into_inner())=reason;break;}
             }
         }}
         writer_cancel.cancel();let _=tokio::time::timeout(Duration::from_millis(200),sink.close()).await;
-    });
+    }));
     loop{tokio::select!{biased;
         _=cancel.cancelled()=>break,
+        changed=invalidations.changed()=>{
+            if changed.is_err(){break;}
+            invalidations.borrow_and_update();
+            if service.validate_access(&owner,&id,epoch).await.is_err(){*final_reason.lock().unwrap_or_else(|p|p.into_inner())=VoiceCloseReason::PermissionRevoked;break;}
+        },
         message=stream.next()=>{
             match message{
                 Some(Ok(Message::Binary(packet)))=>{let Ok(frame)=decode_audio(&packet)else{break;};if service.audio(&owner,&id,frame).await.is_err(){break;}},
@@ -221,6 +238,14 @@ async fn media_socket(socket:WebSocket,service:Arc<VoiceSessionService>,owner:St
 async fn send_media_message(sink:&mut futures_util::stream::SplitSink<WebSocket,Message>,message:Message)->Result<(),VoiceCloseReason>{
     match tokio::time::timeout(Duration::from_millis(200),sink.send(message)).await{
         Ok(Ok(()))=>Ok(()),Ok(Err(_))=>Err(VoiceCloseReason::NetworkLost),Err(_)=>Err(VoiceCloseReason::Backlog)
+    }
+}
+
+async fn send_authenticated_media_message(sink:&mut futures_util::stream::SplitSink<WebSocket,Message>,message:Message,service:&VoiceSessionService,owner:&str,id:&str,epoch:u64,cancel:&tokio_util::sync::CancellationToken)->Result<(),VoiceCloseReason>{
+    service.validate_access(owner,id,epoch).await.map_err(|_|VoiceCloseReason::PermissionRevoked)?;
+    tokio::select!{biased;
+        _=cancel.cancelled()=>Err(VoiceCloseReason::PermissionRevoked),
+        result=send_media_message(sink,message)=>result,
     }
 }
 

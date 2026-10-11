@@ -71,7 +71,7 @@ The source of truth is
 | `/agent-sessions/:agentSessionId` | Single Agent session page. |
 | `/skills` | Skills capability library. |
 | `/mcp` | MCP server management. |
-| `/open-capabilities` | Remote/public capability exposure. |
+| `/connections` | Connections & Devices: phone pairing and relay access, other-computer browser access, and external MCP/REST tools (`task` = `phone`, `browser`, or `tools`). |
 | `/scheduled`, `/scheduled/:cron_job_id` | Scheduled tasks. |
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
@@ -87,7 +87,7 @@ The source of truth is
 Legacy settings paths such as `/settings/model`, `/settings/capabilities`,
 `/settings/skills-hub`, `/settings/tools`, `/settings/display`,
 `/settings/webui`, `/settings/computer-use`, `/settings/voice-input` and
-`/settings/webhook` are redirects, as are `/requirements/kanban`,
+`/settings/webhook` are redirects, as are `/open-capabilities`, `/requirements/kanban`,
 `/requirements/new`, `/requirements/tag-sessions`, `/autowork` and `/other`.
 Do not document them as primary navigation.
 

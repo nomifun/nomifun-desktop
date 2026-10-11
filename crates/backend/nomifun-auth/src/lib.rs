@@ -1,5 +1,7 @@
 //! JWT authentication, password hashing, CSRF protection, rate limiting, and auth middleware.
 mod instance_token;
+mod devices;
+mod connections;
 mod cookie;
 mod csrf;
 mod error;
@@ -17,6 +19,7 @@ mod validation;
 
 // Error type
 pub use error::AuthError;
+pub use devices::DeviceStore;
 
 // JWT service
 pub use jwt::{
@@ -70,8 +73,8 @@ pub use middleware::{
 // Trust resolution (local-trust secret, auth policy)
 pub use trust::{
     AuthPolicy, InstallationTokenTrustState, InstallationTokenTrusted, LOCAL_TRUST_HEADER,
-    LocalTrusted, TrustState, installation_token_trust_resolve_middleware, is_locally_trusted,
-    require_local_product_trust_middleware, require_local_trust_middleware,
+    LocalTrusted, PublicRelayEdge, TrustState, installation_token_trust_resolve_middleware,
+    is_locally_trusted, require_local_product_trust_middleware, require_local_trust_middleware,
     trust_resolve_middleware,
 };
 

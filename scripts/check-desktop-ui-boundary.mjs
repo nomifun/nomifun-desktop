@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspectRendererSource } from './desktop-ui-boundary-policy.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const rendererRoot = join(repositoryRoot, 'ui', 'src', 'renderer');
@@ -22,33 +23,12 @@ files.push(
   join(repositoryRoot, 'ui', 'public', 'manifest.webmanifest')
 );
 
-const prohibitedPatterns = [
-  [/\bisMobile\b/g, 'runtime mobile-layout branch'],
-  [/\bmobile\b|手机|移动端|\bi(?:Phone|Pad|Pod|OS)\b|\bAndroid\b/g, 'mobile-specific renderer code or copy'],
-  [/safe-area-inset|-webkit-touch-callout|-webkit-overflow-scrolling|\b\d+(?:\.\d+)?dvh\b/g, 'mobile viewport or safe-area compatibility'],
-  [/@media\s*\(\s*(?:pointer\s*:\s*coarse|hover\s*:\s*none)\s*\)/g, 'input-device-specific media query'],
-];
-
 const failures = [];
 for (const file of files) {
   const source = readFileSync(file, 'utf8');
   const relativeFile = file.slice(repositoryRoot.length + 1).replaceAll('\\', '/');
-  for (const [pattern, reason] of prohibitedPatterns) {
-    pattern.lastIndex = 0;
-    for (const match of source.matchAll(pattern)) {
-      const line = source.slice(0, match.index).split('\n').length;
-      failures.push(`${relativeFile}:${line}: ${reason}: ${JSON.stringify(match[0])}`);
-    }
-  }
-
-  const mediaPattern = /@media\s*\(\s*max-width\s*:\s*(\d+)px\s*\)/g;
-  for (const match of source.matchAll(mediaPattern)) {
-    const width = Number(match[1]);
-    if (width >= supportedMinimumWidth) continue;
-    const line = source.slice(0, match.index).split('\n').length;
-    failures.push(
-      `${relativeFile}:${line}: viewport breakpoint ${width}px is below the supported ${supportedMinimumWidth}px minimum`
-    );
+  for (const { line, reason, value } of inspectRendererSource(relativeFile, source, supportedMinimumWidth)) {
+    failures.push(`${relativeFile}:${line}: ${reason}: ${JSON.stringify(value)}`);
   }
 }
 

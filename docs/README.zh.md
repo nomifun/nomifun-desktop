@@ -44,7 +44,7 @@ docs/
 ```
 
 当前顶层用户界面包括会话、终端、可扩展模型管理、创作（Canvas + 素材库）、
-Agent 工作台、技能、MCP、开放能力、需求/AutoWork、定时任务、伙伴、知识库、
+Agent 工作台、技能、MCP、连接与设备、需求/AutoWork、定时任务、伙伴、知识库、
 SSH 主机，以及 feature-gated 的插件能力。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。
 

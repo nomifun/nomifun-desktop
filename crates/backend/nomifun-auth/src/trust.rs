@@ -56,7 +56,7 @@ impl AuthPolicy {
 
     /// Whether the desktop's own cross-origin webview may connect. Its document
     /// origin (`tauri://` / `http://tauri.localhost`) differs from the loopback
-    /// API port, so permissive CORS is required for these policies.
+    /// API port, so these policies allow CORS for known webview origins.
     pub fn allows_local_webview(self) -> bool {
         matches!(self, AuthPolicy::NoAuth | AuthPolicy::TrustLocalToken)
     }
@@ -83,6 +83,12 @@ pub struct LocalTrusted;
 /// WebView-only trust used by credential and shell-adjacent endpoints.
 #[derive(Clone, Copy, Debug)]
 pub struct InstallationTokenTrusted;
+
+/// Marker inserted by the dedicated relay listener into every request it
+/// serves, so anonymous edge responses can withhold local-machine detail
+/// (for example the computer name) that loopback and LAN edges may expose.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicRelayEdge;
 
 /// State for resolving the installation access token on the narrow product
 /// control planes that explicitly support the headless CLI.
@@ -169,6 +175,25 @@ pub async fn require_local_trust_middleware(request: Request, next: Next) -> Res
             "This endpoint is only available to the local desktop client".into(),
         ))
     }
+}
+
+/// First-run credential creation belongs to the local desktop owner when the
+/// backend runs under the shell's trust policy. Origin, a JWT, and a loopback
+/// connection do not prove that authority. The standalone authenticated host
+/// retains its public first-run setup; NoAuth remains an explicit dev policy.
+pub(crate) async fn require_owner_setup_permission_middleware(
+    State(policy): State<AuthPolicy>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    if policy == AuthPolicy::TrustLocalToken
+        && request.extensions().get::<LocalTrusted>().is_none()
+    {
+        return Err(AppError::Forbidden(
+            "Initialize Desktop credentials from the local desktop client".into(),
+        ));
+    }
+    Ok(next.run(request).await)
 }
 
 /// Resolve a valid installation bearer token to the canonical installation

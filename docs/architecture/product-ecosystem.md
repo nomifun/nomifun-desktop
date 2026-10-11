@@ -39,9 +39,16 @@ copy the primary data set.
 
 ### Mobile communicates directly with Desktop
 
+Users begin at Desktop's global **Connections & Devices → Connect a phone**,
+then scan or paste the pairing link through Mobile's **Add Desktop** entry.
+Mobile's **Connections & Devices** page shows the selected Desktop identity,
+connection status, and repair actions.
+
 On a LAN, Mobile connects to the authenticated listener inside Desktop. Pairing
-uses a short-lived QR login token: it expires after five minutes and can be
-consumed only once. After authentication, realtime interaction stays between
+uses a short-lived, one-time phone pairing code that issues an independent
+device credential for that phone. Expired or redeemed codes cannot be reused;
+these codes differ from one-time login codes for other computer browsers.
+After authentication, realtime interaction stays between
 the phone and the selected Desktop instance; it does not pass through a NomiFun
 cloud relay. The phone is therefore a control and presentation surface while
 Desktop remains the data, credential, model, Agent, task, and tool authority.
@@ -53,7 +60,8 @@ This design has three practical advantages:
 - a change to a companion, model, Skill, knowledge base, requirement, or task is
   immediately the same state seen by Desktop and Mobile;
 - the Desktop owner explicitly opens and closes the LAN boundary, and can rely
-  on one-time pairing instead of publishing a long-lived bearer URL.
+  on one-time pairing instead of publishing a long-lived bearer URL; each
+  phone's authorization can be revoked independently without affecting others.
 
 There is no built-in TLS on the LAN listener. Use it only on a trusted LAN or a
 trusted private VPN, keep the operating-system firewall enabled, and never
@@ -64,11 +72,22 @@ model and operating steps.
 ### Net Infra is an optional transport layer, not another backend
 
 When Mobile cannot reach Desktop over a trusted LAN, an operator can self-host
-NomiRelay and run `nfagent` where it can reach the Desktop WebUI listener. Mobile
-then connects to the relay business endpoint; it never receives relay-admin
+NomiRelay. The default user flow starts by creating a v2 enrollment code under
+**Connect Desktop** (`/desktop-connect`) in Relay Console, then pasting it into Desktop's
+**Connections & Devices → Connect a phone → Across networks (relay)**.
+Native Desktop manages `nfagent` installation, startup, pause, reconnect, and
+disconnection. Its independent loopback endpoint carries relay access without
+requiring users to run an Agent manually or enable LAN WebUI.
+
+After confirming relay and business-endpoint availability, Desktop generates
+the phone pairing code. Mobile connects only to the relay business endpoint;
+it never receives relay-admin
 credentials or calls the console API. The relay carries HTTP/WebSocket bytes and
 enforces network policy, while Desktop remains the application-data and
-execution authority. Exact deployment and public-network validation belong to
+execution authority. Pausing or disconnecting a relay is separate from revoking
+an individual phone. Running `nfagent` manually remains an advanced CLI deployment
+option, rather than the default Desktop user flow.
+Exact deployment and public-network validation belong to
 the [NomiRelay integration docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration)
 and the [Mobile relay guide](https://github.com/nomifun/nomifun-mobile/blob/main/docs/RELAY-INTEGRATION.md).
 

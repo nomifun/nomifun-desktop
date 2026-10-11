@@ -11,9 +11,10 @@ import SiderNavItem, { type SiderNavItemProps } from './SiderNavItem';
 
 type SiderOpenCapabilitiesEntryProps = Pick<SiderNavItemProps, 'isActive' | 'collapsed' | 'siderTooltipProps' | 'onClick'>;
 
+/** Installation connections use the shared compact navigation row. */
 const SiderOpenCapabilitiesEntry: React.FC<SiderOpenCapabilitiesEntryProps> = ({ collapsed = false, ...props }) => {
   const { t } = useTranslation();
-  return <SiderNavItem {...props} collapsed={collapsed} label={t('settings.openCapabilities.railTitle', { defaultValue: '远程&开放能力' })}
+  return <SiderNavItem {...props} collapsed={collapsed} label={t('settings.deviceConnections.title')}
     icon={<LinkCloud theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />} />;
 };
 

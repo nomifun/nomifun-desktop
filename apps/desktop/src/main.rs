@@ -1159,10 +1159,11 @@ async fn relay_pairing_restart(
 #[tauri::command(rename_all = "camelCase")]
 async fn relay_pairing_stop(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
-        .stop()
+        .stop(server.inner().clone())
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -1171,12 +1172,34 @@ async fn relay_pairing_stop(
 #[tauri::command(rename_all = "camelCase")]
 async fn relay_pairing_disconnect(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
-        .disconnect()
+        .disconnect(server.inner().clone())
         .await
         .map_err(|error| format!("{error:#}"))
+}
+
+/// Forget local pairing state without contacting the Relay.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_forget_local(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .forget_local(server.inner().clone())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_refresh_qr(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager.inner().refresh_qr(server.inner().clone()).await.map_err(|error| format!("{error:#}"))
 }
 
 struct AwakeState(Mutex<Option<keepawake::KeepAwake>>);
@@ -2390,6 +2413,11 @@ fn complete_main_thread_setup(
         relay_pairing::RelayPairingManager::new(pairing_data_dir)
             .context("failed to initialize Relay pairing state")?,
     );
+    let relay_shutdown_owner = pairing_manager.clone();
+    server.register_relay_shutdown(move || {
+        let owner = relay_shutdown_owner.clone();
+        async move { owner.shutdown().await }
+    })?;
     if !app.manage(pairing_manager.clone()) {
         return Err(anyhow::anyhow!(
             "Relay pairing state was already registered"
@@ -3349,6 +3377,8 @@ fn main() -> std::process::ExitCode {
             relay_pairing_restart,
             relay_pairing_stop,
             relay_pairing_disconnect,
+            relay_pairing_forget_local,
+            relay_pairing_refresh_qr,
             set_keep_awake,
             set_tray_labels
         ]))

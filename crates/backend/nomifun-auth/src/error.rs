@@ -23,6 +23,9 @@ pub enum AuthError {
     #[error("Token blacklisted")]
     TokenBlacklisted,
 
+    #[error("Device credential revoked")]
+    DeviceRevoked,
+
     #[error("Password hash error: {0}")]
     HashError(String),
 }
@@ -36,9 +39,20 @@ impl From<AuthError> for AppError {
             AuthError::TokenExpired => AppError::Unauthorized("Token expired".into()),
             AuthError::TokenInvalid(msg) => AppError::Unauthorized(msg),
             AuthError::TokenBlacklisted => AppError::Unauthorized("Token has been revoked".into()),
+            AuthError::DeviceRevoked => AppError::Unauthorized("Device credential revoked".into()),
             AuthError::HashError(msg) => AppError::Internal(format!("Password hash error: {msg}")),
         }
     }
+}
+
+/// A typed Mobile rejection; ordinary browser errors retain their old envelope.
+pub(crate) fn device_revoked_response(status: axum::http::StatusCode) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (status, axum::Json(serde_json::json!({
+        "success": false,
+        "code": "DEVICE_REVOKED",
+        "error": "This device credential is no longer valid. Pair with Desktop again."
+    }))).into_response()
 }
 
 #[cfg(test)]

@@ -46,7 +46,7 @@ models.
 
 ## 2. Get the NomiFun OTA Address
 
-1. Open the companion's **Remote control** tab.
+1. Open the companion's **Channels & Robots** tab.
 2. In **Robot connection**, select **Add a robot**.
 3. If NomiFun reports that LAN access is off, select **Turn it on**.
 4. Keep the dialog open and copy one of the displayed OTA addresses. It ends in

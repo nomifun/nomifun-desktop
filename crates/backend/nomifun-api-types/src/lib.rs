@@ -80,6 +80,8 @@ pub use agent_execution_template::{
 pub use agent_platform::*;
 pub use agnes_model::{AgnesModelContract, agnes_model_contract};
 pub use auth::{
+    ConnectedDevice, ConnectionInfo, DeviceLoginRequest, DevicePairRequest, DevicePairResponse,
+    DevicePairingStatus, DevicePairingTicket,
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,
     UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,

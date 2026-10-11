@@ -17,6 +17,10 @@ name = "webui_lan_smoke"
 path = "tests/webui_lan_smoke.rs"
 
 [[test]]
+name = "relay_listener_smoke"
+path = "tests/relay_listener_smoke.rs"
+
+[[test]]
 name = "skills_builtin_e2e"
 path = "tests/skills_builtin_e2e.rs"
 

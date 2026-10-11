@@ -59,7 +59,7 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
   素材、提示词与私有模板。
 - **技能**：`/skills` 独立管理技能。
 - **MCP**：`/mcp` 管理 MCP server、连接测试、OAuth 和 agent 配置同步。
-- **开放能力**：`/open-capabilities` 管理 WebUI 远程访问、MCP/API 暴露等外部入口。
+- **连接与设备**：`/connections` 连接手机（同网或中继）、其他电脑浏览器与外部 MCP/REST 工具。
 - **桌面伙伴**：`/nomi` 管理伙伴、远程频道绑定和 companion 相关设置。
 - **终端**：`/terminal-new` 创建、`/terminal/:id` 运行后端 PTY。
 - **计划任务**：`/scheduled` 管理 cron 触发的会话任务。

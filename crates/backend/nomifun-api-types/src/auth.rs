@@ -72,6 +72,71 @@ pub struct QrLoginRequest {
     pub qr_token: String,
 }
 
+/// A Mobile invitation is distinct from browser QR login and MCP credentials.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePairRequest {
+    pub qr_token: String,
+    pub device_name: String,
+    pub protocol_version: u32,
+}
+
+/// Manual Mobile login and first-run setup issue a device credential directly.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceLoginRequest {
+    pub username: String,
+    pub password: String,
+    pub device_name: String,
+    pub protocol_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConnectedDevice {
+    pub device_id: String,
+    pub device_name: String,
+    pub created_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    pub revoked_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DevicePairResponse {
+    #[serde(flatten)]
+    pub login: LoginResponse,
+    pub device: ConnectedDevice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevicePairingTicket {
+    pub ticket_id: String,
+    pub qr_token: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevicePairingStatus {
+    pub ticket_id: String,
+    /// ready, redeeming, used, failed, or expired. A code that left `ready`
+    /// can never be exchanged again; only `used` carries `device_id`.
+    pub state: String,
+    /// Present only after a device credential was successfully issued.
+    pub device_id: Option<String>,
+    /// Stable failure reason; Some only when `state` is `failed`.
+    pub failure_code: Option<String>,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    /// Stable installation identity; never a URL or a network interface.
+    pub desktop_id: String,
+    pub desktop_name: String,
+    pub protocol_version: u32,
+    pub min_client_protocol: u32,
+    pub capabilities: Vec<String>,
+}
+
 /// Auth status response for `GET /api/auth/status`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthStatusResponse {

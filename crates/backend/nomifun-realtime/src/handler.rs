@@ -92,8 +92,10 @@ pub async fn ws_upgrade_handler(
 
 /// Resolve the authentication material permitted for this request's origin.
 ///
-/// Same-origin browsers retain the existing extractor priority (Bearer,
-/// cookie, then subprotocol). A known local desktop/dev webview is necessarily
+/// A requested JWT credential binds the handshake even when a same-origin
+/// browser also carries an ambient owner cookie. An invalid explicit token
+/// must not fall back to that cookie. Ordinary application subprotocols retain
+/// the existing cookie/Bearer extractor. A known local desktop/dev webview is necessarily
 /// cross-origin with the loopback backend, so it may connect only when the
 /// first requested subprotocol is itself a valid explicit credential. This
 /// prevents an ambient cookie from authorizing a local cross-origin page.
@@ -124,11 +126,29 @@ fn upgrade_credentials(headers: &HeaderMap, state: &WsHandlerState) -> Result<Up
                 selected_protocol: first_requested_protocol(headers).map(str::to_owned),
             })
         }
-        OriginDisposition::NonBrowser | OriginDisposition::SameOrigin => Ok(UpgradeCredentials {
-            token: (state.token_extractor)(headers),
-            selected_protocol: first_requested_protocol(headers).map(str::to_owned),
-        }),
+        OriginDisposition::NonBrowser | OriginDisposition::SameOrigin => {
+            let protocol = first_requested_protocol(headers);
+            let token = match protocol.filter(|protocol| is_credential_protocol(protocol)) {
+                Some(credential) => Some(credential.to_owned()),
+                None => (state.token_extractor)(headers),
+            };
+            Ok(UpgradeCredentials {
+                token,
+                selected_protocol: protocol.map(str::to_owned),
+            })
+        }
     }
+}
+
+/// The renderer/Mobile auth subprotocol is a JWT; installation credentials
+/// are 32-byte hexadecimal tokens. Classify the wire shape without validating
+/// it so expiry, bad signatures and revoked devices never trigger fallback.
+fn is_credential_protocol(protocol: &str) -> bool {
+    // Malformed JWT segments still express an explicit credential attempt.
+    // Validate later; classifying only successfully decodable tokens would
+    // let a malformed/expired device token recover authority from a cookie.
+    let jwt = protocol.split('.').count() == 3;
+    jwt || (protocol.len() == 64 && protocol.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// Validate a browser WebSocket Origin against the authorities this
@@ -427,11 +447,18 @@ async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandle
     };
 
     let (tx, rx) = mpsc::channel::<WsOutbound>(PER_CONNECTION_BUFFER);
-    let (conn_id, cancellation) = state.manager.register_client(user_id, token, tx);
+    let (conn_id, cancellation) = state.manager.register_client(user_id.clone(), token.clone(), tx);
     let registration = SocketRegistration {
         manager: &state.manager,
         conn_id,
     };
+
+    // Revocation can land after the handshake check but before publication,
+    // including after the invalidation watcher has already swept the map.
+    if (state.token_authenticator)(&token).as_deref() != Some(user_id.as_str()) {
+        send_auth_expired_and_close(socket).await;
+        return;
+    }
 
     info!(%conn_id, "websocket connection established");
 
@@ -439,7 +466,10 @@ async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandle
     {
         // Keep both futures in this task: cancelling the upgrade cannot detach
         // a writer that still owns the socket and outbound queue.
-        let send = send_loop(conn_id, rx, &mut ws_sender, cancellation.clone());
+        let send = send_loop(
+            conn_id, rx, &mut ws_sender, cancellation.clone(),
+            &state.token_authenticator, &token, &user_id,
+        );
         tokio::pin!(send);
         tokio::select! {
             _ = recv_loop(conn_id, ws_receiver, &state) => {}
@@ -490,6 +520,9 @@ async fn send_loop(
     mut rx: mpsc::Receiver<WsOutbound>,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     cancellation: CancellationToken,
+    token_authenticator: &TokenAuthenticator,
+    token: &str,
+    user_id: &str,
 ) {
     loop {
         let outbound = tokio::select! {
@@ -507,6 +540,17 @@ async fn send_loop(
                 None => break,
             },
         };
+        // A notification may not yet have been scheduled. Revalidate before
+        // emitting a queued frame so a revoked device cannot drain business
+        // events while the watcher is waiting for its next poll.
+        if (token_authenticator)(token).as_deref() != Some(user_id) {
+            let close = Message::Close(Some(CloseFrame {
+                code: WebSocketCloseCode::TokenAged.as_u16(),
+                reason: "handshake authorization invalid; reconnect".into(),
+            }));
+            let _ = sender.send(close).await;
+            break;
+        }
         let is_close = matches!(&outbound, WsOutbound::Close(..));
         let msg = match outbound {
             WsOutbound::Text(text) => Message::Text(text.into()),
@@ -515,7 +559,12 @@ async fn send_loop(
                 reason: reason.into(),
             })),
         };
-        if sender.send(msg).await.is_err() {
+        let sent = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            sent = sender.send(msg) => sent,
+        };
+        if sent.is_err() {
             debug!(%conn_id, "send loop: socket write failed, exiting");
             break;
         }

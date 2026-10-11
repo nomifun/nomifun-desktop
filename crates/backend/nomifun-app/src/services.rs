@@ -2217,6 +2217,9 @@ impl AppServices {
 
         let background_shutdown = CancellationToken::new();
         let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
+        let device_store = Arc::new(nomifun_auth::DeviceStore::load(Arc::new(
+            nomifun_db::SqliteClientPreferenceRepository::new(database.pool().clone()),
+        )).await?);
         let services = Self {
             official_runtime,
             database,
@@ -2231,7 +2234,7 @@ impl AppServices {
             _boot_reconciliation_authority: None,
             provider_lifecycle,
             authoritative_user_id,
-            jwt_service: Arc::new(JwtService::new(secret.clone())),
+            jwt_service: Arc::new(JwtService::with_devices(secret.clone(), device_store)),
             user_repo,
             instance_token_repo,
             instance_token_validator,

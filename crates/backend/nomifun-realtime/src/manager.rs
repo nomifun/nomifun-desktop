@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use nomifun_api_types::WebSocketMessage;
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -23,6 +23,7 @@ pub struct WebSocketManager {
     connections: Arc<DashMap<ConnectionId, ClientInfo>>,
     next_id: AtomicU64,
     heartbeat_started: AtomicBool,
+    auth_watch_started: AtomicBool,
     heartbeat_shutdown: CancellationToken,
 }
 
@@ -32,6 +33,7 @@ impl WebSocketManager {
             connections: Arc::new(DashMap::new()),
             next_id: AtomicU64::new(1),
             heartbeat_started: AtomicBool::new(false),
+            auth_watch_started: AtomicBool::new(false),
             heartbeat_shutdown: CancellationToken::new(),
         }
     }
@@ -242,6 +244,80 @@ impl WebSocketManager {
         drop(self.start_heartbeat(token_authenticator));
         true
     }
+
+    /// Revalidate live handshakes as soon as credentials are revoked or rotated.
+    ///
+    /// Invalid connections are cancelled rather than given a queued close:
+    /// draining their existing business frames would expose data after revoke.
+    /// Each token is verified independently so other devices of the same user
+    /// remain connected.
+    pub fn start_auth_watch(
+        &self,
+        token_authenticator: TokenAuthenticator,
+        mut invalidations: watch::Receiver<u64>,
+    ) -> JoinHandle<()> {
+        let connections = Arc::clone(&self.connections);
+        let shutdown = self.heartbeat_shutdown.clone();
+        tokio::spawn(async move {
+            invalidations.borrow_and_update();
+            invalidate_connections(&connections, &token_authenticator);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    changed = invalidations.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        invalidations.borrow_and_update();
+                        invalidate_connections(&connections, &token_authenticator);
+                    }
+                }
+            }
+        })
+    }
+
+    /// Router assembly shares the manager and must install only one watcher.
+    pub fn ensure_auth_watch(
+        &self,
+        token_authenticator: TokenAuthenticator,
+        invalidations: watch::Receiver<u64>,
+    ) -> bool {
+        if self
+            .auth_watch_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.auth_watch_started.store(false, Ordering::Release);
+            warn!("cannot start WebSocket authentication watcher without a Tokio runtime");
+            return false;
+        }
+        drop(self.start_auth_watch(token_authenticator, invalidations));
+        true
+    }
+}
+
+fn invalidate_connections(
+    connections: &DashMap<ConnectionId, ClientInfo>,
+    token_authenticator: &TokenAuthenticator,
+) {
+    let invalid = connections
+        .iter()
+        .filter(|entry| {
+            (token_authenticator)(&entry.value().token).as_deref()
+                != Some(entry.value().user_id.as_str())
+        })
+        .map(|entry| *entry.key())
+        .collect::<Vec<_>>();
+    for conn_id in invalid {
+        if let Some((_, client)) = connections.remove(&conn_id) {
+            client.cancellation.cancel();
+            info!(%conn_id, "handshake authorization revoked, closing connection");
+        }
+    }
 }
 
 impl Drop for WebSocketManager {
@@ -423,6 +499,57 @@ mod tests {
             .unwrap();
         assert!(cancellation.is_cancelled());
         assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn invalidation_closes_only_revoked_device_without_waiting_for_heartbeat() {
+        let mgr = WebSocketManager::new();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let token_authenticator: TokenAuthenticator = {
+            let revoked = revoked.clone();
+            Arc::new(move |token| {
+                if token == "device-a" && revoked.load(Ordering::Acquire) {
+                    None
+                } else {
+                    Some("user".to_owned())
+                }
+            })
+        };
+        let (tx_a, mut rx_a) = new_client_tx();
+        let (tx_b, mut rx_b) = new_client_tx();
+        let (_, cancelled_a) = mgr.register_client("user".into(), "device-a".into(), tx_a);
+        let (_, cancelled_b) = mgr.register_client("user".into(), "device-b".into(), tx_b);
+        let (invalidations, receiver) = watch::channel(0);
+        assert!(mgr.ensure_auth_watch(token_authenticator.clone(), receiver));
+        assert!(!mgr.ensure_auth_watch(token_authenticator, invalidations.subscribe()));
+
+        revoked.store(true, Ordering::Release);
+        invalidations.send_replace(1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_a.cancelled())
+            .await
+            .expect("revocation must close the device immediately");
+        assert!(!cancelled_b.is_cancelled());
+        assert_eq!(mgr.client_count(), 1);
+        mgr.broadcast_to_user("user", WebSocketMessage::new("private", json!({"text":"reply"})));
+        assert_eq!(rx_a.try_recv(), Err(mpsc::error::TryRecvError::Disconnected));
+        assert!(matches!(rx_b.try_recv(), Ok(WsOutbound::Text(text)) if text.contains("private")));
+    }
+
+    #[tokio::test]
+    async fn auth_watch_revalidates_initial_snapshot_and_stops_when_manager_drops() {
+        let mgr = WebSocketManager::new();
+        let (tx, _rx) = new_client_tx();
+        let (_, cancellation) = mgr.register_client("user".into(), "revoked".into(), tx);
+        let (_invalidations, receiver) = watch::channel(7);
+        let handle = mgr.start_auth_watch(always_expired(), receiver);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled())
+            .await
+            .expect("previous invalidations must not be missed during route assembly");
+        drop(mgr);
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("auth watcher must stop with its manager")
+            .unwrap();
     }
 
     #[test]

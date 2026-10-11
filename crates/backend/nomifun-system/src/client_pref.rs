@@ -10,7 +10,7 @@ const MAX_KEY_LENGTH: usize = 255;
 /// endpoint rejects them so a client cannot restore removed product settings:
 /// - Retired Browser v1 keys have no supported write owner. They must not be
 ///   resurrected through the generic preferences API after their UI is removed.
-const SYSTEM_RESERVED_PREFIXES: &[&str] = &["agent.browserUse", "browser.resourcePolicy"];
+const SYSTEM_RESERVED_PREFIXES: &[&str] = &["agent.browserUse", "browser.resourcePolicy", "auth."];
 
 /// Business logic for client preferences (generic key-value store).
 #[derive(Clone)]
@@ -33,6 +33,9 @@ impl ClientPrefService {
 
         let mut map = ClientPreferencesResponse::new();
         for row in rows {
+            // Authentication records have their own owner. They are neither
+            // renderer preferences nor editable through generic config APIs.
+            if row.key.starts_with("auth.") { continue; }
             let value: serde_json::Value =
                 serde_json::from_str(&row.value).unwrap_or(serde_json::Value::String(row.value));
             map.insert(row.key, value);
@@ -156,6 +159,21 @@ mod tests {
         let svc = setup().await;
         let prefs = svc.get_preferences(None).await.unwrap();
         assert!(prefs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_records_have_no_generic_preferences_read_or_write_surface() {
+        let database = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteClientPreferenceRepository::new(database.pool().clone()));
+        repo.upsert_batch(&[("auth.devices.v1", "{\"internal\":true}"), ("theme", "\"dark\"")]).await.unwrap();
+        let svc = ClientPrefService::new(repo.clone());
+        assert_eq!(svc.get_preferences(None).await.unwrap().len(), 1);
+        assert!(svc.get_preferences(Some(&["auth.devices.v1"])).await.unwrap().is_empty());
+        for value in [json!({}), json!(null)] {
+            let request = UpdateClientPreferencesRequest::from_iter([("auth.devices.v1".into(), value)]);
+            assert_eq!(svc.update_preferences(request).await.unwrap_err().status_code(), axum::http::StatusCode::FORBIDDEN);
+        }
+        assert_eq!(repo.get_by_keys(&["auth.devices.v1"]).await.unwrap()[0].value, "{\"internal\":true}");
     }
 
     #[tokio::test]

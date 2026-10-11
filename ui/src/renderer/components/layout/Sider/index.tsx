@@ -127,7 +127,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleSkillsClick = () => navTo('/skills');
   const handlePluginClick = () => navTo('/plugins');
   const handleMcpClick = () => navTo('/mcp');
-  const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
+  const handleOpenCapabilitiesClick = () => navTo('/connections');
   const handleModelHubClick = () => navTo('/models');
   const handleSettingsClick = () => navTo(isSettings ? lastNonSettingsPathRef.current || '/guid' : '/settings/system');
 
@@ -307,7 +307,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               onClick={handleModelHubClick}
             />
             <SiderOpenCapabilitiesEntry
-              isActive={pathname.startsWith('/open-capabilities')}
+              isActive={pathname.startsWith('/connections')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleOpenCapabilitiesClick}

@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('capability hub navigation', () => {
-  test('uses compact Remote and Open labels for the Open Capabilities tab', () => {
+  test('names installation access by the user task', () => {
     const zhSettings = JSON.parse(
       readSource(new URL('../../../services/i18n/locales/zh-CN/settings.json', import.meta.url))
     );
@@ -18,10 +18,8 @@ describe('capability hub navigation', () => {
       readSource(new URL('../../../services/i18n/locales/en-US/settings.json', import.meta.url))
     );
 
-    expect(zhSettings.openCapabilities.title).toBe('远程&开放能力');
-    expect(zhSettings.openCapabilities.railTitle).toBe('远程&开放能力');
-    expect(enSettings.openCapabilities.title).toBe('Remote & Open');
-    expect(enSettings.openCapabilities.railTitle).toBe('Remote & Open');
+    expect(zhSettings.deviceConnections.title).toBe('连接与设备');
+    expect(enSettings.deviceConnections.title).toBe('Connections & Devices');
   });
 
   test('exposes Agent as the public authoring destination and keeps Skills/MCP separate', () => {
@@ -45,8 +43,8 @@ describe('capability hub navigation', () => {
     expect(siderSource.includes("navTo('/mcp')")).toBe(true);
     expect(siderSource.includes("pathname.startsWith('/mcp')")).toBe(true);
     expect(siderSource.includes('SiderOpenCapabilitiesEntry')).toBe(true);
-    expect(siderSource.includes("navTo('/open-capabilities')")).toBe(true);
-    expect(siderSource.includes("pathname.startsWith('/open-capabilities')")).toBe(true);
+    expect(siderSource.includes("navTo('/connections')")).toBe(true);
+    expect(siderSource.includes("pathname.startsWith('/connections')")).toBe(true);
     expect(siderSource.includes("pathname.startsWith('/open-capabilities') || pathname.startsWith('/mcp')")).toBe(false);
 
     expect(siderSource.includes('SiderExtensionsEntry')).toBe(false);
@@ -56,8 +54,10 @@ describe('capability hub navigation', () => {
     const routerSource = readSource(new URL('../Router.tsx', import.meta.url));
 
     expect(routerSource.includes("path='/open-capabilities'")).toBe(true);
-    expect(routerSource.includes("path='/settings/webui' element={<Navigate to='/open-capabilities'")).toBe(true);
-    expect(routerSource.includes("path='/settings/tools' element={<Navigate to='/open-capabilities'")).toBe(true);
+    expect(routerSource.includes("path='/connections'")).toBe(true);
+    expect(routerSource.includes("path='/open-capabilities' element={<Navigate to='/connections?task=browser'")).toBe(true);
+    expect(routerSource.includes("path='/settings/webui' element={<Navigate to='/connections?task=browser'")).toBe(true);
+    expect(routerSource.includes("path='/settings/tools' element={<Navigate to='/connections?task=tools'")).toBe(true);
     expect(routerSource.includes('getHashRouteRedirectUrl')).toBe(true);
     expect(routerSource.includes("return `${origin}/#${pathname}${search}`")).toBe(true);
     expect(routerSource.includes("path='/mcp'")).toBe(true);

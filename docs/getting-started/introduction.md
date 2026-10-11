@@ -73,8 +73,8 @@ For implementation details, see [Architecture Overview](../architecture/overview
   and private templates in the asset library (`/asset-library/*`).
 - **Skills** (`/skills`): focused capability management.
 - **MCP**: local MCP server configuration.
-- **Open Capabilities**: WebUI remote access, remote MCP, and REST capability
-  exposure.
+- **Connections & Devices** (`/connections`): pair phones (same network or relay),
+  open Desktop from other computers' browsers, and connect external MCP/REST tools.
 - **Requirements / AutoWork**: backend-owned queue processing and completion
   notifications.
 - **Scheduled tasks**: recurring or one-shot jobs.

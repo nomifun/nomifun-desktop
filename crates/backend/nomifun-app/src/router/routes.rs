@@ -277,6 +277,29 @@ fn is_plugin_surface_asset_path(path: &str) -> bool {
         && matches!(segments.next(), Some("assets"))
 }
 
+/// The shell's packaged origin and its loopback dev server are cross-origin
+/// with the API. Ordinary remote browsers use the API's own origin. Accept
+/// only serialized origins so credentials, paths and lookalike hosts cannot
+/// turn a URL that merely contains `localhost` into a trusted CORS origin.
+fn is_desktop_webview_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else { return false; };
+    if matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost") {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(origin) else { return false; };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty() || url.password().is_some()
+        || url.path() != "/" || url.query().is_some() || url.fragment().is_some()
+        || url.origin().ascii_serialization() != origin
+    { return false; }
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 /// Fallible Nomi-core router assembly with the current product routes
 /// and global middleware.
 ///
@@ -722,8 +745,13 @@ fn create_nomi_core_router_with_all_state(
     services
         .ws_manager
         .ensure_heartbeat(ws_state.token_authenticator.clone());
+    services.ws_manager.ensure_auth_watch(
+        ws_state.token_authenticator.clone(),
+        services.jwt_service.subscribe_invalidations(),
+    );
 
     let auth_state = AuthRouterState {
+        auth_policy: services.auth_policy,
         jwt_service: services.jwt_service.clone(),
         user_repo: services.user_repo.clone(),
         cookie_config: services.cookie_config.clone(),
@@ -1220,18 +1248,20 @@ fn create_nomi_core_router_with_all_state(
         "startup: route tree build with states completed"
     );
 
-    // Permissive CORS for the desktop's own cross-origin webview (its document
-    // origin is `tauri://` / `http://tauri.localhost`, not the loopback port).
-    // Safe even on the LAN-bound listener: the trust secret rides a header (not
-    // a cookie), so an attacker page can neither read it nor read authenticated
-    // cross-origin responses. The one exception is a Plugin Surface asset:
-    // its sandboxed iframe has the opaque `null` origin, and its bearer URL must
+    // CORS for known packaged webview origins and HTTP(S) loopback development
+    // origins. Local trust still authorizes each privileged endpoint; CORS
+    // does not grant setup or credential authority. A Plugin Surface asset's
+    // sandboxed iframe has the opaque `null` origin, and its bearer URL must
     // never be readable from an ordinary web origin even if that URL leaks.
     // Remote browsers are served same-origin and do not rely on CORS.
     if services.auth_policy.allows_local_webview() {
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin, request| {
-                !is_plugin_surface_asset_path(request.uri.path()) || origin.as_bytes() == b"null"
+                if is_plugin_surface_asset_path(request.uri.path()) {
+                    origin.as_bytes() == b"null"
+                } else {
+                    is_desktop_webview_origin(origin)
+                }
             }))
             .allow_methods([
                 Method::GET,
