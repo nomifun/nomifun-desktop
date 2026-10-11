@@ -21,11 +21,11 @@ describe('CompanionConversation structure', () => {
     const conversation = readSource('./CompanionConversation.tsx');
     const models = readSource('../workspace/tabs/OverviewTab/ModelsSection.tsx');
 
-    expect(conversation.includes('<CompanionAgentIndicator')).toBe(true);
+    expect(conversation.includes('<CompanionAgentControls')).toBe(true);
     expect(conversation.includes('creationEnabled={false}')).toBe(true);
     expect(conversation.includes("creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}")).toBe(true);
     expect(conversation.includes('ProductAgentBindingSelect')).toBe(false);
-    expect(models.includes('<CompanionAgentIndicator')).toBe(true);
+    expect(models.includes('<CompanionAgentControls')).toBe(true);
     expect(models.includes('ProductAgentBindingSelect')).toBe(false);
   });
 });

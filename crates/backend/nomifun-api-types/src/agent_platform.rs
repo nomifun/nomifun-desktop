@@ -373,6 +373,7 @@ pub struct FreshStartPresentationDto {
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetLibraryResponse {
     pub official_templates: Vec<OfficialPresetTemplateDto>,
+    pub official_presets: BTreeMap<OfficialPresetKeyDto, AgentPresetSummaryDto>,
     pub user_presets: Vec<AgentPresetSummaryDto>,
     pub active_bindings: Vec<AgentBindingSummaryDto>,
     pub fresh_start: FreshStartPresentationDto,
@@ -484,8 +485,9 @@ pub struct CreateAgentPresetRequest {
 pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
-    /// Prepare/reuse an internal session-only configuration for direct official
-    /// Agent launch. False explicitly creates a personal Agent in the library.
+    /// Prepare/reuse the owner's editable official Agent for direct launch.
+    /// Model selections derive hidden immutable variants. False creates a
+    /// personal Agent from the bundled baseline in the library.
     /// This field is deliberately required: silently defaulting a missing field
     /// to false turns an ordinary launch into a persistent personal Agent.
     pub reuse_existing: bool,
@@ -1089,6 +1091,10 @@ pub struct ApplyAgentSessionSwitchRequestDto {
     pub selection: AgentSwitchSelectionDto,
     pub handoff_mode: AgentHandoffModeDto,
     pub expected_binding_version: u64,
+    /// Exact server-owned target observed in preview. Companion configuration
+    /// refreshes require it; it never supplies a replacement binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_resolved_snapshot_ref: Option<ResolvedSnapshotRefDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
 }
@@ -1411,6 +1417,18 @@ mod snapshot_tests {
         }))
         .expect("bounded apply command");
         assert_eq!(apply.handoff_mode, AgentHandoffModeDto::ContextOnly);
+        assert!(apply.expected_resolved_snapshot_ref.is_none());
+        let fenced_apply = serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "template", "template_key": "companion.default" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": 4,
+            "expected_resolved_snapshot_ref": {
+                "snapshot_id": "previewed-snapshot",
+                "snapshot_digest": "previewed-digest"
+            }
+        })).expect("the target preview fence is accepted without supplying authority");
+        assert_eq!(fenced_apply.expected_resolved_snapshot_ref.unwrap().snapshot_id,
+            "previewed-snapshot");
 
         for forbidden in ["agent_binding", "resolved_snapshot_ref", "typed_resource_bindings"] {
             let mut request = json!({

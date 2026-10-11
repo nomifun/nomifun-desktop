@@ -48,6 +48,13 @@ export interface CreationReceipt { message_id: MessageId; tasks: ConversationCre
 export const creationModeFor = (capability: CreationTaskCapability): CreationMode | null =>
   capability === 'text' || capability === 'tts' ? null : capability === 'music' ? 'music' : capability === 't2v' || capability === 'i2v' ? 'video' : 'image';
 
+/** Same exact operation-to-action contract as AgentSession media admission. */
+export const requiredCreationAction = (capability: CreationCapability): string =>
+  capability === 't2i' ? 'creation.media/image'
+    : capability === 'i2i' || capability === 'inpaint' ? 'creation.media/image_edit'
+      : capability === 't2v' || capability === 'i2v' ? 'creation.media/video'
+        : capability === 'music' ? 'creation.media/music' : 'creation.media/audio';
+
 export const inputsForMode = (mode: CreationMode, references: readonly CreationInput[]): CreationInput[] =>
   mode === 'music' ? [] : references.filter(ref => ref.kind === 'image' && (mode !== 'video' || ref.role !== 'mask')).map(({ asset_id, kind, role }) => ({
     asset_id, kind,

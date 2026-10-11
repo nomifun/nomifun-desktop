@@ -12,12 +12,10 @@ const source = (name: string) => readFileSync(new URL(name, import.meta.url), 'u
 describe('Agent runtime policy workbench', () => {
   test('presents IDMM as revisioned runtime policy rather than a capability module', () => {
     const editor = source('./AgentPresetEditor.tsx');
-    const template = source('./OfficialTemplateOverview.tsx');
     const panel = source('./AgentRuntimePolicyPanel.tsx');
     const contracts = source('../../../common/types/agentPlatform/contracts.ts');
 
     expect(editor.includes("key: 'runtime'")).toBe(true);
-    expect(template.includes("key: 'runtime'")).toBe(true);
     expect(panel.includes("presentation='embedded'")).toBe(true);
     expect(panel.includes('document.runtime_policy')).toBe(true);
     expect(contracts.includes('runtime_policy:')).toBe(true);

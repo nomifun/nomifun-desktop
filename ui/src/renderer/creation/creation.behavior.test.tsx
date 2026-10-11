@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { parseAgentPresetId, parseConversationId, parseProviderId } from '@/common/types/ids';
-import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import { asCapabilityId, type AgentPresetSummary, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import { useGuidCreation } from './useGuidCreation';
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
@@ -30,7 +30,12 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000102
 const messageId = '0190f5fe-7c00-7a00-8000-000000000106';
 const model = { providerId, model: 'image-exact' };
 const provider = { id: providerId, name: 'Provider', platform: 'openai', enabled: true, models: [{ model: model.model, enabled: true, capabilities: [{ task: 'image_generation', traits: [], protocol: 'openai.images' }, { task: 'image_edit', traits: [], protocol: 'openai.images' }] }] } as unknown as IProvider;
-const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library', 'canvas', 'process_session', 'project_memory', 'workspace'] } } as OfficialPresetTemplate;
+const template = { template_key: 'creative-studio.default', seed: {
+  required_resource_kinds: ['asset_library', 'canvas', 'process_session', 'project_memory', 'workspace'],
+  enabled_capabilities: [{ capability: { id: asCapabilityId('creation.media') }, action_allowlist: [
+    'creation.media/image', 'creation.media/image_edit', 'creation.media/video', 'creation.media/music',
+  ] }],
+} } as OfficialPresetTemplate;
 const realFetch = globalThis.fetch;
 beforeEach(() => {
   setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107');
@@ -39,15 +44,17 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); localStorage.clear(); sessionStorage.clear(); globalThis.fetch = realFetch; });
 
-function mount(generationProvider = provider, sessionCollaboration?: Parameters<typeof useGuidCreation>[5]) {
+function mount(generationProvider = provider, sessionCollaboration?: Parameters<typeof useGuidCreation>[5], capabilityRequirements?: Parameters<typeof useGuidCreation>[6]) {
   const cache = new Map();
   const wrapper = ({ children }: { children: ReactNode }) => <MemoryRouter><SWRConfig value={{ provider: () => cache, fallback: { providers: [generationProvider] }, revalidateOnMount: false, shouldRetryOnError: false }}>{children}</SWRConfig></MemoryRouter>;
-  return renderHook(() => {
+  return renderHook(({ capabilityRequirements }) => {
     const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'chat.minimal' });
     const [input, setInput] = useState('一只橘猫');
-    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template, presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '', () => setInput(''), sessionCollaboration);
+    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template,
+      selectedOfficialPreset: capabilityRequirements ? { preset_id: presetId } as AgentPresetSummary : undefined,
+      presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '', () => setInput(''), sessionCollaboration, capabilityRequirements);
     return { creation, selection, input, setInput };
-  }, { wrapper });
+  }, { wrapper, initialProps: { capabilityRequirements } });
 }
 
 describe('conversation creation admission and draft behavior', () => {
@@ -177,6 +184,85 @@ describe('conversation creation admission and draft behavior', () => {
       expect(hook.result.current.creation.draft.mode).toBe('image');
       expect(toast).toHaveBeenCalledTimes(1);
     } finally { toast.mockRestore(); }
+  });
+
+  test('saved official creation resource requirements fence loading and replace the immutable template baseline', async () => {
+    const prepare = spyOn(ipcBridge.agentPlatform.createFromTemplate, 'invoke').mockResolvedValue({
+      preset: { preset_id: presetId, current_stable_revision: { revision: 2 } },
+    } as never);
+    const create = spyOn(ipcBridge.agentPlatform.sessions.create, 'invoke').mockResolvedValue({ agent_session_id: conversationId } as never);
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const path = String(url);
+      const data = path.endsWith('/creation-tasks')
+        ? { message_id: messageId, tasks: [{ creation_task_id: 'saved-official-task', owner: { kind: 'conversation_turn', conversation_id: conversationId, message_id: messageId }, status: 'queued', result_asset_ids: [] }] }
+        : { conversation_id: conversationId, name: '一只橘猫', type: 'nomi', created_at: 1, modified_at: 2, extra: { workspace: '' } };
+      return new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const hook = mount(provider, undefined, { requiredResourceKinds: new Set(), actionIds: new Set(), ready: false });
+    act(() => hook.result.current.creation.selectMode('image'));
+    await waitFor(() => expect(hook.result.current.creation.draft.models.image).toEqual(model));
+    expect(hook.result.current.creation.ready).toBe(false);
+    await act(async () => { await hook.result.current.creation.send(); });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+
+    hook.rerender({ capabilityRequirements: { requiredResourceKinds: new Set(['asset_library', 'browser']), actionIds: new Set(['creation.media/image']), ready: true } });
+    await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
+    await act(async () => { await hook.result.current.creation.send(); });
+    expect(create).toHaveBeenCalledWith({ preset_id: presetId, title: '一只橘猫', resource_selections: [
+      { resource_kind: 'asset_library', resource_id: 'creative-studio-assets' },
+      { resource_kind: 'browser', resource_id: 'managed-browser' },
+    ] });
+    expect(prepare.mock.calls[0]?.[0].request).not.toHaveProperty('model');
+    expect(hook.result.current.input).toBe('');
+  });
+
+  test.each([
+    ['video', [], false, 'video_generation', 'openai.videos'],
+    ['image', ['creation.media/image_edit'], false, 'image_generation', 'openai.images'],
+    ['image', ['creation.media/image'], true, 'image_edit', 'openai.images'],
+    ['music', ['creation.media/video'], false, 'music_generation', 'minimax.music'],
+  ] as const)('saved official %s creation refuses an ungranted exact operation before preparing any Session', async (mode, actionIds, hasReference, task, protocol) => {
+    const prepare = spyOn(ipcBridge.agentPlatform.createFromTemplate, 'invoke');
+    const create = spyOn(ipcBridge.agentPlatform.sessions.create, 'invoke');
+    const toast = spyOn(Message, 'error').mockReturnValue(() => {});
+    const request = mock(async () => { throw new Error('A denied action must not submit generation'); });
+    globalThis.fetch = request as typeof fetch;
+    const hook = mount({ ...provider, models: [{ model: model.model, enabled: true, capabilities: [{ task, traits: [], protocol }] }] } as unknown as IProvider,
+      undefined, { requiredResourceKinds: new Set(['asset_library']), actionIds: new Set(actionIds), ready: true });
+    act(() => {
+      hook.result.current.creation.selectMode(mode);
+      if (hasReference) hook.result.current.creation.update(draft => ({ ...draft, references: [
+        { asset_id: 'reference-one', kind: 'image', role: 'reference', title: '参考图' },
+      ] }));
+    });
+    await waitFor(() => expect(hook.result.current.creation.draft.models[mode]).toEqual(model));
+    expect(hook.result.current.creation.ready).toBe(false);
+    expect(hook.result.current.creation.disabledReason).toBe('agentSettings.workbench.actionUnavailable');
+    await act(async () => { await hook.result.current.creation.send(); });
+    expect(toast).toHaveBeenCalledWith('agentSettings.workbench.actionUnavailable');
+    expect(prepare).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(hook.result.current.input).toBe('一只橘猫');
+  });
+
+  test('saved official creation with an unresolved mandatory resource is visibly blocked before preparing a Session', async () => {
+    const prepare = spyOn(ipcBridge.agentPlatform.createFromTemplate, 'invoke');
+    const create = spyOn(ipcBridge.agentPlatform.sessions.create, 'invoke');
+    const toast = spyOn(Message, 'error').mockReturnValue(() => {});
+    const request = mock(async () => { throw new Error('An unresolved resource must not submit generation'); });
+    globalThis.fetch = request as typeof fetch;
+    const hook = mount(provider, undefined, { requiredResourceKinds: new Set(['asset_library', 'customer']), actionIds: new Set(['creation.media/image']), ready: true });
+    act(() => hook.result.current.creation.selectMode('image'));
+    await waitFor(() => expect(hook.result.current.creation.draft.models.image).toEqual(model));
+    expect(hook.result.current.creation.ready).toBe(false);
+    expect(hook.result.current.creation.disabledReason).toBe('creation.resourcesUnavailable');
+    await act(async () => { await hook.result.current.creation.send(); });
+    expect(toast).toHaveBeenCalledWith('creation.resourcesUnavailable');
+    expect(prepare).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
   });
 
   test('freezes provider settings, ignores inactive music references, and reuses uncertain admission keys', () => {

@@ -4442,8 +4442,12 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         path: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+        let mut request = Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
+        if method == "PUT" && path.ends_with("/agent") {
+            request = request.header("idempotency-key", uuid::Uuid::now_v7().to_string());
+        }
+        let response = router.oneshot(request
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
@@ -4703,6 +4707,142 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
                 .contains("robot")),
         "an unbound Robot must not reach the model tool surface: {model_request}"
     );
+
+    // The library's owner-scoped official ID is directly editable. Saving a
+    // revision must not silently replace this existing Companion Session.
+    const ADDED_RULE: &str = "OFFICIAL_COMPANION_EXTENDED_RULES_V2";
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let official_id = library["data"]["official_presets"]["companion.default"]["preset_id"]
+        .as_str().expect("editable owner-scoped official Companion ID");
+    let (status, editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{editor}");
+    assert_eq!(editor["data"]["preset"]["source"], "official");
+    let mut draft = editor["data"]["draft"].clone();
+    let original_instructions = draft["document"]["instructions"].as_str().unwrap().to_owned();
+    draft["document"]["instructions"] = json!(format!("{original_instructions}\nOFFICIAL_COMPANION_EXTENDED_RULES_V1"));
+    draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+        "capability": {"id": "web.research"}, "action_allowlist": ["web.research/search"]
+    }));
+    let (status, saved) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision": editor["data"]["revision"]["reference"], "draft": draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["data"]["preset"]["preset_id"], official_id);
+    assert_eq!(saved["data"]["preset"]["source"], "official");
+    assert_eq!(saved["data"]["revision"]["document"]["enabled_capabilities"],
+        draft["document"]["enabled_capabilities"]);
+    assert_eq!(saved["data"]["revision"]["document"]["instructions"], draft["document"]["instructions"]);
+
+    let old_binding = unchanged["data"]["agent_snapshot"]["canonical_binding"].clone();
+    let (status, reopened) = call(router.clone(), "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["conversation_id"], conversation_id,
+        "reopening the Companion must retain its existing Session after the official edit");
+    let session_path = format!("/api/agent-sessions/{conversation_id}");
+    let (status, frozen) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{frozen}");
+    assert_eq!(frozen["data"]["session"]["agent_binding"], old_binding);
+    let selection = json!({ "kind": "template", "template_key": "companion.default" });
+    let preview_path = format!("{session_path}/agent-switch/preview");
+    let (status, preview) = call(router.clone(), "POST", &preview_path,
+        json!({"selection": selection})).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    assert_eq!(preview["data"]["capabilities"]["gained"], json!(["web.research"]));
+    assert_eq!(preview["data"]["model"]["preserved"], true);
+    assert_eq!(preview["data"]["model"]["provider_id"], provider_id);
+    assert_eq!(preview["data"]["model"]["model"], "step-3.7-flash");
+    assert_eq!(preview["data"]["resources"]["dropped"], json!([]));
+    let (status, still_frozen) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{still_frozen}");
+    assert_eq!(still_frozen["data"]["session"]["agent_binding"], old_binding,
+        "preview must preserve the frozen Session binding");
+
+    // A second edit invalidates the exact preview, even though the source
+    // Session's binding version has not changed.
+    draft["current_revision"] = saved["data"]["revision"]["reference"].clone();
+    draft["document"]["instructions"] = json!(format!("{original_instructions}\n{ADDED_RULE}"));
+    let (status, saved_again) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision": saved["data"]["revision"]["reference"], "draft": draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{saved_again}");
+    let switch_path = format!("{session_path}/agent");
+    let (status, stale) = call(router.clone(), "PUT", &switch_path, json!({
+        "selection": selection, "handoff_mode": "context_only",
+        "expected_binding_version": preview["data"]["expected_binding_version"],
+        "expected_resolved_snapshot_ref": preview["data"]["target"]["resolved_snapshot_ref"],
+    })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["code"], "AGENT_SESSION_BINDING_CHANGED");
+    assert_eq!(stale["details"]["stage"], "target_preview");
+    let (status, rejected_binding) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{rejected_binding}");
+    assert_eq!(rejected_binding["data"]["session"]["agent_binding"], old_binding);
+
+    let (status, current_preview) = call(router.clone(), "POST", &preview_path,
+        json!({"selection": selection})).await;
+    assert_eq!(status, StatusCode::OK, "{current_preview}");
+    assert_eq!(current_preview["data"]["can_apply"], true, "{current_preview}");
+    assert_ne!(current_preview["data"]["target"]["resolved_snapshot_ref"],
+        preview["data"]["target"]["resolved_snapshot_ref"]);
+    let (status, applied) = call(router.clone(), "PUT", &switch_path, json!({
+        "selection": selection, "handoff_mode": "context_only",
+        "expected_binding_version": current_preview["data"]["expected_binding_version"],
+        "expected_resolved_snapshot_ref": current_preview["data"]["target"]["resolved_snapshot_ref"],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["data"]["conversation"]["conversation_id"], conversation_id);
+    assert_eq!(applied["data"]["effective_from"], "next_turn");
+    let refreshed = &applied["data"]["conversation"]["agent_snapshot"];
+    let new_binding = &refreshed["canonical_binding"];
+    assert_eq!(new_binding["binding_version"].as_u64(),
+        Some(old_binding["binding_version"].as_u64().unwrap() + 1));
+    assert_eq!(new_binding["typed_resource_bindings"], old_binding["typed_resource_bindings"],
+        "refresh must retain the exact Companion, Memory and Scheduler definitions");
+    assert_eq!(new_binding["resolved_snapshot_ref"], current_preview["data"]["target"]["resolved_snapshot_ref"]);
+    assert_eq!(new_binding["preset_revision_ref"]["preset_id"], current_preview["data"]["target"]["preset_id"]);
+    assert_eq!(new_binding["preset_revision_ref"]["revision"], current_preview["data"]["target"]["preset_revision"]);
+    assert_eq!(refreshed["enabled_capability_actions"]["web.research"], json!(["web.research/search"]));
+    let (status, preserved_history) = call(router.clone(), "GET",
+        &format!("{session_path}/message-history?page_size=50"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{preserved_history}");
+    for message in history_items {
+        assert_eq!(preserved_history["data"]["items"].as_array().unwrap().iter()
+            .find(|retained| retained["message_id"] == message["message_id"]), Some(message),
+            "applying the new official revision must retain existing history");
+    }
+
+    let (status, next_turn) = call(router.clone(), "POST", &format!("{session_path}/turns"), json!({
+        "idempotency_key": uuid::Uuid::now_v7().to_string(),
+        "input": {"content": "Continue with your extended official capabilities."},
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{next_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'",
+            ).bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("refreshed Companion turn must complete using the same Session");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let continued = requests[1].body_json::<Value>().unwrap();
+    assert_eq!(continued["model"], "step-3.7-flash");
+    let rules = continued["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(rules.contains(ADDED_RULE), "the applied official instructions must reach the next real model request");
+    assert!(continued["messages"].to_string().contains(REPLY), "the same canonical history must reach the refreshed Runtime");
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    assert_eq!(library["data"]["official_presets"]["companion.default"]["preset_id"], official_id);
+    assert_eq!(library["data"]["user_presets"], json!([]), "editing the official Agent must not require a copy");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }

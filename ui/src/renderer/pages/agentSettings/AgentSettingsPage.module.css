@@ -117,7 +117,6 @@
 .editorActionButton:global(.arco-btn-secondary):not(:disabled):active { background: rgba(var(--primary-6), .16); }
 .editorActionButton:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .actionButtons { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
-.templateSaveState { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--color-text-3); font-size: 11px; }
 .saveStatus { display: flex; align-items: center; min-width: 0; gap: 8px; color: var(--color-text-3); font-size: 12px; }
 .saveStatus > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .saveStatus strong { color: var(--color-text-2); font-size: 12px; font-weight: 500; }
@@ -141,12 +140,10 @@
   .editorBody { padding: 18px; }
   .actionBar { padding: 13px 16px; gap: 10px; }
   .saveStatus > div > span { display: none; }
-  .templateSaveState { display: none; }
+  .saveStatusWarning > div > span { display: block; }
   .editorHeaderActions { align-self: flex-start; }
 }
 
-.templateReset { flex-shrink: 0; font-size: 11px; }
-@media (max-width: 1100px) { .templateReset { max-width: 104px; overflow: hidden; } }
 
 .capabilityBody { overflow:hidden; display:flex; flex-direction:column; }
 .capabilityPanel { flex:1; min-height:0; }
@@ -154,7 +151,6 @@
   .capabilityBody { overflow-y:auto; }
   .capabilityPanel { height:auto; flex:none; }
   .actionBar { flex-wrap:wrap; padding:12px; gap:8px; }
-  .templateSaveState { display:none; }
   .runtimePolicyFlow { grid-template-columns:1fr; gap:8px; }
   .runtimePolicyFlowStep:not(:last-child)::after { content:'↓'; right:auto; left:21px; top:auto; bottom:-10px; transform:none; z-index:1; }
   .runtimePolicyBoundary { max-width:180px; white-space:normal; text-align:right; }

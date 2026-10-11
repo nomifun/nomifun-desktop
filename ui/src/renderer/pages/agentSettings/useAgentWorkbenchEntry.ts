@@ -17,7 +17,7 @@ export function useAgentWorkbenchEntry({
 }: {
   library: AgentPresetLibraryResponse | null;
   loading: boolean;
-  openTemplate: (template: OfficialPresetTemplate) => void;
+  openTemplate: (template: OfficialPresetTemplate) => void | Promise<void>;
   openPreset: (preset: AgentPresetSummary) => Promise<void>;
   rememberedSelection?: ProductAgentSelection | null;
 }) {
@@ -33,7 +33,7 @@ export function useAgentWorkbenchEntry({
       if (rememberedSelection.kind === 'preset') params.set('preset', rememberedSelection.preset_id);
       else params.set('template', rememberedSelection.template_key);
     }
-    const preset = library.user_presets.find(
+    const preset = [...library.user_presets, ...Object.values(library.official_presets)].find(
       (candidate) => candidate.preset_id === params.get('preset')
     );
     if (preset) {
@@ -43,6 +43,9 @@ export function useAgentWorkbenchEntry({
     const template = library.official_templates.find(
       (candidate) => candidate.template_key === params.get('template')
     );
-    if (template) openTemplate(template);
+    if (template) void openTemplate(template);
+    else if (!params.has('preset') && !params.has('template') && library.official_templates[0]) {
+      void openTemplate(library.official_templates[0]);
+    }
   }, [library, loading, location.key, location.search, openPreset, openTemplate, rememberedSelection]);
 }

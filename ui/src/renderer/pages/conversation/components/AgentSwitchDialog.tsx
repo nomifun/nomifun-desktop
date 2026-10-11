@@ -16,6 +16,8 @@ import styles from './AgentSwitchDialog.module.css';
 
 export interface AgentSwitchDialogProps {
   visible: boolean;
+  title?: string;
+  confirmLabel?: string;
   preview?: PreviewAgentSessionSwitchResponse;
   currentAgentLabel?: string;
   targetAgentLabel?: string;
@@ -24,6 +26,7 @@ export interface AgentSwitchDialogProps {
   mode: AgentHandoffMode;
   error?: string;
   errorCode?: string;
+  recoveryLabel?: string;
   onModeChange: (mode: AgentHandoffMode) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -40,6 +43,8 @@ const DiffTags: React.FC<{ values: string[]; emptyLabel: string }> = ({ values, 
 
 const AgentSwitchDialog: React.FC<AgentSwitchDialogProps> = ({
   visible,
+  title,
+  confirmLabel,
   preview,
   currentAgentLabel,
   targetAgentLabel,
@@ -48,6 +53,7 @@ const AgentSwitchDialog: React.FC<AgentSwitchDialogProps> = ({
   mode,
   error,
   errorCode,
+  recoveryLabel: providedRecoveryLabel,
   onModeChange,
   onConfirm,
   onCancel,
@@ -61,18 +67,18 @@ const AgentSwitchDialog: React.FC<AgentSwitchDialogProps> = ({
       })
     : undefined;
   const recoveryCode = blocker?.code ?? errorCode;
-  const recoveryLabel = recoveryCode === 'AGENT_SESSION_MODEL_INCOMPATIBLE'
+  const recoveryLabel = providedRecoveryLabel ?? (recoveryCode === 'AGENT_SESSION_MODEL_INCOMPATIBLE'
     ? t('conversation.chat.agentSwitch.openModelHub')
     : recoveryCode === 'AGENT_SESSION_RESOURCE_REQUIRED'
       ? t('conversation.chat.agentSwitch.openAgentSettings')
-      : null;
+      : null);
   const canConfirm = Boolean(preview?.can_apply) && !loading && !applying;
   const noChanges = t('common.none', { defaultValue: 'None' });
 
   return (
     <Modal
       visible={visible}
-      title={t('conversation.chat.agentSwitch.title')}
+      title={title ?? t('conversation.chat.agentSwitch.title')}
       onCancel={onCancel}
       unmountOnExit
       maskClosable={!applying}
@@ -82,7 +88,7 @@ const AgentSwitchDialog: React.FC<AgentSwitchDialogProps> = ({
         <div className={styles.footer}>
           <Button onClick={onCancel} disabled={applying}>{t('common.cancel')}</Button>
           <Button type='primary' loading={applying} disabled={!canConfirm} onClick={onConfirm}>
-            {t('conversation.chat.agentSwitch.confirm')}
+            {confirmLabel ?? t('conversation.chat.agentSwitch.confirm')}
           </Button>
         </div>
       )}
@@ -104,7 +110,7 @@ const AgentSwitchDialog: React.FC<AgentSwitchDialogProps> = ({
 
         {preview && (
           <>
-            <section className={styles.transition} aria-label={t('conversation.chat.agentSwitch.title')}>
+            <section className={styles.transition} aria-label={title ?? t('conversation.chat.agentSwitch.title')}>
               <div className={styles.agentIdentity}>
                 <span className={styles.kicker}>{t('conversation.chat.agentSwitch.currentLabel')}</span>
                 <strong>{currentAgentLabel ?? preview.current.label}</strong>

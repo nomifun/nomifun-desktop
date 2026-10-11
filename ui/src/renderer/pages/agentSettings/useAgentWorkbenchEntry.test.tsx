@@ -20,6 +20,7 @@ const draft = {
   bound_target_count: 0,
 } as AgentPresetSummary;
 const library = {
+  official_presets: {},
   official_templates: [firstTemplate, requestedTemplate],
   user_presets: [draft],
   active_bindings: [],

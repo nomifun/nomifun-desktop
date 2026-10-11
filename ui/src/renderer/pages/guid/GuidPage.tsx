@@ -138,36 +138,43 @@ const GuidPage: React.FC = () => {
     guidInput.setFiles([]);
     guidInput.setDir('');
   }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
+  const selectedCapabilityPreset = agentSelection.selectedOfficialPreset ?? agentSelection.selectedPreset;
+  const selectedCapabilityRevisionDigest = selectedCapabilityPreset?.current_stable_revision?.revision_digest;
+  const presetCapabilities = useGuidPresetCapabilities(
+    selectedCapabilityPreset?.preset_id,
+    selectedCapabilityRevisionDigest,
+  );
+  // A missing owner configuration can occur before official initialization.
+  // Once it exists, its saved document is the sole source for launch preflight.
+  const officialSeedFallback = agentSelection.selectedTemplate && !agentSelection.selectedOfficialPreset
+    ? agentSelection.selectedTemplate.seed
+    : undefined;
+
+  const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+      && (Boolean(officialSeedFallback) || (!presetCapabilities.isLoading && !presetCapabilities.error))
+    : !presetCapabilities.isLoading && !presetCapabilities.error;
+  const presetResourceKinds = officialSeedFallback
+    ? new Set(officialSeedFallback.required_resource_kinds)
+    : presetCapabilities.requiredResourceKinds;
+  const presetCapabilityIds = officialSeedFallback
+      ? new Set(officialSeedFallback.enabled_capabilities.map((selection) => selection.capability.id))
+    : presetCapabilities.capabilityIds;
+  const presetActionIds = officialSeedFallback
+    ? new Set(
+        officialSeedFallback.enabled_capabilities.flatMap(
+          (selection) => selection.action_allowlist ?? []
+        )
+      )
+    : presetCapabilities.actionIds;
   const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput, {
     config: collaboration.config, model: modelSelection.current_model, ready: collaboration.ready,
-  });
+  }, { requiredResourceKinds: presetResourceKinds, actionIds: presetActionIds, ready: presetResourceResolutionReady });
   useEffect(() => {
     if (creation.draft.pendingPrompt === undefined) return;
     guidInput.setInput(creation.draft.pendingPrompt);
     creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
   }, [creation.draft.pendingPrompt, creation.update, guidInput.setInput]);
-  const presetCapabilities = useGuidPresetCapabilities(
-    agentSelection.selection.kind === 'preset'
-      ? agentSelection.selection.presetId
-      : undefined
-  );
-
-  const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
-    ? Boolean(agentSelection.selectedTemplate)
-    : !presetCapabilities.isLoading && !presetCapabilities.error;
-  const presetResourceKinds = agentSelection.selectedTemplate
-    ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
-    : presetCapabilities.requiredResourceKinds;
-  const presetCapabilityIds = agentSelection.selectedTemplate
-      ? new Set(agentSelection.selectedTemplate.seed.enabled_capabilities.map((selection) => selection.capability.id))
-    : presetCapabilities.capabilityIds;
-  const presetActionIds = agentSelection.selectedTemplate
-    ? new Set(
-        agentSelection.selectedTemplate.seed.enabled_capabilities.flatMap(
-          (selection) => selection.action_allowlist ?? []
-        )
-      )
-    : presetCapabilities.actionIds;
   const selectedAgentRequiresToolCalls = presetActionIds.size > 0 || capabilityDraft.mcpServerIds.length > 0;
   const requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = selectedAgentRequiresToolCalls
     ? ['function_calling']
@@ -290,21 +297,20 @@ const GuidPage: React.FC = () => {
   }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
   useEffect(() => {
     if (!presetResourceResolutionReady) return;
-    const sourceKey = `${location.key}:${selectedAgentResourceKey}`;
+    const sourceKey = `${location.key}:${selectedAgentResourceKey}:${selectedCapabilityRevisionDigest ?? 'draft'}`;
     if (appliedIdmmDefaultRef.current === sourceKey) return;
     advancedConfig.setIdmmDefault(
-      agentSelection.selection.kind === 'preset'
-        ? presetCapabilities.idmm
-        : createDefaultIdmmConfig()
+      officialSeedFallback ? createDefaultIdmmConfig() : presetCapabilities.idmm
     );
     appliedIdmmDefaultRef.current = sourceKey;
   }, [
     advancedConfig.setIdmmDefault,
-    agentSelection.selection.kind,
+    officialSeedFallback,
     location.key,
     presetCapabilities.idmm,
     presetResourceResolutionReady,
     selectedAgentResourceKey,
+    selectedCapabilityRevisionDigest,
   ]);
 
   const mention = useGuidMention({
@@ -678,12 +684,21 @@ const GuidPage: React.FC = () => {
           <div className={styles.guidLayout}>
             <GuidCompanionShowcase />
 
-            {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
+            {presetCapabilities.error && (
               <Alert
                 type='error'
                 showIcon
                 title={t('common.error')}
                 content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}
+                className={styles.guidPresetCapabilityError}
+              />
+            )}
+
+            {creation.draft.mode && creation.disabledReason && (
+              <Alert
+                type='warning'
+                showIcon
+                content={creation.disabledReason}
                 className={styles.guidPresetCapabilityError}
               />
             )}
@@ -790,7 +805,7 @@ const GuidPage: React.FC = () => {
                     loading={guidInput.loading || creation.loading}
                     disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
                     icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
-                    title={!creation.draft.mode && isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
+                    title={creation.draft.mode ? creation.disabledReason : isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
                     onClick={() => void submitInput()}
                     testId='guid-send-btn'
                   />

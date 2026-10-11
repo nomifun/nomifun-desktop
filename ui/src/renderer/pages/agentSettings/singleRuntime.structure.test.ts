@@ -8,10 +8,8 @@ describe('single Nomi Runtime authoring boundary', () => {
     expect(existsSync(new URL('./AgentRuntimeEngineSelector.tsx', import.meta.url))).toBe(false);
     expect(existsSync(new URL('./AgentRuntimeEngineSelector.test.tsx', import.meta.url))).toBe(false);
     const editor = source('AgentPresetEditor.tsx');
-    const template = source('OfficialTemplateOverview.tsx');
     const controller = source('useAgentSettingsController.ts');
     expect(editor).not.toMatch(/RuntimeEngineSelector|runtime_build|runtimeEngines/);
-    expect(template).not.toMatch(/RuntimeEngineSelector|runtime_build|runtimeEngines/);
     expect(controller).not.toMatch(/withoutRuntimeSelection|runtime_build|runtimeEngines/);
     const contracts = readFileSync(new URL('../../../common/types/agentPlatform/contracts.ts', import.meta.url), 'utf8');
     expect(contracts).not.toContain('RuntimeEngineSelection');

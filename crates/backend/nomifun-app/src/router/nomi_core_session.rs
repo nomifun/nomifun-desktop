@@ -11146,6 +11146,7 @@ struct PreparedAgentSessionSwitch {
     target_label: String,
     handoff: Option<AgentHandoffEnvelopeV1>,
     active_capability_ids: Vec<String>,
+    companion_refresh: bool,
 }
 
 fn handoff_mode(mode: AgentHandoffModeDto) -> AgentHandoffMode {
@@ -11503,10 +11504,269 @@ fn missing_agent_switch_resource_kinds(
         .collect()
 }
 
+/// A Companion keeps its product identity while explicitly accepting a newer
+/// saved configuration of the same official Agent. The template proof comes
+/// from the owned immutable Revision; resource names or presentation extras
+/// alone never authorize this exception to product-bound Agent switching.
+fn companion_agent_refresh_selection(
+    binding: &AgentBindingValue,
+    official_template_key: Option<&str>,
+    selection: &AgentSwitchSelectionDto,
+) -> bool {
+    if official_template_key != Some("companion.default")
+        || !matches!(selection, AgentSwitchSelectionDto::Template { template_key }
+            if template_key == "companion.default")
+    {
+        return false;
+    }
+    let companions = binding.typed_resource_bindings.iter()
+        .filter(|resource| resource.resource_kind.as_ref() == "companion")
+        .collect::<Vec<_>>();
+    let memories = binding.typed_resource_bindings.iter()
+        .filter(|resource| resource.resource_kind.as_ref() == "companion_memory")
+        .collect::<Vec<_>>();
+    companions.len() == 1
+        && memories.len() == 1
+        && companions[0].resource_id == memories[0].resource_id
+        && companions[0].owner_id == memories[0].owner_id
+}
+
+fn fixed_product_agent_switch_resource(
+    binding: &AgentBindingValue,
+    companion_refresh: bool,
+) -> Option<&str> {
+    let companion = companion_refresh.then(|| binding.typed_resource_bindings.iter()
+        .find(|resource| resource.resource_kind.as_ref() == "companion")).flatten();
+    binding.typed_resource_bindings.iter().find_map(|resource| {
+        let kind = resource.resource_kind.as_ref();
+        let owned_companion_channel = kind == "channel" && companion.is_some_and(|companion| {
+            resource.owner_id == companion.owner_id
+                && resource.typed_parameters.get("companion_id").map(String::as_str)
+                    == Some(companion.resource_id.as_ref())
+                && !resource.typed_parameters.contains_key("cs_agent_id")
+        });
+        (matches!(kind, "customer" | "canvas")
+            || (kind == "channel" && !owned_companion_channel)
+            || (!companion_refresh && matches!(kind, "companion" | "companion_memory")))
+            .then_some(kind)
+    })
+}
+
+/// Re-admission derives operations from the edited Agent's exact grants, but
+/// must retain a Companion's chosen cwd, Knowledge policy and connection.
+/// MCP parameters belong to the newly frozen tool locks and are re-resolved by
+/// their existing authority; the selected servers remain Session-owned.
+fn preserve_companion_refresh_resource_choices(
+    replacement: &mut AgentBindingValueDto,
+    current: &AgentBindingValueDto,
+) -> Result<(), AppError> {
+    for resource in &mut replacement.typed_resource_bindings {
+        if resource.resource_kind == "mcp_server" {
+            continue;
+        }
+        let previous = current.typed_resource_bindings.iter().find(|previous| {
+            previous.resource_kind == resource.resource_kind
+                && (previous.resource_id == resource.resource_id
+                    || resource.resource_kind == "workspace")
+        });
+        let Some(previous) = previous else { continue; };
+        if previous.owner_id != resource.owner_id {
+            return Err(AppError::Forbidden(
+                "Companion resource belongs to another owner".to_owned(),
+            ));
+        }
+        resource.resource_id = previous.resource_id.clone();
+        resource.connection_config_ref = previous.connection_config_ref.clone();
+        resource.typed_parameters = previous.typed_parameters.clone();
+        super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
+    }
+    Ok(())
+}
+
+fn validate_agent_switch_target_preview(
+    expected: Option<&nomifun_api_types::ResolvedSnapshotRefDto>,
+    actual: &nomifun_api_types::ResolvedSnapshotRefDto,
+    required: bool,
+) -> Result<(), NomiCoreApiError> {
+    if expected.is_some_and(|expected| expected != actual) || (required && expected.is_none()) {
+        return Err(NomiCoreApiError::with_details(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_BINDING_CHANGED",
+            "The saved Agent configuration changed after preview; preview it again before applying",
+            json!({
+                "stage": "target_preview",
+                "expected_resolved_snapshot_ref": expected,
+                "actual_resolved_snapshot_ref": actual,
+                "recovery": "preview_again",
+            }),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod agent_switch_resource_tests {
-    use super::missing_agent_switch_resource_kinds;
-    use std::collections::BTreeSet;
+    use super::{
+        companion_agent_refresh_selection, fixed_product_agent_switch_resource,
+        missing_agent_switch_resource_kinds, preserve_companion_refresh_resource_choices,
+        validate_agent_switch_target_preview,
+    };
+    use nomifun_agent_contracts::{
+        AgentBindingValue, AgentPresetId, DigestHex, PresetRevisionRef,
+        ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceId,
+        ResourceKind, TypedResourceBinding,
+    };
+    use nomifun_api_types::{AgentBindingValueDto, AgentSwitchSelectionDto};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn companion_binding() -> AgentBindingValue {
+        AgentBindingValue {
+            preset_revision_ref: PresetRevisionRef {
+                preset_id: AgentPresetId::from("0190f5fe-7c00-7a00-8abc-012345678902"),
+                revision: 1,
+                revision_digest: DigestHex::from("b".repeat(64)),
+            },
+            resolved_snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: ResolvedSnapshotId::from("snapshot-test"),
+                snapshot_digest: DigestHex::from("a".repeat(64)),
+            },
+            typed_resource_bindings: ["companion", "companion_memory"].into_iter()
+                .map(|kind| TypedResourceBinding {
+                    binding_id: ResourceBindingId::from(format!("{kind}-binding")),
+                    resource_kind: ResourceKind::from(kind),
+                    resource_id: ResourceId::from("companion-1"),
+                    owner_id: "owner-1".to_owned(),
+                    operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+                    connection_config_ref: None,
+                    typed_parameters: BTreeMap::new(),
+                }).collect(),
+            binding_version: 1,
+        }
+    }
+
+    #[test]
+    fn companion_refresh_only_admits_the_same_verified_official_identity() {
+        let mut binding = companion_binding();
+        let selection = AgentSwitchSelectionDto::Template {
+            template_key: "companion.default".to_owned(),
+        };
+        assert!(companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
+        assert!(!companion_agent_refresh_selection(&binding, None, &selection),
+            "matching product resources alone do not establish official identity");
+        assert!(!companion_agent_refresh_selection(&binding, Some("chat.minimal"), &selection));
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"),
+            &AgentSwitchSelectionDto::Template { template_key: "chat.minimal".to_owned() }));
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"),
+            &AgentSwitchSelectionDto::Preset { preset_id: binding.preset_revision_ref.preset_id.as_ref().to_owned() }));
+        binding.typed_resource_bindings[1].resource_id = ResourceId::from("companion-2");
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
+        binding.typed_resource_bindings.pop();
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
+    }
+
+    #[test]
+    fn companion_refresh_does_not_authorize_other_fixed_product_sessions() {
+        let mut binding = companion_binding();
+        assert_eq!(fixed_product_agent_switch_resource(&binding, false), Some("companion"));
+        assert_eq!(fixed_product_agent_switch_resource(&binding, true), None);
+        for kind in ["customer", "canvas", "channel"] {
+            let mut other = binding.typed_resource_bindings[0].clone();
+            other.resource_kind = ResourceKind::from(kind);
+            binding.typed_resource_bindings.push(other);
+            assert_eq!(fixed_product_agent_switch_resource(&binding, true), Some(kind));
+            binding.typed_resource_bindings.pop();
+        }
+    }
+
+    #[test]
+    fn companion_refresh_only_retains_channels_owned_by_the_same_companion() {
+        let mut binding = companion_binding();
+        let mut channel = binding.typed_resource_bindings[0].clone();
+        channel.resource_kind = ResourceKind::from("channel");
+        channel.resource_id = ResourceId::from("selected-channel");
+        channel.typed_parameters.insert("companion_id".to_owned(), "companion-1".to_owned());
+        binding.typed_resource_bindings.push(channel);
+        assert_eq!(fixed_product_agent_switch_resource(&binding, true), None);
+        assert!(fixed_product_agent_switch_resource(&binding, false).is_some(),
+            "ordinary Agent switching still cannot change a product Channel binding");
+        let channel = binding.typed_resource_bindings.last_mut().unwrap();
+        channel.owner_id = "another-owner".to_owned();
+        assert_eq!(fixed_product_agent_switch_resource(&binding, true), Some("channel"));
+        let channel = binding.typed_resource_bindings.last_mut().unwrap();
+        channel.owner_id = "owner-1".to_owned();
+        channel.typed_parameters.insert("companion_id".to_owned(), "companion-2".to_owned());
+        assert_eq!(fixed_product_agent_switch_resource(&binding, true), Some("channel"));
+        let channel = binding.typed_resource_bindings.last_mut().unwrap();
+        channel.typed_parameters.insert("companion_id".to_owned(), "companion-1".to_owned());
+        channel.typed_parameters.insert("cs_agent_id".to_owned(), "customer-1".to_owned());
+        assert_eq!(fixed_product_agent_switch_resource(&binding, true), Some("channel"));
+    }
+
+    #[test]
+    fn companion_refresh_keeps_resource_choices_but_derives_new_grants() {
+        let mut source: AgentBindingValueDto = serde_json::from_value(
+            serde_json::to_value(companion_binding()).unwrap(),
+        ).unwrap();
+        let mut workspace = source.typed_resource_bindings[0].clone();
+        workspace.resource_kind = "workspace".to_owned();
+        workspace.resource_id = "selected-workspace-project".to_owned();
+        workspace.operations = BTreeSet::from(["read".to_owned()]);
+        workspace.connection_config_ref = Some("owned-connection".to_owned());
+        workspace.typed_parameters = BTreeMap::from([
+            ("workspace_root".to_owned(), "C:/chosen/project".to_owned()),
+        ]);
+        super::super::nomi_core_resource_bindings::freeze_resource_definition_id(&mut workspace).unwrap();
+        let mut knowledge = workspace.clone();
+        knowledge.resource_kind = "knowledge_base".to_owned();
+        knowledge.resource_id = "selected-knowledge".to_owned();
+        knowledge.typed_parameters = BTreeMap::from([
+            ("knowledge_root".to_owned(), "C:/chosen/knowledge".to_owned()),
+            ("knowledge_writeback".to_owned(), "false".to_owned()),
+        ]);
+        super::super::nomi_core_resource_bindings::freeze_resource_definition_id(&mut knowledge).unwrap();
+        source.typed_resource_bindings.extend([workspace.clone(), knowledge.clone()]);
+        let mut target = source.clone();
+        for resource in &mut target.typed_resource_bindings {
+            resource.operations = BTreeSet::from(["read".to_owned(), "write".to_owned()]);
+            resource.connection_config_ref = None;
+            resource.typed_parameters.clear();
+            if resource.resource_kind == "workspace" {
+                resource.resource_id = "default-workspace".to_owned();
+            }
+        }
+        preserve_companion_refresh_resource_choices(&mut target, &source).unwrap();
+        for previous in [workspace, knowledge] {
+            let next = target.typed_resource_bindings.iter().find(|resource|
+                resource.resource_kind == previous.resource_kind).unwrap();
+            assert_eq!(next.resource_id, previous.resource_id);
+            assert_eq!(next.typed_parameters, previous.typed_parameters);
+            assert_eq!(next.connection_config_ref, previous.connection_config_ref);
+            assert_eq!(next.operations, BTreeSet::from(["read".to_owned(), "write".to_owned()]));
+            assert_ne!(next.binding_id, previous.binding_id,
+                "the newly authorized operations produce a new immutable resource definition");
+        }
+    }
+
+    #[test]
+    fn companion_refresh_requires_the_exact_previewed_target() {
+        let target = nomifun_api_types::ResolvedSnapshotRefDto {
+            snapshot_id: "previewed-snapshot".to_owned(),
+            snapshot_digest: "a".repeat(64),
+        };
+        assert!(validate_agent_switch_target_preview(None, &target, false).is_ok(),
+            "generic Agent switches retain compatibility with existing clients");
+        assert!(validate_agent_switch_target_preview(Some(&target), &target, true).is_ok());
+        let missing = validate_agent_switch_target_preview(None, &target, true).unwrap_err();
+        assert_eq!(missing.code, "AGENT_SESSION_BINDING_CHANGED");
+        let mut stale = target.clone();
+        stale.snapshot_digest = "b".repeat(64);
+        let mismatch = validate_agent_switch_target_preview(Some(&stale), &target, true).unwrap_err();
+        assert_eq!(mismatch.code, "AGENT_SESSION_BINDING_CHANGED");
+        assert_eq!(mismatch.status, axum::http::StatusCode::CONFLICT);
+        stale.snapshot_digest = target.snapshot_digest.clone();
+        stale.snapshot_id = "another-snapshot".to_owned();
+        assert!(validate_agent_switch_target_preview(Some(&stale), &target, true).is_err());
+    }
 
     #[test]
     fn unavailable_browser_is_not_a_switch_blocker_when_unbound() {
@@ -11632,6 +11892,7 @@ async fn agent_switch_blockers(
     owner: &AuthenticatedOwner,
     observation: &SessionObservation,
     source_has_running_processes: bool,
+    companion_refresh: bool,
 ) -> Result<Vec<AgentSwitchBlockerDto>, NomiCoreApiError> {
     let session_id = &observation.session.agent_session_id;
     let mut blockers = Vec::new();
@@ -11642,7 +11903,9 @@ async fn agent_switch_blockers(
             details: None,
         });
     }
-    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+    if matches!(observation.head.status.as_str(), "running" | "paused" | "reconciliation")
+        || observation.head.active_turn_id.is_some()
+    {
         blockers.push(AgentSwitchBlockerDto {
             code: "AGENT_SESSION_TURN_ACTIVE".to_owned(),
             message: "Wait for the active Turn before switching Agents".to_owned(),
@@ -11691,17 +11954,10 @@ async fn agent_switch_blockers(
             details: Some(json!({ "execution_id": execution_id, "status": status })),
         });
     }
-    let product_resource = observation
-        .session
-        .agent_binding
-        .typed_resource_bindings
-        .iter()
-        .find(|binding| {
-            matches!(
-                binding.resource_kind.as_ref(),
-                "companion" | "companion_memory" | "customer" | "canvas" | "channel"
-            )
-        });
+    let product_resource = fixed_product_agent_switch_resource(
+        &observation.session.agent_binding,
+        companion_refresh,
+    );
     let cron_bound: i64 = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE conversation_id = ?)",
     )
@@ -11714,7 +11970,7 @@ async fn agent_switch_blockers(
             code: "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED".to_owned(),
             message: "This product-bound Session owns a fixed Agent identity".to_owned(),
             details: Some(json!({
-                "resource_kind": product_resource.map(|binding| binding.resource_kind.as_ref()),
+                "resource_kind": product_resource,
                 "cron_bound": cron_bound != 0,
             })),
         });
@@ -11758,6 +12014,14 @@ async fn prepare_agent_session_switch(
         .control_plane
         .saved_binding_artifacts(&owner.0, &current_dto)
         .await?;
+    let (_, current_official_template) = state.control_plane
+        .saved_binding_presentation(&owner.0, &current_dto)
+        .await?;
+    let companion_refresh = companion_agent_refresh_selection(
+        &observation.session.agent_binding,
+        current_official_template.as_ref().map(|key| key.as_str()),
+        selection,
+    );
     let current_knowledge =
         agent_session_knowledge_binding(&observation.session.agent_binding)?;
     let current_model = current_revision
@@ -11768,6 +12032,13 @@ async fn prepare_agent_session_switch(
             provider_id: route.primary.provider_id.clone(),
             model: route.primary.model.clone(),
         });
+    if companion_refresh && explicit_model.is_some_and(|model| Some(model) != current_model.as_ref()) {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED",
+            "Refreshing the Companion Agent preserves the current Chat model",
+        ));
+    }
     let target_preset_id = match selection {
         AgentSwitchSelectionDto::Preset { preset_id } => preset_id.clone(),
         AgentSwitchSelectionDto::Template { template_key } => state
@@ -11975,6 +12246,29 @@ async fn prepare_agent_session_switch(
             }
         }
     }
+    if companion_refresh {
+        preserve_companion_refresh_resource_choices(&mut replacement_dto, &current_dto)?;
+        let unavailable_selected_resources = current_dto.typed_resource_bindings.iter()
+            .filter(|previous| target_kinds.contains(&previous.resource_kind)
+                && !replacement_dto.typed_resource_bindings.iter().any(|next|
+                    next.resource_kind == previous.resource_kind
+                        && next.resource_id == previous.resource_id))
+            .map(|previous| AgentResourceSelectionDto {
+                resource_kind: previous.resource_kind.clone(),
+                resource_id: previous.resource_id.clone(),
+            }).collect::<Vec<_>>();
+        if !unavailable_selected_resources.is_empty() {
+            blockers.push(AgentSwitchBlockerDto {
+                code: "AGENT_SESSION_RESOURCE_REQUIRED".to_owned(),
+                message: "Restore the Companion's selected resources before applying its configuration".to_owned(),
+                details: Some(json!({
+                    "unavailable_selected_resources": unavailable_selected_resources,
+                    "settings_section": "agents",
+                    "recovery": "restore_selected_resources",
+                })),
+            });
+        }
+    }
     replacement_dto.binding_version = observation
         .session
         .agent_binding
@@ -12000,7 +12294,17 @@ async fn prepare_agent_session_switch(
     )
     .await?;
     blockers.extend(
-        agent_switch_blockers(state, owner, &observation, running_processes).await?,
+        agent_switch_blockers(
+            state,
+            owner,
+            &observation,
+            running_processes,
+            companion_refresh && companion_agent_refresh_selection(
+                &replacement,
+                Some("companion.default"),
+                selection,
+            ),
+        ).await?,
     );
 
     let source_capabilities = current_snapshot
@@ -12145,6 +12449,7 @@ async fn prepare_agent_session_switch(
         target_label,
         handoff,
         active_capability_ids,
+        companion_refresh,
     })
 }
 
@@ -12449,6 +12754,11 @@ async fn apply_nomi_core_agent_session_agent_switch(
     if let Some(blocker) = prepared.preview.blockers.first() {
         return Err(agent_switch_blocker_error(blocker));
     }
+    validate_agent_switch_target_preview(
+        request.expected_resolved_snapshot_ref.as_ref(),
+        &prepared.preview.target.resolved_snapshot_ref,
+        prepared.companion_refresh,
+    )?;
     let mode = handoff_mode(request.handoff_mode);
     if mode == AgentHandoffMode::ContinueTask && prepared.handoff.is_none() {
         return Err(NomiCoreApiError::with_details(

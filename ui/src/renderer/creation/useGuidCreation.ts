@@ -15,10 +15,17 @@ import { useGenerationModel } from './useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { submitCreation } from './client';
 import type { CreationMode } from './types';
+import { capabilityFor, filesForCreation, inputsForMode, requiredCreationAction } from './types';
 import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 import { useTranslation } from 'react-i18next';
 
-export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }) {
+type GuidCreationCapabilityRequirements = {
+  requiredResourceKinds: ReadonlySet<string>;
+  actionIds: ReadonlySet<string>;
+  ready: boolean;
+};
+
+export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }, capabilityRequirements?: GuidCreationCapabilityRequirements) {
   const { t } = useTranslation();
   // Generation admission is fully frozen by the Creative Studio Agent and its
   // asset-library resource. Workspace/collaboration drafts belong to chat
@@ -33,6 +40,26 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
   const sending = useRef(false);
   const pendingSession = useRef<ConversationId | null>(null);
   const isCreative = agent.selection.kind === 'template' && agent.selection.templateKey === 'creative-studio.default';
+  const capabilitiesReady = capabilityRequirements?.ready ?? !agent.selectedOfficialPreset;
+  const template = agent.officialTemplates.find(value => value.template_key === 'creative-studio.default');
+  const resourceAdmission = resolveAgentResourceSelections(
+    capabilityRequirements?.requiredResourceKinds ?? template?.seed?.required_resource_kinds ?? [],
+    {},
+  );
+  const grantedActionIds = capabilityRequirements?.actionIds ?? new Set(
+    template?.seed?.enabled_capabilities?.flatMap(selection => selection.action_allowlist ?? []) ?? [],
+  );
+  const requestedAction = creation.draft.mode ? requiredCreationAction(capabilityFor(
+    creation.draft.mode,
+    inputsForMode(creation.draft.mode, creation.draft.references),
+    filesForCreation(creation.draft.mode, files).length > 0,
+  )) : undefined;
+  const actionAllowed = requestedAction !== undefined && grantedActionIds.has(requestedAction);
+  const disabledReason = isCreative && capabilitiesReady && creation.draft.mode
+    ? !template ? t('creation.agentUnavailable')
+      : !actionAllowed ? t('agentSettings.workbench.actionUnavailable')
+        : resourceAdmission.missingKinds.length > 0 ? t('creation.resourcesUnavailable') : undefined
+    : undefined;
   const selectMode = useCallback((mode: CreationMode) => {
     agent.setSelection({ kind: 'template', templateKey: 'creative-studio.default' });
     creation.setMode(mode);
@@ -60,14 +87,14 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
   }, [location.key, location.search]);
   const send = useCallback(async () => {
     if (sending.current) return;
+    if (!isCreative || !capabilitiesReady) return;
+    if (!creation.draft.mode) return;
+    if (disabledReason) { Message.error(disabledReason); return; }
     if (!model.ready) { Message.error('请选择可用的生成模型'); return; }
     sending.current = true;
     setLoading(true);
     try {
-      const template = agent.officialTemplates.find(value => value.template_key === 'creative-studio.default');
       if (!template) throw new Error(t('creation.agentUnavailable'));
-      const resources = resolveAgentResourceSelections(template.seed.required_resource_kinds, {});
-      if (resources.missingKinds.length) throw new Error(t('creation.resourcesUnavailable'));
       const preset = await prepareOfficialAgent(template);
       const request = buildCreationRequest(creation.draft, input, preset.preset_id, files, model.selected);
       const pendingSessionKey = agentBrowserStorageGenerationKey('creation-guid-pending-session');
@@ -76,7 +103,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
         if (stored) pendingSession.current = parseConversationId(stored);
       }
       if (!pendingSession.current) {
-        const session = await ipcBridge.agentPlatform.sessions.create.invoke({ preset_id: preset.preset_id, title: input.trim().slice(0, 80), resource_selections: resources.selections });
+        const session = await ipcBridge.agentPlatform.sessions.create.invoke({ preset_id: preset.preset_id, title: input.trim().slice(0, 80), resource_selections: resourceAdmission.selections });
         pendingSession.current = parseConversationId(session.agent_session_id);
         sessionStorage.setItem(pendingSessionKey, pendingSession.current);
       }
@@ -97,6 +124,8 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await navigate(`/conversation/${id}`);
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { sending.current = false; setLoading(false); }
-  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
-  return { ...creation, selectMode, exit, send, loading, ready: model.ready };
+  }, [template, isCreative, capabilitiesReady, disabledReason, resourceAdmission.selections, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
+  return { ...creation, selectMode, exit, send, loading, disabledReason,
+    ready: isCreative && model.ready && capabilitiesReady && actionAllowed && resourceAdmission.missingKinds.length === 0,
+  };
 }

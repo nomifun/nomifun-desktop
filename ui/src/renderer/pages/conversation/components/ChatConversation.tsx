@@ -336,6 +336,7 @@ const NomiConversationPanel: React.FC<{
         selection: wireSelection,
         handoff_mode: agentSwitch.mode,
         expected_binding_version: agentSwitch.preview.expected_binding_version,
+        expected_resolved_snapshot_ref: agentSwitch.preview.target.resolved_snapshot_ref,
       },
     }).then(async (result) => {
       await refreshConversationCache(conversation.id);

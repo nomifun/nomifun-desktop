@@ -1,6 +1,6 @@
-import type { AgentPresetDraft, OfficialPresetTemplate, ProductAgentSelection } from '@/common/types/agentPlatform';
+import type { AgentPresetDraft, ProductAgentSelection } from '@/common/types/agentPlatform';
 import { agentBrowserStorageGenerationKey, type BrowserStoragePersistence } from '@/common/utils/browserStorageKey';
-import { agentEditorReturn, editingDocument, type AgentEditorReturn, type TemplateEditingState } from './model';
+import { agentEditorReturn, editingDocument, type AgentEditorReturn } from './model';
 
 function browserStorage(): BrowserStoragePersistence | undefined {
   try { return typeof localStorage === 'undefined' ? undefined : localStorage; }
@@ -40,22 +40,6 @@ export class AgentEditorDrafts {
   }
 
   rememberSelection(selection: ProductAgentSelection): void { this.write('selection', selection); }
-
-  readTemplate(template: OfficialPresetTemplate): TemplateEditingState | undefined {
-    const value = this.read(`template:${template.template_key}`) as { seed?: string; editing?: TemplateEditingState } | null;
-    if (value?.seed !== JSON.stringify(template.seed)) return undefined;
-    const search = `?template=${template.template_key}`;
-    const snapshot = agentEditorReturn({ agentEditorReturn: {
-      version: 1, search, kind: 'template', templateKey: template.template_key, editing: value.editing,
-    } }, search);
-    return snapshot?.kind === 'template' ? snapshot.editing : undefined;
-  }
-
-  writeTemplate(template: OfficialPresetTemplate, editing: TemplateEditingState): void {
-    this.write(`template:${template.template_key}`, { seed: JSON.stringify(template.seed), editing });
-  }
-
-  removeTemplate(template: OfficialPresetTemplate): void { this.remove(`template:${template.template_key}`); }
 
   readPreset(presetId: string): Extract<AgentEditorReturn, { kind: 'preset' }>['draft'] | undefined {
     const search = `?preset=${presetId}`;

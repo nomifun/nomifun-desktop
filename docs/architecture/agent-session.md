@@ -18,6 +18,10 @@ This is the current development entry point. Rust types, the Session event regis
 
 ## Runtime context
 
+Official Agents have stable, owner-scoped editable Presets and use the same immutable revision save path as personal Agents. Release seeds initialize unsaved defaults without overwriting saved customizations. Official product launches resolve the owner's saved configuration; model and extension variants continue through the existing Revision/Snapshot path. Historical official identity is validated from host-owned source, owner, and template identity rather than equality with today's seed or mutable configuration.
+
+Saving does not change an existing Session. A companion can explicitly preview and apply its saved `companion.default` configuration through the canonical Agent switch path at an idle, settled boundary. The update retains the model, resource identities, and selected parameters; operations are validated against the new grants. Other Agent identities, active or paused turns, missing resources, and unsettled effects cannot use this companion update path.
+
 `engine_history.rs` reads typed canonical events and resolved payloads. It does not read Message projections to determine model roles. Native closed turns replay their structured journal. Missing Runtime records fail closed rather than falling back to chat text.
 
 An accepted input that fails or is cancelled before Runtime startup remains valid context together with its explicit terminal fact. It does not acquire fabricated Runtime, tool or completion evidence.
