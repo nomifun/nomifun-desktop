@@ -13,6 +13,8 @@ import TaskModelSelect, {
   type TaskModelSelection,
 } from '@/renderer/components/model/TaskModelSelect';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
+import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from './knowledgeError';
+import { KnowledgeErrorNotice } from './KnowledgeErrorFeedback';
 import styles from './KnowledgeRetrievalSettingsModal.module.css';
 
 type ModelChoice = Pick<TaskModelSelection, 'provider_id' | 'model'>;
@@ -77,6 +79,8 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
   const [draft, setDraft] = useState<RetrievalDraft | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<KnowledgeErrorPresentation | null>(null);
+  const [loadRevision, setLoadRevision] = useState(0);
   const embeddingModels = useModelsForTask('embedding');
   const rerankModels = useModelsForTask('rerank');
 
@@ -85,13 +89,17 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
     let active = true;
     setLoading(true);
     setDraft(null);
+    setError(null);
     void ipcBridge.knowledge.getRetrievalConfig
       .invoke()
       .then((config) => {
         if (active) setDraft(retrievalDraftFromWire(config));
       })
       .catch((error) => {
-        if (active) Message.error(String(error));
+        if (active) {
+          const presentation = normalizeKnowledgeError(error, 'load', t);
+          setError(presentation.handled ? null : presentation);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -99,7 +107,7 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
     return () => {
       active = false;
     };
-  }, [visible]);
+  }, [visible, loadRevision, t]);
 
   const invalidRemoteSelection = useMemo(() => {
     if (!draft) return true;
@@ -115,6 +123,7 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
   const save = async () => {
     if (!draft || invalidRemoteSelection) return;
     setSaving(true);
+    setError(null);
     try {
       const saved = await ipcBridge.knowledge.setRetrievalConfig.invoke(
         retrievalWireFromDraft(draft)
@@ -123,7 +132,8 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
       Message.success(t('knowledge.retrieval.saved'));
       onClose();
     } catch (error) {
-      Message.error(String(error));
+      const presentation = normalizeKnowledgeError(error, 'operation', t);
+      setError(presentation.handled ? null : presentation);
     } finally {
       setSaving(false);
     }
@@ -215,6 +225,12 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
           <p className={styles.intro}>
             {t('knowledge.retrieval.description')}
           </p>
+          {error && (
+            <KnowledgeErrorNotice
+              error={error}
+              onRetry={draft ? undefined : () => setLoadRevision((revision) => revision + 1)}
+            />
+          )}
           {renderMode('embedding')}
           {renderMode('rerank')}
         </div>

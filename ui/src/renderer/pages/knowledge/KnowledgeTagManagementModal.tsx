@@ -11,8 +11,10 @@
 import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { Input, Modal, Popconfirm, Popover } from '@arco-design/web-react';
 import { Check, Close, CloseSmall, DownOne, Plus } from '@icon-park/react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from './knowledgeError';
+import { KnowledgeErrorNotice } from './KnowledgeErrorFeedback';
 
 const PRESET_COLORS = [
   '#3491FA', // blue
@@ -29,15 +31,11 @@ type KnowledgeTagManagementModalProps = {
   visible: boolean;
   onClose: () => void;
   tags: IKnowledgeTag[];
+  loadError?: KnowledgeErrorPresentation | null;
+  onRetryLoad?: () => void;
   createTag: (label: string, color?: string) => Promise<unknown>;
   updateTag: (key: string, patch: { label?: string; color?: string }) => Promise<void>;
   deleteTag: (key: string) => Promise<void>;
-};
-
-const errorText = (error: unknown): string => {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return '';
 };
 
 const ColorDot: React.FC<{ color?: string; size?: number }> = ({ color, size = 14 }) => (
@@ -235,6 +233,8 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
   visible,
   onClose,
   tags,
+  loadError,
+  onRetryLoad,
   createTag,
   updateTag,
   deleteTag,
@@ -244,21 +244,29 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState<string | undefined>(undefined);
   const [newColorOpen, setNewColorOpen] = useState(false);
+  const [actionError, setActionError] = useState<KnowledgeErrorPresentation | null>(null);
+
+  useEffect(() => {
+    if (visible) setActionError(null);
+  }, [visible]);
+
+  const setOperationError = (error: unknown, title?: string) => {
+    const presentation = normalizeKnowledgeError(error, 'operation', t);
+    setActionError(presentation.handled ? null : { ...presentation, title: title ?? presentation.title });
+  };
 
   const handleCreate = async () => {
     const label = newLabel.trim();
     if (!label || busy) return;
     setBusy(true);
+    setActionError(null);
     try {
       await createTag(label, newColor);
       setNewLabel('');
       setNewColor(undefined);
     } catch (error) {
       console.error('Failed to create knowledge tag:', error);
-      Modal.error({
-        title: t('knowledge.tags.createFailed', { defaultValue: 'Failed to create tag' }),
-        content: errorText(error),
-      });
+      setOperationError(error, t('knowledge.tags.createFailed', { defaultValue: 'Failed to create tag' }));
     } finally {
       setBusy(false);
     }
@@ -266,14 +274,12 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
 
   const handleRename = async (key: string, label: string) => {
     setBusy(true);
+    setActionError(null);
     try {
       await updateTag(key, { label });
     } catch (error) {
       console.error('Failed to rename knowledge tag:', error);
-      Modal.error({
-        title: t('knowledge.tags.renameFailed', { defaultValue: 'Failed to rename tag' }),
-        content: errorText(error),
-      });
+      setOperationError(error, t('knowledge.tags.renameFailed', { defaultValue: 'Failed to rename tag' }));
     } finally {
       setBusy(false);
     }
@@ -281,10 +287,12 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
 
   const handleChangeColor = async (key: string, color: string) => {
     setBusy(true);
+    setActionError(null);
     try {
       await updateTag(key, { color });
     } catch (error) {
       console.error('Failed to update tag color:', error);
+      setOperationError(error);
     } finally {
       setBusy(false);
     }
@@ -292,14 +300,12 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
 
   const handleDelete = async (tag: IKnowledgeTag) => {
     setBusy(true);
+    setActionError(null);
     try {
       await deleteTag(tag.key);
     } catch (error) {
       console.error('Failed to delete knowledge tag:', error);
-      Modal.error({
-        title: t('knowledge.tags.deleteFailed', { defaultValue: 'Failed to delete tag' }),
-        content: errorText(error),
-      });
+      setOperationError(error, t('knowledge.tags.deleteFailed', { defaultValue: 'Failed to delete tag' }));
     } finally {
       setBusy(false);
     }
@@ -321,12 +327,15 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
         })}
       </p>
 
+      {loadError && <KnowledgeErrorNotice error={loadError} onRetry={onRetryLoad} />}
+      {actionError && <KnowledgeErrorNotice error={actionError} />}
+
       <div
         className='mb-12px flex flex-wrap content-start items-start gap-6px overflow-y-auto pr-4px'
         style={{ maxHeight: 'min(38vh, 280px)' }}
         data-testid='kb-tag-list'
       >
-        {tags.length === 0 ? (
+        {tags.length === 0 && !loadError ? (
           <div className='w-full rounded-10px border border-dashed border-[var(--color-border-2)] px-10px py-12px text-center text-12px text-[var(--color-text-3)]'>
             {t('knowledge.tags.empty', { defaultValue: 'No tags yet. Create one below.' })}
           </div>

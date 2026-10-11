@@ -18,7 +18,8 @@ import {
   parseKnowledgeUrlDrafts,
   type KnowledgeUrlDraft,
 } from '../knowledgeUrlEntries';
-import { addKnowledgeContent, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
+import { addKnowledgeContent, notifySourceFetchResult } from '../useKnowledge';
+import { showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 
 export interface KnowledgeAddContentControlHandle {
   openDocument: (folderOverride?: string) => void;
@@ -165,7 +166,7 @@ const KnowledgeAddContentControl = forwardRef<
       await onAdded(result);
       Message.success(t('knowledge.actions.createOk'));
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     } finally {
       setCreatingDocument(false);
     }
@@ -183,7 +184,7 @@ const KnowledgeAddContentControl = forwardRef<
       const paths = await ipcBridge.dialog.showOpen.invoke({ properties: ['openDirectory'] });
       if (paths?.[0]) setFolderImportPath(paths[0]);
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     }
   };
 
@@ -221,7 +222,7 @@ const KnowledgeAddContentControl = forwardRef<
         );
       }
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     } finally {
       setFolderImporting(false);
     }
@@ -299,7 +300,7 @@ const KnowledgeAddContentControl = forwardRef<
         );
       }
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     } finally {
       setWebImporting(false);
     }

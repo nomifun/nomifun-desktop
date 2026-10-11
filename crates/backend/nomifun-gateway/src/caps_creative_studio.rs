@@ -181,7 +181,10 @@ fn canvas_operation_error(error: AppError) -> String {
             format!("No usable model provider is configured: {message}")
         }
         AppError::RateLimited => "Creative Studio Canvas operation was rate limited".to_owned(),
-        AppError::Internal(_) => "Creative Studio Canvas operation failed".to_owned(),
+        AppError::Internal(_)
+        | AppError::KnowledgeExportDestinationInvalid(_)
+        | AppError::KnowledgeExportDestinationExists(_)
+        | AppError::KnowledgeExportIo { .. } => "Creative Studio Canvas operation failed".to_owned(),
         AppError::BadGateway(_) => "Creative Studio Canvas upstream operation failed".to_owned(),
         AppError::Timeout(_) => "Creative Studio Canvas operation timed out".to_owned(),
         AppError::UnprocessableEntity(_) => {

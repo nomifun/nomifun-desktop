@@ -47,6 +47,19 @@ pub enum AppError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[error("Knowledge export destination invalid: {0}")]
+    KnowledgeExportDestinationInvalid(String),
+
+    #[error("Knowledge export destination already exists: {0}")]
+    KnowledgeExportDestinationExists(String),
+
+    #[error("Knowledge export failed at {stage}: {source}")]
+    KnowledgeExportIo {
+        stage: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Bad gateway: {0}")]
     BadGateway(String),
 
@@ -103,6 +116,9 @@ impl AppError {
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::KnowledgeExportDestinationInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::KnowledgeExportDestinationExists(_) => StatusCode::CONFLICT,
+            Self::KnowledgeExportIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::Timeout(_) => StatusCode::BAD_GATEWAY,
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -134,6 +150,13 @@ impl AppError {
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
             Self::RateLimited => "RATE_LIMITED",
             Self::Internal(_) => "INTERNAL_ERROR",
+            Self::KnowledgeExportDestinationInvalid(_) => "KNOWLEDGE_EXPORT_DESTINATION_INVALID",
+            Self::KnowledgeExportDestinationExists(_) => "KNOWLEDGE_EXPORT_DESTINATION_EXISTS",
+            Self::KnowledgeExportIo { source, .. } => match source.kind() {
+                std::io::ErrorKind::PermissionDenied => "KNOWLEDGE_EXPORT_ACCESS_DENIED",
+                std::io::ErrorKind::StorageFull => "KNOWLEDGE_EXPORT_STORAGE_FULL",
+                _ => "KNOWLEDGE_EXPORT_WRITE_FAILED",
+            },
             Self::BadGateway(_) => "BAD_GATEWAY",
             Self::Timeout(_) => "TIMEOUT",
             Self::UnprocessableEntity(_) => "UNPROCESSABLE_ENTITY",
@@ -152,6 +175,15 @@ impl AppError {
     /// context in addition to the top-level error code.
     pub fn error_details(&self) -> Option<Value> {
         match self {
+            Self::KnowledgeExportDestinationInvalid(_) | Self::KnowledgeExportDestinationExists(_) => {
+                Some(json!({ "field": "dest_path", "operation": "knowledge.export" }))
+            }
+            Self::KnowledgeExportIo { stage, source } => Some(json!({
+                "operation": "knowledge.export",
+                "stage": stage,
+                "io_kind": format!("{:?}", source.kind()),
+                "os_error": source.raw_os_error(),
+            })),
             Self::WorkspacePathEdgeWhitespace(path) => Some(workspace_path_whitespace_details(path, "create")),
             Self::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => {
                 Some(workspace_path_whitespace_details(path, "runtime"))
@@ -281,6 +313,68 @@ mod tests {
         assert_eq!(body["code"], "COMPONENT_PREPARATION_REQUIRED");
         assert_eq!(body["details"]["component"], "bun");
         assert_eq!(body["details"]["phase"], "runtime_preparation");
+    }
+
+    #[tokio::test]
+    async fn knowledge_export_destination_errors_have_typed_responses() {
+        for (error, status, code) in [
+            (
+                AppError::KnowledgeExportDestinationInvalid("selected a directory".into()),
+                StatusCode::BAD_REQUEST,
+                "KNOWLEDGE_EXPORT_DESTINATION_INVALID",
+            ),
+            (
+                AppError::KnowledgeExportDestinationExists("bundle.zip".into()),
+                StatusCode::CONFLICT,
+                "KNOWLEDGE_EXPORT_DESTINATION_EXISTS",
+            ),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], code);
+            assert_eq!(body["details"]["field"], "dest_path");
+            assert_eq!(body["details"]["operation"], "knowledge.export");
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_export_io_errors_preserve_machine_readable_diagnostics() {
+        for (kind, code) in [
+            (std::io::ErrorKind::PermissionDenied, "KNOWLEDGE_EXPORT_ACCESS_DENIED"),
+            (std::io::ErrorKind::StorageFull, "KNOWLEDGE_EXPORT_STORAGE_FULL"),
+            (std::io::ErrorKind::Other, "KNOWLEDGE_EXPORT_WRITE_FAILED"),
+        ] {
+            let error = AppError::KnowledgeExportIo {
+                stage: "finalize_file",
+                source: std::io::Error::new(kind, "localized operating system message"),
+            };
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], code);
+            assert_eq!(body["details"]["operation"], "knowledge.export");
+            assert_eq!(body["details"]["stage"], "finalize_file");
+            assert_eq!(body["details"]["io_kind"], format!("{kind:?}"));
+            assert!(body["error"].as_str().unwrap().contains("localized operating system message"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn knowledge_export_windows_access_denied_keeps_os_error_code() {
+        let response = AppError::KnowledgeExportIo {
+            stage: "finalize_file",
+            source: std::io::Error::from_raw_os_error(5),
+        }.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "KNOWLEDGE_EXPORT_ACCESS_DENIED");
+        assert_eq!(body["details"]["os_error"], 5);
+        assert_eq!(body["details"]["stage"], "finalize_file");
     }
 
     #[test]

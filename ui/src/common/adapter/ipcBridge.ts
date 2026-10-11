@@ -6381,9 +6381,9 @@ export const knowledge = {
     }
   ), fromApiKnowledgeBinding),
   // ── Import / export (spec 2026-06-11 §4.8: zip with manifest.kind="knowledge-base") ──
-  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string }>(
+  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string; overwrite?: boolean }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/export`,
-    (p) => ({ dest_path: p.dest_path })
+    (p) => ({ dest_path: p.dest_path, overwrite: p.overwrite ?? false })
   ),
   /** Import a knowledge-base bundle — a new managed base is provisioned (name conflicts get a "(2)" suffix). */
   importBase: withResponseMap(httpPost<IKnowledgeBase, { src_path: string }>('/api/knowledge/bases/import'), fromApiKnowledgeBase),
