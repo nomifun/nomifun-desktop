@@ -1,5 +1,5 @@
 use nomifun_agent_contracts::{
-    AgentSessionId, IdmmDecisionExplanation, IdmmDecisionNotice, SessionEventPayloadRef,
+    AgentBindingChangedPayloadV1, AgentSessionId, IdmmDecisionExplanation, IdmmDecisionNotice, SessionEventPayloadRef,
     SessionEventRecord, digest_bytes, digest_payload,
 };
 use serde::{Deserialize, Serialize};
@@ -214,8 +214,23 @@ fn apply_projection_semantics(
         "session/ready" => document.state = Some("ready".to_owned()),
         "session/open-failed" => document.state = Some("open_failed".to_owned()),
         "session/agent-binding-changed" => {
+            let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload.clone())?;
+            if event.kind_version != 1
+                || transition.transition_id.as_ref() != event.correlation_id.as_ref()
+                || transition.effective_after_seq.checked_add(1) != Some(event.seq)
+            {
+                return Err(SessionStoreError::InvalidEvent(
+                    "Agent transition payload differs from its canonical event boundary".into(),
+                ));
+            }
+            if transition.workspace_relocation.is_some() {
+                transition.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+            }
             document.state = Some("completed".to_owned());
             document.reference = Some(payload.clone());
+            // A transition reference is its strict canonical payload. Generic
+            // diagnostics belong to other projection summaries, not this value.
+            return Ok(());
         }
         "turn/started" => document.state = Some("running".to_owned()),
         "turn/paused" => { document.state = Some("paused".to_owned()); document.reference = Some(payload.clone()); }

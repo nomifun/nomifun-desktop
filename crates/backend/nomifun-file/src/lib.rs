@@ -32,6 +32,8 @@ mod vcs_stage;
 mod workspace_write;
 mod workspace_observation;
 mod workspace_read_dir;
+mod zip_source;
+mod zip_cancellation;
 #[cfg(windows)]
 mod windows_read;
 #[cfg(windows)]

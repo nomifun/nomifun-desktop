@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct ListWorkspaceFilesRequest {
     pub root: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// Request body for `POST /api/fs/metadata` — get file metadata.
@@ -91,6 +93,7 @@ pub struct FetchRemoteImageRequest {
 
 /// A single entry in a ZIP creation request.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZipFileEntry {
     pub name: String,
     #[serde(default)]
@@ -106,6 +109,10 @@ pub struct ZipRequest {
     pub path: String,
     #[serde(default)]
     pub request_id: Option<String>,
+    /// Selected workspace roots permitted as disk-entry sources. Destination
+    /// selection never grants read access to the selected folder.
+    #[serde(default)]
+    pub workspaces: Vec<String>,
     pub files: Vec<ZipFileEntry>,
 }
 
@@ -423,6 +430,7 @@ mod tests {
         let req: ZipRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.path, "/out.zip");
         assert_eq!(req.request_id.as_deref(), Some("req-1"));
+        assert!(req.workspaces.is_empty());
         assert_eq!(req.files.len(), 2);
         assert_eq!(req.files[0].content.as_deref(), Some("hello"));
         assert!(req.files[0].file_path.is_none());
@@ -438,6 +446,23 @@ mod tests {
         });
         let req: ZipRequest = serde_json::from_value(raw).unwrap();
         assert!(req.request_id.is_none());
+    }
+
+    #[test]
+    fn zip_request_explicit_workspace_sources() {
+        let req: ZipRequest = serde_json::from_value(json!({
+            "path": "/export/out.zip",
+            "workspaces": ["/selected/project"],
+            "files": [{ "name": "workspace/a.bin", "file_path": "/selected/project/a.bin" }]
+        })).unwrap();
+        assert_eq!(req.workspaces, ["/selected/project"]);
+    }
+
+    #[test]
+    fn zip_entry_rejects_unknown_source_fields() {
+        assert!(serde_json::from_value::<ZipFileEntry>(json!({
+            "name": "a.bin", "sourcePath": "/selected/project/a.bin"
+        })).is_err());
     }
 
     #[test]

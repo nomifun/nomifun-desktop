@@ -13345,12 +13345,22 @@ async fn decorate_agent_transition_template_keys(
 #[path = "conversation_task_plan.rs"]
 mod conversation_task_plan;
 
+#[derive(Serialize)]
+struct CanonicalMessageHistoryPage {
+    #[serde(flatten)]
+    messages: MessageListResponse,
+    /// Opaque sequence boundary for the next raw projection window. Filtering
+    /// presentation-only rows must not prevent a complete history walk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
 async fn get_nomi_core_agent_session_message_history(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     Path(agent_session_id): Path<String>,
     Query(query): Query<ListMessagesQuery>,
-) -> Result<Json<ApiResponse<MessageListResponse>>, NomiCoreApiError> {
+) -> Result<Json<ApiResponse<CanonicalMessageHistoryPage>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
     state
         .session_owner
@@ -13400,6 +13410,15 @@ async fn get_nomi_core_agent_session_message_history(
         .message_history_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
+    // The UUID is an opaque marker; the backward reader uses the sequence
+    // encoded in the timestamp. Anchor to the last raw projection before any
+    // presentation filtering, including pages with no visible messages.
+    let next_cursor = has_more.then(|| {
+        let oldest = projections.last().expect("a nonterminal history page has projections");
+        format!("{}:{}", created_at.saturating_add(
+            i64::try_from(oldest.first_seq).unwrap_or(i64::MAX),
+        ), session_id.as_ref())
+    });
     super::history_thinking_display::hydrate_thinking_lifecycle(&state.session_owner.pool, &session_id, &mut projections).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool,
@@ -13422,10 +13441,9 @@ async fn get_nomi_core_agent_session_message_history(
         }
     }
     history_workspace_paths::hydrate(&state.session_owner, &session_id, created_at, &mut items).await?;
-    Ok(Json(ApiResponse::ok(PaginatedResult {
-        items,
-        total,
-        has_more,
+    Ok(Json(ApiResponse::ok(CanonicalMessageHistoryPage {
+        messages: PaginatedResult { items, total, has_more },
+        next_cursor,
     })))
 }
 

@@ -5,15 +5,13 @@
  */
 
 import type { TMessage } from '@/common/chat/chatLib';
-import type { IDirOrFile } from '@/common/adapter/ipcBridge';
+import type { IWorkspaceFlatFile } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import { getMessageRoleKey, readMessageContent, sanitizeFileName } from '@/renderer/utils/chat/conversationExport';
 
 import type { ExportZipFile } from '../types';
 
-export const EXPORT_IO_TIMEOUT_MS = 15000;
-
-const normalizeZipPath = (value: string): string => value.replace(/\\/g, '/').replace(/^\/+/, '');
+const normalizeZipPath = (value: string): string => value.replace(/\\/g, '/');
 
 export const buildTopicFolderName = (conversation: TChatConversation): string => {
   const safeName = sanitizeFileName(conversation.name || conversation.id);
@@ -22,48 +20,20 @@ export const buildTopicFolderName = (conversation: TChatConversation): string =>
 
 export const appendWorkspaceFilesToZip = (
   files: ExportZipFile[],
-  root: IDirOrFile | undefined,
+  workspaceFiles: IWorkspaceFlatFile[],
   prefix: string
 ): void => {
-  if (!root?.children || root.children.length === 0) {
-    return;
-  }
-
-  const walk = (node: IDirOrFile) => {
-    if (node.isFile) {
-      const relativePath = normalizeZipPath(node.relativePath || node.name);
-      if (relativePath) {
-        files.push({
-          name: `${prefix}/workspace/${relativePath}`,
-          sourcePath: node.fullPath,
-        });
-      }
-      return;
+  for (const file of workspaceFiles) {
+    const relativePath = normalizeZipPath(file.relativePath);
+    if (!relativePath || /^[A-Za-z]:/.test(relativePath) || relativePath.split('/').some((part) => part === '..' || part === '.' || !part)) {
+      throw new Error(`Workspace export file has an invalid relative path: ${file.relativePath}`);
     }
-    node.children?.forEach((child) => walk(child));
-  };
-
-  root.children.forEach((child) => walk(child));
+    files.push({ name: `${prefix}/workspace/${relativePath}`, file_path: file.fullPath });
+  }
 };
 
 export const getBackendKeyFromConversation = (conversation: TChatConversation): string | undefined =>
   conversation.type;
-
-export const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    const timeoutPromise = new Promise<T>((_, reject) => {
-      timer = setTimeout(() => {
-        reject(new Error(`${label} timeout`));
-      }, timeoutMs);
-    });
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
-};
 
 const getMarkdownMessageRoleLabel = (message: TMessage): string => {
   switch (getMessageRoleKey(message)) {
@@ -90,9 +60,12 @@ export const buildConversationMarkdown = (conversation: TChatConversation, messa
   messages.forEach((message, index) => {
     lines.push(`### ${index + 1}. ${getMarkdownMessageRoleLabel(message)} (${message.type})`);
     lines.push('');
-    lines.push('```text');
-    lines.push(readMessageContent(message));
-    lines.push('```');
+    const content = readMessageContent(message);
+    const longestBackticks = (content.match(/`+/g) ?? []).reduce((longest, run) => Math.max(longest, run.length), 0);
+    const fence = '`'.repeat(Math.max(3, longestBackticks + 1));
+    lines.push(`${fence}text`);
+    lines.push(content);
+    lines.push(fence);
     lines.push('');
   });
 

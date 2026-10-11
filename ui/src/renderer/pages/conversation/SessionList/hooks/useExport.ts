@@ -5,14 +5,16 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { TMessage } from '@/common/chat/chatLib';
+import type { IWorkspaceFlatFile } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
+import { parseError, uuidv7 } from '@/common/utils';
+import { formatTimestamp, joinFilePath, sanitizeFileName } from '@/renderer/utils/chat/conversationExport';
+import { EXPORT_IO_TIMEOUT_MS, fetchConversationExportMessages, withTimeout } from '@/renderer/utils/chat/conversationExportData';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { Message } from '@arco-design/web-react';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { formatTimestamp, joinFilePath, sanitizeFileName } from '@/renderer/utils/chat/conversationExport';
 
 import type { ExportTask, ExportZipFile } from '../types';
 import {
@@ -20,8 +22,6 @@ import {
   buildConversationJson,
   buildConversationMarkdown,
   buildTopicFolderName,
-  EXPORT_IO_TIMEOUT_MS,
-  withTimeout,
 } from '../utils/exportHelpers';
 
 type UseExportParams = {
@@ -30,6 +30,9 @@ type UseExportParams = {
   setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<ConversationId>>>;
   onBatchModeChange?: (value: boolean) => void;
 };
+
+type ExportRequest = { id: string; canceled: boolean; zipStarted: boolean };
+class ExportCanceledError extends Error {}
 
 export const useExport = ({
   conversations,
@@ -42,307 +45,212 @@ export const useExport = ({
   const [exportTargetPath, setExportTargetPath] = useState('');
   const [exportModalLoading, setExportModalLoading] = useState(false);
   const [showExportDirectorySelector, setShowExportDirectorySelector] = useState(false);
-  const [currentExportRequestId, setCurrentExportRequestId] = useState<string | null>(null);
-  const exportCanceledRef = useRef(false);
+  const activeRequestRef = useRef<ExportRequest | null>(null);
+  const modalRevisionRef = useRef(0);
+  const directoryRevisionRef = useRef(0);
   const { t } = useTranslation();
 
-  const fileExists = useCallback(async (file_path: string): Promise<boolean> => {
-    try {
-      const metadata = await withTimeout(
-        ipcBridge.fs.getFileMetadata.invoke({ path: file_path }),
-        EXPORT_IO_TIMEOUT_MS,
-        `getFileMetadata:${file_path}`
-      );
-      return metadata.size >= 0;
-    } catch {
-      return false;
-    }
+  const cancelZip = useCallback((request: ExportRequest) => {
+    if (!request.zipStarted) return;
+    void ipcBridge.fs.cancelZip.invoke({ request_id: request.id }).catch((error) => {
+      console.warn('Failed to cancel conversation export:', error);
+    });
   }, []);
 
-  const createUniqueFilePath = useCallback(
-    async (directory: string, file_nameWithoutExt: string, ext: 'json' | 'md' | 'zip') => {
-      const safeBaseName = sanitizeFileName(file_nameWithoutExt);
-      const findCandidate = async (index: number): Promise<string> => {
-        const suffix = index === 0 ? '' : `-${Date.now()}-${index}`;
-        const candidate = joinFilePath(directory, `${safeBaseName}${suffix}.${ext}`);
-        return (await fileExists(candidate)) ? findCandidate(index + 1) : candidate;
-      };
+  const cancelActiveExport = useCallback(() => {
+    const request = activeRequestRef.current;
+    if (request) {
+      request.canceled = true;
+      activeRequestRef.current = null;
+      cancelZip(request);
+    }
+  }, [cancelZip]);
 
-      return findCandidate(0);
-    },
-    [fileExists]
-  );
+  useEffect(() => () => {
+    modalRevisionRef.current += 1;
+    cancelActiveExport();
+  }, [cancelActiveExport]);
 
   const getDesktopPath = useCallback(async (): Promise<string> => {
     try {
-      const desktopPath = await ipcBridge.application.getPath.invoke({ name: 'desktop' });
-      return desktopPath || '';
+      return (await ipcBridge.application.getPath.invoke({ name: 'desktop' })) || '';
     } catch {
       return '';
     }
   }, []);
 
   const closeExportModal = useCallback(() => {
-    if (exportModalLoading) {
-      exportCanceledRef.current = true;
-    }
-    if (exportModalLoading && currentExportRequestId) {
-      void ipcBridge.fs.cancelZip.invoke({ request_id: currentExportRequestId });
-    }
+    modalRevisionRef.current += 1;
+    cancelActiveExport();
     setExportModalVisible(false);
+    setShowExportDirectorySelector(false);
     setExportTask(null);
     setExportTargetPath('');
     setExportModalLoading(false);
-    setCurrentExportRequestId(null);
-  }, [currentExportRequestId, exportModalLoading]);
+  }, [cancelActiveExport]);
 
-  const openExportModal = useCallback(
-    async (task: NonNullable<ExportTask>) => {
-      exportCanceledRef.current = false;
-      setExportTask(task);
-      setExportModalVisible(true);
-      const desktopPath = await getDesktopPath();
+  const openExportModal = useCallback(async (task: NonNullable<ExportTask>) => {
+    cancelActiveExport();
+    const revision = ++modalRevisionRef.current;
+    const directoryRevision = directoryRevisionRef.current;
+    setExportTask(task);
+    setExportTargetPath('');
+    setExportModalLoading(false);
+    setExportModalVisible(true);
+    const desktopPath = await getDesktopPath();
+    if (modalRevisionRef.current === revision && directoryRevisionRef.current === directoryRevision) {
       setExportTargetPath(desktopPath);
-    },
-    [getDesktopPath]
-  );
+    }
+  }, [cancelActiveExport, getDesktopPath]);
 
   const handleSelectExportDirectoryFromModal = useCallback((paths: string[] | undefined) => {
     setShowExportDirectorySelector(false);
-    if (paths && paths.length > 0) {
+    if (paths?.length && !activeRequestRef.current) {
+      directoryRevisionRef.current += 1;
       setExportTargetPath(paths[0]);
     }
   }, []);
 
   const handleSelectExportFolder = useCallback(async () => {
-    if (exportModalLoading) {
-      return;
-    }
-
+    if (activeRequestRef.current) return;
     if (!isDesktopShell()) {
       setShowExportDirectorySelector(true);
       return;
     }
-
+    const revision = modalRevisionRef.current;
     try {
-      const desktopPath = exportTargetPath || (await getDesktopPath());
+      const defaultPath = exportTargetPath || (await getDesktopPath());
+      if (revision !== modalRevisionRef.current) return;
       const folders = await ipcBridge.dialog.showOpen.invoke({
         properties: ['openDirectory', 'createDirectory'],
-        defaultPath: desktopPath || undefined,
+        defaultPath: defaultPath || undefined,
       });
-      if (folders && folders.length > 0) {
+      if (revision === modalRevisionRef.current && folders?.length && !activeRequestRef.current) {
+        directoryRevisionRef.current += 1;
         setExportTargetPath(folders[0]);
       }
     } catch (error) {
+      if (revision !== modalRevisionRef.current) return;
       console.error('Failed to open export directory dialog:', error);
-      Message.error(t('conversation.history.exportFailed'));
+      Message.error(`${t('conversation.history.exportFailed')}: ${parseError(error)}`);
     }
-  }, [exportModalLoading, exportTargetPath, getDesktopPath, t]);
+  }, [exportTargetPath, getDesktopPath, t]);
 
-  const fetchConversationMessages = useCallback(async (conversation_id: ConversationId): Promise<TMessage[]> => {
-    try {
-      const result = await withTimeout(
-        ipcBridge.database.getConversationMessages.invoke({
-          conversation_id: conversation_id,
-          page: 0,
-          page_size: 10000,
-        }),
-        EXPORT_IO_TIMEOUT_MS,
-        `getConversationMessages:${conversation_id}`
-      );
-      return result.items;
-    } catch (error) {
-      console.warn('[SessionList] Export message fetch timeout/failure:', conversation_id, error);
-      return [];
-    }
+  const fetchConversationWorkspaceFiles = useCallback(async (
+    conversation: TChatConversation,
+    assertActive: () => void
+  ): Promise<IWorkspaceFlatFile[]> => {
+    const workspace = conversation.extra?.workspace?.trim();
+    if (!workspace) return [];
+    // Materialize a managed Session workspace through its canonical owner before
+    // asking the file service for its complete recursive project inventory.
+    await withTimeout(
+      ipcBridge.conversation.getWorkspace.invoke({ conversation_id: conversation.id, workspace, path: workspace }),
+      EXPORT_IO_TIMEOUT_MS,
+      `getWorkspace:${conversation.id}`
+    );
+    assertActive();
+    const files = await withTimeout(
+      ipcBridge.fs.listWorkspaceFiles.invoke({ root: workspace, workspace }),
+      EXPORT_IO_TIMEOUT_MS,
+      `listWorkspaceFiles:${conversation.id}`
+    );
+    assertActive();
+    return files;
   }, []);
 
-  const fetchConversationWorkspaceTree = useCallback(async (conversation: TChatConversation) => {
-    const workspace = conversation.extra?.workspace;
-    if (!workspace) {
-      return undefined;
-    }
+  const buildConversationExportFiles = useCallback(async (
+    conversation: TChatConversation,
+    assertActive: () => void
+  ): Promise<ExportZipFile[]> => {
+    const [messages, workspaceFiles] = await Promise.all([
+      fetchConversationExportMessages(conversation.id, assertActive),
+      fetchConversationWorkspaceFiles(conversation, assertActive),
+    ]);
+    assertActive();
+    const topicFolderName = buildTopicFolderName(conversation);
+    const files: ExportZipFile[] = [
+      { name: `${topicFolderName}/conversation/conversation.json`, content: buildConversationJson(conversation, messages) },
+      { name: `${topicFolderName}/conversation/conversation.md`, content: buildConversationMarkdown(conversation, messages) },
+    ];
+    appendWorkspaceFilesToZip(files, workspaceFiles, topicFolderName);
+    return files;
+  }, [fetchConversationWorkspaceFiles]);
 
-    try {
-      const trees = await withTimeout(
-        ipcBridge.conversation.getWorkspace.invoke({
-          conversation_id: conversation.id,
-          workspace,
-          path: workspace,
-        }),
-        EXPORT_IO_TIMEOUT_MS,
-        `getWorkspace:${conversation.id}`
-      );
-      return trees?.[0];
-    } catch (error) {
-      console.warn('[SessionList] Failed to read workspace for export:', conversation.id, error);
-      return undefined;
-    }
-  }, []);
-
-  const buildConversationExportFiles = useCallback(
-    async (conversation: TChatConversation, topicFolderName: string): Promise<ExportZipFile[]> => {
-      const [messages, workspaceTree] = await Promise.all([
-        fetchConversationMessages(conversation.id),
-        fetchConversationWorkspaceTree(conversation),
-      ]);
-      const files: ExportZipFile[] = [
-        {
-          name: `${topicFolderName}/conversation/conversation.json`,
-          content: buildConversationJson(conversation, messages),
-        },
-        {
-          name: `${topicFolderName}/conversation/conversation.md`,
-          content: buildConversationMarkdown(conversation, messages),
-        },
-      ];
-
-      appendWorkspaceFilesToZip(files, workspaceTree, topicFolderName);
-      return files;
-    },
-    [fetchConversationMessages, fetchConversationWorkspaceTree]
-  );
-
-  const runCreateZip = useCallback(
-    async (path: string, files: ExportZipFile[], request_id: string): Promise<boolean> => {
-      try {
-        return await withTimeout(
-          ipcBridge.fs.createZip.invoke({ path, files, request_id }),
-          EXPORT_IO_TIMEOUT_MS * 8,
-          `createZip:${request_id}`
-        );
-      } catch (error) {
-        // Ensure background zip task is stopped when renderer-side timeout/cancel happens.
-        void ipcBridge.fs.cancelZip.invoke({ request_id });
-        throw error;
-      }
-    },
-    []
-  );
-
-  const handleExportConversation = useCallback(
-    (conversation: TChatConversation) => {
-      void openExportModal({ mode: 'single', conversation });
-    },
-    [openExportModal]
-  );
+  const handleExportConversation = useCallback((conversation: TChatConversation) => {
+    void openExportModal({ mode: 'single', conversation });
+  }, [openExportModal]);
 
   const handleBatchExport = useCallback(() => {
     if (selectedConversationIds.size === 0) {
       Message.warning(t('conversation.history.batchNoSelection'));
       return;
     }
-    void openExportModal({
-      mode: 'batch',
-      conversation_ids: Array.from(selectedConversationIds),
-    });
+    void openExportModal({ mode: 'batch', conversation_ids: Array.from(selectedConversationIds) });
   }, [openExportModal, selectedConversationIds, t]);
 
   const handleConfirmExport = useCallback(async () => {
-    if (!exportTask) return;
-
+    if (!exportTask || activeRequestRef.current) return;
     const directory = exportTargetPath.trim();
     if (!directory) {
       Message.warning(t('conversation.history.exportSelectFolder'));
       return;
     }
-
+    const request: ExportRequest = { id: uuidv7(), canceled: false, zipStarted: false };
+    activeRequestRef.current = request;
     setExportModalLoading(true);
-    exportCanceledRef.current = false;
-    const request_id = `export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    setCurrentExportRequestId(request_id);
-
-    const throwIfCanceled = () => {
-      if (exportCanceledRef.current) {
-        throw new Error('export canceled');
-      }
+    const assertActive = () => {
+      if (request.canceled || activeRequestRef.current !== request) throw new ExportCanceledError();
     };
-
     try {
-      if (exportTask.mode === 'single') {
-        throwIfCanceled();
-        const conversation = exportTask.conversation;
-        const shortTopicName = sanitizeFileName(conversation.name || conversation.id).slice(0, 40) || 'topic';
-        const zipFileName = `${shortTopicName}-${formatTimestamp()}`;
-        const exportPath = await createUniqueFilePath(directory, zipFileName, 'zip');
-        throwIfCanceled();
-        const topicFolderName = buildTopicFolderName(conversation);
-        const files = await buildConversationExportFiles(conversation, topicFolderName);
-        throwIfCanceled();
-        const success = await runCreateZip(exportPath, files, request_id);
-        throwIfCanceled();
-
-        if (success) {
-          Message.success(t('conversation.history.exportSuccess'));
-          setExportModalVisible(false);
-          setExportTask(null);
-          setExportTargetPath('');
-          setCurrentExportRequestId(null);
-        } else {
-          Message.error(t('conversation.history.exportFailed'));
-        }
-        return;
-      }
-
-      const selectedConversations = conversations.filter((conversation) =>
-        exportTask.conversation_ids.includes(conversation.id)
-      );
-      if (selectedConversations.length === 0) {
+      const selectedConversations = exportTask.mode === 'single'
+        ? [exportTask.conversation]
+        : exportTask.conversation_ids.map((id) => {
+          const conversation = conversations.find((item) => item.id === id);
+          if (!conversation) throw new Error(`Selected conversation is unavailable: ${id}`);
+          return conversation;
+        });
+      if (!selectedConversations.length) {
         Message.warning(t('conversation.history.batchNoSelection'));
         return;
       }
-
-      const files: ExportZipFile[] = [];
-      const topicFilesList = await Promise.all(
-        selectedConversations.map(async (conversation) => {
-          throwIfCanceled();
-          const topicFiles = await buildConversationExportFiles(conversation, buildTopicFolderName(conversation));
-          throwIfCanceled();
-          return topicFiles;
-        })
+      const files = (await Promise.all(selectedConversations.map((conversation) =>
+        buildConversationExportFiles(conversation, assertActive)
+      ))).flat();
+      assertActive();
+      const name = exportTask.mode === 'single'
+        ? sanitizeFileName(selectedConversations[0].name || selectedConversations[0].id).slice(0, 40)
+        : 'batch-export';
+      const exportPath = joinFilePath(directory, `${name}-${formatTimestamp()}-${request.id.slice(-8)}.zip`);
+      const workspaces = [...new Set(selectedConversations.map((conversation) => conversation.extra?.workspace?.trim()).filter((workspace): workspace is string => Boolean(workspace)))];
+      request.zipStarted = true;
+      const success = await withTimeout(
+        ipcBridge.fs.createZip.invoke({ path: exportPath, files, request_id: request.id, workspaces }),
+        EXPORT_IO_TIMEOUT_MS * 8,
+        `createZip:${request.id}`
       );
-      topicFilesList.forEach((topicFiles) => {
-        files.push(...topicFiles);
-      });
-      const exportPath = await createUniqueFilePath(directory, `batch-export-${formatTimestamp()}`, 'zip');
-      throwIfCanceled();
-      const success = await runCreateZip(exportPath, files, request_id);
-      throwIfCanceled();
-
-      if (success) {
-        Message.success(t('conversation.history.exportSuccess'));
+      assertActive();
+      if (!success) throw new Error('ZIP creation did not complete');
+      Message.success(t('conversation.history.exportSuccess'));
+      if (exportTask.mode === 'batch') {
         setSelectedConversationIds(new Set());
         onBatchModeChange?.(false);
-        setExportModalVisible(false);
-        setExportTask(null);
-        setExportTargetPath('');
-        setCurrentExportRequestId(null);
-      } else {
-        Message.error(t('conversation.history.exportFailed'));
       }
+      setExportModalVisible(false);
+      setExportTask(null);
+      setExportTargetPath('');
     } catch (error) {
-      if (error instanceof Error && error.message.includes('canceled')) {
-        Message.warning(t('conversation.history.exportCanceled'));
-      } else {
-        console.error('Failed to export conversations:', error);
-        Message.error(t('conversation.history.exportFailed'));
-      }
+      if (request.canceled || error instanceof ExportCanceledError) return;
+      cancelZip(request);
+      console.error('Failed to export conversations:', error);
+      Message.error(`${t('conversation.history.exportFailed')}: ${parseError(error)}`);
     } finally {
-      setExportModalLoading(false);
-      setCurrentExportRequestId(null);
-      exportCanceledRef.current = false;
+      if (activeRequestRef.current === request) {
+        activeRequestRef.current = null;
+        setExportModalLoading(false);
+      }
     }
-  }, [
-    buildConversationExportFiles,
-    conversations,
-    createUniqueFilePath,
-    exportTargetPath,
-    exportTask,
-    onBatchModeChange,
-    runCreateZip,
-    t,
-    setSelectedConversationIds,
-  ]);
+  }, [buildConversationExportFiles, cancelZip, conversations, exportTargetPath, exportTask, onBatchModeChange, setSelectedConversationIds, t]);
 
   return {
     exportTask,
