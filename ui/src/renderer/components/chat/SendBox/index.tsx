@@ -180,6 +180,8 @@ const SendBox: React.FC<{
   /** Clear the agent's conversation context (release model context). When set, a `/clear` builtin appears. */
   onClearContext?: () => void | Promise<void>;
   disabled?: boolean;
+  /** Block submission during background refreshes without interrupting typing or IME. */
+  submitDisabled?: boolean;
   loading?: boolean;
   className?: string;
   tools?: React.ReactNode;
@@ -229,6 +231,7 @@ const SendBox: React.FC<{
   sideTools,
   topRightTools,
   disabled,
+  submitDisabled = false,
   placeholder,
   value: input = '',
   onChange: setInput = constVoid,
@@ -1158,6 +1161,7 @@ const SendBox: React.FC<{
   };
 
   const sendMessageHandler = () => {
+    if (disabled || submitDisabled) return;
     if (isUploading || isStopping) return;
     // 编辑模式：提交走截断重跑而非普通发送。
     if (editingMsgId && onEditResubmit) {
@@ -1252,6 +1256,7 @@ const SendBox: React.FC<{
   };
 
   const steerMessageHandler = () => {
+    if (disabled || submitDisabled) return;
     if (!onSteer || isUploading || isStopping) return;
     // The draft is cleared eagerly so an in-flight steer cannot overwrite text
     // the user types while it resolves. Recovery on failure is the handler's
@@ -1293,7 +1298,7 @@ const SendBox: React.FC<{
   const hasDraftToSend = input.trim().length > 0 || domSnippets.length > 0;
 
   // Calculate button disabled state
-  const isButtonDisabled = disabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
+  const isButtonDisabled = disabled || submitDisabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
 
   // Reusable send button component
   const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
@@ -1339,7 +1344,7 @@ const SendBox: React.FC<{
       // Stop is an independent safety action. A non-empty draft must never
       // replace or hide it: users may need to cancel the current turn even
       // while preparing a queued message.
-      if (!hasDraftToSend || disabled || isUploading) {
+      if (!hasDraftToSend || disabled || submitDisabled || isUploading) {
         return stopButton;
       }
       const queuedActions = compactActions ? (

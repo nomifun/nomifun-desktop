@@ -1,4 +1,4 @@
-import { act, cleanup, render, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { useLayoutEffect, type PropsWithChildren } from 'react';
 import { createInstance } from 'i18next';
@@ -209,6 +209,105 @@ test.each([false, true])('a user-created event before the send receipt cannot le
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
   expect(send).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])('Turn completion preserves an active composer and IME draft while capabilities refresh (compact=%p)', async (compact) => {
+  const sessionId = parseConversationId(compact
+    ? '0190f5fe-7c00-7a00-8000-000000001411'
+    : '0190f5fe-7c00-7a00-8000-000000001410');
+  const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000001412');
+  const startedAt = Date.now() - 1000;
+  let authority = { id: sessionId, name: 'Active conversation', type: 'nomi', status: 'running',
+    extra: { workspace: '' }, runtime: { state: 'running', is_processing: true,
+      can_send_message: false, has_runtime: true, active_turn_id: turnId, processing_started_at: startedAt },
+  } as TChatConversation;
+  spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async () => authority);
+  spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({
+    conversation_id: sessionId, sequence: 0, turn_id: null, plan: null, turn_status: null,
+  });
+  const refresh = deferred<AgentSessionCapabilitySelectionState>();
+  const capabilities = spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke')
+    .mockResolvedValueOnce(capabilitySelection).mockReturnValue(refresh.promise);
+  const accepted = deferred<ISendMessageResult>();
+  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockReturnValue(accepted.promise);
+  const completions = new Set<Parameters<typeof ipcBridge.conversation.turnCompleted.on>[0]>();
+  spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(listener => {
+    completions.add(listener); return () => { completions.delete(listener); };
+  });
+  let userCreated!: Parameters<typeof ipcBridge.conversation.userCreated.on>[0];
+  spyOn(ipcBridge.conversation.userCreated, 'on').mockImplementation(listener => {
+    userCreated = listener; return () => {};
+  });
+  const cache = new Map();
+  const page = render(<SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>
+    <MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+      <PreviewProvider persistNamespace={`composer-completion-${compact}`} subscribeGlobalOpen={false}>
+        <InitialMessageProvider><NomiChat conversation_id={sessionId} workspace='' modelSelection={selection}
+          creationEnabled={false} compactProductComposer={compact} /></InitialMessageProvider>
+      </PreviewProvider>
+    </ThemeProvider></I18nextProvider></MemoryRouter>
+  </SWRConfig>);
+  await waitFor(() => expect(page.queryByTestId('sendbox-stop-btn')).not.toBeNull());
+  const editor = page.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  await waitFor(() => expect(editor.disabled).toBe(false));
+  act(() => userCreated({ conversation_id: sessionId, msg_id: turnId, content: 'Current task',
+    position: 'right', status: 'finish', hidden: false, created_at: startedAt }));
+  await waitFor(() => expect(page.getByTestId('message-text-content').textContent).toBe('Current task'));
+  const scroller = page.getByTestId('message-list-scroller');
+
+  const committedPrefix = '已经写好的草稿';
+  const imeBuffer = `${committedPrefix}fa'guo`;
+  act(() => editor.focus());
+  fireEvent.change(editor, { target: { value: committedPrefix } });
+  fireEvent.compositionStart(editor);
+  fireEvent.compositionUpdate(editor, { data: "fa'guo" });
+  fireEvent.change(editor, { target: { value: imeBuffer } });
+  editor.setSelectionRange(4, 7);
+  expect(document.activeElement).toBe(editor);
+  expect(editor.value).toBe(imeBuffer);
+
+  authority = { ...authority, status: 'finished', runtime: { state: 'idle', is_processing: false,
+    can_send_message: true, has_runtime: true } };
+  act(() => completions.forEach(listener => listener({ conversation_id: sessionId, turn_id: turnId,
+    status: 'finished', state: 'ai_waiting_input', detail: '', can_send_message: true,
+    runtime: { state: 'idle', is_processing: false, can_send_message: true, has_runtime: true },
+    workspace: '', model: { platform: 'openai', name: 'Test provider', use_model: 'test-model' },
+    last_message: { content: 'Task finished', created_at: Date.now() },
+  })));
+  await waitFor(() => expect(capabilities).toHaveBeenCalledTimes(2));
+  expect(page.getByTestId('sendbox-input')).toBe(editor);
+  expect(page.getByTestId('message-list-scroller')).toBe(scroller);
+  expect(page.queryByTestId('message-list-skeleton')).toBeNull();
+  expect(editor.disabled).toBe(false);
+  expect(document.activeElement).toBe(editor);
+  expect(editor.value).toBe(imeBuffer);
+  expect([editor.selectionStart, editor.selectionEnd]).toEqual([4, 7]);
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  expect(send).not.toHaveBeenCalled();
+
+  const committedDraft = `${committedPrefix}法国`;
+  fireEvent.compositionEnd(editor, { data: '法国', target: { value: committedDraft } });
+  await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
+  expect(editor.value).toBe(committedDraft);
+  const sendButton = page.getByTestId('sendbox-send-btn') as HTMLButtonElement;
+  expect(sendButton.disabled).toBe(true);
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  fireEvent.click(sendButton);
+  await act(async () => {});
+  expect(send).not.toHaveBeenCalled();
+  expect(editor.value).toBe(committedDraft);
+
+  await act(async () => refresh.resolve({ ...capabilitySelection, binding_version: 2 }));
+  await waitFor(() => expect(sendButton.disabled).toBe(false));
+  expect(page.getByTestId('sendbox-input')).toBe(editor);
+  expect(document.activeElement).toBe(editor);
+  expect(editor.value).toBe(committedDraft);
+  fireEvent.click(sendButton);
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  expect(send.mock.calls[0][0]).toMatchObject({ conversation_id: sessionId, input: committedDraft });
+  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false, completed: false,
+    result_ok: null, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
+  await waitFor(() => expect(editor.value).toBe(''));
 });
 
 test('a late completion cannot clear another conversation or a replacement delivery', () => {

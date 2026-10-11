@@ -915,7 +915,8 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
-        disabled={initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || sessionCapabilities.loading || !sessionCapabilities.state || sessionCapabilities.saving)}
+        disabled={initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
+        submitDisabled={!isCreating && sessionCapabilities.loading}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={
