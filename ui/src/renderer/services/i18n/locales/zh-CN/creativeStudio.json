@@ -1435,7 +1435,6 @@
       "choiceOptionOne": "选项一",
       "choiceOptionTwo": "选项二",
       "duplicateSuffix": "副本",
-      "emptyPrompt": "尚未填写提示词模板",
       "multiCategory": "多图创作",
       "multiDescription": "根据主题生成一组连贯图片提示词，审核后批量生成图片。",
       "multiName": "多图系列生成",
@@ -1638,8 +1637,10 @@
       "aiCreate": "AI 创建",
       "aiUnavailable": "AI 草稿服务暂不可用",
       "allCategories": "全部分类",
+      "allTemplates": "全部模板",
       "cancel": "取消",
       "categoryFallback": "未分类",
+      "clearFilters": "清除筛选",
       "copyError": "模板复制失败",
       "copySuccess": "模板副本已创建",
       "createSuccess": "模板已创建",
@@ -1653,7 +1654,7 @@
       "duplicate": "复制 {{name}}",
       "edit": "编辑 {{name}}",
       "emptyDescription": "创建一个模板，把常用提示词、变量和模型配置沉淀下来。",
-      "justNow": "刚刚",
+      "filters": "筛选模板",
       "listLabel": "模板列表",
       "loadError": "模板加载失败",
       "loadFailed": "模板加载失败",
@@ -1664,14 +1665,16 @@
       "noMatches": "没有匹配的模板",
       "noMatchesDescription": "调整分类或搜索条件后重试。",
       "noTemplates": "暂无模板",
+      "resultCount": "显示 {{visible}} / {{total}} 个模板",
       "retry": "重试",
       "run": "运行",
       "saveError": "模板保存失败",
       "saveSuccess": "模板已保存",
       "searchPlaceholder": "搜索名称、分类、描述",
-      "title": "模板工作台",
-      "updatedAt": "更新于 {{date}}",
-      "variableCount": "{{count}} 个变量"
+      "seriesTemplates": "系列多图",
+      "singleTemplates": "单图模板",
+      "templateType": "模板类型",
+      "title": "模板工作台"
     }
   }
 }

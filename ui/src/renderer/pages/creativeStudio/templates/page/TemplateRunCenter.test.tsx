@@ -13,7 +13,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { cloneTemplateRunAggregate } from '../domain';
 import { IDS, createTemplateRunFixture } from '../domain/testFixtures';
-import TemplateRunCenter from './TemplateRunCenter';
+import TemplateRunCenter, { type CreativeTemplateRunCenterPort } from './TemplateRunCenter';
 import type { CreativeAsset } from '../../assets';
 import common from '../../../../services/i18n/locales/en-US/common.json';
 
@@ -27,7 +27,84 @@ testI18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
+
+const renderProgressRun = (
+  run: ReturnType<typeof createTemplateRunFixture>,
+  taskStatuses: CreativeTemplateRunCenterPort['snapshot']['activities'][string]['taskStatuses'] = {}
+) => {
+  const port: CreativeTemplateRunCenterPort = {
+    snapshot: {
+      loading: false,
+      loadError: null,
+      runs: [run],
+      activities: Object.keys(taskStatuses).length > 0
+        ? { [run.request.id]: { state: 'executing', taskStatuses, error: null } }
+        : {},
+    },
+    assetUrl: () => '',
+    resume: async () => undefined,
+    cancel: async () => undefined,
+    review: async () => undefined,
+    retry: async () => undefined,
+  };
+  return render(
+    <I18nextProvider i18n={testI18n}>
+      <TemplateRunCenter port={port} />
+    </I18nextProvider>
+  );
+};
+
 describe('Template Run Center', () => {
+  test('keeps progress indeterminate until task IDs have been recorded', () => {
+    const run = createTemplateRunFixture();
+    const view = renderProgressRun(run, { [IDS.task]: 'succeeded' });
+
+    expect(view.getByText('Tasks 0/-')).not.toBeNull();
+    expect(view.queryByRole('progressbar')).toBeNull();
+  });
+
+  test('ignores observed terminal tasks that do not belong to the recorded run', () => {
+    const run = createTemplateRunFixture();
+    run.record.status = 'running';
+    run.record.taskIds = [IDS.task, IDS.task2];
+    const view = renderProgressRun(run, {
+      [IDS.task]: 'running',
+      [IDS.task2]: 'queued',
+      [IDS.task3]: 'succeeded',
+    });
+    const progress = view.getByRole('progressbar', { name: 'Tasks 0/2' }) as HTMLProgressElement;
+
+    expect(progress.value).toBe(0);
+    expect(progress.max).toBe(2);
+  });
+
+  test('counts recorded succeeded, failed, and canceled tasks as completed work', () => {
+    const run = createTemplateRunFixture();
+    run.record.status = 'running';
+    run.record.taskIds = [IDS.task, IDS.task2, IDS.task3];
+    const view = renderProgressRun(run, {
+      [IDS.task]: 'succeeded',
+      [IDS.task2]: 'failed',
+      [IDS.task3]: 'canceled',
+    });
+    const progress = view.getByRole('progressbar', { name: 'Tasks 3/3' }) as HTMLProgressElement;
+
+    expect(progress.value).toBe(3);
+    expect(progress.max).toBe(3);
+  });
+
+  test('restores completed progress from a succeeded aggregate without live task observations', () => {
+    const run = createTemplateRunFixture();
+    run.record.status = 'succeeded';
+    run.record.taskIds = [IDS.task, IDS.task2];
+    const view = renderProgressRun(run);
+    const progress = view.getByRole('progressbar', { name: 'Tasks 2/2' }) as HTMLProgressElement;
+
+    expect(progress.value).toBe(2);
+    expect(progress.max).toBe(2);
+    expect(view.getByText('Completed')).not.toBeNull();
+  });
+
   test('renders an available image result and opens it in the shared preview', async () => {
     const run = createTemplateRunFixture();
     run.record.status = 'succeeded';

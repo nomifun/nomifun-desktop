@@ -4,20 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Input, Message, Modal, Select, Spin } from '@arco-design/web-react';
-import {
-  Copy,
-  Delete,
-  EditTwo,
-  MagicWand,
-  Pic,
-  Play,
-  Plus,
-  Robot,
-} from '@icon-park/react';
+import { Button, Message, Modal, Spin } from '@arco-design/web-react';
+import { Pic, Plus, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
 
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import type { TemplateDraftPort } from '../agent';
@@ -32,6 +22,9 @@ import {
   type CreativeTemplateRepository,
 } from '../services';
 import styles from './CreativeTemplateWorkspacePage.module.css';
+import TemplateWorkspaceCard from './TemplateWorkspaceCard';
+import TemplateWorkspaceToolbar, { type TemplateKindFilter } from './TemplateWorkspaceToolbar';
+import TemplateWorkspaceEmptyIllustration from './TemplateWorkspaceEmptyIllustration';
 import TemplateAgentDraftModal from './TemplateAgentDraftModal';
 import TemplateEditorModal from './TemplateEditorModal';
 import TemplateRunModal, {
@@ -44,14 +37,11 @@ import {
   createBlankTemplate,
   duplicateTemplate,
   withPrivateTemplateVisibility,
-  templateOutputLabel,
-  templatePromptPreview,
 } from './templateViewModel';
 import {
   createTemplateTranslationCopy,
   formatTemplateValidationError,
   templateFallbackError,
-  type CreativeTemplateTranslationCopy,
 } from '../templateI18n';
 
 type PageState = 'loading' | 'ready' | 'error';
@@ -91,126 +81,6 @@ const upsertTemplate = (
   template: CreativeTemplateDefinitionV1
 ) => newestFirst([template, ...templates.filter((candidate) => candidate.id !== template.id)]);
 
-const formatDate = (timestamp: number, locale: string, justNow: string): string => {
-  const date = new Date(timestamp);
-  if (!Number.isFinite(timestamp) || Number.isNaN(date.getTime()) || timestamp === 0) return justNow;
-  return new Intl.DateTimeFormat(locale, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-};
-
-const TemplateCard: React.FC<{
-  template: CreativeTemplateDefinitionV1;
-  disabled: boolean;
-  copy: CreativeTemplateTranslationCopy;
-  t: TFunction;
-  locale: string;
-  onRun: () => void;
-  onEdit: () => void;
-  onCopy: () => void;
-  onDelete: () => void;
-}> = ({ template, disabled, copy, t, locale, onRun, onEdit, onCopy, onDelete }) => (
-  <article className={styles.card} data-template-id={template.id}>
-    <div className={styles.cardAccent} aria-hidden='true' />
-    <div className={styles.cardBody}>
-      <div className={styles.cardHeader}>
-        <div className={styles.cardIdentity}>
-          <h2 className={styles.cardTitle}>{template.metadata.name}</h2>
-          <div className={styles.chips}>
-            <span className={styles.chip}>
-              {template.metadata.category ||
-                t('creativeStudio.templates.workspace.categoryFallback', {
-                  defaultValue: 'Uncategorized',
-                })}
-            </span>
-            <span
-              className={styles.chip}
-              data-tone={template.output.kind === 'multi-image-series' ? 'purple' : undefined}
-            >
-              {templateOutputLabel(template.output, copy)}
-            </span>
-            <span className={styles.chip}>
-              {t('creativeStudio.templates.workspace.variableCount', {
-                count: template.variables.length,
-                defaultValue: '{{count}} variables',
-              })}
-            </span>
-          </div>
-        </div>
-        <Button
-          type='primary'
-          size='small'
-          disabled={disabled}
-          icon={<Play theme='outline' size={14} fill='currentColor' />}
-          onClick={onRun}
-        >
-          {t('creativeStudio.templates.workspace.run', { defaultValue: 'Run' })}
-        </Button>
-      </div>
-      <p className={styles.cardDescription}>
-        {template.metadata.description ||
-          t('creativeStudio.templates.workspace.noDescription', {
-            defaultValue: 'No description',
-          })}
-      </p>
-      <div className={styles.promptPreview}>{templatePromptPreview(template, copy)}</div>
-      <footer className={styles.cardFooter}>
-        <p className={styles.cardDate}>
-          {t('creativeStudio.templates.workspace.updatedAt', {
-            date: formatDate(
-              template.metadata.updatedAt,
-              locale,
-              t('creativeStudio.templates.workspace.justNow', { defaultValue: 'Just now' })
-            ),
-            defaultValue: 'Updated {{date}}',
-          })}
-        </p>
-        <div className={styles.cardActions}>
-          <button
-            type='button'
-            className={styles.iconButton}
-            aria-label={t('creativeStudio.templates.workspace.edit', {
-              name: template.metadata.name,
-              defaultValue: 'Edit {{name}}',
-            })}
-            disabled={disabled}
-            onClick={onEdit}
-          >
-            <EditTwo theme='outline' size={14} fill='currentColor' />
-          </button>
-          <button
-            type='button'
-            className={styles.iconButton}
-            aria-label={t('creativeStudio.templates.workspace.duplicate', {
-              name: template.metadata.name,
-              defaultValue: 'Duplicate {{name}}',
-            })}
-            disabled={disabled}
-            onClick={onCopy}
-          >
-            <Copy theme='outline' size={14} fill='currentColor' />
-          </button>
-          <button
-            type='button'
-            className={styles.iconButton}
-            data-danger='true'
-            aria-label={t('creativeStudio.templates.workspace.delete', {
-              name: template.metadata.name,
-              defaultValue: 'Delete {{name}}',
-            })}
-            disabled={disabled}
-            onClick={onDelete}
-          >
-            <Delete theme='outline' size={14} fill='currentColor' />
-          </button>
-        </div>
-      </footer>
-    </div>
-  </article>
-);
-
 const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps> = ({
   repository = creativeTemplateRepository,
   runner,
@@ -232,6 +102,8 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
   const [templates, setTemplates] = useState(() => newestFirst(initialTemplates));
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('all');
+  const [kind, setKind] = useState<TemplateKindFilter>('all');
+  const resetFilters = () => { setQuery(''); setCategory('all'); setKind('all'); };
   const [editing, setEditing] = useState<CreativeTemplateDefinitionV1 | null>(null);
   const [editingIsNew, setEditingIsNew] = useState(false);
   const [running, setRunning] = useState<CreativeTemplateDefinitionV1 | null>(null);
@@ -305,6 +177,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return templates.filter((template) => {
+      if (kind !== 'all' && template.output.kind !== kind) return false;
       if (
         category !== 'all' &&
         (template.metadata.category || UNCATEGORIZED_CATEGORY) !== category
@@ -319,7 +192,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
         ...template.metadata.tags,
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
-  }, [category, query, uncategorized, templates]);
+  }, [category, kind, query, templates]);
 
   const beginCreate = (mode: 'single-image' | 'multi-image-series') => {
     setEditing(withPrivateTemplateVisibility(createBlankTemplate(mode, copy)));
@@ -433,89 +306,33 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
       aria-busy={pageState === 'loading'}
     >
       <div className={styles.inner}>
-        <section className={styles.headerCard}>
-            <div className={styles.headerIdentity}>
-              <div className={styles.titleRow}>
-                <MagicWand theme='outline' size={20} fill='currentColor' />
-                <h1>
-                  {t('creativeStudio.templates.workspace.title', {
-                    defaultValue: 'Template Studio',
-                  })}
-                </h1>
-              </div>
-            <p>
-              {t('creativeStudio.templates.workspace.description', {
-                defaultValue:
-                  'Turn fixed prompts, variables, and model settings into reusable templates. Fill in the variables each time to generate in batches.',
-              })}
-            </p>
+        <header className={styles.header}>
+          <div className={styles.headerIdentity}>
+            <h1>{t('creativeStudio.templates.workspace.title', { defaultValue: 'Template Studio' })}</h1>
+            <p>{t('creativeStudio.templates.workspace.description', { defaultValue: 'Turn fixed prompts, variables, and model settings into reusable templates. Fill in the variables each time to generate in batches.' })}</p>
           </div>
           <div className={styles.headerActions}>
-            <Select
-              className={styles.categorySelect}
-              value={category}
-              options={[
-                {
-                  value: 'all',
-                  label: t('creativeStudio.templates.workspace.allCategories', {
-                    defaultValue: 'All categories',
-                  }),
-                },
-                ...categories.map((item) => ({
-                  value: item,
-                  label: item === UNCATEGORIZED_CATEGORY ? uncategorized : item,
-                })),
-              ]}
-              disabled={pageState !== 'ready'}
-              onChange={setCategory}
-            />
-            <Input.Search
-              className={styles.search}
-              allowClear
-              value={query}
-              placeholder={t('creativeStudio.templates.workspace.searchPlaceholder', {
-                defaultValue: 'Search names, categories, and descriptions',
-              })}
-              disabled={pageState !== 'ready'}
-              onChange={setQuery}
-            />
             <Button
-              icon={<Robot theme='outline' size={15} fill='currentColor' />}
+              size='small'
+              icon={<Robot theme='outline' size={14} fill='currentColor' />}
               disabled={disabled || !agentDraftAvailable}
-              title={
-                agentDraftAvailable
-                  ? undefined
-                  : t('creativeStudio.templates.workspace.aiUnavailable', {
-                      defaultValue: 'AI draft service is unavailable',
-                    })
-              }
+              title={agentDraftAvailable ? undefined : t('creativeStudio.templates.workspace.aiUnavailable', { defaultValue: 'AI draft service is unavailable' })}
               onClick={() => setAgentDraftOpen(true)}
-            >
-              {t('creativeStudio.templates.workspace.aiCreate', {
-                defaultValue: 'Create with AI',
-              })}
+            >{t('creativeStudio.templates.workspace.aiCreate', { defaultValue: 'Create with AI' })}</Button>
+            <Button size='small' icon={<Pic theme='outline' size={14} fill='currentColor' />} disabled={disabled} onClick={() => beginCreate('multi-image-series')}>
+              {t('creativeStudio.templates.workspace.newMulti', { defaultValue: 'New multi-image template' })}
             </Button>
-            <Button
-              icon={<Pic theme='outline' size={15} fill='currentColor' />}
-              disabled={disabled}
-              onClick={() => beginCreate('multi-image-series')}
-            >
-              {t('creativeStudio.templates.workspace.newMulti', {
-                defaultValue: 'New multi-image template',
-              })}
-            </Button>
-            <Button
-              type='primary'
-              icon={<Plus theme='outline' size={15} fill='currentColor' />}
-              disabled={disabled}
-              onClick={() => beginCreate('single-image')}
-            >
-              {t('creativeStudio.templates.workspace.newSingle', {
-                defaultValue: 'New template',
-              })}
+            <Button type='primary' size='small' icon={<Plus theme='outline' size={14} fill='currentColor' />} disabled={disabled} onClick={() => beginCreate('single-image')}>
+              {t('creativeStudio.templates.workspace.newSingle', { defaultValue: 'New template' })}
             </Button>
           </div>
-        </section>
+        </header>
+        <TemplateWorkspaceToolbar
+          kind={kind} category={category} query={query}
+          categories={categories.map((item) => ({ value: item, label: item === UNCATEGORIZED_CATEGORY ? uncategorized : item }))}
+          count={filtered.length} total={templates.length} disabled={pageState !== 'ready'}
+          onKindChange={setKind} onCategoryChange={setCategory} onQueryChange={setQuery} onReset={resetFilters}
+        />
 
         {pageState === 'loading' ? (
           <div className={styles.statePanel}>
@@ -539,6 +356,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
           </div>
         ) : filtered.length === 0 ? (
           <div className={styles.emptyState}>
+            <TemplateWorkspaceEmptyIllustration />
             <h2>
               {templates.length === 0
                 ? t('creativeStudio.templates.workspace.noTemplates', {
@@ -568,7 +386,9 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
                   defaultValue: 'New template',
                 })}
               </Button>
-            ) : null}
+            ) : (
+              <Button onClick={resetFilters}>{t('creativeStudio.templates.workspace.clearFilters', { defaultValue: 'Clear filters' })}</Button>
+            )}
           </div>
         ) : (
           <section
@@ -578,13 +398,11 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             })}
           >
             {filtered.map((template) => (
-              <TemplateCard
+              <TemplateWorkspaceCard
                 key={template.id}
                 template={template}
                 disabled={action !== null}
                 copy={copy}
-                t={t}
-                locale={locale}
                 onRun={() => setRunning(cloneTemplateDefinition(template))}
                 onEdit={() => {
                   setEditing(

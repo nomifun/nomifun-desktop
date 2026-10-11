@@ -49,7 +49,7 @@ export function VisualTabs({ items, activeKey, onChange, label, id }: {
   items: VisualTabItem[]; activeKey: string; onChange: (key: string) => void; label: string; id: string;
 }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
-  return <div className='cv-tabs' role='tablist' aria-label={label}>
+  return <div className='cv-tabs nomi-pill-tabs' role='tablist' aria-label={label}>
     {items.map((item, index) => <button key={item.key} type='button' role='tab'
       id={`${id}-tab-${item.key}`} aria-controls={`${id}-panel`} aria-selected={item.key === activeKey}
       tabIndex={item.key === activeKey ? 0 : -1} ref={(node) => { refs.current[index] = node; }}

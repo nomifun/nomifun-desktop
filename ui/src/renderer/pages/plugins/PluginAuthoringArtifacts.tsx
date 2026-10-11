@@ -249,7 +249,7 @@ function Artifact({ summary, active, refresh, readOnly, operationDisabled, onAut
       {savedId && <Button size='small' type='primary' onClick={() => navigate(`/plugins/run/${encodeURIComponent(savedId)}`)}>{t('pluginPlatform.actions.open')}<Right /></Button>}
     </div>
     <div className={styles.toolbar}>
-      <div className={styles.viewTabs} role='tablist' aria-label={t('pluginPlatform.authoring.artifacts')}>
+      <div className={`nomi-pill-tabs ${styles.viewTabs}`} role='tablist' aria-label={t('pluginPlatform.authoring.artifacts')}>
         <button type='button' role='tab' aria-selected={view === 'preview'} onClick={() => setView('preview')}><PlayOne />{t('pluginPlatform.authoring.preview')}</button>
         <button type='button' role='tab' aria-selected={view === 'files'} onClick={() => setView('files')}><FileCode />{t('pluginPlatform.authoring.files')}</button>
       </div>

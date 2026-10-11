@@ -50,7 +50,7 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
     <div
       role='tablist'
       className={classNames(
-        'items-center gap-2px p-4px rounded-12px bg-[var(--color-fill-2)]',
+        'nomi-pill-tabs items-center gap-2px p-4px rounded-12px bg-[var(--color-fill-2)]',
         block ? 'flex w-full box-border overflow-visible' : 'inline-flex max-w-full box-border overflow-x-auto scrollbar-hide',
         className
       )}
@@ -69,7 +69,7 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
               block ? 'flex-1 min-w-0' : 'shrink-0',
               heightClass,
               active
-                ? '!bg-[var(--color-bg-2)] !text-[var(--color-text-1)] border border-solid border-[var(--color-border-3)] shadow-[0_1px_2px_rgba(0,0,0,0.08),0_2px_8px_rgba(0,0,0,0.12)]'
+                ? '!bg-[var(--pill-tab-active-bg,var(--color-bg-2))] !text-[var(--color-text-1)] border border-solid border-[var(--color-border-3)] shadow-[0_1px_2px_rgba(0,0,0,0.08),0_2px_8px_rgba(0,0,0,0.12)]'
                 : 'text-t-secondary hover:text-t-primary'
             )}
           >

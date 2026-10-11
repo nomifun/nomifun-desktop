@@ -40,7 +40,7 @@
 .librarySearch input::placeholder { color: var(--agent-muted); }
 .libraryTabs { display: flex; gap: 3px; margin: 0 10px 10px; padding: 3px; border-radius: 9px; background: var(--color-fill-1); }
 .libraryTabs button { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; min-height: 33px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-3); font-size: 12px; cursor: pointer; white-space: nowrap; }
-.libraryTabs button[aria-selected='true'] { background: var(--color-bg-2); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
+.libraryTabs button[aria-selected='true'] { background: var(--pill-tab-active-bg, var(--color-bg-2)); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
 .libraryTabs button span { font-size: 10px; color: var(--color-text-3); }
 .libraryBody { overflow-y: auto; min-height: 0; padding: 0 10px 14px; }
 .libraryHint { padding: 0 5px; margin: 0 0 12px; color: var(--agent-muted); font-size: 11px; line-height: 1.6; }

@@ -6,6 +6,17 @@
  * rules retain a predictable, accessible foreground/background pairing.
  */
 
+/* Neutral pill/segmented Tabs opt in on their container. Light mode keeps each
+ * layout's existing surface through the fallback; dark mode separates selection
+ * from the much quieter hover fill. This token only owns the active background. */
+.nomi-pill-tabs {
+  --pill-tab-active-bg: initial;
+}
+
+:where([data-theme='dark'], body[arco-theme='dark']) .nomi-pill-tabs {
+  --pill-tab-active-bg: color-mix(in srgb, var(--color-text-1) 28%, var(--bg-base, var(--color-bg-1)));
+}
+
 .arco-checkbox-mask {
   position: relative;
   overflow: hidden;

@@ -425,7 +425,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
             onInput={(event) => setQuery(event.currentTarget.value)}
           />
         </label>
-        <div className={styles.statusFilters} role='group' aria-label={t('agentSettings.workbench.filterStatus')}>
+        <div className={`nomi-pill-tabs ${styles.statusFilters}`} role='group' aria-label={t('agentSettings.workbench.filterStatus')}>
           {(['all', 'enabled', 'attention'] as const).map((value) => (
             <button
               type='button'

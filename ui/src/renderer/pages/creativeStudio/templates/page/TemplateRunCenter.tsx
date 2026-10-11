@@ -16,6 +16,8 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+
+import NomiInput from '@renderer/components/base/NomiInput';
 import { useCreativeAssetAvailability, type CreativeAsset } from '../../assets';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
 import CreativeMediaLightbox from '../../assets/components/CreativeMediaLightbox';
@@ -26,7 +28,7 @@ import type {
   CreativeTemplateRuntimeSnapshot,
   ReviewCreativeTemplateDraft,
 } from '../runtime';
-import styles from './CreativeTemplateWorkspacePage.module.css';
+import styles from './TemplateWorkspaceDialogs.module.css';
 import {
   formatTemplateLoadError,
   formatTemplateRuntimeError,
@@ -162,7 +164,7 @@ const TemplateRunReviewModal: React.FC<{
           <section key={draft.id} className={styles.reviewCard}>
             <div className={styles.reviewIndex}>{String(index + 1).padStart(2, '0')}</div>
             <div className={styles.reviewFields}>
-              <Input
+              <NomiInput
                 value={draft.title}
                 disabled={saving}
                 aria-label={t('creativeStudio.templates.runCenter.review.titleField', {
@@ -307,10 +309,20 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
         {cards.map((run) => {
           const activity = snapshot.activities[run.request.id];
           const paused = activity?.state === 'paused';
-          const observed = Object.values(activity?.taskStatuses ?? {});
-          const completedTasks = observed.filter((status) =>
-            status === 'succeeded' || status === 'failed' || status === 'canceled'
-          ).length;
+          const totalTasks = run.record.taskIds.length;
+          const completedTasks = run.record.status === 'succeeded'
+            ? totalTasks
+            : run.record.taskIds.filter((taskId) => {
+                const status = activity?.taskStatuses[taskId];
+                return status === 'succeeded' || status === 'failed' || status === 'canceled';
+              }).length;
+          const progressLabel = t('creativeStudio.templates.runCenter.progress', {
+            completed: completedTasks,
+            total: totalTasks || t('creativeStudio.templates.runCenter.progressUnknown', {
+              defaultValue: '-',
+            }),
+            defaultValue: 'Tasks {{completed}}/{{total}}',
+          });
           const displayStatus = paused
             ? t('creativeStudio.templates.runCenter.status.paused', {
                 defaultValue: 'Waiting to resume',
@@ -340,30 +352,27 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                 </span>
               </div>
 
-              <div className={styles.runProgressRow}>
-                <span>
-                  {run.templateSnapshot.output.kind === 'multi-image-series'
-                    ? t('creativeStudio.templates.runCenter.kind.multi', {
-                        defaultValue: 'Multi-image series',
-                      })
-                    : t('creativeStudio.templates.runCenter.kind.single', {
-                        defaultValue: 'Single-image task',
-                      })}
-                </span>
-                <span>
-                  {t('creativeStudio.templates.runCenter.progress', {
-                    completed: Math.max(
-                      completedTasks,
-                      run.record.status === 'succeeded' ? run.record.taskIds.length : 0
-                    ),
-                    total:
-                      run.record.taskIds.length ||
-                      t('creativeStudio.templates.runCenter.progressUnknown', {
-                        defaultValue: '-',
-                      }),
-                    defaultValue: 'Tasks {{completed}}/{{total}}',
-                  })}
-                </span>
+              <div className={styles.runProgress}>
+                <div className={styles.runProgressRow}>
+                  <span>
+                    {run.templateSnapshot.output.kind === 'multi-image-series'
+                      ? t('creativeStudio.templates.runCenter.kind.multi', {
+                          defaultValue: 'Multi-image series',
+                        })
+                      : t('creativeStudio.templates.runCenter.kind.single', {
+                          defaultValue: 'Single-image task',
+                        })}
+                  </span>
+                  <span>{progressLabel}</span>
+                </div>
+                {totalTasks > 0 ? (
+                  <progress
+                    className={styles.runProgressBar}
+                    value={completedTasks}
+                    max={totalTasks}
+                    aria-label={progressLabel}
+                  />
+                ) : null}
               </div>
 
               {activity?.error ? (

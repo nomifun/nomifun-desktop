@@ -64,7 +64,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
       <Button size='small' icon={<AddOne theme='outline' size={15} />} loading={creating} disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>{t('agentSettings.actions.create')}</Button>
     </div>
     <label className={styles.librarySearch}><Search theme='outline' size={15} /><input type='search' value={query} placeholder={t('agentSettings.workbench.librarySearch')} aria-label={t('agentSettings.workbench.librarySearch')} onChange={(event) => setQuery(event.target.value)} /></label>
-    <div className={styles.libraryTabs} role='tablist' aria-label={t('agentSettings.library.title')}>
+    <div className={`nomi-pill-tabs ${styles.libraryTabs}`} role='tablist' aria-label={t('agentSettings.library.title')}>
       <button ref={node => { if (node) tabRefs.current.set('mine', node); else tabRefs.current.delete('mine'); }} id='agent-library-tab-mine' type='button' role='tab' tabIndex={mode === 'mine' ? 0 : -1} aria-controls='agent-library-panel' aria-selected={mode === 'mine'} onKeyDown={event => tabKey(event, 'mine')} onClick={() => setMode('mine')}>{t('agentSettings.workbench.mine')}<span>{library.user_presets.length}</span></button>
       <button ref={node => { if (node) tabRefs.current.set('official', node); else tabRefs.current.delete('official'); }} id='agent-library-tab-official' type='button' role='tab' tabIndex={mode === 'official' ? 0 : -1} aria-controls='agent-library-panel' aria-selected={mode === 'official'} onKeyDown={event => tabKey(event, 'official')} onClick={() => setMode('official')}>{t('agentSettings.workbench.official')}<span>{library.official_templates.length}</span></button>
     </div>

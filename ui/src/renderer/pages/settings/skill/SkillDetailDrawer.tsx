@@ -154,7 +154,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                 </div>
                 <div className='mt-2px text-11px text-t-tertiary'>SKILL.md</div>
               </div>
-              <div className='flex rounded-[100px] bg-fill-2 p-3px' role='tablist'>
+              <div className='nomi-pill-tabs flex rounded-[100px] bg-fill-2 p-3px' role='tablist'>
                 {([
                   ['preview', t('settings.skillsHub.detailPreview', { defaultValue: 'Preview' }), FileText],
                   ['source', t('settings.skillsHub.detailSource', { defaultValue: 'Source' }), Code],
@@ -173,7 +173,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                     }}
                     className={[
                       'flex cursor-pointer items-center gap-5px rounded-[100px] px-10px py-5px text-11px font-600 transition-colors',
-                      viewMode === mode ? 'bg-base text-t-primary shadow-sm' : 'text-t-tertiary hover:text-t-secondary',
+                      viewMode === mode ? 'bg-[var(--pill-tab-active-bg,var(--bg-base))] text-t-primary shadow-sm' : 'text-t-tertiary hover:text-t-secondary',
                     ].join(' ')}
                   >
                     <Icon size={12} />

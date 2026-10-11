@@ -1435,7 +1435,6 @@
       "choiceOptionOne": "Option one",
       "choiceOptionTwo": "Option two",
       "duplicateSuffix": "Copy",
-      "emptyPrompt": "No prompt template yet",
       "multiCategory": "Multi-image creation",
       "multiDescription": "Generate a coherent set of image prompts from a topic, review them, then create the images in batch.",
       "multiName": "Image series generator",
@@ -1638,8 +1637,10 @@
       "aiCreate": "Create with AI",
       "aiUnavailable": "AI draft service is unavailable",
       "allCategories": "All categories",
+      "allTemplates": "All templates",
       "cancel": "Cancel",
       "categoryFallback": "Uncategorized",
+      "clearFilters": "Clear filters",
       "copyError": "Failed to copy template",
       "copySuccess": "Template copy created",
       "createSuccess": "Template created",
@@ -1653,7 +1654,7 @@
       "duplicate": "Duplicate {{name}}",
       "edit": "Edit {{name}}",
       "emptyDescription": "Create a template to save frequently used prompts, variables, and model settings.",
-      "justNow": "Just now",
+      "filters": "Filter templates",
       "listLabel": "Template list",
       "loadError": "Failed to load templates",
       "loadFailed": "Failed to load templates",
@@ -1664,14 +1665,16 @@
       "noMatches": "No matching templates",
       "noMatchesDescription": "Adjust the category or search filters and try again.",
       "noTemplates": "No templates yet",
+      "resultCount": "{{visible}} of {{total}} templates",
       "retry": "Retry",
       "run": "Run",
       "saveError": "Failed to save template",
       "saveSuccess": "Template saved",
       "searchPlaceholder": "Search names, categories, and descriptions",
-      "title": "Template Studio",
-      "updatedAt": "Updated {{date}}",
-      "variableCount": "{{count}} variables"
+      "seriesTemplates": "Image series",
+      "singleTemplates": "Single image",
+      "templateType": "Template type",
+      "title": "Template Studio"
     }
   }
 }

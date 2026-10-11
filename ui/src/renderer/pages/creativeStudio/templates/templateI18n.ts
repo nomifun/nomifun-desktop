@@ -29,7 +29,6 @@ export interface CreativeTemplateTranslationCopy {
   singlePromptTemplate: string;
   multiPromptTemplate: string;
   duplicateSuffix: string;
-  emptyPrompt: string;
   outputSingle: string;
   outputMulti: string;
 }
@@ -152,11 +151,6 @@ export function createTemplateTranslationCopy(
       t,
       'creativeStudio.templates.defaults.duplicateSuffix',
       'Copy'
-    ),
-    emptyPrompt: translate(
-      t,
-      'creativeStudio.templates.defaults.emptyPrompt',
-      'Prompt template not filled in yet'
     ),
     outputSingle: translate(
       t,

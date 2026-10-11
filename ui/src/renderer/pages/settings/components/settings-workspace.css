@@ -34,7 +34,7 @@
 .cv-tabs { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-fill-1); margin-bottom: 16px; overflow-x: auto; }
 .cv-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; white-space: nowrap; padding: 6px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; font: inherit; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: background .15s, color .15s; }
 .cv-tabs button:hover { color: var(--text-primary); }
-.cv-tabs button[aria-selected='true'] { background: var(--color-bg-1); border-color: var(--color-border-2); color: var(--text-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 4%); }
+.cv-tabs button[aria-selected='true'] { background: var(--pill-tab-active-bg, var(--color-bg-1)); border-color: var(--color-border-2); color: var(--text-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 4%); }
 .cv-tabs__dot { width: 5px; height: 5px; border-radius: 50%; background: var(--warning); }
 .cv-choice { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--color-border-2); background: var(--color-fill-1); border-radius: 8px; }
 .cv-choice button { display: flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-secondary); cursor: pointer; white-space: nowrap; font: inherit; font-size: 12px; }
