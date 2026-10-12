@@ -4,15 +4,15 @@
 //! is spawned** (including the tokio runtime). It rewrites
 //! `std::env::var("PATH")` to include:
 //!
-//! 1. An already-admitted managed Bun directory, when available (cache-only).
-//! 2. Platform extra bins (`~/.bun/bin`, `~/.cargo/bin`, homebrew,
-//!    asdf/mise/fnm, env-var-driven roots like `PNPM_HOME`, …).
-//! 3. The current `PATH` (inherited from the launching process).
-//! 4. The **interactive** login-shell `PATH` (Unix only, 5s timeout) —
+//! 1. The current `PATH` (inherited from the launching process).
+//! 2. The **interactive** login-shell `PATH` (Unix only, 5s timeout) —
 //!    sources `~/.zshrc` / `~/.bashrc` in addition to the login files, so
 //!    toolchain dirs added there (nvm/fnm/pnpm/asdf/mise, custom npm
 //!    prefixes) are visible. Fixes launchd / Finder / systemd-service
 //!    starts where the inherited PATH is minimal.
+//! 3. Platform extra bins (`~/.bun/bin`, `~/.cargo/bin`, homebrew,
+//!    asdf/mise/fnm, env-var-driven roots like `PNPM_HOME`, …).
+//! 4. An already-admitted managed Bun directory, when available (cache-only fallback).
 //!
 //! After this runs, all downstream `which::which(...)` and
 //! `Command::new(...)` calls see the enhanced PATH with zero further
@@ -39,7 +39,9 @@ pub unsafe fn enhance_process_path() -> String {
     let login = login_shell_path();
     let extras = platform_extra_bins();
     // Cache-only: PATH discovery must never trigger a first-start download.
-    let bun_dir = crate::bun_bin_dir();
+    let bun_dir = crate::managed::cached_tool(crate::ToolId::Bun)
+        .and_then(Result::ok)
+        .and_then(|tool| tool.executable_path.parent().map(PathBuf::from));
 
     let merged = merge_process_path(bun_dir.as_deref(), &extras, &current, login.as_deref());
 
@@ -69,17 +71,17 @@ fn merge_process_path(
     current: &str,
     login: Option<&str>,
 ) -> String {
-    // Order: bun_dir, extras, current, login. First-occurrence wins.
+    // The user's explicit inherited PATH wins, then shell/tools discovery, then managed fallback.
     // This crate owns bundled-toolchain source discovery; nomi-process-runtime owns the shared,
     // platform-correct ordered de-duplication and join.
     let mut sources = Vec::new();
-    if let Some(p) = bun_dir {
-        sources.push(p.to_path_buf());
-    }
-    sources.extend(extras.iter().cloned());
     sources.extend(std::env::split_paths(current));
     if let Some(l) = login {
         sources.extend(std::env::split_paths(l));
+    }
+    sources.extend(extras.iter().cloned());
+    if let Some(p) = bun_dir {
+        sources.push(p.to_path_buf());
     }
 
     nomi_process_runtime::merge_process_path(sources)
@@ -435,11 +437,11 @@ mod tests {
         let result = merge_process_path(None, &extras, &current, Some(&login));
         let parts: Vec<&str> = result.split(s).collect();
 
-        assert_eq!(parts, vec!["/e", "/a", "/b", "/c", "/d"]);
+        assert_eq!(parts, vec!["/a", "/b", "/c", "/d", "/e"]);
     }
 
     #[test]
-    fn merge_process_path_keeps_bun_dir_at_front() {
+    fn merge_process_path_keeps_managed_bun_as_fallback() {
         let s = sep();
         let current = format!("/a{s}/b");
         let bun = PathBuf::from("/bun");
@@ -447,7 +449,7 @@ mod tests {
         let result = merge_process_path(Some(&bun), &[], &current, None);
         let parts: Vec<&str> = result.split(s).collect();
 
-        assert_eq!(parts, vec!["/bun", "/a", "/b"]);
+        assert_eq!(parts, vec!["/a", "/b", "/bun"]);
     }
 
     #[test]

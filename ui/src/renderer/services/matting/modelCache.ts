@@ -19,11 +19,11 @@
  *   - mirrored into Cache Storage so the worker reads a local copy (no auth, no
  *     network) and repeat sessions skip the localhost round-trip entirely.
  *
- * `ensureMattingModel` is single-flight: concurrent callers (prewarm on wizard
- * open + the await before matting) share one in-flight download.
+ * `ensureMattingModel` is single-flight: background preparation after entering
+ * the authenticated app and the await before matting share one download.
  */
 
-import { getBaseUrl } from '@/common/adapter/httpBridge';
+import { buildBackendAuthHeaders, getBaseUrl } from '@/common/adapter/httpBridge';
 import { MODEL_CACHE_NAME, modelCacheKey } from './modelCacheKey';
 
 export type ModelProgress = (loaded: number, total: number) => void;
@@ -60,7 +60,7 @@ async function cachedModelOk(cache: Cache | undefined): Promise<boolean> {
 
 async function downloadToCache(cache: Cache | undefined): Promise<void> {
   const url = `${getBaseUrl()}/api/companion/matting-model`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: buildBackendAuthHeaders('GET'), credentials: 'include' });
   if (!res.ok) throw new Error(`matting model fetch failed: HTTP ${res.status}`);
   const total = Number(res.headers.get('content-length') ?? 0) || 0;
 
@@ -140,7 +140,8 @@ export function ensureMattingModel(onProgress?: ModelProgress): Promise<void> {
   }
   const p = inFlight;
   if (onProgress) {
-    void p.finally(() => progressSubs.delete(onProgress));
+    const unsubscribe = () => progressSubs.delete(onProgress);
+    void p.then(unsubscribe, unsubscribe);
   }
   return p;
 }

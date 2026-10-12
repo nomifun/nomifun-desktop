@@ -27,7 +27,7 @@ exact requirements:
 | Tool | Minimum | Why | Notes |
 | --- | --- | --- | --- |
 | **Rust** | stable, edition 2024 | Compile the backend (and the Tauri shell, for desktop). | Install via [`rustup`](https://rustup.rs/). The workspace pins `edition = "2024"` and `resolver = "3"`. |
-| **Bun** | **≥ 1.3.13** | Frontend package manager and build runner; application runtime tools are supplied separately through managed preparation. | `1.1.38` has a stdin bug — do not use it. |
+| **Bun** | **≥ 1.3.13** | Frontend package manager and build runner; user commands in the application prefer system tools, with downloads offered only when the user chooses them. | `1.1.38` has a stdin bug — do not use it. |
 | **Tauri CLI** | v2 | Build the desktop shell. | Pulled in as a `devDependency`; no global install needed. |
 | **Git** | any recent | Clone, plus skill discovery and some built-in tools. | |
 | **C/C++ build tools** | platform-specific | `rusqlite` (bundled), `aws-lc-rs`, `libgit2-sys`. | Windows: MSVC + WebView2 runtime. macOS: Xcode CLT. Linux: `build-essential cmake clang pkg-config perl`. |

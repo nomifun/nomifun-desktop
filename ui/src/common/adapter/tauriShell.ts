@@ -360,12 +360,19 @@ export function tauriWebuiStop<T>(): Promise<T> {
 
 export interface TauriRelayPairingBootstrapRequest {
   pairingEnvelope: string;
+  allowRuntimeDownload?: boolean;
+}
+
+export interface TauriRelayPairingRestartRequest {
+  allowRuntimeDownload?: boolean;
 }
 
 export type TauriRelayPairingState = 'disconnected' | 'paused' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 export interface TauriRelayPairingStatus {
   state: TauriRelayPairingState;
+  /** Read-only availability of the approved local Relay component. */
+  runtimeAvailable?: boolean;
   enabled?: boolean;
   pendingBootstrap?: boolean;
   relayState?: string | null;
@@ -400,6 +407,7 @@ export function tauriRelayPairingBootstrap(
 ): Promise<TauriRelayPairingStatus> {
   return invokeCommand<TauriRelayPairingStatus>('relay_pairing_bootstrap', {
     pairingEnvelope: request.pairingEnvelope,
+    allowRuntimeDownload: request.allowRuntimeDownload === true,
   });
 }
 
@@ -414,8 +422,10 @@ export function tauriRelayPairingStop(): Promise<TauriRelayPairingStatus> {
 }
 
 /** Restart the local Relay agent using its persisted long-lived credential. */
-export function tauriRelayPairingRestart(): Promise<TauriRelayPairingStatus> {
-  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_restart');
+export function tauriRelayPairingRestart(request?: TauriRelayPairingRestartRequest | void): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_restart', {
+    allowRuntimeDownload: request?.allowRuntimeDownload === true,
+  });
 }
 
 /** Refresh a short-lived Mobile pairing ticket through the connected relay. */

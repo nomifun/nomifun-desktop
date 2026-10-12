@@ -45,7 +45,7 @@ cargo build --release -p nomifun-web
 
 - 已构建的 SPA 目录；
 - 可写数据目录；
-- release 自动内嵌 OfficeCLI；Node 在后端启动前受管下载准备，Bun 按功能需要准备；runtime 缓存须可写、可执行（见[组件契约](../architecture/external-tools.zh.md)）；
+- release 自动内嵌 OfficeCLI；启动无需下载 Node/Bun；用户命令优先使用系统 Bun／`bunx`，其次是有效的既有缓存，缺失时由用户选择下载；受管 runtime 缓存须可写、可执行（见[组件契约](../architecture/external-tools.zh.md)）；
 - 默认鉴权/admin 初始化流程，或仅在可信本地开发中显式使用 `--insecure-no-auth`。
 
 示例：
@@ -77,21 +77,22 @@ OS 的安装包/应用包。
 
 ## `nfagent` 按需运行时
 
-桌面安装包**不内置** `nfagent`。用户第一次使用 NomiRelay 配对、恢复或重启
-Relay agent 时，桌面端才按当前 OS/架构从
+桌面安装包**不内置** `nfagent`。NomiRelay 自动恢复和普通 agent 重启只使用
+有效的既有缓存。制品缺失或批准版本变化时，需要用户明确选择“下载连接组件并连接”，
+桌面端才按当前 OS/架构从
 [`apps/desktop/nfagent-runtime.json`](../../apps/desktop/nfagent-runtime.json)
 指定的不可变 HTTPS URL 下载对应二进制。这样普通用户不使用 NomiRelay 时，
 安装包不会额外携带约 6–7 MiB 的 agent。
 
 受管理的运行时安装具有以下约束：
 
-- 每次使用前都校验完整 SHA-256；缓存损坏时会删除并重新下载。
+- 每次使用前都校验完整 SHA-256；缓存损坏时会删除，再次下载仍需用户明确选择。
 - 下载体限制为 32 MiB，先写入临时文件，校验成功后再原子发布。
 - 缓存位置为
   `<data-dir>/runtime/nfagent/<version>/<sha256-prefix>/<asset-name>`，
   后续启动复用同一份已验证文件。
-- 首次配对会先完成运行时下载和校验，再消费一次性 Relay 邀请，避免网络下载失败
-  使邀请白白失效。
+- 用户选择下载后，首次配对先完成运行时下载和校验，再消费一次性 Relay 邀请，
+  避免网络下载失败使邀请白白失效。
 - 运行时 URL 不允许使用 `latest`、查询参数或 fragment；发布文件名必须与目标平台
   的固定名称一致。
 

@@ -19,6 +19,7 @@ const ACTION_ERROR_MESSAGES: Record<string, string> = {
   RELAY_BOOTSTRAP_REJECTED: 'settings.deviceConnections.relayErrorBootstrapRejected',
   RELAY_ENTRY_NOT_READY: 'settings.deviceConnections.relayErrorEntryNotReady',
   RELAY_AGENT_NOT_READY: 'settings.deviceConnections.relayErrorAgentNotReady',
+  RELAY_AGENT_INSTALL_REQUIRED: 'settings.deviceConnections.relayErrorAgentInstallRequired',
   RELAY_REVOKE_UNCONFIRMED: 'settings.deviceConnections.relayErrorRevokeUnconfirmed',
   RELAY_STATE_UNREADABLE: 'settings.deviceConnections.relayErrorStateUnreadable',
   RELAY_ALREADY_PAIRED: 'settings.deviceConnections.relayErrorAlreadyPaired',
@@ -36,6 +37,10 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
   const actionEpoch = useRef(0);
   const busy = useRef(false);
   const mounted = useRef(true);
+  const runtimeMissing = status.runtimeAvailable === false
+    || (status.runtimeAvailable !== true && (status.errorCode === 'RELAY_AGENT_INSTALL_REQUIRED'
+      || status.actionErrorCode === 'RELAY_AGENT_INSTALL_REQUIRED'));
+  const runtimeKnown = status.runtimeAvailable === true || runtimeMissing;
 
   const acceptStatus = useCallback((next: IRelayPairingStatus) => {
     setStatus(next);
@@ -63,8 +68,9 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
     return () => { mounted.current = false; window.clearInterval(timer); };
   }, [acceptStatus, t]);
 
-  const runAction = async (action: 'bootstrap' | 'restart' | 'stop' | 'disconnect' | 'forgetLocal') => {
+  const runAction = async (action: 'bootstrap' | 'restart' | 'stop' | 'disconnect' | 'forgetLocal', allowRuntimeDownload = false) => {
     if (busy.current) return;
+    if ((action === 'bootstrap' || action === 'restart') && !runtimeKnown) return;
     if (action === 'bootstrap' && !/^nomifun-relay-pair:v[12]:/.test(envelope.trim())) {
       setError(t('settings.deviceConnections.envelopeInvalid'));
       return;
@@ -76,7 +82,9 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
     if (action === 'bootstrap' || action === 'restart') acceptStatus({ ...status, state: 'connecting' });
     try {
       const next = action === 'bootstrap'
-        ? await ipcBridge.relayPairing.bootstrap.invoke({ pairingEnvelope: envelope.trim() })
+        ? await ipcBridge.relayPairing.bootstrap.invoke({ pairingEnvelope: envelope.trim(), allowRuntimeDownload })
+        : action === 'restart'
+        ? await ipcBridge.relayPairing.restart.invoke({ allowRuntimeDownload })
         : await ipcBridge.relayPairing[action].invoke();
       if (!mounted.current) return;
       acceptStatus(next);
@@ -162,14 +170,21 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
       </div>
       {canBootstrap && <label className='flex flex-col gap-6px text-13px text-t-secondary'>
         {t('settings.deviceConnections.envelopeLabel')}
-        <Input.Password value={envelope} onChange={setEnvelope} placeholder='nomifun-relay-pair:v2:…' autoComplete='off' maxLength={8192} onPressEnter={() => void runAction('bootstrap')} />
+        <Input.Password value={envelope} onChange={setEnvelope} placeholder='nomifun-relay-pair:v2:…' autoComplete='off' maxLength={8192} onPressEnter={() => { if (status.runtimeAvailable === true) void runAction('bootstrap'); }} />
       </label>}
+      {!stateUnreadable && !runtimeKnown && <Alert type='info' content={t('settings.deviceConnections.relayRuntimeStatusPending')} />}
+      {!stateUnreadable && runtimeMissing && <Alert type='info' content={<div>
+        {t('settings.deviceConnections.relayDownloadHint')}{' '}
+        <Button type='text' size='mini' onClick={() => void ipcBridge.shell.openExternal.invoke('https://github.com/nomifun/nomifun-net-infra/releases/tag/nfagent-v0.1.0')}>
+          {t('settings.deviceConnections.relayDownloadSource')}
+        </Button>
+      </div>} />}
       <div className='flex flex-wrap gap-8px'>
-        {canBootstrap && <Button type='primary' loading={loading} disabled={!envelope.trim()} onClick={() => void runAction('bootstrap')}>
-          {t('settings.deviceConnections.relayConnect')}
+        {canBootstrap && <Button type='primary' loading={loading} disabled={!envelope.trim() || !runtimeKnown} onClick={() => void runAction('bootstrap', runtimeMissing)}>
+          {t(runtimeMissing ? 'settings.deviceConnections.relayDownloadAndConnect' : 'settings.deviceConnections.relayConnect')}
         </Button>}
         {!stateUnreadable && (status.relay || status.pendingBootstrap) && <>
-          <Button loading={loading} onClick={() => void runAction('restart')}>{t('settings.deviceConnections.relayReconnect')}</Button>
+          <Button loading={loading} disabled={!runtimeKnown} onClick={() => void runAction('restart', runtimeMissing)}>{t(runtimeMissing ? 'settings.deviceConnections.relayDownloadAndReconnect' : 'settings.deviceConnections.relayReconnect')}</Button>
           {status.enabled !== false && status.state !== 'paused' && <Button loading={loading} onClick={() => void runAction('stop')}>{t('settings.deviceConnections.relayPause')}</Button>}
           <Button status='danger' loading={loading} onClick={disconnect}>{t('settings.deviceConnections.relayRemove')}</Button>
         </>}
@@ -183,6 +198,8 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
         <span>{t(status.health.tunnelReachable ? 'settings.deviceConnections.tunnelReady' : 'settings.deviceConnections.tunnelUnavailable')}</span>
       </div>}
       {actionMessage && <Alert type='error' showIcon content={actionMessage} />}
+      {status.errorCode === 'RELAY_AGENT_INSTALL_REQUIRED' && status.actionErrorCode !== 'RELAY_AGENT_INSTALL_REQUIRED'
+        && <Alert type='info' content={t('settings.deviceConnections.relayErrorAgentInstallRequired')} />}
       {status.actionErrorCode === 'RELAY_ENTRY_NOT_READY' && !!status.relayReason &&
         <div className='text-12px text-t-tertiary'>{t('settings.deviceConnections.relayReasonDetail', { reason: status.relayReason })}</div>}
       {status.errorCode === 'RELAY_TUNNEL_UNREACHABLE' && <Alert type='warning' content={t('settings.deviceConnections.relayTunnelHint')} />}

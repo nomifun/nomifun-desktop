@@ -337,9 +337,11 @@ sudo cp -r ui/dist/. /opt/nomifun/web/
 
 ### 受管执行组件
 
-Release 构建内嵌 OfficeCLI。Node 在后端启动前受管下载固定版本并验证摘要，
-Bun 按功能需要准备；已准备制品在 `<data_dir>/runtime` 离线复用，使用经验证的绝对路径。服务账户需要数据目录写权限，
-以及 runtime 缓存的读取与执行权限；无需另装系统级产品组件。
+Release 构建内嵌 OfficeCLI。后端启动无需准备或下载 Node/Bun。用户命令优先使用
+系统 Bun／`bunx`，其次是有效的既有受管缓存；可选组件缺失时，只有用户选择才
+下载。应用托管使用系统或用户指定的 Node。受管制品在 `<data_dir>/runtime`
+离线复用，使用经验证的绝对路径。服务账户需要数据目录写权限，以及 runtime
+缓存的读取与执行权限；部署前为服务账户配置业务所需的用户工具。
 
 诊断子命令属于 `nomicore`，不属于 WebUI 宿主 CLI。若部署可选诊断程序，
 先构建并复制：
@@ -353,10 +355,11 @@ sudo cp target/release/nomicore /opt/nomifun/
 sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
 ```
 
-在服务数据目录已创建后运行。`--verify` 可能下载 Node/Bun、解压并执行私有能力探测；不带
-该标记的 `tool-doctor` 是只读清单。源码 debug 构建可使用
-`NOMIFUN_EMBED_OFFICECLI=1` 或显式、经验证的绝对开发路径。首次 Node
-准备需要服务账户能访问网络；首次离线部署前先完成准备。详见[外部工具](../architecture/external-tools.zh.md)。
+在服务数据目录已创建后运行。`--verify` 校验本地可用制品，可能解压内嵌 OfficeCLI
+并执行私有能力探测，不下载缺失的 Node/Bun；不带该标记的 `tool-doctor` 是只读
+清单。源码 debug 构建可使用 `NOMIFUN_EMBED_OFFICECLI=1` 或显式、经验证的
+绝对开发路径。缺失的可选受管组件报告为不可用，普通诊断不安装它们。
+详见[外部工具](../architecture/external-tools.zh.md)。
 
 ### 安装 unit
 
@@ -406,7 +409,9 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 | 依赖 | 是否必需 | 说明 |
 |---|---|---|
 | `glibc` + `ca-certificates` | 是 | sqlite 是静态链接的，TLS 使用 rustls —— **不需要 openssl，不需要 libsqlite**。 |
-| Bun、真实 Node、OfficeCLI | 随 release 交付 | 固定版本与制品由组件清单管理，按需解压到受管缓存；不依赖环境中的同名工具。 |
+| OfficeCLI | Release 内嵌 | 批准制品本地解压到受管缓存；Office 预览无需下载 Node/Bun。 |
+| Bun／`bunx` | 按用户命令需要 | 优先使用系统工具，有效的既有受管 Bun 缓存可后备；缺失时由用户明确选择下载。 |
+| Node | 按应用托管需要 | 使用系统或用户指定的 Node；当前 Agent／插件执行没有受管 Node 消费者。 |
 | `npm` / `npx` 等用户工具 | 按配置需要 | 用户配置的 MCP stdio 命令使用；Docker 的独立 Node/npm 镜像来源固定在组件清单中。Office 预览不安装全局 npm 包。 |
 | Python 3 + PyYAML | 推荐 | 支持 Agent 的 Python 脚本模式和随附的 Python 内置技能。Docker 镜像里已包含。 |
 | `git` | 推荐 | 技能发现和一些内置工具会使用。 |

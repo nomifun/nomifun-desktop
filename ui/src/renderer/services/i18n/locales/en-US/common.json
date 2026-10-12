@@ -137,31 +137,15 @@
     "extracting": "Preparing {{tool}}: extracting",
     "verifying": "Preparing {{tool}}: verifying",
     "ready": "{{tool}} is ready",
-    "failed": "{{tool}} preparation failed"
+    "failed": "{{tool}} preparation failed",
+    "downloadTitle": "{{tool}} is required for this command",
+    "downloadHint": "No usable {{tool}} was found on this host. You can install it yourself and retry, or let NomiFun download it and continue. The download starts only when you choose it.",
+    "downloadAction": "Download {{tool}}"
   },
   "startup": {
-    "preparing": "Preparing the app environment",
-    "downloading": "Downloading the required runtime",
-    "extracting": "Unpacking the runtime",
-    "verifying": "Verifying the runtime",
     "starting": "Starting NomiFun",
     "quitting": "Closing NomiFun",
-    "failed": "The app environment could not be prepared",
-    "firstUseHint": "First use requires a runtime download. Later launches use the verified cache.",
-    "downloadBytes": "{{received}} / {{total}} downloaded",
-    "receivedBytes": "{{received}} downloaded",
-    "failedHint": "Check your connection and that the app data folder is writable, then retry.",
     "connectionFailed": "The startup status could not be read. Close the app and try again.",
-    "quit": "Quit",
-    "errors": {
-      "download": "The runtime could not be downloaded. Check your connection and retry.",
-      "cache": "The runtime cache could not be prepared. Check disk space and folder permissions, then retry.",
-      "asset": "The downloaded runtime failed its integrity checks. Retry the download.",
-      "verification": "The runtime could not be verified. Repair or update the app before trying again.",
-      "changed": "The verified runtime changed. Repair it and restart the app.",
-      "size": "The runtime exceeded its download size limit. Update the app before trying again.",
-      "unavailable": "The required runtime is not available. Retry its preparation.",
-      "cleanup": "The runtime process has not been confirmed stopped. Retrying is blocked while safe shutdown completes."
-    }
+    "quit": "Quit"
   }
 }

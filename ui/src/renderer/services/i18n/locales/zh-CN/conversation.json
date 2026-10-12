@@ -293,7 +293,7 @@
       },
       "USER_AGENT_HANDSHAKE_TIMEOUT": {
         "title": "Agent 握手超时",
-        "body": "所选 Agent 未在预期时间内完成启动握手。首次启动可能需要下载运行组件（数十 MB），请确认网络/代理可用后重试；重试会自动清理未完成的下载。"
+        "body": "所选 Agent 未在预期时间内完成启动握手。请检查该 Agent 的运行环境，重启或重新连接后重试。"
       },
       "USER_AGENT_PROTOCOL_MISMATCH": {
         "title": "Agent 协议版本不兼容",

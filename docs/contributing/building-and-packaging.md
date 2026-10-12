@@ -47,7 +47,7 @@ Runtime requirements:
 
 - built SPA directory;
 - writable data directory;
-- OfficeCLI embedded automatically in release; Node prepared by verified managed download before backend startup, Bun on feature use; writable/executable runtime cache ([component contract](../architecture/external-tools.md));
+- OfficeCLI embedded automatically in release; startup requires no Node/Bun download; user commands prefer system Bun/`bunx`, with verified existing cache fallback and user-chosen downloads when absent; writable/executable managed runtime cache ([component contract](../architecture/external-tools.md));
 - configured auth/admin flow, or explicit `--insecure-no-auth` for trusted
   loopback-only development.
 
@@ -82,9 +82,11 @@ packaging is not part of the supported workflow.
 
 ## On-demand `nfagent` runtime
 
-Desktop installers do **not** bundle `nfagent`. The first NomiRelay pairing,
-restore, or agent restart downloads the binary for the current OS/architecture
-from the immutable HTTPS URL in
+Desktop installers do **not** bundle `nfagent`. Automatic NomiRelay restore and
+ordinary agent restart use an existing valid cache only. If the artifact is absent
+or the approved version changes, the user must explicitly choose to download the
+connection component and connect. That choice downloads the binary for the current
+OS/architecture from the immutable HTTPS URL in
 [`apps/desktop/nfagent-runtime.json`](../../apps/desktop/nfagent-runtime.json).
 Users who never use NomiRelay therefore do not carry the extra roughly 6–7 MiB
 agent in the installer.
@@ -92,14 +94,15 @@ agent in the installer.
 The managed runtime installation has these constraints:
 
 - The full SHA-256 is checked before every use; a corrupt cache is removed and
-  downloaded again.
+  another download requires an explicit user choice.
 - Downloads are capped at 32 MiB, written to a staging file, verified, and only
   then published atomically.
 - The cache lives at
   `<data-dir>/runtime/nfagent/<version>/<sha256-prefix>/<asset-name>` and is
   reused on later launches.
-- Initial pairing installs the runtime before consuming the one-shot Relay
-  invitation, so a download failure does not waste the invitation.
+- After the user's download choice, initial pairing installs the runtime before
+  consuming the one-shot Relay invitation, so a download failure does not waste
+  the invitation.
 - Runtime URLs cannot use `latest`, query parameters, or fragments, and asset
   names must match the fixed target-platform names.
 

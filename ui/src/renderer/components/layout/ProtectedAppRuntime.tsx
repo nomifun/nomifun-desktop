@@ -15,6 +15,7 @@ import { useDeepLink } from '@renderer/hooks/system/useDeepLink';
 import { useNotificationClick } from '@renderer/hooks/system/useNotificationClick';
 import { useCompanionWindowsSync } from '@renderer/hooks/useCompanionWindowsSync';
 import { useTrayLabels } from '@renderer/hooks/useTrayLabels';
+import { ensureMattingModel } from '@renderer/services/matting/modelCache';
 
 /**
  * Authenticated application runtime shared by every protected product surface.
@@ -41,6 +42,7 @@ const ProtectedAppRuntime: React.FC = () => {
       <CompanionNavigateListener />
       <CompanionWindowsSyncMount />
       <TrayLabelsMount />
+      <MattingModelPrewarmMount />
       <Outlet />
     </>
   );
@@ -65,6 +67,16 @@ const CompanionWindowsSyncMount: React.FC = () => {
 // Inert outside the Tauri desktop shell.
 const TrayLabelsMount: React.FC = () => {
   useTrayLabels();
+  return null;
+};
+
+// The DIY cutout model is prepared silently after authenticated startup has
+// completed. This optional task never delays app rendering; failed preparation
+// can be retried by the wizard, whose quick-cutout fallback remains available.
+const MattingModelPrewarmMount: React.FC = () => {
+  useEffect(() => {
+    void ensureMattingModel().catch(() => {});
+  }, []);
   return null;
 };
 

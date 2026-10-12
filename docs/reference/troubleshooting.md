@@ -100,11 +100,13 @@ restart. Note that conversations do not depend on any of this — the built-in
 
 ### Managed tools under systemd
 
-Release binaries embed OfficeCLI. Node is prepared through verified managed
-download before backend startup; Bun is prepared on feature use. Prepared artifacts
-are reused offline under the configured data directory with verified absolute paths; a service
-account does not need another user's Bun installation. Check data-directory
-access and the actual components as the service user:
+Release binaries embed OfficeCLI; backend startup needs no Node/Bun preparation
+or download. User commands prefer the service account's system Bun/`bunx`, then a
+verified existing managed Bun cache. If both are absent, terminal or MCP actions
+offer the user an explicit download choice. App Hosting uses system or
+user-configured Node. Managed artifacts are reused offline under the configured
+data directory with verified absolute paths. Check data-directory access and
+available components as the service user:
 
 Use the optional `nomicore` diagnostic binary built from `nomifun-app`
 (`cargo build --release -p nomifun-app --bin nomicore`). The WebUI host CLI
@@ -115,9 +117,10 @@ sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --
 ```
 
 `tool-doctor` without `--verify` only prints the supply catalogue. Verification
-may download Node/Bun, extract components, and run private probes, but never
-opens the database. Check network access for first preparation and runtime cache
-access/execute permissions. Debug builds without OfficeCLI embedded need its
+checks available local artifacts, may extract embedded OfficeCLI, and runs private
+probes, but never opens the database or starts or waits for Node/Bun downloads.
+Check runtime cache access/execute permissions; missing optional components remain
+unavailable until the user chooses to install them. Debug builds without OfficeCLI embedded need its
 validated explicit development override.
 See [External tools](../architecture/external-tools.md).
 

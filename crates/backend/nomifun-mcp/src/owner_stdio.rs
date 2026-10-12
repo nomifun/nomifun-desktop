@@ -80,7 +80,9 @@ impl StdioTransport {
         deadline: Instant,
     ) -> Result<Self, McpOwnerError> {
         validate_config(command, args, env)?;
-        let (command, args) = prepare_managed_stdio_command(command, args, deadline).await?;
+        let (command, args) = timeout_at(deadline, resolve_managed_stdio_command(command, args, env))
+            .await
+            .map_err(|_| McpOwnerError::new("MCP_RUNTIME_RESOLUTION_TIMEOUT", "Local Bun resolution timed out before the MCP process was started"))??;
         let configured_env = env.clone();
         // Resolution and platform spawn can block. If the waiter is cancelled
         // or times out, the task's result is dropped and ManagedChildProcess
@@ -89,12 +91,12 @@ impl StdioTransport {
             if Instant::now() >= deadline {
                 return Err(startup_timeout());
             }
-            let env = child_environment(&configured_env);
-            let program = resolve_program(&command, &env)?;
+            let child_env = child_environment(&configured_env);
+            let program = resolve_program(&command, &child_env)?;
             let mut builder = ChildProcessBuilder::new(program);
             builder
                 .env_clear()
-                .envs(env)
+                .envs(child_env)
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -547,29 +549,36 @@ fn child_environment(configured: &HashMap<String, String>) -> HashMap<OsString, 
     env
 }
 
-async fn prepare_managed_stdio_command(
+async fn resolve_managed_stdio_command(
     command: &str,
     args: &[String],
-    deadline: Instant,
+    env: &HashMap<String, String>,
 ) -> Result<(String, Vec<String>), McpOwnerError> {
     if nomifun_runtime::managed_command_tool(command).is_none() {
         return Ok((command.to_owned(), args.to_vec()));
     }
-    tracing::info!(
-        component = "bun",
-        "Preparing the managed Bun runtime for MCP stdio launch"
-    );
-    let prepared = timeout_at(deadline, nomifun_runtime::prepare_managed_command(command, args)).await
-        .map_err(|_| McpOwnerError::new("MCP_RUNTIME_PREPARATION_TIMEOUT","Managed Bun preparation timed out. Check component preparation progress and retry; the shared preparation may still complete."))?
-        .map_err(|_| {
-            let snapshot = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
-            let detail = snapshot.error.map(|error| format!("{}: {}",error.code,error.message)).unwrap_or_else(|| "Check managed component preparation status and retry.".into());
-            McpOwnerError::new("MCP_RUNTIME_PREPARATION_FAILED",format!("Managed Bun preparation failed: {detail}"))
-        })?.expect("recognized managed launch command");
+    // Preserve the server's child PATH. If it excludes Bun, an ambient host
+    // installation must not silently replace that explicit choice.
+    let prepared = nomifun_runtime::prepare_managed_command_with_env(command, args, env, None).await
+        .map_err(|cause| runtime_resolution_error(&cause))?
+        .ok_or_else(|| runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared))?;
     Ok((
         prepared.executable_path.to_string_lossy().into_owned(),
         prepared.args,
     ))
+}
+
+fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> McpOwnerError {
+    match cause {
+        nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
+        nomifun_runtime::ToolError::NotPrepared | nomifun_runtime::ToolError::Unavailable { .. } => {
+            McpOwnerError::new(
+                "COMPONENT_PREPARATION_REQUIRED",
+                "Bun is unavailable. Install Bun on the system or choose to download it in NomiFun, then retry this MCP connection.",
+            )
+        }
+        cause => McpOwnerError::new("MCP_RUNTIME_UNAVAILABLE", format!("The existing Bun runtime is unavailable: {cause}")),
+    }
 }
 
 fn resolve_program(
@@ -617,15 +626,46 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn managed_preparation_does_not_replace_explicit_user_stdio_paths() {
+    async fn runtime_resolution_does_not_replace_explicit_user_stdio_paths() {
         let command = "/user/chosen/bun";
         let args = vec!["server.js".to_owned()];
         let (actual, arguments) =
-            prepare_managed_stdio_command(command, &args, Instant::now() + Duration::from_secs(1))
+            resolve_managed_stdio_command(command, &args, &HashMap::new())
                 .await
                 .unwrap();
         assert_eq!(actual, command);
         assert_eq!(arguments, args);
+    }
+
+    #[tokio::test]
+    async fn configured_child_path_bun_precedes_runtime_supply_and_preserves_bunx() {
+        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        std::fs::write(&program, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = HashMap::from([("PATH".to_owned(), root.path().to_string_lossy().into_owned())]);
+        let args = vec!["server.js".into()];
+        for (command, expected_args) in [("bun", args.clone()), ("bunx", vec!["x".into(), "server.js".into()])] {
+            let (actual, actual_args) = resolve_managed_stdio_command(
+                command, &args, &env,
+            ).await.unwrap();
+            assert_eq!(Path::new(&actual), program);
+            assert_eq!(actual_args, expected_args);
+        }
+        assert_eq!(nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun), before);
+    }
+
+    #[test]
+    fn missing_stdio_runtime_has_a_user_choice_error() {
+        let missing = nomifun_runtime::ToolError::Shared(Arc::new(nomifun_runtime::ToolError::NotPrepared));
+        let error = runtime_resolution_error(&missing);
+        assert_eq!(error.code(), "COMPONENT_PREPARATION_REQUIRED");
+        assert!(error.message().contains("Install Bun"));
     }
 
     #[test]

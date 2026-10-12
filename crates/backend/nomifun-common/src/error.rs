@@ -23,8 +23,11 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
-    #[error("Managed component {0} must be prepared before this operation. Prepare it and retry.")]
+    #[error("Component {0} is missing. Install it on the system or explicitly choose to download it, then retry.")]
     ComponentPreparationRequired(String),
+
+    #[error("Component {component} is unavailable: {reason}")]
+    ComponentUnavailable { component: String, reason: String },
 
     #[error("Session configuration changed: {0}")]
     SessionConfigurationChanged(String),
@@ -110,6 +113,7 @@ impl AppError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::ComponentPreparationRequired(_) => StatusCode::CONFLICT,
+            Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
@@ -144,6 +148,7 @@ impl AppError {
             }
             Self::Conflict(_) => "CONFLICT",
             Self::ComponentPreparationRequired(_) => "COMPONENT_PREPARATION_REQUIRED",
+            Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
@@ -197,6 +202,9 @@ impl AppError {
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
             Self::ComponentPreparationRequired(component) => {
                 Some(json!({ "component": component, "phase": "runtime_preparation" }))
+            }
+            Self::ComponentUnavailable { component, .. } => {
+                Some(json!({ "component": component, "phase": "runtime_resolution" }))
             }
             _ => None,
         }

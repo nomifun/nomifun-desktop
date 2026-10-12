@@ -179,9 +179,11 @@ Apache-2.0 条款下使用、修改、再分发，并将代码打包——包括
 运行时没有 `libsqlite`、也没有 `openssl` 依赖。用
 `cargo build --release -p nomifun-web` 即可构建。
 
-Release 二进制内嵌 OfficeCLI。Node 在后端启动前经受管下载准备，Bun 按功能
-需要准备；批准版本不变时，已准备组件跨应用更新复用并可离线使用。首次 Node
-准备需要网络。Debug 构建可用 `NOMIFUN_EMBED_OFFICECLI=1` 内嵌 OfficeCLI，
+Release 二进制内嵌 OfficeCLI；后端启动无需准备或下载 Node/Bun。终端与 MCP
+命令优先使用系统 Bun／`bunx`，其次是有效的既有受管 Bun 缓存。两者都缺失时，
+由用户选择是否下载批准组件。普通解析与诊断不发起或等待下载。应用托管使用
+系统或用户指定的 Node；批准组件身份不变时，既有缓存可离线复用。
+Debug 构建可用 `NOMIFUN_EMBED_OFFICECLI=1` 内嵌 OfficeCLI，
 或使用经验证的显式开发路径覆盖。参见[外部工具](../architecture/external-tools.zh.md)。
 
 桌面外壳同样可以产出单一二进制（`nomifun-desktop`），但用于分发时，

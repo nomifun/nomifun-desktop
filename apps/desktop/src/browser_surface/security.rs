@@ -14,7 +14,7 @@ fn is_allowed_app_command(webview: &str, window: &str, command: &str) -> bool {
             && window == "startup"
             && matches!(
                 command,
-                "desktop_startup_status" | "desktop_startup_retry" | "desktop_startup_quit"
+                "desktop_startup_status" | "desktop_startup_quit"
             ))
 }
 
@@ -44,16 +44,20 @@ mod tests {
     use super::{is_allowed_app_command, is_app_webview};
 
     #[test]
-    fn startup_has_only_its_three_native_commands_and_observation_permissions() {
+    fn startup_has_only_status_quit_and_observation_permissions() {
         for command in [
             "desktop_startup_status",
-            "desktop_startup_retry",
             "desktop_startup_quit",
         ] {
             assert!(is_allowed_app_command("startup", "startup", command));
             assert!(!is_allowed_app_command("browser-child", "startup", command));
             assert!(!is_allowed_app_command("startup", "main", command));
         }
+        assert!(!is_allowed_app_command(
+            "startup",
+            "startup",
+            "desktop_startup_retry"
+        ));
         assert!(!is_allowed_app_command(
             "startup",
             "startup",

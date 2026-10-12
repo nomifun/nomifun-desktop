@@ -148,7 +148,7 @@ access has its own admin password because it is reachable from another browser.
 
 Yes for the server: `nomifun-web` is one statically-linked Rust binary plus the `ui/dist/` directory it serves. SQLite is statically linked, TLS uses rustls — there is no `libsqlite`, no `openssl` dependency at runtime. Build with `cargo build --release -p nomifun-web`.
 
-Release binaries embed OfficeCLI. Node is prepared through verified managed download before backend startup; Bun is prepared when a feature requests it. Prepared components are reused offline across application updates while their approved version is unchanged. The first Node preparation requires network access. Debug builds can embed OfficeCLI with `NOMIFUN_EMBED_OFFICECLI=1` or use validated explicit development overrides. See [External tools](../architecture/external-tools.md).
+Release binaries embed OfficeCLI; backend startup needs no Node/Bun preparation or download. Terminal and MCP commands prefer system Bun/`bunx`, then a verified existing managed Bun cache. If neither is available, the user chooses whether to download the approved component. Ordinary resolution and diagnostics never start or wait for downloads. App Hosting uses system or user-configured Node. Existing approved components are reused offline while their identity is unchanged. Debug builds can embed OfficeCLI with `NOMIFUN_EMBED_OFFICECLI=1` or use validated explicit development overrides. See [External tools](../architecture/external-tools.md).
 
 The desktop shell also produces a single binary (`nomifun-desktop`), but for distribution you typically want the platform-native packaging via `bun run build` once installer signing is set up.
 

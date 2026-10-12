@@ -348,11 +348,13 @@ sudo cp -r ui/dist/. /opt/nomifun/web/
 
 ### Managed execution components
 
-Release builds embed OfficeCLI. Node is prepared by fixed-version, hash-verified
-managed download before backend startup; Bun is prepared on feature use. Prepared
-artifacts are reused offline under `<data_dir>/runtime`, using verified absolute paths. Grant the service account read/execute access
-to that cache and write access to its data directory. No separate system-wide
-installation of these product components is required.
+Release builds embed OfficeCLI. Backend startup requires no Node/Bun preparation
+or download. User commands prefer system Bun/`bunx`, then a verified existing
+managed cache; an absent optional component is downloaded only after a user choice.
+App Hosting uses system or user-configured Node. Managed artifacts are reused
+offline under `<data_dir>/runtime`, using verified absolute paths. Grant the
+service account read/execute access to that cache and write access to its data
+directory. Provision required user tools for the service account before deployment.
 
 The diagnostic subcommand belongs to `nomicore`, not the WebUI host CLI.
 If deploying the optional diagnostic companion, build/copy it first:
@@ -366,11 +368,12 @@ sudo cp target/release/nomicore /opt/nomifun/
 sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
 ```
 
-Run this after the service data directory exists. `--verify` may download Node/Bun,
-extract tools, and run private capability probes; `tool-doctor` alone is a read-only inventory.
+Run this after the service data directory exists. `--verify` verifies available
+local artifacts, may extract embedded OfficeCLI, and runs private capability
+probes; it never downloads missing Node/Bun. `tool-doctor` alone is a read-only inventory.
 Source debug builds may use `NOMIFUN_EMBED_OFFICECLI=1` or validated explicit
-development paths. The first Node preparation requires network access from the
-service account; prepare it before first offline deployment.
+development paths. Missing optional managed components are reported as unavailable;
+ordinary diagnostics do not install them.
 See [External tools](../architecture/external-tools.md).
 
 ### Install the unit
@@ -421,7 +424,9 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 | Dependency | Required? | Notes |
 |---|---|---|
 | `glibc` + `ca-certificates` | Yes | sqlite is statically linked, TLS uses rustls — **no openssl, no libsqlite needed**. |
-| Bun, genuine Node, OfficeCLI | Bundled in release | Approved versions/assets extract to managed cache and never use ambient same-named tools. |
+| OfficeCLI | Embedded in release | Approved artifact extracts locally to managed cache; Office preview needs no Node/Bun download. |
+| Bun / `bunx` | As needed by user commands | System tools take priority; verified existing managed Bun cache is a fallback. Missing components require an explicit user download choice. |
+| Node | As needed by App Hosting | Uses system or user-configured Node; current Agent/plugin execution has no managed Node consumer. |
 | User tools such as `npm` / `npx` | As configured | Needed by user-defined MCP stdio commands; Docker Node/npm image provenance is fixed in the component manifest. Office preview does not install global npm packages. |
 | Python 3 + PyYAML | Recommended | Enables the Agent's Python script mode and bundled Python-based skills. Already inside the Docker image. |
 | `git` | Recommended | Skill discovery and a few built-in tools. |

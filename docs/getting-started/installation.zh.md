@@ -23,7 +23,7 @@ NomiFun 有两种宿主模式，共享同一个 Rust 后端（参见
 | 工具 | 最低版本 | 用途 | 备注 |
 | --- | --- | --- | --- |
 | **Rust** | stable，edition 2024 | 编译后端（桌面端还需编译 Tauri 外壳）。 | 通过 [`rustup`](https://rustup.rs/) 安装。工作区固定使用 `edition = "2024"` 与 `resolver = "3"`。 |
-| **Bun** | **≥ 1.3.13** | 前端包管理器与构建工具；应用运行所需工具另由受管准备供应。 | `1.1.38` 存在 stdin 缺陷——请勿使用。 |
+| **Bun** | **≥ 1.3.13** | 前端包管理器与构建工具；应用中的用户命令优先使用系统环境，缺失时由用户选择下载。 | `1.1.38` 存在 stdin 缺陷——请勿使用。 |
 | **Tauri CLI** | v2 | 构建桌面外壳。 | 作为 `devDependency` 引入；无需全局安装。 |
 | **Git** | 任何近期版本 | 克隆仓库，以及技能发现与若干内置工具会用到。 | |
 | **C/C++ 构建工具** | 因平台而异 | `rusqlite`（bundled）、`aws-lc-rs`、`libgit2-sys` 需要。 | Windows：MSVC + WebView2 运行时。macOS：Xcode CLT。Linux：`build-essential cmake clang pkg-config perl`。 |

@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 
 use nomifun_api_types::{
     ApiResponse, BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerResponse, ErrorResponse,
-    McpConnectionTestErrorCode, McpServerId, McpServerResponse, OAuthCheckStatusRequest, OAuthLoginRequest,
+    McpConnectionTestErrorCode, McpConnectionTestResult, McpServerId, McpServerResponse, OAuthCheckStatusRequest, OAuthLoginRequest,
     OAuthLoginResponse, OAuthLogoutRequest, OAuthStatusResponse, TestMcpConnectionRequest,
     UpdateMcpServerRequest,
 };
@@ -173,24 +173,32 @@ async fn test_connection(
         return Ok(Json(ApiResponse::ok(result)).into_response());
     }
 
-    let status = result
+    Ok(connection_test_error_response(result))
+}
+
+fn connection_test_error_response(result: McpConnectionTestResult) -> Response {
+    let missing_runtime = result.details.as_ref()
+        .and_then(|details| details.get("owner_code"))
+        .and_then(serde_json::Value::as_str)
+        == Some("COMPONENT_PREPARATION_REQUIRED");
+    let status = if missing_runtime { StatusCode::CONFLICT } else { result
         .code
         .map(connection_test_failure_status)
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+        .unwrap_or(StatusCode::BAD_GATEWAY) };
     let error = result
         .error
         .clone()
         .unwrap_or_else(|| "MCP connection test failed".to_string());
-    let code = result
+    let code = if missing_runtime { "COMPONENT_PREPARATION_REQUIRED" } else { result
         .code
         .map(McpConnectionTestErrorCode::as_str)
-        .unwrap_or("MCP_CONNECTION_FAILED");
+        .unwrap_or("MCP_CONNECTION_FAILED") };
 
-    Ok((
+    (
         status,
         Json(ErrorResponse::new_with_details(error, code, result.details.clone())),
     )
-        .into_response())
+        .into_response()
 }
 
 fn connection_test_failure_status(code: McpConnectionTestErrorCode) -> StatusCode {
@@ -260,4 +268,29 @@ async fn oauth_logout(
 async fn oauth_authenticated(State(state): State<McpRouterState>) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
     let urls = state.oauth_service.get_authenticated_servers().await?;
     Ok(Json(ApiResponse::ok(urls)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_runtime_response_preserves_the_download_choice_contract() {
+        let result = McpConnectionTestResult {
+            success: false, tools: None, error: Some("Bun is unavailable".into()),
+            code: Some(McpConnectionTestErrorCode::CommandStartFailed),
+            details: Some(serde_json::json!({
+                "owner_code":"COMPONENT_PREPARATION_REQUIRED", "component":"bun",
+                "runtime":"bun", "phase":"runtime_resolution", "retryable":true,
+            })),
+            needs_auth: None, auth_method: None, www_authenticate: None,
+        };
+        let response = connection_test_error_response(result);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "COMPONENT_PREPARATION_REQUIRED");
+        assert_eq!(body["details"]["runtime"], "bun");
+        assert_eq!(body["details"]["phase"], "runtime_resolution");
+    }
 }

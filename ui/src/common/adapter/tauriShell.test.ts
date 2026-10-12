@@ -10,6 +10,8 @@ import {
   parseDeepLink,
   tauriDownloadUpdate,
   tauriInstallUpdate,
+  tauriRelayPairingBootstrap,
+  tauriRelayPairingRestart,
   type TauriDownloadUpdateProgress,
 } from './tauriShell';
 
@@ -95,6 +97,38 @@ const withTauriInternals = async (
     restoreWindow();
   }
 };
+
+describe('Relay component download choice', () => {
+  test('bootstrap and restart do not authorize downloads by default', async () => {
+    const calls: Array<{ command: string; args: unknown }> = [];
+    await withTauriInternals(async (command, args) => {
+      calls.push({ command, args });
+      return { state: 'disconnected', runtimeAvailable: false };
+    }, async () => {
+      await tauriRelayPairingBootstrap({ pairingEnvelope: 'nomifun-relay-pair:v2:opaque' });
+      await tauriRelayPairingRestart();
+    });
+    expect(calls).toEqual([
+      { command: 'relay_pairing_bootstrap', args: { pairingEnvelope: 'nomifun-relay-pair:v2:opaque', allowRuntimeDownload: false } },
+      { command: 'relay_pairing_restart', args: { allowRuntimeDownload: false } },
+    ]);
+  });
+
+  test('only an explicit download choice passes authorization to native Relay commands', async () => {
+    const calls: Array<{ command: string; args: unknown }> = [];
+    await withTauriInternals(async (command, args) => {
+      calls.push({ command, args });
+      return { state: 'connected', runtimeAvailable: true };
+    }, async () => {
+      await tauriRelayPairingBootstrap({ pairingEnvelope: 'nomifun-relay-pair:v2:opaque', allowRuntimeDownload: true });
+      await tauriRelayPairingRestart({ allowRuntimeDownload: true });
+    });
+    expect(calls).toEqual([
+      { command: 'relay_pairing_bootstrap', args: { pairingEnvelope: 'nomifun-relay-pair:v2:opaque', allowRuntimeDownload: true } },
+      { command: 'relay_pairing_restart', args: { allowRuntimeDownload: true } },
+    ]);
+  });
+});
 
 describe('native update commands', () => {
   test('download invokes the Rust-owned command and forwards progress', async () => {

@@ -171,7 +171,10 @@ fn canvas_operation_error(error: AppError) -> String {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }
         AppError::ComponentPreparationRequired(_) => {
-            "A required host component must be prepared before the Creative Studio Canvas operation".to_owned()
+            "A required host component is missing; install it or explicitly choose to download it before retrying the Creative Studio Canvas operation".to_owned()
+        }
+        AppError::ComponentUnavailable { .. } => {
+            "A required host component is unavailable for the Creative Studio Canvas operation".to_owned()
         }
         AppError::RevisionConflict(_) => "Creative Studio Canvas revision conflict".to_owned(),
         AppError::ProviderInUse(_) => {

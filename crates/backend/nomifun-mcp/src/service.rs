@@ -261,6 +261,9 @@ impl McpConfigService {
         probe: McpProbeRevision,
         result: &McpConnectionTestResult,
     ) -> Result<(), McpError> {
+        if crate::connection_test::is_local_runtime_failure(result) {
+            return Ok(());
+        }
         let _guard = self.mutation_lock.lock().await;
         let tools = if result.success { result.tools.as_ref() } else { None };
         let tools_json = tools.map(serde_json::to_string).transpose()?;
@@ -281,6 +284,9 @@ impl McpConfigService {
         mcp_server_id: &McpServerId,
         result: &McpConnectionTestResult,
     ) -> Result<(), McpError> {
+        if crate::connection_test::is_local_runtime_failure(result) {
+            return Ok(());
+        }
         if self.catalog.is_some() {
             return Err(McpError::InvalidEdit("Live catalogs require a revision-fenced connection probe".into()));
         }
@@ -1291,5 +1297,37 @@ mod tests {
         assert_eq!(updated.last_test_status, nomifun_common::McpServerStatus::Error);
         assert!(updated.tools.is_none());
         assert!(updated.last_connected.is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_runtime_preserves_saved_connection_and_tool_catalog() {
+        let svc = make_service();
+        let created = svc.add_server(stdio_create_req("runtime-missing")).await.unwrap();
+        let success = McpConnectionTestResult {
+            success: true,
+            tools: Some(vec![nomifun_api_types::McpToolResponse {
+                name: "existing_tool".into(), description: None, input_schema: None,
+            }]),
+            error: None, code: None, details: None, needs_auth: None,
+            auth_method: None, www_authenticate: None,
+        };
+        svc.persist_test_result(&created.mcp_server_id, &success).await.unwrap();
+        let before = svc.get_server(&created.mcp_server_id).await.unwrap();
+        let transport = McpServerTransport::from(before.transport.clone());
+        let probe = svc.begin_probe(&before.mcp_server_id, &before.name, &transport)
+            .await.unwrap().unwrap();
+        let missing = McpConnectionTestResult {
+            success: false, tools: None, error: Some("Install Bun or choose a download".into()),
+            code: Some(nomifun_api_types::McpConnectionTestErrorCode::CommandStartFailed),
+            details: Some(serde_json::json!({
+                "owner_code": "COMPONENT_PREPARATION_REQUIRED", "component": "bun",
+                "phase": "runtime_resolution", "runtime": "bun",
+            })),
+            needs_auth: None, auth_method: None, www_authenticate: None,
+        };
+        svc.finish_probe(probe, &missing).await.unwrap();
+        svc.persist_test_result(&created.mcp_server_id, &missing).await.unwrap();
+        let after = svc.get_server(&created.mcp_server_id).await.unwrap();
+        assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(before).unwrap());
     }
 }

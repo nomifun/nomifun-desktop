@@ -249,10 +249,13 @@ v3 reset/restore，不通过历史逐行迁移导入。多伙伴布局如下：
 
 ## 受管执行组件
 
-Release 二进制仅内嵌 OfficeCLI；Node/Bun 按清单受管下载，已准备批准制品可离线复用。
-`nomifun_runtime::init(&data_dir)` 把缓存根锚定到 `<data_dir>/runtime`；
-`resolve_tool` 统一下载、本地解压与能力准入，消费者使用返回的绝对路径，
-不猜测缓存目录名称。Bun 同步发现只读已准备缓存，不改系统 PATH，也不冒充 Node；进程树仍由
+Release 二进制仅内嵌 OfficeCLI；后端启动不准备或下载 Node/Bun。用户命令优先使用
+系统 Bun／`bunx`，有效的既有受管缓存可作为后备；缺失可选组件仅在用户选择下载后供应。
+`nomifun_runtime::init(&data_dir)` 把受管缓存根锚定到 `<data_dir>/runtime`；
+普通解析只准入本地可用制品，可本地解压内嵌 OfficeCLI。
+消费者使用经验证的绝对路径，不猜测缓存目录名称。普通发现与诊断不发起或等待缺失工具下载，
+也不改系统 PATH。当前 Agent／插件执行没有受管 Node 消费者，应用托管使用系统
+或用户指定的 Node。进程树仍由
 `nomi-process-runtime` 持有并回收。
 
 未初始化数据根的独立库消费者通过 `dirs::cache_dir()` 使用平台缓存目录。
@@ -306,7 +309,7 @@ runtime 二进制与 Office HTML 产物均为可丢弃缓存。供应、身份�
   用户项目，绝不会被隐式复制。
 - **伙伴数据** —— bundle 递归纳入 `<data_dir>/companion/`（整机一份的记忆数据库 +
   每宠配置，见[伙伴指南](../guides/companions.zh.md)）。
-- **受管 runtime 与 Office 预览缓存** —— 可丢弃；下次需要时重新解压／生成。
+- **受管 runtime 与 Office 预览缓存** —— 可丢弃；内嵌制品下次需要时重新解压，预览重新生成，可选下载仍由用户选择。
 
 `nomicore` 提供离线 CLI 命令：
 

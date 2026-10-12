@@ -178,7 +178,7 @@ Developer ID 签名与公证已通过 `bun run build:signed` 和
 另一个进程占用了 `127.0.0.1` 临时端口。后端会尝试 `pick_free_port()`，失败时回退到 `8799` —— 退出任何其他 NomiFun 实例后再试。
 
 **受管执行组件不可用。**
-正式桌面包内嵌 OfficeCLI。后端启动前，准备窗口受管下载固定版本的真实 Node，验证摘要并显示阶段、字节进度和可重试错误；Bun 按功能需要准备。批准版本不变时，已准备组件可离线复用。请检查缓存访问／执行权限及组件诊断。Debug 构建可内嵌 OfficeCLI 或使用经验证的显式开发路径。参见[外部工具](../architecture/external-tools.zh.md)。
+正式桌面包内嵌 OfficeCLI，启动无需准备或下载 Node/Bun。终端与 MCP 操作优先使用系统 Bun／`bunx`，其次使用有效的既有受管 Bun 缓存；两者都缺失时，由用户选择是否下载批准组件。普通诊断和命令发现不下载工具。应用托管使用系统或用户指定的 Node，并提供由用户前往 Node 官网自行安装的操作。使用受管组件时请检查缓存访问／执行权限。Debug 构建可内嵌 OfficeCLI 或使用经验证的显式开发路径。参见[外部工具](../architecture/external-tools.zh.md)。
 
 ## 另请参阅
 

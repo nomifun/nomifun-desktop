@@ -10,7 +10,8 @@ import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
-import { ensureManagedBun, formatRuntimePreparation, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
+import { downloadBunRuntime, formatRuntimePreparation, isBunDownloadRequired, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
+import { useRuntimeDownloadConfirmation } from '@/renderer/hooks/system/useRuntimeDownloadConfirmation';
 import { emitter } from '@/renderer/utils/emitter';
 import {
   WorkspaceDirectoryUnavailableError,
@@ -33,6 +34,7 @@ const TerminalCreatePage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
+  const requestRuntimeDownload = useRuntimeDownloadConfirmation(location.key);
   const [presetId, setPresetId] = useState<TerminalPresetId>('shell');
   const [cwd, setCwd] = useState('');
   const [commandPreview, setCommandPreview] = useState(() =>
@@ -101,12 +103,7 @@ const TerminalCreatePage: React.FC = () => {
         : '';
       if (!isCurrent()) return;
       if (launchCwd !== cwd) setCwd(launchCwd);
-      if (!await ensureManagedBun(command, { isCurrent, onProgress: (snapshot) => {
-        if (isCurrent()) setPreparation(snapshot);
-      } })) return;
-      if (!isCurrent()) return;
-      setPreparation(null);
-      const session = await ipcBridge.terminal.create.invoke({
+      const request: Parameters<typeof ipcBridge.terminal.create.invoke>[0] = {
         cwd: launchCwd,
         command,
         args,
@@ -117,7 +114,23 @@ const TerminalCreatePage: React.FC = () => {
         // correct dimensions from frame one — no garble-until-you-resize.
         defer_spawn: true,
         knowledge_base_ids: kbIds.length > 0 ? kbIds : undefined,
-      });
+      };
+      let session: Awaited<ReturnType<typeof ipcBridge.terminal.create.invoke>>;
+      try {
+        // Let the owner resolve the actual command in this launch directory.
+        // Missing runtime errors occur before it creates a row or spawns a PTY.
+        session = await ipcBridge.terminal.create.invoke(request);
+      } catch (error) {
+        if (!isBunDownloadRequired(error)) throw error;
+        if (!isCurrent() || !await requestRuntimeDownload(isCurrent)) return;
+        if (!await downloadBunRuntime({
+          isCurrent,
+          onProgress: (snapshot) => { if (isCurrent()) setPreparation(snapshot); },
+        })) return;
+        if (!isCurrent()) return;
+        setPreparation(null);
+        session = await ipcBridge.terminal.create.invoke(request);
+      }
       if (!isCurrent()) return;
       // Remember the launched command for quick reuse — only for the custom preset.
       if (presetId === 'shell') addRecentLaunchCommand(commandPreview);

@@ -718,7 +718,7 @@ impl TerminalService {
         }
         // Verify prerequisite readiness before minting/persisting any terminal
         // row or materializing its workspace knowledge/PTY side effects.
-        crate::types::resolve_command_for_spawn(&req.command, &req.args)?;
+        crate::types::resolve_command_for_spawn(&req.command, &req.args, req.env.as_ref(), Some(Path::new(&req.cwd))).await?;
         let name = req
             .name
             .clone()
@@ -845,7 +845,7 @@ impl TerminalService {
         knowledge_scope: TerminalKnowledgeScope,
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
-        let (program, resolved_args) = crate::types::resolve_command_for_spawn(command, args)?;
+        let (program, resolved_args) = crate::types::resolve_command_for_spawn(command, args, env.as_ref(), Some(Path::new(cwd))).await?;
         #[cfg(all(test, windows))]
         let program = resolve_windows_test_program(&program);
         // Mint the PTY generation before issuing child capabilities so their
@@ -2504,7 +2504,8 @@ impl TerminalService {
         let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
         let args = crate::types::parse_args(&row.args);
         if matches!(target, RelaunchTarget::Stored) {
-            crate::types::resolve_command_for_spawn(&row.command, &args)?;
+            let env = process_env_from_persisted(row.env.as_deref());
+            crate::types::resolve_command_for_spawn(&row.command, &args, env.as_ref(), Some(Path::new(&row.cwd))).await?;
         }
 
         // Re-sync knowledge mounts + README on every relaunch. Binding
@@ -4104,24 +4105,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unprepared_bun_rejects_before_persisting_a_terminal_or_workspace_effects() {
-        assert!(
-            nomifun_runtime::resolve_cached_managed_command("bun", &[]).unwrap().is_none(),
-            "this process has not requested Bun preparation"
-        );
+    async fn existing_bun_or_missing_runtime_is_decided_before_terminal_effects() {
+        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
         let (svc, events, repo) = service_with_repo();
         let mut request = req("bun", &["-e", "process.stdout.write('unexpected')"]);
         request.defer_spawn = true;
-        let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
-        let app: nomifun_common::AppError = error.into();
-        assert_eq!(app.status_code(), axum::http::StatusCode::CONFLICT);
-        assert_eq!(app.error_code(), "COMPONENT_PREPARATION_REQUIRED");
-        assert!(repo.rows.lock().unwrap().is_empty());
+        let available = nomifun_runtime::resolve_cached_managed_command_with_env(
+            "bun", &[], &HashMap::new(), Some(Path::new(&request.cwd)),
+        ).unwrap().is_some();
+        if available {
+            let response = svc.create(TEST_USER_ID, request).await.unwrap();
+            assert_eq!(response.command, "bun");
+            assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        } else {
+            let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
+            let app: nomifun_common::AppError = error.into();
+            assert_eq!(app.status_code(), axum::http::StatusCode::CONFLICT);
+            assert_eq!(app.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+            assert!(repo.rows.lock().unwrap().is_empty());
+            assert!(events.events.lock().unwrap().is_empty());
+        }
         assert!(svc.live.is_empty());
-        assert!(events.events.lock().unwrap().is_empty());
         assert_eq!(
-            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun).phase,
-            nomifun_runtime::ToolPreparationPhase::Idle
+            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun),
+            before
         );
     }
 
@@ -4133,11 +4140,25 @@ mod tests {
         let (svc, events, repo) = service_with_repo();
         let script = "process.stdout.write('managed-bun-ready'); setInterval(()=>{},1000)";
         let request = req("bun", &["-e", script]);
-        let error: nomifun_common::AppError = svc.create(TEST_USER_ID, request.clone()).await.unwrap_err().into();
-        assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
-        assert!(repo.rows.lock().unwrap().is_empty());
-        nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::Bun).await
-            .expect("explicitly prepare the approved native Bun");
+        if nomifun_runtime::resolve_cached_managed_command_with_env(
+            "bun", &[], &HashMap::new(), Some(Path::new(&request.cwd)),
+        ).unwrap().is_none() {
+            let error: nomifun_common::AppError = svc.create(TEST_USER_ID, request.clone()).await.unwrap_err().into();
+            assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+            assert!(repo.rows.lock().unwrap().is_empty());
+            let mut progress = nomifun_runtime::subscribe_tool_preparation(nomifun_runtime::ToolId::Bun);
+            nomifun_runtime::begin_tool_preparation(nomifun_runtime::ToolId::Bun);
+            tokio::time::timeout(Duration::from_secs(180), async {
+                loop {
+                    let snapshot = progress.borrow().clone();
+                    if matches!(snapshot.phase, nomifun_runtime::ToolPreparationPhase::Ready | nomifun_runtime::ToolPreparationPhase::Error) {
+                        assert_eq!(snapshot.phase, nomifun_runtime::ToolPreparationPhase::Ready, "{snapshot:?}");
+                        break;
+                    }
+                    progress.changed().await.unwrap();
+                }
+            }).await.expect("explicit Bun download must finish");
+        }
         let response = svc.create(TEST_USER_ID, request).await.unwrap();
         assert!(svc.live.contains_key(response.terminal_id.as_str()));
         assert_eq!(repo.rows.lock().unwrap().len(), 1);

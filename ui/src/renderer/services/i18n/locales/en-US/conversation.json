@@ -293,7 +293,7 @@
       },
       "USER_AGENT_HANDSHAKE_TIMEOUT": {
         "title": "Agent handshake timed out",
-        "body": "The selected agent did not finish its startup handshake in time. The first launch may need to download the agent runtime (tens of MB) — check your network/proxy, then retry; retrying resumes cleanly."
+        "body": "The selected agent did not finish its startup handshake in time. Check its execution environment, then restart or reconnect the agent and retry."
       },
       "USER_AGENT_PROTOCOL_MISMATCH": {
         "title": "Agent protocol versions are incompatible",

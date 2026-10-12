@@ -2,16 +2,17 @@
 
 The current supply contract lives in
 [`nomifun-runtime/components.json`](../../crates/backend/nomifun-runtime/components.json).
-[`nomifun_runtime::resolve_tool`](../../crates/backend/nomifun-runtime/src/managed.rs)
-is the admission entry point shared by build artifacts, consumers, diagnostics,
-and the bundled Office skills.
+The runtime resolver and explicit preparation APIs live in
+[`nomifun-runtime/src/managed.rs`](../../crates/backend/nomifun-runtime/src/managed.rs).
+Build artifacts, managed cache admission, diagnostics, and the bundled Office
+skills share the approved component identities.
 
 ## Component ownership
 
 | Component | Approved version | Source | Consumer |
 | --- | --- | --- | --- |
 | Bun | 1.3.13 | Fixed `oven-sh/bun` release | Tasks explicitly requiring Bun |
-| Node | 22.22.0 | Fixed `nodejs.org/dist` release | Genuine Node for Unified Plugin Core |
+| Node | 22.22.0 | Fixed `nodejs.org/dist` release | Optional managed artifact; no current Agent/plugin consumer |
 | OfficeCLI | 1.0.156 | Fixed `iOfficeAI/OfficeCLI` release; npm identity `@officecli/officecli` | Read-only Office previews and document skills |
 
 Versions, platform/architecture assets, URLs, upstream checksum provenance,
@@ -20,8 +21,8 @@ digests are in the manifest. Archive hashes authorize component downloads; extra
 hashes identify runtime artifacts and `VerifiedTool.digest`. These hashes need
 not be identical.
 
-Release builds embed OfficeCLI only. Node and Bun use managed downloads from
-the same manifest; they are not application payloads. Debug builds can embed
+Release builds embed OfficeCLI only. Optional Node and Bun downloads use
+the same manifest; they are not application payloads or startup prerequisites. Debug builds can embed
 OfficeCLI with `NOMIFUN_EMBED_OFFICECLI=1`. An unsupported target fails the build.
 Builds still verify approved Node/Bun archives and derive their executable digests,
 embedding only small identity metadata. A matching executable cache from the former
@@ -32,17 +33,26 @@ background global npm installation or latest-version upgrade.
 
 [`notices/manifest.json`](../../crates/backend/nomifun-runtime/notices/manifest.json)
 records component notice provenance and versions. Optional nfagent, ONNX native
-libraries, and browsers retain their existing domain supply mechanisms; the
-catalogue references those authorities rather than introducing another ledger.
+libraries, and browsers retain their domain supply mechanisms; the catalogue
+references those authorities rather than introducing another ledger. Automatic
+NomiRelay restore reuses only an available valid nfagent cache. A missing artifact
+or changed approved version waits for the user to choose to download the connection
+component and connect; ordinary bootstrap or restart does not authorize a download.
+The DIY matting model has an explicit product exception: after first app use, it
+may install silently in the background under the authenticated app runtime. This
+does not block application startup; unavailable or failed model installation keeps
+the quick matting fallback. The model retains its own supply mechanism and is not
+added to the managed tool catalogue.
 User-configured MCP and terminal CLIs retain user ownership. Discovery failures
 must remain distinct from successful empty configuration.
 
 ## Supply and admission
 
-`resolve_tool(ToolId::Bun | Node | OfficeCli)` returns `VerifiedTool` with the
+The existing-artifact resolver returns `VerifiedTool` with the
 verified absolute executable path, observed version, and executable digest.
-OfficeCLI extracts locally; Node/Bun first check the managed download cache,
-then retrieve their approved platform artifact only if needed. Both paths use
+Ordinary resolution admits locally available artifacts only and never starts or
+waits for a Node/Bun download. OfficeCLI extracts its embedded payload locally.
+An explicit user download retrieves the approved platform artifact. Managed supply uses
 `<data_dir>/runtime`, inter-process locks, bounded temporary files, hash
 verification, and atomic publication. Downloaded executable identity is derived
 from the approved archive rather than trusting a standalone cache stamp.
@@ -58,17 +68,21 @@ File existence and version output alone are insufficient.
 Successful admission is reused within the process; failures can be retried.
 Later executable size or modification-time changes fail closed until repaired
 and restarted. The application creates no Bun-as-Node aliases and does not
-modify the system PATH. It retains managed Bun discovery in the application
-process and its children only for an already prepared component. Synchronous
-PATH discovery never starts or waits for a download. Real Bun consumers prepare
-it asynchronously and use the returned absolute path. Plugin Core retains one immutable Node authority;
-Node consumers use the real Node returned by its resolver. Process ownership,
-timeouts, cancellation, and tree cleanup remain in `nomi-process-runtime`.
+modify the system PATH. User-configured Bun and `bunx` commands prefer tools
+already installed on the system. A verified existing managed Bun cache can be
+used as a fallback. Ordinary discovery, command resolution, and diagnostics never
+start or wait for missing-tool downloads. Current Agent/plugin execution has no managed Node
+consumer. App Hosting discovers system or user-configured Node; its installation
+action lets the user open the official Node website and install it themselves.
+Process ownership, timeouts, cancellation, and tree cleanup remain in
+`nomi-process-runtime`.
 
 Debug-only `NOMIFUN_BUN_PATH`, `NOMIFUN_NODE_PATH`, and
 `NOMIFUN_OFFICECLI_PATH` accept explicit absolute executable paths. Paths are
 canonicalized and still pass engine, capability, and development version-range
-checks. Release ignores overrides and never falls back to same-named PATH tools.
+checks. Release ignores these development overrides for managed component
+admission. User command discovery and App Hosting retain their separate system
+and custom-path selection.
 
 For declared OfficeCLI family Skills, `engine_skills::compile` resolves the
 component once and attaches a separate immutable Host context resource with
@@ -91,38 +105,38 @@ and use the same data root as the installation being inspected.
 
 The first command prints the catalogue, domain supply references, and notices
 without extracting tools, probing processes, or opening a database. `--verify`
-explicitly prepares all three tools, which may download Node/Bun, extract
-approved binaries into that data root, and run private capability probes. JSON observations include
+verifies available local components, may extract embedded OfficeCLI into that
+data root, and runs private capability probes. It never downloads missing Node/Bun. JSON observations include
 `ready` / `unavailable`, actual version/path/digest, or the error; any failed
 component yields a nonzero exit code. Neither mode initializes Agent data,
 database storage, logging, or startup database rebuild authority.
 
 Source developers can use `cargo run -p nomifun-app --bin nomicore -- tool-doctor --verify`.
 A debug build without OfficeCLI embedded needs its explicit development
-override; Node/Bun use the managed download supplier by default. The
+override; missing managed Node/Bun are reported as unavailable. The
 separate `doctor` command discovers user CLIs through PATH; it does not replace
 product component admission.
 
 ## First preparation and package size
 
-Node is required before the unified backend can start. The desktop startup
-window observes the shared supplier and displays checking, download byte progress,
-extraction, and capability verification. A retryable preparation failure offers
-retry before any backend is created. Web hosts report the same preparation through
-startup diagnostics. One successful Node admission establishes the existing
-immutable runtime authority; there is no second runtime selector or hot switch.
+Desktop and Web backend startup do not prepare or download Node. A fresh
+installation can start without managed Node or Bun. Terminal and MCP UIs submit
+the execution request directly. The backend resolves the actual launcher in its
+working directory and child PATH, preferring user tools before valid managed caches.
+Only an explicit missing-Bun response offers a download choice; confirmation
+downloads Bun and retries the captured request. Cancelling neither downloads nor continues execution.
+Office conversion uses embedded OfficeCLI and needs no Node/Bun download or network.
 
-Bun is prepared only when a feature explicitly requests it. Concurrent requests
-share preparation; cancellation of one observer does not revoke another user.
-Prepared approved artifacts are reused offline across releases while their identity
-is unchanged. A fresh installation requires network for initial Node preparation.
-Office conversion itself needs neither a Node/Bun download nor network access.
-
-Owner-authenticated `GET /api/runtime-tools/{tool}` observes preparation;
-`POST /api/runtime-tools/{tool}/prepare` immediately begins or joins it. Only
+Owner-authenticated `GET /api/runtime-tools/{tool}/availability` diagnoses local
+components without downloading. It does not replace execution-specific working
+directory, launcher, or environment resolution. `GET /api/runtime-tools/{tool}` observes
+preparation state; `POST /api/runtime-tools/{tool}/prepare` is the explicit user
+download entry point and begins or joins the shared preparation task. Only
 `bun`, `node`, and `officecli` are accepted; callers cannot supply URLs, paths,
-versions, or global cancellation. MCP tests and terminal launches prepare Bun
-before their business RPC. Unprepared direct requests return
+versions, or global cancellation. Concurrent explicit requests share preparation;
+one observer's cancellation does not revoke another consumer. Verified approved
+artifacts are reused offline across releases while their identity is unchanged.
+Missing-tool direct requests return
 `COMPONENT_PREPARATION_REQUIRED` before creating a terminal row or process.
 
 Only the target architecture is delivered. Raising compression or deleting

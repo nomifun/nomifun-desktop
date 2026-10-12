@@ -98,7 +98,10 @@ async fn acquire_lock(directory: &Path, cancel: &CancellationToken) -> Result<Fi
         }
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error().is_some_and(|code| {
+                    Some(code) == fs2::lock_contended_error().raw_os_error()
+                }) => {}
             Err(error) => return Err(error.into()),
         }
         tokio::select! {
@@ -493,7 +496,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let client = fixture_client();
         let cancellation = CancellationToken::new();
-        let (first, second) = tokio::join!(
+        // Force both suppliers to contend on an actual OS lock before either
+        // proceeds. Windows reports fs2's native lock error rather than WouldBlock.
+        let held = acquire_lock(directory.path(), &cancellation).await.unwrap();
+        let release = async move {
+            tokio::task::yield_now().await;
+            FileExt::unlock(&held).unwrap();
+        };
+        let (first, second, ()) = tokio::join!(
+            biased;
             supply_in(
                 directory.path(),
                 ToolId::Bun,
@@ -512,6 +523,7 @@ mod tests {
                 &client,
                 &cancellation
             ),
+            release,
         );
         let (path, digest) = first.unwrap();
         assert_eq!(second.unwrap(), (path.clone(), digest));

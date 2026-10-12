@@ -105,20 +105,31 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
     (resolve_program(&program), resolved_args)
 }
 
-/// Actual terminal launches only consume committed components. Preparation
-/// happens through the host component API before this operation's effect
-/// window, so a raw/old HTTP caller cannot leave a delayed PTY after timeout.
-pub(crate) fn resolve_command_for_spawn(
+/// Actual terminal launches prefer a user-installed Bun and can reuse an
+/// existing verified download. Missing runtimes are rejected before terminal
+/// effects; launching never starts or waits for a component download.
+pub(crate) async fn resolve_command_for_spawn(
     command: &str,
     args: &[String],
+    env: Option<&HashMap<String, String>>,
+    cwd: Option<&Path>,
 ) -> Result<(String, Vec<String>), crate::error::TerminalError> {
     if nomifun_runtime::managed_command_tool(command).is_some() {
-        let prepared = nomifun_runtime::resolve_cached_managed_command(command, args)
-            .map_err(|error| crate::error::TerminalError::Spawn(format!("Managed Bun is unavailable: {error}")))?
-            .ok_or_else(|| nomifun_common::AppError::ComponentPreparationRequired("bun".into()))?;
+        let default_env = HashMap::new();
+        let prepared = nomifun_runtime::prepare_managed_command_with_env(command, args, env.unwrap_or(&default_env), cwd).await
+            .map_err(|error| nomifun_common::AppError::ComponentUnavailable {
+                component: "bun".into(), reason: error.to_string(),
+            })?;
+        let prepared = require_bun_command(prepared)?;
         return Ok((prepared.executable_path.to_string_lossy().into_owned(), prepared.args));
     }
     Ok(resolve_command(command, args))
+}
+
+fn require_bun_command(
+    prepared: Option<nomifun_runtime::PreparedCommand>,
+) -> Result<nomifun_runtime::PreparedCommand, crate::error::TerminalError> {
+    prepared.ok_or_else(|| nomifun_common::AppError::ComponentPreparationRequired("bun".into()).into())
 }
 
 /// Resolve a bare command name to its absolute executable path so the PTY
@@ -132,7 +143,7 @@ pub(crate) fn resolve_command_for_spawn(
 ///
 /// Inputs that already contain a path separator (an absolute path, or the
 /// expanded login shell) or that don't resolve are returned unchanged.
-/// Uses the bundled-toolchain resolver before the PTY backend starts the process.
+/// Uses local command discovery before the PTY backend starts the process.
 fn resolve_program(program: &str) -> String {
     if !program.is_empty()
         && !program.contains('/')
@@ -245,13 +256,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn user_supplied_paths_are_not_download_requests() {
+    #[tokio::test]
+    async fn user_supplied_paths_are_not_download_requests() {
         let source = "/configured/private/runtime";
         let arguments = vec!["user-script.js".to_owned()];
-        let (program, args) = resolve_command_for_spawn(source, &arguments).unwrap();
+        let (program, args) = resolve_command_for_spawn(source, &arguments, None, None).await.unwrap();
         assert_eq!(program, source);
         assert_eq!(args, arguments);
+    }
+
+    #[test]
+    fn missing_bun_requires_a_user_choice_without_a_spawn() {
+        let error: nomifun_common::AppError = require_bun_command(None).unwrap_err().into();
+        assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+        let existing = nomifun_runtime::PreparedCommand {
+            executable_path: "/user/system/bun".into(),
+            args: vec!["x".into(), "server".into()],
+        };
+        assert_eq!(require_bun_command(Some(existing.clone())).unwrap(), existing);
+    }
+
+    #[tokio::test]
+    async fn terminal_bun_uses_child_path_relative_to_its_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let tools = root.path().join("tools");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let bun = tools.join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        std::fs::write(&bun, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = HashMap::from([(
+            if cfg!(windows) { "PaTh" } else { "PATH" }.to_owned(), "../tools".to_owned(),
+        )]);
+        let args = vec!["user-script.js".into()];
+        let (program, actual_args) = resolve_command_for_spawn("bun", &args, Some(&env), Some(&child)).await.unwrap();
+        assert_eq!(std::fs::canonicalize(program).unwrap(), std::fs::canonicalize(bun).unwrap());
+        assert_eq!(actual_args, args);
     }
 
     #[test]

@@ -1,6 +1,5 @@
-/** Managed preparation precedes the deadline of the requested user operation. */
-import { httpGet, httpPost } from './httpBridge';
-import { application } from './ipcBridge';
+/** Runtime downloads begin only after the user selects them. */
+import { httpGet, httpPost, isBackendHttpError } from './httpBridge';
 import type { TFunction } from 'i18next';
 
 export interface RuntimeToolSnapshot {
@@ -22,9 +21,11 @@ export const runtimeTools = {
   ),
 };
 
-export function requiresManagedBun(command: string, windowsHost = false): boolean {
-  // Explicit user paths and shell text retain their own executable semantics.
-  return windowsHost ? /^(?:bun|bunx)(?:\.exe)?$/i.test(command) : command === 'bun' || command === 'bunx';
+export function isBunDownloadRequired(error: unknown): boolean {
+  if (!isBackendHttpError(error) || error.code !== 'COMPONENT_PREPARATION_REQUIRED') return false;
+  const details = error.details;
+  return !!details && typeof details === 'object' && !Array.isArray(details)
+    && 'component' in details && details.component === 'bun';
 }
 
 function validSnapshot(value: RuntimeToolSnapshot): boolean {
@@ -36,19 +37,12 @@ function validSnapshot(value: RuntimeToolSnapshot): boolean {
     && (value.phase !== 'error' || (typeof value.error?.message === 'string' && typeof value.error.retryable === 'boolean'));
 }
 
-/** Detaching stops this observer; the supplier retains other consumers. */
-export async function ensureManagedBun(
-  command: string,
-  options: { isCurrent: () => boolean; onProgress?: (snapshot: RuntimeToolSnapshot) => void }
-): Promise<boolean> {
-  if (!requiresManagedBun(command, true)) return options.isCurrent();
+/** Called only after the user explicitly chooses to download Bun. */
+export async function downloadBunRuntime(options: {
+  isCurrent: () => boolean;
+  onProgress?: (snapshot: RuntimeToolSnapshot) => void;
+}): Promise<boolean> {
   if (!options.isCurrent()) return false;
-  if (!requiresManagedBun(command)) {
-    // CLI aliases belong to the backend host, including remote WebUI hosts.
-    const info = await application.systemInfo.invoke();
-    if (!options.isCurrent()) return false;
-    if (info.platform !== 'win32') return true;
-  }
   let snapshot = await runtimeTools.prepare.invoke({ tool: 'bun' });
   let revision = -1;
   const deadline = performance.now() + 11 * 60_000;

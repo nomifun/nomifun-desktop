@@ -1133,11 +1133,16 @@ async fn relay_pairing_bootstrap(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
     server: tauri::State<'_, Arc<DesktopServer>>,
     pairing_envelope: String,
+    allow_runtime_download: Option<bool>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
         .clone()
-        .bootstrap(server.inner().clone(), &pairing_envelope)
+        .bootstrap(
+            server.inner().clone(),
+            &pairing_envelope,
+            allow_runtime_download.unwrap_or(false),
+        )
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -1147,11 +1152,12 @@ async fn relay_pairing_bootstrap(
 async fn relay_pairing_restart(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
     server: tauri::State<'_, Arc<DesktopServer>>,
+    allow_runtime_download: Option<bool>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
         .clone()
-        .restart(server.inner().clone())
+        .restart(server.inner().clone(), allow_runtime_download.unwrap_or(false))
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -2710,7 +2716,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             };
 
             if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
-                if startup.preparing() {
+                if startup.starting() {
                     desktop_startup::begin_quit(app);
                 }
             }
@@ -3158,37 +3164,6 @@ fn main() -> std::process::ExitCode {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
-                                let startup = setup_app_handle
-                                    .state::<Arc<desktop_startup::StartupState>>()
-                                    .inner()
-                                    .clone();
-                                // Fail closed if the host preparation controller itself
-                                // panics before the supplier returns its cleanup proof.
-                                mark_startup_cleanup_entered(&startup_cleanup_for_run);
-                                match desktop_startup::prepare_node(setup_app_handle.clone(), startup)
-                                    .await
-                                {
-                                    desktop_startup::PreparationOutcome::Prepared => {}
-                                    desktop_startup::PreparationOutcome::Cancelled => {
-                                        mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
-                                        supervisor_coordinator.mark_backend_not_started();
-                                        setup_app_handle.exit(supervisor_coordinator.final_exit_code());
-                                        return Ok(());
-                                    }
-                                    desktop_startup::PreparationOutcome::CleanupUnproven => {
-                                        // The supplier's exact child authority is retained by
-                                        // the existing cleanup relay/platform reaper. Reuse the
-                                        // unverified startup + bounded deferred-exit path; never
-                                        // call backend-not-started as component cleanup proof.
-                                        return Err(anyhow::anyhow!("managed startup component cleanup remains unverified"));
-                                    }
-                                }
-                                if supervisor_coordinator.has_pending_shutdown() {
-                                    mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
-                                    supervisor_coordinator.mark_backend_not_started();
-                                    setup_app_handle.exit(supervisor_coordinator.final_exit_code());
-                                    return Ok(());
-                                }
                                 let host_services=nomifun_app::DesktopHostServices {
                                     browser_resources,
                                     attached_chrome,
@@ -3200,6 +3175,14 @@ fn main() -> std::process::ExitCode {
                                     headless_browser_runtime::prepare(&mut host_services).await;
                                     host_services
                                 };
+                                if supervisor_coordinator.has_pending_shutdown() {
+                                    supervisor_coordinator.mark_backend_not_started();
+                                    setup_app_handle.exit(supervisor_coordinator.final_exit_code());
+                                    return Ok(());
+                                }
+                                // Backend startup can create owned resources before
+                                // returning the server or retained cleanup authority.
+                                mark_startup_cleanup_entered(&startup_cleanup_for_run);
                                 let (server, keep_alive) = match DesktopServer::start_with_outcome(
                                     &cli,
                                     &merged_path,
@@ -3417,7 +3400,6 @@ fn main() -> std::process::ExitCode {
         .manage(Arc::new(desktop_startup::StartupState::new()))
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
             desktop_startup::desktop_startup_status,
-            desktop_startup::desktop_startup_retry,
             desktop_startup::desktop_startup_quit,
             browser_surface::commands::browser_surface_attach,
             browser_surface::commands::browser_surface_update,

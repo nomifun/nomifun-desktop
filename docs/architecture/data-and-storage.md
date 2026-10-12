@@ -406,12 +406,16 @@ fetched markdown snapshots in a `snapshots/` subdirectory there).
 
 ## Managed execution components
 
-Release binaries contain OfficeCLI only. Node/Bun use fixed-version, hash-verified
-managed downloads and reuse prepared approved artifacts offline. `nomifun_runtime::init(&data_dir)` anchors its cache at
-`<data_dir>/runtime`; downloads, local extraction, and admission all use
-`resolve_tool`. Consumers read the verified path instead of guessing cache names. Consumers use returned
-absolute paths and capability admission; synchronous Bun discovery is cache-only
-and never impersonates Node or modifies system PATH. Process trees remain owned by
+Release binaries contain OfficeCLI only. Backend startup does not prepare or
+download Node/Bun. User commands prefer system Bun/`bunx`; a verified existing
+managed cache can be used as a fallback. Missing optional components are downloaded
+only after the user chooses to download them. `nomifun_runtime::init(&data_dir)`
+anchors managed cache at `<data_dir>/runtime`; ordinary resolution only admits
+available local artifacts and may extract embedded OfficeCLI. Consumers
+use verified absolute paths instead of guessing cache names. Ordinary discovery
+and diagnostics never start or wait for missing-tool downloads or modify system PATH. Current
+Agent/plugin execution has no managed Node consumer; App Hosting uses system or
+user-configured Node. Process trees remain owned by
 `nomi-process-runtime`.
 
 Uninitialized library consumers use the platform cache root through
@@ -482,7 +486,7 @@ non-loopback bind address.
 - **Companion data** — the bundle recursively includes
   `<data_dir>/companion/` (the install-wide memory database + per-companion
   profiles; see the [Companions guide](../guides/companions.md)).
-- **managed runtime cache** — disposable; will be re-extracted on next boot.
+- **managed runtime cache** — disposable; embedded artifacts are re-extracted when needed, and optional downloads require a user choice.
 
 Offline CLI commands are provided by `nomicore`:
 

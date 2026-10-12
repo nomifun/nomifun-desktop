@@ -269,7 +269,7 @@ impl EngineProcessScope {
             // Obvious input errors are rejected before the uncertain spawn
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
-            prepare_managed_program(&mut request, &self.cancellation).await?;
+            resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
             state.unregistered_start = true;
             let session = match self
                 .owner
@@ -475,29 +475,47 @@ fn rejected_terminal_control(id: &str, poll: &EngineProcessPoll, operation: Oper
     Ok(output)
 }
 
-/// Supply a literal product Bun executable before entering the uncertain user
-/// process-start window. Shell text and explicit user executable paths retain
-/// their existing semantics; one turn cancelling never cancels shared supply.
-async fn prepare_managed_program(
+/// Resolve system Bun or an existing verified download before entering the
+/// uncertain process-start window. Missing components require a user choice;
+/// an Agent execution request never starts their download.
+async fn resolve_managed_program(
     request: &mut EngineProcessRequest,
     cancellation: &CancellationToken,
+    workspace_root: &Path,
 ) -> Result<(), Wave2HostPortError> {
     if request.shell_script.is_some() || nomifun_runtime::managed_command_tool(&request.command).is_none() {
         return Ok(());
     }
+    if cancellation.is_cancelled() {
+        return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started"));
+    }
+    let env = request.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+    let cwd = workspace_root.join(request.cwd.as_deref().unwrap_or("."));
     let prepared = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started")),
-        result = nomifun_runtime::prepare_managed_command(&request.command, &request.args) => result.map_err(|cause|
-            Wave2HostPortError::new("COMPONENT_PREPARATION_FAILED", cause.to_string()))?,
+        _ = cancellation.cancelled() => return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started")),
+        result = nomifun_runtime::prepare_managed_command_with_env(&request.command, &request.args, &env, Some(&cwd)) => result.map_err(|cause| runtime_resolution_error(&cause))?,
     };
     if cancellation.is_cancelled() {
-        return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started"));
+        return Err(Wave2HostPortError::new("CANCELLED", "Process resolution cancelled before user code started"));
     }
-    let prepared = prepared.ok_or_else(|| error("Managed Bun preparation did not supply the requested executable"))?;
-    request.command = prepared.executable_path.to_str().ok_or_else(|| error("Managed Bun path cannot be represented by the process protocol"))?.to_owned();
+    let prepared = prepared.ok_or_else(|| runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared))?;
+    request.command = prepared.executable_path.to_str().ok_or_else(|| error("Bun path cannot be represented by the process protocol"))?.to_owned();
     request.args = prepared.args;
     request.validate().map_err(error)
+}
+
+fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> Wave2HostPortError {
+    match cause {
+        nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
+        nomifun_runtime::ToolError::NotPrepared | nomifun_runtime::ToolError::Unavailable { .. } => {
+            Wave2HostPortError::new(
+                "COMPONENT_PREPARATION_REQUIRED",
+                "Bun is unavailable. Install Bun on the system or choose to download it in NomiFun, then retry.",
+            )
+        }
+        cause => Wave2HostPortError::new("COMPONENT_UNAVAILABLE", cause.to_string()),
+    }
 }
 
 async fn reconcile_unregistered_start(
@@ -547,21 +565,56 @@ mod tests {
     async fn managed_program_preserves_shell_text_and_explicit_user_executables() {
         for mut request in [EngineProcessRequest::shell("bun test"), EngineProcessRequest::pipe("/user/tools/bun"), EngineProcessRequest::pipe("bun test")] {
             let original = request.clone();
-            prepare_managed_program(&mut request, &CancellationToken::new()).await.unwrap();
+            resolve_managed_program(&mut request, &CancellationToken::new(), Path::new(".")).await.unwrap();
             assert_eq!(request, original);
         }
     }
 
     #[tokio::test]
-    async fn managed_program_cancelled_before_supply_cannot_enter_user_start() {
+    async fn managed_program_cancelled_before_resolution_cannot_enter_user_start() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let mut request = EngineProcessRequest::pipe("bunx");
         request.args = vec!["tool-package".into()];
         let original = request.clone();
-        let failure = prepare_managed_program(&mut request, &cancellation).await.unwrap_err();
+        let failure = resolve_managed_program(&mut request, &cancellation, Path::new(".")).await.unwrap_err();
         assert_eq!(failure.code, "CANCELLED");
         assert_eq!(request, original);
+    }
+
+    #[test]
+    fn missing_runtime_is_a_user_choice_before_process_start() {
+        let failure = runtime_resolution_error(&nomifun_runtime::ToolError::NotPrepared);
+        assert_eq!(failure.code, "COMPONENT_PREPARATION_REQUIRED");
+        assert!(failure.message.contains("Install Bun"));
+        let shared = nomifun_runtime::ToolError::Shared(std::sync::Arc::new(nomifun_runtime::ToolError::NotPrepared));
+        assert_eq!(runtime_resolution_error(&shared).code, "COMPONENT_PREPARATION_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn managed_program_uses_child_path_relative_to_workspace_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let tools = root.path().join("tools");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let bun = tools.join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        std::fs::write(&bun, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut request = EngineProcessRequest::pipe("bun");
+        request.args = vec!["user-script.js".into()];
+        request.cwd = Some("child".into());
+        request.env.insert(if cfg!(windows) { "PaTh" } else { "PATH" }.into(), "../tools".into());
+        let original_env = request.env.clone();
+        resolve_managed_program(&mut request, &CancellationToken::new(), root.path()).await.unwrap();
+        assert_eq!(std::fs::canonicalize(&request.command).unwrap(), std::fs::canonicalize(bun).unwrap());
+        assert_eq!(request.args, vec!["user-script.js"]);
+        assert_eq!(request.cwd.as_deref(), Some("child"));
+        assert_eq!(request.env, original_env);
     }
 
     #[cfg(target_os = "macos")]

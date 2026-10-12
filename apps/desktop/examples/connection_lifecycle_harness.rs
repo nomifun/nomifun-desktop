@@ -69,13 +69,17 @@ async fn main() -> Result<()> {
             match method {
                 "boot" => Ok(json!({"backendUrl":format!("http://127.0.0.1:{}",server.loopback_port()),
                     "nativeTrust":server.local_trust_secret(),"relayPort":25811})),
-                "prepare_runtime" => Ok(json!({"runtimePath":manager.ensure_nfagent_installed().await?.display().to_string(),
+                // This explicit acceptance RPC authorizes the pinned download;
+                // automatic restore and ordinary actions remain local-only.
+                "prepare_runtime" => Ok(json!({"runtimePath":manager.download_nfagent().await?.display().to_string(),
                     "runtimeVersion":"0.1.0"})),
                 "bootstrap" => Ok(serde_json::to_value(manager.bootstrap(server.clone(),
-                    request.get("envelope").and_then(Value::as_str).context("bootstrap envelope is required")?).await?)?),
+                    request.get("envelope").and_then(Value::as_str).context("bootstrap envelope is required")?,
+                    request.get("allowRuntimeDownload").and_then(Value::as_bool).unwrap_or(false)).await?)?),
                 "status" => Ok(serde_json::to_value(manager.status(server.clone()).await?)?),
                 "pause" => Ok(serde_json::to_value(manager.stop(server.clone()).await?)?),
-                "restart" => Ok(serde_json::to_value(manager.restart(server.clone()).await?)?),
+                "restart" => Ok(serde_json::to_value(manager.restart(server.clone(),
+                    request.get("allowRuntimeDownload").and_then(Value::as_bool).unwrap_or(false)).await?)?),
                 "disconnect" => Ok(serde_json::to_value(manager.disconnect(server.clone()).await?)?),
                 "forget_local" => Ok(serde_json::to_value(manager.forget_local(server.clone()).await?)?),
                 "refresh_qr" => Ok(serde_json::to_value(manager.refresh_qr(server.clone()).await?)?),

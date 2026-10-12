@@ -140,9 +140,11 @@ nomicore doctor
 
 ### systemd 下的受管工具
 
-Release 二进制内嵌 OfficeCLI；Node 在后端启动前受管下载准备，Bun 按功能
-准备。已准备制品在配置的数据目录离线复用，使用已验证的绝对路径；服务账户不需要其他用户的 Bun 安装。以服务
-账户检查数据目录访问与实际组件：
+Release 二进制内嵌 OfficeCLI；后端启动无需准备或下载 Node/Bun。用户命令优先
+使用服务账户的系统 Bun／`bunx`，其次是有效的既有受管 Bun 缓存。两者都缺失时，
+终端或 MCP 操作提供由用户明确选择的下载入口。应用托管使用系统或用户指定的
+Node。受管制品在配置的数据目录离线复用，使用已验证的绝对路径。以服务账户
+检查数据目录访问与可用组件：
 
 使用从 `nomifun-app` 构建的可选 `nomicore` 诊断程序
 （`cargo build --release -p nomifun-app --bin nomicore`）。WebUI 宿主 CLI
@@ -152,9 +154,10 @@ Release 二进制内嵌 OfficeCLI；Node 在后端启动前受管下载准备，
 sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
 ```
 
-不带 `--verify` 的 `tool-doctor` 只输出供应清单；显式验证可能下载 Node/Bun、解压与运行私有
-探测，但不会打开数据库。首次准备应检查网络访问，之后检查缓存读写／执行
-权限。未内嵌 OfficeCLI 的 debug 构建需要它的显式、经验证的开发路径覆盖。
+不带 `--verify` 的 `tool-doctor` 只输出供应清单；显式验证检查本地可用制品，
+可能解压内嵌 OfficeCLI 与运行私有探测，但不会打开数据库或发起、等待 Node/Bun
+下载。请检查缓存读写／执行权限；缺失的可选组件保持不可用，直到用户选择安装。
+未内嵌 OfficeCLI 的 debug 构建需要它的显式、经验证的开发路径覆盖。
 详见[外部工具](../architecture/external-tools.zh.md)。
 
 ## Office 预览

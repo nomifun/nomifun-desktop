@@ -50,6 +50,7 @@ import {
   tauriRelayPairingRefreshQr,
   tauriRelayPairingStop,
   type TauriRelayPairingBootstrapRequest,
+  type TauriRelayPairingRestartRequest,
   type TauriRelayPairingStatus,
   tauriWindowClose,
   tauriWindowIsMaximized,
@@ -2693,8 +2694,8 @@ export const relayPairing = {
     () => tauriRelayPairingStop(),
     { state: 'disconnected' }
   ),
-  restart: shellProvider<IRelayPairingStatus, void>(
-    () => tauriRelayPairingRestart(),
+  restart: shellProvider<IRelayPairingStatus, TauriRelayPairingRestartRequest | void>(
+    (request) => tauriRelayPairingRestart(request),
     { state: 'disconnected' }
   ),
   disconnect: shellProvider<IRelayPairingStatus, void>(

@@ -306,10 +306,6 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
     setFrameError(null);
     setSubmitting(false);
     fileRef.current = null;
-    // Prewarm the matting model the moment the wizard opens, so it's cached by
-    // the time the user finishes picking an image (download runs on the main
-    // thread via the backend proxy; failure is non-fatal — matting degrades).
-    void ensureMattingModel().catch(() => {});
   }, [open, swapResult]);
 
   // Closing invalidates in-flight work and frees the worker (wasm memory).

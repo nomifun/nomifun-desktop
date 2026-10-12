@@ -184,7 +184,7 @@ Make sure the WebView runtime is installed (WebView2 on Windows 10 needs the Eve
 Another process is holding `127.0.0.1` ephemeral ports. The backend tries `pick_free_port()` and falls back to `8799` if that fails — quit any other NomiFun instance and try again.
 
 **Managed execution components are unavailable.**
-Released desktop bundles contain OfficeCLI. Before the backend starts, the startup window prepares genuine Node through a fixed-version, hash-verified download and reports stages, bytes, and retryable failures. Bun is prepared on feature use. Once prepared, unchanged components are reused offline. Check cache access/execute permissions and component diagnostics. Debug builds can embed OfficeCLI or use validated explicit development paths. See [External tools](../architecture/external-tools.md).
+Released desktop bundles contain OfficeCLI and start without preparing or downloading Node/Bun. Terminal and MCP actions prefer system Bun/`bunx`, then a valid existing managed Bun cache; when both are absent, the user chooses whether to download the approved component. Ordinary diagnostics and command discovery do not download tools. App Hosting uses system or user-configured Node and offers the official Node website for user installation. Check cache access/execute permissions when using managed components. Debug builds can embed OfficeCLI or use validated explicit development paths. See [External tools](../architecture/external-tools.md).
 
 ## See also
 

@@ -137,31 +137,15 @@
     "extracting": "正在准备 {{tool}}：解压中",
     "verifying": "正在准备 {{tool}}：验证中",
     "ready": "{{tool}} 已准备就绪",
-    "failed": "{{tool}} 准备失败"
+    "failed": "{{tool}} 准备失败",
+    "downloadTitle": "需要 {{tool}} 运行环境",
+    "downloadHint": "未在此主机找到可用的 {{tool}}。你可以自行安装后重试，或选择由 NomiFun 下载并继续。下载只会在你点击后开始。",
+    "downloadAction": "下载 {{tool}}"
   },
   "startup": {
-    "preparing": "正在准备应用环境…",
-    "downloading": "正在下载运行组件…",
-    "extracting": "正在解压运行组件…",
-    "verifying": "正在验证运行组件…",
     "starting": "正在启动 NomiFun…",
     "quitting": "正在退出 NomiFun…",
-    "failed": "应用环境准备失败",
-    "firstUseHint": "首次使用需要下载运行组件，后续启动将使用已验证的缓存。",
-    "downloadBytes": "已下载 {{received}} / {{total}}",
-    "receivedBytes": "已下载 {{received}}",
-    "failedHint": "请检查网络连接及应用数据目录的写入权限，然后重试。",
     "connectionFailed": "无法读取启动状态，请退出应用后重试。",
-    "quit": "退出",
-    "errors": {
-      "download": "运行组件下载失败，请检查网络连接后重试。",
-      "cache": "无法准备运行组件缓存，请检查磁盘空间和目录权限后重试。",
-      "asset": "下载的运行组件未通过完整性校验，请重新下载。",
-      "verification": "运行组件未通过身份或能力验证，请修复或更新应用。",
-      "changed": "已验证的运行组件发生变化，请修复后重新启动应用。",
-      "size": "运行组件超过下载大小限制，请更新应用后重试。",
-      "unavailable": "所需运行组件不可用，请重新准备。",
-      "cleanup": "尚未确认运行组件进程已停止，安全退出完成前无法重试。"
-    }
+    "quit": "退出"
   }
 }

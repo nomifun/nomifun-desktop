@@ -4,7 +4,8 @@ import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
-import { ensureManagedBun, formatRuntimePreparation } from '@/common/adapter/runtimeTools';
+import { downloadBunRuntime, formatRuntimePreparation, isBunDownloadRequired, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
+import { useRuntimeDownloadConfirmation } from '@/renderer/hooks/system/useRuntimeDownloadConfirmation';
 import { uuidv7 } from '@/common/utils/uuidv7';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
@@ -201,6 +202,7 @@ export const useMcpConnection = (
   onAuthResolved?: (server: IMcpServer) => void
 ) => {
   const { t } = useTranslation();
+  const requestRuntimeDownload = useRuntimeDownloadConfirmation();
   const [testingServers, setTestingServers] = useState<Record<string, boolean>>({});
   const active = useRef(true);
   const pendingTests = useRef(new Map<string, number>());
@@ -239,18 +241,32 @@ export const useMcpConnection = (
       let probeEntered = false;
       const preparationId = `mcp-runtime-${uuidv7()}`;
       try {
-        if (server.transport.type === 'stdio' && !await ensureManagedBun(server.transport.command, {
-          isCurrent: () => active.current,
-          onProgress: (snapshot) => {
-            if (notify && active.current) closePreparation = Message.loading({ id: preparationId,
-              content: `${server.name}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
-          },
-        })) return;
-        closePreparation?.();
-        closePreparation = undefined;
         if (!active.current) return;
         probeEntered = true;
-        const result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
+        let result: Awaited<ReturnType<typeof mcpService.testMcpConnection.invoke>>;
+        try {
+          result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
+        } catch (error) {
+          if (server.transport.type !== 'stdio' || !isBunDownloadRequired(error)) throw error;
+          // The owner resolves the server's own PATH before reporting a missing
+          // runtime. This preflight failure does not update its saved catalog.
+          probeEntered = false;
+          // Save/import can trigger silent probes. Only an explicit test offers
+          // a runtime download, and cancelling leaves the saved server intact.
+          if (!notify || !active.current || !await requestRuntimeDownload(() => active.current)) return;
+          if (!await downloadBunRuntime({
+            isCurrent: () => active.current,
+            onProgress: (snapshot: RuntimeToolSnapshot) => {
+              if (active.current) closePreparation = Message.loading({ id: preparationId,
+                content: `${server.name}: ${formatRuntimePreparation(snapshot, t)}`, duration: 0 });
+            },
+          })) return;
+          closePreparation?.();
+          closePreparation = undefined;
+          if (!active.current) return;
+          probeEntered = true;
+          result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
+        }
         if (!active.current) return;
         const needsAuth = result.needsAuth ?? result.needs_auth;
         const authMethod = result.authMethod ?? result.auth_method;
@@ -304,6 +320,9 @@ export const useMcpConnection = (
           }
         }
       } catch (error) {
+        if (isBackendHttpError(error) && getMcpErrorDetails(error.details).phase === 'runtime_resolution') {
+          probeEntered = false;
+        }
         if (!active.current) return;
         const errorMsg = truncateErrorMessage(formatThrownMcpErrorMessage(t, error));
         if (notify) {
@@ -330,7 +349,7 @@ export const useMcpConnection = (
         if (probeEntered) notifyMcpCatalogChanged();
       }
     },
-    [t, onAuthRequired, onAuthResolved]
+    [t, onAuthRequired, onAuthResolved, requestRuntimeDownload]
   );
 
   const handleTestMcpConnections = useCallback(

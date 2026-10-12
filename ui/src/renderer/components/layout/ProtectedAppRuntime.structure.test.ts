@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 const runtimeSource = readSource(new URL('./ProtectedAppRuntime.tsx', import.meta.url));
+const wizardSource = readSource(new URL('../../pages/nomi/CustomFigureWizard/index.tsx', import.meta.url));
 const routerSource = readSource(new URL('./Router.tsx', import.meta.url));
 const themeRuntimeSource = readSource(new URL('./AppThemeRuntime.tsx', import.meta.url));
 const workbenchLayoutSource = readSource(new URL('./Layout.tsx', import.meta.url));
@@ -26,6 +27,17 @@ const legacyFocusTopBarUrl = new URL(
 const legacyWorkshopPageUrl = new URL('../../pages/workshop/index.tsx', import.meta.url);
 
 describe('protected application runtime boundary', () => {
+  test('keeps optional cutout preparation outside startup waits and the wizard-open reset', () => {
+    expect(runtimeSource.includes('<MattingModelPrewarmMount />')).toBe(true);
+    expect(runtimeSource.indexOf('<MattingModelPrewarmMount />')).toBeGreaterThan(
+      runtimeSource.indexOf("if (status !== 'authenticated')")
+    );
+    expect(runtimeSource.includes('void ensureMattingModel().catch(() => {});')).toBe(true);
+    expect(wizardSource.includes("void runMatte(file, 'auto', tolerance);")).toBe(true);
+    expect(wizardSource.includes('void ensureMattingModel().catch(() => {});')).toBe(false);
+    expect(wizardSource.includes('downloadAndSmartMatte')).toBe(false);
+  });
+
   test('owns authentication and application-wide desktop effects without a visible layout', () => {
     expect(runtimeSource.includes('const ProtectedAppRuntime: React.FC = () =>')).toBe(true);
     expect(runtimeSource.includes('const { status } = useAuth();')).toBe(true);
