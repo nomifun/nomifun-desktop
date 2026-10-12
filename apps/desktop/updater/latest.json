@@ -1,7 +1,7 @@
 {
   "version": "0.8.5",
   "notes": "- Complete and edit official Agent presets: the six presets gain native\n  knowledge, session, terminal, and linked execution management; the\n  companion can select and apply Agent presets.\n- Repair the export path: canonical history is fully preserved and ZIP\n  archives publish atomically with cancellation, collision, and\n  file-identity protection; knowledge ZIP export validates destinations,\n  requires explicit overwrite confirmation, and unifies success/failure\n  feedback with copyable diagnostics.\n- Unify the relay and device connection entry and tighten pairing\n  authorization.\n- Migrate complete datasets when changing the data directory.\n- Make session switching seamless; render canonical turn file changes;\n  preserve composer input during turn completion.\n- Unify managed tools and Office artifact previews at runtime; refine the\n  template workspace and dark pill tabs.",
-  "pub_date": "2026-10-12T08:48:04.672Z",
+  "pub_date": "2026-10-12T09:51:18.560Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpEK2VZV1Y5OTl6K01NQ3h2TFVhSmx5Y0xOakUzYi8rRDdMTjFMSHFscWUraTdjWFpJdmg0RGNPSVN3NE1ZRHpLNzBEa1Y4THdxK1ZGWjkyekkwdndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzkwOTUzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjNPb2t3MklNUWdFTWlNSkQyc1VXenFKbnptUEFHZjFlWmZiQjVvWVdqTWJNY0gxcmd5ZEtLNXVLZ29pVkhOd0tYNFRoaGFabkNwb1pRZHNreXBKb0JBPT0K",
@@ -26,6 +26,10 @@
     "linux-x86_64-deb": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhpUFVXNkdzWkw0VHRTY1JEaFNaRlYzODU2TUVHT3BFTm5IVGlOb2xyZjNmQk16M0xoZkJRZHI5ekxFUHRQSkpWMldXSjZabHBpdW5KS29VdDZmVWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzk0ODgyCWZpbGU6Tm9taUZ1bl8wLjguNV9hbWQ2NC5kZWIKY28vUHpidXBodytxZDBxK1hnZFp1US93OTdwY1BkQnhHbXZXeGswMlFaMHA2dUtZYjRMNUtWYU16QVpEakQrUGNoMWhZdk95c2RtcFBsYWw3T2JGRHc9PQo=",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.5/NomiFun_0.8.5_amd64.deb"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNRbVoxanp4Q00wRHhVVGhGekZWNlBLNFVROHdKYnJRRERZNkM1VzFISTZVb3hsRHdKWVZWcUdnVDV5bmd4N01WUHMyZ3M5RUdKaVJkL3ZNVkhOTFFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzk4NDM5CWZpbGU6Tm9taUZ1bl8wLjguNV94NjQtc2V0dXAuZXhlCmNSZjF2RDh4QVRCRE82UHFJVmFOMlZ3eWFqOFFHSkh4cEVrYWphbC82bDlaL0MrOG5yZ2h6SDdJNXg2WWJ2U09oNkhyS0l4QkpUdG4wU2RvSnVYMkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.5/NomiFun_0.8.5_x64-setup.exe"
     }
   }
 }
