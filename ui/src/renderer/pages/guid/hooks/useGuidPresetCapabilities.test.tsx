@@ -9,7 +9,7 @@ import { configService } from '@/common/config/configService';
 import {
   asCapabilityId, asDigestHex, asPackageId, createEmptyAgentPresetDocument,
   type AgentPresetDocument, type AgentPresetEditorResponse, type AgentPresetLibraryResponse,
-  type AgentPresetSummary, type CapabilityCatalogItem, type OfficialPresetTemplate,
+  type AgentPresetSummary, type CapabilityModuleCatalogItem, type OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import { parseAgentPresetId } from '@/common/types/ids';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
@@ -27,12 +27,13 @@ const template: OfficialPresetTemplate = {
   immutable: true, forkable: true,
 };
 const capability = { id: asCapabilityId('platform.remote-review') };
-const catalog: CapabilityCatalogItem[] = [{
-  capability, kind: 'tool', display_name: 'Remote reviewer', description: '',
+const catalog: CapabilityModuleCatalogItem[] = [{
+  module: capability, summary_kind: 'tool', display_name: 'Remote reviewer', description: '',
   source_package: { id: asPackageId('platform'), version: '1.0.0' },
-  source_kind: 'bundled', materialization_state: 'materialized', supported_surfaces: ['conversation'],
-  required_runtime_features: ['tool_calls'], required_resource_kinds: ['customer'],
-  required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0,
+  authoring_policy: 'direct', supported_surfaces: ['desktop'],
+  actions: [{ action_id: 'platform.remote-review/read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'visible' }],
+  context_schema_refs: [], event_schema_refs: [], required_host_ports: [],
+  required_resource_kinds: ['customer'], required_modules: [], conflicting_modules: [],
 }];
 const summary = (revision?: number): AgentPresetSummary => ({
   preset_id: officialId, source: 'official', display_name: 'Assistant', bound_target_count: 0,
@@ -61,7 +62,7 @@ const extendedDocument = (): AgentPresetDocument => ({
 beforeEach(() => {
   configService.reset();
   setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000110');
-  spyOn(agentPlatform.capabilities, 'invoke').mockResolvedValue(catalog);
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: catalog, capabilities: [], skills: [], mcp_tools: [], roles: [] });
 });
 afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); configService.reset(); });
 
@@ -95,6 +96,30 @@ test('official selection reads its baseline draft without preparing or saving a 
   expect(getEditor).toHaveBeenCalledWith({ preset_id: officialId });
   expect(prepare).not.toHaveBeenCalled();
   expect(save).not.toHaveBeenCalled();
+});
+
+test('a saved general Agent keeps asset grants without showing canvas requirements', async () => {
+  const preset = summary(1);
+  const document: AgentPresetDocument = { ...createEmptyAgentPresetDocument(), enabled_capabilities: [{
+    capability: { id: asCapabilityId('creative.workshop') },
+    action_allowlist: ['creative.workshop/asset.read', 'creative.workshop/asset.write'],
+  }] };
+  spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(editor(preset, document));
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({
+    modules: [{ ...catalog[0], module: document.enabled_capabilities[0].capability,
+      required_resource_kinds: ['asset_library', 'canvas'],
+      actions: [...['read', 'write'].map(operation => ({
+        ...catalog[0].actions[0], action_id: `creative.workshop/asset.${operation}`,
+        required_resource_operations: { asset_library: [operation] },
+      })), { ...catalog[0].actions[0], action_id: 'creative.workshop/canvas.read',
+        required_resource_operations: { canvas: ['read'] },
+      }],
+    }], capabilities: [], skills: [], mcp_tools: [], roles: [],
+  });
+  const hook = mount(preset);
+  await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
+  expect(hook.result.current.capabilities.actionIds).toEqual(new Set(document.enabled_capabilities[0].action_allowlist));
+  expect(hook.result.current.capabilities.requiredResourceKinds).toEqual(new Set(['asset_library']));
 });
 
 test('saving extended official capabilities at the same ID refreshes resource and tool preflight before sending', async () => {

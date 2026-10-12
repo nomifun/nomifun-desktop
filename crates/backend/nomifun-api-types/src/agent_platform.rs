@@ -206,6 +206,10 @@ pub struct CapabilityModuleActionDto {
     pub output_schema: String,
     pub effect_class: String,
     pub presentation: String,
+    /// Exact Action resource requirements. Omission retains the Module gate;
+    /// an empty map explicitly declares that this Action needs no resources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_resource_operations: Option<BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// Catalog projection used by the Module/Action workbench. `summary_kind` is

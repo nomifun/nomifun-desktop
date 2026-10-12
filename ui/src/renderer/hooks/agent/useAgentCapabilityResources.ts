@@ -5,20 +5,35 @@
  */
 
 import type {
-  CapabilityRef,
-  CapabilityCatalogItem,
+  CapabilitySelection,
+  CapabilityModuleCatalogItem,
 } from '@/common/types/agentPlatform';
 
-const referenceKey = (reference: Pick<CapabilityRef, 'id'>): string => String(reference.id);
-
-export const requiredResourceKindsForCapabilityReferences = (
-  references: readonly Pick<CapabilityRef, 'id'>[],
-  catalog: readonly CapabilityCatalogItem[]
+export const requiredResourceKindsForCapabilitySelections = (
+  selections: readonly CapabilitySelection[],
+  catalog: readonly CapabilityModuleCatalogItem[]
 ): Set<string> => {
-  const selected = new Set(references.map(referenceKey));
-  return new Set(
-    catalog
-      .filter((item) => selected.has(referenceKey(item.capability)))
-      .flatMap((item) => item.required_resource_kinds)
-  );
+  const modules = new Map(catalog.map((module) => [String(module.module.id), module]));
+  const kinds = new Set<string>();
+  for (const selection of selections) {
+    const module = modules.get(String(selection.capability.id));
+    if (!module) continue;
+    const declaredActionKinds = new Set(module.actions.flatMap((action) =>
+      Object.keys(action.required_resource_operations ?? {})
+    ));
+    // Context and Event consumers still use the complete Module resource gate.
+    const keepModuleGate = module.context_schema_refs.length || module.event_schema_refs.length;
+    module.required_resource_kinds
+      .filter((kind) => keepModuleGate || !declaredActionKinds.has(kind))
+      .forEach((kind) => kinds.add(kind));
+    for (const actionId of selection.action_allowlist ?? []) {
+      const action = module.actions.find((candidate) => candidate.action_id === actionId);
+      const requirements = action?.required_resource_operations;
+      const actionKinds = requirements == null
+        ? module.required_resource_kinds
+        : Object.keys(requirements);
+      actionKinds.forEach((kind) => kinds.add(kind));
+    }
+  }
+  return kinds;
 };
