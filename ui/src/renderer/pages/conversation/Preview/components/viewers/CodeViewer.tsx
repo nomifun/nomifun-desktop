@@ -13,6 +13,26 @@ import { useTranslation } from 'react-i18next';
 import SyntaxHighlighter, { vs, vs2015 } from '@/renderer/components/Markdown/SyntaxHighlighter';
 import SelectionToolbar from '../renderers/SelectionToolbar';
 
+const codeContentStyle: React.CSSProperties = {
+  margin: 0,
+  padding: '6px 10px',
+  border: 'none',
+  borderRadius: 0,
+  boxShadow: 'none',
+  background: 'transparent',
+  color: 'var(--text-primary)',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+  fontSize: '12px',
+  lineHeight: '18px',
+  overflow: 'visible',
+};
+
+const codeLineNumberStyle: React.CSSProperties = {
+  color: 'var(--color-text-3)',
+  fontStyle: 'normal',
+  paddingRight: '16px',
+};
+
 interface CodePreviewProps {
   content: string; // 代码内容 / Code content
   language?: string; // 编程语言 / Programming language
@@ -134,7 +154,7 @@ const CodePreview: React.FC<CodePreviewProps> = ({
   };
 
   return (
-    <div className='flex flex-col w-full h-full overflow-hidden'>
+    <div className='flex flex-col w-full h-full min-h-0 min-w-0 overflow-hidden'>
       {/* 工具栏：原文/预览切换 + 下载按钮 / Toolbar: Source/Preview toggle + Download button */}
       {!hideToolbar && (
         <div className='flex items-center justify-between h-40px px-12px bg-2 flex-shrink-0'>
@@ -183,7 +203,7 @@ const CodePreview: React.FC<CodePreviewProps> = ({
       )}
 
       {/* 内容区域 / Content area */}
-      <div ref={containerRef} className='flex-1 overflow-auto p-16px'>
+      <div ref={containerRef} className='flex-1 min-h-0 min-w-0 overflow-auto'>
         {isRenderedTruncated && (
           <div className='mb-12px px-10px py-8px rd-6px bg-2 text-12px text-t-secondary'>
             {t('preview.largeTextTruncatedHint', { count: renderedContent.length })}
@@ -192,21 +212,24 @@ const CodePreview: React.FC<CodePreviewProps> = ({
         {viewMode === 'source' || isLargeContent ? (
           // 原文模式或大文本：显示纯文本，避免高亮器阻塞
           // Source mode or large text: render plain text to avoid highlighter blocking
-          <pre className='w-full m-0 p-12px bg-2 rd-8px overflow-auto font-mono text-12px text-t-primary whitespace-pre-wrap break-words'>
+          <pre className='w-full whitespace-pre-wrap break-words' style={codeContentStyle}>
             {displayedContent}
           </pre>
         ) : (
           // 预览模式：语法高亮 / Preview mode: Syntax highlighting
           <SyntaxHighlighter
-            style={currentTheme === 'dark' ? vs2015 : vs}
+            style={{ ...(currentTheme === 'dark' ? vs2015 : vs), linenumber: codeLineNumberStyle }}
             language={language}
             PreTag='div'
+            showLineNumbers
+            lineNumberStyle={codeLineNumberStyle}
             wrapLongLines={language === 'text' || language === 'txt'}
             customStyle={
               language === 'text' || language === 'txt'
-                ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
-                : undefined
+                ? { ...codeContentStyle, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+                : codeContentStyle
             }
+            codeTagProps={{ style: { fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', color: 'inherit' } }}
           >
             {displayedContent}
           </SyntaxHighlighter>
