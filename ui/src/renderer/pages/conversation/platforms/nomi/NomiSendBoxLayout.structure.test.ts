@@ -72,7 +72,7 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('keeps collaboration configuration on Guid and omits the redundant conversation composer trigger', () => {
+  test('shares the same editable collaboration control on the new and active conversation rails', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
@@ -90,10 +90,12 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('collaborationControlNode')).toBe(false);
     expect(nomiChatSource.includes('collaboratorSelectorNode')).toBe(false);
     expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(nomiChatSource.includes('collaborationEnabled={collaborationEnabled}')).toBe(true);
+    expect(sendBoxSource.includes('{composerCollaborationEnabled && <CollaborationComposerControl')).toBe(true);
     expect(sendBoxSource.includes('sideTools={compactProductComposer || hideSessionCapabilities ? undefined : <SessionCapabilityPicker')).toBe(true);
   });
 
-  test('does not load frozen collaboration configuration solely for the conversation composer', () => {
+  test('collaboration edits remain unsent drafts and do not mutate Session metadata or frozen plans', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
 
     expect(chatSource.includes('agentExecutionTemplate.get')).toBe(false);
@@ -101,6 +103,10 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('reconcileModelRefs')).toBe(false);
     expect(chatSource.includes('buildConversationModelPool')).toBe(false);
     expect(chatSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    expect(sendBoxSource.includes('useCollaborationDraft(current_model, collaborationDraftScope(conversation_id))')).toBe(true);
+    expect(sendBoxSource.includes('startCollaboration(conversation_id')).toBe(true);
+    expect(sendBoxSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
   });
 
   test('supports embedding the policy panel behind the unified collaboration trigger', () => {

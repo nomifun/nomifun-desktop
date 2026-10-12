@@ -26,6 +26,7 @@ import type { AppliedCollaborationTemplate } from '@/renderer/components/collabo
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { SessionComposerToolsContext } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import railStyles from '@/renderer/components/chat/SessionCapabilityPicker/styles.module.css';
+import panelStyles from '@/renderer/components/collaboration/CollaborationComposerControl.module.css';
 
 export type GuidAppliedCollaborationTemplate = AppliedCollaborationTemplate;
 
@@ -48,9 +49,10 @@ export interface GuidCollaboratorSelectorProps {
   triggerLabel?: string;
   /** Highlights a unified trigger when collaboration is enabled. */
   triggerActive?: boolean;
-  /** Existing AgentSessions expose their frozen collaboration facts read-only. */
+  /** Temporarily lock edits while allowing the user to inspect the panel. */
   disabled?: boolean;
   disabledReason?: string;
+  applyNote?: string;
 }
 
 /** Case-insensitive substring match against an option's text label. */
@@ -76,6 +78,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   triggerActive = false,
   disabled = false,
   disabledReason,
+  applyNote,
 }) => {
   const { t } = useTranslation();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
@@ -84,13 +87,6 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const open = rail ? rail.openTool === 'collaboration' : localOpen;
   const setOpen = (visible: boolean) => {
-    if (disabled) {
-      if (!visible && rail) {
-        rail.setOpenTool((current) => current === 'collaboration' ? undefined : current);
-      }
-      else if (!visible) setLocalOpen(false);
-      return;
-    }
     if (rail) {
       rail.setOpenTool((current) => visible ? 'collaboration' : current === 'collaboration' ? undefined : current);
     } else {
@@ -116,6 +112,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
 
   const handleChange = useCallback(
     (v: unknown) => {
+      if (disabled) return;
       // Strip the pinned 主模型 — it is implicit (owned by the 主模型 picker) and is
       // never persisted as a collaborator. Re-pinned on the next render via
       // `encodedValue`, so it can't be removed from the pool here.
@@ -126,7 +123,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
       );
       onChange(keys.map(decodePair));
     },
-    [onChange, mainKey],
+    [onChange, mainKey, disabled],
   );
 
   const label = selectedTemplate
@@ -136,13 +133,13 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
       : t('guid.collaboration.models.label');
 
   const panel = (
-    <div className={ocStyles.composerPopover}>
-      <div className='flex flex-col gap-10px'>
-        <div className='flex items-center gap-8px'>
-          <Branch theme='outline' size='14' fill='rgb(var(--primary-6))' className='shrink-0' />
-          <span className={ocStyles.composerPopoverTitle}>{t('guid.collaboration.models.title')}</span>
+    <div className={panelStyles.panel} role='dialog' aria-label={triggerLabel ?? t('guid.collaboration.models.title')} data-testid='collaboration-composer-panel'>
+        <div className={panelStyles.header}>
+          <span className={panelStyles.title}>{triggerLabel ?? t('guid.collaboration.models.title')}</span>
+          <span className={panelStyles.hint}>{applyNote}</span>
         </div>
-
+        <div className={panelStyles.section}>
+        <span className={panelStyles.sectionTitle}>{t('guid.collaboration.models.title')}</span>
         {!hasModels ? (
           <div className='text-12px leading-18px text-warning-6'>
             {t('agentExecution.editor.noModels', {
@@ -153,6 +150,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
           <>
             <NomiSelect
               mode='multiple'
+              size='small'
               value={encodedValue}
               onChange={handleChange}
               disabled={disabled || Boolean(selectedTemplate)}
@@ -190,7 +188,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
                 );
               })}
             </NomiSelect>
-            <div className={ocStyles.composerHint}>
+            <div className={panelStyles.hint}>
               {selectedTemplate
                 ? t('collaboration.template.activeHint', {
                     defaultValue: '将完整使用方案中的 {{count}} 位协作者；不会截断成当前模型选择。',
@@ -204,6 +202,8 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
             </div>
           </>
         )}
+        </div>
+        {panelFooter}
         <GuidCollaborationTemplatePicker
           visible={open}
           selectedTemplateId={selectedTemplate?.execution_template_id ?? null}
@@ -212,9 +212,9 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
           workDir={workDir}
           onApply={onTemplateApply}
           onClear={onTemplateClear}
+          disabled={disabled}
         />
-        {panelFooter}
-      </div>
+        {disabledReason && <p className={`${panelStyles.hint} ${panelStyles.note}`} role='status'>{disabledReason}</p>}
     </div>
   );
 
@@ -239,7 +239,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
           ref={triggerRef}
           type='button'
           className={classNames(railStyles.railButton, open && railStyles.active)}
-          disabled={isLoading || disabled}
+          disabled={isLoading}
           aria-label={disabledReason ? `${visibleLabel}: ${disabledReason}` : visibleLabel}
           title={disabledReason ?? visibleLabel}
           data-readonly={disabled ? 'true' : undefined}
@@ -266,7 +266,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
         )}
         shape='round'
         size='small'
-        disabled={isLoading || disabled}
+        disabled={isLoading}
         data-testid='guid-collaborator-selector'
         aria-label={disabledReason ? `${visibleLabel}: ${disabledReason}` : visibleLabel}
         title={disabledReason ?? visibleLabel}

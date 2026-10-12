@@ -50,6 +50,7 @@ const NomiChat: React.FC<{
   creationTasksEnabled?: boolean;
   /** Product-owned chat surfaces can explicitly suppress media creation scenes. */
   creationEnabled?: boolean;
+  collaborationEnabled?: boolean;
   /** Product-owned compact composer; configuration is exposed outside chat. */
   compactProductComposer?: boolean;
   hideSessionCapabilities?: boolean;
@@ -77,6 +78,7 @@ const NomiChat: React.FC<{
   extraRightTools,
   creationTasksEnabled = false,
   creationEnabled = true,
+  collaborationEnabled = false,
   compactProductComposer = false,
   hideSessionCapabilities = false,
   submissionDisabled = false,
@@ -179,6 +181,7 @@ const NomiChat: React.FC<{
               onReasoningEffortChange={onReasoningEffortChange}
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}
+              collaborationEnabled={collaborationEnabled}
               compactProductComposer={compactProductComposer}
               hideSessionCapabilities={hideSessionCapabilities}
               submissionDisabled={submissionDisabled}

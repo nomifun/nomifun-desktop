@@ -10,6 +10,10 @@
     "open": "Collaboration policy",
     "button": "Collaboration"
   },
+  "session": {
+    "editAfterTurn": "Edit the collaboration setup after this turn finishes.",
+    "busy": "This conversation or collaboration is still active. Finish the current work before sending a new collaboration request."
+  },
   "template": {
     "title": "Collaboration plans",
     "empty": "No saved plans",

@@ -1,5 +1,5 @@
 import type { TProviderWithModel } from '@/common/config/storage';
-import type { GuidCollaborationConfig } from '@/renderer/pages/guid/hooks/useGuidCollaboration';
+import type { CollaborationConfig } from '@/renderer/components/collaboration/useCollaborationDraft';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Message } from '@arco-design/web-react';
@@ -25,7 +25,7 @@ type GuidCreationCapabilityRequirements = {
   ready: boolean;
 };
 
-export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }, capabilityRequirements?: GuidCreationCapabilityRequirements, enabled = true) {
+export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: CollaborationConfig; model?: TProviderWithModel; ready: boolean }, capabilityRequirements?: GuidCreationCapabilityRequirements, enabled = true) {
   const { t } = useTranslation();
   // Generation admission is fully frozen by the Creative Studio Agent and its
   // asset-library resource. Workspace/collaboration drafts belong to chat

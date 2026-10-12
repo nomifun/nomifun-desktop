@@ -35,7 +35,8 @@ import type {
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
-import type { GuidCollaborationConfig } from './useGuidCollaboration';
+import type { CollaborationConfig } from '@/renderer/components/collaboration/useCollaborationDraft';
+import { shouldStartCollaboration, startCollaboration } from '@/renderer/components/collaboration/collaborationSubmission';
 import {
   WorkspaceDirectoryUnavailableError,
   validateExistingWorkspaceDirectory,
@@ -67,7 +68,8 @@ export type GuidSendDeps = {
   /** Session-scoped behavior for the exact selected Knowledge resources. */
   knowledgePolicy?: NonNullable<CreateAgentSessionRequest['knowledge_policy']>;
   sessionCapabilities?: CreateAgentSessionRequest['session_capabilities'];
-  collaboration?: GuidCollaborationConfig;
+  collaboration?: CollaborationConfig;
+  preserveCollaborationDraft?: (conversationId: ConversationId) => void;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -89,57 +91,6 @@ export type GuidSendResult = {
   handleSend: () => Promise<void>;
   sendMessageHandler: () => void;
   isButtonDisabled: boolean;
-};
-
-/**
- * A collaboration draft owns the first piece of work when it selects more than
- * one model, a saved collaboration plan, or an explicit non-default policy. A
- * single-model automatic policy is the ordinary chat default: it grants later
- * delegation but must not invent an AgentExecution before the lead Agent has
- * handled the user's message.
- */
-export const shouldStartGuidCollaboration = (
-  collaboration: GuidCollaborationConfig | undefined
-): collaboration is GuidCollaborationConfig =>
-  Boolean(
-    collaboration &&
-      (collaboration.execution_model_pool.mode === 'range' ||
-        collaboration.execution_template_id !== null ||
-        collaboration.delegation_policy !== 'automatic' ||
-        collaboration.decision_policy !== 'automatic')
-  );
-
-const startGuidCollaboration = async (
-  conversationId: ConversationId,
-  goal: string,
-  workspace: string,
-  model: TProviderWithModel,
-  collaboration: GuidCollaborationConfig
-): Promise<void> => {
-  const shared = {
-    goal: goal.trim(),
-    ...(workspace.trim() ? { work_dir: workspace.trim() } : {}),
-    delegation_policy: collaboration.delegation_policy,
-    decision_policy: collaboration.decision_policy,
-    lead_conversation_id: conversationId,
-    lead_model: {
-      provider_id: model.id,
-      model: model.use_model,
-    },
-  };
-
-  if (collaboration.execution_template_id !== null) {
-    await ipcBridge.agentExecutionTemplate.createExecution.invoke({
-      execution_template_id: collaboration.execution_template_id,
-      request: shared,
-    });
-    return;
-  }
-
-  await ipcBridge.agentExecution.create.invoke({
-    ...shared,
-    model_pool: collaboration.execution_model_pool,
-  });
 };
 
 const discardFailedGuidSession = async (conversationId: ConversationId): Promise<void> => {
@@ -173,6 +124,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     collaboration,
+    preserveCollaborationDraft,
     dir,
     workspaceEnabled,
     resourceResolutionReady,
@@ -197,7 +149,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
     const startsCollaboration =
-      !entryPlan.autoWorkEntry && shouldStartGuidCollaboration(collaboration);
+      !entryPlan.autoWorkEntry && shouldStartCollaboration(collaboration);
     if (startsCollaboration && files.length > 0) {
       throw new Error(t('guid.collaboration.attachmentsUnsupported'));
     }
@@ -265,7 +217,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
       if (startsCollaboration) {
         try {
-          await startGuidCollaboration(
+          await startCollaboration(
             conversationId,
             input,
             conversation.extra?.workspace ?? canonicalWorkspace,
@@ -312,6 +264,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     // mounted transcript owns preparation and the first canonical Turn.
     await Promise.all([seedConversationCache(conversation), ...(onConversationCreated ? [] : [loadConversationRoute()])]);
     if (initialMessage) beginInitialMessage?.(initialMessage);
+    if (collaboration) preserveCollaborationDraft?.(conversationId);
     try {
       if (onConversationCreated) onConversationCreated(conversation);
       else await navigate(`/conversation/${conversationId}`);
@@ -327,6 +280,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     current_model,
     reasoningEffort,
     collaboration,
+    preserveCollaborationDraft,
     dir,
     files,
     input,

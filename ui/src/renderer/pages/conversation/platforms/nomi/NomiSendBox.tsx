@@ -48,7 +48,7 @@ import {
   shouldReleaseStopInteraction,
   useConversationStopAttemptGuard,
 } from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
-import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
+import { getConversationOrNull, refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { conversationRequestError, hasCanonicalRequestError, type ConversationRequestFailure } from '@/renderer/pages/conversation/utils/conversationRequestError';
 import ConversationErrorNote from '../../Messages/components/ConversationErrorNote';
 import { warmupConversationForPassiveMount } from '@/renderer/pages/conversation/utils/warmupConversation';
@@ -78,6 +78,11 @@ import { mutate as mutateSWR } from 'swr';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { useConversationTaskPlan } from './useConversationTaskPlan';
 import { useInitialMessage } from '../../components/ConversationShell/InitialMessageContext';
+import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
+import { collaborationDraftScope, useCollaborationDraft } from '@/renderer/components/collaboration/useCollaborationDraft';
+import { shouldStartCollaboration, startCollaboration } from '@/renderer/components/collaboration/collaborationSubmission';
+import { useExecutionSafe } from '../../execution/ExecutionContext';
+import { isTerminalExecutionStatus } from '../../execution/executionStatusMeta';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -140,6 +145,7 @@ const NomiSendBox: React.FC<{
   extraRightTools?: React.ReactNode;
   /** False for product surfaces that currently support chat only. */
   creationEnabled?: boolean;
+  collaborationEnabled?: boolean;
   /** Hide work-session configuration chrome on a dedicated product surface. */
   compactProductComposer?: boolean;
   hideSessionCapabilities?: boolean;
@@ -159,14 +165,18 @@ const NomiSendBox: React.FC<{
   onReasoningEffortChange,
   extraRightTools,
   creationEnabled = true,
+  collaborationEnabled = false,
   compactProductComposer = false,
   hideSessionCapabilities = false,
   submissionDisabled = false,
   onBeforeSubmit,
 }) => {
+  const composerCollaborationEnabled = collaborationEnabled && !compactProductComposer && !hideSessionCapabilities;
   const submissionDisabledRef = useLatestRef(submissionDisabled);
   const preparingSubmissionRef = useRef(false);
   const [preparingSubmission, setPreparingSubmission] = useState(false);
+  const [collaborationSubmitting, setCollaborationSubmitting] = useState(false);
+  const collaborationSubmittingRef = useRef(false);
   const [workspacePath, setWorkspacePath] = useState('');
   const capabilityCatalog = useSessionCapabilityCatalog();
   const sessionCapabilities = useSessionCapabilitySelection(conversation_id);
@@ -181,6 +191,13 @@ const NomiSendBox: React.FC<{
   }, [onBeforeSubmit, t]);
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
+  const collaboration = useCollaborationDraft(current_model, collaborationDraftScope(conversation_id));
+  const executionContext = useExecutionSafe();
+  const sessionExecution = executionContext?.conversationId === conversation_id ? executionContext : null;
+  const executionBusy = Boolean(sessionExecution?.executionId && (
+    sessionExecution.detail?.execution.execution_id !== sessionExecution.executionId
+    || !isTerminalExecutionStatus(sessionExecution.detail?.execution.status)
+  ));
   const [defaultVisionModel] = useConfig('models.default.vision');
 
   const {
@@ -528,7 +545,7 @@ const NomiSendBox: React.FC<{
   } = useConversationCommandQueue({
     conversation_id: conversation_id,
     enabled: true,
-    isBusy: isBusy || preparingSubmission || pauseNotice !== null || submissionDisabled,
+    isBusy: isBusy || preparingSubmission || collaborationSubmitting || pauseNotice !== null || submissionDisabled,
     isHydrated: hasHydratedRunningState,
     onExecute: executeCommand,
   });
@@ -620,8 +637,10 @@ const NomiSendBox: React.FC<{
     return () => { cancelled = true; };
   }, [submissionDisabled, submissionDisabledRef, conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, initialDeliveryRetry, sessionCapabilities.loading, sessionCapabilities.state, setContent, requestConversationIdRef, endInitialMessage]);
 
+  const collaborationCanSubmit = useLatestRef(Boolean(composerCollaborationEnabled
+    && !isBusy && !pauseNotice && !initialSubmissionPending && !modelSelectionDisabled && !executionBusy && !hasPendingCommands));
   const onSendHandler = async (message: string) => {
-    if (submissionDisabledRef.current || preparingSubmissionRef.current) throw new Error(t('common.processing'));
+    if (submissionDisabledRef.current || preparingSubmissionRef.current || collaborationSubmittingRef.current) throw new Error(t('common.processing'));
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
     if (creation?.draft.mode) {
       if (creationSubmittingRef.current) throw new Error('任务正在提交');
@@ -651,6 +670,41 @@ const NomiSendBox: React.FC<{
         reportRequestFailure(error, 'CONVERSATION_CREATION_FAILED');
         throw error;
       } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
+      return;
+    }
+    const collaborationConfig = composerCollaborationEnabled ? collaboration.config : undefined;
+    if (collaborationConfig && !collaboration.ready) throw new Error(t('common.processing'));
+    if (shouldStartCollaboration(collaborationConfig)) {
+      if (filesToSend.length > 0) {
+        const message = t('guid.collaboration.attachmentsUnsupported');
+        Message.warning(message);
+        throw new Error(message);
+      }
+      if (!current_model || !collaborationCanSubmit.current) {
+        const message = t('collaboration.session.busy');
+        Message.warning(message);
+        throw new Error(message);
+      }
+      collaborationSubmittingRef.current = true;
+      setCollaborationSubmitting(true);
+      setRequestFailure(null);
+      try {
+        await prepareIdleSubmission();
+        await sessionCapabilities.applyBeforeSend();
+        if (!mountedRef.current || requestConversationIdRef.current !== conversation_id || submissionDisabledRef.current
+          || !collaborationCanSubmit.current) throw new Error(t('collaboration.session.busy'));
+        await startCollaboration(conversation_id, message, workspacePath, current_model, collaborationConfig);
+        // The POST receipt owns success. Refresh failure must never invite a
+        // second admission or fall through to an ordinary chat Turn.
+        void refreshConversationCache(conversation_id).catch(error => console.error('[NomiSendBox] Collaboration link refresh failed:', error));
+        emitter.emit('chat.history.refresh');
+      } catch (error) {
+        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED');
+        throw error;
+      } finally {
+        collaborationSubmittingRef.current = false;
+        setCollaborationSubmitting(false);
+      }
       return;
     }
     if (!canSendFiles(filesToSend)) return;
@@ -970,7 +1024,23 @@ const NomiSendBox: React.FC<{
           onRetry={() => { capabilityCatalog.retry(); sessionCapabilities.retry(); }}
           disabled={initialSubmissionPending || isBusy || Boolean(pauseNotice) || modelSelectionDisabled || sessionCapabilities.saving || sessionCapabilities.state?.editable !== true}
           applyMode='next-send'
-        />}
+        >
+          {composerCollaborationEnabled && <CollaborationComposerControl
+            value={collaboration.activeCollaborators}
+            onChange={collaboration.setCollaborators}
+            mainModel={collaboration.mainModel}
+            selectedTemplate={collaboration.selectedTemplate}
+            workDir={workspacePath}
+            onTemplateApply={collaboration.setTemplate}
+            onTemplateClear={() => collaboration.setTemplate(null)}
+            policy={collaboration.policy}
+            onPolicyChange={collaboration.setPolicy}
+            disabled={initialSubmissionPending || isBusy || Boolean(pauseNotice) || modelSelectionDisabled || collaborationSubmitting}
+            disabledReason={initialSubmissionPending || isBusy || Boolean(pauseNotice) || modelSelectionDisabled || collaborationSubmitting
+              ? t('collaboration.session.editAfterTurn') : undefined}
+            applyNote={t('conversation.capabilityPicker.nextSendApplyNote')}
+          />}
+        </SessionCapabilityPicker>}
         prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
         taskPlan={taskPlan}
@@ -982,8 +1052,8 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
-        disabled={submissionDisabled || preparingSubmission || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
-        submitDisabled={!isCreating && sessionCapabilities.loading}
+        disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
+        submitDisabled={!isCreating && (sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={

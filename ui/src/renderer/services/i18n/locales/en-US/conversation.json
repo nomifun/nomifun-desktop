@@ -761,7 +761,6 @@
     "apiErrorNoCli": "API error occurred. No CLI agent available for fallback.",
     "apiErrorSwitchFailed": "Failed to create fallback conversation.",
     "apiErrorSwitched": "API error, auto-switched to {{cli}} CLI",
-    "frozenSessionConfigHint": "Collaboration stays frozen for this conversation. Use the Agent selector to switch the Agent from the next turn.",
     "frozenAgentUnavailable": "This conversation no longer has a valid frozen Agent binding. Start a new conversation.",
     "agentSwitch": {
       "loading": "Switching Agent…",
