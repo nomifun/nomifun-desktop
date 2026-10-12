@@ -18,6 +18,7 @@ type CollaborationPolicyControlProps = CollaborationPolicyValue & {
    * combine models and policy behind one trigger. */
   embedded?: boolean;
   className?: string;
+  disabled?: boolean;
 };
 
 const DELEGATION_OPTIONS: TDelegationPolicy[] = ['disabled', 'automatic', 'prefer_parallel'];
@@ -30,6 +31,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
   compact = false,
   embedded = false,
   className,
+  disabled = false,
 }) => {
   const { t } = useTranslation();
   const titleId = React.useId();
@@ -62,6 +64,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
                 className={`${styles.segmentedOption} ${active ? styles.segmentedOptionActive : ''}`}
                 role='radio'
                 aria-checked={active}
+                disabled={disabled}
                 onClick={() =>
                   void onChange({
                     delegationPolicy: option,
@@ -84,7 +87,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
           size='small'
           className={styles.decisionSwitch}
           checked={decisionPolicy === 'ask_user'}
-          disabled={delegationPolicy === 'disabled'}
+          disabled={disabled || delegationPolicy === 'disabled'}
           aria-label={askUserLabel}
           onChange={(checked) =>
             void onChange({

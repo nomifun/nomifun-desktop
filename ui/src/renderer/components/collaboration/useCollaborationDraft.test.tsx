@@ -1,12 +1,12 @@
-import '../../../../../test/setup-dom.ts';
+import '../../../../test/setup-dom.ts';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { uuidv7 } from '@/common/utils';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
-import { parseProviderId, parseExecutionTemplateId } from '@/common/types/ids';
+import { parseConversationId, parseProviderId, parseExecutionTemplateId } from '@/common/types/ids';
 import type { TProviderWithModel } from '@/common/config/storage';
 import * as catalog from '@/renderer/pages/conversation/execution/useExecutionModelPool';
-import { useGuidCollaboration } from './useGuidCollaboration';
+import { collaborationDraftScope, useCollaborationDraft } from './useCollaborationDraft';
 
 const provider = parseProviderId('0190f5fe-7c00-7a00-8000-000000000105');
 const main = { provider_id: provider, model: 'main' };
@@ -28,7 +28,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); spy.mockRestore(); sessionStorage.clear(); });
 
 test('pins the lead once, retains collaboration settings across navigation and resets an explicit new draft', () => {
-  const hook = renderHook(() => useGuidCollaboration(model));
+  const hook = renderHook(() => useCollaborationDraft(model));
   act(() => {
     hook.result.current.setCollaborators([main, helper, helper]);
     hook.result.current.setPolicy({ delegationPolicy: 'prefer_parallel', decisionPolicy: 'ask_user' });
@@ -36,7 +36,7 @@ test('pins the lead once, retains collaboration settings across navigation and r
   });
   expect(hook.result.current.config).toEqual({ execution_model_pool: { mode: 'range', models: [main, helper] }, execution_template_id: templateId, delegation_policy: 'prefer_parallel', decision_policy: 'ask_user' });
   hook.unmount();
-  const restored = renderHook(() => useGuidCollaboration(model));
+  const restored = renderHook(() => useCollaborationDraft(model));
   expect(restored.result.current.activeCollaborators).toEqual([helper]);
   expect(restored.result.current.policy.delegationPolicy).toBe('prefer_parallel');
   act(() => restored.result.current.reset());
@@ -44,7 +44,7 @@ test('pins the lead once, retains collaboration settings across navigation and r
 });
 
 test('loading never deletes selections; disabled models can return, removed models cannot', () => {
-  const hook = renderHook(() => useGuidCollaboration(model));
+  const hook = renderHook(() => useCollaborationDraft(model));
   act(() => hook.result.current.setCollaborators([helper]));
   loading = true; available = []; configured = [];
   hook.rerender();
@@ -60,10 +60,44 @@ test('loading never deletes selections; disabled models can return, removed mode
 });
 
 test('changing the lead clears an incompatible collaboration plan', () => {
-  const hook = renderHook(({ current }) => useGuidCollaboration(current), { initialProps: { current: model } });
+  const hook = renderHook(({ current }) => useCollaborationDraft(current), { initialProps: { current: model } });
   act(() => hook.result.current.setTemplate({ execution_template_id: templateId, name: '审阅', participantCount: 1, models: [main] }));
   hook.rerender({ current: { ...model, use_model: 'helper' } });
   expect(hook.result.current.selectedTemplate).toBeNull();
   expect(hook.result.current.config?.execution_template_id).toBeNull();
   expect(hook.result.current.config?.execution_model_pool).toEqual({ mode: 'single', model: helper });
+});
+
+test('launch carries the editable models, policies and plan into this conversation only', () => {
+  const sessionId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000107');
+  const otherId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000108');
+  const welcome = renderHook(() => useCollaborationDraft(model));
+  act(() => {
+    welcome.result.current.setCollaborators([helper]);
+    welcome.result.current.setPolicy({ delegationPolicy: 'prefer_parallel', decisionPolicy: 'ask_user' });
+    welcome.result.current.setTemplate({ execution_template_id: templateId, name: 'Review', participantCount: 2, models: [main, helper] });
+  });
+  act(() => welcome.result.current.copyToConversation(sessionId));
+  const session = renderHook(() => useCollaborationDraft(model, collaborationDraftScope(sessionId)));
+  expect(session.result.current.config).toEqual(welcome.result.current.config);
+  act(() => session.result.current.setPolicy({ delegationPolicy: 'disabled', decisionPolicy: 'automatic' }));
+  expect(welcome.result.current.policy.delegationPolicy).toBe('prefer_parallel');
+  const other = renderHook(() => useCollaborationDraft(model, collaborationDraftScope(otherId)));
+  expect(other.result.current.activeCollaborators).toEqual([]);
+  expect(other.result.current.selectedTemplate).toBeNull();
+});
+
+test('changing conversation scope restores each draft and late callbacks cannot mutate the new scope', () => {
+  const sessionId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000107');
+  const otherId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000108');
+  const hook = renderHook(({ scope }) => useCollaborationDraft(model, scope), { initialProps: { scope: collaborationDraftScope(sessionId) } });
+  act(() => hook.result.current.setCollaborators([helper]));
+  const oldSetter = hook.result.current.setPolicy;
+  hook.rerender({ scope: collaborationDraftScope(otherId) });
+  expect(hook.result.current.activeCollaborators).toEqual([]);
+  act(() => oldSetter({ delegationPolicy: 'prefer_parallel', decisionPolicy: 'ask_user' }));
+  expect(hook.result.current.policy.delegationPolicy).toBe('automatic');
+  hook.rerender({ scope: collaborationDraftScope(sessionId) });
+  expect(hook.result.current.activeCollaborators).toEqual([helper]);
+  expect(hook.result.current.policy.delegationPolicy).toBe('prefer_parallel');
 });

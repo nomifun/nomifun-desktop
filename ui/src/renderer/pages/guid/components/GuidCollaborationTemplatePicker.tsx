@@ -12,10 +12,11 @@ import {
   toAppliedCollaborationTemplate,
   type AppliedCollaborationTemplate,
 } from '@/renderer/components/collaboration/collaborationTemplateModel';
-import { Button, Empty, Input, Message, Popconfirm, Spin } from '@arco-design/web-react';
+import { Button, Input, Message, Popconfirm, Spin } from '@arco-design/web-react';
 import { Delete, FolderOpen, Save } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import styles from '@/renderer/components/collaboration/CollaborationComposerControl.module.css';
 
 type Props = {
   visible: boolean;
@@ -25,6 +26,7 @@ type Props = {
   workDir?: string;
   onApply: (template: AppliedCollaborationTemplate) => void;
   onClear: () => void;
+  disabled?: boolean;
 };
 
 const pairKey = (value: TExecutionModelRef): string => `${value.provider_id}\u0000${value.model}`;
@@ -37,6 +39,7 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
   workDir,
   onApply,
   onClear,
+  disabled = false,
 }) => {
   const { t } = useTranslation();
   const [templates, setTemplates] = useState<TAgentExecutionTemplate[]>([]);
@@ -77,6 +80,7 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
 
   const apply = useCallback(
     async (template: TAgentExecutionTemplate) => {
+      if (disabled) return;
       try {
         const detail: TAgentExecutionTemplateDetail = await ipcBridge.agentExecutionTemplate.get.invoke({
           execution_template_id: template.execution_template_id,
@@ -106,12 +110,12 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
         );
       }
     },
-    [mainModel, onApply, t],
+    [disabled, mainModel, onApply, t],
   );
 
   const save = useCallback(async () => {
     const trimmed = name.trim();
-    if (!trimmed) return;
+    if (disabled || !trimmed || currentModels.length === 0) return;
     setSaving(true);
     try {
       const created = await ipcBridge.agentExecutionTemplate.create.invoke({
@@ -143,10 +147,11 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
     } finally {
       setSaving(false);
     }
-  }, [currentModels, name, onApply, refresh, t, workDir]);
+  }, [currentModels, disabled, name, onApply, refresh, t, workDir]);
 
   const remove = useCallback(
     async (template: TAgentExecutionTemplate) => {
+      if (disabled) return;
       try {
         await ipcBridge.agentExecutionTemplate.remove.invoke({
           execution_template_id: template.execution_template_id,
@@ -168,40 +173,39 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
         );
       }
     },
-    [onClear, refresh, selectedTemplateId, t],
+    [disabled, onClear, refresh, selectedTemplateId, t],
   );
 
   return (
-    <div className='mt-10px border-t border-t-solid border-t-[var(--color-border-2)] pt-10px' data-testid='collaboration-template-picker'>
-      <div className='mb-7px flex items-center justify-between gap-8px'>
-        <div className='text-12px font-600 text-t-primary'>
+    <div className={styles.templates} data-testid='collaboration-template-picker'>
+      <div className={styles.sectionHeader}>
+        <div className={styles.sectionTitle}>
           {t('collaboration.template.title', { defaultValue: '协作方案' })}
         </div>
         {selectedTemplateId && (
-          <Button type='text' size='mini' onClick={onClear}>
+          <Button type='text' size='mini' disabled={disabled} onClick={onClear}>
             {t('collaboration.template.clear', { defaultValue: '取消使用' })}
           </Button>
         )}
       </div>
 
       <Spin loading={loading} className='w-full'>
-        <div className='max-h-132px overflow-y-auto'>
+        <div className={styles.templateList}>
           {templates.length === 0 && !loading ? (
-            <Empty
-              description={t('collaboration.template.empty', {
+            <div className={styles.empty}>{t('collaboration.template.empty', {
                 defaultValue: '暂无已保存方案',
-              })}
-            />
+              })}</div>
           ) : (
             templates.map((template) => (
               <div
                 key={template.execution_template_id}
-                className='mb-4px flex items-center gap-4px rd-7px px-5px py-4px hover:bg-fill-2'
+                className={styles.templateRow}
                 data-selected={selectedTemplateId === template.execution_template_id}
               >
                 <Button
                   type='text'
                   size='mini'
+                  disabled={disabled}
                   className='min-w-0 flex-1 justify-start'
                   icon={<FolderOpen theme='outline' size='13' />}
                   onClick={() => void apply(template)}
@@ -218,6 +222,7 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
                     type='text'
                     size='mini'
                     status='danger'
+                    disabled={disabled}
                     aria-label={t('collaboration.template.delete', { defaultValue: '删除方案' })}
                     icon={<Delete theme='outline' size='13' />}
                   />
@@ -228,9 +233,10 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
         </div>
       </Spin>
 
-      <div className='mt-7px flex gap-6px'>
+      <div className={styles.saveRow}>
         <Input
           size='mini'
+          disabled={disabled}
           value={name}
           onChange={setName}
           onPressEnter={() => void save()}
@@ -243,7 +249,7 @@ const GuidCollaborationTemplatePicker: React.FC<Props> = ({
           size='mini'
           type='primary'
           loading={saving}
-          disabled={!name.trim() || currentModels.length === 0}
+          disabled={disabled || !name.trim() || currentModels.length === 0}
           icon={<Save theme='outline' size='13' />}
           onClick={() => void save()}
         >

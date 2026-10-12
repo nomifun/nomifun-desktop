@@ -8,7 +8,7 @@ const modelSelectorSource = readFileSync(
 );
 
 describe('Versioned Conversation model authority', () => {
-  test('switches only the model binding without restoring the redundant collaboration trigger', () => {
+  test('switches only the model binding and passes the frozen collaboration capability to the shared composer', () => {
     expect(source.includes('readOnly: true')).toBe(false);
     expect(modelSelectorSource.includes('selection.pickerDisabled')).toBe(true);
     expect(source.includes('ipcBridge.conversation.switchModel.invoke')).toBe(true);
@@ -17,5 +17,6 @@ describe('Versioned Conversation model authority', () => {
     expect(source.includes('modelSelectionDisabled={modelSwitching || agentSwitching}')).toBe(true);
     expect(source.includes('CollaborationComposerControl')).toBe(false);
     expect(source.includes('collaborationControlNode')).toBe(false);
+    expect(source.includes("collaborationEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('agent.collaboration') === true}")).toBe(true);
   });
 });

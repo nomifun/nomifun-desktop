@@ -54,12 +54,13 @@ import {
 import { useGuidSessionOptions } from './hooks/useGuidSessionOptions';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
-import { useGuidCollaboration } from './hooks/useGuidCollaboration';
+import { useCollaborationDraft } from '@/renderer/components/collaboration/useCollaborationDraft';
+import { shouldStartCollaboration } from '@/renderer/components/collaboration/collaborationSubmission';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
-import { shouldStartGuidCollaboration, useGuidSend, type GuidSendDeps } from './hooks/useGuidSend';
+import { useGuidSend, type GuidSendDeps } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
@@ -142,7 +143,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     fixedTemplateKey: productEntry?.templateKey,
   });
   const modelSelection = useGuidModelSelection('nomi');
-  const collaboration = useGuidCollaboration(modelSelection.current_model);
+  const collaboration = useCollaborationDraft(modelSelection.current_model);
   const guidInput = useGuidInput({
     locationState: productEntry ? { workspace: productEntry.workspace } : navigationState,
   });
@@ -285,7 +286,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const collaborationLaunchConfigured = collaborationEnabled
-    && shouldStartGuidCollaboration(collaboration.config);
+    && shouldStartCollaboration(collaboration.config);
   const resourceSelectionsReady = presetResourceResolutionReady
     && resourcePickerReady
     && resourceSelectionResolution.missingKinds.length === 0;
@@ -368,6 +369,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
       && initializedCapabilities.current && !capabilityCatalog.loading && !capabilityCatalog.error
       && (!collaborationEnabled || collaboration.ready),
     collaboration: !productEntry && collaborationEnabled ? collaboration.config : undefined,
+    preserveCollaborationDraft: collaboration.copyToConversation,
     resourceSelections: sessionResourceSelections,
     sessionCapabilities: toSessionCapabilitySelection(capabilityDraft),
     knowledgePolicy,
@@ -774,6 +776,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                       onTemplateClear={() => collaboration.setTemplate(null)}
                       policy={collaboration.policy}
                       onPolicyChange={collaboration.setPolicy}
+                      applyNote={t('conversation.capabilityPicker.createApplyNote')}
                       disabled={advancedConfig.autoWork.enabled}
                       disabledReason={advancedConfig.autoWork.enabled ? t('guid.collaboration.autoworkExclusive') : undefined}
                     />}

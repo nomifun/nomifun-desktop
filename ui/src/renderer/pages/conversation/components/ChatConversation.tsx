@@ -138,6 +138,7 @@ const NomiConversationLayout: React.FC<{
         isProcessing={isConversationProcessing(conversation)}
         creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
         creationEnabled={!chatLayoutProps.embedded}
+        collaborationEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('agent.collaboration') === true}
         hideSessionCapabilities={chatLayoutProps.embedded}
         submissionDisabled={submissionDisabled}
         onBeforeSubmit={onBeforeSubmit}

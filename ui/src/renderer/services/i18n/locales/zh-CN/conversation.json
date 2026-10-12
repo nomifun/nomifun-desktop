@@ -761,7 +761,6 @@
     "apiErrorNoCli": "API 错误，没有可用的 CLI 代理进行回退。",
     "apiErrorSwitchFailed": "创建回退会话失败。",
     "apiErrorSwitched": "API 错误，已自动切换到 {{cli}} CLI",
-    "frozenSessionConfigHint": "当前会话的协作配置保持冻结；Agent 可通过会话内选择器从下一轮起切换。",
     "frozenAgentUnavailable": "当前会话缺少有效的冻结 Agent 绑定，请创建新会话。",
     "agentSwitch": {
       "loading": "正在切换 Agent…",

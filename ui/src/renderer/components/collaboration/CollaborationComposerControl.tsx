@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import GuidCollaboratorSelector, { type GuidCollaboratorSelectorProps } from '@/renderer/pages/guid/components/GuidCollaboratorSelector';
 import CollaborationPolicyControl, { type CollaborationPolicyValue } from './CollaborationPolicyControl';
 
-/** Shared collaboration presentation; existing frozen Sessions pass `disabled`. */
+/** Shared authoring for new and existing conversation composers. */
 export default function CollaborationComposerControl({ policy, onPolicyChange, runtimeType = 'nomi', ...models }: Omit<GuidCollaboratorSelectorProps, 'panelFooter' | 'triggerLabel' | 'triggerActive' | 'className'> & {
   policy: CollaborationPolicyValue;
   onPolicyChange: (policy: CollaborationPolicyValue) => void | Promise<void>;
@@ -15,6 +15,6 @@ export default function CollaborationComposerControl({ policy, onPolicyChange, r
     triggerActive={policy.delegationPolicy !== 'disabled'}
     panelFooter={<CollaborationPolicyControl runtimeType={runtimeType}
       delegationPolicy={policy.delegationPolicy} decisionPolicy={policy.decisionPolicy}
-      onChange={onPolicyChange} embedded />}
+      onChange={onPolicyChange} disabled={models.disabled} embedded />}
   />;
 }
