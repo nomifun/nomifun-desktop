@@ -159,7 +159,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       if (disposed || !element.isConnected || element !== slot.current) return null;
       const rect = element.getBoundingClientRect();
       if (!rect.width || !rect.height) return null;
-      // During the conversation/focus layout transition the slot can briefly
+      // During conversation layout updates the slot can briefly
       // extend past the renderer viewport. Wait for its next layout instead
       // of sending invalid native bounds and leaving a permanent error panel.
       if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > window.innerWidth || rect.y + rect.height > window.innerHeight) return null;

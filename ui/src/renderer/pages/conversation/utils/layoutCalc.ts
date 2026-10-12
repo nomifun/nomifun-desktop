@@ -10,6 +10,8 @@ export const DEFAULT_WORKSPACE_PANEL_PX = 260;
 
 export type LayoutCalcInput = {
   containerWidth: number;
+  /** 嵌套工作区可允许聊天区小于普通会话的最小宽度。 */
+  minChatPanelPx?: number;
   /** 用户偏好的工作空间宽度（像素） */
   workspaceWidthPx: number;
   chatSplitRatio: number;
@@ -37,6 +39,7 @@ export type LayoutMetrics = {
 export const calcLayoutMetrics = (input: LayoutCalcInput): LayoutMetrics => {
   const {
     containerWidth,
+    minChatPanelPx = MIN_CHAT_PANEL_PX,
     workspaceWidthPx: requestedWorkspaceWidthPx,
     chatSplitRatio,
     workspaceEnabled,
@@ -48,7 +51,7 @@ export const calcLayoutMetrics = (input: LayoutCalcInput): LayoutMetrics => {
 
   // Workspace uses a fixed pixel width and shrinks to the container limit.
   const workspaceVisible = workspaceEnabled && !rightSiderCollapsed;
-  const previewReservedPx = isPreviewOpen ? MIN_CHAT_PANEL_PX + MIN_PREVIEW_PANEL_PX : MIN_CHAT_PANEL_PX;
+  const previewReservedPx = isPreviewOpen ? minChatPanelPx + MIN_PREVIEW_PANEL_PX : minChatPanelPx;
   const workspaceMaxByContainer = Math.max(MIN_WORKSPACE_PANEL_PX, safeContainerWidth - previewReservedPx);
   const effectiveWorkspaceWidthPx = workspaceVisible
     ? Math.max(
@@ -59,12 +62,12 @@ export const calcLayoutMetrics = (input: LayoutCalcInput): LayoutMetrics => {
 
   // 计算 chat / preview 之间的动态比例约束（基于剩余可用宽度）
   const availableWidthForChatPreview = Math.max(safeContainerWidth - effectiveWorkspaceWidthPx, 1);
-  const minChatRatioByPx = (MIN_CHAT_PANEL_PX / availableWidthForChatPreview) * 100;
+  const minChatRatioByPx = (minChatPanelPx / availableWidthForChatPreview) * 100;
   const minPreviewRatioByPx = (MIN_PREVIEW_PANEL_PX / availableWidthForChatPreview) * 100;
   const dynamicChatMinRatio =
-    workspaceEnabled && isPreviewOpen ? Math.max(MIN_CHAT_RATIO, minChatRatioByPx) : MIN_CHAT_RATIO;
+    isPreviewOpen ? Math.max(MIN_CHAT_RATIO, minChatRatioByPx) : MIN_CHAT_RATIO;
   const dynamicChatMaxCandidate =
-    workspaceEnabled && isPreviewOpen
+    isPreviewOpen
       ? Math.min(80, 100 - Math.max(MIN_PREVIEW_RATIO, minPreviewRatioByPx))
       : 80;
   const dynamicChatMaxRatio = Math.max(dynamicChatMinRatio, dynamicChatMaxCandidate);

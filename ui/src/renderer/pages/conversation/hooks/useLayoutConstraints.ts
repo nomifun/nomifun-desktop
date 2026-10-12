@@ -8,6 +8,7 @@ import { useEffect } from 'react';
 
 type UseLayoutConstraintsParams = {
   containerWidth: number;
+  minChatPanelPx?: number;
   workspaceEnabled: boolean;
   isPreviewOpen: boolean;
   rightSiderCollapsed: boolean;
@@ -27,6 +28,7 @@ type UseLayoutConstraintsParams = {
  */
 export function useLayoutConstraints({
   containerWidth,
+  minChatPanelPx = MIN_CHAT_PANEL_PX,
   workspaceEnabled,
   isPreviewOpen,
   rightSiderCollapsed,
@@ -46,18 +48,19 @@ export function useLayoutConstraints({
     const safeContainerWidth = Math.max(containerWidth || 0, 1);
     const maxWorkspaceByContainer = Math.max(
       MIN_WORKSPACE_PANEL_PX,
-      safeContainerWidth - MIN_CHAT_PANEL_PX - MIN_PREVIEW_PANEL_PX
+      safeContainerWidth - minChatPanelPx - MIN_PREVIEW_PANEL_PX
     );
     const maxWorkspace = Math.min(MAX_WORKSPACE_PANEL_PX, maxWorkspaceByContainer);
     if (workspaceWidthPx > maxWorkspace) {
       setWorkspaceWidthPx(maxWorkspace);
     }
     // Auto-collapse workspace when container is too narrow for all three panels
-    if (safeContainerWidth < MIN_CHAT_PANEL_PX + MIN_PREVIEW_PANEL_PX + MIN_WORKSPACE_PANEL_PX) {
+    if (safeContainerWidth < minChatPanelPx + MIN_PREVIEW_PANEL_PX + MIN_WORKSPACE_PANEL_PX) {
       setRightSiderCollapsed(true);
     }
   }, [
     containerWidth,
+    minChatPanelPx,
     isPreviewOpen,
     rightSiderCollapsed,
     setRightSiderCollapsed,
@@ -68,7 +71,7 @@ export function useLayoutConstraints({
 
   // Clamp chat split ratio within dynamic bounds
   useEffect(() => {
-    if (!workspaceEnabled || !isPreviewOpen) {
+    if (!isPreviewOpen) {
       return;
     }
     const clampedChat = Math.max(dynamicChatMinRatio, Math.min(dynamicChatMaxRatio, chatSplitRatio));
@@ -81,6 +84,5 @@ export function useLayoutConstraints({
     dynamicChatMinRatio,
     isPreviewOpen,
     setChatSplitRatio,
-    workspaceEnabled,
   ]);
 }

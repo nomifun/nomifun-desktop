@@ -1,7 +1,4 @@
 /* Chat layout header styles */
-.chat-focus-stop-host { display:flex; align-items:center; flex-shrink:0; }
-.chat-focus-stop-host:empty { display:none; }
-
 .chat-layout-header-host { container: conversation-header / inline-size; }
 .chat-layout-header-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 

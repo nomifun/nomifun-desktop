@@ -38,17 +38,6 @@ describe('ChatLayout advanced controls', () => {
     expect(source).toContain('onLinkAvailabilityChange={setBrowserLinkAvailable}');
   });
 
-  test('keeps the existing composer stop action in the header while browser focus hides chat', () => {
-    const source = readSource(new URL('./index.tsx', import.meta.url));
-    expect(source).toContain('<StopButtonHostContext.Provider value={browserFocus ? stopButtonHost : null}>');
-    expect(source).toContain("{browserFocus && <div ref={setStopButtonHost} className='chat-focus-stop-host' />}");
-    expect(source).toContain("display: browserFocus ? 'none' : undefined");
-    expect(source).toContain('if (!browserFocus) return undefined');
-    expect(source).toContain('document.getElementById(browserPanelId)');
-    expect(source).toContain("if (active?.closest('[role=\"dialog\"], [aria-modal=\"true\"]')) return");
-    expect(source).toContain('if (panel && !panel.contains(active)) panel.focus()');
-  });
-
   test('keeps the stable header controls', () => {
     const source = readSource(new URL('./index.tsx', import.meta.url));
 

@@ -28,6 +28,8 @@ import { isDesktopShell, isMacOS, isWindows, openExternalUrl } from '@/renderer/
 import {
   DEFAULT_WORKSPACE_PANEL_PX,
   MAX_WORKSPACE_PANEL_PX,
+  MIN_CHAT_PANEL_PX,
+  MIN_PREVIEW_PANEL_PX,
   MIN_WORKSPACE_PANEL_PX,
   WORKSPACE_HEADER_HEIGHT,
   calcLayoutMetrics,
@@ -41,7 +43,6 @@ import './chat-layout.css';
 import BrowserPanel from '../../Browser/BrowserPanel';
 import { BrowserLinkContext, type BrowserLinkRequest } from '../../Browser/BrowserLinkContext';
 import type { LocalBrowserLink } from '../../Browser/localBrowserLink';
-import { StopButtonHostContext } from '@/renderer/components/chat/SendBox/StopButtonPortal';
 
 // headerExtra allows injecting custom actions (e.g., model picker) into the header's right area
 export interface ChatLayoutProps {
@@ -118,7 +119,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const { isOpen: isPreviewOpen, closePreview } = usePreviewContext();
   const [browserOpen, setBrowserOpen] = useState(false);
   const browserButton = useRef<HTMLButtonElement>(null);
-  const [stopButtonHost, setStopButtonHost] = useState<HTMLDivElement | null>(null);
   const [browserLinkRequest, setBrowserLinkRequest] = useState<BrowserLinkRequest>();
   const [browserLinkAvailable, setBrowserLinkAvailable] = useState(false);
   const browserLinkSequence = useRef(0);
@@ -197,6 +197,10 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const { ref: containerRef, width: containerWidth } = useContainerWidth<HTMLDivElement>({
     fallbackToWindowWidth: true,
   });
+  const showSessionToolRail = !props.embedded && (Boolean(conversation_id) || workspaceEnabled);
+  // The fixed tool rail is outside the resizable chat / work-surface row.
+  const workAreaWidth = Math.max(containerWidth - (showSessionToolRail ? 32 : 0), 1);
+  const minChatPanelPx = props.embedded ? 0 : MIN_CHAT_PANEL_PX;
 
   // --- Hook C: title rename ---
   const { editingTitle, setEditingTitle, titleDraft, setTitleDraft, renameLoading, canRenameTitle, submitTitleRename } =
@@ -220,7 +224,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
 
   // Pre-hook metrics: compute dynamic min/max for the chat-preview split hook
   const { dynamicChatMinRatio, dynamicChatMaxRatio } = calcLayoutMetrics({
-    containerWidth,
+    containerWidth: workAreaWidth,
+    minChatPanelPx,
     workspaceWidthPx: workspaceWidthPxPref,
     chatSplitRatio: 60, // placeholder; only dynamicChatMinRatio/dynamicChatMaxRatio are used here
     workspaceEnabled,
@@ -241,7 +246,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
 
   // Full metrics with real chatSplitRatio
   const { chatFlex, workspaceWidthPx, titleAreaMaxWidth } = calcLayoutMetrics({
-    containerWidth,
+    containerWidth: workAreaWidth,
+    minChatPanelPx,
     workspaceWidthPx: workspaceWidthPxPref,
     chatSplitRatio,
     workspaceEnabled,
@@ -261,7 +267,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
 
   // --- Hook E: layout constraints ---
   useLayoutConstraints({
-    containerWidth,
+    containerWidth: workAreaWidth,
+    minChatPanelPx,
     workspaceEnabled,
     isPreviewOpen: workSurfaceOpen,
     rightSiderCollapsed,
@@ -275,20 +282,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   });
 
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
-  const showSessionToolRail = !props.embedded && (Boolean(conversation_id) || workspaceEnabled);
-  const browserAvailableWidth = Math.max(1, containerWidth - (showSessionToolRail ? 32 : 0) - (rightSiderCollapsed ? 0 : workspaceWidthPx));
-  const browserFocus = browserOpen && browserAvailableWidth < 904;
-  const browserChatFlex = Math.max(360 / browserAvailableWidth * 100, Math.min(chatFlex, 100 - 544 / browserAvailableWidth * 100));
-  useEffect(() => {
-    if (!browserFocus) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const panel = document.getElementById(browserPanelId);
-      const active = document.activeElement as HTMLElement | null;
-      if (active?.closest('[role="dialog"], [aria-modal="true"]')) return;
-      if (panel && !panel.contains(active)) panel.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [browserFocus, browserPanelId]);
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const handleWorkspaceMeta = (event: Event) => {
@@ -344,7 +337,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         )}
         {props.headerExtra}
       </div>
-      {browserFocus && <div ref={setStopButtonHost} className='chat-focus-stop-host' />}
     </ArcoLayout.Header>
   );
 
@@ -356,7 +348,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   );
 
   return (
-    <StopButtonHostContext.Provider value={browserFocus ? stopButtonHost : null}>
     <BrowserLinkContext.Provider value={conversation_id && browserLinkAvailable ? openBrowserLink : null}>
     <ArcoLayout
       className='size-full color-black '
@@ -382,9 +373,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
               style={{
                 flexGrow: workSurfaceOpen ? 0 : 1,
                 flexShrink: 0,
-                flexBasis: workSurfaceOpen ? `${browserOpen ? browserChatFlex : chatFlex}%` : 0,
-                minWidth: props.embedded ? 0 : '360px',
-                display: browserFocus ? 'none' : undefined,
+                flexBasis: workSurfaceOpen ? `${chatFlex}%` : 0,
+                minWidth: `${minChatPanelPx}px`,
               }}
             >
               <ArcoLayout.Content className='flex flex-col flex-1 bg-1 overflow-hidden'>
@@ -399,26 +389,25 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   // The file preview's translateX entrance animation would
                   // temporarily place their measured slot outside the window.
                   browserOpen ? 'browser-capability-surface' : 'preview-panel',
-                  'flex flex-col relative overflow-visible',
-                  !browserOpen && 'rounded-[15px] mb-[12px] mr-[12px] ml-[8px]'
+                  'flex flex-col relative overflow-visible'
                 )}
                 style={{
                   flexGrow: 1,
                   flexShrink: 1,
                   flexBasis: 0,
                   border: '1px solid var(--bg-3)',
-                  minWidth: browserOpen ? (browserFocus ? 0 : '520px') : '340px',
+                  minWidth: `${MIN_PREVIEW_PANEL_PX}px`,
                   boxSizing: 'border-box',
                 }}
               >
-                {!browserFocus && createPreviewDragHandle({
+                {createPreviewDragHandle({
                   className: 'absolute top-0 bottom-0 z-30',
                   style: { width: '20px', left: '-20px' },
                   linePlacement: 'end',
                   lineClassName: 'opacity-30 group-hover:opacity-100 group-active:opacity-100',
                   lineStyle: { width: '2px' },
                 })}
-                <div className={classNames('h-full w-full overflow-hidden', !browserOpen && 'rounded-[15px]')}>
+                <div className='h-full w-full overflow-hidden'>
                   {browserOpen && conversation_id ? <BrowserPanel panelId={browserPanelId} agentSessionId={conversation_id} hostSurfaceAvailable={isDesktopRuntime} linkRequest={browserLinkRequest} onLinkAvailabilityChange={setBrowserLinkAvailable} onLinkConsumed={(id, handled) => setBrowserLinkRequest(current => {
                     if (current?.id !== id) return current;
                     if (!handled) void openExternalUrl(current.url).catch(() => {});
@@ -502,7 +491,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
       </div>
     </ArcoLayout>
     </BrowserLinkContext.Provider>
-    </StopButtonHostContext.Provider>
   );
 };
 

@@ -153,7 +153,7 @@ const PreviewTabs: React.FC<PreviewTabsProps> = ({
 
         {/* 收起面板按钮 / Collapse panel button */}
         {onClosePanel && (
-          <div className='flex items-center h-full px-10px flex-shrink-0 rounded-tr-[16px]'>
+          <div className='flex items-center h-full px-10px flex-shrink-0'>
             <div
               className='flex items-center justify-center w-20px h-20px rd-4px cursor-pointer hover:bg-3 transition-colors'
               onClick={onClosePanel}
@@ -168,7 +168,7 @@ const PreviewTabs: React.FC<PreviewTabsProps> = ({
       {/* 左侧渐变指示器 / Left gradient indicator */}
       {showLeftFade && (
         <div
-          className='pointer-events-none absolute left-0 top-0 bottom-0 w-32px rounded-tl-[16px]'
+          className='pointer-events-none absolute left-0 top-0 bottom-0 w-32px'
           style={{
             background: 'linear-gradient(90deg, var(--bg-2) 0%, transparent 100%)',
           }}
@@ -178,7 +178,7 @@ const PreviewTabs: React.FC<PreviewTabsProps> = ({
       {/* 右侧渐变指示器 / Right gradient indicator */}
       {showRightFade && (
         <div
-          className='pointer-events-none absolute right-0 top-0 bottom-0 w-32px rounded-tr-[16px]'
+          className='pointer-events-none absolute right-0 top-0 bottom-0 w-32px'
           style={{
             background: 'linear-gradient(270deg, var(--bg-2) 0%, transparent 100%)',
           }}

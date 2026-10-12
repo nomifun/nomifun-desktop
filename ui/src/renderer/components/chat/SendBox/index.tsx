@@ -47,7 +47,6 @@ import { getConversationInputHistory, isCaretOnFirstLine } from '@/renderer/util
 import TaskPlanBar from '@renderer/pages/conversation/components/TaskPlanBar';
 import type { TaskPlanSnapshot } from '@/common/protocolBindings/TaskPlanSnapshot';
 import Composer, { ComposerSendButton } from '../Composer';
-import { StopButtonPortal } from './StopButtonPortal';
 
 const constVoid = (): void => undefined;
 const listWorkspaceMentionFiles = (root: string) => ipcBridge.fs.listWorkspaceFiles.invoke({ root });
@@ -1304,7 +1303,6 @@ const SendBox: React.FC<{
   const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
 
   const stopButton = (
-    <StopButtonPortal>
     <Button
       shape='circle'
       type='secondary'
@@ -1317,7 +1315,6 @@ const SendBox: React.FC<{
       aria-label={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}
       title={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}
     ></Button>
-    </StopButtonPortal>
   );
 
   // Secondary "steer now" action — interjects the draft into the running turn
