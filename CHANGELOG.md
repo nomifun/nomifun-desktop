@@ -5,6 +5,24 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.5 - 2026-10-12
+
+- Complete and edit official Agent presets: the six presets gain native
+  knowledge, session, terminal, and linked execution management; the
+  companion can select and apply Agent presets.
+- Repair the export path: canonical history is fully preserved and ZIP
+  archives publish atomically with cancellation, collision, and
+  file-identity protection; knowledge ZIP export validates destinations,
+  requires explicit overwrite confirmation, and unifies success/failure
+  feedback with copyable diagnostics.
+- Unify the relay and device connection entry and tighten pairing
+  authorization.
+- Migrate complete datasets when changing the data directory.
+- Make session switching seamless; render canonical turn file changes;
+  preserve composer input during turn completion.
+- Unify managed tools and Office artifact previews at runtime; refine the
+  template workspace and dark pill tabs.
+
 ## v0.8.4 - 2026-10-11
 
 - Make bulk session deletion reliable.
