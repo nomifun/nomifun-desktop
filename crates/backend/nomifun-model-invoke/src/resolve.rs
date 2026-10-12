@@ -467,7 +467,22 @@ impl ModelInvokeService {
         task: ModelTask,
         request: TaskRequest,
     ) -> Result<(ResolvedCall, Arc<dyn ProtocolAdapter>), InvokeError> {
+        self.resolve_with_expected_task_configuration(model_ref, task, request, None).await
+    }
+
+    pub(crate) async fn resolve_with_expected_task_configuration(
+        &self,
+        model_ref: &ModelRef,
+        task: ModelTask,
+        request: TaskRequest,
+        expected: Option<&ResolvedTaskConfig>,
+    ) -> Result<(ResolvedCall, Arc<dyn ProtocolAdapter>), InvokeError> {
         let config = self.resolve_task_config(model_ref, task).await?;
+        if expected.is_some_and(|expected| !expected.matches_invocation_configuration(&config)) {
+            return Err(InvokeError::task_configuration_changed(
+                "selected task invocation configuration changed before dispatch; retry the operation"
+            ));
+        }
         let descriptor = protocol_task_descriptor(&config.protocol, task).ok_or_else(|| {
             InvokeError::config(format!(
                 "capability declares unknown or task-incompatible protocol {:?}",

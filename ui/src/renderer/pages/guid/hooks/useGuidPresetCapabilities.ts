@@ -7,11 +7,12 @@
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type {
   AgentPresetDocument,
+  AgentCatalogResponse,
 } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
 import type { IIdmmConfig } from '@/common/types/idmm';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
-import { requiredResourceKindsForCapabilityReferences } from '@/renderer/hooks/agent/useAgentCapabilityResources';
+import { requiredResourceKindsForCapabilitySelections } from '@/renderer/hooks/agent/useAgentCapabilityResources';
 import { useEffect, useState } from 'react';
 
 export type GuidPresetCapabilityState = {
@@ -34,18 +35,16 @@ const emptyState = (): GuidPresetCapabilityState => ({
 
 /**
  * Resolve target-resource requirements from the exact stable Revision
- * references and the current capability catalog. Resource instances are never
- * read or persisted here; only the catalog-declared kinds are projected.
+ * action grants and the current Module catalog. Resource instances are never
+ * read or persisted here; only the declared Action resource kinds are projected.
  */
 export const requiredResourceKindsForDocument = (
   document: AgentPresetDocument,
-  catalog: Parameters<typeof requiredResourceKindsForCapabilityReferences>[1]
+  catalog: Pick<AgentCatalogResponse, 'modules'>
 ): Set<string> =>
-  requiredResourceKindsForCapabilityReferences(
-    document.enabled_capabilities.map(
-      (selection) => selection.capability
-    ),
-    catalog
+  requiredResourceKindsForCapabilitySelections(
+    document.enabled_capabilities,
+    catalog.modules
   );
 
 /** Load the saved capability and resource defaults used by Guid. */
@@ -69,7 +68,7 @@ export const useGuidPresetCapabilities = (
     setState({ sourceKey, value: { ...emptyState(), isLoading: true } });
     void Promise.all([
       agentPlatform.getEditor.invoke({ preset_id: presetId }),
-      agentPlatform.capabilities.invoke(),
+      agentPlatform.catalog.invoke(),
     ])
       .then(([editor, catalog]) => {
         if (cancelled) return;

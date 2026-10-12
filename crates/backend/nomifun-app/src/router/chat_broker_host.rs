@@ -99,14 +99,19 @@ fn convert_chat_route_candidate(
         ChatRouteProtocol::Vertex => ChatProtocol::Vertex,
     };
     let mut features = candidate.features.iter().map(convert_route_feature).collect::<BTreeSet<_>>();
-    // Older immutable route records may omit media traits because they were
+    // Older immutable route records may omit serializer features because they were
     // authored through manual checkboxes. The selected serializer owns input
     // representation; transport support does not expand Agent tool authority.
-    features.retain(|feature| !matches!(feature, ChatModelFeature::ImageInput | ChatModelFeature::AudioInput));
+    let is_serializer_feature = |feature: &ChatModelFeature| matches!(feature,
+        ChatModelFeature::ImageInput | ChatModelFeature::AudioInput | ChatModelFeature::AudioOutput
+        | ChatModelFeature::ReasoningSignature | ChatModelFeature::PromptCache
+        | ChatModelFeature::StructuredOutput | ChatModelFeature::ProviderRoundState
+        | ChatModelFeature::NativeResponsesItems);
+    features.retain(|feature| !is_serializer_feature(feature));
     features.extend(
         nomifun_chat_model_broker::protocol_features(protocol)
             .into_iter()
-            .filter(|feature| matches!(feature, ChatModelFeature::ImageInput | ChatModelFeature::AudioInput)),
+            .filter(is_serializer_feature),
     );
     let activation_features = candidate
         .activation_features
@@ -250,6 +255,15 @@ impl ProductionProviderRepositoryPort for ProductionProviderRepository {
             None => provider_model_config_digest(&self.pool, &route.provider_id, &route.model).await?,
         };
         if digest != route.config_revision_digest {
+            let legacy = provider_legacy_model_config_digest(&self.pool, &route.provider_id, &route.model).await?;
+            if legacy == route.config_revision_digest {
+                let enabled: Option<bool> = sqlx::query_scalar("SELECT enabled FROM providers WHERE provider_id = ?")
+                    .bind(route.provider_id.as_ref()).fetch_optional(&self.pool).await
+                    .map_err(|_| ProductionRepositoryError::Unavailable)?;
+                return Ok(enabled.map(|enabled| ProviderRepositoryRecord {
+                    provider_id: route.provider_id.clone(), enabled, config_revision_digest: legacy,
+                }));
+            }
             // Old persisted route records used the entire provider graph. Keep
             // accepting those only when that exact legacy graph still matches.
             return self.find_provider(&route.provider_id).await;
@@ -308,7 +322,7 @@ pub(crate) async fn provider_config_digest(
     pool: &SqlitePool,
     provider_id: &ProviderIdRef,
 ) -> Result<DigestHex, ProductionRepositoryError> {
-    provider_config_digest_inner(pool, provider_id, None).await
+    provider_config_digest_inner(pool, provider_id, None, ProviderConfigurationScope::ProviderV1).await
 }
 
 /// A new route freezes its selected model, provider authentication and named
@@ -318,11 +332,27 @@ pub(crate) async fn provider_model_config_digest(
     provider_id: &ProviderIdRef,
     model: &str,
 ) -> Result<DigestHex, ProductionRepositoryError> {
-    provider_config_digest_inner(pool, provider_id, Some(model)).await
+    provider_config_digest_inner(pool, provider_id, Some(model), ProviderConfigurationScope::ModelV2).await
+}
+
+async fn provider_legacy_model_config_digest(
+    pool: &SqlitePool, provider_id: &ProviderIdRef, model: &str,
+) -> Result<DigestHex, ProductionRepositoryError> {
+    provider_config_digest_inner(pool, provider_id, Some(model), ProviderConfigurationScope::ModelV1).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderConfigurationScope {
+    ProviderV1,
+    ModelV1,
+    ModelV2,
 }
 
 async fn route_config_matches(pool: &SqlitePool, route: &ResolvedChatRoute) -> Result<bool, ProductionRepositoryError> {
     if provider_model_config_digest(pool, &route.provider_id, &route.model).await? == route.config_revision_digest {
+        return Ok(true);
+    }
+    if provider_legacy_model_config_digest(pool, &route.provider_id, &route.model).await? == route.config_revision_digest {
         return Ok(true);
     }
     Ok(provider_config_digest(pool, &route.provider_id).await? == route.config_revision_digest)
@@ -332,8 +362,9 @@ async fn provider_config_digest_inner(
     pool: &SqlitePool,
     provider_id: &ProviderIdRef,
     model: Option<&str>,
+    scope: ProviderConfigurationScope,
 ) -> Result<DigestHex, ProductionRepositoryError> {
-    Ok(provider_config_observation(pool, provider_id, model, None).await?.0)
+    Ok(provider_config_observation(pool, provider_id, model, None, scope).await?.0)
 }
 
 /// A transaction observes the complete graph, not a mixture from two saves.
@@ -344,7 +375,11 @@ async fn provider_config_observation(
     provider_id: &ProviderIdRef,
     model: Option<&str>,
     frozen: Option<&FrozenModelConfiguration>,
+    scope: ProviderConfigurationScope,
 ) -> Result<(DigestHex, Vec<FrozenCapabilityConfiguration>), ProductionRepositoryError> {
+    if (scope == ProviderConfigurationScope::ProviderV1) != model.is_none() {
+        return Err(ProductionRepositoryError::InvalidData);
+    }
     let mut observation = pool.begin().await.map_err(|_| ProductionRepositoryError::Unavailable)?;
     let provider = sqlx::query_as::<_, nomifun_db::models::Provider>(
         "SELECT * FROM providers WHERE provider_id = ?",
@@ -384,6 +419,14 @@ async fn provider_config_observation(
     .fetch_all(&mut *observation)
     .await
     .map_err(|_| ProductionRepositoryError::Unavailable)?;
+
+    if scope == ProviderConfigurationScope::ModelV2 {
+        // A newly advertised model may add a named protocol connection. Only
+        // roles reachable from this selected model's task configurations are
+        // part of its invocation authority; provider/default auth stays live.
+        connections.retain(|connection| capabilities.iter()
+            .any(|capability| capability.connection_role == connection.role));
+    }
 
     models.sort_by(|left, right| left.model.cmp(&right.model));
     capabilities.sort_by(|left, right| {
@@ -476,7 +519,11 @@ async fn provider_config_observation(
     }
 
     let input = DigestInput {
-        schema: if model.is_some() { "nomifun.provider-model-invocation-graph.v1" } else { "nomifun.provider-invocation-graph.v1" },
+        schema: match scope {
+            ProviderConfigurationScope::ProviderV1 => "nomifun.provider-invocation-graph.v1",
+            ProviderConfigurationScope::ModelV1 => "nomifun.provider-model-invocation-graph.v1",
+            ProviderConfigurationScope::ModelV2 => "nomifun.provider-model-invocation-graph.v2",
+        },
         provider: ProviderDigestProvider {
             provider_id: provider.provider_id,
             platform: provider.platform,
@@ -555,7 +602,7 @@ impl FrozenCapabilityConfiguration {
 #[derive(Clone)]
 struct FrozenModelConfiguration {
     route: ResolvedChatRoute,
-    legacy_provider_graph: bool,
+    digest_scope: ProviderConfigurationScope,
     capabilities: Vec<FrozenCapabilityConfiguration>,
 }
 
@@ -579,16 +626,24 @@ impl TurnModelConfiguration {
         for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
             let route = convert_chat_route_candidate(candidate).map_err(ProductionRepositoryError::from)?;
             let (digest, capabilities) = provider_config_observation(
-                pool, &route.provider_id, Some(&route.model), None,
+                pool, &route.provider_id, Some(&route.model), None, ProviderConfigurationScope::ModelV2,
             ).await?;
-            let (legacy_provider_graph, capabilities) = if digest == route.config_revision_digest {
-                (false, capabilities)
+            let (digest_scope, capabilities) = if digest == route.config_revision_digest {
+                (ProviderConfigurationScope::ModelV2, capabilities)
             } else {
-                let (digest, capabilities) = provider_config_observation(pool, &route.provider_id, None, None).await?;
-                if digest != route.config_revision_digest { return Err(ProductionRepositoryError::InvalidData); }
-                (true, capabilities.into_iter().filter(|saved| saved.model == route.model).collect())
+                let (digest, capabilities) = provider_config_observation(pool, &route.provider_id,
+                    Some(&route.model), None, ProviderConfigurationScope::ModelV1).await?;
+                if digest == route.config_revision_digest {
+                    (ProviderConfigurationScope::ModelV1, capabilities)
+                } else {
+                    let (digest, capabilities) = provider_config_observation(pool, &route.provider_id,
+                        None, None, ProviderConfigurationScope::ProviderV1).await?;
+                    if digest != route.config_revision_digest { return Err(ProductionRepositoryError::InvalidData); }
+                    (ProviderConfigurationScope::ProviderV1,
+                        capabilities.into_iter().filter(|saved| saved.model == route.model).collect())
+                }
             };
-            candidates.push(FrozenModelConfiguration { route, legacy_provider_graph, capabilities });
+            candidates.push(FrozenModelConfiguration { route, digest_scope, capabilities });
         }
         let mut active = self.0.write().map_err(|_| ProductionRepositoryError::Unavailable)?;
         if active.is_some() { return Err(ProductionRepositoryError::InvalidData); }
@@ -625,7 +680,8 @@ impl TurnModelConfiguration {
     async fn digest_for_route(&self, pool: &SqlitePool, route: &ResolvedChatRoute) -> Result<DigestHex, ProductionRepositoryError> {
         let saved = self.candidate(route)?;
         provider_config_observation(pool, &route.provider_id,
-            (!saved.legacy_provider_graph).then_some(route.model.as_str()), Some(&saved)).await.map(|value| value.0)
+            (saved.digest_scope != ProviderConfigurationScope::ProviderV1).then_some(route.model.as_str()),
+            Some(&saved), saved.digest_scope).await.map(|value| value.0)
     }
 
     pub(super) fn model_facts(

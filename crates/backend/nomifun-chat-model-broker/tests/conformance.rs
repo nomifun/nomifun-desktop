@@ -847,9 +847,6 @@ fn gemini_raw_sse_and_json_shapes_decode_parts_usage_and_finish() {
             ChatModelEvent::ReasoningDelta {
                 text: "thinking".to_owned()
             },
-            ChatModelEvent::ReasoningSignature {
-                signature: "sig-1".to_owned()
-            },
             ChatModelEvent::ToolCallCompleted {
                 call: nomifun_chat_model_broker::ChatToolCall {
                     call_id: nomifun_chat_model_broker::ToolCallId("gemini-call-1".to_owned()),
@@ -983,6 +980,554 @@ fn gemini_tool_result_continuation_uses_function_name_and_preserves_call_id() {
     assert_eq!(function_response["id"], "call-history-gemini");
     assert_eq!(function_response["name"], "lookup");
     assert_ne!(function_response["name"], function_response["id"]);
+}
+
+async fn bound_gemini_tool_call(
+    route: &ResolvedChatRoute,
+    signature_field: &str,
+) -> nomifun_chat_model_broker::ChatToolCall {
+    bound_gemini_tool_call_from_attempt(route, signature_field, None).await
+}
+
+async fn bound_gemini_tool_call_from_attempt(
+    route: &ResolvedChatRoute,
+    signature_field: &str,
+    primary: Option<ResolvedChatRoute>,
+) -> nomifun_chat_model_broker::ChatToolCall {
+    let mut part = serde_json::json!({
+            "functionCall": {"id": "signed-call", "name": "lookup", "args": {"q": "fixture"}}
+    });
+    part[signature_field] = serde_json::json!("opaque-tool-signature");
+    let frames = [
+            serde_json::json!({
+                "responseId": "signed-tool-response",
+                "candidates": [{"content": {"role": "model", "parts": [part]}}]
+            }),
+            serde_json::json!({
+                "responseId": "signed-tool-response",
+                "candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}]
+            }),
+    ];
+    let transport = ScriptedTransport::new([TransportScript::Frames(
+        frames.into_iter().map(|data| frame("message", data)).collect(),
+    )]);
+    let primary_transport = ScriptedTransport::new([TransportScript::OpenError(ChatModelError::new(
+        ChatModelErrorCode::ProviderUnavailable, "fixture primary failure", ChatRetryDirective::Failover,
+    ))]);
+    let transports = transport_map([
+        (ChatProtocol::Gemini, provider_transport(&transport)),
+        (ChatProtocol::OpenaiChat, provider_transport(&primary_transport)),
+    ]);
+    let routes = if let Some(primary) = primary {
+        ResolvedChatRouteSet { primary, failovers: vec![route.clone()] }
+    } else {
+        ResolvedChatRouteSet { primary: route.clone(), failovers: vec![] }
+    };
+    let request = basic_request(&routes.primary);
+    let broker = broker(
+        StaticCausalityGate::allow(), routes,
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+        BrokerRetryPolicy { max_total_attempts: 2, max_attempts_per_route: 1 },
+    );
+    let events = broker.open_stream(request).await.unwrap()
+        .map(|result| result.unwrap().event).collect::<Vec<_>>().await;
+    assert!(!events.iter().any(|event| matches!(event,
+            ChatModelEvent::ReasoningDelta { .. } | ChatModelEvent::ReasoningSignature { .. })));
+    assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::ToolCalls
+        })));
+    let calls = events.into_iter().filter_map(|event| match event {
+            ChatModelEvent::ToolCallCompleted { call } => Some(call),
+            _ => None,
+        }).collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    let call: nomifun_chat_model_broker::ChatToolCall =
+        serde_json::from_value(serde_json::to_value(&calls[0]).unwrap()).unwrap();
+    assert_eq!(call.provider_metadata.as_ref().unwrap().0["_nomifun_producing_route_digest"],
+        serde_json::to_value(nomifun_agent_contracts::digest_payload(route).unwrap()).unwrap());
+    call
+}
+
+fn gemini_tool_continuation(
+    route: &ResolvedChatRoute,
+    call: nomifun_chat_model_broker::ChatToolCall,
+) -> ChatModelRequest {
+    let mut request = basic_request(route);
+    request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant, provider_round_id: None,
+            content: vec![ChatContentPart::ToolCall {
+                call_id: call.call_id.clone(), name: call.name, arguments: call.arguments,
+                provider_metadata: call.provider_metadata,
+            }],
+    });
+    request.input.messages.push(ChatMessage {
+            role: ChatRole::Tool, provider_round_id: None,
+            content: vec![ChatContentPart::ToolResult {
+                call_id: call.call_id,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text: "found".into() }],
+                is_error: false,
+            }],
+    });
+    request
+}
+
+#[tokio::test]
+async fn gemini_signed_tool_sse_round_trips_to_the_next_request_without_reasoning_text() {
+    let adapter = GeminiAdapter::new(ScriptedTransport::new([]));
+    let route = route(ChatProtocol::Gemini, "signed-tool", 1);
+    let lease = CredentialLease::new(
+        route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle",
+    );
+    for signature_field in ["thoughtSignature", "thought_signature"] {
+        let call = bound_gemini_tool_call(&route, signature_field).await;
+        let request = gemini_tool_continuation(&route, call);
+        let body = adapter.encode_request(&request, &route, &lease).unwrap().body;
+        assert_eq!(body["contents"][1]["parts"][0], serde_json::json!({
+            "functionCall": {"id": "signed-call", "name": "lookup", "args": {"q": "fixture"}},
+            "thoughtSignature": "opaque-tool-signature"
+        }));
+        assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["id"], "signed-call");
+        assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["name"], "lookup");
+    }
+}
+
+#[tokio::test]
+async fn gemini_signed_tools_reject_unknown_origin_and_every_changed_route_identity() {
+    let original = route(ChatProtocol::Gemini, "signed-route-fence", 1);
+    let call = bound_gemini_tool_call(&original, "thoughtSignature").await;
+    let request = gemini_tool_continuation(&original, call);
+    let transports = transport_map([]);
+    let adapters = adapters(&transports);
+    let mut changed = Vec::new();
+    let mut route = original.clone(); route.model = "another-model".into(); changed.push(route);
+    let mut route = original.clone(); route.provider_id = ProviderIdRef("another-provider".into()); changed.push(route);
+    let mut route = original.clone(); route.model_route_id = ModelRouteId("another-route".into()); changed.push(route);
+    let mut route = original.clone(); route.model_route_revision += 1; changed.push(route);
+    let mut route = original.clone(); route.connection_config_ref = ConnectionConfigRef("another-connection".into()); changed.push(route);
+    let mut route = original.clone(); route.config_revision_digest = DigestHex("b".repeat(64)); changed.push(route);
+    let mut route = original.clone(); route.credential_ref = ProviderCredentialRef("another-credential-ref".into()); changed.push(route);
+    for protocol in ChatProtocol::ALL.into_iter().filter(|protocol| *protocol != ChatProtocol::Gemini) {
+        let mut route = original.clone(); route.protocol = protocol; route.features = protocol_features(protocol); changed.push(route);
+    }
+    for route in changed {
+        let adapter = adapters.iter().find(|adapter| adapter.protocol() == route.protocol).unwrap();
+        let lease = CredentialLease::new(
+            route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle",
+        );
+        let error = adapter.encode_request(&request, &route, &lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature, "{route:?}");
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+        // An explicit new selection with the old signed history must fail
+        // before claiming causality or obtaining transport credentials.
+        let gate = StaticCausalityGate::allow();
+        let mut switched = request.clone();
+        let selected = basic_request(&route);
+        switched.route = selected.route;
+        switched.causality = selected.causality;
+        let broker = broker(
+            gate.clone(), ResolvedChatRouteSet { primary: route, failovers: vec![] },
+            Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+            BrokerRetryPolicy { max_total_attempts: 1, max_attempts_per_route: 1 },
+        );
+        let error = match broker.open_stream(switched).await {
+            Err(error) => error,
+            Ok(_) => panic!("changed route accepted signed history"),
+        };
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+        assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+    }
+    let adapter = adapters.iter().find(|adapter| adapter.protocol() == ChatProtocol::Gemini).unwrap();
+    let lease = CredentialLease::new(
+        original.credential_ref.clone(), CredentialTarget::for_route(&original), "fixture-handle",
+    );
+    for origin in [None, Some(serde_json::json!("unknown-origin")), Some(serde_json::json!(42))] {
+        let mut request = request.clone();
+        let part = request.input.messages.iter_mut().flat_map(|message| &mut message.content)
+            .find(|part| matches!(part, ChatContentPart::ToolCall { .. })).unwrap();
+        if let ChatContentPart::ToolCall { provider_metadata: Some(metadata), .. } = part {
+            let metadata = metadata.0.as_object_mut().unwrap();
+            metadata.remove("_nomifun_producing_route_digest");
+            if let Some(origin) = origin { metadata.insert("_nomifun_producing_route_digest".into(), origin); }
+        }
+        let error = adapter.encode_request(&request, &original, &lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+    }
+}
+
+#[tokio::test]
+async fn gemini_tool_signature_origin_uses_the_actual_failover_attempt() {
+    let producing = route(ChatProtocol::Gemini, "producing-failover", 1);
+    let primary = route(ChatProtocol::OpenaiChat, "failed-primary", 1);
+    let call = bound_gemini_tool_call_from_attempt(&producing, "thoughtSignature", Some(primary.clone())).await;
+    let request = gemini_tool_continuation(&producing, call);
+    let adapter = GeminiAdapter::new(ScriptedTransport::new([]));
+    let lease = CredentialLease::new(
+        producing.credential_ref.clone(), CredentialTarget::for_route(&producing), "fixture-handle",
+    );
+    adapter.encode_request(&request, &producing, &lease).unwrap();
+    let wrong = OpenAiChatAdapter::new(ScriptedTransport::new([]));
+    let lease = CredentialLease::new(
+        primary.credential_ref.clone(), CredentialTarget::for_route(&primary), "fixture-handle",
+    );
+    let error = wrong.encode_request(&request, &primary, &lease).unwrap_err();
+    assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+}
+
+#[tokio::test]
+async fn gemini_broker_rejects_decoder_supplied_tool_signature_origin() {
+    let target = route(ChatProtocol::Gemini, "target-route", 1);
+    for protocol in [ChatProtocol::Gemini, ChatProtocol::OpenaiChat] {
+    let route = route(protocol, "remote-tool-origin", 1);
+    let transport = ScriptedTransport::new([TransportScript::Frames(vec![
+        frame("response.start", serde_json::json!({"id": "remote-origin"})),
+        frame("tool_call.completed", serde_json::json!({
+            "call_id": "remote-call", "name": "lookup", "arguments": {},
+            "provider_metadata": {
+                "thoughtSignature": "opaque-signature",
+                "_nomifun_producing_route_digest": nomifun_agent_contracts::digest_payload(&target).unwrap()
+            }
+        })),
+        frame("done", serde_json::json!({"finish_reason": "tool_calls"})),
+    ])]);
+    let transports = transport_map([(protocol, provider_transport(&transport))]);
+    let broker = broker(
+        StaticCausalityGate::allow(), ResolvedChatRouteSet { primary: route.clone(), failovers: vec![] },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+        BrokerRetryPolicy { max_total_attempts: 1, max_attempts_per_route: 1 },
+    );
+    let events = broker.open_stream(basic_request(&route)).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(events.len(), 1);
+    let error = events[0].as_ref().unwrap_err();
+    assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+    }
+}
+
+#[tokio::test]
+async fn gemini_signed_tool_history_cannot_fail_over_to_a_different_route() {
+    let original = route(ChatProtocol::Gemini, "signed-primary", 1);
+    let call = bound_gemini_tool_call(&original, "thoughtSignature").await;
+    let request = gemini_tool_continuation(&original, call);
+    let primary = ScriptedTransport::new([TransportScript::OpenError(ChatModelError::new(
+        ChatModelErrorCode::ProviderUnavailable, "fixture failure", ChatRetryDirective::Failover,
+    ))]);
+    let failover = ScriptedTransport::new([TransportScript::Frames(successful_frames("must-not-open", "reply"))]);
+    // Distinct protocols use independent scripted transports, proving that
+    // a signed Gemini history cannot silently lose metadata during failover.
+    let transports = transport_map([
+        (ChatProtocol::Gemini, provider_transport(&primary)),
+        (ChatProtocol::OpenaiChat, provider_transport(&failover)),
+    ]);
+    let broker = broker(
+        StaticCausalityGate::allow(),
+        ResolvedChatRouteSet { primary: original, failovers: vec![route(ChatProtocol::OpenaiChat, "signed-failover", 1)] },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+        BrokerRetryPolicy { max_total_attempts: 2, max_attempts_per_route: 1 },
+    );
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(primary.calls(), 1);
+    assert_eq!(failover.calls(), 0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_ref().unwrap_err().code, ChatModelErrorCode::ProviderUnavailable);
+}
+
+#[test]
+fn gemini_unsigned_reasoning_preserves_thought_marker_and_signed_reasoning_fails_closed() {
+    let adapter = GeminiAdapter::new(ScriptedTransport::new([]));
+    let route = route(ChatProtocol::Gemini, "reasoning-history", 1);
+    let lease = CredentialLease::new(
+        route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle",
+    );
+    let mut request = basic_request(&route);
+    request.input.messages.push(ChatMessage {
+        role: ChatRole::Assistant, provider_round_id: None,
+        content: vec![
+            ChatContentPart::Reasoning {
+                text: "unsigned thought".into(), signature: None, encrypted_content: None,
+            },
+            ChatContentPart::Text { text: "answer".into() },
+        ],
+    });
+    let body = adapter.encode_request(&request, &route, &lease).unwrap().body;
+    assert_eq!(body["contents"][1]["parts"], serde_json::json!([
+        {"text": "unsigned thought", "thought": true},
+        {"text": "answer"}
+    ]));
+    request.input.messages[1].content.insert(0, ChatContentPart::Reasoning {
+        text: "signed thought".into(), signature: Some("opaque-reasoning-signature".into()),
+        encrypted_content: None,
+    });
+    let error = adapter.encode_request(&request, &route, &lease).unwrap_err();
+    assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+}
+
+#[test]
+fn generic_reasoning_signatures_are_rejected_by_every_protocol_adapter() {
+    let transports = transport_map([]);
+    for adapter in adapters(&transports) {
+        let route = route(adapter.protocol(), "unknown-reasoning-origin", 1);
+        let mut request = basic_request(&route);
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant, provider_round_id: None,
+            content: vec![ChatContentPart::Reasoning {
+                text: "private thought".into(), signature: Some("unknown-origin-signature".into()),
+                encrypted_content: None,
+            }],
+        });
+        let lease = CredentialLease::new(
+            route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle",
+        );
+        let error = adapter.encode_request(&request, &route, &lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature, "{:?}", adapter.protocol());
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+    }
+}
+
+#[tokio::test]
+async fn generic_reasoning_signature_rejection_precedes_causality_credentials_and_all_failover_transports() {
+    struct CountingCredentials { calls: AtomicUsize }
+    #[async_trait]
+    impl ProviderCredentialStore for CountingCredentials {
+        async fn lease(&self, credential_ref: &ProviderCredentialRef, target: &CredentialTarget)
+            -> Result<CredentialLease, ChatModelError>
+        {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(CredentialLease::new(credential_ref.clone(), target.clone(), "fixture-handle"))
+        }
+    }
+    let primary = route(ChatProtocol::Gemini, "generic-signature-primary", 1);
+    let mut request = basic_request(&primary);
+    request.input.messages.push(ChatMessage {
+        role: ChatRole::Assistant, provider_round_id: None,
+        content: vec![ChatContentPart::Reasoning {
+            text: "private thought".into(), signature: Some("unknown-origin-signature".into()),
+            encrypted_content: None,
+        }],
+    });
+    let scripted = ChatProtocol::ALL.into_iter().map(|protocol| (protocol,
+        ScriptedTransport::new([TransportScript::Frames(successful_frames("must-not-open", "reply"))])
+    )).collect::<Vec<_>>();
+    let transports = transport_map(scripted.iter().map(|(protocol, transport)|
+        (*protocol, provider_transport(transport))));
+    let gate = StaticCausalityGate::allow();
+    let credentials = Arc::new(CountingCredentials { calls: AtomicUsize::new(0) });
+    let failovers = ChatProtocol::ALL.into_iter().filter(|protocol| *protocol != ChatProtocol::Gemini)
+        .map(|protocol| route(protocol, &format!("generic-signature-{protocol:?}"), 1)).collect();
+    let broker = broker(
+        gate.clone(), ResolvedChatRouteSet { primary, failovers }, credentials.clone(), &transports,
+        BrokerRetryPolicy { max_total_attempts: 6, max_attempts_per_route: 1 },
+    );
+    let error = match broker.open_stream(request).await {
+        Err(error) => error,
+        Ok(_) => panic!("unknown reasoning origin opened a broker stream"),
+    };
+    assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+    assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+    assert_eq!(credentials.calls.load(Ordering::Acquire), 0);
+    for (protocol, transport) in scripted {
+        assert_eq!(transport.calls(), 0, "{protocol:?}");
+    }
+}
+
+#[tokio::test]
+async fn anthropic_typed_reasoning_round_trips_actual_broker_route_and_rejects_changed_route() {
+    use nomifun_chat_model_broker::ChatProviderReasoning;
+
+    for via_failover in [false, true] {
+        let producing = route(ChatProtocol::Anthropic, "typed-reasoning-producer", 1);
+        let failed_primary = route(ChatProtocol::OpenaiChat, "typed-reasoning-primary", 1);
+        let frames = [
+            ("message_start", serde_json::json!({"type":"message_start", "message": {
+                "id":"typed-reasoning-response", "type":"message", "role":"assistant",
+                "content":[], "stop_reason":null, "usage":{"input_tokens":3,"output_tokens":0}
+            }})),
+            ("content_block_start", serde_json::json!({"type":"content_block_start", "index":0,
+                "content_block":{"type":"thinking","thinking":""}})),
+            ("content_block_delta", serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"thinking_delta","thinking":"native thought"}})),
+            ("content_block_delta", serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"signature_delta","signature":"opaque-signature"}})),
+            ("content_block_stop", serde_json::json!({"type":"content_block_stop","index":0})),
+            ("content_block_start", serde_json::json!({"type":"content_block_start", "index":1,
+                "content_block":{"type":"redacted_thinking","data":"opaque-redacted-data"}})),
+            ("content_block_stop", serde_json::json!({"type":"content_block_stop","index":1})),
+            ("message_delta", serde_json::json!({"type":"message_delta",
+                "delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}})),
+            ("message_stop", serde_json::json!({"type":"message_stop"})),
+        ];
+        let transport = ScriptedTransport::new([TransportScript::Frames(
+            frames.into_iter().map(|(event, data)| frame(event, data)).collect(),
+        )]);
+        let primary_transport = ScriptedTransport::new([TransportScript::OpenError(ChatModelError::new(
+            ChatModelErrorCode::ProviderUnavailable, "fixture primary failure", ChatRetryDirective::Failover,
+        ))]);
+        let transports = transport_map([
+            (ChatProtocol::Anthropic, provider_transport(&transport)),
+            (ChatProtocol::OpenaiChat, provider_transport(&primary_transport)),
+        ]);
+        let routes = if via_failover {
+            ResolvedChatRouteSet { primary: failed_primary, failovers: vec![producing.clone()] }
+        } else {
+            ResolvedChatRouteSet { primary: producing.clone(), failovers: vec![] }
+        };
+        let request = basic_request(&routes.primary);
+        let producing_broker = broker(
+            StaticCausalityGate::allow(), routes,
+            Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+            BrokerRetryPolicy { max_total_attempts: 2, max_attempts_per_route: 1 },
+        );
+        let events = producing_broker.open_stream(request).await.unwrap()
+            .map(|result| result.unwrap().event).collect::<Vec<_>>().await;
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed
+        })));
+        let blocks = events.into_iter().filter_map(|event| match event {
+            ChatModelEvent::ProviderReasoningBlock { block } => Some(block),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let origin = nomifun_agent_contracts::digest_payload(&producing).unwrap();
+        assert_eq!(blocks, vec![
+            ChatProviderReasoning::AnthropicThinking {
+                text: "native thought".into(), signature: "opaque-signature".into(),
+                route_digest: Some(origin.clone()),
+            },
+            ChatProviderReasoning::AnthropicRedactedThinking {
+                data: "opaque-redacted-data".into(), route_digest: Some(origin),
+            },
+        ]);
+        assert_eq!(transport.calls(), 1);
+        assert_eq!(primary_transport.calls(), usize::from(via_failover));
+        // Canonical serialization retains the Broker-bound origin for replay.
+        let blocks: Vec<ChatProviderReasoning> =
+            serde_json::from_value(serde_json::to_value(blocks).unwrap()).unwrap();
+        let mut continuation = basic_request(&producing);
+        continuation.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant, provider_round_id: None,
+            content: blocks.into_iter().map(|block| ChatContentPart::ProviderReasoning { block }).collect(),
+        });
+        let adapter = AnthropicAdapter::new(ScriptedTransport::new([]));
+        let lease = CredentialLease::new(
+            producing.credential_ref.clone(), CredentialTarget::for_route(&producing), "fixture-handle",
+        );
+        let body = adapter.encode_request(&continuation, &producing, &lease).unwrap().body;
+        assert_eq!(body["messages"][1]["content"], serde_json::json!([
+            {"type":"thinking","thinking":"native thought","signature":"opaque-signature"},
+            {"type":"redacted_thinking","data":"opaque-redacted-data"}
+        ]));
+        assert!(!body.to_string().contains("route_digest"));
+
+        let mut changed = producing.clone();
+        changed.model_route_revision += 1;
+        let changed_lease = CredentialLease::new(
+            changed.credential_ref.clone(), CredentialTarget::for_route(&changed), "fixture-handle",
+        );
+        let error = adapter.encode_request(&continuation, &changed, &changed_lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+        let gate = StaticCausalityGate::allow();
+        let mut switched = basic_request(&changed);
+        switched.input = continuation.input;
+        let changed_broker = broker(
+            gate.clone(), ResolvedChatRouteSet { primary: changed, failovers: vec![] },
+            Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+            BrokerRetryPolicy { max_total_attempts: 1, max_attempts_per_route: 1 },
+        );
+        let error = match changed_broker.open_stream(switched).await {
+            Err(error) => error,
+            Ok(_) => panic!("changed route accepted typed reasoning history"),
+        };
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+        assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+        assert_eq!(transport.calls(), 1, "changed route must not open another attempt");
+    }
+}
+
+#[test]
+fn gemini_empty_text_signature_frame_is_not_dropped() {
+    let adapter = GeminiAdapter::new(ScriptedTransport::new([]));
+    let events = adapter.decode_frame(ProviderWireFrame {
+        diagnostic: None, event: "message".into(),
+        data: serde_json::json!({
+            "responseId": "signature-only-frame",
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"text": "", "thought": true, "thoughtSignature": "opaque-signature"}
+            ]}}]
+        }),
+    }).unwrap();
+    assert!(events.iter().any(|event| matches!(event,
+        ChatModelEvent::ReasoningSignature { signature } if signature == "opaque-signature")));
+    assert!(!events.iter().any(|event| matches!(event,
+        ChatModelEvent::ReasoningDelta { .. } | ChatModelEvent::OutputTextDelta { .. })));
+}
+
+#[test]
+fn gemini_tool_signature_metadata_is_validated_without_merging_other_fields() {
+    let fixture = recorded_conformance_fixtures().into_iter()
+        .find(|fixture| fixture.protocol == ChatProtocol::Gemini).unwrap();
+    let adapter = GeminiAdapter::new(ScriptedTransport::new([]));
+    let lease = CredentialLease::new(
+        fixture.route.credential_ref.clone(), CredentialTarget::for_route(&fixture.route), "fixture-handle",
+    );
+    let with_metadata = |metadata: serde_json::Value| {
+        let mut request = fixture.request.clone();
+        let part = request.input.messages.iter_mut().flat_map(|message| &mut message.content)
+            .find(|part| matches!(part, ChatContentPart::ToolCall { .. })).unwrap();
+        if let ChatContentPart::ToolCall { provider_metadata, .. } = part {
+            *provider_metadata = Some(nomifun_agent_contracts::StrictJsonValue(metadata));
+        }
+        request
+    };
+    for metadata in [
+        serde_json::json!(null), serde_json::json!([]), serde_json::json!("not an object"),
+        serde_json::json!({"thoughtSignature": null}), serde_json::json!({"thoughtSignature": 42}),
+        serde_json::json!({"thoughtSignature": ""}),
+        serde_json::json!({"thoughtSignature": "one", "thought_signature": "two"}),
+    ] {
+        let error = adapter.encode_request(&with_metadata(metadata), &fixture.route, &lease).unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+    }
+    for signature_field in ["thoughtSignature", "thought_signature"] {
+        let mut metadata = serde_json::json!({"unrelated_field": {"text": "do not merge"}});
+        metadata[signature_field] = serde_json::json!("opaque-tool-signature");
+        metadata["_nomifun_producing_route_digest"] =
+            serde_json::to_value(nomifun_agent_contracts::digest_payload(&fixture.route).unwrap()).unwrap();
+        let body = adapter.encode_request(&with_metadata(metadata), &fixture.route, &lease).unwrap().body;
+        let part = body["contents"].as_array().unwrap().iter()
+            .flat_map(|content| content["parts"].as_array().unwrap())
+            .find(|part| part.get("functionCall").is_some()).unwrap();
+        assert_eq!(part["thoughtSignature"], "opaque-tool-signature");
+        assert!(part.get("unrelated_field").is_none());
+        assert!(part.get("_nomifun_producing_route_digest").is_none());
+        assert!(part["functionCall"].get("thoughtSignature").is_none());
+    }
+}
+
+#[test]
+fn unsigned_tool_metadata_remains_compatible_with_each_protocol() {
+    let transports = transport_map([]);
+    let adapters = adapters(&transports);
+    for fixture in recorded_conformance_fixtures() {
+        let mut request = fixture.request;
+        for part in request.input.messages.iter_mut().flat_map(|message| &mut message.content) {
+            if let ChatContentPart::ToolCall { provider_metadata, .. } = part {
+                *provider_metadata = Some(nomifun_agent_contracts::StrictJsonValue(
+                    serde_json::json!({"unrelated_field": "unsigned-provider-metadata"}),
+                ));
+            }
+        }
+        let adapter = adapters.iter().find(|adapter| adapter.protocol() == fixture.protocol).unwrap();
+        let lease = CredentialLease::new(
+            fixture.route.credential_ref.clone(), CredentialTarget::for_route(&fixture.route), "fixture-handle",
+        );
+        adapter.encode_request(&request, &fixture.route, &lease).unwrap();
+    }
 }
 
 #[test]
@@ -1655,6 +2200,47 @@ fn single_route_retry_broker(
         BrokerRetryPolicy::default(),
     );
     (broker, request, transport)
+}
+
+#[tokio::test(start_paused = true)]
+async fn gateway_business_failures_never_switch_configured_route() {
+    use nomifun_net::provider_gateway_error::GatewayBusinessError;
+
+    for business in [GatewayBusinessError::InsufficientBalance,
+        GatewayBusinessError::SubscriptionExpired, GatewayBusinessError::ModelNotInPlan,
+        GatewayBusinessError::KeyExpired, GatewayBusinessError::RateLimited] {
+        let primary_route = route(ChatProtocol::OpenaiChat, "gateway-primary", 1);
+        let request = basic_request(&primary_route);
+        let primary = ScriptedTransport::new((0..3).map(|_| {
+            TransportScript::Frames(vec![frame("error", serde_json::json!({
+                "error": {"code": business.code(), "message": "private upstream detail"}
+            }))])
+        }));
+        let failover = ScriptedTransport::new([TransportScript::Frames(successful_frames(
+            "must-not-open", "another model must not bypass a gateway business failure",
+        ))]);
+        let transports = transport_map([
+            (ChatProtocol::OpenaiChat, provider_transport(&primary)),
+            (ChatProtocol::Anthropic, provider_transport(&failover)),
+        ]);
+        let broker = broker(
+            StaticCausalityGate::allow(),
+            ResolvedChatRouteSet {
+                primary: primary_route,
+                failovers: vec![route(ChatProtocol::Anthropic, "gateway-failover", 1)],
+            },
+            Arc::new(StaticCredentialStore { mismatch: false }),
+            &transports,
+            BrokerRetryPolicy { max_total_attempts: 4, max_attempts_per_route: 2 },
+        );
+        let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+        assert_eq!(primary.calls(), if business == GatewayBusinessError::RateLimited { 2 } else { 1 });
+        assert_eq!(failover.calls(), 0, "{}", business.code());
+        assert_eq!(events.len(), 1);
+        let error = events[0].as_ref().unwrap_err();
+        assert_eq!(error.message, business.action_message());
+        assert_eq!(error.diagnostic.as_ref().unwrap().provider_code.as_deref(), Some(business.code()));
+    }
 }
 
 async fn wait_for_attempt(transport: &ScriptedTransport, count: usize) {

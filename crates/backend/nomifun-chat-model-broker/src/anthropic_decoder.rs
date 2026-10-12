@@ -618,4 +618,50 @@ mod tests {
             Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })
         ));
     }
+
+    #[test]
+    fn native_signed_thinking_preserves_cache_dimensions_and_cumulative_output() {
+        let mut decoder = AnthropicDecoder::default();
+        let frames = [
+            ("message_start", serde_json::json!({"type":"message_start", "message": {
+                "id":"msg_signed", "type":"message", "role":"assistant", "content":[],
+                "stop_reason":null, "usage":{"input_tokens":3,"output_tokens":0,
+                    "cache_read_input_tokens":7,"cache_creation_input_tokens":2}
+            }})),
+            ("content_block_start", serde_json::json!({"type":"content_block_start", "index":0,
+                "content_block":{"type":"thinking","thinking":""}})),
+            ("content_block_delta", serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"thinking_delta","thinking":"native thought"}})),
+            ("content_block_delta", serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"signature_delta","signature":"opaque-"}})),
+            ("content_block_delta", serde_json::json!({"type":"content_block_delta", "index":0,
+                "delta":{"type":"signature_delta","signature":"signature"}})),
+            ("content_block_stop", serde_json::json!({"type":"content_block_stop","index":0})),
+            ("message_delta", serde_json::json!({"type":"message_delta","delta":{},
+                "usage":{"output_tokens":2}})),
+            ("message_delta", serde_json::json!({"type":"message_delta",
+                "delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}})),
+            ("message_stop", serde_json::json!({"type":"message_stop"})),
+        ];
+        let mut events = Vec::new();
+        for (event, data) in frames {
+            events.extend(decoder.decode(&ProviderWireFrame { diagnostic: None, event: event.into(), data })
+                .expect("native frame is handled").unwrap());
+        }
+        assert!(events.iter().any(|event| matches!(event,
+            ChatModelEvent::ProviderReasoningBlock {
+                block: ChatProviderReasoning::AnthropicThinking { text, signature, route_digest: None }
+            } if text == "native thought" && signature == "opaque-signature")));
+        let usage = events.iter().find_map(|event| match event {
+            ChatModelEvent::Usage { usage } => Some(usage),
+            _ => None,
+        }).unwrap();
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 4, "output snapshots must not be summed");
+        assert_eq!(usage.cache_read_tokens, 7);
+        assert_eq!(usage.cache_write_tokens, 2);
+        assert!(matches!(events.last(), Some(ChatModelEvent::Completed {
+            finish_reason: ChatFinishReason::Completed
+        })));
+    }
 }

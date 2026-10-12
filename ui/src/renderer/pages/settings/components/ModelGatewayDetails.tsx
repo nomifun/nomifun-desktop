@@ -8,12 +8,12 @@ import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ModelGatewayAccountResponse, ModelGatewayMetaResponse } from '@/common/types/provider/modelGateway';
 import { Alert, Button } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { GatewayOperator } from './ModelGatewaySetup';
 import { gatewayDate, gatewayExternalUrl, gatewayInteger, gatewayMoney } from './modelGatewayForm';
 
-const ModelGatewayDetails: React.FC<{ provider: IProvider; onChanged(): Promise<unknown> }> = ({ provider, onChanged }) => {
+const ModelGatewayDetails: React.FC<{ provider: IProvider; onChanged(): Promise<unknown>; refreshToken?: number }> = ({ provider, onChanged, refreshToken }) => {
   const { t, i18n } = useTranslation();
   const [syncNotice, setSyncNotice] = useState<{ type: 'success' | 'error'; text: string }>();
   const [meta, setMeta] = useState<ModelGatewayMetaResponse>();
@@ -21,27 +21,42 @@ const ModelGatewayDetails: React.FC<{ provider: IProvider; onChanged(): Promise<
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
+  const refreshRevision = useRef(0);
+  const connectionRevision = useRef(0);
   const refresh = useCallback(async () => {
-    setLoading(true); setError(false);
+    const current = ++refreshRevision.current;
+    setLoading(true); setError(false); setMeta(undefined); setAccount(undefined);
     const [nextMeta, nextAccount] = await Promise.allSettled([
       ipcBridge.modelGateway.providerMeta.invoke({ provider_id: provider.id }),
       ipcBridge.modelGateway.account.invoke({ provider_id: provider.id }),
     ]);
+    if (current !== refreshRevision.current) return;
     if (nextMeta.status === 'fulfilled') setMeta(nextMeta.value); else setMeta(undefined);
     if (nextAccount.status === 'fulfilled') setAccount(nextAccount.value); else setAccount(undefined);
     setError(nextMeta.status === 'rejected' || nextAccount.status === 'rejected');
     setLoading(false);
-  }, [provider.id, provider.base_url, provider.has_credentials]);
-  useEffect(() => { void refresh(); }, [refresh]);
+  }, [provider.id, provider.base_url, provider.has_credentials, refreshToken]);
+  useEffect(() => {
+    setSyncNotice(undefined); setSyncing(false);
+    void refresh();
+    return () => {
+      // A saved connection can change while its previous requests are pending.
+      refreshRevision.current += 1;
+      connectionRevision.current += 1;
+    };
+  }, [refresh]);
   const sync = async () => {
+    if (loading || syncing) return;
+    const current = connectionRevision.current;
     setSyncing(true); setSyncNotice(undefined);
     try {
       const result = await ipcBridge.modelGateway.sync.invoke({ provider_id: provider.id });
       await onChanged();
+      if (current !== connectionRevision.current) return;
       setSyncNotice({ type: 'success', text: t('settings.modelGateway.syncComplete', { added: result.added, updated: result.updated }) });
       await refresh();
-    } catch { setSyncNotice({ type: 'error', text: t('settings.modelGateway.syncFailed') }); }
-    finally { setSyncing(false); }
+    } catch { if (current === connectionRevision.current) setSyncNotice({ type: 'error', text: t('settings.modelGateway.syncFailed') }); }
+    finally { if (current === connectionRevision.current) setSyncing(false); }
   };
   const unknown = t('settings.modelGateway.unknown');
   const purchaseUrl = gatewayExternalUrl(meta?.operator.purchase_url);
@@ -49,8 +64,8 @@ const ModelGatewayDetails: React.FC<{ provider: IProvider; onChanged(): Promise<
     <div className='my-8px flex flex-col gap-12px' data-model-gateway-details>
       {meta && <GatewayOperator meta={meta} />}
       <div className='flex flex-wrap gap-8px'>
-        <Button size='small' onClick={() => void refresh()} loading={loading}>{t('settings.modelGateway.refreshAccount')}</Button>
-        <Button size='small' onClick={() => void sync()} loading={syncing} disabled={loading}>{t('settings.modelGateway.syncCatalog')}</Button>
+        <Button size='small' onClick={() => void refresh()} loading={loading} disabled={syncing}>{t('settings.modelGateway.refreshAccount')}</Button>
+        <Button size='small' onClick={() => void sync()} loading={syncing} disabled={loading || syncing}>{t('settings.modelGateway.syncCatalog')}</Button>
         {purchaseUrl && <Button size='small' type='primary' onClick={() => void ipcBridge.shell.openExternal.invoke(purchaseUrl)}>{t('settings.modelGateway.recharge')}</Button>}
       </div>
       {error && <Alert type='warning' content={t('settings.modelGateway.accountFailed')} />}

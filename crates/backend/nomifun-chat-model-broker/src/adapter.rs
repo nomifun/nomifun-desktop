@@ -17,7 +17,8 @@ use crate::contracts::{
     ProviderIdRef, ProviderResponseId, ProviderRoundId, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::CredentialLease;
-use crate::provider_reasoning::ProviderReasoningRoute;
+use crate::provider_reasoning::{ProviderReasoningRoute, gemini_tool_matches_route,
+    gemini_tool_signature, validate_reasoning_signature_origins};
 
 pub type ProviderWireStream =
     Pin<Box<dyn Stream<Item = Result<ProviderWireFrame, ChatModelError>> + Send>>;
@@ -231,6 +232,18 @@ impl AdapterCore {
         request
             .validate()
             .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
+        validate_reasoning_signature_origins(&request.input)?;
+        for part in request.input.messages.iter().flat_map(|message| &message.content) {
+            if let ChatContentPart::ToolCall { provider_metadata, .. } = part
+                && !gemini_tool_matches_route(provider_metadata, route)?
+            {
+                return Err(ChatModelError::new(
+                    ChatModelErrorCode::UnsupportedFeature,
+                    "Gemini tool signature requires the exact route that produced it",
+                    crate::contracts::ChatRetryDirective::Never,
+                ));
+            }
+        }
         if self.protocol != ChatProtocol::OpenaiResponses && request.input.messages.iter().any(|message| {
             message.content.iter().any(|part| matches!(part,
                 ChatContentPart::Reasoning { encrypted_content: Some(_), .. }))
@@ -1108,12 +1121,18 @@ fn gemini_part(
             call_id,
             name,
             arguments,
-            ..
-        } => Ok(json!({"functionCall": {
-            "id": call_id,
-            "name": name,
-            "args": arguments.0.clone()
-        }})),
+            provider_metadata,
+        } => {
+            let mut part = json!({"functionCall": {
+                "id": call_id,
+                "name": name,
+                "args": arguments.0.clone()
+            }});
+            if let Some(signature) = gemini_tool_signature(provider_metadata)? {
+                part["thoughtSignature"] = json!(signature);
+            }
+            Ok(part)
+        }
         ChatContentPart::ToolResult {
             call_id,
             output,
@@ -1133,7 +1152,7 @@ fn gemini_part(
                 }
             }}))
         }
-        ChatContentPart::Reasoning { text, .. } => Ok(json!({"text": text})),
+        ChatContentPart::Reasoning { text, .. } => Ok(json!({"text": text, "thought": true})),
         ChatContentPart::ProviderReasoning { .. } => Err(ChatModelError::new(
             ChatModelErrorCode::UnsupportedFeature,
             "typed Anthropic reasoning cannot be encoded as Gemini content",
@@ -1908,7 +1927,9 @@ fn decode_gemini_raw_frame(
                             ));
                         }
                     };
-                    if let Some(signature) = signature.filter(|signature| !signature.is_empty()) {
+                    if part.get("functionCall").is_none()
+                        && let Some(signature) = signature.filter(|signature| !signature.is_empty())
+                    {
                         events.push(ChatModelEvent::ReasoningSignature {
                             signature: signature.to_owned(),
                         });

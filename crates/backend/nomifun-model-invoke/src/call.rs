@@ -228,7 +228,7 @@ pub struct ResolvedConnection {
 }
 
 /// Typed transport fields owned by exactly one capability row.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ResolvedTaskTransport {
     pub endpoint: Option<String>,
     pub poll_endpoint: Option<String>,
@@ -266,6 +266,33 @@ pub struct ResolvedTaskConfig {
 }
 
 impl ResolvedTaskConfig {
+    /// Compare the exact task's effective invocation authority across a
+    /// multi-call operation. Provider-wide revisions may change when unrelated
+    /// catalog rows change, while credentials, targets and native parameters
+    /// must remain stable. Both values must come from the canonical resolver;
+    /// this comparison does not replace fresh enabled/capability validation.
+    /// Local catalog provenance and descriptive traits do not enter execution.
+    pub fn matches_invocation_configuration(&self, other: &Self) -> bool {
+        self.provider_id == other.provider_id
+            && self.model == other.model
+            && self.task == other.task
+            && self.platform == other.platform
+            && self.protocol == other.protocol
+            && self.connection.role == other.connection.role
+            && self.connection.base_url == other.connection.base_url
+            && self.connection.auth.scheme == other.connection.auth.scheme
+            && self.connection.auth.credentials == other.connection.auth.credentials
+            && self.connection.extra == other.connection.extra
+            && self.transport == other.transport
+            && crate::adapters::provider_body_fields(&self.provider_params)
+                .collect::<std::collections::BTreeMap<_, _>>()
+                == crate::adapters::provider_body_fields(&other.provider_params)
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            && self.context_limit == other.context_limit
+            && self.output_limit == other.output_limit
+            && self.bedrock_config == other.bedrock_config
+    }
+
     /// Build the adapter-facing parameter object. This is an ephemeral view,
     /// not a second persistence schema: every transport value originates from
     /// the typed capability row and provider parameters remain disjoint.

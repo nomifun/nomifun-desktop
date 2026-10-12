@@ -3,7 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
-import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -58,5 +58,61 @@ describe('gateway account and catalog sync', () => {
     fireEvent.click(page.getByRole('button', { name: settings.modelGateway.syncCatalog }));
     await waitFor(() => expect(onChanged.mock.calls).toHaveLength(1));
     expect(sync.mock.calls).toEqual([[{ provider_id: provider.id }]]);
+  });
+  test('clears account and operator actions while the saved gateway destination is changing', async () => {
+    const nextProvider = { ...provider, base_url: 'https://other.example/v1' };
+    const metaCall = spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValueOnce(meta)
+      .mockImplementation(() => new Promise(() => {}));
+    spyOn(ipcBridge.modelGateway.account, 'invoke').mockResolvedValueOnce(account)
+      .mockImplementation(() => new Promise(() => {}));
+    const { page, rerender, onChanged } = mount();
+    await waitFor(() => expect(page.getByText('$123.45')).toBeDefined());
+    rerender(<I18nextProvider i18n={i18n}><ModelGatewayDetails provider={nextProvider} onChanged={onChanged} /></I18nextProvider>);
+    await waitFor(() => expect(metaCall.mock.calls).toHaveLength(2));
+    expect(page.queryByText('$123.45') === null).toBe(true);
+    expect(page.queryByText('Partner') === null).toBe(true);
+    expect(page.queryByRole('button', { name: settings.modelGateway.recharge }) === null).toBe(true);
+  });
+  test('ignores account replies from the previous saved gateway destination', async () => {
+    let completeMeta!: (value: ModelGatewayMetaResponse) => void;
+    let completeAccount!: (value: ModelGatewayAccountResponse) => void;
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke')
+      .mockImplementationOnce(() => new Promise((resolve) => { completeMeta = resolve; }))
+      .mockResolvedValue({ ...meta, operator: { ...meta.operator, name: 'Other operator' } });
+    spyOn(ipcBridge.modelGateway.account, 'invoke')
+      .mockImplementationOnce(() => new Promise((resolve) => { completeAccount = resolve; }))
+      .mockResolvedValue({ ...account, balance: { ...account.balance, amount: '678' } });
+    const { page, rerender, onChanged } = mount();
+    rerender(<I18nextProvider i18n={i18n}><ModelGatewayDetails provider={{ ...provider, base_url: 'https://other.example/v1' }} onChanged={onChanged} /></I18nextProvider>);
+    await waitFor(() => expect(page.getByText('$6.78')).toBeDefined());
+    await act(async () => { completeMeta(meta); completeAccount(account); });
+    expect(page.queryByText('$6.78') !== null).toBe(true);
+    expect(page.queryByText('Other operator') !== null).toBe(true);
+    expect(page.queryByText('$123.45') === null).toBe(true);
+    expect(page.queryByText('Partner') === null).toBe(true);
+  });
+  test('refreshes the account after key-only connection edits without relying on public credential presence', async () => {
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValue(meta);
+    const accountCall = spyOn(ipcBridge.modelGateway.account, 'invoke').mockResolvedValueOnce(account)
+      .mockResolvedValue({ ...account, key: { ...account.key, name: 'Replacement key' } });
+    const { page, rerender, onChanged } = mount();
+    await waitFor(() => expect(page.getByText('Desktop')).toBeDefined());
+    rerender(<I18nextProvider i18n={i18n}><ModelGatewayDetails provider={provider} onChanged={onChanged} refreshToken={1} /></I18nextProvider>);
+    await waitFor(() => expect(page.queryByText('Replacement key') !== null).toBe(true));
+    expect(accountCall.mock.calls).toEqual([[{ provider_id: provider.id }], [{ provider_id: provider.id }]]);
+    expect(page.queryByText('Desktop') === null).toBe(true);
+  });
+  test('a failed catalog sync preserves the configured provider and reports a safe error', async () => {
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValue(meta);
+    spyOn(ipcBridge.modelGateway.account, 'invoke').mockResolvedValue(account);
+    const sync = spyOn(ipcBridge.modelGateway.sync, 'invoke').mockRejectedValue(new Error('sensitive response body'));
+    const { page, container, onChanged } = mount();
+    await waitFor(() => expect(page.getByText('$123.45')).toBeDefined());
+    fireEvent.click(page.getByRole('button', { name: settings.modelGateway.syncCatalog }));
+    await waitFor(() => expect(page.getByText(settings.modelGateway.syncFailed)).toBeDefined());
+    expect(sync.mock.calls).toEqual([[{ provider_id: provider.id }]]);
+    expect(onChanged.mock.calls).toHaveLength(0);
+    expect(page.queryByText('$123.45') !== null).toBe(true);
+    expect(container.textContent).not.toContain('sensitive response body');
   });
 });

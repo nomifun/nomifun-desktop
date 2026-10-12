@@ -117,6 +117,10 @@ Agent 数据。活动或暂停 Turn、Remote 和 Attempt（包括 Automation Att
 
 完成账本的 prior_task 候选只来自最新已关闭 Turn，并要求与当前 Session、runtime binding 和 Snapshot 完全一致。模型或 Agent 切换后的旧 Snapshot 仍作为已验证的普通历史保留，但不导入它的执行账本；不向更早的 Turn 搜索一个匹配的旧账本。
 
+Chat 路由的当前模型配置摘要只纳入该模型的任务配置及其引用的命名连接；新增其他模型或无关协议连接不改变这条路由。服务商认证、所选模型和实际连接的变化仍须通过原有精确路由校验。既有摘要只能在它原先覆盖的完整配置图仍然匹配时使用，不改写 Session 或 native checkpoint 来放宽恢复条件。Gemini 工具调用的原生签名随既有 canonical `ToolCall` metadata 保留；Broker 使用实际生产该调用的路由建立来源摘要，只有相同路由允许续传。缺少来源或来源不匹配的签名失败关闭，内部来源字段不进入上游请求。
+
+通用 `Reasoning.signature` 没有可验证的生产路由，Broker 准备和各协议编码均明确拒绝其续传，不根据当前模型补造来源。Gemini 无签名思考仍按原生 `thought: true` 表达，带来源的工具签名和 typed Anthropic reasoning 沿用各自的精确路由边界；Gemini 的通用签名思考历史暂不支持。独立签名流事件被解析并不证明完整多轮或 native checkpoint 恢复可用。
+
 Agent 或资源切换不能删除已结算效果引用的资源定义，也不能修改同一 binding ID 的定义。所有持久资源定义使用合同层 `resource_definition_id`：摘要覆盖 kind、resource、owner、operations、connection 和完整参数，排除 ID 自身；相同定义复用 ID，权限或参数改变生成新 ID。调用方在最终工作目录和策略参数确定后生成 ID，不以物理资源 ID 替代定义身份。执行期权限收窄继续引用原 canonical 定义，不写入第二份资源定义。
 
 Store 在同一事务中更新当前 binding 并保留必要的历史引用；资源查询、知识库挂载和删除保护只按当前 binding 选取资源。历史定义用于回执追溯，不赋予新 Agent 权限，不形成第二份活动资源账本。

@@ -301,6 +301,8 @@ export interface CapabilityModuleAction {
   output_schema: string;
   effect_class: string;
   presentation: string;
+  /** Missing/null retains the Module gate; an empty map means no resources. */
+  required_resource_operations?: Record<string, string[]> | null;
 }
 
 export interface CapabilityModuleCatalogItem {

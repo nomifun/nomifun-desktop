@@ -17,6 +17,23 @@ fn state(db: &nomifun_db::Database) -> SystemRouterState {
 fn meta() -> Value { json!({"contract_version":"1.0","operator":{"name":"Independent Partner","homepage_url":"https://operator.example/","console_url":"https://operator.example/console","purchase_url":"https://operator.example/purchase","terms_url":null,"privacy_url":null},"capabilities":["openai-response","anthropic","gemini"],"optional_endpoints":[]}) }
 fn model(id: &str, endpoint: &str, context: i64) -> Value { json!({"id":id,"display_name":id,"vendor":"fixture","tasks":["chat"],"task_endpoints":{"chat":{"endpoints":[endpoint],"preferred_endpoint":endpoint}},"context_window":context,"max_output_tokens":4096,"input_modalities":["text","image"],"traits":["vision_input"],"pricing":[{"task":"chat","meter":"input_tokens","unit_size":1000,"amount":9,"currency":"USD"}],"included_in_plan":true,"status":"available"}) }
 fn catalog() -> Value { json!({"contract_version":"1.0","models":[model("gpt-fixture","openai-response",128000),model("claude-fixture","anthropic",200000),model("gemini-fixture","gemini",1000000)]}) }
+fn multi_task_catalog() -> Value {
+    json!({"contract_version":"1.0","models":[{
+        "id":"opaque-multi-task", "display_name":"Five tasks", "vendor":"independent",
+        "tasks":["chat","image_generation","image_edit","embedding","rerank"],
+        "task_endpoints":{
+            "chat":{"endpoints":["openai","openai-response"],"preferred_endpoint":"openai-response"},
+            "image_generation":{"endpoints":["image-generation"],"preferred_endpoint":"image-generation"},
+            "image_edit":{"endpoints":["image-generation"],"preferred_endpoint":"image-generation"},
+            "embedding":{"endpoints":["embeddings"],"preferred_endpoint":"embeddings"},
+            "rerank":{"endpoints":["jina-rerank"],"preferred_endpoint":"jina-rerank"}
+        },
+        "context_window":65536, "max_output_tokens":8192,
+        "input_modalities":["text","image","audio","video"],
+        "traits":["web_search","function_calling","reasoning","streaming","future_advisory_trait"],
+        "pricing":[], "included_in_plan":true, "status":"degraded"
+    }]})
+}
 fn account() -> Value { json!({"contract_version":"1.0","plan":{"name":"Fixture Plan","period_start":"2026-10-01T00:00:00Z","period_end":"2026-11-01T00:00:00Z","quota":{"unit":"tokens","total":null,"used":12}},"balance":{"amount":-5,"currency":"USD"},"key":{"name":"Fixture Key","expires_at":null,"quota_unit":"tokens","remaining_quota":null},"rate_limits":{"requests_per_minute":null,"tokens_per_minute":1000,"concurrent_requests":0}}) }
 async fn mount(server: &MockServer, key: &str, value: Value) {
     Mock::given(method("GET")).and(path("/nomifun/v1/meta")).respond_with(ResponseTemplate::new(200).set_body_json(meta())).mount(server).await;
@@ -50,6 +67,63 @@ fn strict_catalog_mapping_rejects_entire_invalid_directory() {
     assert!(nomifun_system::model_gateway::parse_catalog(value).is_err());
     let mut value = catalog(); value["models"][0]["task_endpoints"]["rerank"]=json!({"endpoints":["jina-rerank"],"preferred_endpoint":"jina-rerank"});
     assert!(nomifun_system::model_gateway::parse_catalog(value).is_err());
+}
+
+#[test]
+fn public_v1_catalog_rejects_tasks_outside_its_five_task_contract() {
+    for (task, endpoint) in [
+        ("speech_synthesis", "audio-speech"),
+        ("speech_recognition", "audio-transcription"),
+        ("video_generation", "image-generation"),
+        ("music_generation", "audio-speech"),
+        ("realtime_conversation", "openai"),
+    ] {
+        let mut value = catalog();
+        let mut unsupported = model("unsupported-fixture", "openai", 4096);
+        unsupported["tasks"] = json!([task]);
+        unsupported["task_endpoints"] = json!({task:{"endpoints":[endpoint],"preferred_endpoint":endpoint}});
+        unsupported["pricing"] = json!([]);
+        value["models"].as_array_mut().unwrap().push(unsupported);
+        assert!(nomifun_system::model_gateway::parse_catalog(value).is_err(), "{task}");
+    }
+}
+
+#[tokio::test]
+async fn five_task_import_persists_explicit_preference_modalities_and_limits() {
+    let server = MockServer::start().await;
+    mount(&server, "fixture-key", multi_task_catalog()).await;
+    let db = init_database_memory().await.unwrap();
+    let state = state(&db);
+    let created = state.provider_service.create_gateway(CreateModelGatewayRequest {
+        base_url: server.uri(), api_key: "fixture-key".into(), name: "Independent gateway".into(),
+        models: vec!["opaque-multi-task".into()],
+    }).await.unwrap();
+    let saved = state.provider_service.list().await.unwrap().into_iter().find(|provider| provider.provider_id == created.provider_id).unwrap();
+    assert_eq!(saved.models.len(), 1);
+    let capabilities = &saved.models[0].capabilities;
+    assert_eq!(capabilities.len(), 5);
+    for (task, protocol) in [
+        (ModelTask::Chat, "openai.responses"),
+        (ModelTask::ImageGeneration, "openai.images"),
+        (ModelTask::ImageEdit, "openai.images"),
+        (ModelTask::Embedding, "openai.embeddings"),
+        (ModelTask::Rerank, "generic.rerank"),
+    ] {
+        let capability = capabilities.iter().find(|capability| capability.task == task).unwrap();
+        assert_eq!(capability.protocol, protocol);
+        assert_eq!(capability.connection_role, "default");
+        assert_eq!(capability.context_limit, Some(65536));
+        assert_eq!(capability.output_limit, Some(8192));
+        assert!(capability.health.is_none());
+        if task == ModelTask::Chat {
+            assert_eq!(capability.traits, vec![ModelTrait::VisionInput, ModelTrait::AudioInput, ModelTrait::VideoInput, ModelTrait::WebSearch]);
+        } else {
+            assert!(capability.traits.is_empty());
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.iter().find(|request| request.url.path() == "/nomifun/v1/meta").unwrap().headers.contains_key("authorization"));
+    assert_eq!(requests.iter().find(|request| request.url.path() == "/nomifun/v1/catalog").unwrap().headers["authorization"], "Bearer fixture-key");
 }
 
 #[test]
@@ -122,16 +196,36 @@ async fn graph_create_and_rotate_updates_all_roles_once_and_rejects_cross_origin
     let profile_repo = SqliteProviderConnectionRepository::new(db.pool().clone());
     let profiles = profile_repo.list_for_provider(&created.provider_id).await.unwrap();
     assert_eq!(profiles.len(),2); assert!(profiles.iter().all(|profile| profile.base_url==server.uri()));
-    // No-op edits retain ciphertext, revision and health observations.
-    state.provider_service.update_gateway_connection(&created.provider_id,UpdateModelGatewayConnectionRequest {base_url:server.uri(),api_key:None,name:Some("Renamed".into())}).await.unwrap();
+    // Display edits and explicitly resubmitting the same key retain every
+    // invocation fact, including ciphertext used by the current route digest.
+    for api_key in [None, Some("fixture-key".into())] {
+        let response = state.provider_service.update_gateway_connection(&created.provider_id,UpdateModelGatewayConnectionRequest {base_url:server.uri(),api_key,name:Some("Renamed".into())}).await.unwrap();
+        let renamed = repository.find_by_id(&created.provider_id).await.unwrap().unwrap();
+        assert_eq!(renamed.name,"Renamed");
+        assert_eq!(before.config_revision,renamed.config_revision);
+        assert_eq!(before.credentials_encrypted,renamed.credentials_encrypted);
+        assert_eq!((&before.provider_id,&before.platform,&before.base_url,&before.auth_scheme,before.enabled,&before.bedrock_config),
+            (&renamed.provider_id,&renamed.platform,&renamed.base_url,&renamed.auth_scheme,renamed.enabled,&renamed.bedrock_config));
+        assert_eq!(response.models,created.models);
+        let renamed_profiles = profile_repo.list_for_provider(&created.provider_id).await.unwrap();
+        assert_eq!(profiles.len(),renamed_profiles.len());
+        for profile in &profiles {
+            let renamed = renamed_profiles.iter().find(|renamed| renamed.role == profile.role).unwrap();
+            assert_eq!(profile.credentials_encrypted,renamed.credentials_encrypted,"{}",profile.role);
+            assert_eq!((&profile.connection_id,&profile.provider_id,&profile.base_url,&profile.auth_scheme,&profile.extra),
+                (&renamed.connection_id,&renamed.provider_id,&renamed.base_url,&renamed.auth_scheme,&renamed.extra));
+        }
+    }
     let renamed = repository.find_by_id(&created.provider_id).await.unwrap().unwrap();
-    assert_eq!(before.config_revision,renamed.config_revision);
     server.reset().await; mount(&server,"rotated-key",catalog()).await;
     state.provider_service.update_gateway_connection(&created.provider_id,UpdateModelGatewayConnectionRequest {base_url:server.uri(),api_key:Some("rotated-key".into()),name:None}).await.unwrap();
     let rotated = repository.find_by_id(&created.provider_id).await.unwrap().unwrap();
     assert_eq!(rotated.config_revision,renamed.config_revision+1);
+    assert_ne!(rotated.credentials_encrypted,renamed.credentials_encrypted);
     assert_eq!(state.provider_service.api_keys(&created.provider_id).await.unwrap(),vec!["rotated-key"]);
     for profile in profile_repo.list_for_provider(&created.provider_id).await.unwrap() {
+        let before = profiles.iter().find(|before| before.role == profile.role).unwrap();
+        assert_ne!(profile.credentials_encrypted,before.credentials_encrypted,"{}",profile.role);
         let plaintext = nomifun_common::decrypt_string(&profile.credentials_encrypted,&KEY).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&plaintext).unwrap(),json!({"api_keys":["rotated-key"]}));
     }
@@ -163,6 +257,75 @@ async fn directory_sync_adds_updates_unmodified_metadata_and_preserves_overrides
     assert!(result.models.iter().any(|m|m.model=="gemini-fixture"));
     let again = state.provider_service.sync_gateway_catalog(&created.provider_id).await.unwrap();
     assert_eq!(again.added,0); assert_eq!(again.updated,0);
+}
+
+#[tokio::test]
+async fn directory_sync_failures_and_empty_directory_preserve_the_saved_graph() {
+    let server = MockServer::start().await;
+    mount(&server, "fixture-key", catalog()).await;
+    let db = init_database_memory().await.unwrap();
+    let state = state(&db);
+    let created = create(&state.provider_service, &server).await;
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let profile_repository = SqliteProviderConnectionRepository::new(db.pool().clone());
+    let before = repository.find_by_id(&created.provider_id).await.unwrap().unwrap();
+    let profiles_before = profile_repository.list_for_provider(&created.provider_id).await.unwrap();
+    let mut invalid = catalog();
+    invalid["models"][1]["task_endpoints"]["chat"]["preferred_endpoint"] = json!("unknown-endpoint");
+    for response in [
+        ResponseTemplate::new(503).set_body_json(json!({"error":{"message":"Temporary maintenance"}})),
+        ResponseTemplate::new(200).set_body_string("incomplete JSON"),
+        ResponseTemplate::new(200).set_body_json(invalid),
+    ] {
+        server.reset().await;
+        Mock::given(method("GET")).and(path("/nomifun/v1/catalog"))
+            .and(header("authorization", "Bearer fixture-key")).respond_with(response).mount(&server).await;
+        assert!(state.provider_service.sync_gateway_catalog(&created.provider_id).await.is_err());
+        let saved = state.provider_service.list().await.unwrap();
+        assert_eq!(saved[0].models, created.models);
+        let after = repository.find_by_id(&created.provider_id).await.unwrap().unwrap();
+        assert_eq!(before.config_revision, after.config_revision);
+        assert_eq!(before.credentials_encrypted, after.credentials_encrypted);
+        for (old, new) in profiles_before.iter().zip(profile_repository.list_for_provider(&created.provider_id).await.unwrap()) {
+            assert_eq!(old.role, new.role);
+            assert_eq!(old.base_url, new.base_url);
+            assert_eq!(old.credentials_encrypted, new.credentials_encrypted);
+        }
+    }
+    server.reset().await;
+    mount(&server, "fixture-key", json!({"contract_version":"1.0","models":[]})).await;
+    let result = state.provider_service.sync_gateway_catalog(&created.provider_id).await.unwrap();
+    assert_eq!(result.added, 0);
+    assert_eq!(result.updated, 0);
+    assert_eq!(result.models, created.models);
+    assert_eq!(repository.find_by_id(&created.provider_id).await.unwrap().unwrap().config_revision, before.config_revision);
+}
+
+#[tokio::test]
+async fn directory_sync_preserves_user_models_without_catalog_provenance() {
+    let server = MockServer::start().await;
+    mount(&server, "fixture-key", catalog()).await;
+    let db = init_database_memory().await.unwrap();
+    let state = state(&db);
+    let created = create(&state.provider_service, &server).await;
+    let user_model: ProviderModelInput = serde_json::from_value(json!({
+        "model":"gpt-fixture", "display_name":"User authored", "enabled":false, "sort_order":17,
+        "description":"No source baseline",
+        "capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default",
+            "provider_params":{"temperature":0.5},"context_limit":1234,"output_limit":567}]
+    })).unwrap();
+    state.provider_model_service.save(SaveProviderModelRequest {
+        provider_id: created.provider_id.clone(), model: user_model,
+    }).await.unwrap();
+    let before = state.provider_service.list().await.unwrap()[0].models.iter().find(|model| model.model == "gpt-fixture").unwrap().clone();
+    server.reset().await;
+    let mut changed = catalog();
+    changed["models"][0] = model("gpt-fixture", "anthropic", 256000);
+    mount(&server, "fixture-key", changed).await;
+    let result = state.provider_service.sync_gateway_catalog(&created.provider_id).await.unwrap();
+    assert_eq!(result.added, 0);
+    assert_eq!(result.updated, 0);
+    assert_eq!(result.models.iter().find(|model| model.model == "gpt-fixture").unwrap(), &before);
 }
 
 #[tokio::test]

@@ -19,7 +19,8 @@ use crate::ports::{
     ChatCapabilityObserver, ChatCausalityGate, ChatRouteResolver, CredentialTarget,
     NoopChatCapabilityObserver, ProviderCredentialStore,
 };
-use crate::provider_reasoning::ProviderReasoningRoute;
+use crate::provider_reasoning::{ProviderReasoningRoute, bind_gemini_tool_route,
+    gemini_tool_matches_route, validate_reasoning_signature_origins};
 
 const BROKER_STREAM_CAPACITY: usize = 64;
 const MAX_BUFFERED_PRE_SEMANTIC_EVENTS: usize = 32;
@@ -209,6 +210,7 @@ impl ChatModelBroker {
         request
             .validate()
             .map_err(contract_error_to_model_error)?;
+        validate_reasoning_signature_origins(&request.input)?;
         let routes = self.route_resolver.resolve(&request.route).await?;
         routes
             .validate_for(&request.route)
@@ -216,6 +218,14 @@ impl ChatModelBroker {
         let required = request.input.required_features();
         let mut candidates = Vec::new();
         for route in routes.candidates() {
+            let mut signed_tools_match = true;
+            for part in request.input.messages.iter().flat_map(|message| &message.content) {
+                if let crate::ChatContentPart::ToolCall { provider_metadata, .. } = part
+                    && !gemini_tool_matches_route(provider_metadata, route)?
+                {
+                    signed_tools_match = false;
+                }
+            }
             let Some(adapter) = self.adapters.get(&route.protocol) else {
                 return Err(ChatModelError::new(
                     ChatModelErrorCode::AdapterUnavailable,
@@ -224,7 +234,8 @@ impl ChatModelBroker {
                 )
                 .with_route(route.model_route_id.clone()));
             };
-            if !required.is_superset(&route.activation_features)
+            if !signed_tools_match
+                || !required.is_superset(&route.activation_features)
                 || !route.features.is_superset(&required)
                 || !adapter.features().is_superset(&required)
                 || request.input.messages.iter().any(|message| message.content.iter().any(|part|
@@ -389,6 +400,10 @@ async fn run_broker(
                 }
                 let retry = error.retry;
                 let delay = crate::retry::delay(&error, total_attempt);
+                let gateway_business = error.diagnostic.as_ref()
+                    .and_then(|diagnostic| diagnostic.provider_code.as_deref())
+                    .and_then(nomifun_net::provider_gateway_error::GatewayBusinessError::from_code)
+                    .is_some();
                 last_error = Some(error);
                 let total_capacity =
                     total_attempt < retry_policy.max_total_attempts;
@@ -399,8 +414,12 @@ async fn run_broker(
                     // Keep this exact admitted route and lease fresh credentials
                     // for its next attempt only after the cooldown has elapsed.
                 } else if retry != ChatRetryDirective::Never
+                    && !gateway_business
                     && route_index + 1 < routes.len()
                 {
+                    // Gateway account/limit failures retain their selected
+                    // route. Ordinary provider failures keep the existing
+                    // bounded retry and configured failover policy.
                     route_index += 1;
                     route_attempt = 0;
                 } else {
@@ -565,6 +584,14 @@ async fn consume_attempt_stream(
         };
 
         for mut event in events {
+            if let ChatModelEvent::ToolCallCompleted { call } = &mut event
+                && let Err(error) = bind_gemini_tool_route(call, route)
+            {
+                return AttemptOutcome::Failed {
+                    error: with_stream_diagnostic(error).with_route(route.model_route_id.clone()),
+                    semantic_output_committed,
+                };
+            }
             if let ChatModelEvent::ProviderReasoningBlock { block } = &mut event {
                 if let Err(message) = block.bind_route(route) {
                     return AttemptOutcome::Failed {

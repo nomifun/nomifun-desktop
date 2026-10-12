@@ -13,7 +13,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { gatewayAddress } from './modelGatewayForm';
 
-const EditModelGatewayModal = ModalHOC<{ data?: IProvider; onChanged(): Promise<unknown> }>(({ data, modalProps, modalCtrl, onChanged }) => {
+const EditModelGatewayModal = ModalHOC<{ data?: IProvider; onChanged(provider: IProvider): Promise<unknown> }>(({ data, modalProps, modalCtrl, onChanged }) => {
   const { t } = useTranslation();
   const [baseUrl, setBaseUrl] = useState('');
   const [name, setName] = useState('');
@@ -32,8 +32,8 @@ const EditModelGatewayModal = ModalHOC<{ data?: IProvider; onChanged(): Promise<
     if (!data || !address || !name.trim() || saving || (destinationChanged && !apiKey.trim())) return;
     setSaving(true); setError(false);
     try {
-      await ipcBridge.modelGateway.updateConnection.invoke({ provider_id: data.id, base_url: address.root, name: name.trim(), ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) });
-      await onChanged(); setApiKey(''); modalCtrl.close();
+      const provider = await ipcBridge.modelGateway.updateConnection.invoke({ provider_id: data.id, base_url: address.root, name: name.trim(), ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) });
+      await onChanged(provider); setApiKey(''); modalCtrl.close();
     } catch { setError(true); }
     finally { setSaving(false); }
   };

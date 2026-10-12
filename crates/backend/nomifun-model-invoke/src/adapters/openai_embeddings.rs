@@ -4,7 +4,9 @@
 //! `POST` the dispatch target (conventionally `{base}/v1/embeddings`) with
 //! `{model, input: [..]}`; the response `data[].embedding` vectors are
 //! returned as [`TaskResult::Embeddings`], ordered by each item's `index`
-//! field when every item carries one, else by array order.
+//! field when present. Compatible responses without indices use array order;
+//! partial, duplicate or out-of-range indices fail rather than misassigning
+//! vectors to the caller's inputs.
 
 use std::time::Duration;
 
@@ -63,14 +65,21 @@ impl ProtocolAdapter for OpenAiEmbeddingsAdapter {
             .json()
             .await
             .map_err(|e| InvokeError::response_json("invalid embeddings JSON", &e))?;
-        Ok(TaskOutcome::Done(TaskResult::Embeddings(parse_embeddings_response(&value)?)))
+        let vectors = parse_embeddings_response(&value)?;
+        if vectors.len() != req.inputs.len() {
+            return Err(InvokeError::parse(format!(
+                "embeddings response returned {} vectors for {} inputs",
+                vectors.len(), req.inputs.len()
+            )));
+        }
+        Ok(TaskOutcome::Done(TaskResult::Embeddings(vectors)))
     }
 }
 
 /// Parse an OpenAI embeddings response body
 /// (`{ data: [ { embedding: [..], index? } ] }`) into one vector per input.
-/// When every item carries an `index`, the vectors are re-ordered by it;
-/// otherwise array order is kept. Pure — unit tested.
+/// Indices must either be absent from every item or cover each input once.
+/// Array order is used only for entirely unindexed compatible responses.
 pub(crate) fn parse_embeddings_response(value: &Value) -> Result<Vec<Vec<f32>>, InvokeError> {
     let data = value
         .get("data")
@@ -92,11 +101,23 @@ pub(crate) fn parse_embeddings_response(value: &Value) -> Result<Vec<Vec<f32>>, 
                 .ok_or_else(|| InvokeError::parse("embedding vector contains a non-numeric element"))?;
             vector.push(f as f32);
         }
-        items.push((item.get("index").and_then(|v| v.as_u64()), vector));
+        let index = item.get("index").map(|index| {
+            index.as_u64().ok_or_else(|| InvokeError::parse(
+                "embedding data item has an invalid 'index'"
+            ))
+        }).transpose()?;
+        items.push((index, vector));
     }
-    // Order by the provider's `index` only when every item declares one.
-    if items.iter().all(|(idx, _)| idx.is_some()) {
+    if items.iter().any(|(idx, _)| idx.is_some()) {
+        if items.iter().any(|(idx, _)| idx.is_none()) {
+            return Err(InvokeError::parse("embeddings response contains partial indices"));
+        }
         items.sort_by_key(|(idx, _)| idx.unwrap_or(u64::MAX));
+        if items.iter().enumerate().any(|(expected, (index, _))| *index != Some(expected as u64)) {
+            return Err(InvokeError::parse(
+                "embeddings response indices must cover every input once without gaps or duplicates"
+            ));
+        }
     }
     Ok(items.into_iter().map(|(_, v)| v).collect())
 }
@@ -143,12 +164,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_partial_indices_keep_array_order() {
-        let v = json!({"data": [
-            {"index": 1, "embedding": [3.0]},
-            {"embedding": [1.0]},
-        ]});
-        assert_eq!(parse_embeddings_response(&v).unwrap(), vec![vec![3.0], vec![1.0]]);
+    fn parse_rejects_ambiguous_or_invalid_indices() {
+        for data in [
+            json!([{"index": 1, "embedding": [3.0]}, {"embedding": [1.0]}]),
+            json!([{"index": 0, "embedding": [3.0]}, {"index": 0, "embedding": [1.0]}]),
+            json!([{"index": 1, "embedding": [3.0]}, {"index": 2, "embedding": [1.0]}]),
+            json!([{"index": -1, "embedding": [3.0]}]),
+            json!([{"index": "0", "embedding": [3.0]}]),
+            json!([{"index": null, "embedding": [3.0]}]),
+        ] {
+            let error = parse_embeddings_response(&json!({"data": data})).unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        }
     }
 
     #[test]
@@ -203,6 +230,29 @@ mod tests {
         let call = call("http://127.0.0.1:9", "text-embedding-3-small", embed_request(&[]));
         let err = OpenAiEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn embeddings_reject_misassigned_vectors_and_wrong_batch_size_on_the_wire() {
+        let server = MockServer::start().await;
+        for data in [
+            json!([{"index": 1, "embedding": [3.0]}, {"embedding": [1.0]}]),
+            json!([{"index": 0, "embedding": [3.0]}, {"index": 0, "embedding": [1.0]}]),
+            json!([{"index": 0, "embedding": [3.0]}]),
+            json!([{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": [2.0]}, {"index": 2, "embedding": [3.0]}]),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/embeddings"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": data})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let call = call(&server.uri(), "gateway-embedding", embed_request(&["alpha", "beta"]));
+            let error = OpenAiEmbeddingsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError);
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

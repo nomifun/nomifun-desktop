@@ -8932,13 +8932,12 @@ impl KnowledgeService {
             return Ok(Vec::new());
         }
         let invoke = self.retrieval_model_invoke()?;
-        let start_revision = invoke
+        let start_configuration = invoke
             .resolve_task_config(&model_ref, ModelTask::Embedding)
             .await
-            .map_err(AppError::from)?
-            .config_revision;
+            .map_err(AppError::from)?;
 
-        let query_vectors = invoke_embedding_batch(&invoke, &model_ref, vec![query.to_owned()]).await?;
+        let query_vectors = invoke_embedding_batch(&invoke, &model_ref, &start_configuration, vec![query.to_owned()]).await?;
         let query_vector = query_vectors.into_iter().next().ok_or_else(|| {
             AppError::BadGateway("embedding provider returned no query vector".into())
         })?;
@@ -8948,7 +8947,7 @@ impl KnowledgeService {
         let mut candidates = Vec::with_capacity(bounded.len());
         for batch in bounded.chunks(REMOTE_EMBEDDING_BATCH_SIZE) {
             let inputs = batch.iter().map(|(_, text)| text.clone()).collect::<Vec<_>>();
-            let vectors = invoke_embedding_batch(&invoke, &model_ref, inputs).await?;
+            let vectors = invoke_embedding_batch(&invoke, &model_ref, &start_configuration, inputs).await?;
             if vectors.len() != batch.len() {
                 return Err(AppError::BadGateway(format!(
                     "embedding provider returned {} vectors for {} documents",
@@ -8981,15 +8980,14 @@ impl KnowledgeService {
                 });
             }
         }
-        let end_revision = invoke
+        let end_configuration = invoke
             .resolve_task_config(&model_ref, ModelTask::Embedding)
             .await
-            .map_err(AppError::from)?
-            .config_revision;
-        if end_revision != start_revision {
-            return Err(AppError::Conflict(format!(
-                "embedding provider configuration changed during retrieval (revision {start_revision} -> {end_revision}); retry the search"
-            )));
+            .map_err(AppError::from)?;
+        if !start_configuration.matches_invocation_configuration(&end_configuration) {
+            return Err(AppError::Conflict(
+                "embedding provider configuration changed during retrieval; retry the search".into()
+            ));
         }
         candidates.sort_by(|a, b| {
             b.hit
@@ -9435,19 +9433,27 @@ fn retrieval_candidate_text(candidate: &RetrievalCandidate) -> String {
 async fn invoke_embedding_batch(
     invoke: &ModelInvokeService,
     model_ref: &ModelRef,
+    expected_configuration: &nomifun_model_invoke::ResolvedTaskConfig,
     inputs: Vec<String>,
 ) -> Result<Vec<Vec<f32>>, AppError> {
     let expected = inputs.len();
     let outcome = invoke
-        .invoke(
+        .invoke_at_task_configuration(
             model_ref,
+            expected_configuration,
             TaskRequest::Embedding(EmbedRequest {
                 inputs,
                 extra: serde_json::json!({}),
             }),
         )
         .await
-        .map_err(AppError::from)?;
+        .map_err(|error| {
+            if error.is_task_configuration_changed() {
+                AppError::Conflict("embedding provider configuration changed during retrieval; retry the search".into())
+            } else {
+                AppError::from(error)
+            }
+        })?;
     let TaskOutcome::Done(TaskResult::Embeddings(vectors)) = outcome else {
         return Err(AppError::BadGateway(
             "embedding provider did not return completed embedding vectors".into(),

@@ -277,6 +277,7 @@ async fn read_error_response(
         http_status: Some(code),
         retry_after_ms,
         catalog_failure: false,
+        task_configuration_changed: false,
         context_length_rejected: gateway_business_error.is_none() && matches!(code, 400 | 413 | 422) && context_length_rejected,
         unsupported_technical_capability: (gateway_business_error.is_none() && matches!(code, 400 | 422))
             .then_some(unsupported_technical_capability)
