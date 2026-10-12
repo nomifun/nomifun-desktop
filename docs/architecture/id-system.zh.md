@@ -26,7 +26,7 @@ v3 明确区分五类概念：
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
-   canonical Agent Store 表与 Unified Plugin 表是两组冻结例外，按基线
+   canonical Agent Store 表是当前冻结例外，按基线
    声明使用 TEXT/复合主键。
 
 2. 需要跨数据库、跨设备、跨文件、API、事件或受管 store 稳定定位的实体，
@@ -36,7 +36,7 @@ v3 明确区分五类概念：
 3. 从不离开所属持久化子系统的关系、单例、缓存和事件行只使用整数 `id`
    作为内部技术身份，不为形式统一而额外生成 UUID，也不把该值升级为产品
    wire locator。
-4. 表间关系由 Repository/Service 维护为逻辑外键；两组冻结例外之外的
+4. 表间关系由 Repository/Service 维护为逻辑外键；Agent Store 冻结例外之外的
    产品 schema 不包含物理外键、`REFERENCES` 或数据库级联；除基线已注册
    的 guard/validator trigger 外不存在数据库触发器。
 5. v3 是新的数据集代际。历史数据集整体重置，不迁移旧行和旧 ID 格式。
@@ -49,7 +49,7 @@ v3 明确区分五类概念：
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-canonical Agent Store 表与 Unified Plugin 表改用基线冻结的 TEXT/复合主键。
+canonical Agent Store 表改用基线冻结的 TEXT/复合主键。
 SQLite 内部表、migration metadata 和临时表不属于产品持久表。
 
 技术 `id` 的语义是：
@@ -146,7 +146,7 @@ Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
 
 ## 逻辑外键
 
-v3 在两组冻结例外（canonical Agent Store 表与 Unified Plugin 表，基线中
+v3 在 Agent Store 冻结例外（canonical Agent Store 表，基线中
 保留了物理 `FOREIGN KEY`/`ON DELETE` 声明）之外移除产品 schema 的物理
 外键。基线还在少数领域携带已注册的 guard/validator trigger；新增领域
 不得在未更新 schema 契约的情况下引入 trigger 或物理约束。其余产品 DDL

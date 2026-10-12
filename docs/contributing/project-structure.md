@@ -121,7 +121,7 @@ from silently tying themselves to engine internals.
 ## `crates/backend/` — the `nomifun-*` crates (the backend)
 
 54 crates. The table below lists the main roles; it is not exhaustive — the
-Agent Store, Unified Plugin, robot, voice, workshop, and platform crates are
+Agent Store, application hosting, robot, voice, workshop, and platform crates are
 covered in [`../architecture/backend-crates.md`](../architecture/backend-crates.md).
 
 | Crate | One-line role |

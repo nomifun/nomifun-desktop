@@ -40,8 +40,7 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 
 持久化身份遵循 [id-system.md](id-system.zh.md) 中的 v3 分层契约：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 与
-  Unified Plugin 两组冻结例外使用 TEXT/复合主键；
+- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 冻结例外使用 TEXT/复合主键；
 - 需要跨数据集的稳定实体增加具名、裸标准 UUIDv7 字段；
 - 仅内部关系、单例、缓存和事件行在当前数据集内部使用表 `id`；
   需要产品定位的实体使用具名 UUIDv7 业务字段；
@@ -98,10 +97,9 @@ IDMM Intervention。
 
 运行时 baseline 校验至少确认：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 与
-  Unified Plugin 表按基线冻结使用 TEXT/复合主键；
+- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 表按基线冻结使用 TEXT/复合主键；
 - 稳定业务 ID 是裸标准 UUIDv7；
-- 两组例外之外的 schema 没有物理 `FOREIGN KEY`、`REFERENCES`、数据库
+- Agent Store 例外之外的 schema 没有物理 `FOREIGN KEY`、`REFERENCES`、数据库
   cascade 或 `*_row_id`；唯一的 trigger 是基线已注册的 guard trigger；
 - 每个逻辑关联都有必需索引和 registry 登记。
 
@@ -127,7 +125,7 @@ v3 baseline 直接创建上述权限模型，不保留或规范化旧 schema gen
 
 ### 逻辑关联策略
 
-默认策略是逻辑关联：Agent Store 与 Unified Plugin 两组例外之外的产品表
+默认策略是逻辑关联：Agent Store Agent Store 例外之外的产品表
 都没有物理外键。稳定父实体关联（例如
 `messages.conversation_id`、`cron_job_runs.cron_job_id`）保存父实体的裸 UUIDv7
 业务 ID。Repository 层在事务

@@ -96,7 +96,8 @@ pub struct InstallationTokenTrustState {
 #[derive(Clone)]
 pub struct TrustState {
     pub policy: AuthPolicy,
-    /// The per-boot secret. Only `Some` under [`AuthPolicy::TrustLocalToken`].
+    /// Per-boot connection secret shared with trusted local Host children.
+    /// Required hosts accept this proof while retaining JWT and CORS policy.
     pub local_trust_secret: Option<Arc<str>>,
     /// Canonical installation owner resolved from the database at boot. Local
     /// trust grants this exact identity; it never reconstructs one from a
@@ -131,11 +132,10 @@ fn header_secret_matches(headers: &HeaderMap, secret: &str) -> bool {
 pub fn is_locally_trusted(state: &TrustState, headers: &HeaderMap) -> bool {
     match state.policy {
         AuthPolicy::NoAuth => true,
-        AuthPolicy::TrustLocalToken => state
+        AuthPolicy::TrustLocalToken | AuthPolicy::Required => state
             .local_trust_secret
             .as_deref()
             .is_some_and(|secret| header_secret_matches(headers, secret)),
-        AuthPolicy::Required => false,
     }
 }
 
@@ -259,6 +259,20 @@ mod tests {
             authoritative_user_id: Arc::from(TEST_OWNER_ID),
         };
         assert!(!is_locally_trusted(&st, &hdrs(Some("anything"))));
+    }
+
+    #[test]
+    fn authenticated_headless_host_accepts_only_its_current_boot_secret() {
+        let st = TrustState {
+            policy: AuthPolicy::Required,
+            local_trust_secret: Some(Arc::from("current-boot")),
+            authoritative_user_id: Arc::from(TEST_OWNER_ID),
+        };
+        assert!(is_locally_trusted(&st, &hdrs(Some("current-boot"))));
+        assert!(!is_locally_trusted(&st, &hdrs(Some("previous-boot"))));
+        assert!(!is_locally_trusted(&st, &hdrs(None)));
+        assert!(!st.policy.allows_local_webview());
+        assert!(st.policy.requires_admin_provisioning());
     }
 
     #[test]

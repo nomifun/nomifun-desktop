@@ -335,8 +335,8 @@ import {
   fromBackendWorkspaceList,
   type RawWorkspaceFlatFile,
 } from './workspaceMapper';
-export { pluginPlatform } from './pluginPlatformBridge';
-export type * from '../types/pluginPlatform';
+export { appHosting } from './appHostingBridge';
+export type * from '../types/appHosting';
 
 // ---------------------------------------------------------------------------
 // Shell — routed to POST /api/shell/*
@@ -1079,7 +1079,6 @@ export const conversation = {
             content: p.input,
             files: p.files,
             inject_skills: p.inject_skills,
-            plugin_delivery: p.plugin_delivery,
           },
         },
         { idempotencyKey, initialOnly: p.initial_only === true }
@@ -1112,7 +1111,6 @@ export const conversation = {
             content: p.input,
             files: p.files,
             inject_skills: p.inject_skills,
-            plugin_delivery: p.plugin_delivery,
           },
         },
         { idempotencyKey }
@@ -3128,7 +3126,6 @@ export const terminal = {
 
 interface ISendMessageParams {
   /** Deliverable obligation only; it never grants Plugin tools. */
-  plugin_delivery?: import('@/common/types/pluginDevelopment').PluginDeliveryRequirement;
   input: string;
   conversation_id: ConversationId;
   files?: string[];

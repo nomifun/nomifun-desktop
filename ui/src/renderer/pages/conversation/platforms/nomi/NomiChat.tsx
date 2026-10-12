@@ -49,6 +49,9 @@ const NomiChat: React.FC<{
   creationEnabled?: boolean;
   /** Product-owned compact composer; configuration is exposed outside chat. */
   compactProductComposer?: boolean;
+  hideSessionCapabilities?: boolean;
+  submissionDisabled?: boolean;
+  onBeforeSubmit?: () => Promise<void>;
 }> = ({
   conversation_id,
   workspace,
@@ -70,6 +73,9 @@ const NomiChat: React.FC<{
   creationTasksEnabled = false,
   creationEnabled = true,
   compactProductComposer = false,
+  hideSessionCapabilities = false,
+  submissionDisabled = false,
+  onBeforeSubmit,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
@@ -150,6 +156,9 @@ const NomiChat: React.FC<{
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}
               compactProductComposer={compactProductComposer}
+              hideSessionCapabilities={hideSessionCapabilities}
+              submissionDisabled={submissionDisabled}
+              onBeforeSubmit={onBeforeSubmit}
               turnActivity={turnActivity}
             />
           )}

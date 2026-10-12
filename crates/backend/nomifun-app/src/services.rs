@@ -758,8 +758,8 @@ pub struct AppServices {
     pub work_dir_is_cli_override: bool,
     /// Authentication policy (single source of truth, replaces `local: bool`).
     pub auth_policy: AuthPolicy,
-    /// Per-boot secret the desktop's own webview presents to be trusted as the
-    /// local client. Only `Some` under `AuthPolicy::TrustLocalToken`.
+    /// Per-boot LocalTrust shared by Desktop and Headless managed children.
+    /// It grants the installation owner without changing external auth policy.
     pub local_trust_secret: Option<Arc<str>>,
     pub app_version: String,
     /// Resolved skill paths shared with the Agent compiler and Session host for
@@ -801,15 +801,9 @@ pub struct AppServices {
     /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
     /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
-    /// Unified Plugin Core authorities. Business data is isolated in the
-    /// generation DataRoot; SQLite stores only Plugin pointers and metadata.
-    pub plugin_repository: Arc<nomifun_plugin_platform::SqlitePluginRepository>,
-    pub plugin_artifacts: Arc<nomifun_plugin_platform::PluginArtifactStore>,
-    pub plugin_data_roots: Arc<nomifun_plugin_platform::PluginDataRootManager>,
-    pub plugin_drafts: Arc<nomifun_plugin_platform::PluginDraftStore>,
-    pub plugin_transfers: Arc<nomifun_plugin_platform::PluginBackupFilesystem>,
-    pub plugin_service_runtime:
-        Arc<std::sync::OnceLock<Arc<nomifun_plugin_platform::PluginServiceRuntime>>>,
+    /// One owner for imported files, ordinary commands and managed app processes.
+    pub app_hosting: Arc<nomifun_app_hosting::HostingOwner>,
+    pub(crate) app_mcp_sources: Arc<crate::router::app_mcp_sources::AppMcpSources>,
     /// Singleton generation service — the Creative Studio media task queue.
     /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -1377,10 +1371,8 @@ impl AppServices {
         if let Err(error)=self.browser_platform_shutdown.shutdown().await {
             errors.push(format!("Gateway ingress cleanup failed: {error:#}"));
         }
-        if let Some(runtime) = self.plugin_service_runtime.get()
-            && let Err(error) = runtime.shutdown().await
-        {
-            errors.push(format!("Plugin Service cleanup failed: {error}"));
+        if let Err(error) = self.app_hosting.shutdown().await {
+            errors.push(format!("Hosted application cleanup failed: {error}"));
         }
         if let Err(error) = self.quiesce_auto_work_runner().await {
             errors.push(format!("AutoWork quiesce failed: {error:#}"));
@@ -1516,12 +1508,10 @@ impl AppServices {
     /// preserving the original failure as the primary error.
     pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
         self.request_background_shutdown();
-        if let Some(runtime) = self.plugin_service_runtime.get()
-            && let Err(cleanup_error) = runtime.shutdown().await
-        {
+        if let Err(cleanup_error) = self.app_hosting.shutdown().await {
             tracing::error!(
                 %cleanup_error,
-                "Plugin Service cleanup failed during startup failure cleanup"
+                "Hosted application cleanup failed during startup failure cleanup"
             );
         }
         if let Err(cleanup_error) = self.quiesce_auto_work_runner().await {
@@ -1668,7 +1658,8 @@ impl AppServices {
             tracing::warn!(path = %terminal_mcp_dir.display(), %error, "Could not reset ephemeral terminal MCP config directory");
         }
         let auth_policy = config.auth_policy;
-        let local_trust_secret = config.local_trust_secret.clone();
+        let local_trust_secret = Some(config.local_trust_secret.clone().unwrap_or_else(||
+            Arc::from(nomifun_auth::generate_random_hex_secret())));
         let app_version = config.app_version.clone();
         let user_repo: Arc<dyn IUserRepository> =
             Arc::new(SqliteUserRepository::new(database.pool().clone()));
@@ -2148,21 +2139,17 @@ impl AppServices {
         let provider_repo_for_services: Arc<dyn IProviderRepository> =
             provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>;
 
-        let plugin_repository = Arc::new(
-            nomifun_plugin_platform::SqlitePluginRepository::new(database.pool().clone()),
+        let app_hosting = nomifun_app_hosting::HostingOwner::new(
+            data_dir.join("app-hosting"),
+            nomifun_app_hosting::LocalConnection {
+                host_url: format!("http://127.0.0.1:{}", config.port),
+                local_trust: local_trust_secret.as_deref().unwrap_or_default().to_owned(),
+            },
+        ).await?;
+
+        let app_mcp_sources = crate::router::app_mcp_sources::AppMcpSources::new(
+            app_hosting.clone(), Arc::new(nomifun_db::SqliteMcpServerRepository::new(database.pool().clone())),
         );
-        let plugin_artifacts = Arc::new(nomifun_plugin_platform::PluginArtifactStore::new(
-            data_dir.join("plugin-core"),
-            nomifun_plugin_platform::ArtifactStoreLimits::default(),
-        )?);
-        let plugin_data_roots = Arc::new(nomifun_plugin_platform::PluginDataRootManager::new(
-            data_dir.join("plugin-data"),
-        )?);
-        let plugin_drafts = Arc::new(nomifun_plugin_platform::PluginDraftStore::new(
-            data_dir.join("plugin-drafts"),
-        )?);
-        let plugin_transfers = Arc::new(nomifun_plugin_platform::PluginBackupFilesystem::new());
-        let plugin_service_runtime = Arc::new(std::sync::OnceLock::new());
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -2274,12 +2261,8 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
-            plugin_repository,
-            plugin_artifacts,
-            plugin_data_roots,
-            plugin_drafts,
-            plugin_transfers,
-            plugin_service_runtime,
+            app_hosting,
+            app_mcp_sources,
             creation_service,
             model_invoke_service,
             knowledge_service,

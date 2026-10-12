@@ -1,0 +1,204 @@
+{
+  "host": "http://127.0.0.1:49391",
+  "app": "01a12b5c-6525-7b12-a775-df21acfc1e6a",
+  "prompts": [
+    "帮我创建一个贪吃蛇游戏",
+    "把蛇的颜色改成蓝色，并把应用改名为蓝色贪吃蛇",
+    "继续完成并确认这次修改"
+  ],
+  "firstParameters": [
+    {
+      "label": null,
+      "placeholder": "发送消息到 内置应用...  输入 / 唤起命令，@ 引用文件",
+      "value": ""
+    },
+    {
+      "label": "名称",
+      "placeholder": null,
+      "value": "贪吃蛇"
+    },
+    {
+      "label": "应用描述",
+      "placeholder": null,
+      "value": "我的游戏备注（未保存）"
+    },
+    {
+      "label": "标签",
+      "placeholder": "用逗号分隔，例如：效率, 生活",
+      "value": "game, snake, html5"
+    },
+    {
+      "label": "项目目录",
+      "placeholder": ".",
+      "value": "."
+    },
+    {
+      "label": "依赖安装命令",
+      "placeholder": "跳过此步骤",
+      "value": ""
+    },
+    {
+      "label": "预览启动命令",
+      "placeholder": "未单独配置，预览将使用生产启动命令",
+      "value": ""
+    },
+    {
+      "label": "打包命令",
+      "placeholder": "跳过此步骤",
+      "value": ""
+    },
+    {
+      "label": "生产启动命令",
+      "placeholder": "",
+      "value": "node \".nomifun-static-server.cjs\""
+    },
+    {
+      "label": "产物目录",
+      "placeholder": "",
+      "value": "."
+    },
+    {
+      "label": "网页地址（可选）",
+      "placeholder": "",
+      "value": "http://127.0.0.1:54668"
+    },
+    {
+      "label": "Node 可执行文件",
+      "placeholder": "自动使用系统 Node",
+      "value": ""
+    },
+    {
+      "label": "环境变量",
+      "placeholder": "PORT=4317\nDATA_DIR=./data",
+      "value": "PORT=54668"
+    },
+    {
+      "label": "MCP 地址（可选）",
+      "placeholder": "http://127.0.0.1:4317/mcp",
+      "value": ""
+    },
+    {
+      "label": null,
+      "placeholder": "未选择 Agent",
+      "value": ""
+    }
+  ],
+  "firstInspector": "贪吃蛇\n运行中\n开始使用\n停止\n重新打包并启动\n\n运行配置已填写，可在高级配置中查看和修改。\n\n编辑\n名称\n应用描述\n标签\n高级配置：安装、预览、打包与启动\n\n命令在项目目录执行，非必需命令可以留空。设置在下次启动时生效。\n\n识别运行配置\n\n根据应用文件补全可识别的运行配置，保留已有命令，不会启动应用。\n\n项目类型\n源码项目\n编译产物\n项目目录\n依赖安装命令\n预览启动命令\n\n预览将使用：node \".nomifun-static-server.cjs\"\n\n打包命令\n生产启动命令\n产物目录\n网页地址（可选）\n使用静态网页 HTTP 服务预设\n\n静态预设仅用于普通网页文件，保存时会自动填写可用的本机端口。服务端和后台应用需填写实际的前台启动命令。\n\nNode 可执行文件\n检测 Node、npm 和 Bun\n环境变量\n\n每行一个 KEY=value。NomiFun 连接信息会自动提供给运行中的进程。\n\nMCP 地址（可选）\n应用使用的 Agent（可选）\n未选择 Agent\n\n停止应用后可更换它调用的 Agent。\n\n应用通过自己的后端连接平台，无需配置 NomiFun token 或使用 SDK。\n\n你修改的字段尚未保存；其余字段继续同步应用的最新配置。\n\n保存\n程序预览\n独立打开\n刷新预览\n放大\n收起预览\n文件目录与命令输出\n覆盖文件\n删除",
+  "firstGameBody": "🐍 贪吃蛇\n得分：0\n最高分：0\n速度：1\n开始游戏\n暂停\n\n使用方向键 ↑ ↓ ← → 或 WASD 控制蛇的移动",
+  "firstFrame": {
+    "frameTree": {
+      "childFrames": [
+        {
+          "frame": {
+            "adFrameStatus": {
+              "adFrameType": "none",
+              "explanations": []
+            },
+            "crossOriginIsolatedContextType": "NotIsolatedFeatureDisabled",
+            "domainAndRegistry": "",
+            "gatedAPIFeatures": [],
+            "id": "7176E590BA5B0486C328BEFB2465FA29",
+            "loaderId": "00EB88ED4D73B375C3D2263231482497",
+            "mimeType": "text/html",
+            "name": "",
+            "parentId": "4CA2FB96F3DAD74854C0781B50C8475A",
+            "secureContextType": "SecureLocalhost",
+            "securityOrigin": "http://127.0.0.1:54668",
+            "securityOriginDetails": {
+              "isLocalhost": true
+            },
+            "url": "http://127.0.0.1:54668/"
+          }
+        }
+      ],
+      "frame": {
+        "adFrameStatus": {
+          "adFrameType": "none"
+        },
+        "crossOriginIsolatedContextType": "NotIsolated",
+        "domainAndRegistry": "",
+        "gatedAPIFeatures": [],
+        "id": "4CA2FB96F3DAD74854C0781B50C8475A",
+        "loaderId": "F410AADD606E0FB0535DA3456347BC58",
+        "mimeType": "text/html",
+        "secureContextType": "SecureLocalhost",
+        "securityOrigin": "http://127.0.0.1:5179",
+        "securityOriginDetails": {
+          "isLocalhost": true
+        },
+        "url": "http://127.0.0.1:5179/",
+        "urlFragment": "#/apps/01a12b5c-6525-7b12-a775-df21acfc1e6a?intent=create"
+      }
+    }
+  },
+  "followupFrame": {
+    "frameTree": {
+      "childFrames": [
+        {
+          "frame": {
+            "adFrameStatus": {
+              "adFrameType": "none",
+              "explanations": []
+            },
+            "crossOriginIsolatedContextType": "NotIsolatedFeatureDisabled",
+            "domainAndRegistry": "",
+            "gatedAPIFeatures": [],
+            "id": "D500287D24749AC842E9DE628A7969D6",
+            "loaderId": "19E4728A87116251E453AD8CDE65F20F",
+            "mimeType": "text/html",
+            "name": "",
+            "parentId": "4CA2FB96F3DAD74854C0781B50C8475A",
+            "secureContextType": "SecureLocalhost",
+            "securityOrigin": "http://127.0.0.1:54668",
+            "securityOriginDetails": {
+              "isLocalhost": true
+            },
+            "url": "http://127.0.0.1:54668/"
+          }
+        }
+      ],
+      "frame": {
+        "adFrameStatus": {
+          "adFrameType": "none"
+        },
+        "crossOriginIsolatedContextType": "NotIsolated",
+        "domainAndRegistry": "",
+        "gatedAPIFeatures": [],
+        "id": "4CA2FB96F3DAD74854C0781B50C8475A",
+        "loaderId": "F410AADD606E0FB0535DA3456347BC58",
+        "mimeType": "text/html",
+        "secureContextType": "SecureLocalhost",
+        "securityOrigin": "http://127.0.0.1:5179",
+        "securityOriginDetails": {
+          "isLocalhost": true
+        },
+        "url": "http://127.0.0.1:5179/",
+        "urlFragment": "#/apps/01a12b5c-6525-7b12-a775-df21acfc1e6a?intent=create"
+      }
+    }
+  },
+  "finalFields": [
+    {
+      "label": null,
+      "value": ""
+    },
+    {
+      "label": "名称",
+      "value": "蓝色贪吃蛇"
+    },
+    {
+      "label": "应用描述",
+      "value": "我的游戏备注（未保存）"
+    },
+    {
+      "label": "标签",
+      "value": "game, snake, html5"
+    }
+  ],
+  "followupInspector": "Conflict: Stop application development before changing its files\n蓝色贪吃蛇\n运行中\n停止\n重新打包并启动\n\n运行配置已填写，可在高级配置中查看和修改。\n\n编辑\n名称\n应用描述\n标签\n高级配置：安装、预览、打包与启动\n\n你修改的字段尚未保存；其余字段继续同步应用的最新配置。\n\n保存\n程序预览\n独立打开\n刷新预览\n放大\n收起预览\n文件目录与命令输出\n覆盖文件\n删除",
+  "pausedCanvasStable": true,
+  "resumeChangesCanvas": true,
+  "overall_product_pass": false,
+  "remaining_failure": "read-only-completion-config-raced-the-admission-fence",
+  "secondToolFailuresPreserved": 7
+}

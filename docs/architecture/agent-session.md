@@ -18,6 +18,53 @@ This is the current development entry point. Rust types, the Session event regis
 
 ## Runtime context
 
+Application workspaces use an ordinary Conversation with the fixed official
+`app.developer` Agent and user-selected model/reasoning policy. The application's
+owned directory is the frozen workspace. Its `development_session_id` is a verified
+navigation reference, not authority, exclusive ownership or another binding ledger.
+Reopening verifies the canonical owner, purpose, template and directory. Application
+deletion preserves the ordinary Session and valid history; the removed path cannot
+be reconstructed or executed merely because history remains.
+
+Each application owns one independent project directory. A project supports multiple
+ordinary Sessions, and different applications do not share project roots. History is queried by
+the exact owner, ordinary purpose and current explicitly selected workspace binding, including
+canonical archive metadata. Past resource definitions and the latest navigation
+reference are not membership or authority. Session content stays independent in
+the canonical store; source directories contain no copied transcript. New Sessions
+with an explicit directory freeze the project-memory resource identity from the
+owner and canonical root. They share existing project-memory state for that project,
+retain this identity across Agent switches, and leave prior default bindings intact.
+Project memory retains the current in-memory Host persistence contract; it does
+not survive a Host restart. Project files and canonical Session history persist.
+Installation-level placeholders for default Session-owned workspaces never identify
+an application's project directory.
+
+Only that built-in template defaults to all ten `app.hosting` actions. Other
+official templates leave NomiFun application development optional. Prior personal
+selections and frozen Sessions gain no actions automatically. The guide loads on
+demand; mutations use existing HostedEffectReceipts with exact canonical causation.
+Manual file imports, overwrites and deletion hold directory and current project
+Session admission fences and reject active Turns or pending/unknown effects.
+Creation, forks, binding changes, warmup and admission take a directory read fence
+in the existing transient lock registry. This prevents a new Session crossing the
+membership scan while files change, without another transcript or ledger.
+The existing typed deleting-session query also protects exact owner/project roots
+until normal cleanup completes; it grants no execution authority and does not put
+deleting Sessions back into ordinary history.
+An admitted Agent import takes the same project fences and existing native workspace
+mutation lock. It verifies its exact Session, Turn, Snapshot, operation, tool causation
+and pending Effect receipt; only that invocation's own pending effect is permitted.
+Other active work and unsettled effects remain blockers, and rejections settle through
+the existing pre-dispatch rejection contract.
+
+Within that fence, application deletion waits for normal Runtime teardown of its
+exact development Session and releases only the idle exact-root File/Artifact/VCS
+owner cache and native directory handles. Session, Turn, Event, Payload, Effect and
+resource-definition values remain unchanged. Another Session's active resources,
+retained invocations or unresolved Git outcomes block release; application deletion
+does not close unrelated Sessions or processes.
+
 `engine_history.rs` reads typed canonical events and resolved payloads. It does not read Message projections to determine model roles. Native closed turns replay their structured journal. Missing Runtime records fail closed rather than falling back to chat text.
 
 An accepted input that fails or is cancelled before Runtime startup remains valid context together with its explicit terminal fact. It does not acquire fabricated Runtime, tool or completion evidence.

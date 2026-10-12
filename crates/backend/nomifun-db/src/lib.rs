@@ -1,4 +1,5 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
+mod retire_plugin_works;
 pub mod backup_bundle;
 mod agent_store_reset;
 mod agent_store_clean_cut;

@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "status": "product_followup_incomplete",
+  "host_url": "http://127.0.0.1:54748",
+  "app_id": "01a12b38-3aac-7a20-b7e3-5c2ef76f728d",
+  "session_id": "01a12b38-6b52-7aa2-9a35-656ed9c0e33c",
+  "ordinary_prompt": "把蛇的颜色改成蓝色，并把应用改名为蓝色贪吃蛇",
+  "captured_from": "Authenticated read-only canonical event API",
+  "first_turn_update_succeeded": true,
+  "first_turn_update_call_seq": 123,
+  "second_turn_unexposed_update_call_seq": 386,
+  "second_turn_unexposed_update_refusal_seq": 388,
+  "second_turn_update_guessed_argument_types": {
+    "tags": "string",
+    "detect_settings": "string"
+  },
+  "second_turn_search_query": "app.hosting",
+  "search_max_matches": 5,
+  "search_result_tools": [
+    "app_status",
+    "current_app",
+    "import_app",
+    "list_apps",
+    "preview_app"
+  ],
+  "search_omitted_required_update_app": true,
+  "second_turn_preview_call_seq": 413,
+  "application_name_updated": false,
+  "overall_product_pass": false,
+  "cause": "Deferred activation is turn-local. The follow-up assumed update_app remained exposed, then a broad module search returned only five alphabetical matches and omitted update_app. No missing grant was proved. Required typed schema was not exposed to the model before its guessed call.",
+  "repair": "Preactivate only selected action names from the final active frozen tool plan at normal turn preparation. This changes presentation, not Snapshot, grants, resources, or completion phase policy.",
+  "canonical_receipts": [
+    {
+      "seq": 123,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b38-6cf6-700e-b02b-50fe294ba774:94",
+      "payload": {
+        "producer_seq": 94,
+        "event": {
+          "event": "tool_call_completed",
+          "step": 5,
+          "call": {
+            "call_id": "chatcmpl-tool-86745e2018d8dbe9",
+            "name": "update_app",
+            "arguments": {
+              "app_id": "01a12b38-3aac-7a20-b7e3-5c2ef76f728d",
+              "description": "一个可直接在浏览器中运行的贪吃蛇小游戏，支持键盘方向键/WASD 控制、计分、暂停和重置。",
+              "detect_settings": true,
+              "import_kind": "source",
+              "name": "贪吃蛇",
+              "tags": [
+                "游戏",
+                "贪吃蛇",
+                "HTML5",
+                "Canvas"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 386,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b42-60f5-7404-9826-eefd57c71293:174",
+      "payload": {
+        "producer_seq": 174,
+        "event": {
+          "event": "tool_call_completed",
+          "step": 8,
+          "call": {
+            "call_id": "chatcmpl-tool-b3ccbd6e659f23a6",
+            "name": "update_app",
+            "arguments": {
+              "app_id": "01a12b38-3aac-7a20-b7e3-5c2ef76f728d",
+              "description": "一个可直接在浏览器中运行的蓝色贪吃蛇小游戏，支持键盘方向键/WASD 控制、计分、暂停和重置。",
+              "detect_settings": "True",
+              "import_kind": "source",
+              "name": "蓝色贪吃蛇",
+              "tags": "[\"游戏\", \"贪吃蛇\", \"蓝色\", \"HTML5\", \"Canvas\"]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 388,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b42-60f5-7404-9826-eefd57c71293:176",
+      "payload": {
+        "producer_seq": 176,
+        "event": {
+          "event": "tool_completed",
+          "step": 8,
+          "result": {
+            "call_id": "chatcmpl-tool-b3ccbd6e659f23a6",
+            "output": [
+              {
+                "type": "text",
+                "text": "Not executed: tool \"update_app\" is not exposed in the current model tool definitions. No calls in this batch ran. Use an exact advertised tool name and its schema. The Agent's enabled capabilities are frozen for this Session; there is no implicit alias, fallback tool or permission grant. Reconsider the plan before effects, then submit a corrected batch with fresh call IDs."
+              }
+            ],
+            "is_error": true
+          }
+        }
+      }
+    },
+    {
+      "seq": 400,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b42-60f5-7404-9826-eefd57c71293:185",
+      "payload": {
+        "producer_seq": 185,
+        "event": {
+          "event": "tool_call_completed",
+          "step": 9,
+          "call": {
+            "call_id": "chatcmpl-tool-a515de5bb90f9f3e",
+            "name": "ToolSearch",
+            "arguments": {
+              "query": "app.hosting"
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 402,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b42-60f5-7404-9826-eefd57c71293:187",
+      "payload": {
+        "producer_seq": 187,
+        "event": {
+          "event": "tool_completed",
+          "step": 9,
+          "result": {
+            "call_id": "chatcmpl-tool-a515de5bb90f9f3e",
+            "output": [
+              {
+                "type": "text",
+                "text": "[\n  {\n    \"name\": \"app_status\",\n    \"description\": \"NomiFun application development / NomiFun 应用开发: app.hosting Action: app.hosting/status.\",\n    \"activated\": true,\n    \"already_available\": false,\n    \"schema_visibility\": \"visible_on_next_model_step\"\n  },\n  {\n    \"name\": \"current_app\",\n    \"description\": \"NomiFun application development / NomiFun 应用开发: app.hosting Action: app.hosting/current.\",\n    \"activated\": true,\n    \"already_available\": false,\n    \"schema_visibility\": \"visible_on_next_model_step\"\n  },\n  {\n    \"name\": \"import_app\",\n    \"description\": \"NomiFun application development / NomiFun 应用开发: app.hosting Action: app.hosting/import.\",\n    \"activated\": true,\n    \"already_available\": false,\n    \"schema_visibility\": \"visible_on_next_model_step\"\n  },\n  {\n    \"name\": \"list_apps\",\n    \"description\": \"NomiFun application development / NomiFun 应用开发: app.hosting Action: app.hosting/list.\",\n    \"activated\": true,\n    \"already_available\": false,\n    \"schema_visibility\": \"visible_on_next_model_step\"\n  },\n  {\n    \"name\": \"preview_app\",\n    \"description\": \"NomiFun application development / NomiFun 应用开发: app.hosting Action: app.hosting/preview.\",\n    \"activated\": true,\n    \"already_available\": false,\n    \"schema_visibility\": \"visible_on_next_model_step\"\n  }\n]"
+              }
+            ],
+            "is_error": false
+          }
+        }
+      }
+    },
+    {
+      "seq": 413,
+      "kind": "runtime/progress-recorded",
+      "event_id": "runtime-progress:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:turn:user:01a12b35-11eb-7840-a7e1-483e25fde4de:01a12b38-6b52-7aa2-9a35-656ed9c0e33c:01a12b42-60f5-7404-9826-eefd57c71293:195",
+      "payload": {
+        "producer_seq": 195,
+        "event": {
+          "event": "tool_call_completed",
+          "step": 10,
+          "call": {
+            "call_id": "chatcmpl-tool-8c0ce153c3b2dbd1",
+            "name": "preview_app",
+            "arguments": {
+              "app_id": "01a12b38-3aac-7a20-b7e3-5c2ef76f728d"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

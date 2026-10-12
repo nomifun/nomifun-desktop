@@ -128,15 +128,6 @@ impl CanonicalAgentSessionOwner {
         .await
     }
 
-    pub async fn open_with_purpose(
-        &self, owner: PrincipalRef, binding: AgentBindingValue, title: Option<String>,
-        active_capability_ids: Vec<String>, reasoning_effort: Option<ReasoningEffort>,
-        purpose: SessionPurpose, idempotency_key: &str, created_at: i64,
-    ) -> Result<OpenAgentSession, AppError> {
-        self.open_with_options(owner, binding, title, active_capability_ids, None,
-            reasoning_effort, purpose, idempotency_key, created_at).await
-    }
-
     async fn open_with_options(
         &self,
         owner: PrincipalRef,
@@ -149,6 +140,9 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
+        if purpose == SessionPurpose::PluginAuthoring {
+            return Err(AppError::Conflict("PLUGIN_AUTHORING_RETIRED: new authoring Sessions are no longer supported".into()));
+        }
         let key = scoped_key(&owner, idempotency_key, "open")?;
         let producer = EventProducerId::from("session_api");
         let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
@@ -307,7 +301,7 @@ impl CanonicalAgentSessionOwner {
     }
 
     pub async fn start_voice_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,input:Value,fence:&nomifun_agent_session::NativeInputContextFence)->Result<AgentTurnReceipt,AppError> {
-        self.require_owner(owner,session).await?;let key=scoped_key(owner,key,session.as_ref())?;let operation_id=OperationId::from(format!("turn:{key}"));
+        self.require_executable(owner,session).await?;let key=scoped_key(owner,key,session.as_ref())?;let operation_id=OperationId::from(format!("turn:{key}"));
         let (_,result)=self.store.start_voice_turn(session,"session_api".into(),key.into(),operation_id.clone(),StrictJsonValue(input),fence).await.map_err(store_error)?;
         Ok(AgentTurnReceipt {operation_id,cursor:result.cursor,duplicate:result.duplicate})
     }
@@ -320,7 +314,7 @@ impl CanonicalAgentSessionOwner {
         input: Value,
         initial_only: bool,
     ) -> Result<AgentTurnReceipt, AppError> {
-        self.require_owner(owner, session_id).await?;
+        self.require_executable(owner, session_id).await?;
         let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
         let operation_id = OperationId::from(format!("turn:{key}"));
         let (_, turn_result) = if initial_only {
@@ -359,7 +353,7 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         input: Value,
     ) -> Result<AgentMutationReceipt, AppError> {
-        self.require_owner(owner, session_id).await?;
+        self.require_executable(owner, session_id).await?;
         let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
         let (target_operation_id, result) = self
             .store
@@ -392,7 +386,7 @@ impl CanonicalAgentSessionOwner {
         target_operation_id: &OperationId,
         input: Value,
     ) -> Result<AgentMutationReceipt, AppError> {
-        self.require_owner(owner, session_id).await?;
+        self.require_executable(owner, session_id).await?;
         let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
         let (target_operation_id, result) = self.store.steer_exact_turn(
             session_id, target_operation_id, IdempotencyKey::from(format!("{key}:steer")),
@@ -462,7 +456,7 @@ impl CanonicalAgentSessionOwner {
 
     pub async fn steer_exact_native_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,input:Value,
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
-        self.require_owner(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
+        self.require_executable(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
         let (target_operation_id,result)=self.store.steer_exact_native_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
         let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical steering has no durable Turn receipt".into()))?;
         Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
@@ -470,7 +464,7 @@ impl CanonicalAgentSessionOwner {
 
     pub async fn steer_exact_native_immediate_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,input:Value,
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
-        self.require_owner(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
+        self.require_executable(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
         let (target_operation_id,result)=self.store.steer_exact_native_immediate_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
         let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical voice steering has no durable Turn receipt".into()))?;
         Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
@@ -492,7 +486,7 @@ impl CanonicalAgentSessionOwner {
             parent_through_seq, title.as_deref(), &producer, &event_key).await.map_err(store_error)? {
             return Ok(receipt);
         }
-        let parent = self.require_owner(owner, parent_session_id).await?;
+        let parent = self.require_executable(owner, parent_session_id).await?;
         let facts = self.store.chat_causality_facts(parent_session_id, &OperationId::from("fork-context"))
             .await.map_err(store_error)?;
         if parent_through_seq > facts.head.last_seq {
@@ -651,6 +645,14 @@ impl CanonicalAgentSessionOwner {
             .map_err(store_error)
     }
 
+    async fn require_executable(&self, owner: &PrincipalRef, session_id: &AgentSessionId) -> Result<AgentSessionLiveRecord, AppError> {
+        let session = self.require_owner(owner, session_id).await?;
+        if session.metadata.purpose == SessionPurpose::PluginAuthoring {
+            return Err(AppError::Conflict("PLUGIN_AUTHORING_RETIRED: this historical Session is read-only".into()));
+        }
+        Ok(session)
+    }
+
     async fn require_owner(
         &self,
         owner: &PrincipalRef,
@@ -730,58 +732,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_purpose_is_atomic_idempotent_and_not_mutable_session_metadata() {
+    async fn historical_authoring_is_readable_but_cannot_open_execute_or_fork() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
-        let ordinary = service.open(owner(), binding(), None, Vec::new(), "ordinary-purpose", 1).await.unwrap();
-        assert_eq!(ordinary.session.metadata.purpose, SessionPurpose::Conversation);
-        let plugin = service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
-            Some(ReasoningEffort::Low), SessionPurpose::PluginAuthoring, "plugin-purpose", 2).await.unwrap();
-        let id = &plugin.session.agent_session_id;
-        assert_eq!(plugin.session.metadata.purpose, SessionPurpose::PluginAuthoring);
-        let before: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1 AND kind='session/opening'")
-            .bind(id.as_ref()).fetch_one(database.pool()).await.unwrap();
-        let opening: Value = serde_json::from_str(&before).unwrap();
-        assert_eq!(opening["metadata"]["purpose"], "plugin_authoring");
-        let replay = service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
-            Some(ReasoningEffort::Low), SessionPurpose::PluginAuthoring, "plugin-purpose", 20).await.unwrap();
-        assert!(replay.duplicate);
-        assert_eq!(replay.session.agent_session_id, *id);
-        assert!(matches!(service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
-            Some(ReasoningEffort::Low), SessionPurpose::Conversation, "plugin-purpose", 20).await,
-            Err(AppError::Conflict(_))), "the same key cannot reopen under a different product purpose");
-        assert!(serde_json::from_value::<nomifun_agent_session::UpdateAgentSessionMetadata>(
-            json!({"title":"Moved","purpose":"conversation"})).is_err());
-        let updated = service.store.update_session_metadata(&owner(), id,
-            nomifun_agent_session::UpdateAgentSessionMetadata { title: Some("Renamed".into()), archived: Some(true), pinned: Some(true) })
-            .await.unwrap();
-        assert_eq!(updated.metadata.purpose, SessionPurpose::PluginAuthoring);
-        assert_eq!(updated.metadata.title.as_deref(), Some("Renamed"));
-        assert_eq!(service.store.get_live_session(id).await.unwrap().metadata.purpose, SessionPurpose::PluginAuthoring);
-        let listed = service.store.list_live_sessions(&owner(), None, 20).await.unwrap();
-        assert_eq!(listed.items.iter().find(|item| item.session.agent_session_id == *id).unwrap().session.metadata.purpose,
-            SessionPurpose::PluginAuthoring);
-        let after: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1")
-            .bind(id.as_ref()).fetch_one(database.pool()).await.unwrap();
-        assert_eq!(before, after, "mutable metadata never rewrites the immutable creation fact");
-    }
-
-    #[tokio::test]
-    async fn plugin_authoring_fork_preserves_canonical_product_purpose() {
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
-        let parent = service.open_with_purpose(owner(), binding(), None, Vec::new(), None,
-            SessionPurpose::PluginAuthoring, "plugin-fork-parent", 1).await.unwrap();
-        service.start_turn(&owner(), &parent.session.agent_session_id, "plugin-fork-input", json!({"content":"Build the app"})).await.unwrap();
-        service.cancel(&owner(), &parent.session.agent_session_id, "plugin-fork-stop").await.unwrap();
-        let cursor = service.store.current_cursor(&parent.session.agent_session_id).await.unwrap();
-        let child = service.fork(&owner(), &parent.session.agent_session_id, cursor.seq, None, "plugin-fork-child", 2).await.unwrap();
-        assert_eq!(child.child_session.metadata.purpose, SessionPurpose::PluginAuthoring);
-        assert_eq!(service.store.get_live_session(&child.child_session.agent_session_id).await.unwrap().metadata.purpose,
-            SessionPurpose::PluginAuthoring);
-        let opening: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1")
-            .bind(child.child_session.agent_session_id.as_ref()).fetch_one(database.pool()).await.unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&opening).unwrap()["metadata"]["purpose"], "plugin_authoring");
+        let denied = service.open_with_options(owner(), binding(), None, Vec::new(), None, None,
+            SessionPurpose::PluginAuthoring, "retired-new", 1).await.unwrap_err();
+        assert!(denied.to_string().contains("PLUGIN_AUTHORING_RETIRED"));
+        // Fixture models an existing canonical record, never a migration reader.
+        let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
+        let session = AgentSessionLiveRecord {
+            agent_session_id: session_id.clone(), owner_ref: owner(),
+            metadata: AgentSessionMetadata { purpose: SessionPurpose::PluginAuthoring, title: Some("Historical app".into()),
+                archived: false, pinned: false, reasoning_effort: None },
+            agent_binding: binding(), remote_binding_provenance: None, parent_session_id: None, fork_base_payload_id: None, next_seq: 1,
+        };
+        service.store.create_session(CreateSessionRequest::new(session, 1, "historical-open", "session_api".into(), "historical-open".into(), "historical-open".into())).await.unwrap();
+        let original = serde_json::to_value(service.store.read_events(&session_id, None, 20).await.unwrap()).unwrap();
+        assert_eq!(service.get(&owner(), &session_id).await.unwrap().session.metadata.purpose, SessionPurpose::PluginAuthoring);
+        assert!(service.start_turn(&owner(), &session_id, "new", json!({"content":"continue"})).await.unwrap_err().to_string().contains("PLUGIN_AUTHORING_RETIRED"));
+        assert!(service.fork(&owner(), &session_id, 1, None, "fork", 2).await.unwrap_err().to_string().contains("PLUGIN_AUTHORING_RETIRED"));
+        assert_eq!(serde_json::to_value(service.store.read_events(&session_id, None, 20).await.unwrap()).unwrap(), original);
     }
 
     #[tokio::test]

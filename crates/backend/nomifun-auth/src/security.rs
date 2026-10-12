@@ -83,22 +83,6 @@ fn is_office_preview_capability_path(path: &str) -> bool {
     )
 }
 
-fn is_plugin_surface_path(path: &str) -> bool {
-    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
-    let fenced = match segments.as_slice() {
-        ["api", "plugins" | "plugin-drafts", owner_id, "surface", "assets", session_id, generation, digest, _asset, ..] => {
-            Some((*owner_id, *session_id, *generation, *digest))
-        }
-        _ => None,
-    };
-    fenced.is_some_and(|(owner_id, session_id, generation, digest)| {
-        nomifun_common::validate_uuidv7(owner_id).is_ok()
-            && nomifun_common::validate_uuidv7(session_id).is_ok()
-            && generation.parse::<u64>().is_ok_and(|value| value > 0)
-            && is_preview_capability(digest)
-    })
-}
-
 fn replace_frame_ancestors(policy: &str) -> String {
     let ancestors = frame_ancestors();
     let mut directives: Vec<&str> = policy
@@ -181,7 +165,6 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     }
 
     if is_office_preview_capability_path(&path)
-        || is_plugin_surface_path(&path)
     {
         apply_office_frame_policy(headers);
     } else {
@@ -300,37 +283,6 @@ mod tests {
             response.headers().get(CACHE_CONTROL).unwrap(),
             "public, max-age=31536000, immutable"
         );
-    }
-
-    #[tokio::test]
-    async fn unified_plugin_surface_descriptor_can_be_framed_by_the_app() {
-        let digest =
-            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let path = format!(
-            "/api/plugins/0199cc00-0000-7000-8000-000000000001/surface/assets/0199cc00-0000-7000-8000-000000000002/3/{digest}/ui/index.html"
-        );
-        let app = Router::new()
-            .route(&path, get(|| async { "ok" }))
-            .layer(middleware::from_fn(security_headers_middleware));
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert!(response.headers().get(X_FRAME_OPTIONS).is_none());
-        let policy = response
-            .headers()
-            .get(&CONTENT_SECURITY_POLICY)
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(policy.contains("frame-ancestors 'self'"));
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice,
-    CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload,
+    CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
@@ -17,8 +17,8 @@ use nomifun_agent_contracts::{
     AGENT_STORE_BASELINE_SQL,
     OfficialPresetKey,
     OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
-    PluginActionPublication, PluginArtifact, PluginManifest, PluginRegistrationMetadata,
-    RemoteBinding, UnifiedPluginContractManifest,
+    PluginRegistrationMetadata,
+    RemoteBinding,
     ResolvedSnapshotEnvelope, SessionEventRegistryPayload, TargetPackageInventoryPayload,
     VersionString, digest_bytes, digest_payload,
 };
@@ -60,17 +60,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         contracts.join("remote/d026-request-admission-ordering.fixture.json");
     let platform_path =
         contracts.join("validation/platform-validation-manifest.payload.json");
-    let plugin_contract_path =
-        contracts.join("plugin/unified-plugin-contract.v1.json");
-
     let closure: ContractClosurePayload = read_json(&closure_path)?;
     validate_closure(&closure)?;
     let closure_digest = digest_payload(&closure)?;
-
-    let plugin_contract: UnifiedPluginContractManifest =
-        read_json(&plugin_contract_path)?;
-    plugin_contract.validate()?;
-    let plugin_contract_digest = digest_payload(&plugin_contract)?;
 
     let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
     validate_target_inventory(&inventory)?;
@@ -149,16 +141,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         &schemas,
         &["platform_validation_manifest"],
     ))?;
-    let plugin_schema_digest = digest_payload(&schema_subset(
-        &schemas,
-        &[
-            "plugin_action_publication",
-            "plugin_artifact",
-            "plugin_manifest",
-            "unified_plugin_contract_manifest",
-        ],
-    ))?;
-
     let coding_seed = seed
         .templates
         .get(&OfficialPresetKey::CodingCodex)
@@ -229,8 +211,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     digest_map.insert("error_registry".to_owned(), error_digest);
     digest_map.insert("official_preset_seed_manifest".to_owned(), seed_digest);
     digest_map.insert("package_schema".to_owned(), package_schema_digest);
-    digest_map.insert("plugin_contract".to_owned(), plugin_contract_digest);
-    digest_map.insert("plugin_schema".to_owned(), plugin_schema_digest);
     digest_map.insert(
         "platform_validation_contract".to_owned(),
         platform_contract_digest,
@@ -303,24 +283,18 @@ fn run() -> Result<(), Box<dyn Error>> {
             "platform-validation-fixture.envelope.json".to_owned(),
             pretty_json(&platform_envelope)?,
         ),
-        (
-            "unified-plugin-contract.envelope.json".to_owned(),
-            pretty_json(&ArtifactEnvelope::new(plugin_contract.clone())?)?,
-        ),
     ]);
 
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
         write_json(&platform_path, &platform)?;
-        write_json(&plugin_contract_path, &plugin_contract)?;
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
         }
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
-        check_json(&plugin_contract_path, &plugin_contract)?;
         for (name, contents) in &outputs {
             let path = generated.join(name);
             let existing = fs::read_to_string(&path)
@@ -358,6 +332,16 @@ fn validate_api_inventory(
                 operation.operation_id
             )
             .into());
+        }
+        let retired_drafts_path = ["/api/", "plugin-drafts"].concat();
+        if operation.path.starts_with(&retired_drafts_path)
+            || operation.path.starts_with("/api/plugins/authoring")
+            || (operation.path.starts_with("/api/plugins/") && operation.path.ends_with("/config"))
+        {
+            return Err(format!(
+                "retired plugin hosting operation remains active: {} {}",
+                operation.operation_id, operation.path
+            ).into());
         }
         if !operation
             .canonical_errors
@@ -407,6 +391,35 @@ fn validate_api_inventory(
             return Err(format!("missing canonical Agent API operation {operation_id} {path}").into());
         }
     }
+    // Generic kernel package/plugin catalog metadata remains supported. The
+    // ordinary app owner replaces only the retired authoring/config domain.
+    let required_hosting_operations = [
+        ("plugins.list", CanonicalHttpMethod::Get, "/api/plugins"),
+        ("plugins.get", CanonicalHttpMethod::Get, "/api/plugins/{plugin_id}"),
+        ("apps.list", CanonicalHttpMethod::Get, "/api/apps"),
+        ("apps.create", CanonicalHttpMethod::Post, "/api/apps"),
+        ("apps.import", CanonicalHttpMethod::Post, "/api/apps/import"),
+        ("apps.import_zip", CanonicalHttpMethod::Post, "/api/apps/import-zip"),
+        ("apps.environment", CanonicalHttpMethod::Post, "/api/apps/environment"),
+        ("apps.get", CanonicalHttpMethod::Get, "/api/apps/{id}"),
+        ("apps.update", CanonicalHttpMethod::Put, "/api/apps/{id}"),
+        ("apps.delete", CanonicalHttpMethod::Delete, "/api/apps/{id}"),
+        ("apps.operate", CanonicalHttpMethod::Post, "/api/apps/{id}/operate"),
+        ("apps.development_session", CanonicalHttpMethod::Post, "/api/apps/{id}/development-session"),
+        ("apps.import_into", CanonicalHttpMethod::Post, "/api/apps/{id}/import"),
+        ("apps.import_into_zip", CanonicalHttpMethod::Post, "/api/apps/{id}/import-zip"),
+        ("apps.overwrite", CanonicalHttpMethod::Post, "/api/apps/{id}/overwrite"),
+        ("apps.overwrite_zip", CanonicalHttpMethod::Post, "/api/apps/{id}/overwrite-zip"),
+        ("app_mcp_sources.list", CanonicalHttpMethod::Get, "/api/app-hosting/mcp-sources"),
+        ("app_mcp_sources.refresh", CanonicalHttpMethod::Post, "/api/app-hosting/mcp-sources/{id}/refresh"),
+    ];
+    for (operation_id, method, path) in required_hosting_operations {
+        if !api_inventory.operations.iter().any(|operation| {
+            operation.operation_id == operation_id && operation.method == method && operation.path == path
+        }) {
+            return Err(format!("missing canonical app/catalog API operation {operation_id} {method:?} {path}").into());
+        }
+    }
     if !api_inventory
         .forbidden_paths
         .contains(&["/api/", "presets"].concat())
@@ -414,6 +427,51 @@ fn validate_api_inventory(
         return Err("legacy preset route must remain explicitly forbidden".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod api_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn current_app_inventory_keeps_kernel_metadata_and_real_hosting_routes() {
+        validate_api_inventory(&nomifun_agent_contracts::canonical_api_inventory_payload()).unwrap();
+    }
+
+    #[test]
+    fn retired_authoring_and_config_endpoints_cannot_reenter_the_inventory() {
+        for path in ["/api/plugins/authoring/sessions".to_owned(), "/api/plugins/{plugin_id}/config".to_owned(), ["/api/", "plugin-drafts/{id}"].concat()] {
+            let mut inventory = nomifun_agent_contracts::canonical_api_inventory_payload();
+            let mut operation = inventory.operations[0].clone();
+            operation.operation_id = "retired.fixture".into();
+            operation.path = path;
+            inventory.operations.push(operation);
+            let error = validate_api_inventory(&inventory).unwrap_err().to_string();
+            assert!(error.contains("retired plugin hosting"), "{error}");
+        }
+    }
+
+    #[test]
+    fn hosting_operation_methods_must_match_the_real_owner() {
+        let mut inventory = nomifun_agent_contracts::canonical_api_inventory_payload();
+        inventory.operations.iter_mut().find(|operation| operation.operation_id == "apps.import").unwrap().method = CanonicalHttpMethod::Put;
+        assert!(validate_api_inventory(&inventory).unwrap_err().to_string().contains("apps.import Post /api/apps/import"));
+    }
+
+    #[test]
+    fn workspace_entry_operations_cannot_be_omitted_or_use_a_different_method() {
+        for id in ["apps.create", "apps.development_session", "apps.import_into", "apps.import_into_zip"] {
+            let mut inventory = nomifun_agent_contracts::canonical_api_inventory_payload();
+            inventory.operations.retain(|operation| operation.operation_id != id);
+            let error = validate_api_inventory(&inventory).unwrap_err().to_string();
+            assert!(error.contains(id), "{error}");
+
+            let mut inventory = nomifun_agent_contracts::canonical_api_inventory_payload();
+            inventory.operations.iter_mut().find(|operation| operation.operation_id == id).unwrap().method = CanonicalHttpMethod::Put;
+            let error = validate_api_inventory(&inventory).unwrap_err().to_string();
+            assert!(error.contains(id) && error.contains("Post"), "{error}");
+        }
+    }
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Box<dyn Error>> {
@@ -524,16 +582,6 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "platform_validation_manifest",
     )?;
-    add_schema::<UnifiedPluginContractManifest>(
-        &mut schemas,
-        "unified_plugin_contract_manifest",
-    )?;
-    add_schema::<PluginManifest>(&mut schemas, "plugin_manifest")?;
-    add_schema::<PluginArtifact>(&mut schemas, "plugin_artifact")?;
-    add_schema::<PluginActionPublication>(
-        &mut schemas,
-        "plugin_action_publication",
-    )?;
     Ok(schemas)
 }
 
@@ -547,10 +595,6 @@ fn validate_generated_schemas(
         "agent_preset_revision",
         "capability_catalog_entry",
         "agent_snapshot",
-        "unified_plugin_contract_manifest",
-        "plugin_manifest",
-        "plugin_artifact",
-        "plugin_action_publication",
     ];
     for name in required {
         if !schemas.contains_key(name) {
@@ -652,27 +696,6 @@ fn validate_generated_schemas(
     )?;
     if !package_manifest.contains("\"contribution_id\"") {
         return Err("CapabilityManifest must own explicit contribution_id".into());
-    }
-    let plugin_manifest = serde_json::to_string(
-        schemas
-            .get("plugin_manifest")
-            .expect("Unified Plugin manifest schema is generated"),
-    )?;
-    for forbidden in [
-        "package_contributions",
-        "roles",
-        "providers",
-        "consumers",
-        "release_id",
-        "candidate_id",
-        "mount_id",
-    ] {
-        if plugin_manifest.contains(&format!("\"{forbidden}\"")) {
-            return Err(format!(
-                "Unified Plugin manifest must not expose {forbidden}"
-            )
-            .into());
-        }
     }
     Ok(())
 }

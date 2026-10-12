@@ -210,9 +210,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             channels: Arc::new(nomifun_db::SqliteChannelRepository::new(
                 services.database.pool().clone(),
             )),
-            mcp_servers: Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-                services.database.pool().clone(),
-            )),
+            mcp_servers: services.app_mcp_sources.clone(),
             ssh_hosts: services.ssh_pool.host_service(),
             robots: services.robot.as_ref().map(|robot| Arc::clone(&robot.registry)),
             #[cfg(feature = "browser-use")]

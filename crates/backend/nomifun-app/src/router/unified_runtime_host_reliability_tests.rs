@@ -390,7 +390,34 @@ async fn admitted_workspace_context_reaches_the_formal_turn_without_a_probe() {
         .bind(session).fetch_one(fixture.pool()).await.unwrap();
     assert_eq!(models,0,"context preparation must not spend a model request");
     assert_eq!(effects,0,"admitted workspace data must not trigger a cwd or listing command");
+    assert!(prepared.preactivated_tools.is_empty(), "a workspace-only Agent must not receive application schemas");
     fixture.finish().await;
+}
+
+#[test]
+fn selected_application_tools_preserve_the_exact_frozen_active_action_subset() {
+    let binding = |name: &str, capability: &str, action: &str| {
+        let schema = StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":{}}));
+        AgentToolBinding {
+            model_name: name.to_owned(), definition: ChatToolDefinition { name: name.to_owned(),
+                description: "isolated presentation-policy fixture".into(), input_schema: schema.clone(), deferred: true },
+            schema_digest: nomifun_engine_core::input_schema_digest(&schema).unwrap(),
+            canonical_input_schema_ref: "schema://nomifun/presentation-policy-fixture@1".into(),
+            capability_contract_digest: "a".repeat(64).into(), capability_id: capability.into(), action_id: action.into(),
+            resource_binding_ids: BTreeSet::new(), effect_class: AgentEffectClass::ReadOnly, parallel_safe: true,
+        }
+    };
+    let plan = AgentToolPlan::new([
+        binding("owned_current", "app.hosting", "app.hosting/current"),
+        binding("owned_update", "app.hosting", "app.hosting/update"),
+        binding("foreign_update", "another.module", "app.hosting/update"),
+    ]).unwrap();
+    let before = plan.model_definitions();
+    assert_eq!(selected_application_tools(&plan), ["owned_current", "owned_update"]);
+    assert_eq!(selected_application_tools(&plan), ["owned_current", "owned_update"], "a subsequent turn restores the same selected schemas without discovery history");
+    assert_eq!(plan.model_definitions(), before, "preactivation cannot author new bindings or replace a frozen schema");
+    assert!(plan.model_name_for_action("app.hosting", "app.hosting/preview").is_none(), "the policy cannot manufacture an ungranted preview action");
+    assert!(selected_application_tools(&AgentToolPlan::default()).is_empty(), "inactive or unselected application modules supply no tools");
 }
 
 #[tokio::test]
@@ -428,7 +455,7 @@ async fn cancellation_replay_and_delayed_stop_preserve_the_real_successor_runtim
     let late_steer = fixture.owner.steer_turn_for_execution(fixture.services.authoritative_user_id.as_ref(), session.as_ref(),
         "first-late-durable-steer", "cleanup-retry-turn", nomifun_api_types::SendMessageRequest {
             content:"This belongs only to the cancelled original task".into(),files:vec![],inject_skills:vec![],
-            hidden:false,origin:Some("agent_execution".into()),channel_platform:None,plugin_delivery:None,
+            hidden:false,origin:Some("agent_execution".into()),channel_platform:None,
         }).await.unwrap();
     assert_eq!(late_steer, first["message_id"].as_str().unwrap());
     assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some("successor-operation"));
@@ -463,7 +490,7 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     }).await.unwrap();
     let request = || nomifun_api_types::SendMessageRequest {
         content:"Original committed steering\n中文纠正必须保留".into(),files:vec![],inject_skills:vec![],hidden:false,
-        origin:Some("agent_execution".into()),channel_platform:None,plugin_delivery:None,
+        origin:Some("agent_execution".into()),channel_platform:None,
     };
     // The real canonical admission commits, then its sender disappears before
     // calling the native queue. A retry sees duplicate=true but must deliver.

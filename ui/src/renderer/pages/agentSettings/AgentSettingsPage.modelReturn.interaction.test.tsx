@@ -19,8 +19,6 @@ import * as libraryPanel from './AgentPresetLibrary';
 import * as authContext from '@/renderer/hooks/context/AuthContext';
 import * as modelProviders from '@/renderer/hooks/agent/useModelProviderList';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
-import { PLUGIN_CREATE_ACTIONS, PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
-import seedManifest from '../../../../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json';
 import { agentEditorReturn, editingDocument, isAgentModelConfigurationMissing } from './model';
 import AgentSettingsPage from './AgentSettingsPage';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -34,7 +32,7 @@ const template: OfficialPresetTemplate = { template_key: 'chat.minimal', immutab
 const otherTemplate = { ...template, template_key: 'coding.codex' } as OfficialPresetTemplate;
 const capability: CapabilityCatalogItem = { capability: { id: asCapabilityId('business.check') }, kind: 'tool',
   display_name: 'Business check', description: 'Check business input', source_package: { id: asPackageId('test'), version: '1.0.0' },
-  source_kind: 'plugin_product', materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
+  source_kind: 'managed_local', materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
   required_resource_kinds: [], required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0 };
 const capabilityModule: CapabilityModuleCatalogItem = {
   module: capability.capability, display_name: capability.display_name, description: capability.description,
@@ -72,10 +70,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     official_templates: options.templates ?? [template, otherTemplate], user_presets: editor ? [editor.preset] : [], active_bindings: [],
     fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: 2, user_preset_count: editor ? 1 : 0 },
   } as AgentPresetLibraryResponse));
-  const pluginModule = { ...capabilityModule, module: { id: asCapabilityId(PLUGIN_DEVELOPMENT_MODULE) }, display_name: 'Plugins & small apps',
-    actions: PLUGIN_CREATE_ACTIONS.map(action_id => ({ ...capabilityModule.actions[0], action_id })) };
-  const pluginCapability = { ...capability, capability: pluginModule.module, display_name: pluginModule.display_name, action_count: pluginModule.actions.length };
-  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule, pluginModule], capabilities: [capability, pluginCapability], skills: [], mcp_tools: [], roles: [] });
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule], capabilities: [capability], skills: [], mcp_tools: [], roles: [] });
   const create = spyOn(agentPlatform.createPreset, 'invoke').mockRejectedValueOnce(error).mockImplementation(async request => {
     editor = { preset: { preset_id: presetId, source: 'user', display_name: request.display_name, bound_target_count: 0, current_stable_revision: revision },
       draft: { preset_id: presetId, display_name: request.display_name, document: request.document!, current_revision: revision },
@@ -90,9 +85,6 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const Models = () => { const navigate = useNavigate(), history = useNavigationHistory()!; return <div><h1>Model management</h1>
     <button onClick={history.back}>Back to editing</button><button onClick={() => navigate('/agent?template=coding.codex')}>Other template</button>
   </div>; };
-  const Author = () => { const navigate = useNavigate(), history = useNavigationHistory()!; return <div><h1>Check authoring</h1>
-    <button onClick={history.back}>Back to Agent</button><button onClick={() => navigate('/plugins/run/check?saved=1')}>Saved destination</button></div>; };
-  const Saved = () => { const history = useNavigationHistory()!; return <div><h1>Saved check</h1><button onClick={history.back}>Back to author</button></div>; };
   const HistoryControls = () => { const history = useNavigationHistory()!; return <button disabled={!history.canForward} onClick={history.forward}>App forward</button>; };
   const SidebarControls = () => { const navigate = useNavigate(); return <nav><button onClick={() => navigate('/models')}>Sidebar models</button>
     <button onClick={() => navigate('/agent')}>Sidebar Agent</button></nav>; };
@@ -103,7 +95,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
     fallback: { providers: [] } }}><PresetCacheProbe /><MemoryRouter initialEntries={[options.entry ?? (initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal')]}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><SidebarControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
-      <Route path='/plugins/create' element={<Author />} /><Route path='/plugins/run/:id' element={<Saved />} /></Routes></NavigationHistoryProvider>
+</Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
   if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
   else await view.findByRole('heading', { name: options.entry?.includes('assistant.general') ? en.template.assistant.general.name : en.template.chat.minimal.name });
@@ -232,39 +224,6 @@ test('return snapshots exclude model configuration and cannot cross a changed te
   expect(agentEditorReturn({ agentEditorReturn: snapshot }, '?preset=another')).toBeNull();
 });
 
-test('opening before-tool authoring in the plugin workspace returns to the same unsaved Agent edits without saving or sending', async () => {
-  (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
-  const document = createEmptyAgentPresetDocument();
-  const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
-    current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
-    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  const v = await mount(undefined, original);
-  fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
-  fireEvent.input(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Unsaved Agent' } });
-  await v.findByRole('heading', { name: 'Unsaved Agent' });
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.extensionsTab }));
-  fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
-  await v.findByRole('heading', { name: 'Check authoring' });
-  fireEvent.click(v.getByRole('button', { name: 'Saved destination' }));
-  await v.findByRole('heading', { name: 'Saved check' });
-  fireEvent.click(v.getByRole('button', { name: 'Back to author' }));
-  await v.findByRole('heading', { name: 'Check authoring' });
-  fireEvent.click(v.getByRole('button', { name: 'Back to Agent' }));
-  await v.findByRole('heading', { name: 'Unsaved Agent' });
-  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
-  expect(v.getAllByRole('combobox')).toHaveLength(1);
-  expect(v.save).not.toHaveBeenCalled();
-  expect(v.create).not.toHaveBeenCalled();
-  expect(v.turn).not.toHaveBeenCalled();
-  fireEvent.click(v.getByRole('button', { name: 'App forward' }));
-  await v.findByRole('heading', { name: 'Check authoring' });
-  fireEvent.click(v.getByRole('button', { name: 'Back to Agent' }));
-  await v.findByRole('heading', { name: 'Unsaved Agent' });
-  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
-});
-
 test('a changed saved revision cannot receive an older model-management navigation snapshot', async () => {
   const document = createEmptyAgentPresetDocument();
   const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
@@ -285,51 +244,5 @@ test('a changed saved revision cannot receive an older model-management navigati
   expect(v.getByText(en.workbench.returnChanged)).toBeTruthy();
   expect(v.queryByRole('heading', { name: 'Old unsaved name' }) === null).toBe(true);
   expect(v.getByRole('switch', { name: 'Enable Business check' })).toBeTruthy();
-  expect(v.save).not.toHaveBeenCalled();
-});
-
-test('the general template enables plugin development by default and preserves an explicit disable across sidebar navigation', async () => {
-  const pluginGrant = seedManifest.templates['assistant.general'].enabled_capabilities.find(item => item.capability.id === PLUGIN_DEVELOPMENT_MODULE)!;
-  expect(new Set(pluginGrant.action_allowlist)).toEqual(new Set(PLUGIN_CREATE_ACTIONS));
-  const general = { ...template, template_key: 'assistant.general',
-    seed: { ...template.seed, enabled_capabilities: [pluginGrant] } } as OfficialPresetTemplate;
-  const v = await mount(undefined, undefined, { entry: '/agent?template=assistant.general', templates: [template, general] });
-  const pluginName = en.modules.pluginDevelopment.name;
-  fireEvent.click(v.getByRole('switch', { name: `Disable ${pluginName}` }));
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar models' }));
-  await v.findByRole('heading', { name: 'Model management' });
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar Agent' }));
-  await v.findByRole('heading', { name: en.template.assistant.general.name });
-  expect(v.getByRole('switch', { name: `Enable ${pluginName}` })).toBeTruthy();
-  fireEvent.click(v.getByRole('switch', { name: `Enable ${pluginName}` }));
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar models' }));
-  await v.findByRole('heading', { name: 'Model management' });
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar Agent' }));
-  await v.findByRole('heading', { name: en.template.assistant.general.name });
-  expect(v.getByRole('switch', { name: `Disable ${pluginName}` })).toBeTruthy();
-  expect(v.create).not.toHaveBeenCalled();
-  expect(v.save).not.toHaveBeenCalled();
-  expect(v.turn).not.toHaveBeenCalled();
-});
-
-test('personal Agent plugin grants survive sidebar navigation until explicitly discarded', async () => {
-  const document = createEmptyAgentPresetDocument();
-  const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
-    current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
-    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  const v = await mount(undefined, original);
-  const pluginName = en.modules.pluginDevelopment.name;
-  fireEvent.click(v.getByRole('switch', { name: `Enable ${pluginName}` }));
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar models' }));
-  await v.findByRole('heading', { name: 'Model management' });
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar Agent' }));
-  await v.findByRole('heading', { name: 'Saved Agent' });
-  expect(v.getByRole('switch', { name: `Disable ${pluginName}` })).toBeTruthy();
-  fireEvent.click(v.getByRole('button', { name: en.workbench.resetChanges }));
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar models' }));
-  await v.findByRole('heading', { name: 'Model management' });
-  fireEvent.click(v.getByRole('button', { name: 'Sidebar Agent' }));
-  await v.findByRole('heading', { name: 'Saved Agent' });
-  expect(v.getByRole('switch', { name: `Enable ${pluginName}` })).toBeTruthy();
   expect(v.save).not.toHaveBeenCalled();
 });

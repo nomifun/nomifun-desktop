@@ -42,6 +42,7 @@ type UseGuidAgentSelectionOptions = {
   selectedAgentPresetId?: string;
   selectedAgentTemplateKey?: OfficialPresetKey;
   locationKey?: string;
+  fixedTemplateKey?: OfficialPresetKey;
 };
 
 /** Selects an official Agent or a saved personal Agent from the workbench catalog. */
@@ -50,6 +51,7 @@ export const useGuidAgentSelection = ({
   selectedAgentPresetId,
   selectedAgentTemplateKey,
   locationKey,
+  fixedTemplateKey,
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
   const [selection, setSelectionState] = useGuidDraftState<GuidAgentSelection>('agent', () => {
     try {
@@ -80,8 +82,9 @@ export const useGuidAgentSelection = ({
     [conversationPresets]
   );
   const officialTemplates = useMemo(
-    () => (library?.official_templates ?? []).filter(isConversationAgentTemplate),
-    [library?.official_templates],
+    () => (library?.official_templates ?? []).filter(template =>
+      template.template_key === fixedTemplateKey || isConversationAgentTemplate(template)),
+    [library?.official_templates, fixedTemplateKey],
   );
 
   const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
@@ -108,8 +111,9 @@ export const useGuidAgentSelection = ({
         : undefined,
     [presets, selectedPresetId]
   );
-  const effectiveSelection =
-    selection.kind === 'preset' && !selectedPreset && loadError
+  const effectiveSelection = fixedTemplateKey
+    ? { kind: 'template' as const, templateKey: fixedTemplateKey }
+    : selection.kind === 'preset' && !selectedPreset && loadError
       ? DEFAULT_GUID_AGENT_SELECTION
       : selection;
   const selectedTemplate = effectiveSelection.kind === 'template'

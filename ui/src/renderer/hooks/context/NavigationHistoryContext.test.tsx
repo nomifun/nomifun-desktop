@@ -16,21 +16,21 @@ test('the production titlebar history preserves an explicit replacement across a
   const snapshot = { agentEditorReturn: { preset: 'a', name: 'Unsaved name' } };
   act(() => {
     v.result.current.history.replaceCurrent('/agent?preset=a', snapshot);
-    void v.result.current.navigate('/plugins/create/check', { state: { author: 'check' } });
+    void v.result.current.navigate('/apps/check', { state: { author: 'check' } });
   });
-  act(() => { void v.result.current.navigate('/plugins/run/check?saved=1'); });
+  act(() => { void v.result.current.navigate('/apps/check?running=1'); });
   act(() => v.result.current.history.back());
-  expect(v.result.current.location.pathname).toBe('/plugins/create/check');
+  expect(v.result.current.location.pathname).toBe('/apps/check');
   expect(v.result.current.location.state).toEqual({ author: 'check' });
   act(() => v.result.current.history.back());
   expect(v.result.current.location.pathname + v.result.current.location.search).toBe('/agent?preset=a');
   expect(v.result.current.location.state).toEqual(snapshot);
   expect(v.result.current.history.canBack).toBe(false);
   act(() => v.result.current.history.forward());
-  expect(v.result.current.location.pathname).toBe('/plugins/create/check');
+  expect(v.result.current.location.pathname).toBe('/apps/check');
   expect(v.result.current.location.state).toEqual({ author: 'check' });
   act(() => v.result.current.history.forward());
-  expect(v.result.current.location.search).toBe('?saved=1');
+  expect(v.result.current.location.search).toBe('?running=1');
   expect(v.result.current.history.canForward).toBe(false);
 });
 

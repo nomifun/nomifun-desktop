@@ -300,7 +300,6 @@ const AgentSettingsPage: React.FC = () => {
               onSave={() => void controller.saveRevision()}
               onDiscard={controller.discardChanges}
               onOpenModels={() => { void openKeepingEdits('/models'); }}
-              onOpenAuthor={openKeepingEdits}
               onStartConversation={startConversation}
             />
           ) : (

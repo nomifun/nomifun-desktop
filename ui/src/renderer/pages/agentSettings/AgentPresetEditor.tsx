@@ -61,7 +61,6 @@ type AgentPresetEditorProps = {
   saveLabel?: string;
   onDiscard?: () => void;
   onOpenModels?: () => void;
-  onOpenAuthor?: (destination: string) => void | Promise<void>;
   onStartConversation: (preset: AgentPresetSummary) => void;
 };
 
@@ -135,7 +134,7 @@ const AgentChatModelPicker: React.FC<{
 
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor, draft, catalog, sourceTemplate, busyAction, dirty, onDraftChange,
-  onSave, saveLabel, onDiscard, onOpenModels, onOpenAuthor, onStartConversation,
+  onSave, saveLabel, onDiscard, onOpenModels, onStartConversation,
 }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
@@ -289,7 +288,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </div>}
       {activeTab === 'runtime' && <AgentRuntimePolicyPanel idPrefix='agent' document={draft.document} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />}
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
-        <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onOpenAuthor={onOpenAuthor} onChange={(document) => onDraftChange({ ...draft, document })} />
+        <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
         <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}
     </div>

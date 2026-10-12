@@ -1260,6 +1260,39 @@ impl AgentSessionStore {
         require_live_row(row)
     }
 
+    /// Recover only the receipt for one exact canonical creation command.
+    /// A still-fenced deleting receipt remains a conflict. Ordinary Session
+    /// deletion later purges its private opening under the existing contract;
+    /// this lookup never retains a second creation ledger after that purge.
+    pub async fn session_by_opening_key(
+        &self, owner: &PrincipalRef, opening_key: &str,
+    ) -> Result<Option<(AgentSessionLiveRecord, SessionEventRecord)>, SessionStoreError> {
+        validate_principal(owner)?;
+        let prefix = format!("{}:{}:open:", owner.principal_kind, owner.principal_id);
+        if !opening_key.starts_with(&prefix) || opening_key.len() == prefix.len() || opening_key.len() > 1024 {
+            return Err(SessionStoreError::InvalidSession("opening key must belong to its exact owner and creation scope".into()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let Some(event) = event_by_producer_key_tx(&mut tx, "session_api", opening_key).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let event = event_from_row(event)?;
+        if event.seq != 1 || event.kind.0 != "session/opening" || event.kind_version != 1
+            || event.correlation_id.as_ref() != format!("open:{opening_key}")
+            || event.event_id.as_ref() != format!("opening:{opening_key}")
+            || !matches!(&event.payload, SessionEventPayloadRef::InlineJson(payload)
+                if payload.0.get("operation_id").and_then(Value::as_str) == Some(format!("open:{opening_key}").as_str())) {
+            return Err(SessionStoreError::IdempotencyConflict("creation key does not refer to an exact canonical opening receipt".into()));
+        }
+        let session = require_live_session_tx(&mut tx, event.agent_session_id.as_ref()).await?;
+        if session.owner_ref != *owner {
+            return Err(SessionStoreError::InvalidSession("opening receipt Session belongs to a different owner".into()));
+        }
+        tx.commit().await?;
+        Ok(Some((session, event)))
+    }
+
     pub async fn session_created_at(
         &self,
         session_id: &AgentSessionId,
@@ -1283,19 +1316,38 @@ impl AgentSessionStore {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<AgentSessionListPage, SessionStoreError> {
-        self.list_live_sessions_inner(owner, cursor, limit, None).await
+        self.list_live_sessions_inner(owner, cursor, limit, None, None).await
     }
 
     pub async fn list_live_sessions_for_purpose(
         &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
         purpose: nomifun_agent_contracts::SessionPurpose,
     ) -> Result<AgentSessionListPage, SessionStoreError> {
-        self.list_live_sessions_inner(owner, cursor, limit, Some(purpose)).await
+        self.list_live_sessions_inner(owner, cursor, limit, Some(purpose), None).await
+    }
+
+    /// Project membership comes from the current explicit workspace binding.
+    /// The `default-workspace` catalog placeholder describes an installation
+    /// root before the host materializes its isolated Session directory; it is
+    /// never an explicit project identity, even when its parameter matches.
+    /// Retained resource definitions and message projections never reattach a
+    /// Session after its workspace has changed. The caller supplies an exact
+    /// host-canonical root, including when it is listing preserved history.
+    pub async fn list_live_sessions_for_workspace(
+        &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
+        workspace_root: &str,
+    ) -> Result<AgentSessionListPage, SessionStoreError> {
+        if workspace_root.is_empty() || workspace_root.trim() != workspace_root {
+            return Err(SessionStoreError::InvalidSession("workspace root must be non-empty and exact".into()));
+        }
+        self.list_live_sessions_inner(owner, cursor, limit,
+            Some(nomifun_agent_contracts::SessionPurpose::Conversation), Some(workspace_root)).await
     }
 
     async fn list_live_sessions_inner(
         &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
         purpose: Option<nomifun_agent_contracts::SessionPurpose>,
+        workspace_root: Option<&str>,
     ) -> Result<AgentSessionListPage, SessionStoreError> {
         validate_principal(owner)?;
         if limit == 0 || limit > 10_000 {
@@ -1338,6 +1390,9 @@ impl AgentSessionStore {
             count_query.push(" AND (").push(PURPOSE_SQL).push(" = ").push_bind(purpose)
                 .push(" OR ").push(BAD_PURPOSE_SQL).push(")");
         }
+        if let Some(root) = workspace_root {
+            push_workspace_filter(&mut count_query, owner, root);
+        }
         let total: i64 = count_query.build_query_scalar().fetch_one(&mut *tx).await?;
         let fetch_limit = i64::from(limit) + 1;
         let mut page_query = sqlx::QueryBuilder::<Sqlite>::new(ROW_SELECT);
@@ -1345,6 +1400,9 @@ impl AgentSessionStore {
         if let Some(purpose) = purpose_name {
             page_query.push(" AND (").push(PURPOSE_SQL).push(" = ").push_bind(purpose)
                 .push(" OR ").push(BAD_PURPOSE_SQL).push(")");
+        }
+        if let Some(root) = workspace_root {
+            push_workspace_filter(&mut page_query, owner, root);
         }
         if let Some(cursor) = cursor { page_query.push(" AND agent_session_id < ").push_bind(cursor); }
         page_query.push(" ORDER BY agent_session_id DESC LIMIT ").push_bind(fetch_limit);
@@ -6457,6 +6515,16 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
             "next_seq",
         )?,
     })
+}
+
+fn push_workspace_filter<'a>(query: &mut sqlx::QueryBuilder<'a, Sqlite>, owner: &'a PrincipalRef, root: &'a str) {
+    query.push(" AND EXISTS (SELECT 1 FROM json_each(agent_sessions.agent_binding_json, '$.typed_resource_bindings') workspace \
+        WHERE json_extract(workspace.value, '$.resource_kind') = 'workspace' \
+        AND substr(json_extract(workspace.value, '$.resource_id'), 1, 19) = 'selected-workspace-' \
+        AND json_extract(workspace.value, '$.owner_id') = ")
+        .push_bind(&owner.principal_id)
+        .push(" AND json_extract(workspace.value, '$.typed_parameters.workspace_root') = ")
+        .push_bind(root).push(")");
 }
 
 fn opening_purpose(row: &StoredSessionRow) -> Result<nomifun_agent_contracts::SessionPurpose, SessionStoreError> {

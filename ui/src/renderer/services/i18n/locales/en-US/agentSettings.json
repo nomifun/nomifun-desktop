@@ -9,9 +9,6 @@
     "reset": "Restore default order",
     "missing": "Extension is unavailable or no longer selected. Restore it or reset the order.",
     "toolAccess": "Tool checks can read the tool name and shared parameters. They can block execution, but cannot grant permissions, replace your approval or change parameters. A failed check stops execution.",
-    "createBeforeTool": "Create a before-tool check",
-    "createHint": "Edit and publish a draft, then return to Capabilities to select it. Creating a draft does not enable it.",
-    "createFailed": "The check draft could not be created. Try again explicitly; no extension was selected.",
     "phase": {
       "before_model": "Before model request",
       "before_tool": "Before tool execution",
@@ -135,6 +132,12 @@
         "description": "Combines workspace I/O, version control, processes, deliverables, project memory, research, and collaboration. Computer control can be added when needed."
       }
     },
+    "app": {
+      "developer": {
+        "name": "Built-in Apps",
+        "description": "Create, import and edit ordinary applications in Apps, configure their commands and optionally connect them to NomiFun."
+      }
+    },
     "companion": {
       "default": {
         "name": "Companion",
@@ -155,7 +158,7 @@
     }
   },
   "modules": {
-    "pluginDevelopment": { "name": "Plugins and small apps (Beta)", "description": "Create, edit, verify and install plugins through conversations. Enables the whole development feature; installed plugins run independently." },
+    "appHosting": {"name": "NomiFun app development", "description": "Create, import and edit apps in conversation, configure commands and preview or use them. Read platform connection guidance when needed."},
     "modelManagement": { "name": "Model management", "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults." },
     "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
     "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },
@@ -180,7 +183,7 @@
     "workspaceVcs": { "name": "Version control", "description": "Inspect and explicitly change version-control state in the selected workspace." }
   },
   "actionLabels": {
-    "inspect": "Inspect configuration and protocols", "create_provider": "Add provider", "add_model": "Add model",
+    "inspect": "Inspect configuration and protocols", "create_provider": "Add provider", "add_model": "Add model", "guide": "Read app guide",
     "search": "Search", "fetch": "Read pages", "read": "Read", "write": "Write", "autogen": "Generate knowledge",
     "recall": "Recall", "delegate": "Delegate", "fork": "Fork", "request_user_decision": "Ask the user", "list": "List", "create": "Create", "update": "Update", "delete": "Delete", "edit": "Edit", "launch": "Launch",
     "observe": "Observe", "navigate": "Navigate", "act": "Interact", "render_content": "Read page content", "download": "Download", "upload": "Upload", "evaluate": "Evaluate scripts",

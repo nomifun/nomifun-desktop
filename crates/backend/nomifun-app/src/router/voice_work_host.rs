@@ -203,7 +203,7 @@ fn work_error(error:impl std::fmt::Display)->VoiceError {
     let _=error;VoiceError::new(VoiceErrorKind::StaleBinding,"The canonical owner could not confirm this exact voice work operation.")
 }
 fn bounded(text:&str,max:usize)->String {let mut end=text.len().min(max);while !text.is_char_boundary(end){end-=1;}text[..end].into()}
-fn voice_message(content:String)->SendMessageRequest {SendMessageRequest {content,files:vec![],inject_skills:vec![],hidden:false,origin:Some("mobile_voice".into()),channel_platform:None,plugin_delivery:None}}
+fn voice_message(content:String)->SendMessageRequest {SendMessageRequest {content,files:vec![],inject_skills:vec![],hidden:false,origin:Some("mobile_voice".into()),channel_platform:None}}
 fn fence(target:&WorkTarget)->NativeTurnMutationFence {NativeTurnMutationFence {binding_version:target.binding_version,execution_generation:target.execution_generation}}
 fn require_target(target:&WorkTarget,session:&AgentSessionId,version:u64)->Result<(),VoiceError> {
     if target.agent_session_id!=*session||target.binding_version!=version{return Err(VoiceError::new(VoiceErrorKind::StaleBinding,"The command belongs to its exact voice interaction Session and binding."));}Ok(())

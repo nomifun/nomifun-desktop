@@ -142,6 +142,28 @@ impl NomiCoreApplication {
         );
     }
 
+    /// Publish the actual bound address, including Headless port failover.
+    pub async fn publish_app_hosting_endpoint(&self, actual_port: u16, listen_host: &str) {
+        let local_address = match listen_host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(ip)) if ip.is_unspecified() => "[::1]".to_owned(),
+            Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
+            Ok(std::net::IpAddr::V4(ip)) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+            Ok(std::net::IpAddr::V4(ip)) => ip.to_string(),
+            Err(_) => listen_host.to_owned(),
+        };
+        self.services.app_hosting.set_local_endpoint(
+            format!("http://{local_address}:{actual_port}"),
+        );
+    }
+
+    /// Cancel hosted preparation and stop its trees before HTTP graceful drain.
+    /// Otherwise an active install request can keep the server waiting before
+    /// `close` ever gets a chance to cancel that same install.
+    pub async fn stop_hosted_applications_for_shutdown(&self) -> Result<()> {
+        self.services.app_hosting.shutdown().await?;
+        Ok(())
+    }
+
     pub async fn close(self) -> Result<()> {
         // The HTTP listener is already quiescent when this method is called.
         // Desktop startup-failure cleanup uses this exact same AppServices

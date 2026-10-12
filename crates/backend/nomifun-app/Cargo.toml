@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 autotests = false
 
+[[test]]
+name = "app_hosting_e2e"
+path = "tests/app_hosting_e2e.rs"
+
+[[test]]
+name = "app_hosting_shutdown"
+path = "tests/app_hosting_shutdown.rs"
+
 [[bin]]
 name = "nomicore"
 path = "src/main.rs"
@@ -69,9 +77,6 @@ path = "tests/idmm_e2e.rs"
 name = "ssh_host_e2e"
 path = "tests/ssh_host_e2e.rs"
 
-[[test]]
-name = "plugin_e2e"
-path = "tests/plugin_e2e.rs"
 
 [[test]]
 name = "auxiliary_e2e"
@@ -215,9 +220,7 @@ nomifun-agent-domain-wave3.workspace = true
 nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-domain-wave5.workspace = true
 nomifun-agent-kernel.workspace = true
-nomifun-js-runtime.workspace = true
-nomifun-plugin-platform.workspace = true
-nomifun-plugin-development.workspace = true
+nomifun-app-hosting.workspace = true
 walkdir.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-agent-session.workspace = true
@@ -359,3 +362,11 @@ required-features = ["browser-use"]
 name = "browser_workspace"
 path = "tests/browser_workspace.rs"
 required-features = ["browser-use"]
+
+[[test]]
+name = "app_workspace_api"
+path = "tests/app_workspace_api.rs"
+
+[[test]]
+name = "app_project_sessions"
+path = "tests/app_project_sessions.rs"

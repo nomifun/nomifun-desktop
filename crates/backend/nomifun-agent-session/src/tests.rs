@@ -313,6 +313,104 @@ async fn purpose_filtered_session_pages_count_and_cursor_only_the_requested_prod
     }
 }
 
+#[tokio::test]
+async fn workspace_filtered_pages_keep_archived_history_and_exclude_foreign_current_roots() {
+    use nomifun_agent_contracts::SessionPurpose;
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    for index in 0..9 {
+        let mut session = live_session(session_id());
+        let root = if index % 3 == 0 { "/projects/other" } else { "/projects/application" };
+        session.metadata.archived = index == 2;
+        session.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+            binding_id: format!("project-workspace-{index}").into(), resource_kind: "workspace".into(),
+            resource_id: format!("selected-workspace-{}", digest_bytes(root.as_bytes()).as_ref()).into(), owner_id: owner().principal_id,
+            operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+            typed_parameters: BTreeMap::from([("workspace_root".into(), root.into())]),
+        }];
+        if index == 5 { session.metadata.purpose = SessionPurpose::PluginAuthoring; }
+        store.create_session(create_request(session, &format!("workspace-page-{index}"))).await.unwrap();
+    }
+    let mut foreign = live_session(session_id());
+    foreign.owner_ref.principal_id = "other-user".into();
+    foreign.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: "foreign-workspace".into(), resource_kind: "workspace".into(),
+        resource_id: format!("selected-workspace-{}", digest_bytes(b"/projects/application").as_ref()).into(),
+        owner_id: "other-user".into(), operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("workspace_root".into(), "/projects/application".into())]),
+    }];
+    store.create_session(create_request(foreign, "foreign-workspace-page")).await.unwrap();
+    let mut managed = live_session(session_id());
+    managed.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id:"managed-workspace-placeholder".into(), resource_kind:"workspace".into(), resource_id:"default-workspace".into(),
+        owner_id:owner().principal_id, operations:BTreeSet::from(["read".into()]), connection_config_ref:None,
+        typed_parameters:BTreeMap::from([("workspace_root".into(), "/projects/application".into())]),
+    }];
+    store.create_session(create_request(managed, "workspace-page-managed-placeholder")).await.unwrap();
+    let all = store.list_live_sessions_for_workspace(&owner(), None, 20, "/projects/application").await.unwrap();
+    assert_eq!(all.total, 5);
+    assert!(all.items.iter().any(|item| item.session.metadata.archived), "archiving a Session cannot erase project history");
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store.list_live_sessions_for_workspace(&owner(), cursor.as_deref(), 2, "/projects/application").await.unwrap();
+        assert_eq!(page.total, 5);
+        assert!(!page.items.is_empty());
+        ids.extend(page.items.iter().map(|item| item.session.agent_session_id.clone()));
+        if !page.has_more { assert!(page.next_cursor.is_none()); break; }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(ids, all.items.into_iter().map(|item| item.session.agent_session_id).collect::<Vec<_>>());
+    assert!(store.list_live_sessions_for_workspace(&owner(), None, 20, "/projects/application/subdirectory").await.unwrap().items.is_empty());
+}
+
+#[tokio::test]
+async fn exact_canonical_opening_lookup_is_owner_scoped_and_rejects_a_fenced_deleting_receipt() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let key = "user:user-001:open:app-development:application:new:creation-key";
+    let mut request = create_request(live_session(session_id()), "opening-receipt");
+    request.producer_id = "session_api".into();
+    request.idempotency_key = key.into();
+    request.operation_id = format!("open:{key}").into();
+    request.correlation_id = format!("open:{key}").into();
+    request.opening_event_id = Some(format!("opening:{key}").into());
+    let session = store.create_session(request).await.unwrap().session;
+    let before = store.current_cursor(&session.agent_session_id).await.unwrap();
+    let (found, opening) = store.session_by_opening_key(&owner(), key).await.unwrap().unwrap();
+    assert_eq!(found.agent_session_id, session.agent_session_id);
+    assert_eq!(opening.seq, 1);
+    assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(), before);
+    assert!(store.session_by_opening_key(&owner(), "user:user-001:open:absent").await.unwrap().is_none());
+    let foreign = PrincipalRef { principal_kind:"user".into(), principal_id:"foreign".into() };
+    assert!(store.session_by_opening_key(&foreign, key).await.is_err());
+    let delete = DeleteAgentSessionCommand { operation_id:"delete-opening-receipt".into(), agent_session_id:session.agent_session_id.clone(), owner_ref:owner(), requested_at:3000 };
+    store.fence_delete(&delete).await.unwrap();
+    assert!(matches!(store.session_by_opening_key(&owner(), key).await, Err(SessionStoreError::Deleted(_))));
+    store.complete_delete(&delete, 3100).await.unwrap();
+    assert!(store.session_by_opening_key(&owner(), key).await.unwrap().is_none(), "ordinary explicit Session deletion purges private opening facts");
+}
+
+#[tokio::test]
+async fn project_history_membership_uses_current_binding_and_preserves_historical_effect_resources() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let session = settled_resource_effect_session_at_workspace(&store, "project-history-switch", Some("/projects/original")).await;
+    let expected = session.agent_binding.clone();
+    let effects = store.list_effects(&session.agent_session_id).await.unwrap();
+    assert_eq!(store.list_live_sessions_for_workspace(&owner(), None, 20, "/projects/original").await.unwrap().total, 1);
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    let workspace = replacement.typed_resource_bindings.iter_mut().find(|binding| binding.resource_kind.as_ref() == "workspace").unwrap();
+    workspace.binding_id = "new-project-history-workspace".into();
+    workspace.resource_id = format!("selected-workspace-{}", digest_bytes(b"/projects/replacement").as_ref()).into();
+    workspace.typed_parameters.insert("workspace_root".into(), "/projects/replacement".into());
+    store.replace_session_resource_bindings(&owner(), &session.agent_session_id, &expected, replacement, "workspace").await.unwrap();
+    assert!(store.list_live_sessions_for_workspace(&owner(), None, 20, "/projects/original").await.unwrap().items.is_empty());
+    assert_eq!(store.list_live_sessions_for_workspace(&owner(), None, 20, "/projects/replacement").await.unwrap().total, 1);
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects);
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_session_resources WHERE session_id=? AND binding_id=?")
+        .bind(session.agent_session_id.as_ref()).bind("workspace:project-history-switch").fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(retained, 1, "old workspace remains an immutable effect reference, never current membership");
+}
+
 async fn create_turn(
     store: &AgentSessionStore,
     key: &str,
@@ -411,13 +509,29 @@ async fn shared_agent_store_schema_and_session_creation_are_exact_and_idempotent
     let canonical_tables = nomifun_agent_contracts::agent_store_schema_manifest_payload()
         .tables
         .into_iter()
+        .filter(|table| table.reset_scope == nomifun_agent_contracts::SchemaResetScope::AgentData)
         .map(|table| table.table_name)
+        .chain(std::iter::once("schema_metadata".to_owned()))
         .collect::<BTreeSet<_>>();
-    assert!(canonical_tables.is_subset(&tables), "the owner/reset manifest describes a controlled subset of the shared database");
+    assert!(canonical_tables.is_subset(&tables), "the Agent reset scope plus canonical metadata describes the controlled canonical subset");
     let main = nomifun_db::init_database_memory().await.unwrap();
     let main_tables: BTreeSet<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'")
         .fetch_all(main.pool()).await.unwrap().into_iter().collect();
-    assert_eq!(tables, main_tables, "fixtures and product initialization must use exactly the same complete baseline");
+    // The canonical fixture deliberately starts from immutable migration 001.
+    // The head-1 manifest's Preserve entries also describe unrelated platform
+    // domains. Product forward migrations may retire those tables. They must
+    // still preserve every Agent table, index, trigger and metadata SQL exactly.
+    nomifun_db::validate_current_migration_lineage(main.pool()).await.unwrap();
+    assert!(canonical_tables.is_subset(&main_tables), "current product initialization lost Agent-owned tables: {:?}", canonical_tables.difference(&main_tables).collect::<Vec<_>>());
+    for table in &canonical_tables {
+        let fixture_schema: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT type, name, sql FROM sqlite_schema WHERE tbl_name=? ORDER BY type,name")
+            .bind(table).fetch_all(store.test_pool()).await.unwrap();
+        let product_schema: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT type, name, sql FROM sqlite_schema WHERE tbl_name=? ORDER BY type,name")
+            .bind(table).fetch_all(main.pool()).await.unwrap();
+        assert_eq!(fixture_schema, product_schema, "current product initialization must preserve exact canonical schema for {table}");
+    }
     for owned in [
         "agent_sessions",
         "agent_turns",
@@ -966,14 +1080,24 @@ async fn full_agent_transition_persists_only_a_bounded_exact_closed_turn_handoff
 async fn settled_resource_effect_session(
     store: &AgentSessionStore, key: &str,
 ) -> AgentSessionLiveRecord {
+    settled_resource_effect_session_at_workspace(store, key, None).await
+}
+
+async fn settled_resource_effect_session_at_workspace(
+    store: &AgentSessionStore, key: &str, workspace_root: Option<&str>,
+) -> AgentSessionLiveRecord {
     let resource = |kind: &str, operation: &str| TypedResourceBinding {
         binding_id: ResourceBindingId::from(format!("{kind}:{key}")),
         resource_kind: ResourceKind::from(kind.to_owned()),
-        resource_id: ResourceId::from(key.to_owned()),
+        resource_id: ResourceId::from(if kind == "workspace" && workspace_root.is_some() {
+            format!("selected-workspace-{}", digest_bytes(workspace_root.unwrap().as_bytes()).as_ref())
+        } else { key.to_owned() }),
         owner_id: owner().principal_id,
         operations: BTreeSet::from([operation.to_owned()]),
         connection_config_ref: None,
-        typed_parameters: BTreeMap::new(),
+        typed_parameters: if kind == "workspace" { workspace_root.map(|root|
+            BTreeMap::from([("workspace_root".into(), root.into())])).unwrap_or_default()
+        } else { BTreeMap::new() },
     };
     let mut session = live_session(session_id());
     session.agent_binding.typed_resource_bindings = vec![

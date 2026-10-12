@@ -33,6 +33,7 @@ export const OFFICIAL_PRESET_KEYS = [
   'companion.default',
   'customer-service.default',
   'creative-studio.default',
+  'app.developer',
 ] as const;
 
 export type OfficialPresetKey = (typeof OFFICIAL_PRESET_KEYS)[number];

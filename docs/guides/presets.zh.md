@@ -2,7 +2,7 @@
 
 > 本页按 05 §15 的当前合同更新。用户可见的产品名称是 **Agent 工作台**，
 > 公共 UI 路由是 `/agent`；`AgentPreset` 只是后端 authoring aggregate 的内部名称。
-> Plugin Action/Binding 以 Unified Plugin Core 为准；本页不定义 Plugin 作者合同。
+> 应用 MCP 工具通过现役会话选择接入；程序启停归应用托管 owner。
 
 ## 入口与最短路径
 
@@ -23,16 +23,15 @@ Runtime、网络、系统和提供商管理仍属于全局设置，尤其是
 | 对象 | 所属方 | Agent 工作台能做什么 |
 | --- | --- | --- |
 | Package / Agent Module | Agent 平台内部 | 只读取已正式物化的内置来源和 provenance |
-| Unified Plugin Action | Plugin Core | 按稳定 Action ID 发现并调用已启用 Plugin 的 Agent Binding |
+| 应用 MCP 工具 | 应用托管与现役 MCP owner | 发现应用来源并显式选择给 Agent/会话，不自动启动程序 |
 | Capability Catalog | 平台能力目录域 | 查询能力、来源、合同、支持的消费者和 availability |
 | Skill Catalog | 平台技能目录域 | 选择 instruction/workflow；Skill 本身不是执行器 |
 | AgentPreset | Agent authoring 域 | 保存用户意图和当前 Revision 引用 |
 | AgentPresetRevision | Agent authoring 域 | 保存不可变 payload、ContributionLock 和 revision digest |
 | Agent Session | Agent 运行域 | 消费冻结的 Snapshot，不反向改写 Revision |
 
-Unified Plugin Core 不是 Agent 子系统。安装、启停、配置、Credential、generation
-DataRoot 和 Service 生命周期由 Plugin Core 负责；Agent 只在消费者边界读取
-`agent.*` Binding，并以稳定 `plugin:<plugin_id>/<action_id>` 调用 Action。
+应用的当前目录、命令、进程和 MCP 地址归应用托管 owner。Agent 仅通过现役 MCP 链
+发现并调用明确选择的工具，不复制可写来源配置，也不持有另一份进程。
 
 ## 四种创建种子
 
@@ -40,9 +39,9 @@ DataRoot 和 Service 生命周期由 Plugin Core 负责；Agent 只在消费者�
 
 | 种子 | 初始内容 | 不会自动做什么 |
 | --- | --- | --- |
-| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP 或 Plugin |
+| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP 或应用工具 |
 | 通用 | 官方常用 Capability/Skill | 不吸收用户安装的全部扩展 |
-| 全面 | 官方 Coding 基线 | 不安装或纳入全部 Plugin |
+| 全面 | 官方 Coding 基线 | 不安装或纳入全部应用工具 |
 | 自定义 | 空白或可选种子 | 不允许填写内部 ID、Digest 或 Runtime 参数 |
 
 所有创建结果都进入同一条主链：
@@ -61,14 +60,14 @@ DataRoot 和 Service 生命周期由 Plugin Core 负责；Agent 只在消费者�
 ## 能力、技能与来源
 
 工作台从平台 Capability Catalog 查询能力。Catalog 条目至少包含稳定能力 ID、合同
-digest、owner、来源 Package 或 Unified Plugin provenance、支持的消费者、typed contribution、所需资源和
+digest、owner、Package 或应用 MCP 来源、支持的消费者、typed contribution、所需资源和
 按消费者区分的 availability。
 
 Capability 没有独立版本号。Preset、依赖和冲突只引用稳定能力 ID；内置实现由 Package
 版本、合同 digest、ContributionLock 与 Snapshot digest 冻结，因此更新实现不需要同步改写工作台引用。
 
-- 只有已启用并完成 materialization 的内置贡献，以及已启用 Plugin 的 Agent Binding，才能进入正式发现面；
-- Plugin Draft、Preview DataRoot、Credential 和私有 generation DataRoot 不会进入 Agent Snapshot；
+- 只有已启用并完成 materialization 的内置贡献，以及明确选择的应用 MCP 工具，才能进入正式发现面；
+- 托管应用的连接凭据和私有业务数据不进入 Agent Snapshot；
 - 标记为 non-Agent-only 的能力不会出现在 Agent picker；
 - 能力不可用、合同不匹配或资源缺失时显示可解释状态，并 fail closed；
 - Skill 只提供 instruction/workflow 和资源说明，不自动扩张 Snapshot。
@@ -130,5 +129,5 @@ Snapshot digest 和 typed failure。
 Agent revision、Snapshot、Session 与 Module 授权的当前实现见
 [Agent Session 架构](../architecture/agent-session.zh.md)。
 
-Plugin 的创建、预览、安装、配置和 Backup 请见
-[插件平台架构](../architecture/plugin-platform.zh.md)。
+应用的导入、预览、当前设置和启停请见
+[应用托管架构](../architecture/app-hosting.zh.md)。

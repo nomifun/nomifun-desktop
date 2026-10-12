@@ -22,7 +22,7 @@ type Props = {
 
 const TemplateIcon: React.FC<{ templateKey: OfficialPresetKey }> = ({ templateKey }) => {
   const icons = { 'chat.minimal': MessageOne, 'assistant.general': User, 'coding.codex': Code,
-    'companion.default': User, 'customer-service.default': Customer, 'creative-studio.default': Magic };
+    'companion.default': User, 'customer-service.default': Customer, 'creative-studio.default': Magic, 'app.developer': Code };
   const Icon = icons[templateKey];
   return <Icon theme='outline' size={18} />;
 };

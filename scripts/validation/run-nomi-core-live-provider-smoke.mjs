@@ -23,10 +23,17 @@
  * Navigation also requires NOMIFUN_LIVE_PLAYWRIGHT_MODULE pointing at an existing
  * Playwright ESM entry, and optionally NOMIFUN_LIVE_BROWSER_NODE for its Node host.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --app-hosting-smoke --report .tmp-hosting.json
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --app-hosting-smoke --app-hosting-browser-hold --artifact-dir C:/new-generated-project-evidence
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --app-workspace-ui-fixture
+ * The UI fixture boots an isolated production Host with a public test login
+ * and a real configured provider. Product validation remains null; explicitly
+ * POST its finish URL after independent browser QA to shut it down.
+ * Browser hold emits a safe loopback QA callback and waits up to fifteen minutes per stage
+ * for independent increment/refresh/clear checks. It does not fabricate clicks.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --general-desktop-smoke
- *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --plugin-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --companion-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --creative-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json
@@ -75,14 +82,20 @@ const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
 const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
 const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
 const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfun';
-const PLUGIN_TEST_NAME = 'nomi_core_general_plugin_creation_reaches_live_stepfun';
-const PLUGIN_SUMMARY_FIELDS = ['steps', 'relays', 'protocol_rejections', 'tool_errors', 'pauses', 'task_continues', 'current_continues', 'plugin_tool_calls', 'list', 'open', 'read', 'plan', 'apply', 'check', 'preview', 'test_action', 'test_ui', 'install', 'inspect'];
 const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
 const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const IDMM_TEST_NAME = 'nomi_core_idmm_reaches_live_stepfun';
+const APP_HOSTING_TEST_NAME = 'nomi_core_app_generation_and_hosting_reaches_live_stepfun';
+const APP_WORKSPACE_UI_TEST_NAME = 'nomi_core_app_workspace_ui_fixture';
+const APP_WORKSPACE_UI_READY = 'NOMIFUN_LIVE_APP_WORKSPACE_UI_READY ';
+const APP_WORKSPACE_UI_CLOSED = 'NOMIFUN_LIVE_APP_WORKSPACE_UI_CLOSED validation=null';
+const APP_HOSTING_READY = 'NOMIFUN_LIVE_APP_HOSTING_READY ';
+const APP_HOSTING_EVIDENCE = 'NOMIFUN_LIVE_APP_HOSTING_EVIDENCE ';
+const APP_HOSTING_ARTIFACT_ENV = 'NOMIFUN_LIVE_APP_HOSTING_ARTIFACT_DIR';
+const APP_HOSTING_HOLD_ENV = 'NOMIFUN_LIVE_APP_HOSTING_BROWSER_HOLD';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
-const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : process.argv.includes('--plugin-smoke') ? 60 : 30) * 60 * 1000;
+const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : process.argv.includes('--app-hosting-smoke') ? 60 : process.argv.includes('--app-workspace-ui-fixture') ? 45 : 30) * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
 const TEST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const FAILURE_SENTINEL =
@@ -97,15 +110,19 @@ const codingSmoke = process.argv.includes('--coding-smoke');
 const longCodingSmoke = process.argv.includes('--long-coding-smoke');
 const gameSmoke = process.argv.includes('--game-smoke');
 const generalDesktopSmoke = process.argv.includes('--general-desktop-smoke');
-const pluginSmoke = process.argv.includes('--plugin-smoke');
 const companionSmoke = process.argv.includes('--companion-smoke');
 const creativeSmoke = process.argv.includes('--creative-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const idmmSmoke = process.argv.includes('--idmm-smoke');
+const appHostingSmoke = process.argv.includes('--app-hosting-smoke');
+const appWorkspaceUiFixture = process.argv.includes('--app-workspace-ui-fixture');
+const appHostingBrowserHold = process.argv.includes('--app-hosting-browser-hold');
+const artifactIndex = process.argv.indexOf('--artifact-dir');
+const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : pluginSmoke ? PLUGIN_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : pluginSmoke ? 'general_plugin' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
@@ -348,26 +365,6 @@ function typedFailureFromOutput(output) {
   return null;
 }
 
-// Forward only the fixed counter names and bounded integers, never child text.
-function pluginSummaryFromLine(line) {
-  const prefix = 'NOMIFUN_LIVE_PLUGIN_SUMMARY ';
-  if (!line.startsWith(prefix) || line.length > 1000) return null;
-  const fields = line.slice(prefix.length).split(' ');
-  if (fields.length !== PLUGIN_SUMMARY_FIELDS.length) return null;
-  for (const [index, field] of fields.entries()) {
-    const match = field.match(/^([a-z_]+)=([0-9]{1,5})$/);
-    if (!match || match[1] !== PLUGIN_SUMMARY_FIELDS[index]) return null;
-  }
-  return fields.join(' ');
-}
-
-// Fixed-vocabulary call/pause tokens only: lowercase Action names, uppercase
-// host codes, '!' and ','. No child text can match this charset beyond them.
-function pluginFlowFromLine(line) {
-  const match = line.match(/^NOMIFUN_LIVE_PLUGIN_FLOW flow=([A-Za-z_!,]{0,1800})$/);
-  return match ? match[1] : null;
-}
-
 function selectedTestPassed(stdout, selected) {
   return stdout.split(/\r?\n/).some((line) => line === `test ${selected} ... ok`);
 }
@@ -422,6 +419,124 @@ function beforeToolStagesFromOutput(stdout) {
   return stages;
 }
 
+function loopbackUrl(value, expectedPath = null) {
+  if (typeof value !== 'string' || value.length > 180 || /[\r\n]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1' && /^[0-9]{1,5}$/.test(url.port) &&
+      Number(url.port) > 0 && Number(url.port) <= 65535 && !url.username && !url.password && !url.search && !url.hash &&
+      (expectedPath === null || url.pathname === expectedPath);
+  } catch { return false; }
+}
+
+function appHostingReady(line) {
+  if (!line.startsWith(APP_HOSTING_READY) || /[\r\n]/.test(line)) return null;
+  try {
+    const raw = JSON.parse(line.slice(APP_HOSTING_READY.length));
+    const id = /^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+    if (!loopbackUrl(raw.app_url) || !loopbackUrl(raw.host_url, '/') ||
+        !loopbackUrl(raw.qa_callback, '/__app-hosting-smoke/ui-state') ||
+        !raw.qa_callback.startsWith(raw.host_url + '/') || !id.test(raw.session_id) || !id.test(raw.app_id)) return null;
+    return {app_url:raw.app_url, host_url:raw.host_url, session_id:raw.session_id, app_id:raw.app_id, qa_callback:raw.qa_callback,
+      ...(['generated','repaired'].includes(raw.stage) ? {stage:raw.stage} : {}),
+      ...(raw.web_test_username === 'app-workspace-smoke' ? {web_test_username:raw.web_test_username} : {})};
+  } catch { return null; }
+}
+
+function appWorkspaceUiReady(line) {
+  if (!line.startsWith(APP_WORKSPACE_UI_READY) || /[\r\n]/.test(line)) return null;
+  try {
+    const raw = JSON.parse(line.slice(APP_WORKSPACE_UI_READY.length));
+    if (!loopbackUrl(raw.host_url, '/') || !loopbackUrl(raw.finish_url, '/__app-workspace-fixture/finish') ||
+        !raw.finish_url.startsWith(raw.host_url + '/') || raw.web_test_username !== 'app-workspace-smoke' ||
+        !ALLOWED_MODELS.has(raw.model) || raw.validation !== null || typeof raw.provider_id !== 'string' ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(raw.provider_id)) return null;
+    return {host_url:raw.host_url,finish_url:raw.finish_url,web_test_username:raw.web_test_username,
+      provider_id:raw.provider_id,model:raw.model,validation:null};
+  } catch { return null; }
+}
+
+function appHostingEvidence(output) {
+  const lines = output.split(/\r?\n/).filter(line => line.startsWith(APP_HOSTING_EVIDENCE));
+  if (lines.length !== 1) throw new Error('missing hosting evidence');
+  const raw = JSON.parse(lines[0].slice(APP_HOSTING_EVIDENCE.length));
+  if (raw.schema_version !== 3 || raw.provider !== 'stepfun-plan' || !ALLOWED_MODELS.has(raw.model) ||
+      raw.template !== 'app.developer' || raw.runtime_terminal !== 'turn/completed' || !loopbackUrl(raw.app_url) ||
+      raw.default_hosting_grant !== true || raw.fixed_app_agent !== true || raw.manual_create_before_model_configuration !== true ||
+      raw.ordinary_session !== true || raw.current_workspace_is_managed_directory !== true || raw.application_count !== 1 || raw.application_id_preserved !== true || typeof raw.preview !== 'boolean' ||
+      typeof raw.current_workspace !== 'string' || !isAbsolute(raw.current_workspace) || raw.current_workspace.length > 4096 || /[\x00-\x1f\x7f]/.test(raw.current_workspace) ||
+      raw.external_unauthenticated_status !== 403 || raw.connection?.connected !== true || raw.connection?.app_count !== 1 ||
+      !Number.isSafeInteger(raw.verified_host_requests) || raw.verified_host_requests < 1 || raw.verified_host_requests > 100 ||
+      raw.stop?.returned_state !== 'stopped' || raw.stop?.returned_pid !== null || raw.stop?.root_pid_gone !== true ||
+      raw.stop?.direct_tcp_connect !== false || raw.stop?.no_proxy !== true || raw.stop?.fresh_http_connection !== true || raw.stop?.after_stop_response !== null ||
+      raw.script_syntax_checked !== true || raw.http_status !== 200 ||
+      raw.http_bytes_equal !== true || raw.stop_verified !== true || !/^[a-f0-9]{64}$/.test(raw.source_sha256) ||
+      !/^[a-f0-9]{64}$/.test(raw.backend_sha256) ||
+      !Number.isSafeInteger(raw.source_bytes) || raw.source_bytes < 100 || raw.source_bytes > 8*1024*1024 ||
+      !Array.isArray(raw.settlements) || raw.settlements.length > 128) throw new Error('invalid hosting evidence');
+  const projectSettlement = item => {
+    if (!['workspace.files/write','workspace.files/patch','app.hosting/import','app.hosting/update','app.hosting/preview','app.hosting/rebuild','app.hosting/start','app.hosting/stop','app.hosting/status','app.hosting/list','app.hosting/current','app.hosting/guide'].includes(item.action_id) ||
+        typeof item.operation_id !== 'string' || item.operation_id.length > 180 || /[\r\n]/.test(item.operation_id) ||
+        !Number.isSafeInteger(item.dispatch_seq) || !Number.isSafeInteger(item.result_seq) || item.result_seq <= item.dispatch_seq ||
+        typeof item.result_success !== 'boolean' || !/^[a-f0-9]{64}$/.test(item.result_sha256) ||
+        (item.effect_succeeded_seq !== null && (!Number.isSafeInteger(item.effect_succeeded_seq) ||
+          item.effect_succeeded_seq <= item.dispatch_seq || item.effect_succeeded_seq >= item.result_seq))) throw new Error('invalid settlement');
+    return {action_id:item.action_id, operation_id:item.operation_id, dispatch_seq:item.dispatch_seq,result_seq:item.result_seq,
+      result_success:item.result_success,result_sha256:item.result_sha256,effect_succeeded_seq:item.effect_succeeded_seq,app_id:item.app_id ?? null};
+  };
+  const settlements = raw.settlements.map(projectSettlement);
+  for (const action of ['workspace.files/write','app.hosting/update']) {
+    if (!settlements.some(item => item.action_id === action && item.result_success && item.effect_succeeded_seq !== null)) throw new Error('missing exact settlement');
+  }
+  if (!settlements.some(item => ['app.hosting/preview','app.hosting/start'].includes(item.action_id) && item.result_success && item.effect_succeeded_seq !== null && item.app_id === raw.app_id)) throw new Error('missing actual run settlement');
+  if (!settlements.some(item => item.action_id === 'app.hosting/current' && item.result_success && item.app_id === raw.app_id)) throw new Error('current application was not identified');
+  if (!settlements.some(item => item.action_id === 'app.hosting/update' && item.result_success && item.app_id === raw.app_id) ||
+      settlements.some(item => item.action_id === 'app.hosting/import')) throw new Error('application workspace was duplicated or not updated');
+  if (!settlements.some(item => item.action_id === 'app.hosting/guide' && item.result_success)) throw new Error('guide was not read');
+  if (raw.browser_qa !== null && (!raw.browser_qa || raw.browser_qa.independent_callback !== true ||
+      raw.browser_qa.increment !== true || raw.browser_qa.refresh_persisted !== true || raw.browser_qa.clear !== true || raw.browser_qa.connected !== true)) throw new Error('invalid browser callback');
+  const repair = raw.repair;
+  if (!repair || repair.runtime_terminal !== 'turn/completed' || repair.app_id_preserved !== true || repair.session_id_preserved !== true ||
+      repair.prior_history_unchanged !== true || repair.source_changed !== true || repair.original_pid_gone !== true ||
+      repair.upstream_failure?.injected_http_status !== 503 || repair.upstream_failure?.app_http_status !== 503 ||
+      repair.upstream_failure?.body?.connected !== false || repair.upstream_failure?.body?.app_count !== 0 ||
+      repair.upstream_failure?.recovered_success !== true || !Number.isSafeInteger(repair.upstream_failure?.verified_injected_requests) ||
+      repair.upstream_failure.verified_injected_requests < 1 || !Number.isSafeInteger(repair.upstream_failure?.recovered_verified_requests) ||
+      repair.upstream_failure.recovered_verified_requests < 1 || !Array.isArray(repair.settlements) || repair.settlements.length > 128 ||
+      repair.managed_pid !== raw.managed_pid || repair.managed_pid !== raw.stop.observed_root_pid ||
+      !Array.isArray(raw.turns) || raw.turns.length !== 2 || raw.turns[0].operation_id !== raw.operation_id ||
+      raw.turns[1].operation_id !== repair.operation_id || raw.turns[0].operation_id === raw.turns[1].operation_id ||
+      raw.turns.some(turn => turn.runtime_terminal !== 'turn/completed')) throw new Error('invalid application repair evidence');
+  const repairSettlements = repair.settlements.map(projectSettlement);
+  const stop = repairSettlements.find(item => item.action_id === 'app.hosting/stop' && item.result_success && item.effect_succeeded_seq !== null && item.app_id === raw.app_id);
+  const write = repairSettlements.find(item => ['workspace.files/write','workspace.files/patch'].includes(item.action_id) && item.result_success && item.effect_succeeded_seq !== null && item.dispatch_seq > stop?.result_seq);
+  const run = repairSettlements.find(item => ['app.hosting/preview','app.hosting/rebuild','app.hosting/start'].includes(item.action_id) && item.result_success && item.effect_succeeded_seq !== null && item.app_id === raw.app_id && item.dispatch_seq > write?.result_seq);
+  if (!stop || !write || !run || repairSettlements.some(item => item.action_id === 'app.hosting/import')) throw new Error('repair owner order is not proven');
+  if (repair.browser_qa !== null && (!repair.browser_qa || repair.browser_qa.independent_callback !== true || repair.browser_qa.increment !== true ||
+      repair.browser_qa.refresh_persisted !== true || repair.browser_qa.clear !== true || repair.browser_qa.connected !== true)) throw new Error('invalid repair browser callback');
+  // Explicit projection: never forward unrecognized child fields or outputs.
+  return {schema_version:3, provider:raw.provider,model:raw.model,template:raw.template,default_hosting_grant:true,
+    fixed_app_agent:true,manual_create_before_model_configuration:true,ordinary_session:true,current_workspace:raw.current_workspace,
+    current_workspace_is_managed_directory:true,application_count:1,application_id_preserved:true,session_id:raw.session_id,
+    operation_id:raw.operation_id,app_id:raw.app_id,app_name:typeof raw.app_name === 'string' ? raw.app_name.slice(0,160) : null,
+    app_url:raw.app_url,managed_pid:raw.managed_pid,preview:raw.preview,runtime_terminal:raw.runtime_terminal,settlements,
+    source_sha256:raw.source_sha256,source_bytes:raw.source_bytes,script_syntax_checked:true,
+    backend_sha256:raw.backend_sha256,external_unauthenticated_status:403,connection:{connected:true,app_count:1},verified_host_requests:raw.verified_host_requests,
+    stop:{returned_state:'stopped',returned_pid:null,observed_root_pid:raw.stop.observed_root_pid,root_pid_gone:true,
+      direct_tcp_connect:false,no_proxy:true,fresh_http_connection:true,after_stop_response:null},
+    http_status:200,http_bytes_equal:true,stop_verified:true,browser_qa:raw.browser_qa === null ? null : {
+      independent_callback:true,increment:true,refresh_persisted:true,clear:true,connected:true},
+    turns:[{operation_id:raw.operation_id,runtime_terminal:'turn/completed',settlements},
+      {operation_id:repair.operation_id,runtime_terminal:'turn/completed',settlements:repairSettlements}],
+    repair:{operation_id:repair.operation_id,runtime_terminal:'turn/completed',app_id_preserved:true,session_id_preserved:true,
+      prior_history_unchanged:true,source_changed:true,original_pid_gone:true,managed_pid:repair.managed_pid,settlements:repairSettlements,
+      upstream_failure:{injected_http_status:503,app_http_status:503,body:{connected:false,app_count:0},recovered_success:true,
+        verified_injected_requests:repair.upstream_failure.verified_injected_requests,recovered_verified_requests:repair.upstream_failure.recovered_verified_requests},browser_qa:repair.browser_qa === null ? null : {
+          independent_callback:true,increment:true,refresh_persisted:true,clear:true,connected:true}},
+    generated_project:typeof raw.generated_project === 'string' ? raw.generated_project : null,
+    repaired_project:typeof raw.repaired_project === 'string' ? raw.repaired_project : null};
+}
+
 async function resolveToolchainEnvironment() {
   const credentialFreeInput = environmentWithoutCredential(process.env);
   if (process.platform !== 'win32') {
@@ -463,20 +578,23 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--plugin-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
-    if (arg === '--report') return !idmmSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
+    if (arg === '--report') return (!idmmSmoke && !appHostingSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
+    if (arg === '--artifact-dir') return !appHostingSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--') || !isAbsolute(userArgs[index + 1]);
+    if (index > 0 && userArgs[index - 1] === '--artifact-dir') return false;
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
     return !allowedFlags.includes(arg);
-  }) || userArgs.filter(arg => arg === '--data-dir').length > 1 || userArgs.filter(arg => arg === '--report').length > 1 ||
+  }) || userArgs.filter(arg => arg === '--data-dir').length > 1 || userArgs.filter(arg => arg === '--report').length > 1 || userArgs.filter(arg => arg === '--artifact-dir').length > 1 ||
+      (artifactDir && (existsSync(artifactDir) || !existsSync(dirname(artifactDir)) || !statSync(dirname(artifactDir)).isDirectory())) ||
       (reportPath && (!reportPath.endsWith('.json') || !existsSync(dirname(reportPath))))) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_ARGUMENT_INVALID', 400);
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, pluginSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -518,13 +636,15 @@ async function main() {
   // Only the explicit CLI mode can request retention; inherited test variables
   // must not silently change the normal cleanup contract.
   for (const name of Object.keys(environment)) {
-    if ([RETAIN_FIXTURE_ENVIRONMENT_NAME, FIXTURE_PARENT_ENVIRONMENT_NAME, 'NOMIFUN_LIVE_REASONING_NAVIGATION'].includes(name.toUpperCase())) delete environment[name];
+    if ([RETAIN_FIXTURE_ENVIRONMENT_NAME, FIXTURE_PARENT_ENVIRONMENT_NAME, 'NOMIFUN_LIVE_REASONING_NAVIGATION', APP_HOSTING_ARTIFACT_ENV, APP_HOSTING_HOLD_ENV].includes(name.toUpperCase())) delete environment[name];
   }
   if (retainNativeFixture) {
     environment[RETAIN_FIXTURE_ENVIRONMENT_NAME] = '1';
     environment[FIXTURE_PARENT_ENVIRONMENT_NAME] = fixtureParent;
   }
   if (reasoningNavigation) environment.NOMIFUN_LIVE_REASONING_NAVIGATION = '1';
+  if (appHostingSmoke && artifactDir) environment[APP_HOSTING_ARTIFACT_ENV] = artifactDir;
+  if (appHostingBrowserHold) environment[APP_HOSTING_HOLD_ENV] = '1';
 
   environment.CARGO_TERM_COLOR = 'never';
   environment.RUST_BACKTRACE = '0';
@@ -539,7 +659,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
-      ...(generalDesktopSmoke || pluginSmoke ? ['--features', 'browser-use,computer-use'] : []),
+      ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
     ],
@@ -655,7 +775,33 @@ async function main() {
         environment,
         input: credentialInput,
         outputLimitBytes: TEST_OUTPUT_LIMIT_BYTES,
-        onStderrLine: reasoningNavigation ? navigationReady : idmmSmoke ? line => {
+        onStderrLine: appWorkspaceUiFixture ? line => {
+          const ready = appWorkspaceUiReady(line);
+          if (ready) console.log('live_smoke_app_workspace_ui_ready=' + JSON.stringify(ready));
+          if (line === APP_WORKSPACE_UI_CLOSED) console.log('live_smoke_app_workspace_ui_closed=true validation=null');
+          const preserved = line.match(/^NOMIFUN_LIVE_APP_WORKSPACE_SHUTDOWN_FILES_PRESERVED app_count=([0-9]{1,5}) file_count=([0-9]{1,5}) sha256=([a-f0-9,]*)$/);
+          if (preserved && (preserved[3] === '' || preserved[3].split(',').every(hash => /^[a-f0-9]{64}$/.test(hash))) &&
+              (preserved[3] === '' ? 0 : preserved[3].split(',').length) === Number(preserved[2])) {
+            console.log(`live_smoke_app_workspace_shutdown_files_preserved=app_count=${preserved[1]} file_count=${preserved[2]} sha256=${preserved[3]}`);
+          }
+        } : appHostingSmoke ? line => {
+          const ready = appHostingReady(line);
+          if (ready && appHostingBrowserHold) console.log(`live_smoke_app_hosting_ready=${JSON.stringify(ready)}`);
+          const stage = line.match(/^NOMIFUN_LIVE_APP_HOSTING_STAGE stage=(generate|repair) status=running$/);
+          if (stage) console.log('live_smoke_app_hosting_stage=' + stage[1] + ' status=running');
+          const rejection = line.match(/^NOMIFUN_LIVE_APP_HOSTING_REJECTION phase=(domain|principal|capability|action|store|session_read|session_owner|resolved_snapshot_ref|resource_key|replay_read|canonical_tool_causation|effect_started_append|import_source_canonicalization|effect_replay_read)$/);
+          if (rejection) console.log('live_smoke_app_hosting_rejection=phase=' + rejection[1]);
+          if (line.startsWith('NOMIFUN_LIVE_APP_HOSTING_STOP_DIAGNOSTIC ')) {
+            try {
+              const raw = JSON.parse(line.slice('NOMIFUN_LIVE_APP_HOSTING_STOP_DIAGNOSTIC '.length));
+              if (loopbackUrl(raw.app_url) && loopbackUrl(raw.host_url)) console.log('live_smoke_app_hosting_stop_diagnostic=' + JSON.stringify({
+                app_url:raw.app_url,host_url:raw.host_url,root_pid:raw.stop?.observed_root_pid,
+                root_pid_gone:raw.stop?.root_pid_gone,direct_tcp_connect:raw.stop?.direct_tcp_connect,
+                http_status:raw.stop?.after_stop_response?.status ?? null,
+                matches_generated_html:raw.stop?.after_stop_response?.matches_generated_html ?? false}));
+            } catch { /* No arbitrary child output is forwarded. */ }
+          }
+        } : reasoningNavigation ? navigationReady : idmmSmoke ? line => {
           const active = line.match(/^NOMIFUN_IDMM_DEMO_ACTIVE case=([a-z_]+)$/);
           if (active && IDMM_DEMO_CASES.includes(active[1])) console.log(`idmm_demo_case=${active[1]} status=running`);
           const item = parseIdmmDemoCase(line);
@@ -735,10 +881,7 @@ async function main() {
     if (turnFailure) console.log(`live_smoke_turn_failure=${turnFailure[0].slice('NOMIFUN_LIVE_SMOKE_TURN_FAILURE '.length)}`);
     const runtimeProgress = line.match(/^NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps=([0-9]{1,5}) compact_calls=([0-9]{1,5}) compacted=([0-9]{1,5}) degraded=([0-9]{1,5}) reads=([0-9]{1,5}) execs=([0-9]{1,5}) writes=([0-9]{1,5}) reports=([0-9]{1,5})$/);
     if (runtimeProgress) console.log(`live_smoke_runtime_progress=${runtimeProgress[0].slice('NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS '.length)}`);
-    const pluginSummary = pluginSummaryFromLine(line);
-    if (pluginSummary) console.log(`live_smoke_plugin_summary=${pluginSummary}`);
-    const pluginFlow = pluginFlowFromLine(line);
-    if (pluginFlow !== null) console.log(`live_smoke_plugin_flow=${pluginFlow}`);
+
     const controlErrors = line.match(/^NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence=([A-Z_:,]{1,450})$/);
     if (controlErrors) console.log(`live_smoke_control_errors=${controlErrors[1]}`);
     const toolRejections = line.match(/^NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS invalid_arguments=([0-9]{1,5}) unavailable_names=([0-9]{1,5}) kernel_rejections=([0-9]{1,5}) delegations=([0-9]{1,5}) text_events=([0-9]{1,5})$/);
@@ -793,6 +936,29 @@ async function main() {
         return;
       }
     }
+    if (appHostingSmoke) {
+      try {
+        const evidence = appHostingEvidence(test.stderr);
+        if (evidence.model !== model || (appHostingBrowserHold && (evidence.browser_qa === null || evidence.repair.browser_qa === null))) throw new Error('hosting mode evidence mismatch');
+        console.log('live_smoke_app_hosting_evidence=' + JSON.stringify(evidence));
+        if (reportPath) {
+          writeFileSync(reportPath, JSON.stringify({...evidence,status:'pass',completed_at:new Date().toISOString()},null,2)+'\n',{mode:0o600});
+          console.log('live_smoke_app_hosting_report=' + JSON.stringify(reportPath));
+        }
+      } catch {
+        emitFailure('live_smoke_status=fail', 'APP_HOSTING_EVIDENCE_OR_REPORT_INVALID', 503);
+        process.exitCode = 2; return;
+      }
+    }
+    if (appWorkspaceUiFixture) {
+      const ready = test.stderr.split(/\r?\n/).map(appWorkspaceUiReady).filter(Boolean);
+      const closed = test.stderr.split(/\r?\n/).filter(line => line === APP_WORKSPACE_UI_CLOSED);
+      if (ready.length !== 1 || closed.length !== 1) {
+        emitFailure('live_smoke_status=fail','UI_FIXTURE_LIFECYCLE_EVIDENCE_INVALID',503);
+        process.exitCode = 2; return;
+      }
+      console.log('live_smoke_scope=production_host_lifecycle validation=null');
+    }
     if (retainNativeFixture) {
       try {
         const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent));
@@ -816,6 +982,11 @@ async function main() {
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (appHostingSmoke && reportPath) {
+    try { writeFileSync(reportPath, JSON.stringify({schema_version:3,provider:'stepfun-plan',model,template:'app.developer',fixed_app_agent:true,status:'fail',
+      completed_at:new Date().toISOString(),failure:typed ?? {code:'TEST_EXECUTION_FAILED'},artifact_directory:artifactDir},null,2)+'\n',{mode:0o600}); }
+    catch { /* Failure remains authoritative if report writing fails. */ }
+  }
   if (idmmSmoke && reportPath) {
     try {
       const cases = test.stderr.split(/\r?\n/).map(parseIdmmDemoCase).filter(Boolean);
@@ -869,6 +1040,52 @@ function navigationFixtureReady(line) {
 }
 
 function runSelfTest() {
+  const hostingId = '0190f5fe-7c00-7a00-8abc-012345678911';
+  const fixtureReady = APP_WORKSPACE_UI_READY + JSON.stringify({host_url:'http://127.0.0.1:43124',
+    finish_url:'http://127.0.0.1:43124/__app-workspace-fixture/finish',web_test_username:'app-workspace-smoke',
+    provider_id:hostingId,model:DEFAULT_MODEL,validation:null,secret:'DO_NOT_EMIT'});
+  if (!appWorkspaceUiReady(fixtureReady) || JSON.stringify(appWorkspaceUiReady(fixtureReady)).includes('DO_NOT_EMIT') ||
+      appWorkspaceUiReady(fixtureReady.replace('127.0.0.1','example.com')) || appWorkspaceUiReady(fixtureReady.replace('null','true'))) {
+    throw new Error('UI fixture readiness must not manufacture acceptance');
+  }
+  const hostingReadyLine = APP_HOSTING_READY + JSON.stringify({app_url:'http://127.0.0.1:43123',host_url:'http://127.0.0.1:43124',
+    session_id:hostingId,app_id:hostingId,qa_callback:'http://127.0.0.1:43124/__app-hosting-smoke/ui-state',secret:'DO_NOT_EMIT'});
+  if (!appHostingReady(hostingReadyLine) || JSON.stringify(appHostingReady(hostingReadyLine)).includes('DO_NOT_EMIT') ||
+      appHostingReady(hostingReadyLine.replace('43123','0')) || appHostingReady(hostingReadyLine.replace('127.0.0.1','example.com')) ||
+      appHostingReady(hostingReadyLine+'\n')) throw new Error('hosting ready signal projection failed');
+  const hostingEvidence = {schema_version:3,provider:'stepfun-plan',model:DEFAULT_MODEL,template:'app.developer',runtime_terminal:'turn/completed',
+    default_hosting_grant:true,fixed_app_agent:true,manual_create_before_model_configuration:true,ordinary_session:true,
+    current_workspace:resolve(ROOT,'.git','app-workspace-validation','synthetic'),current_workspace_is_managed_directory:true,application_count:1,application_id_preserved:true,
+    app_id:hostingId,preview:true,managed_pid:1234,operation_id:'first-operation',
+    external_unauthenticated_status:403,connection:{connected:true,app_count:1},verified_host_requests:1,
+    stop:{returned_state:'stopped',returned_pid:null,observed_root_pid:1234,root_pid_gone:true,direct_tcp_connect:false,
+      no_proxy:true,fresh_http_connection:true,after_stop_response:null},
+    app_url:'http://127.0.0.1:43123',script_syntax_checked:true,http_status:200,http_bytes_equal:true,
+    stop_verified:true,source_sha256:'a'.repeat(64),backend_sha256:'c'.repeat(64),source_bytes:1024,browser_qa:null,secret:'DO_NOT_EMIT',
+    settlements:['workspace.files/write','app.hosting/update','app.hosting/start','app.hosting/guide','app.hosting/current'].map((action_id,i)=>({action_id,operation_id:'test-operation-'+i,
+      dispatch_seq:i*10+1,result_seq:i*10+3,result_success:true,result_sha256:'b'.repeat(64),effect_succeeded_seq:i*10+2,app_id:hostingId,output:'DO_NOT_EMIT'}))};
+  hostingEvidence.repair = {operation_id:'repair-operation',runtime_terminal:'turn/completed',app_id_preserved:true,session_id_preserved:true,
+    prior_history_unchanged:true,source_changed:true,original_pid_gone:true,managed_pid:1234,browser_qa:null,
+    upstream_failure:{injected_http_status:503,app_http_status:503,body:{connected:false,app_count:0},verified_injected_requests:1,recovered_success:true,recovered_verified_requests:1},
+    settlements:['app.hosting/stop','workspace.files/patch','app.hosting/preview'].map((action_id,i)=>({action_id,operation_id:'repair-tool-'+i,
+      dispatch_seq:100+i*10+1,result_seq:100+i*10+3,result_success:true,result_sha256:'b'.repeat(64),effect_succeeded_seq:100+i*10+2,app_id:hostingId}))};
+  hostingEvidence.turns = [{operation_id:'first-operation',runtime_terminal:'turn/completed'},{operation_id:'repair-operation',runtime_terminal:'turn/completed'}];
+  if (JSON.stringify(appHostingEvidence(APP_HOSTING_EVIDENCE+JSON.stringify(hostingEvidence))).includes('DO_NOT_EMIT')) throw new Error('hosting evidence redaction failed');
+  for (const invalid of [{...hostingEvidence,http_status:404},{...hostingEvidence,settlements:hostingEvidence.settlements.slice(1)},
+      {...hostingEvidence,template:'coding.codex'}, {...hostingEvidence,default_hosting_grant:false},
+      {...hostingEvidence,current_workspace_is_managed_directory:false}, {...hostingEvidence,application_id_preserved:false},
+      {...hostingEvidence,repair:null},{...hostingEvidence,repair:{...hostingEvidence.repair,prior_history_unchanged:false}},
+      {...hostingEvidence,repair:{...hostingEvidence.repair,upstream_failure:{...hostingEvidence.repair.upstream_failure,app_http_status:200}}},
+      {...hostingEvidence,settlements:[...hostingEvidence.settlements,{...hostingEvidence.settlements[1],action_id:'app.hosting/import'}]},
+      {...hostingEvidence,settlements:hostingEvidence.settlements.map(item=>({...item,effect_succeeded_seq:null}))},
+      {...hostingEvidence,stop:{...hostingEvidence.stop,root_pid_gone:false}},
+      {...hostingEvidence,stop:{...hostingEvidence.stop,direct_tcp_connect:true}},
+      {...hostingEvidence,stop:{...hostingEvidence.stop,after_stop_response:{status:200}}},
+      {...hostingEvidence,stop:{...hostingEvidence.stop,no_proxy:false}},
+      {...hostingEvidence,stop:{...hostingEvidence.stop,fresh_http_connection:false}}]) {
+    let rejected = false; try { appHostingEvidence(APP_HOSTING_EVIDENCE+JSON.stringify(invalid)); } catch { rejected = true; }
+    if (!rejected) throw new Error('incomplete hosting evidence accepted');
+  }
   if (cargoFailureCode("rust-lld: error: failed to write output 'test.exe': permission denied") !== 'CARGO_LINK_OUTPUT_UNAVAILABLE' ||
       cargoFailureCode('error[E0308]: mismatched types') !== 'CARGO_BUILD_FAILED') {
     throw new Error('cargo failure classification self-test failed');
@@ -925,21 +1142,6 @@ function runSelfTest() {
     throw new Error('model allowlist self-test failed');
   }
   if (!ALLOWED_MODELS.has('step-5-preview')) throw new Error('model allowlist self-test failed');
-  const pluginSummary = 'steps=7 relays=1 protocol_rejections=0 tool_errors=0 pauses=0 task_continues=0 current_continues=1 plugin_tool_calls=1 list=1 open=1 read=1 plan=1 apply=1 check=1 preview=0 test_action=1 test_ui=0 install=1 inspect=1';
-  const pluginLine = `NOMIFUN_LIVE_PLUGIN_SUMMARY ${pluginSummary}`;
-  if (pluginSummaryFromLine(pluginLine) !== pluginSummary ||
-      pluginSummaryFromLine(`${pluginLine} secret=1`) !== null ||
-      pluginSummaryFromLine(`${pluginLine} approvals=0`) !== null ||
-      pluginSummaryFromLine(pluginLine.replace('steps=7', 'steps=SECRET')) !== null ||
-      pluginSummaryFromLine(pluginLine.replace('steps=7', 'secret=7')) !== null ||
-      !selectedTestPassed(`test ${PLUGIN_TEST_NAME} ... ok`, PLUGIN_TEST_NAME)) {
-    throw new Error('plugin summary forwarding self-test failed');
-  }
-  if (pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open,plan,REPORT!REQUIREMENTS,PAUSE') !== 'open,plan,REPORT!REQUIREMENTS,PAUSE' ||
-      pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open secret') !== null ||
-      pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open:"x"') !== null) {
-    throw new Error('plugin flow forwarding self-test failed');
-  }
   const scrubbed = environmentWithoutCredential({
     PATH: 'safe',
     [API_KEY_ENVIRONMENT_NAME.toLowerCase()]: 'must-not-copy',

@@ -20,6 +20,25 @@ fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi tool surface: {value}"))
 }
 
+pub(super) fn capacity_diagnostic<'a>(
+    capability_ids: impl IntoIterator<Item = &'a CapabilityId>,
+    mcp_locks: &[nomifun_agent_contracts::ResolvedMcpToolLock],
+    unit: &str,
+    limit: usize,
+) -> String {
+    let sources = mcp_locks.iter().map(|lock| (&lock.capability_id,&lock.server_id))
+        .collect::<std::collections::BTreeMap<_,_>>();
+    let mut counts = std::collections::BTreeMap::<String,usize>::new();
+    let mut total = 0usize;
+    for id in capability_ids {
+        let source = sources.get(id).map(|id| format!("MCP source {}",id.as_ref())).unwrap_or_else(||id.as_ref().to_owned());
+        *counts.entry(source).or_default() += 1;
+        total += 1;
+    }
+    let counts = counts.into_iter().map(|(source,count)| format!("{source}={count}")).collect::<Vec<_>>().join(", ");
+    format!("selected {total} {unit} exceeds limit {limit}; source counts: {counts}; select fewer tools or sources")
+}
+
 pub(super) async fn compile(
     snapshot: &CompiledSnapshot,
     active: &ActiveCapabilitySetSnapshot,
@@ -35,7 +54,8 @@ pub(super) async fn compile(
     }
     if snapshot.content().enabled_capabilities.len() > 128
     {
-        return Err(error("Nomi supports at most 128 selected capabilities"));
+        return Err(error(capacity_diagnostic(snapshot.content().enabled_capabilities.iter().map(|capability|&capability.capability.id),
+            &snapshot.content().mcp_tool_locks,"capabilities",128)));
     }
     let allowed_platform_actions = snapshot
         .content()
@@ -266,9 +286,8 @@ pub(super) async fn compile(
     }
     let exposures = resource_ready;
     if exposures.len() > 128 {
-        return Err(error(
-            "selected tool surface exceeds 128 actions; narrow the Agent selection",
-        ));
+        return Err(error(capacity_diagnostic(exposures.iter().map(|exposure|&exposure.capability_id),
+            &snapshot.content().mcp_tool_locks,"actions",128)));
     }
     compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
 }
@@ -408,6 +427,23 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn action_capacity_names_the_app_mcp_source_and_preserves_all_counts() {
+        let capability: CapabilityId = "nomi.mcp.v1.fixture".into();
+        let source = "0190f5fe-7c00-7a00-8000-000000000001";
+        let lock = nomifun_agent_contracts::ResolvedMcpToolLock {
+            server_id:source.into(),canonical_tool_key:capability.as_ref().to_owned().into(),capability_id:capability.clone(),
+            schema_digest:"a".repeat(64).into(),materialization_revision:nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
+        };
+        let workspace: CapabilityId = "workspace.files".into();
+        let ids = vec![capability;125].into_iter().chain(vec![workspace;5]).collect::<Vec<_>>();
+        let diagnostic = capacity_diagnostic(ids.iter(),&[lock],"actions",128);
+        assert!(diagnostic.contains("selected 130 actions"));
+        assert!(diagnostic.contains(&format!("MCP source {source}=125")));
+        assert!(diagnostic.contains("workspace.files=5"));
+        assert!(diagnostic.contains("limit 128"));
+    }
 
     fn canonical_process_schema(action_id: &str) -> StrictJsonValue {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();

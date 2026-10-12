@@ -29,8 +29,8 @@ They are not interchangeable.
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
-   The canonical Agent Store tables and the Unified Plugin tables are the two
-   frozen exception groups; they use TEXT/composite keys exactly as declared
+   The canonical Agent Store tables are the current
+   frozen exception group; they use TEXT/composite keys exactly as declared
    in the baseline schema.
 2. An entity that needs a stable product locator across databases, devices,
    files, APIs, events, or managed stores has a separately named, bare UUIDv7
@@ -41,7 +41,7 @@ They are not interchangeable.
    receive a UUID merely for uniformity, and that `id` never becomes a product
    wire locator.
 4. Relationships are logical references maintained by repositories and
-   services. Outside the two frozen exception groups, the product schema
+   services. Outside the Agent Store exception group, the product schema
    contains no physical foreign keys, `REFERENCES` clauses, or database
    cascades; only the baseline's registered guard/validator triggers exist.
 5. v3 is a new dataset lineage. Historical datasets are reset as a whole; rows
@@ -56,7 +56,7 @@ and dependent tables, must declare:
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-The canonical Agent Store tables and the Unified Plugin tables use the
+The canonical Agent Store tables use the
 TEXT/composite keys frozen in the baseline instead. SQLite internal tables,
 migration metadata, and temporary tables are not product tables.
 
@@ -164,8 +164,8 @@ boundary.
 
 ## Logical references
 
-v3 removes physical foreign keys from product schemas outside the two frozen
-exception groups (canonical Agent Store tables and Unified Plugin tables,
+v3 removes physical foreign keys from product schemas outside the frozen Agent Store
+exception group (canonical Agent Store tables,
 which keep the physical `FOREIGN KEY`/`ON DELETE` declarations written in the
 baseline). The baseline also ships registered guard/validator triggers in a
 few domains; no new domain may add triggers or physical constraints without an

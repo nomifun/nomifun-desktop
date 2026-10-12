@@ -1,0 +1,61 @@
+{
+  "production_frontend_build_id": "f1227eaf-4221-40d0-b853-7dca437e0577",
+  "checks": {
+    "apps_targeted_tests": {
+      "passed": 8,
+      "failed": 0
+    },
+    "typecheck": "passed",
+    "desktop_ui_boundary": "passed",
+    "production_ui_build": "passed"
+  },
+  "verified": {
+    "preparation_stop": {
+      "state": "stopped",
+      "operation": null,
+      "pid": null,
+      "last_error": null,
+      "shell_pid_alive": false,
+      "node_pid_alive": false,
+      "output": "long install is waiting\n"
+    },
+    "late_prepare_response_or_error_ignored": true,
+    "windows_failure_output": {
+      "state": "failed",
+      "pid": null,
+      "last_error": "foreground application exited during startup (exit code: 1)",
+      "output": "'nomifun-missing-command-for-ui-smoke' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。\r\n",
+      "contains_replacement_character": false,
+      "contains_readable_chinese": true
+    },
+    "typed_banner": {
+      "visible_text": "Bad request: foreground application exited during startup (exit code: 1)",
+      "http_path_or_json_exposed": false
+    },
+    "deletion": {
+      "deleted": [
+        {
+          "id": "01a121dc-7caa-7ed2-b116-ea6dba972358",
+          "api_deleted": true,
+          "managed_directory_exists": false
+        },
+        {
+          "id": "01a121dd-75e1-75c2-b11a-023402d1d6cb",
+          "api_deleted": true,
+          "managed_directory_exists": false
+        }
+      ],
+      "remaining_app_count": 0,
+      "original_html_exists": true,
+      "original_zip_exists": true,
+      "original_slow_install_exists": true
+    },
+    "ui_empty_list_verified": true,
+    "browser_viewport_reset": true,
+    "host_stopped_by_ui_agent": false
+  },
+  "screenshots": [
+    ".tmp/app-hosting-ui-prepare-stopped-880x600.jpg",
+    ".tmp/app-hosting-ui-failure-corrected-880x600.jpg"
+  ]
+}

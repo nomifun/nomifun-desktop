@@ -1,3 +1,9 @@
+.appSources { padding: 16px; border: 1px solid var(--color-border-2); border-radius: 10px; }
+.appSources h3 { margin: 0 0 8px; font-size: 15px; }
+.appSources p { color: var(--color-text-2); font-size: 12px; }
+.appSource { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; font-size: 12px; }
+.appSource strong { flex: 1; }
+.appSource small { width: 100%; color: var(--color-text-3); }
 .workspace {
   --capability-canvas-surface: var(--color-bg-2);
   --capability-rail-surface: var(--color-bg-1);

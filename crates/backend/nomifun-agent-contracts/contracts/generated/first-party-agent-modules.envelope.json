@@ -9,17 +9,17 @@
     "packages": [
       {
         "package": {
-          "id": "nomifun.plugin-development",
+          "id": "nomifun.app-hosting",
           "version": "1.0.0"
         },
         "source": {
           "source_kind": "bundled",
-          "source_identity": "nomifun.plugin-development"
+          "source_identity": "nomifun.app-hosting"
         },
         "capabilities": [
           {
             "capability": {
-              "id": "plugin.development"
+              "id": "app.hosting"
             },
             "kind": "tool"
           }
@@ -593,5 +593,5 @@
       }
     ]
   },
-  "payload_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
+  "payload_digest": "acf5f8d76104be721a0273932a065699be4707b507644df7da798f46636f46b9"
 }

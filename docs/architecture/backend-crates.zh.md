@@ -26,14 +26,14 @@
 所有后端 crate 遵循统一的 v3 数据契约：
 
 - 每张 NomiFun 产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，
-  canonical Agent Store 表与 Unified Plugin 表两组例外按基线冻结使用
+  canonical Agent Store 表例外按基线冻结使用
   TEXT/复合主键；
 - 需要跨数据集稳定识别的实体使用 `user_id`、`conversation_id`、
   `message_id` 等具名裸标准 UUIDv7；
 - 纯内部行只把表 `id` 作为 repository 实现细节，关系通过 owner UUIDv7、
   sequence、自然键或复合条件表达；
 - 一条关系只保留一个引用字段，不存在 `*_row_id` 双轨字段；
-- Repository/Service 维护带索引的逻辑关联；上述两组例外之外的产品 DDL
+- Repository/Service 维护带索引的逻辑关联；上述 Agent Store 例外之外的产品 DDL
   不包含物理 `FOREIGN KEY`、`REFERENCES`、`ON DELETE` 或 `ON UPDATE`，
   除基线已注册的 guard trigger 外不新增数据库触发器；
 - v3 启动时发现不兼容的受管数据集，会整体 reset/quarantine，而不是迁移
@@ -96,9 +96,7 @@
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及机器人 / 设备绑定集成。 |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Canonical 创作域：持有带版本项目文档、素材、提示词、模板/运行、严格 one-shot 模板草稿、Canvas ZIP 归档，以及大部分 owner-only `/api/creative-studio/*` 路由。项目文档、模板状态与素材 metadata 在 SQLite；二进制原件/缩略图在 `{data_dir}/workshop/assets/`。唯一公开面是供浏览器媒体元素使用的只读 `GET /api/creative-studio/files/{asset_id}`。 |
-| [`nomifun-plugin-platform`](../../crates/backend/nomifun-plugin-platform/) | Unified Plugin Core：一种 Manifest/Package/Plugin 身份、内容寻址 Artifact、Draft、generation DataRoot、Action/Binding registry、独立 Service 进程、Surface Bridge、Package/Backup、回退，以及唯一 `/api/plugins` + `/api/plugin-drafts` HTTP 面。 |
-| [`nomifun-plugin-development`](../../crates/backend/nomifun-plugin-development/) | 可选 Agent 模块：通过普通会话工具开发一个 Unified Plugin；Plugin 实例与运行时仍归 Plugin Core 所有。 |
-| [`nomifun-js-runtime`](../../crates/backend/nomifun-js-runtime/) | Unified Plugin Core 唯一不可变的进程级 JavaScript Runtime 权威。 |
+| [`nomifun-app-hosting`](../../crates/backend/nomifun-app-hosting/) | 普通应用的唯一托管 owner：源码/产物导入、当前命令与设置、精确进程树、有限输出、覆盖和删除；HTTP 与 Agent 管理工具共用。 |
 | [`nomifun-robot`](../../crates/backend/nomifun-robot/) | 机器人网关：LAN 接入的实体机器人（小智固件）作为桌面伙伴的物理化身。 |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创作画布节点与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |

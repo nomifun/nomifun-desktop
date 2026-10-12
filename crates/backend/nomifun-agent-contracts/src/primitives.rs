@@ -61,8 +61,6 @@ string_newtype!(IdempotencyKey);
 string_newtype!(McpBindingId);
 string_newtype!(McpServerId);
 string_newtype!(McpToolKey);
-string_newtype!(PluginId);
-string_newtype!(PluginDraftId);
 string_newtype!(PluginMutationId);
 string_newtype!(ModelRouteId);
 string_newtype!(OperationId);

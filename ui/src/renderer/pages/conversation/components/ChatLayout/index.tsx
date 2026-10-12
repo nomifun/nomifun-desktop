@@ -45,6 +45,8 @@ import { StopButtonHostContext } from '@/renderer/components/chat/SendBox/StopBu
 
 // headerExtra allows injecting custom actions (e.g., model picker) into the header's right area
 export interface ChatLayoutProps {
+  /** A product workspace provides its own header and details pane. */
+  embedded?: boolean;
   children?: React.ReactNode;
   title?: React.ReactNode;
   sider: React.ReactNode;
@@ -273,7 +275,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   });
 
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
-  const showSessionToolRail = Boolean(conversation_id) || workspaceEnabled;
+  const showSessionToolRail = !props.embedded && (Boolean(conversation_id) || workspaceEnabled);
   const browserAvailableWidth = Math.max(1, containerWidth - (showSessionToolRail ? 32 : 0) - (rightSiderCollapsed ? 0 : workspaceWidthPx));
   const browserFocus = browserOpen && browserAvailableWidth < 904;
   const browserChatFlex = Math.max(360 / browserAvailableWidth * 100, Math.min(chatFlex, 100 - 544 / browserAvailableWidth * 100));
@@ -372,7 +374,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             flexBasis: 0,
           }}
         >
-          <div className='shrink-0 !bg-1 chat-layout-header-host'>{headerBlock}</div>
+          {!props.embedded && <div className='shrink-0 !bg-1 chat-layout-header-host'>{headerBlock}</div>}
           <div className='flex flex-1 min-h-0 relative'>
             {/* Chat area - always mounted, never unmounted on preview toggle */}
             <div
@@ -381,7 +383,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                 flexGrow: workSurfaceOpen ? 0 : 1,
                 flexShrink: 0,
                 flexBasis: workSurfaceOpen ? `${browserOpen ? browserChatFlex : chatFlex}%` : 0,
-                minWidth: '360px',
+                minWidth: props.embedded ? 0 : '360px',
                 display: browserFocus ? 'none' : undefined,
               }}
             >

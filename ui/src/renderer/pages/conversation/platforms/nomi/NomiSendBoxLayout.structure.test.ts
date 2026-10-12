@@ -80,7 +80,7 @@ describe('Nomi sendbox control layout', () => {
     const homeSource = readSource(new URL('../../../guid/GuidPage.tsx', import.meta.url));
 
     expect(homeSource.includes('<CollaborationComposerControl')).toBe(true);
-    expect(homeSource.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
+    expect(homeSource.includes('collaboration: !productEntry && collaborationEnabled ? collaboration.config : undefined')).toBe(true);
     expect(sharedControl.includes('panelFooter={')).toBe(true);
     expect(sharedControl.includes('<CollaborationPolicyControl')).toBe(true);
     expect(sharedControl.includes('embedded')).toBe(true);
@@ -90,7 +90,7 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('collaborationControlNode')).toBe(false);
     expect(nomiChatSource.includes('collaboratorSelectorNode')).toBe(false);
     expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
-    expect(sendBoxSource.includes('sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker')).toBe(true);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer || hideSessionCapabilities ? undefined : <SessionCapabilityPicker')).toBe(true);
   });
 
   test('does not load frozen collaboration configuration solely for the conversation composer', () => {

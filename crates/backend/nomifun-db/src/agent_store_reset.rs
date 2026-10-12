@@ -187,10 +187,7 @@ pub(crate) async fn reset_agent_data_in_transaction(
     } else {
         0
     };
-    if existing_tables.contains("plugin_drafts") {
-        sqlx::query("UPDATE plugin_drafts SET source_conversation_id = NULL WHERE source_conversation_id IS NOT NULL")
-            .execute(&mut **tx).await?;
-    }
+
     if existing_tables.contains("channel_inbound_receipts") {
         // Keep Channel deduplication authority so a provider retry cannot
         // replay an old delivery as new work after Agent history is cleared.

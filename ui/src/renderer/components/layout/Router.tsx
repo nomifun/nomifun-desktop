@@ -22,7 +22,8 @@ const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/A
 const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
-const PluginLibraryPage = React.lazy(() => import('@renderer/pages/plugins'));
+const AppsPage = React.lazy(() => import('@renderer/pages/apps'));
+const AppWorkspaceRoute = React.lazy(() => import('@renderer/pages/apps/AppWorkspaceRoute'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/ExecutionEngines'));
@@ -49,8 +50,6 @@ const CreativeStudioPromptsRoute = React.lazy(loadCreativeStudioPromptsRoute);
 const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
-const PluginRunPage = React.lazy(() => import('@renderer/pages/plugins/PluginRunPage'));
-const PluginAuthoringPage = React.lazy(() => import('@renderer/pages/plugins/PluginAuthoringPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -155,9 +154,10 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
-            <Route path='/plugins' element={withRouteFallback(PluginLibraryPage)} />
-            <Route path='/plugins/create' element={withRouteFallback(PluginAuthoringPage)} />
-            <Route path='/plugins/authoring/:sessionId' element={withRouteFallback(PluginAuthoringPage)} />
+            <Route path='/apps' element={withRouteFallback(AppsPage)} />
+            <Route path='/apps/new' element={withRouteFallback(AppWorkspaceRoute)} />
+            <Route path='/apps/import' element={withRouteFallback(AppWorkspaceRoute)} />
+            <Route path='/apps/:id' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
@@ -206,8 +206,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
-            {/* One Plugin library, creator, and App/detail surface. */}
-            <Route path='/plugins/run/:id' element={withRouteFallback(PluginRunPage)} />
           </Route>
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />

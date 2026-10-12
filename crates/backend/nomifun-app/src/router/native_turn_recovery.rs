@@ -86,6 +86,9 @@ impl NomiCoreSessionOwner {
         let _recovery_guard = self.session_operation_lock(&format!("native-recovery:{}",session.as_ref())).write_owned().await;
         let _operation_guard = self.session_operation_lock(session.as_ref()).read_owned().await;
         let facts = self.canonical.store().native_recovery_facts(session, operation).await.map_err(agent_session_store_error)?;
+        if facts.session.metadata.purpose == nomifun_agent_contracts::SessionPurpose::PluginAuthoring {
+            return Err(AppError::Conflict("PLUGIN_AUTHORING_RETIRED: historical authoring execution cannot recover".into()));
+        }
         if expected_generation.is_some_and(|generation| generation != facts.execution_generation) { return Ok(()); }
         if facts.head.status != "running" || facts.head.active_turn_id.as_deref() != Some(operation.as_ref()) {
             return Ok(());
@@ -118,15 +121,6 @@ impl NomiCoreSessionOwner {
         // process cannot publish a spurious error over the winner's stream.
         let journal = engines.open_journal(&admitted, tokio_util::sync::CancellationToken::new()).await?;
         let generation = journal.generation();
-        let pause=facts.events.iter().rev().find(|event|event.kind.0=="turn/paused" && event.correlation_id.as_ref()==operation.as_ref())
-            .and_then(|event|facts.event_payloads.get(event.event_id.as_ref())).map(|payload|&payload["pause"]);
-        if pause.is_some_and(|pause|pause["reason"]=="PLUGIN_CURRENT_CONVERSATION_PENDING") {
-            if pause.is_none_or(|pause|pause["cleanup_proven"]!=json!(true)) {
-                return Err(AppError::Conflict("plugin tool refresh requires proven cleanup".into()));
-            }
-            self.runtime_sessions.terminate_and_wait_result(session.as_ref(),None).await?;
-            engines.retire_plugin_view_after_pause(&admitted).await?;
-        }
         let cancellation = tokio_util::sync::CancellationToken::new();
         let runtime = match self.runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(), generation, cancellation.clone(), options).await {
             Ok(runtime) => runtime,

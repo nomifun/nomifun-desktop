@@ -12,12 +12,24 @@ use std::time::Duration;
 mod native_turn_recovery;
 #[path = "session_capability_selection.rs"]
 mod session_capability_selection;
+#[path = "app_project_fences.rs"]
+mod app_project_fences;
+pub(super) use app_project_fences::{AppProjectWorkspaceFence, guard_app_project_directory_read, guard_agent_app_project_import};
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
 #[cfg(test)]
 #[path = "idmm_message_tests.rs"]
 mod idmm_message_tests;
+#[cfg(test)]
+#[path = "app_completion_fence_tests.rs"]
+mod app_completion_fence_tests;
+#[cfg(test)]
+#[path = "app_project_memory_tests.rs"]
+mod app_project_memory_tests;
+#[cfg(test)]
+#[path = "app_project_fence_tests.rs"]
+mod app_project_fence_tests;
 
 use async_trait::async_trait;
 use axum::extract::{Path, Query, Request, State};
@@ -753,10 +765,6 @@ impl NomiCoreSessionOwner {
         &self.canonical
     }
 
-    pub(super) fn domain_pool(&self) -> &nomifun_db::SqlitePool {
-        &self.pool
-    }
-
     #[cfg(feature = "browser-use")]
     pub(crate) fn session_operation_locks(&self) -> Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>> {
         self.session_operation_locks.clone()
@@ -778,6 +786,7 @@ impl NomiCoreSessionOwner {
         session_id: &AgentSessionId,
         binding: &AgentBindingValue,
     ) -> Result<Option<String>, AppError> {
+        let _project_directory_fence = self.guard_binding_workspace_read(owner_id, binding)?;
         let workspace = frozen_workspace_root(
             &self.managed_workspace_root,
             owner_id,
@@ -1267,6 +1276,7 @@ impl NomiCoreSessionOwner {
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
         self.validate_idmm_state(&idmm_config).await?;
+        let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &saved_binding)?;
         let opened = self
             .canonical
             .open_with_provenance(
@@ -1449,6 +1459,9 @@ impl NomiCoreSessionOwner {
                 session_id,
             )
             .await?;
+        if session.session.metadata.purpose == nomifun_agent_contracts::SessionPurpose::PluginAuthoring {
+            return Err(AppError::Conflict("PLUGIN_AUTHORING_RETIRED: this historical Session is read-only; develop applications in an ordinary Session".into()));
+        }
         if expected_binding_version.is_some_and(|expected|session.session.agent_binding.binding_version!=expected) {
             return Err(AppError::Conflict("voice input no longer matches its frozen Agent binding".into()));
         }
@@ -1546,17 +1559,6 @@ impl NomiCoreSessionOwner {
                     saved_binding = current.0;
                     snapshot = current.2;
                 }
-            }
-        }
-        if request.plugin_delivery.is_some() {
-            let module = snapshot.content.enabled_capabilities.iter().find(|capability|
-                capability.consumption.is_contribution()
-                    && capability.capability.id.as_ref() == nomifun_plugin_development::MODULE_ID);
-            if module.is_none() || nomifun_plugin_development::CREATE_ACTIONS.iter().any(|action|
-                !module.expect("checked module").action_allowlist.iter().any(|allowed| allowed.as_ref() == *action)) {
-                return Err(AppError::UnprocessableEntity(
-                    "AGENT_LAUNCH_MODULE_REQUIRED: plugin delivery requires the saved creation module and actions".into(),
-                ));
             }
         }
         self.materialize_workspace_for_binding(owner_id, session_id, &saved_binding)
@@ -2014,6 +2016,8 @@ impl NomiCoreSessionOwner {
         initial_only: bool,
         idmm_decision: Option<IdmmDecisionExplanation>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
+        let exact = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, session_id).await?;
+        let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &exact.session.agent_binding)?;
         if self.canonical.store().head(session_id).await.map_err(agent_session_store_error)?.status == "paused" {
             // The same owner settlement used by reload also precedes a fresh
             // request from callers that do not first fetch the conversation.
@@ -2028,6 +2032,8 @@ impl NomiCoreSessionOwner {
 
     async fn dispatch_canonical_turn_locked(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
         initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>)->Result<IdempotentMessageDelivery,AppError> {
+        let exact = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, session_id).await?;
+        let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &exact.session.agent_binding)?;
         let mut input = if let Some(version)=voice_binding {
             self.canonical_turn_input_with_expectation(owner_id,session_id,&Self::turn_operation_id(owner_id,session_id.as_ref(),idempotency_key),&request,Some(version)).await?
         }else {self
@@ -4343,7 +4349,6 @@ fn cron_turn_message_to_request(
     message: nomifun_cron::CronTurnMessage,
 ) -> SendMessageRequest {
     SendMessageRequest {
-        plugin_delivery: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -4401,6 +4406,7 @@ fn cron_session_handle_from_response(
 }
 
 const SELECTED_WORKSPACE_RESOURCE_PREFIX: &str = "selected-workspace-";
+const PROJECT_WORKSPACE_MEMORY_PREFIX: &str = "project-workspace-memory-";
 
 /// Freeze a user-picked host directory into the Session binding without ever
 /// accepting client-supplied operations or typed authority. The host validates
@@ -4449,9 +4455,20 @@ fn freeze_selected_workspace(
                     .typed_parameters
                     .insert("workspace_root".to_owned(), canonical.to_owned());
             }
+            "project_memory" if matches!(check, WorkspaceDirectoryCheck::Create)
+                || resource.resource_id.starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX) => {
+                // New project Sessions share one existing memory namespace for
+                // this owner/root, never the installation-wide default. Reads
+                // and normal runtime validation do not migrate old bindings.
+                let identity = serde_json::to_vec(&(owner_id, canonical))
+                    .map_err(|error| AppError::Internal(error.to_string()))?;
+                resource.resource_id = format!("{PROJECT_WORKSPACE_MEMORY_PREFIX}{:x}", Sha256::digest(identity));
+                resource.typed_parameters.insert("workspace_root".to_owned(), canonical.to_owned());
+            }
             _ => {}
         }
-        if matches!(resource.resource_kind.as_str(), "workspace" | "process_session") {
+        if matches!(resource.resource_kind.as_str(), "workspace" | "process_session")
+            || resource.resource_kind == "project_memory" && resource.resource_id.starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX) {
             super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
         }
     }
@@ -6043,6 +6060,44 @@ mod session_boundary_tests {
         let expected = target.typed_resource_bindings.clone();
         freeze_selected_workspace(&mut target, OWNER_ID, &directory.path().to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
         assert_eq!(target.typed_resource_bindings, expected, "identical final definitions reuse their identities");
+    }
+
+    #[test]
+    fn selected_project_memory_is_shared_by_root_and_isolated_between_projects_and_owners() {
+        let first = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let seed = |owner: &str| {
+            let mut value: AgentBindingValueDto = serde_json::from_value(serde_json::to_value(
+                frozen_binding(&std::env::temp_dir().to_string_lossy(), owner)).unwrap()).unwrap();
+            value.typed_resource_bindings.push(nomifun_api_types::TypedResourceBindingDto {
+                binding_id: "old-default-project-memory".into(), resource_kind: "project_memory".into(),
+                resource_id: super::super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID.into(),
+                owner_id: owner.into(), operations: BTreeSet::from(["read".into(), "write".into()]),
+                connection_config_ref: None, typed_parameters: BTreeMap::new(),
+            });
+            value
+        };
+        let memory = |value: &AgentBindingValueDto| value.typed_resource_bindings.iter()
+            .find(|resource| resource.resource_kind == "project_memory").unwrap().clone();
+        let old = seed(OWNER_ID);
+        let mut unchanged = old.clone();
+        freeze_selected_workspace(&mut unchanged, OWNER_ID, &first.path().to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
+        assert_eq!(memory(&unchanged), memory(&old), "runtime validation cannot silently migrate frozen default memory");
+        let mut a = old.clone();
+        let mut b = old.clone();
+        freeze_selected_workspace(&mut a, OWNER_ID, &first.path().to_string_lossy(), WorkspaceDirectoryCheck::Create).unwrap();
+        freeze_selected_workspace(&mut b, OWNER_ID, &first.path().to_string_lossy(), WorkspaceDirectoryCheck::Create).unwrap();
+        assert_eq!(memory(&a), memory(&b), "new independent Sessions in the same project share the memory identity");
+        freeze_selected_workspace(&mut b, OWNER_ID, &other.path().to_string_lossy(), WorkspaceDirectoryCheck::Create).unwrap();
+        assert_ne!(memory(&a).resource_id, memory(&b).resource_id);
+        let foreign_owner = "0190f5fe-7c00-7a00-8000-000000000099";
+        let mut foreign = seed(foreign_owner);
+        freeze_selected_workspace(&mut foreign, foreign_owner, &first.path().to_string_lossy(), WorkspaceDirectoryCheck::Create).unwrap();
+        assert_ne!(memory(&a).resource_id, memory(&foreign).resource_id);
+        assert_eq!(old, seed(OWNER_ID), "source binding artifacts are never rewritten");
+        let before = memory(&a);
+        freeze_selected_workspace(&mut a, OWNER_ID, &first.path().to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
+        assert_eq!(memory(&a), before);
     }
 
     #[test]
@@ -10580,9 +10635,6 @@ async fn create_nomi_core_agent_session(
     for required in &request.required_modules {
         let selection = document.enabled_capabilities.iter().find(|selection| &selection.capability.id == required);
         if selection.is_none()
-            || (required == nomifun_plugin_development::MODULE_ID
-                && nomifun_plugin_development::CREATE_ACTIONS.iter().any(|action|
-                    !selection.expect("checked selection").action_allowlist.iter().any(|granted| granted == action)))
         {
             return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
                 "AGENT_LAUNCH_MODULE_REQUIRED", format!("The saved Agent cannot execute required module {required}")));
@@ -10616,6 +10668,7 @@ async fn create_nomi_core_agent_session(
     let binding_contract: AgentBindingValue = serde_json::to_value(&binding)
         .and_then(serde_json::from_value)
         .map_err(|error| AppError::Conflict(format!("Invalid Agent binding: {error}")))?;
+    let _project_directory_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &binding_contract)?;
     let active_capabilities = projection
         .snapshot
         .content
@@ -10668,46 +10721,311 @@ async fn create_nomi_core_agent_session(
     })))
 }
 
-/// The plugin workbench shares the canonical owner and official Runtime, but
-/// opens with an immutable product purpose and the user's resolved Agent binding.
-pub(super) async fn create_plugin_authoring_session(
-    state: &NomiCoreAgentApiState,
-    owner: &UserId,
-    binding: AgentBindingValueDto,
-    reasoning_effort: Option<SessionReasoningEffortDto>,
-    creation_key: &str,
-) -> Result<String, NomiCoreApiError> {
-    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(owner, &binding).await?;
-    let selections = snapshot.content.required_resource_kinds.iter().filter_map(|kind| {
-        automatic_agent_resource_id(kind.as_ref()).map(|resource_id| AgentResourceSelectionDto {
-            resource_kind: kind.as_ref().to_owned(), resource_id: resource_id.to_owned(),
-        })
-    }).collect::<Vec<_>>();
-    let binding = state.resource_bindings.resolve_for_saved_binding(
-        &state.control_plane, owner, binding, &selections,
-    ).await?;
-    let authenticated = AuthenticatedOwner(owner.clone());
-    let projection = resolve_saved_binding_projection(state, &authenticated, &binding, Some("Plugin authoring")).await?;
-    super::plugin_authoring_sessions::validate_scope(&projection.snapshot)?;
-    if let Some(effort) = reasoning_effort {
-        if !saved_binding_supports_reasoning_effort(state, &authenticated, &binding, contract_reasoning_effort(effort)).await? {
-            return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
-                "AGENT_SESSION_REASONING_UNSUPPORTED", "The selected model does not support this reasoning effort"));
+/// An explicit project command may open another existing Session or create a
+/// fresh one. A navigation pointer never supplies membership or permissions.
+pub(super) async fn resolve_app_development_session_selection(
+    state: &NomiCoreAgentApiState, owner_id: &str, app: &nomifun_app_hosting::AppRecord,
+    selected_session_id: Option<&str>, creation_key: Option<&str>,
+    model: Option<AgentChatModelSelectionDto>, reasoning_effort: Option<SessionReasoningEffortDto>,
+) -> Result<ConversationResponse, NomiCoreApiError> {
+    if owner_id != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden("Application development Session owner mismatch".into()).into());
+    }
+    let owner = AuthenticatedOwner(UserId::from(owner_id.to_owned()));
+    let workspace = canonical_existing_workspace_directory(&app.directory, WorkspaceDirectoryCheck::Create)?;
+    let workspace = workspace.to_str().ok_or_else(|| AppError::WorkspaceDirectoryUnavailable(app.directory.display().to_string()))?;
+
+    if selected_session_id.is_some() && creation_key.is_some() {
+        return Err(AppError::BadRequest("Select a project Session or create a new one, not both".into()).into());
+    }
+    let new_creation_key = creation_key.map(|key| {
+        let parsed = Uuid::parse_str(key).map_err(|_| AppError::BadRequest("Application Session creation_key must be a UUIDv7".into()))?;
+        if parsed.get_version_num() != 7 || parsed.to_string() != key {
+            return Err(AppError::BadRequest("Application Session creation_key must be an exact UUIDv7".into()));
+        }
+        Ok(format!("app-development:{}:new:{key}", app.id))
+    }).transpose()?;
+    if let Some(key) = &new_creation_key {
+        let principal = authenticated_principal(&owner);
+        let scoped = format!("{}:{}:open:{key}", principal.principal_kind, principal.principal_id);
+        if let Some((session, opening)) = state.session_owner.canonical().store().session_by_opening_key(&principal, &scoped)
+            .await.map_err(agent_session_store_error)? {
+            let conversation = load_owned_nomi_core_session(state, &owner, &session.agent_session_id).await?;
+            if !app_project_session_editable(state, &owner, workspace, &conversation).await? {
+                return Err(AppError::Conflict("The creation receipt no longer belongs to this application workspace".into()).into());
+            }
+            let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = opening.payload else {
+                return Err(AppError::Conflict("The creation receipt has no canonical opening payload".into()).into());
+            };
+            let opening_binding: AgentBindingValue = serde_json::from_value(payload.0["agent_binding"].clone())
+                .map_err(|error| AppError::Conflict(format!("Invalid opening binding: {error}")))?;
+            let opening_metadata: nomifun_agent_contracts::AgentSessionMetadata = serde_json::from_value(payload.0["metadata"].clone())
+                .map_err(|error| AppError::Conflict(format!("Invalid opening metadata: {error}")))?;
+            let (binding, revision, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &agent_binding_dto(&opening_binding)?).await?;
+            let projection_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+                .map_err(|error| AppError::Forbidden(format!("Invalid project Session owner: {error}")))?;
+            let original = super::agent_binding_projection::project_saved_artifacts(&projection_owner, binding, revision, snapshot, None)?;
+            if model.as_ref().is_some_and(|requested| original.projection.request.model.as_ref()
+                .is_none_or(|saved| saved.provider_id != requested.provider_id || saved.model != requested.model))
+                || reasoning_effort.is_some_and(|requested| opening_metadata.reasoning_effort != Some(contract_reasoning_effort(requested))) {
+                return Err(AppError::Conflict("The application Session creation key was already used with a different model or reasoning effort".into()).into());
+            }
+            return Ok(conversation);
         }
     }
-    let idmm = idmm_config_from_runtime_policy(&projection.runtime_policy)?;
-    state.session_owner.validate_idmm_state(&idmm).await?;
-    let binding_contract: AgentBindingValue = serde_json::from_value(serde_json::to_value(&binding)?)?;
-    let active = projection.snapshot.content.contributions().map(|value| value.capability.id.as_ref().to_owned()).collect();
-    let opened = state.session_owner.canonical().open_with_purpose(authenticated_principal(&authenticated),
-        binding_contract, Some("Plugin authoring".into()), active,
-        reasoning_effort.map(contract_reasoning_effort), nomifun_agent_contracts::SessionPurpose::PluginAuthoring,
-        creation_key, now_ms()).await?;
-    // Materialize the selected binding's workspace, or its managed scratch directory.
-    state.session_owner.materialize_workspace_for_binding(owner.as_ref(), &opened.session.agent_session_id,
-        &opened.session.agent_binding).await?;
-    state.session_owner.initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm).await?;
-    Ok(opened.session.agent_session_id.as_ref().to_owned())
+    let reference = if creation_key.is_some() { None } else { selected_session_id.or(app.development_session_id.as_deref()) };
+    if let Some(reference) = reference {
+        let session_id = parse_agent_session_id(reference)?;
+        if let Some(session) = state.session_owner.canonical_conversation_projection(owner_id, &session_id).await? {
+            if !app_project_session_editable(state, &owner, workspace, &session).await? {
+                return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_SESSION_MISMATCH",
+                    "The linked Session's Agent or workspace no longer matches this application"));
+            }
+            // Model changes use the ordinary explicit model-switch command.
+            // Reopening an application must not silently replace a binding.
+            return Ok(session);
+        }
+        if selected_session_id.is_some() {
+            return Err(AppError::NotFound("The selected project Session no longer exists".into()).into());
+        }
+    }
+
+    let editor = state.control_plane.create_from_template(&owner.0, "app.developer",
+        CreateAgentPresetFromTemplateRequest { model: model.clone(), reuse_existing: true,
+            display_name: "app.developer".into(), description: None,
+            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await?;
+    let binding = state.control_plane.resolve_agent_session_binding_with_model(&owner.0,
+        editor.preset.preset_id.as_ref(), model.as_ref()).await?;
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &binding).await?;
+    let mut resource_selections = Vec::new();
+    for kind in &snapshot.content.required_resource_kinds {
+        let resource_id = match kind.as_ref() {
+            "workspace" => super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID,
+            "process_session" => super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID,
+            "project_memory" => super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID,
+            // Global extensions stay the existing explicitly chosen chain.
+            "mcp_server" => continue,
+            kind => return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPER_RESOURCE_UNSUPPORTED",
+                format!("The built-in application Agent requires an unsupported resource: {kind}"))),
+        };
+        resource_selections.push(AgentResourceSelectionDto { resource_kind: kind.as_ref().to_owned(), resource_id: resource_id.to_owned() });
+    }
+    let mut headers = HeaderMap::new();
+    let idempotency_key = new_creation_key.unwrap_or_else(|| format!("app-development:{}:{}", app.id,
+        app.development_session_id.as_deref().unwrap_or("initial")));
+    headers.insert("Idempotency-Key", idempotency_key.parse()
+        .map_err(|_| AppError::Conflict("Invalid application development Session identity".into()))?);
+    let Json(opened) = create_nomi_core_agent_session(State(state.clone()), Extension(owner.clone()), headers,
+        Json(CreateAgentSessionRequestDto { preset_id: editor.preset.preset_id, title: Some(app.name.clone()),
+            model, reasoning_effort, resource_selections, knowledge_policy: None,
+            workspace: Some(workspace.to_owned()), session_capabilities: Some(Default::default()),
+            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) })).await?;
+    let opened = opened.data.ok_or_else(|| AppError::Conflict("Application development Session was not created".into()))?;
+    load_owned_nomi_core_session(state, &owner, &parse_agent_session_id(&opened.agent_session_id)?).await
+}
+
+async fn app_project_session_editable(
+    state: &NomiCoreAgentApiState, owner: &AuthenticatedOwner, workspace: &str,
+    conversation: &ConversationResponse,
+) -> Result<bool, NomiCoreApiError> {
+    let metadata = session_metadata(conversation, owner)?;
+    if conversation.session_purpose != nomifun_agent_contracts::SessionPurpose::Conversation
+        || metadata.remote.is_some() || !has_selected_workspace(&metadata.binding) {
+        return Ok(false);
+    }
+    let session_id = parse_agent_session_id(&conversation.conversation_id)?;
+    let Some(frozen) = frozen_workspace_root(&state.session_owner.managed_workspace_root,
+        owner.as_ref(), &session_id, &metadata.binding)? else { return Ok(false); };
+    if frozen != workspace { return Ok(false); }
+    let binding = agent_binding_dto(&metadata.binding)?;
+    let (_, template) = state.control_plane.saved_binding_presentation(&owner.0, &binding).await?;
+    Ok(template.is_some_and(|key| key.as_str() == "app.developer"))
+}
+
+#[derive(Serialize)]
+pub(super) struct AppProjectSessionHistoryItem {
+    pub conversation: ConversationResponse,
+    pub editable_in_app: bool,
+    pub archived: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct AppProjectSessionHistory {
+    pub items: Vec<AppProjectSessionHistoryItem>,
+    pub total: u64,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub project_directory: String,
+    pub current_session_id: Option<String>,
+}
+
+/// Project history is a query over ordinary canonical Sessions, not an
+/// application-owned transcript or another persisted Session association.
+pub(super) async fn app_project_session_history(
+    state: &NomiCoreAgentApiState, owner_id: &str, app: &nomifun_app_hosting::AppRecord,
+    cursor: Option<&str>, limit: u32,
+) -> Result<AppProjectSessionHistory, NomiCoreApiError> {
+    if owner_id != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden("Application project Session owner mismatch".into()).into());
+    }
+    let directory = canonical_existing_workspace_directory(&app.directory, WorkspaceDirectoryCheck::Create)?;
+    let project_directory = directory.to_str().ok_or_else(|| AppError::WorkspaceDirectoryUnavailable(app.directory.display().to_string()))?.to_owned();
+    let owner = AuthenticatedOwner(UserId::from(owner_id.to_owned()));
+    let page = state.session_owner.canonical().store().list_live_sessions_for_workspace(
+        &authenticated_principal(&owner), cursor, limit, &project_directory).await.map_err(agent_session_store_error)?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for item in page.items {
+        let conversation = state.session_owner.canonical_conversation_projection_readonly(owner_id, &item.session.agent_session_id).await?
+            .ok_or_else(|| AppError::Conflict("A listed project Session lost its canonical projection".into()))?;
+        if session_metadata(&conversation, &owner)?.binding != item.session.agent_binding {
+            return Err(AppError::Conflict("A project Session changed its binding during history lookup; retry the page".into()).into());
+        }
+        let editable_in_app = app_project_session_editable(state, &owner, &project_directory, &conversation).await?;
+        items.push(AppProjectSessionHistoryItem { conversation, editable_in_app, archived: item.session.metadata.archived });
+    }
+    Ok(AppProjectSessionHistory { items, total: page.total, has_more: page.has_more,
+        next_cursor: page.next_cursor, project_directory, current_session_id: app.development_session_id.clone() })
+}
+
+/// Only an explicit submission command refreshes a current-generation blank
+/// application role through the normal canonical configuration transition.
+/// Existing Revision/Snapshot bytes, Session identity and history remain intact.
+pub(super) async fn refresh_app_development_workflow_session(
+    state: &NomiCoreAgentApiState, owner_id: &str, app: &nomifun_app_hosting::AppRecord,
+    conversation: ConversationResponse,
+) -> Result<ConversationResponse, NomiCoreApiError> {
+    let owner = AuthenticatedOwner(UserId::from(owner_id.to_owned()));
+    let root = canonical_existing_workspace_directory(&app.directory, WorkspaceDirectoryCheck::Create)?;
+    let workspace = root.to_str().ok_or_else(|| AppError::Conflict("Application project directory is not UTF-8".into()))?;
+    if owner_id != state.authoritative_user_id.as_ref()
+        || !app_project_session_editable(state, &owner, workspace, &conversation).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_SESSION_MISMATCH", "The application workflow does not match its owned Session"));
+    }
+    let session_id = parse_agent_session_id(&conversation.conversation_id)?;
+    session_capability_selection::refresh_app_workflow(state, &owner, &session_id).await?;
+    load_owned_nomi_core_session(state, &owner, &session_id).await
+}
+
+/// Hold the ordinary admission fence while manual operations change the
+/// application's files. Agent tools call the same application owner directly
+/// within their already admitted Turn instead of entering this HTTP fence.
+pub(super) async fn guard_app_development_workspace_change(
+    state: &NomiCoreAgentApiState,
+    owner_id: &str,
+    app: &nomifun_app_hosting::AppRecord,
+) -> Result<Option<AppProjectWorkspaceFence>, NomiCoreApiError> {
+    guard_app_development_workspace_change_with_wait(state, owner_id, app, false).await
+}
+
+async fn guard_app_development_workspace_change_with_wait(
+    state: &NomiCoreAgentApiState,
+    owner_id: &str,
+    app: &nomifun_app_hosting::AppRecord,
+    wait_for_completion_release: bool,
+) -> Result<Option<AppProjectWorkspaceFence>, NomiCoreApiError> {
+    app_project_fences::workspace_change(state, owner_id, app, wait_for_completion_release).await.map(Some)
+}
+
+/// `turn.completed.turn_id` is the accepted source message UUID, not the
+/// canonical operation ID or the caller's original idempotency key. Resolve
+/// that one immutable input before checking the most recent successful Turn.
+/// A UI busy flag or generated assistant text is not completion evidence.
+pub(super) struct AppDevelopmentCompletedConfigGuard {
+    pub fence: Option<AppProjectWorkspaceFence>,
+    pub generated_files_changed: bool,
+}
+
+pub(super) async fn guard_app_development_completed_config(
+    state: &NomiCoreAgentApiState,
+    owner_id: &str,
+    app: &nomifun_app_hosting::AppRecord,
+    reference: &str,
+    turn_id: &str,
+) -> Result<AppDevelopmentCompletedConfigGuard, NomiCoreApiError> {
+    let fence = guard_app_development_workspace_change_with_wait(state, owner_id, app, true).await?;
+    let session_id = parse_agent_session_id(reference)?;
+    if !fence.as_ref().is_some_and(|fence| fence.session_ids.contains(&session_id)) {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_SESSION_MISMATCH",
+            "The completed Turn belongs to a Session outside this application project"));
+    }
+    let store = state.session_owner.canonical().store();
+    let head = store.head(&session_id).await.map_err(agent_session_store_error)?;
+    let mut source = None;
+    let mut cursor = nomifun_agent_contracts::SessionEventCursor { agent_session_id: session_id.clone(), seq: 0 };
+    while cursor.seq < head.last_seq {
+        let page = store.read_events(&session_id, Some(&cursor), 1000).await.map_err(agent_session_store_error)?;
+        if let Some(event) = page.events.into_iter().find(|event| event.event_id.as_ref() == turn_id) {
+            source = Some(event);
+            break;
+        }
+        if page.next_cursor.seq <= cursor.seq { break; }
+        cursor = page.next_cursor;
+    }
+    let source = source.filter(|event| event.kind.0 == "message/user-accepted"
+        && event.kind_version == 1 && event.producer_id.as_ref() == "session_api")
+        .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_COMPLETION_UNKNOWN",
+            "The completed notification does not refer to an accepted input in this application Session"))?;
+    let prefix = format!("user:{owner_id}:{reference}:");
+    let key = source.idempotency_key.as_ref().strip_prefix(&prefix).and_then(|key| key.strip_suffix(":message"))
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_COMPLETION_UNKNOWN",
+            "The accepted application input has no exact owner-scoped idempotency identity"))?;
+    let operation = NomiCoreSessionOwner::turn_operation_id(owner_id, reference, key);
+    let receipt = store.read_turn_receipt(&session_id, &operation).await
+        .map_err(agent_session_store_error)?;
+    let matching_source = receipt.started_event.as_ref().is_some_and(|event| {
+        event.causation_event_id.as_ref() == Some(&source.event_id)
+            && event.correlation_id.as_ref() == operation.as_ref()
+            && matches!(&event.payload, nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)
+                if payload.0.get("source_message_id").and_then(Value::as_str) == Some(turn_id)
+                    && payload.0.get("operation_id").and_then(Value::as_str) == Some(operation.as_ref()))
+    });
+    let terminal = receipt.terminal_event.as_ref().filter(|event|
+        matching_source && receipt.status == nomifun_agent_session::TurnReceiptStatus::Completed && event.kind.0 == "turn/completed")
+        .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_NOT_COMPLETED",
+            "Application configuration can be completed only after the requested Turn succeeded"))?;
+    let head = store.head(&session_id).await.map_err(agent_session_store_error)?;
+    let mut cursor = nomifun_agent_contracts::SessionEventCursor { agent_session_id: session_id.clone(), seq: terminal.seq };
+    while cursor.seq < head.last_seq {
+        let page = store.read_events(&session_id, Some(&cursor), 1000).await.map_err(agent_session_store_error)?;
+        if page.events.iter().any(|event| event.kind.0 == "turn/started") {
+            return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_COMPLETION_STALE",
+                "A newer application development Turn has started; this completion request is stale"));
+        }
+        if page.next_cursor.seq <= cursor.seq {
+            return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_COMPLETION_UNKNOWN",
+                "The canonical completion cursor could not be confirmed"));
+        }
+        cursor = page.next_cursor;
+    }
+    // This Store query reads only the current canonical binding, excluding
+    // retained historical resource definitions from workspace authority.
+    let workspaces = store.session_resources(&session_id).await.map_err(agent_session_store_error)?;
+    let workspace = workspaces.iter().find(|binding| binding.resource_kind.as_ref() == "workspace");
+    let import_resource = super::hosted_effect_receipts::application_resource_key(owner_id, "app.hosting/import", &json!({"app_id":app.id})).await?;
+    let generated_files_changed = store.list_effects(&session_id).await.map_err(agent_session_store_error)?.iter().any(|effect| {
+        // Tool operation IDs are distinct from their parent Turn ID. Only
+        // this exact successful Turn and its selected source resource count.
+        effect.turn_id == operation && effect.state == nomifun_agent_session::AgentEffectState::Returned
+            && ((effect.owner_domain == "workspace" && effect.capability_module.as_ref() == "workspace.files"
+                && matches!(effect.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch")
+                && workspace.is_some_and(|binding| effect.resource_binding_id.as_ref() == Some(&binding.binding_id)))
+                || (effect.owner_domain == "app_hosting" && effect.capability_module.as_ref() == "app.hosting"
+                    && effect.action_id.as_ref() == "app.hosting/import"
+                    && effect.resource_key.as_deref() == Some(import_resource.as_str())))
+    });
+    Ok(AppDevelopmentCompletedConfigGuard { fence, generated_files_changed })
+}
+
+/// After the ordinary admission/effect fence has passed, release only the
+/// transient Runtime resources retaining this exact application workspace.
+/// The canonical Session, binding, events, payloads and checkpoints are not
+/// deleted, converted, rebound, or used as an execution recovery shortcut.
+pub(super) async fn release_app_development_workspace_runtime(
+    state: &NomiCoreAgentApiState,
+    app: &nomifun_app_hosting::AppRecord,
+) -> Result<(), NomiCoreApiError> {
+    app_project_fences::release_workspace_runtime(state, app).await
 }
 
 fn freeze_agent_session_knowledge_policy(
@@ -11742,6 +12060,10 @@ async fn prepare_agent_session_switch(
         }
         let resource_id = if kind == "workspace" && selected_workspace.is_some() {
             super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID.to_owned()
+        } else if kind == "project_memory" && binding.resource_id.as_ref().starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX) {
+            // Resolve the selected actions through the normal catalog, then
+            // retain the host-frozen project namespace below.
+            super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID.to_owned()
         } else {
             binding.resource_id.as_ref().to_owned()
         };
@@ -11811,6 +12133,16 @@ async fn prepare_agent_session_switch(
             workspace,
             WorkspaceDirectoryCheck::Runtime,
         )?;
+    }
+    if let Some(previous) = observation.session.agent_binding.typed_resource_bindings.iter()
+        .find(|resource| resource.resource_kind.as_ref() == "project_memory"
+            && resource.resource_id.as_ref().starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX)) {
+        for resource in replacement_dto.typed_resource_bindings.iter_mut()
+            .filter(|resource| resource.resource_kind == "project_memory") {
+            resource.resource_id = previous.resource_id.as_ref().to_owned();
+            resource.typed_parameters = previous.typed_parameters.clone();
+            super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
+        }
     }
     if replacement_dto.typed_resource_bindings.iter().any(|resource| {
         resource.resource_kind == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
@@ -12317,6 +12649,8 @@ async fn apply_nomi_core_agent_session_agent_switch(
             }),
         ));
     }
+    let _current_project_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &current.session.agent_binding)?;
+    let _replacement_project_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &prepared.replacement)?;
     if let Some(blocker) = prepared.preview.blockers.first() {
         return Err(agent_switch_blocker_error(blocker));
     }
@@ -13723,8 +14057,10 @@ async fn warm_nomi_core_agent_session(
     let _operation_fence = state
         .session_owner
         .session_operation_lock(session_id.as_ref())
-        .read_owned()
-        .await;
+        .try_read_owned()
+        .map_err(|_| AppError::Conflict("AgentSession preparation is unavailable during a concurrent lifecycle mutation".into()))?;
+    let exact = state.session_owner.canonical().get(&authenticated_principal(&owner), &session_id).await?;
+    let _project_directory_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &exact.session.agent_binding)?;
     state
         .session_owner
         .materialize_session_workspace(owner.as_ref(), &session_id)
@@ -14161,6 +14497,7 @@ async fn fork_nomi_core_agent_session(
             "fork must reuse the parent Session's server-resolved Agent binding",
         ));
     }
+    let _project_directory_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &target_binding)?;
     let operation_id = request_idempotency_key(
         &headers,
         "nomi-core-agent-session-fork",
@@ -14243,6 +14580,97 @@ async fn delete_nomi_core_agent_session(
         state: "deleted",
         deleted_at: deleted.tombstone.deleted_at,
     })))
+}
+
+/// Prepare the existing Agent/RemoteBinding owner for one hosted application.
+/// UI supplies only the Agent identity. No token or alternate Session ledger.
+pub(super) struct AppAgentBindingChange {
+    pub binding_id: String,
+    previous: Option<nomifun_api_types::RemoteBindingDto>,
+    applied: Option<nomifun_api_types::RemoteBindingDto>,
+}
+
+pub(super) async fn prepare_app_agent_binding(
+    state: &NomiCoreAgentApiState,
+    owner_id: &str,
+    app_id: &str,
+    agent_id: &str,
+    existing_binding_id: Option<&str>,
+) -> Result<AppAgentBindingChange, NomiCoreApiError> {
+    let owner = UserId::from(owner_id.to_owned());
+    let mut binding = state.control_plane.resolve_agent_session_binding_with_model(&owner, agent_id, None).await?;
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
+    let selections = snapshot.content.required_resource_kinds.iter().filter_map(|kind| {
+        automatic_agent_resource_id(kind.as_ref()).map(|resource_id| AgentResourceSelectionDto {
+            resource_kind: kind.as_ref().to_owned(), resource_id: resource_id.to_owned(),
+        })
+    }).collect::<Vec<_>>();
+    binding = state.resource_bindings.resolve_for_saved_binding(&state.control_plane, &owner, binding, &selections).await?;
+    let name = format!("Application {app_id}");
+    let previous = match existing_binding_id {
+        Some(id) => Some(state.control_plane.get_remote_binding(&owner,id).await?.ok_or_else(||
+            AppError::Conflict("The application's Agent connection no longer exists; clear its Agent selection before selecting again".into()))?),
+        None => None,
+    };
+    let prepared = if let Some(previous) = &previous {
+        if previous.name != name { return Err(AppError::Conflict("Application Agent connection ownership differs from its retained reference".into()).into()); }
+        binding.binding_version = previous.agent_binding.binding_version.checked_add(1)
+            .ok_or_else(|| AppError::Conflict("Agent connection version overflow".into()))?;
+        state.control_plane.update_remote_binding(&owner,&previous.remote_binding_id,nomifun_api_types::UpdateRemoteBindingRequest {
+            expected_binding_version:previous.agent_binding.binding_version,
+            expected_agent_binding_digest:digest_payload(&previous.agent_binding).map_err(|error|AppError::Internal(error.to_string()))?.as_ref().to_owned(),
+            name,agent_binding:binding,
+        }).await?
+    } else {
+        state.control_plane.create_remote_binding(&owner,nomifun_api_types::CreateRemoteBindingRequest {name,agent_binding:binding}).await?
+    };
+    Ok(AppAgentBindingChange {binding_id:prepared.remote_binding_id.clone(),previous,applied:Some(prepared)})
+}
+
+pub(super) async fn clear_app_agent_binding(state:&NomiCoreAgentApiState,owner_id:&str,app_id:&str,binding_id:&str) -> Result<AppAgentBindingChange,NomiCoreApiError> {
+    let owner = UserId::from(owner_id.to_owned());
+    let previous = state.control_plane.get_remote_binding(&owner,binding_id).await?;
+    if let Some(previous) = &previous {
+        if previous.name != format!("Application {app_id}") { return Err(AppError::Conflict("Application Agent connection ownership differs from its retained reference".into()).into()); }
+        state.control_plane.delete_remote_binding_if_current(&owner,previous).await?;
+    }
+    Ok(AppAgentBindingChange {binding_id:binding_id.to_owned(),previous,applied:None})
+}
+
+pub(super) async fn rollback_app_agent_binding(state:&NomiCoreAgentApiState,owner_id:&str,change:&AppAgentBindingChange) -> Result<(),NomiCoreApiError> {
+    let owner = UserId::from(owner_id.to_owned());
+    match (&change.previous,&change.applied) {
+        (Some(previous),Some(applied)) => {
+            if state.control_plane.get_remote_binding(&owner,&change.binding_id).await?.as_ref() != Some(applied) {
+                return Err(AppError::Conflict("Application Agent connection changed while its settings failure was being compensated; its current definition was preserved".into()).into());
+            }
+            let mut binding = previous.agent_binding.clone();
+            binding.binding_version = applied.agent_binding.binding_version.checked_add(1)
+                .ok_or_else(|| AppError::Conflict("Agent connection version overflow".into()))?;
+            state.control_plane.update_remote_binding(&owner,&change.binding_id,nomifun_api_types::UpdateRemoteBindingRequest {
+                expected_binding_version:applied.agent_binding.binding_version,
+                expected_agent_binding_digest:digest_payload(&applied.agent_binding).map_err(|error|AppError::Internal(error.to_string()))?.as_ref().to_owned(),
+                name:previous.name.clone(),agent_binding:binding,
+            }).await?;
+        },
+        (None,Some(applied)) => state.control_plane.delete_remote_binding_if_current(&owner,applied).await?,
+        (Some(previous),None) => state.control_plane.restore_remote_binding_after_failed_local_change(&owner,previous).await?,
+        (None,None) => {},
+    }
+    Ok(())
+}
+
+pub(super) async fn delete_app_agent_binding(
+    state: &NomiCoreAgentApiState,
+    owner_id: &str,
+    binding_id: &str,
+) -> Result<(), NomiCoreApiError> {
+    let owner = UserId::from(owner_id.to_owned());
+    // Idempotent app deletion can resume after the binding owner completed.
+    if let Some(current) = state.control_plane.get_remote_binding(&owner, binding_id).await? {
+        state.control_plane.delete_remote_binding_if_current(&owner, &current).await?;
+    }
+    Ok(())
 }
 
 async fn execute_nomi_core_agent_session_delete(
@@ -15666,14 +16094,9 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
             )
         })?;
     let mut request = nonempty_turn_content(content)?;
-    if let Some(requirement) = object.get("plugin_delivery").filter(|value| !value.is_null()) {
-        let requirement: nomifun_api_types::PluginDeliveryRequirement = serde_json::from_value(requirement.clone())?;
-        if let Some(draft) = &requirement.draft_id {
-            nomifun_common::validate_uuidv7(draft).map_err(|_| NomiCoreApiError::new(
-                StatusCode::BAD_REQUEST,"PLUGIN_INVALID_DRAFT_ID","plugin_delivery requires a canonical draft UUIDv7",
-            ))?;
-        }
-        request.plugin_delivery = Some(requirement);
+    if object.contains_key("plugin_delivery") {
+        return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "NOMI_CORE_INVALID_REQUEST",
+            "Turn input contains retired application-authoring metadata; use ordinary coding and application hosting operations"));
     }
     if let Some(files) = object.get("files") {
         request.files = serde_json::from_value(files.clone())?;
@@ -15714,18 +16137,14 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
 }
 
 pub(super) fn canonical_turn_input(request: &SendMessageRequest) -> Value {
-    let mut input = json!({
+    json!({
         "content": request.content,
         "files": request.files,
         "inject_skills": request.inject_skills,
         "hidden": request.hidden,
         "origin": request.origin,
         "channel_platform": request.channel_platform,
-    });
-    if let Some(requirement) = &request.plugin_delivery {
-        input["plugin_delivery"] = serde_json::to_value(requirement).expect("delivery requirement");
-    }
-    input
+    })
 }
 
 fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreApiError> {
@@ -15737,7 +16156,6 @@ fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreAp
         ));
     }
     Ok(SendMessageRequest {
-        plugin_delivery: None,
         content: content.to_owned(),
         files: Vec::new(),
         inject_skills: Vec::new(),

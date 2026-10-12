@@ -110,6 +110,8 @@ pub enum OfficialPresetKeyDto {
     AssistantGeneral,
     #[serde(rename = "coding.codex")]
     CodingCodex,
+    #[serde(rename = "app.developer")]
+    AppDeveloper,
     #[serde(rename = "companion.default")]
     CompanionDefault,
     #[serde(rename = "customer-service.default")]

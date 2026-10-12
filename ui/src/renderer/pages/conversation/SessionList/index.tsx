@@ -47,6 +47,7 @@ import {
   type SidebarDisplayPreferences,
 } from './utils/sidebarDisplayPreferences';
 import type { SessionEntry, SessionKind, WorkpathNode } from './utils/workpathTree';
+import { useAppProjectWorkpathNames } from './hooks/useAppProjectWorkpathNames';
 
 export type WorkpathSessionListProps = {
   onSessionClick?: () => void;
@@ -115,10 +116,11 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     return subscribeProjectWorkpaths(() => setEmptyProjectWorkpaths(getProjectWorkpaths()));
   }, []);
 
-  const tree = useMemo(
+  const workpathTree = useMemo(
     () => buildWorkpathTree(workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths),
     [workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths]
   );
+  const tree = useAppProjectWorkpathNames(workpathTree);
 
   const projectWorkpathKeys = useMemo(() => new Set(visibleEmptyProjectWorkpaths), [visibleEmptyProjectWorkpaths]);
   const branchWorkpaths = useMemo(

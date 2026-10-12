@@ -14,9 +14,17 @@ Usage:
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Browser
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BeforeToolSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -CodingSmoke
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -AppHostingSmoke -AppHostingBrowserHold -ArtifactDir C:/new-app-workspace-evidence -Report C:/app-workspace-evidence.json
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -AppWorkspaceUiFixture
+  AppWorkspaceUiFixture starts an isolated production Host for up to 30 minutes,
+  with a public fixture login and real configured model; product validation is
+  null until independently tested. Explicitly finish its loopback endpoint.
+  AppHostingSmoke creates one real empty application without a model, then
+  selects a model for its fixed built-in app.developer ordinary Session. The
+  model writes and configures this application's current managed workspace;
+  this mode never seeds project files or imports a duplicate application.
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -GameSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -LongCodingSmoke
-  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -PluginSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BrowserGui -DataDir C:/new-disposable-gui-data
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Delete
 #>
@@ -33,7 +41,11 @@ param(
   [switch]$CodingSmoke,
   [switch]$GameSmoke,
   [switch]$LongCodingSmoke,
-  [switch]$PluginSmoke,
+  [switch]$AppHostingSmoke,
+  [switch]$AppWorkspaceUiFixture,
+  [switch]$AppHostingBrowserHold,
+  [string]$ArtifactDir,
+  [string]$Report,
   [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
@@ -43,8 +55,14 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $IdmmSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke, $PluginSmoke).Where({ [bool]$_ }).Count -gt 1) {
+if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $IdmmSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke, $AppHostingSmoke, $AppWorkspaceUiFixture).Where({ [bool]$_ }).Count -gt 1) {
   throw 'Smoke modes are mutually exclusive.'
+}
+if (($AppHostingBrowserHold -or -not [string]::IsNullOrWhiteSpace($ArtifactDir) -or -not [string]::IsNullOrWhiteSpace($Report)) -and -not $AppHostingSmoke) {
+  throw 'AppHostingBrowserHold, ArtifactDir and Report require AppHostingSmoke.'
+}
+if (-not [string]::IsNullOrWhiteSpace($ArtifactDir) -and (-not [IO.Path]::IsPathRooted($ArtifactDir) -or (Test-Path -LiteralPath $ArtifactDir))) {
+  throw 'ArtifactDir requires a new absolute directory.'
 }
 if ($BrowserGui -and ([string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
   throw 'BrowserGui requires a new absolute DataDir and cannot be combined with Browser.'
@@ -225,14 +243,20 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
   } elseif ($IdmmSmoke) {
     & bun run demo:idmm
+  } elseif ($AppHostingSmoke) {
+    $hostingArguments = @('scripts/validation/run-nomi-core-live-provider-smoke.mjs', '--app-hosting-smoke')
+    if ($AppHostingBrowserHold) { $hostingArguments += '--app-hosting-browser-hold' }
+    if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) { $hostingArguments += @('--artifact-dir', $ArtifactDir) }
+    if (-not [string]::IsNullOrWhiteSpace($Report)) { $hostingArguments += @('--report', $Report) }
+    & bun @hostingArguments
+  } elseif ($AppWorkspaceUiFixture) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --app-workspace-ui-fixture
   } elseif ($CodingSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
   } elseif ($GameSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
   } elseif ($LongCodingSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
-  } elseif ($PluginSmoke) {
-    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --plugin-smoke
   } else {
     & bun run test:nomi-core-live-provider
   }

@@ -35,16 +35,13 @@ pub(crate) struct NomiCoreBuiltinPlan {
 pub(crate) async fn build(
     services: &AppServices,
     effect_store: nomifun_agent_session::AgentSessionStore,
-    plugin: super::plugin::PluginRouterState,
+    session_owner: std::sync::Weak<super::nomi_core_session::NomiCoreSessionOwner>,
 ) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = Vec::new();
     registrations.push(super::nomi_core_tool_discovery::registration()?);
     registrations.push(super::model_management::registration(services)?);
     let model_management_tools = super::model_management::capability_ids();
-    registrations.push(nomifun_plugin_development::registration(Arc::new(
-        super::plugin_development::Host::new(plugin, services),
-    )).map_err(anyhow::Error::msg)?);
-    let plugin_development_tools = nomifun_plugin_development::capability_ids();
+    let app_hosting_tools = super::app_hosting_tools::capability_ids();
 
     #[cfg(feature = "browser-use")]
     let wave1_search = services.local_web_search.as_ref().map(|provider| {
@@ -73,6 +70,7 @@ pub(crate) async fn build(
     )]);
 
     let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store.clone());
+    registrations.push(super::app_hosting_tools::registration(services, session_owner, wave2_owner.clone())?);
     let wave2_ports =
         nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
     #[cfg(feature = "browser-use")]
@@ -105,7 +103,7 @@ pub(crate) async fn build(
         .map_err(anyhow::Error::msg)?;
     replace_package_registrations(&mut registrations, wave2);
     let mcp_registrations = super::nomi_core_mcp_catalog::load_registrations(
-        &nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),
+        services.app_mcp_sources.as_ref(),
         wave2_owner.clone(),
     )
     .await?;
@@ -225,8 +223,8 @@ pub(crate) async fn build(
 
     let schema_router = NomiPlatformBuiltinToolSchemaRouter::new([
         (
-            plugin_development_tools.clone(),
-            Arc::new(super::plugin_development::SchemaResolver)
+            app_hosting_tools.clone(),
+            Arc::new(super::app_hosting_tools::SchemaResolver)
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
         ),
         (
@@ -261,7 +259,7 @@ pub(crate) async fn build(
     let tool_capability_ids = wave1_tools
         .into_iter()
         .chain(model_management_tools)
-        .chain(plugin_development_tools)
+        .chain(app_hosting_tools)
         .chain(wave2_tools)
         .chain(wave3_tools)
         .chain(wave4_tools)

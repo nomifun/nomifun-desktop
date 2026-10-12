@@ -375,6 +375,9 @@ export function isBackendRequestError(error: unknown): error is BackendRequestEr
  */
 export type HttpRequestOptions = {
   silentStatuses?: number[];
+  /** Binary uploads share the ordinary auth, CSRF retry and error path. */
+  rawBody?: Blob;
+  rawContentType?: string;
   /**
    * Optional mutation deduplication token. This deliberately maps to the
    * standard request header only; it is never merged into the JSON body.
@@ -399,7 +402,7 @@ export type HttpRequestOptions = {
 };
 
 const SENSITIVE_LOG_KEY_PATTERN =
-  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|surface[_-]?session|secret|password|credential|capability|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
+  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|local[_-]?trust|secret|password|credential|capability|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
 
 function isSensitiveLogKey(key: string): boolean {
   if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return true;
@@ -508,7 +511,9 @@ export async function httpRequest<T>(
   for (let attempt = 0; ; attempt++) {
     const headers: Record<string, string> = {};
 
-    if (body !== undefined) {
+    if (options?.rawBody !== undefined) {
+      headers['Content-Type'] = options.rawContentType ?? 'application/octet-stream';
+    } else if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
     }
 
@@ -536,7 +541,7 @@ export async function httpRequest<T>(
       response = await fetch(url, {
         method,
         headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: options?.rawBody ?? (body !== undefined ? JSON.stringify(body) : undefined),
         signal: controller?.signal,
         // Every GET issued through this bridge targets mutable application state
         // (conversation history, settings, catalogs, runtime status, ...).  The

@@ -100,6 +100,8 @@ const NomiConversationLayout: React.FC<{
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   agentSelectorNode?: React.ReactNode;
   currentAgentLabel: string;
+  submissionDisabled?: boolean;
+  onBeforeSubmit?: () => Promise<void>;
   modelSelectionDisabled?: boolean;
   reasoningEffort?: SessionReasoningEffort;
   reasoningEffortUpdating?: boolean;
@@ -110,6 +112,8 @@ const NomiConversationLayout: React.FC<{
   modelSelection,
   agentSelectorNode,
   currentAgentLabel,
+  submissionDisabled,
+  onBeforeSubmit,
   modelSelectionDisabled,
   reasoningEffort,
   reasoningEffortUpdating,
@@ -120,7 +124,7 @@ const NomiConversationLayout: React.FC<{
   return (
     <ExecutionConversationLayout
       {...chatLayoutProps}
-      sider={<ChatSlider conversation={conversation} extraTabs={workspaceExtraTabs} />}
+      sider={chatLayoutProps.embedded ? null : <ChatSlider conversation={conversation} extraTabs={workspaceExtraTabs} />}
       conversation_id={conversation.id}
       workspaceExtraTabs={workspaceExtraTabs}
     >
@@ -140,6 +144,10 @@ const NomiConversationLayout: React.FC<{
         onReasoningEffortChange={onReasoningEffortChange}
         isProcessing={isConversationProcessing(conversation)}
         creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
+        creationEnabled={!chatLayoutProps.embedded}
+        hideSessionCapabilities={chatLayoutProps.embedded}
+        submissionDisabled={submissionDisabled}
+        onBeforeSubmit={onBeforeSubmit}
       />
     </ExecutionConversationLayout>
   );
@@ -148,10 +156,14 @@ const NomiConversationLayout: React.FC<{
 const NomiConversationPanel: React.FC<{
   conversation: NomiConversation;
   sliderTitle: React.ReactNode;
-}> = ({ conversation, sliderTitle }) => {
+  embedded?: boolean;
+  fixedAgentLabel?: string;
+  submissionDisabled?: boolean;
+  onBeforeSubmit?: () => Promise<void>;
+}> = ({ conversation, sliderTitle, embedded, fixedAgentLabel, submissionDisabled, onBeforeSubmit }) => {
   const hasPreset = Boolean(conversation.preset_id);
   const navigate = useNavigate();
-  const creation = useCreationDraft(conversation.id);
+  const creation = useCreationDraft(conversation.id, !embedded);
   useEffect(() => ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
     if (String(event.agent_session_id) !== String(conversation.id)) return;
     void refreshConversationCache(conversation.id).catch((error) => {
@@ -270,6 +282,7 @@ const NomiConversationPanel: React.FC<{
     errorCode?: string;
   } | null>(null);
   const switchCurrentConversationAgent = useCallback((selection: GuidAgentSelection) => {
+    if (fixedAgentLabel) return;
     if (isConversationProcessing(conversation)) {
       Message.warning(t('conversation.chat.agentSwitch.waitForTurn'));
       return;
@@ -368,6 +381,7 @@ const NomiConversationPanel: React.FC<{
   }, [frozenPresetId, t]);
   const frozenCreativeAgent = officialTemplateKey === 'creative-studio.default';
   const selectCreationMode = (mode: CreationMode) => {
+    if (embedded) return;
     if (frozenCreativeAgent) {
       creation.setMode(mode);
       return;
@@ -381,10 +395,10 @@ const NomiConversationPanel: React.FC<{
     });
   };
   const exitCreation = () => creation.setMode(null);
-  const currentAgentLabel = officialTemplateKey
+  const currentAgentLabel = fixedAgentLabel ?? (officialTemplateKey
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[officialTemplateKey]}.name`)
-    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
-  const agentSelectorNode = (
+    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent');
+  const agentSelectorNode = fixedAgentLabel ? <span data-testid='fixed-app-agent'>{fixedAgentLabel}</span> : (
     <GuidAgentSelector
       presets={executableAgentPresets}
       officialTemplates={conversationOfficialTemplates}
@@ -416,6 +430,7 @@ const NomiConversationPanel: React.FC<{
     (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
 
   const chatLayoutProps = {
+    embedded,
     title: conversation.name,
     siderTitle: sliderTitle,
     sider: <ChatSlider conversation={conversation} />,
@@ -438,17 +453,17 @@ const NomiConversationPanel: React.FC<{
         />}
       </div>
     ),
-    workspaceEnabled,
+    workspaceEnabled: embedded ? false : workspaceEnabled,
     workspacePath: conversation.extra?.workspace,
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
     knowledgeEnabled,
     knowledgeWritebackAvailable,
-    hideAdvancedControls,
+    hideAdvancedControls: embedded || hideAdvancedControls,
   };
 
   return (
-    <CreationComposerContext.Provider value={{ ...creation, presetId: frozenPresetId, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
+    <CreationComposerContext.Provider value={embedded ? null : { ...creation, presetId: frozenPresetId, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
       <>
         <AgentSwitchDialog
           visible={agentSwitch !== null}
@@ -479,6 +494,8 @@ const NomiConversationPanel: React.FC<{
           modelSelection={modelSelection}
           agentSelectorNode={agentSelectorNode}
           currentAgentLabel={currentAgentLabel}
+          submissionDisabled={submissionDisabled}
+          onBeforeSubmit={onBeforeSubmit}
           modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}
           reasoningEffort={reasoningEffort}
           reasoningEffortUpdating={reasoningEffortUpdating}
@@ -491,7 +508,11 @@ const NomiConversationPanel: React.FC<{
 
 const ChatConversation: React.FC<{
   conversation?: TChatConversation;
-}> = ({ conversation }) => {
+  embedded?: boolean;
+  fixedAgentLabel?: string;
+  submissionDisabled?: boolean;
+  onBeforeSubmit?: () => Promise<void>;
+}> = ({ conversation, embedded, fixedAgentLabel, submissionDisabled, onBeforeSubmit }) => {
   const { t } = useTranslation();
   const workspaceEnabled = Boolean(conversation?.extra?.workspace);
 
@@ -508,6 +529,14 @@ const ChatConversation: React.FC<{
   const isRetainedAttemptTranscript = Boolean(
     conversation?.execution_step_id || conversation?.execution_attempt_id,
   );
+
+  // Retired authoring Sessions retain canonical history only. They cannot
+  // reopen the old workflow or expose its execution controls.
+  if (conversation?.session_purpose === 'plugin_authoring') {
+    return <ChatLayout title={conversation.name} conversation_id={conversation.id} hideAdvancedControls disableRename workspaceEnabled={false} sider={null}>
+      <ReadOnlyConversationView conversation={conversation} />
+    </ChatLayout>;
+  }
 
   // An Attempt Conversation is immutable execution audit data, not a second
   // ordinary chat entry point. Direct/history navigation therefore uses the
@@ -553,7 +582,7 @@ const ChatConversation: React.FC<{
     }
     return (
       <ExecutionProvider conversation={conversation}>
-        <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} />
+        <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} embedded={embedded} fixedAgentLabel={fixedAgentLabel} submissionDisabled={submissionDisabled} onBeforeSubmit={onBeforeSubmit} />
       </ExecutionProvider>
     );
   }

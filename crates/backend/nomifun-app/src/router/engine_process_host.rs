@@ -144,9 +144,6 @@ impl EngineProcessScope {
         self.closed.store(true, Ordering::Release);
         self.cancellation.cancel();
     }
-    pub(crate) async fn is_quiescent(&self) -> bool {
-        self.state.lock().await.is_quiescent()
-    }
 
     pub(crate) fn workspace_root(&self) -> &Path {
         self.owner.workspace_root()
@@ -534,7 +531,7 @@ mod tests {
             assert_eq!(rejected["state"], "not_started");
             assert_eq!(rejected["success"], false);
             assert_eq!(rejected["user_code_started"], false);
-            assert!(scope.is_quiescent().await);
+            assert!(scope.state.lock().await.is_quiescent());
             let message = rejected["message"].as_str().unwrap();
             assert!(message.contains("For an ordinary executable, use command"));
             assert!(message.contains("never splits command"));
@@ -548,7 +545,7 @@ mod tests {
         assert_eq!(corrected["exit_code"], 0);
         assert_eq!(corrected["success"], true);
         assert_eq!(corrected["cleanup"]["reaped"], true);
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         drop(scope);
         pool.close().await;
@@ -599,7 +596,7 @@ mod tests {
         let text = replay["output"]["text"].as_str().unwrap();
         assert!(text.contains("READY\n"));
         assert!(!text.contains("ECHO:") && !text.contains("must-not-be-sent"));
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         drop(scope);
         pool.close().await;
@@ -644,7 +641,7 @@ mod tests {
         for field in ["source_encoding", "decode_errors", "next_cursor", "retained_bytes", "dropped_bytes"] {
             assert_eq!(empty["output"][field], result["output"][field], "frozen {field}");
         }
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         println!("WINDOWS_MIXED_TOOL_EVIDENCE {}", serde_json::json!({"result":result,"empty":empty}));
         drop(scope); pool.close().await;
@@ -683,7 +680,7 @@ mod tests {
         assert_eq!(terminal["success"], false);
         assert_eq!(terminal["cleanup"]["reaped"], true);
         assert!(output.contains("CMD_KEEPER_READY"));
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         drop(scope);pool.close().await;
     }
@@ -708,7 +705,7 @@ mod tests {
         let check = std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",
             &format!("if(Get-Process -Id {pid} -ErrorAction SilentlyContinue){{exit 1}}; exit 0")]).creation_flags(0x08000000).output().unwrap();
         assert!(check.status.success(), "the ready background child must be gone when success is returned");
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         println!("WINDOWS_CMD_OWNER_EVIDENCE {}", serde_json::json!({"kind":"background-child","child_pid":pid,"result":result}));
         drop(scope);pool.close().await;
@@ -746,7 +743,7 @@ mod tests {
         assert!(text.contains("5") && (text.contains("Access is denied") || text.contains("拒绝访问") || text.contains("访问被拒绝")),
             "the actual OS output must identify access denied, not service absence");
         assert_eq!(scope.state.lock().await.sessions.len(), 1, "no privileged fallback or command retry");
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         println!("WINDOWS_STANDARD_TOKEN_EVIDENCE {}", result);
         drop(scope);
@@ -780,7 +777,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();
-        assert!(!scope.is_quiescent().await, "scope still has no cached terminal");
+        assert!(!scope.state.lock().await.is_quiescent(), "scope still has no cached terminal");
         let mut receipts: Vec<serde_json::Value> = Vec::new();
         for (index, operation) in ["stdin", "close_stdin", "resize"].into_iter().enumerate() {
             let mut args = serde_json::json!({"operation":operation,"process_id":id});
@@ -803,7 +800,7 @@ mod tests {
         if tty { assert!(text.contains("READY\r\n")); } else { assert_eq!(text, "READY\n"); }
         assert!(!text.contains("ECHO:") && !text.contains("WINDOWS_LATE_INPUT_MUST_NOT_RUN"));
         assert_eq!(replay["cleanup"]["reaped"], true);
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         println!("WINDOWS_EXPIRED_OWNER_EVIDENCE {}", serde_json::json!({"tty":tty,"started":started,"late_controls":receipts,"replay":replay}));
         drop(scope);
@@ -836,7 +833,7 @@ mod tests {
         assert_eq!(rejected["code"], "PROCESS_REFERENCE_INVALID");
         assert_eq!(rejected["state"], "not_executed");
         assert_eq!(rejected["control_applied"], false);
-        assert!(!scope.is_quiescent().await, "rejecting a reference must not claim that the original child was reaped");
+        assert!(!scope.state.lock().await.is_quiescent(), "rejecting a reference must not claim that the original child was reaped");
 
         let (other_journal, other_pool) = super::super::engine_journal::test_fixture().await;
         let other = EngineProcessScope::new(root.path(), other_journal).unwrap();
@@ -844,7 +841,7 @@ mod tests {
             "operation":"cancel", "process_id":id
         })), "reject-foreign-reference").await.unwrap();
         assert_eq!(foreign.0["code"], "PROCESS_REFERENCE_INVALID");
-        assert!(other.is_quiescent().await);
+        assert!(other.state.lock().await.is_quiescent());
 
         scope.invoke(StrictJsonValue(serde_json::json!({
             "operation":"stdin", "process_id":id, "input":"ok", "append_newline":true
@@ -868,7 +865,7 @@ mod tests {
         assert!(text.contains("ORIGINAL:ok"));
         assert!(!text.contains("must-not-be-sent"));
         assert_eq!(finished.0["cleanup"]["reaped"], true);
-        assert!(scope.is_quiescent().await);
+        assert!(scope.state.lock().await.is_quiescent());
         scope.cleanup().await.unwrap();
         other.cleanup().await.unwrap();
         drop(scope);

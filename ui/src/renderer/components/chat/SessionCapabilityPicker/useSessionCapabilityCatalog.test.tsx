@@ -2,6 +2,7 @@ import '../../../../../test/setup-dom.ts';
 import { cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
+import { appHosting } from '@/common/adapter/appHostingBridge';
 import * as mcpCatalog from '@/renderer/hooks/mcp/catalog';
 import { useSessionCapabilityCatalog } from './useSessionCapabilityCatalog';
 import { defaultSessionCapabilityDraft } from './model';
@@ -16,10 +17,14 @@ test('catalog retains unavailable packages for inspection while auto defaults ex
   track(spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([bad, good]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([bad, good]));
   track(spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [], builtinServers: [], userServers: [] }));
+  track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([{ app_id: '0190f5fe-7c00-7a00-8000-000000000077', name: 'My app',
+    url: 'http://127.0.0.1:4317/mcp', state: 'running', connection_status: 'connected', tools: [{ name: 'read' }], reason: null }]));
   const hook = renderHook(() => useSessionCapabilityCatalog());
   await waitFor(() => expect(hook.result.current.loading).toBe(false));
   expect(hook.result.current.error).toBeUndefined();
   expect(hook.result.current.catalog.skills).toHaveLength(2);
   expect(hook.result.current.catalog.skills.find((skill) => skill.name === 'bad-auto')?.session_error).toBe(bad.session_error);
   expect(defaultSessionCapabilityDraft(hook.result.current.catalog).skillNames).toEqual(['good-auto']);
+  expect(hook.result.current.catalog.mcpServers[0].appSource).toBe(true);
+  expect(defaultSessionCapabilityDraft(hook.result.current.catalog).mcpServerIds).toEqual([]);
 });

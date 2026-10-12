@@ -829,6 +829,7 @@ impl DesktopServer {
                 );
             }
         };
+        services.app_hosting.set_local_endpoint(format!("http://127.0.0.1:{loopback_port}"));
         let router = match crate::router::try_create_router(&services).await {
             Ok(router) => router,
             Err(error) => {
@@ -1164,6 +1165,28 @@ impl DesktopServer {
         let mut errors = Vec::new();
 
         self._keep_alive.request_background_shutdown();
+        // Signal HTTP ingress first, but cancel hosted preparation before
+        // waiting for graceful drain: an install request otherwise keeps that
+        // drain open and prevents the same application's stop from ever running.
+        self.listener_lifecycle.loopback_termination.request_stop();
+        self.loopback_shutdown.send_replace(true);
+        {
+            let lan = self.lan.lock().await;
+            if let Some(listener) = lan.as_ref() {
+                listener.termination.request_stop();
+                listener.shutdown.send_replace(true);
+            }
+        }
+        let hosted_cleanup = if let Some(application) = &self.nomi_core_application {
+            application.stop_hosted_applications_for_shutdown().await
+        } else if let Some(services) = self._keep_alive.services() {
+            services.app_hosting.shutdown().await.map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = hosted_cleanup {
+            errors.push(format!("hosted application cleanup failed: {error:#}"));
+        }
         if let Err(error) = self.stop_listeners_and_wait().await {
             errors.push(format!("listener cleanup failed: {error:#}"));
         }

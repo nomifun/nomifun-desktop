@@ -33,8 +33,8 @@ test('a new official seed cannot be overwritten by a draft of its old defaults',
   setBrowserStorageGeneration(generation);
   const drafts = new AgentEditorDrafts('owner', storage());
   drafts.writeTemplate(template, { displayName: 'General', document: editingDocument(createEmptyAgentPresetDocument()), activeTab: 'capabilities' });
-  expect(drafts.readTemplate({ ...template, seed: { ...template.seed, enabled_capabilities: [{ capability: { id: asCapabilityId('plugin.development') },
-    action_allowlist: ['plugin.development/list'] }] } })).toBeUndefined();
+  expect(drafts.readTemplate({ ...template, seed: { ...template.seed, enabled_capabilities: [{ capability: { id: asCapabilityId('app.hosting') },
+    action_allowlist: ['app.hosting/list'] }] } })).toBeUndefined();
 });
 
 test('persisted personal edits omit model routes and chat route records', () => {

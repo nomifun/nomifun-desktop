@@ -352,7 +352,6 @@ async fn send(
         }
     }
     let req = SendMessageRequest {
-        plugin_delivery: None,
         content: p.content,
         files: vec![],
         inject_skills: vec![],

@@ -1,13 +1,11 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
-import * as pluginLaunch from '../plugins/pluginAuthoringLaunch';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import { SWRConfig } from 'swr';
 import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem, type CapabilityModuleCatalogItem } from '@/common/types/agentPlatform';
@@ -33,15 +31,14 @@ const moduleOf = (value: CapabilityCatalogItem): CapabilityModuleCatalogItem => 
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 const initial = (): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), enabled_capabilities: catalog.map(value => ({ capability: value.capability })) });
-function mount(document = initial(), currentCatalog = catalog, disabled = false, kind: 'context' | 'middleware' = 'context', onOpenAuthor?: (destination: string) => void) {
+function mount(document = initial(), currentCatalog = catalog, disabled = false, kind: 'context' | 'middleware' = 'context') {
   let current = document;
   const Harness = () => {
     const [value, setValue] = useState(document);
-    return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onOpenAuthor={onOpenAuthor} onChange={next => { current = next; setValue(next); }} />;
+    return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onChange={next => { current = next; setValue(next); }} />;
   };
-  const Creator = () => <div>Authoring {new URLSearchParams(useLocation().search).get('template')}</div>;
   return { ...render(<I18nextProvider i18n={i18n}><MemoryRouter><Routes>
-    <Route path='/' element={<Harness />} /><Route path='/plugins/create' element={<Creator />} />
+    <Route path='/' element={<Harness />} />
   </Routes></MemoryRouter></I18nextProvider>), state: () => current };
 }
 beforeEach(() => {
@@ -168,78 +165,4 @@ test('execution stages come from the host and unknown selected extensions remain
   fireEvent.click(view.getByRole('button', { name: 'Move check earlier' }));
   expect(result.state().middleware_order).toEqual(['check', 'unknown', 'future', 'model']);
   expect(result.state().enabled_capabilities).toEqual(original.enabled_capabilities);
-});
-
-test('ordinary user launches one check authoring conversation without saving or changing selection', async () => {
-  let finish!: () => void;
-  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockImplementation(async navigate => {
-    await new Promise<void>(resolve => { finish = resolve; });
-    await navigate('/plugins/create?template=check');
-  });
-  const save = spyOn(pluginPlatform.drafts.save, 'invoke');
-  const document = createEmptyAgentPresetDocument();
-  const result = mount(document, [], false, 'middleware'), view = within(result.container);
-  expect(view.getByText(en.middlewareOrder.empty)).toBeTruthy();
-  const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
-  fireEvent.click(button); fireEvent.click(button);
-  expect(create).toHaveBeenCalledTimes(1);
-  expect(create.mock.calls[0][1]).toEqual({ template: 'agent.before_tool' });
-  expect((button as HTMLButtonElement).disabled).toBe(true);
-  await act(async () => { finish(); });
-  expect(view.getByText('Authoring check')).toBeTruthy();
-  expect(save).not.toHaveBeenCalled();
-  expect(result.state()).toEqual(document);
-});
-
-test('failed authoring launch is visible and retries only on another explicit click', async () => {
-  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockRejectedValue(new Error('offline'));
-  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware'), view = within(result.container);
-  fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
-  await waitFor(() => expect(view.getByText(en.middlewareOrder.createFailed)).toBeTruthy());
-  expect(create).toHaveBeenCalledTimes(1);
-  await act(async () => { fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool })); });
-  expect(create).toHaveBeenCalledTimes(2);
-  expect(view.queryByText(/Authoring /)).toBeNull();
-});
-
-test('disabled editor cannot create a check and Context does not offer the execution template', () => {
-  const create = spyOn(pluginLaunch, 'launchPluginAuthoring');
-  const result = mount(createEmptyAgentPresetDocument(), [], true, 'middleware'), view = within(result.container);
-  const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
-  expect((button as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(button);
-  expect(create).not.toHaveBeenCalled();
-  result.unmount();
-  const context = mount();
-  expect(within(context.container).queryByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeNull();
-});
-
-test('remote WebUI cannot launch Plugin authoring from Agent settings', () => {
-  delete (window as typeof window & { __backendPort?: number }).__backendPort;
-  const create = spyOn(pluginLaunch, 'launchPluginAuthoring');
-  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
-  const button = within(result.container).getByRole('button', {
-    name: en.middlewareOrder.createBeforeTool,
-  });
-  expect((button as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(button);
-  expect(create).not.toHaveBeenCalled();
-});
-
-test('a late authoring launch cannot navigate after the editor unmounts', async () => {
-  let finish!: () => void;
-  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockImplementation(async navigate => {
-    await new Promise<void>(resolve => { finish = resolve; });
-    await navigate('/plugins/create?template=late');
-  });
-  const open = mock(() => {});
-  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware', open);
-  fireEvent.click(within(result.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
-  result.unmount();
-  const next = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
-  await act(async () => { finish(); });
-  expect(open).not.toHaveBeenCalled();
-  expect(within(next.container).queryByText('Authoring late')).toBeNull();
-  expect(within(next.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeTruthy();
-  expect(create).toHaveBeenCalledTimes(1);
 });

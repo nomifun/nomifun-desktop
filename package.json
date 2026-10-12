@@ -33,12 +33,11 @@
     "test:desktop": "bun scripts/test-rust.mjs desktop",
     "test:browser": "bun scripts/test-rust.mjs browser",
     "test:ui": "bun test --cwd ui",
-    "test:plugin-sdk": "node --test crates/backend/nomifun-plugin-platform/tests/plugin_sdk.test.mjs",
     "test:nomi-core-live-provider": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs",
     "demo:idmm": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json",
     "test:agent-reliability-report": "node --test scripts/validation/agent-reliability-report.test.mjs",
     "check:agent-reliability": "node scripts/validation/agent-reliability-report.mjs",
-    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:unified-plugin-boundary && bun run check:agent-vocabulary && bun run help --check",
+    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:app-hosting-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
     "check:desktop-ui-boundary": "bun scripts/check-desktop-ui-boundary.mjs",
     "check:i18n": "bun scripts/generate-i18n-types.mjs --self-test && bun scripts/generate-i18n-types.mjs --check",
@@ -51,7 +50,6 @@
     "check:process-runtime-boundary": "bun scripts/check-process-runtime-boundary.mjs",
     "check:browser-platform-boundary": "bun scripts/check-browser-platform-boundary.mjs",
     "check:uarc-boundary": "bun scripts/check-uarc-boundary.mjs",
-    "check:unified-plugin-boundary": "bun scripts/check-unified-plugin-boundary.mjs",
     "check:nomi-core-live-provider": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compile-only",
     "check:agent-vocabulary": "bun scripts/check-agent-vocabulary.mjs",
     "gate:agent-v2": "bun scripts/gate-agent-v2.mjs",
@@ -64,7 +62,8 @@
     "check:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- check && bun scripts/check-voice-contracts.mjs",
     "gen:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- write && bun scripts/check-voice-contracts.mjs --write",
     "test:voice-smoke-runner": "node --test ./scripts/validation/run-agent-voice-smoke.test.mjs",
-    "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs"
+    "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs",
+    "check:app-hosting-boundary": "bun scripts/check-app-hosting-boundary.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.2",
