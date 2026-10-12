@@ -172,8 +172,11 @@ async fn incompatible_87_row_upgrade_rebuilds_once_and_recovers_interrupted_boot
         ("current", false, true),
     ] {
         let root = TempDir::new().unwrap();
-        let data = root.path().join("data");
-        let work = root.path().join("work");
+        // Storage relocation rejects roots that traverse symbolic links, so the
+        // fixture must use the canonical temp path (macOS maps /var -> /private/var).
+        let base = nomifun_common::paths::canonicalize_simplified(root.path()).unwrap();
+        let data = base.join("data");
+        let work = base.join("work");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&work).unwrap();
         let config = AppConfig {
