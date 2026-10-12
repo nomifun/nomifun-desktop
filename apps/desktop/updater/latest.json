@@ -1,11 +1,15 @@
 {
   "version": "0.8.5",
   "notes": "- Complete and edit official Agent presets: the six presets gain native\n  knowledge, session, terminal, and linked execution management; the\n  companion can select and apply Agent presets.\n- Repair the export path: canonical history is fully preserved and ZIP\n  archives publish atomically with cancellation, collision, and\n  file-identity protection; knowledge ZIP export validates destinations,\n  requires explicit overwrite confirmation, and unifies success/failure\n  feedback with copyable diagnostics.\n- Unify the relay and device connection entry and tighten pairing\n  authorization.\n- Migrate complete datasets when changing the data directory.\n- Make session switching seamless; render canonical turn file changes;\n  preserve composer input during turn completion.\n- Unify managed tools and Office artifact previews at runtime; refine the\n  template workspace and dark pill tabs.",
-  "pub_date": "2026-10-12T07:49:59.794Z",
+  "pub_date": "2026-10-12T08:08:07.035Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpEK2VZV1Y5OTl6K01NQ3h2TFVhSmx5Y0xOakUzYi8rRDdMTjFMSHFscWUraTdjWFpJdmg0RGNPSVN3NE1ZRHpLNzBEa1Y4THdxK1ZGWjkyekkwdndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzkwOTUzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjNPb2t3MklNUWdFTWlNSkQyc1VXenFKbnptUEFHZjFlWmZiQjVvWVdqTWJNY0gxcmd5ZEtLNXVLZ29pVkhOd0tYNFRoaGFabkNwb1pRZHNreXBKb0JBPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.5/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODF3STJDamRkZmFoMERMR1cyMDE5b3h1L3JmZkhSSVFKb1dXMkRGME9XakdMQ1lHR0d5SWp6MnpJek9NNTdxOVZHYkJuUndSVjJaN1RTOWozNWY3VndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzkyMzg5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClNyQlJWQzlOZko4a0h5OWw2aFFoSkVCcDhuUDV3TUJYNjBEYmpqTTNhanB2dCtEYzV1ZzhlQlBHcTRqOVN4NUNaUk9rVStGbE10QW5hTTNQQ0d1S0R3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.5/NomiFun_0.8.5_x64.app.tar.gz"
     }
   }
 }
