@@ -1,10 +1,6 @@
 import type { AgentPresetDocument, CapabilityCatalogItem, CapabilityId } from '@/common/types/agentPlatform';
-import { Alert, Button, Tag } from '@arco-design/web-react';
-import { useEffect, useRef, useState } from 'react';
+import { Button, Tag } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
-import { launchPluginAuthoring } from '../plugins/pluginAuthoringLaunch';
-import { isDesktopShell } from '@/renderer/utils/platform';
 import styles from './AgentContextOrder.module.css';
 
 type Props = {
@@ -13,20 +9,10 @@ type Props = {
   disabled?: boolean;
   kind?: 'context' | 'middleware';
   onChange: (document: AgentPresetDocument) => void;
-  onOpenAuthor?: (destination: string) => void | Promise<void>;
 };
 
-export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange, onOpenAuthor }: Props) {
+export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange }: Props) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const desktopShell = isDesktopShell();
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState(false);
-  const pending = useRef(false);
-  const currentOpenAuthor = useRef(onOpenAuthor);
-  currentOpenAuthor.current = onOpenAuthor;
-  const mounted = useRef(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const field = kind === 'context' ? 'context_order' : 'middleware_order';
   const labels = kind === 'context' ? 'contextOrder' : 'middlewareOrder';
   const selected = new Set(document.enabled_capabilities.map(value => value.capability.id));
@@ -36,25 +22,6 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   // Retain unavailable explicit choices so a catalog refresh cannot silently change the draft.
   const explicit = document[field] ?? [];
   const ids = [...explicit, ...[...contexts.keys()].filter(id => !explicit.includes(id)).sort()];
-  const createBeforeTool = async () => {
-    if (!desktopShell || disabled || pending.current) return;
-    pending.current = true; setCreating(true); setCreateError(false);
-    try {
-      if (mounted.current) {
-        await launchPluginAuthoring(async destination => {
-          if (!mounted.current) return;
-          if (typeof destination === 'number') return;
-          if (currentOpenAuthor.current && typeof destination === 'string') await currentOpenAuthor.current(destination);
-          else await navigate(destination);
-        }, { template: 'agent.before_tool' });
-      }
-    } catch {
-      if (mounted.current) setCreateError(true);
-    } finally {
-      pending.current = false;
-      if (mounted.current) setCreating(false);
-    }
-  };
   const move = (id: CapabilityId, offset: number) => {
     if (disabled) return;
     const index = ids.indexOf(id), target = index + offset;
@@ -66,16 +33,7 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   return <section className={styles.section} aria-label={t(`agentSettings.${labels}.title`)}>
     <h3>{t(`agentSettings.${labels}.title`)}</h3>
     <p>{t(`agentSettings.${labels}.hint`)}</p>
-    {kind === 'middleware' && <>
-      <p>{t('agentSettings.middlewareOrder.toolAccess')}</p>
-      <div className={styles.authoring}>
-        <Button size='small' loading={creating} disabled={!desktopShell || disabled || creating} onClick={() => void createBeforeTool()}>
-          {t('agentSettings.middlewareOrder.createBeforeTool')}
-        </Button>
-        <p>{t('agentSettings.middlewareOrder.createHint')}</p>
-      </div>
-      {createError && <Alert type='warning' content={t('agentSettings.middlewareOrder.createFailed')} />}
-    </>}
+    {kind === 'middleware' && <p>{t('agentSettings.middlewareOrder.toolAccess')}</p>}
     {!ids.length && <p>{t(`agentSettings.${labels}.empty`)}</p>}
     <ol className={styles.list}>
       {ids.map((id, index) => {

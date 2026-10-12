@@ -1055,6 +1055,16 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         }
         Ok(())
     }
+
+    async fn delete_remote_binding_if_current(&self, expected: &RemoteBinding) -> Result<(), ControlPlaneError> {
+        let digest = digest_payload(&expected.agent_binding).map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        let changed = sqlx::query("DELETE FROM remote_bindings WHERE remote_binding_id = ? AND owner_user_id = ? AND name = ? AND binding_version = ? AND agent_binding_digest = ?")
+            .bind(expected.remote_binding_id.as_ref()).bind(expected.owner_user_id.as_ref()).bind(&expected.name)
+            .bind(i64_from_u64(expected.agent_binding.binding_version,"binding_version")?).bind(digest.as_ref())
+            .execute(&self.pool).await.map_err(sql)?;
+        if changed.rows_affected() != 1 { return Err(conflict("RemoteBinding changed before its exact deletion")); }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

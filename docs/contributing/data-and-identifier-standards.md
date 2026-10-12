@@ -118,16 +118,14 @@ infer identity or reference semantics from a column suffix alone.
 
 ## 4. Logical references replace physical foreign keys
 
-Non-Agent product DDL must not contain the following. Two frozen exception
-groups may use physical foreign keys and `ON DELETE`/`ON UPDATE` actions
-exactly as declared in the canonical baseline: the canonical Agent Store
-tables, and the Unified Plugin tables (`plugins`, `plugin_drafts`,
-`plugin_credential_bindings`, `plugin_grants`, `plugin_mutations`,
-`plugin_artifacts`, and related plugin-owned tables). The baseline also ships
-registered guard/validator triggers in a few domains (channel, requirements,
-terminal, creation, plugin, Agent mutation guards). These exceptions do not
-extend to other domains, and no new domain may add physical constraints,
-cascades, or triggers without an explicit schema-contract update.
+Non-Agent product DDL must not contain the following. The current frozen
+exception is the canonical Agent Store tables, which retain the physical keys
+and cascade actions declared in the baseline. Registered guard/validator
+triggers in channel, requirements, terminal, creation and Agent domains remain
+explicit schema-contract exceptions. Published migration files are immutable;
+retired application tables are removed through forward migration rather than
+checksum changes. No new domain may add physical constraints, cascades or
+triggers without an explicit schema-contract update.
 
 ```text
 FOREIGN KEY

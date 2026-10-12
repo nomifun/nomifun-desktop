@@ -16,6 +16,7 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
   'companion.default': 'companion.default',
   'customer-service.default': 'customerService.default',
   'creative-studio.default': 'creativeStudio.default',
+  'app.developer': 'app.developer',
 };
 
 /** One explicit authoring detour in browser history; never model routes, credentials, or Runtime selection. */
@@ -124,9 +125,9 @@ export const humanizeResourceKind = (resourceKind: string): string =>
 export const MODULE_I18N_KEYS: Readonly<Record<string, string>> = {
   'agent.collaboration': 'agentCollaboration',
   'model.management': 'modelManagement',
+  'app.hosting': 'appHosting',
   'knowledge.management': 'knowledgeManagement',
   'session.management': 'sessionManagement',
-  'plugin.development': 'pluginDevelopment',
   'automation.schedule': 'automationSchedule',
   browser: 'browser',
   'channel.messaging': 'channelMessaging',

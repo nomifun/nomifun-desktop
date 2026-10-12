@@ -106,8 +106,6 @@ pub(crate) struct EngineKernelAssembly {
     pub browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
-    pub agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
-    pub plugin_development: super::plugin::PluginRouterState,
 }
 
 fn constraints_allow_action(
@@ -168,8 +166,6 @@ pub struct EngineKernelSession {
     workspace_watch_context: Option<Arc<dyn ContextContributor>>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
-    plugin_bindings: Arc<super::engine_plugin_bindings::FrozenAgentPluginBindings>,
-    plugin_development: Option<super::plugin::PluginRouterState>,
     state: Mutex<State>,
 }
 
@@ -239,12 +235,6 @@ impl EngineKernelSession {
             return Err(failure(error));
         }
         let constraints = ExecutionConstraints::from_extra(&session.session().extra)?;
-        let plugin_bindings = Arc::new(
-            super::engine_plugin_bindings::FrozenAgentPluginBindings::freeze(
-                assembly.agent_plugins.clone(),
-                constraints.restricted(),
-            )?,
-        );
         let snapshot = session.snapshot();
         let session_id = AgentSessionId::from(session.session().conversation_id.clone());
         let principal = session.principal();
@@ -417,9 +407,6 @@ impl EngineKernelSession {
             workspace_watch_context,
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
-            plugin_bindings,
-            plugin_development: selected().any(|item| item.capability.id.as_ref() == nomifun_plugin_development::MODULE_ID)
-                .then(|| assembly.plugin_development.clone()),
             state: Mutex::new(State::default()),
         })
     }
@@ -443,6 +430,12 @@ impl EngineKernelSession {
     }
     pub fn active_state(&self) -> &Arc<SessionCapabilityState> {
         &self.active
+    }
+    pub fn workspace(&self) -> &str {
+        &self.workspace
+    }
+    pub(super) fn workspace_root_identity(&self) -> Option<&std::path::Path> {
+        self.git_root.as_deref()
     }
     pub fn execution_constraints(&self) -> ExecutionConstraints {
         self.constraints
@@ -679,23 +672,7 @@ impl EngineKernelSession {
         self.kernel.snapshot().map_err(failure)
     }
 
-    /// Unified Plugin Actions are supplied by the Action/Binding adapter.
-    pub async fn plugin_action_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
-        Ok(self.plugin_bindings.tool_plan())
-    }
-
-    pub fn wrap_model_middleware(
-        &self,
-        inner: Arc<dyn nomifun_chat_model_broker::EngineModelPort>,
-    ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
-        Ok(self.plugin_bindings.wrap_model(inner))
-    }
-
-    pub fn has_unscoped_tool_hooks(&self) -> bool {
-        self.plugin_bindings.has_unscoped_tool_hooks()
-    }
-
-    pub async fn plugin_context_for_turn(
+    pub async fn capability_context_for_turn(
         &self,
         turn: &nomifun_ai_agent::context_contributor::TurnContext,
         cancellation: tokio_util::sync::CancellationToken,
@@ -719,10 +696,6 @@ impl EngineKernelSession {
             };
             contributions.extend(context);
         }
-        let plugin_context = self.plugin_bindings
-            .context_for_turn(turn, cancellation)
-            .await?;
-        contributions.extend(plugin_context);
         Ok((!contributions.is_empty()).then(|| contributions.join("\n\n")))
     }
 
@@ -731,7 +704,10 @@ impl EngineKernelSession {
         full: &EngineToolPlan,
         active: &std::collections::BTreeSet<nomifun_agent_contracts::CapabilityId>,
     ) -> Result<EngineToolPlan, AppError> {
-        self.plugin_bindings.retain_active(full, active)
+        EngineToolPlan::new(full.model_definitions().into_iter().filter_map(|definition| {
+            let binding = full.binding(&definition.name)?;
+            active.contains(&binding.capability_id).then(|| binding.clone())
+        })).map_err(failure)
     }
 
     pub fn tool_discovery_port(
@@ -1001,15 +977,7 @@ impl EngineKernelSession {
                 "tool surface already installed or resources closed",
             ));
         }
-        let kernel_plan = EngineToolPlan::new(plan.model_definitions().into_iter().filter_map(
-            |definition| {
-                let binding = plan
-                    .binding(&definition.name)
-                    .expect("plan definitions have bindings");
-                (!self.plugin_bindings.contains_tool_binding(binding)).then(|| binding.clone())
-            },
-        ))
-        .map_err(failure)?;
+        let kernel_plan = plan.clone();
         let exposures = kernel_plan.model_definitions().into_iter().map(|definition| {
             let binding = kernel_plan
                 .binding(&definition.name)
@@ -1020,13 +988,8 @@ impl EngineKernelSession {
                 action_id: binding.action_id.clone(),
             }
         });
-        // The complete frozen Plugin surface must be present; only its
-        // presentation flag follows the plan.
-        let plugin_part = self.plugin_bindings.tool_plan_presented_as(&plan)?;
         let canonical = self
-            .compile_tool_plan(exposures)?
-            .merged(&plugin_part)
-            .map_err(failure)?;
+            .compile_tool_plan(exposures)?;
         if plan != canonical {
             return Err(failure(
                 "tool plan differs from the canonical Session mapping",
@@ -1088,7 +1051,6 @@ impl EngineKernelSession {
             }) as Arc<dyn nomifun_engine_core::EngineToolInvoker>,
             None => invoker,
         };
-        let invoker = self.plugin_bindings.wrap_tools(invoker);
         // Check the exact frozen mapping before host adapters; none may
         // dispatch using caller-supplied capability or effect labels.
         let invoker = ConstrainedTools {
@@ -1275,20 +1237,9 @@ impl EngineKernelSession {
         })
         .await;
         let hosted = guard_effect_settlement(|| self.ensure_hosted_effects_settled()).await;
-        let authoring = guard_effect_settlement(|| async {
-            if let Some(state) = &self.plugin_development {
-                let root = self.state.lock().map_err(|_| failure("resource state poisoned"))?
-                    .turn.as_ref().map(|turn| turn.root.clone());
-                if let Some(root) = root {
-                    super::plugin_authoring::cleanup_authoring_turn(state, &self.principal.principal_id,
-                        self.session_id.as_ref(), &root).await.map_err(failure)?;
-                }
-            }
-            Ok(())
-        }).await;
         for (stage,failed) in [("admission",admission.is_err()),("process_owner",processes.is_err()),
             ("tool_tasks",tasks.is_err()),("resource_tasks",resource_tasks.is_err()),("git_owner",git.is_err()),
-            ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err()),("plugin_authoring",authoring.is_err())] {
+            ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err())] {
             if failed {tracing::warn!(stage,session_id=self.session_id.as_ref(),"owned resource cleanup remains unproven");}
         }
         admission?;
@@ -1305,7 +1256,6 @@ impl EngineKernelSession {
         git?;
         mcp?;
         hosted?;
-        authoring?;
         Ok(())
     }
 

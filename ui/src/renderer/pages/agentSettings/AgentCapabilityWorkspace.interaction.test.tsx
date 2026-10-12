@@ -1,8 +1,10 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
+import { appHosting } from '@/common/adapter/appHostingBridge';
+import { SWRConfig } from 'swr';
 import { Modal } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
@@ -10,6 +12,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import {
   asCapabilityId,
+  asDigestHex,
   asPackageId,
   createEmptyAgentPresetDocument,
   type AgentCatalogResponse,
@@ -20,13 +23,14 @@ import {
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
 import settings from '../../services/i18n/locales/en-US/settings.json';
+import appHostingLocale from '../../services/i18n/locales/en-US/appHosting.json';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
   fallbackLng: 'en-US',
-  resources: { 'en-US': { translation: { agentSettings: en, common, settings } } },
+  resources: { 'en-US': { translation: { agentSettings: en, common, settings, appHosting: appHostingLocale } } },
   interpolation: { escapeValue: false },
 });
 
@@ -86,6 +90,14 @@ const knowledge = moduleItem('knowledge', [['knowledge/search', 'read_sensitive'
 const browser = moduleItem('browser', [['browser/observe', 'read_sensitive']]);
 const unavailableComputer = moduleItem('computer', [['computer/observe', 'read_sensitive']], ['computer']);
 const availableComputer = moduleItem('computer', [['computer/input', 'physical']], ['computer']);
+const appDevelopment = moduleItem('app.hosting', [
+  ['app.hosting/import', 'write_durable'],
+  ['app.hosting/list', 'read_sensitive'],
+  ['app.hosting/start', 'write_durable'],
+  ['app.hosting/status', 'read_sensitive'],
+  ['app.hosting/stop', 'write_durable'],
+  ['app.hosting/guide', 'read_local'],
+]);
 const workspaceGuard: CapabilityModuleCatalogItem = {
   ...moduleItem('workspace.guard', [['workspace.guard/read', 'read_local']]),
   authoring_policy: 'dependency_only',
@@ -136,22 +148,87 @@ function mount(
   };
   const result = render(
     <MemoryRouter>
-      <I18nextProvider i18n={testI18n}><Harness /></I18nextProvider>
+      <SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={testI18n}><Harness /></I18nextProvider></SWRConfig>
       <Location />
     </MemoryRouter>
   );
   return { ...result, state: () => current };
 }
 
+beforeEach(() => { spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]); });
 afterEach(async () => {
   await act(async () => {
     Modal.destroyAll();
   });
   cleanup();
   document.body.replaceChildren();
+  mock.restore();
 });
 
 describe('Agent capability Module workbench', () => {
+  test('offers communicating app development without enabling it until the user selects it', async () => {
+    const screen = mount(documentWith([]), catalog([files, appDevelopment]));
+    const moduleName = en.modules.appHosting.name;
+    const toggle = screen.getByRole('switch', { name: `Enable ${moduleName}` });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(screen.state().enabled_capabilities).toEqual([]);
+    expect(screen.getByText(en.modules.appHosting.description)).toBeTruthy();
+
+    fireEvent.input(screen.getByRole('searchbox', { name: en.workbench.searchModules }), {
+      target: { value: 'app.hosting/guide' },
+    });
+    expect(screen.getByRole('heading', { name: moduleName })).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'Enable Workspace I/O' })).toBeNull();
+    expect(screen.state().enabled_capabilities).toEqual([]);
+
+    await act(async () => { fireEvent.click(toggle); });
+    await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([{
+      capability: appDevelopment.module,
+      action_allowlist: ['app.hosting/guide', 'app.hosting/list', 'app.hosting/status'],
+    }]));
+    expect(screen.getByRole('switch', { name: `Disable ${moduleName}` }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('button', { name: /6 actions and contributions/ })).toBeTruthy();
+    const guide = screen.getByRole('checkbox', { name: `Allow ${en.actionLabels.guide} in ${moduleName}` }) as HTMLInputElement;
+    expect(guide.checked).toBe(true);
+    fireEvent.click(guide);
+    expect(screen.state().enabled_capabilities[0].action_allowlist).toEqual(['app.hosting/list', 'app.hosting/status']);
+    fireEvent.click(screen.getByRole('switch', { name: `Disable ${moduleName}` }));
+    expect(screen.state().enabled_capabilities).toEqual([]);
+  });
+
+  test('keeps an existing five-action app grant intact when the development guide becomes available', async () => {
+    const savedActions = appDevelopment.actions.slice(0, 5).map((action) => action.action_id);
+    const initial = documentWith([[appDevelopment.module, savedActions]]);
+    const screen = await act(async () => mount(initial, catalog([files, appDevelopment])));
+    fireEvent.click(screen.getByRole('button', { name: /6 actions and contributions/ }));
+    const guide = screen.getByRole('checkbox', {
+      name: `Allow ${en.actionLabels.guide} in ${en.modules.appHosting.name}`,
+    }) as HTMLInputElement;
+    expect(guide.checked).toBe(false);
+    expect(screen.state()).toEqual(initial);
+    fireEvent.click(guide);
+    expect(screen.state().enabled_capabilities[0].action_allowlist).toEqual([
+      'app.hosting/guide', 'app.hosting/import', 'app.hosting/list',
+      'app.hosting/start', 'app.hosting/status', 'app.hosting/stop',
+    ]);
+  });
+
+  test('App MCP tools are discoverable and selected explicitly in the same Agent document', async () => {
+    const appId = '0190f5fe-7c00-7a00-8000-000000000077';
+    const tool = moduleItem(`nomi.mcp.v1.${'b'.repeat(64)}`);
+    spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([{ app_id: appId, name: 'My app', url: 'http://127.0.0.1:4317/mcp',
+      state: 'running', connection_status: 'connected', tools: [{ name: 'read' }], reason: null }]);
+    const currentCatalog = catalog([files, tool]);
+    currentCatalog.mcp_tools.push({ server_id: appId, canonical_tool_key: 'read', capability: tool.module, source_package: tool.source_package,
+      schema_digest: asDigestHex('c'.repeat(64)), materialization_version: '1' });
+    const view = mount(documentWith([]), currentCatalog);
+    const name = `My app / ${tool.display_name}`;
+    const button = await view.findByRole('switch', { name: `Enable ${name}` });
+    expect(view.state().enabled_capabilities).toEqual([]);
+    fireEvent.click(button);
+    expect(view.state().enabled_capabilities).toEqual([{ capability: tool.module, action_allowlist: [tool.actions[0].action_id] }]);
+    expect(view.getByRole('region', { name: appHostingLocale.tools.title })).toBeTruthy();
+  });
   test('shows an honest empty catalog state', () => {
     const screen = mount(documentWith([]), catalog([]));
     expect(screen.getByRole('status').textContent).toContain(en.workbench.noModules);
@@ -183,20 +260,20 @@ describe('Agent capability Module workbench', () => {
     { catalogued: true, selected: false },
     { catalogued: true, selected: true },
     { catalogued: false, selected: true },
-  ])('shows plugin development while preserving saved grants (%j)', async ({ catalogued, selected }) => {
-    const plugin = moduleItem('plugin.development', [
-      ['plugin.development/list', 'read_local'],
-      ['plugin.development/create', 'write_durable'],
+  ])('shows application hosting while preserving saved grants (%j)', async ({ catalogued, selected }) => {
+    const plugin = moduleItem('app.hosting', [
+      ['app.hosting/list', 'read_local'],
+      ['app.hosting/create', 'write_durable'],
     ]);
     const pluginGrant = {
       capability: plugin.module,
-      action_allowlist: ['plugin.development/list', 'plugin.development/create'],
+      action_allowlist: ['app.hosting/list', 'app.hosting/create'],
     };
     const screen = mount(
       documentWith(selected ? [[pluginGrant.capability, [...pluginGrant.action_allowlist]]] : []),
       catalog(catalogued ? [files, plugin] : [files])
     );
-    const pluginName = catalogued ? en.modules.pluginDevelopment.name : 'plugin.development';
+    const pluginName = catalogued ? en.modules.appHosting.name : 'app.hosting';
     const assertVisible = () => {
       expect(screen.getByRole('heading', { name: pluginName })).toBeTruthy();
       expect(screen.getByRole('switch', { name: `${selected ? 'Disable' : 'Enable'} ${pluginName}` })

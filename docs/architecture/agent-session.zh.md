@@ -6,7 +6,40 @@ AgentSession 是 NomiFun 会话、回合、内容、效果和取消的唯一事�
 
 ## 事实与派生数据
 
-插件工作台复用同一 canonical Session owner 与 Nomi Runtime。不可变 SessionPurpose 保存在已有 `session/opening.metadata`，新创作取 PluginAuthoring，普通创建取 Conversation；没有增加表列或产品绑定账本。读取与分页只从 typed opening 事实派生归属，合法当前代旧 opening 缺省为 Conversation，缺失或非法事实拒绝读取。普通 metadata 更新不能改变归属，fork 必须保持父会话归属。产品 projection 仅展示该事实，不授予工具权限。
+应用开发使用普通 Conversation 与通用 coding 能力，不创建专属创作流水线。不可变 SessionPurpose 保存在已有 `session/opening.metadata`；退役的 PluginAuthoring 仅保留 typed 只读识别，禁止新建、执行、恢复或 fork，允许原 owner 取消及删除。读取与分页只从 typed opening 事实派生用途，合法当前代旧 opening 缺省为 Conversation，缺失或非法事实拒绝读取。普通 metadata 更新不能改变用途，产品 projection 不授予工具权限。
+
+应用页工作区固定官方 `app.developer`（内置应用），模型及推理强度仍由用户选择，使用现役普通 Session 创建和切换合同。当前应用目录就是明确冻结的 workspace_root。AppRecord 中的 `development_session_id` 只提供可验证的导航引用；重开校验 owner、普通用途、固定模板与确切工作区，不从这个引用获得新权限或独占所有权。删除应用保留普通开发 Session、事件、payload 和合法历史；目录已删除时不能凭历史继续执行或补造工作区。
+
+一个应用对应一个独立项目，项目可以包含多个普通 Session；不同应用不共享项目根目录。
+项目历史仅查询确切 owner、普通用途和当前显式 typed workspace binding，
+不把默认工作区安装级占位参数当作项目目录。旧资源定义、最近导航和显示路径偏好均不构成归属或权限。归档状态来自 canonical metadata。
+不同 Session 的内容独立保存，项目目录中不复制 transcript，不为新会话拼接全部历史。
+新建明确工作目录的 Session 优先复用当前同 owner、同 canonical root 的既有 scoped `project_memory`
+resource 身份；首次建立该命名空间时使用 owner 与 canonical root 的摘要。同项目的新会话复用现役记忆状态，
+Agent 切换与正式存储位置迁移保留该逻辑身份。已有默认记忆 binding 不被迁移或暗改。
+项目记忆保留现役 Host 内存存储合同，不声称跨重启持久；项目源码和 canonical 会话历史持久保留。
+
+Agent 工作台的系统能力「NomiFun 应用开发」沿用冻结模块/动作选择。只有 `app.developer` 默认选入 `app.hosting` 十个动作，其他官方模板默认不启用；已有个人配置和 Session 不自动扩权。详细指南只在 `read_app_guide` 调用时返回。当前应用定位、元数据/命令更新、导入、预览及启停使用原应用 owner；有变更的 Agent 操作经现役 HostedEffectReceipts 写入同一 Effect 事实链，使用 Kernel 准入的确切 Session/Turn/operation/Snapshot 与工具事件因果，不从消息投影或最新 Turn 借权。Host 保留操作与结算直到结束，已知部分失败不表示未执行，未确认结果保持未结算和不可自动重放围栏。
+
+手工导入、覆盖和删除持有目录及全部当前项目 Session 的既有准入围栏，在应用 gate 内复核导航引用，拒绝活动 Turn、pending/unknown Effect 和未结束的 native producer。创建、fork、binding 切换、warmup 和准入使用同一现有内存锁注册表的目录读围栏，封住成员查询后的新会话竞争。此接缝不改写 Session 事实，不新增绑定或执行账本。
+处于 `deleting` 的 Session 不进入普通历史；原 typed 删除候选仍保护其确切项目目录，
+不能因它已从 live 列表消失或 Runtime 缓存已释放而忽略未知效果与删除清理。
+
+已准入的 Agent 导入持有同目录与项目 Session 围栏以及现役原生工作区写锁，精确校验本次
+Session、Turn、Snapshot、operation、工具因果和 pending Effect 收据，只允许本次调用自身的效果。
+其他活动回合、pending/unknown 效果不因 Agent 导入获得豁免；拒绝使用原 Effect 的执行前拒绝结算。
+
+应用开发入口在新的闲置提交前，可通过显式 `refresh_workflow` 命令将当前代旧空职责配置更新为
+正式内置应用职责。目标仅从原确切 Revision/Snapshot 派生，保留模型、权限、Skill/MCP 和所有
+typed resources；在原 Runtime teardown、Effect 结算和 CAS 围栏内追加普通 ContextOnly binding
+transition。旧配置、历史和 Session 身份保持原值，GET/重开不触发更新，不暗改 Runtime 系统指令。
+
+应用界面在开发回合结束时发出的配置识别请求使用完成通知的确切已接受消息引用。
+Host 只从该 canonical 输入及对应启动事实解析操作 ID，复核成功终态、后继回合及原生/效果
+结算后才处理同一应用。消息 UUID、输入幂等键和操作 ID 不互换，不从消息投影、当前最新回合
+或模型文字补造关联。配置识别不启动程序，也不作者或重写 Session 内容。
+
+删除应用时，围栏内核验 canonical opening 来源，等待经当前应用入口创建的多个普通 Session 的正常 Runtime 资源 teardown，然后释放闲置的确切工作区 File/Artifact/VCS owner 缓存与原生目录句柄。保留 Session、Turn、Event、Payload、Effect 和资源定义原值；无关同目录 fork、其他 Session 的活动资源、仍被调用持有的 owner 或未确认的 Git 效果拒绝释放，不为物理删除关闭无关 Session 或进程。
 
 | 数据 | 所有者与用途 |
 | --- | --- |
@@ -35,7 +68,7 @@ flowchart LR
 
 `engine_history.rs` 从 canonical events 及已解析 payload 构建 typed history，不读取 `agent_messages` 来决定模型消息角色。Runtime 回合通过有序的 native journal 重建；缺失结构化日志不能降级成聊天文本继续执行。
 
-插件创作继承用户所选 Agent 的现有能力、Skill、MCP 和 typed resources，不增加插件工具专属能力上限，也不设置三次失败或 64 步的插件专属暂停计数。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。自动结构检查、预览和交互用例作为创作工具保留，结算读取真实 typed 工具与产物事实，不持久化第二份进度账本或插件专用 checkpoint。当前会话工具使用证明复用精确 Turn 的 `turn_output_facts`，在同一读取事务中解析 inline 与 stored Payload，并核对实际 Runtime 调用、Host dispatch 和同 call 的 settlement；缺失或非法事实拒绝证明。恢复使用原生 Session 的执行预算与安全机制，不增加预算。
+应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 
@@ -96,13 +129,14 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 ### 官方预设的能力与资源补齐
 
-官方 seed 按真实业务 Action 配置六种预设，不以人格文案或模块名称替代授权。各预设的职责保持明确：
+官方 seed 按真实业务 Action 配置七种预设，不以人格文案或模块名称替代授权。各预设的职责保持明确：
 
 | 预设 | 默认能力边界 |
 | --- | --- |
 | `chat.minimal` | 保持零模块、零 Action；普通文字对话不因本次补齐而获得工具权限。 |
-| `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及插件开发、SSH、知识库和会话管理。 |
-| `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、插件开发、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
+| `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及 SSH、知识库和会话管理。 |
+| `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
+| `app.developer` | 完整 Coding 基线加应用托管十个动作；应用目录固定为工作区，普通多会话与运行设置共用原 owner。其他预设不默认选择应用托管。 |
 | `companion.default` | 保留伙伴人格、长期记忆、机器人视觉、渠道和计划任务；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
 | `customer-service.default` | 客服笔记读写与交接、知识检索、渠道发送和回复，以及文件、进程、产物、研究和计划任务；不默认授予全局知识库或跨会话、终端管理。 |
 | `creative-studio.default` | 媒体、Canvas、素材、模板、Office、文件、进程、产物、项目记忆、研究、浏览器、协作和计划任务；保留三个创作 Package Skill。 |
@@ -121,7 +155,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 App 的编译消费面始终是 desktop，不由 Browser/Computer 适配器是否编译决定。可选设备授权上限只对精确固定的 bundled 公开 Provider 延迟物理平台判断：必须是单公开成员、单资源种类、完整 Action 操作合同，且没有私有实现、依赖、Context 或 Event。物理平台不支持的成员只记为当前编译对象内的不可执行集合，不写入 Snapshot 或 checkpoint；资源绑定和调用仍拒绝它。其他 Provider、缺失合同和非 Agent 直接操作继续使用严格准入。
 
-授权目录不按模块或动作总数 128 截断。启用 ToolSearch 时，初始 schema 展示按 24 KiB 和 112 个工具投影，给 Runtime 控制和一次五个搜索匹配留位；完整绑定及 schema 保留在原 ToolPlan。后继搜索使用最多 117 个授权工具的展示窗口，最新匹配完整保留，旧工具仍能再次搜索。canonical 恢复和预激活采用相同规则；没有 ToolSearch 时只检查实际组装后的可见工具数。搜索窗口是展示状态，不是第二套授权或持久账本。
+授权目录不按模块或动作总数 128 截断。启用 ToolSearch 时，初始 schema 展示按 24 KiB 和 112 个工具投影，给 Runtime 控制和一次五个搜索匹配留位；完整绑定及 schema 保留在原 ToolPlan。后继搜索成组保留最新最多五个匹配，旧展示工具填充剩余窗口，未展示的工具仍可再次搜索。Host 显式预激活直接使用最终已授权的冻结调用名，一次原子展示整个请求集合，不拆成五项搜索批次而让组内工具相互逐出。最新搜索集合与 Host 显式集合都可超过 24 KiB 软目标，但仍受最多 117 个授权定义、含 Runtime 控制最多 128 个可见工具，以及完整请求上下文预算的硬限制；超限时整组拒绝，不部分修改展示集合。canonical 恢复按原事实重建展示状态并应用相应集合规则；没有 ToolSearch 时只检查实际组装后的可见工具数。搜索窗口是展示状态，不是第二套授权或持久账本。
 
 ### 同一现役数据集的位置迁移
 
@@ -136,9 +170,19 @@ App 的编译消费面始终是 desktop，不由 Browser/Computer 适配器是�
 产品托管知识库由当前 `knowledge_bases.managed` 与精确注册根证明所有权，再转换当前冻结的 `knowledge_root`；
 外部知识库保持原路径。
 
+应用托管 owner 的纯离线登记检查为本次迁移提供已验证的应用 UUID，canonical writer 再核对真实
+installation owner，只认 `{source_data}/app-hosting/apps/{app_id}` 的精确登记根。检查不启动 HostingOwner，
+不执行孤儿进程恢复；registry 中任何未确认的 identity、PID、running 状态或操作都阻止迁移。
+完整数据副本准备后，只把 staging registry 的 `record.directory` 改为最终目标根，其他字段保持原值。
+发布协调器逐项核对源登记与该精确位置变化，应用源码及其他副本文件仍通过完整大小和摘要校验；
+最终 installed manifest 覆盖已改写的登记，发布恢复不重放迁移或读取旧盘补造权限。
+未发布副本的重试允许逐项保留原始精确副本或仅目录已重写的登记，提交仍要求全部登记完成重写。
+已有验证副本时不再打开源 SQLite，避免只读探测产生 WAL/SHM；源完整摘要、纯应用检查与暂存库校验继续执行。
+
 转换使用原 canonical Store 的单一写事务，将所有受影响 Session 的完整资源集合成组更新，重新计算资源定义 ID，
 并追加 `session/agent-binding-changed` 的 `workspace_relocation` typed proof。proof 记录源数据根、源工作根、
-目标数据根、托管知识库 ID 及完整前后资源定义；只允许托管位置参数变化，owner、资源身份、权限、连接与其他参数精确不变。
+目标数据根、托管知识库 ID、可选 `managed_app_workspace` 的应用/owner 证明及完整前后资源定义；
+只允许托管位置参数变化，owner、资源身份、权限、连接与其他参数精确不变。
 此明确的位置转换保留同一 Revision/Snapshot，只增加 binding version；同 Snapshot 转换必须验证 proof 和 request digest，
 不能成为普通 Agent 或能力切换的例外。原 Event/Payload、不可变 Snapshot 和历史资源定义不改写，也不建立第二份 binding 账本。
 重试直接验证原转换事件的精确操作和当前绑定，不依据额外幂等日志猜测完成状态。
@@ -146,11 +190,17 @@ App 的编译消费面始终是 desktop，不由 Browser/Computer 适配器是�
 每次位置变化都记录 Session-owned `conversations/<Session ID>` 命名空间，即使逻辑资源定义没有变化，
 或当前 Agent 已选择外部项目。可选 `managed_session_namespace` 只引用该 Session opening 中精确的默认 Workspace 定义，
 原 writer 和 reader 都核验原始归属与连续的位置证明链。当前 selected Workspace/Process 的根只有精确等于该 Session
-托管子目录时才更新位置参数；资源 ID、权限与连接保持原值，整个源工作根或其他相似路径不能被自动收编。
+托管子目录时才更新位置参数；已注册应用通过自己的 `managed_app_workspace` 证明更新精确应用根上的
+Workspace、Process Session 和 scoped project-memory 位置参数。它们的逻辑资源 ID、权限与连接保持原值，
+同项目的新 Session 继续复用已搬迁的记忆身份。非登记、相邻或外部项目保持原路径，整个源工作根或其他
+相似路径不能被自动收编。
 历史消息只在已鉴权的 canonical 投影出口附加临时 `managed_file_paths`，按原始来源 seq、当时托管阶段、
 精确 Session 根和规范相对路径解析到当前根；用户在迁移后明确引用旧目录、其他 Session 或外部项目不会被重解释。
 原附件展示名的时间戳去除只通过同一 accepted 输入中的精确 `files` 回执消歧，不搜索磁盘或改写历史原文。
 图片、附件与工具文件打开共用此投影映射；旧盘不可用不影响已迁移文件访问。
+应用删除后保留的普通 Session 不授予后续数据迁移应用目录的权限。若精确当前资源定义与完整位置证明仍合法，
+但其已删除应用根位于当前数据集之外，历史 reader 将其视为外部根，不生成新应用路径映射或重建目录。
+损坏的证明或当前资源定义继续拒绝读取；默认托管 Session 命名空间仍须匹配有效数据根。
 
 源库复制前和目标发布前都校验活动/暂停 Turn、Attempt、可恢复 native checkpoint、pending/unknown 效果和 Patch recovery。
 服务器锁与 Turn 终态不证明子进程退出；离线校验还读取同一 canonical Turn 的 native dispatch、owner settlement、
@@ -185,7 +235,7 @@ Session 只持久化一个 native `reasoning_effort`，取值由共享 `Reasonin
 ### 全局扩展与输入框选择
 
 MCP 与 Skill 是所有 Agent 共用的全局能力，预设不持有扩展总开关。创建或空闲时明确更新会话选择，
-host 捕获全局技能库，并把选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
+host 捕获全局技能库；应用 MCP 来源必须由 Agent/会话明确选择，默认不全局注入。将选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
 现有 Agent Store，不创建另一份绑定或权限台账。Library Skill 冻结正文、辅助资源、来源与摘要，
 `selected` 控制默认输入注入；Package Skill 保留现役精确锁与原 JSON 合同。
 
@@ -292,11 +342,17 @@ Execution 的 Step spec 是任务输入，不是另一份产物合同。完成�
 因此丢失。该阶段再次提议执行工具属于审核协议错误，不能重放已结算效果，也不能把未派发的
 新提议计成实际执行失败或覆盖同一 Turn 中已有的工具回执。审核纠正必须明确保留这些 canonical
 观察；实际失败、未知效果、未完成工作和证据不足仍由原有完成门槛拒绝。
+模型已明确建立的执行计划仍有未完成步骤时，普通进度文字不能提前进入只允许报告的完成审核。
+该判断使用当前 Runtime 的正式 execution plan，不依赖用户是否将需求写成编号列表，也不根据
+应用页或模型正文再建一套任务账本。既有预算、已关闭审核、真实失败与未知效果围栏继续生效。
 审核阶段及其有界协议纠正预算由同一个 native checkpoint 保存；暂停恢复和上下文刷新
 不能重新开放已关闭的执行工具。新的 accepted input 才能明确解除对应审核阶段，旧格式
 checkpoint 不通过字段回退重建审核状态。
 
 自动工具路由只能提示当前输入中明确的动作和对象。内部委派输入只用 step_spec 判断意图，task_brief、参考内容和代码中的媒体词不能截断已授权工具目录。工具搜索覆盖全部已授权工具，包括已显示和延迟显示的工具；提前展示某个工具不增加权限。
+应用开发每轮可提前展示最终 turn plan 中已授权且启用的 `app.hosting` 管理动作，避免一次有界搜索
+遗漏更新、停止等当前能力动作。仍使用冻结工具 schema 和原有执行校验；未选择该能力的普通
+Agent 不展示这些工具，连接指南正文按需读取。提前展示不修改 Snapshot、权限或完成审核阶段。
 
 取消先由 canonical owner 在同一事务中固定目标 Turn；Runtime 停止只使用该回执的目标和当前 native execution generation。重复取消、迟到 StopTurn 或原 Turn 已结束时不能取消后继回合。AgentExecution 的 StopTurn write-ahead intent 保存稳定取消标识和精确目标 OperationId；决策续执行与普通 Step 共用调度 job，使其他任务结算、取消和租约丢失能继续被处理。
 

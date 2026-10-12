@@ -32,7 +32,14 @@ use crate::store::{
 use crate::wire::{document_payload, payload_document, wire_cast};
 
 const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
-const PLUGIN_AUTHORING_MODULE_ID: &str = "plugin.development";
+
+// This small product workflow is authored into new immutable AppDeveloper
+// Revisions. The detailed platform guide remains an on-demand tool resource.
+const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in application developer. Treat a request to create, import or change an application as completing the usable application in this workspace, including its application record and preview, not just writing source files. At the start of application work, discover app.hosting/current and app.hosting/guide with ToolSearch, then call current_app and read_app_guide. When current_app returns an application, keep its exact app_id and edit its existing managed workspace; do not import a second copy or create another application. Infer a useful application name, short description and appropriate tags from the user's request, and use update_app to keep the actual application metadata and ordinary runtime settings aligned with the files you create. Read existing project scripts and configuration; preserve user data and existing explicit settings unless the requested change requires modifying them. Use update_app with detect_settings:true to recognize ordinary supported project commands, then inspect the returned settings and fill any missing custom commands or real web_url yourself. Settings that do not apply may remain null; never invent install or build commands. Once the files and configuration are ready, call preview_app or rebuild_app on the same application through the hosting owner; do not start a separate unmanaged web server. Verify the returned state, actual HTTP response and relevant business behavior using already-authorized tools, and use the same owner to repair and restart after changes. Clearly distinguish verified behavior from checks unavailable with your granted tools. A generated file, a running process, or an empty web_url does not prove that an embedded preview works. Finish with the application's actual name, preview result and any real remaining failure; never claim preview success from prose alone. For ordinary questions or an explicit request to inspect only, do not modify or start an application.";
+
+fn official_template_instructions(key: OfficialPresetKey) -> &'static str {
+    if key == OfficialPresetKey::AppDeveloper { APP_DEVELOPMENT_INSTRUCTIONS } else { "" }
+}
 
 fn required_chat_features<'a>(
     capability_ids: impl IntoIterator<Item = &'a str>,
@@ -295,6 +302,51 @@ impl AgentControlPlane {
         })
     }
 
+    /// Retire only the replaced application-plugin grants in current owned
+    /// configurations. New artifacts go through the canonical compiler/store;
+    /// immutable revisions, snapshots, bindings and Session history stay intact.
+    pub async fn retire_replaced_app_plugin_configuration(&self, owner: &UserId) -> Result<usize, ControlPlaneError> {
+        let mut changed = 0;
+        let retired = |id: &str| id == "plugin.development" || id.starts_with("plugin:");
+        for stored in self.store.list_presets(owner).await? {
+            let preset_id = stored.preset.preset_id.clone();
+            let retired_configuration: Result<bool, ControlPlaneError> = async {
+            let Some(current) = self.current_revision(&stored).await? else { return Ok(false); };
+            if !current.payload.enabled_capabilities.iter().any(|item| retired(item.capability.id.as_ref())) { return Ok(false); }
+            let mut payload = current.payload.clone();
+            payload.enabled_capabilities.retain(|item| !retired(item.capability.id.as_ref()));
+            payload.context_order.retain(|id| !retired(id.as_ref()));
+            payload.middleware_order.retain(|id| !retired(id.as_ref()));
+            let snapshot = self.current_snapshot(Some(&current)).await?;
+            let draft = draft_api(&stored, Some(&current), payload_document(&payload)?, None)?;
+            let compilation = self.authoring_compiler(owner).await?.compile_payload(
+                owner, &draft, payload, Some(&current), snapshot.as_ref(), self.catalog.snapshot()?.as_ref(),
+            )?;
+            let snapshot = compilation.snapshot.ok_or_else(|| ControlPlaneError::with_details(
+                "APP_PLUGIN_RETIREMENT_REQUIRES_CONFIGURATION", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Agent {} has other unavailable references; its old configuration was preserved", stored.preset.display_name),
+                json!({"preset_id":stored.preset.preset_id,"diagnostics":compilation.diagnostics}),
+            ))?;
+            let revision = AgentPresetRevision {
+                reference: compilation.candidate_revision_ref, payload: compilation.payload,
+                contribution_locks: compilation.contribution_locks, created_by: owner.clone(),
+                created_at_ms: snapshot.created_at_ms, reason: Some("Retire replaced application-plugin grants".into()),
+            };
+            revision.validate().map_err(|violation| ControlPlaneError::Wire(violation.message))?;
+            self.store.append_revision(stored.preset.current_stable_revision.as_ref(), revision, snapshot,
+                stored.preset.display_name, stored.preset.description).await?;
+            Ok(true)
+            }.await;
+            match retired_configuration {
+                Ok(true) => changed += 1,
+                Ok(false) => {},
+                Err(error) => tracing::warn!(preset_id = preset_id.as_ref(), code = error.code().as_ref(),
+                    "Application-plugin retirement requires this Agent's configuration to be corrected; its original revision and immutable history were preserved"),
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn catalog(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {
         self.catalog.snapshot()?.as_api()
     }
@@ -489,7 +541,7 @@ impl AgentControlPlane {
             skill_bindings: seed.skill_bindings.iter().map(exact_ref_api).collect(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
-            instructions: String::new(),
+            instructions: official_template_instructions(template_key).to_owned(),
             starter_prompts: Vec::new(),
             runtime_policy: Default::default(),
         };
@@ -548,6 +600,7 @@ impl AgentControlPlane {
             .map(|selection| template_selection_api(selection, catalog))
             .collect::<Result<Vec<_>, _>>()?;
         document.skill_bindings = seed.skill_bindings.iter().map(exact_ref_api).collect();
+        document.instructions = official_template_instructions(key).to_owned();
         Ok(document)
     }
 
@@ -650,89 +703,6 @@ impl AgentControlPlane {
         self.resolve_agent_session_capabilities_binding(owner, &binding, selection).await
     }
 
-    /// Plugin authoring uses the selected Agent's normal Session compilation.
-    /// Only the required development actions are checked here; the Agent's
-    /// other modules, resources and global extensions remain available.
-    pub async fn resolve_plugin_authoring_session_binding(
-        &self,
-        owner: &UserId,
-        preset_id: &str,
-        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
-    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
-        let source = self.owned_preset(owner, preset_id).await?;
-        let revision = self.current_revision(&source).await?
-            .ok_or_else(|| not_found("AgentPresetRevision"))?;
-        let binding = session_binding_from_stable_artifacts(
-            revision.reference.clone(), Some(revision.clone()),
-            self.current_snapshot(Some(&revision)).await?,
-        )?;
-        // Check the selected Agent before resolving a model variant or global
-        // defaults, so an explicitly disabled module cannot be re-enabled.
-        self.ensure_plugin_authoring_actions(owner, &wire_cast(&binding)?).await?;
-        let binding = self.resolve_agent_session_binding_with_model(owner, preset_id, model).await?;
-        self.ensure_plugin_authoring_actions(owner, &binding).await?;
-        Ok(binding)
-    }
-
-    pub async fn resolve_plugin_authoring_template_binding(
-        &self,
-        owner: &UserId,
-        template_key: &str,
-        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
-    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
-        let key = parse_official_key(template_key).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
-        let preset_id = official_preset_id(owner, key);
-        let document = if self.store.get_preset(&preset_id).await?.is_some() {
-            self.editor(owner, preset_id.as_ref(), None).await?.draft.document
-        } else {
-            self.official_seed_document(key, self.catalog.snapshot()?.as_ref())?
-        };
-        let required = self.plugin_authoring_selection()?;
-        if document.enabled_capabilities.iter().find(|selection| selection.capability.id == required.capability.id.as_ref())
-            .is_none_or(|selection| required.action_allowlist.iter().any(|action| !selection.action_allowlist.contains(action.as_ref())))
-        {
-            return Err(ControlPlaneError::canonical("AGENT_LAUNCH_MODULE_REQUIRED",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "The selected Agent must enable every plugin.development creation action"));
-        }
-        let prepared = self.create_from_template(owner, template_key, CreateAgentPresetFromTemplateRequest {
-            model: model.cloned(), reuse_existing: true, display_name: key.as_str().to_owned(),
-            description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
-        }).await?;
-        let binding = self.resolve_agent_session_binding_with_model(owner, &prepared.preset.preset_id, None).await?;
-        self.ensure_plugin_authoring_actions(owner, &binding).await?;
-        Ok(binding)
-    }
-
-    fn plugin_authoring_selection(&self) -> Result<CapabilitySelection, ControlPlaneError> {
-        self.templates.seed(OfficialPresetKey::AssistantGeneral)
-            .and_then(|seed| seed.enabled_capabilities.iter().find(|selection|
-                selection.capability.id.as_ref() == PLUGIN_AUTHORING_MODULE_ID))
-            .cloned().ok_or_else(|| not_found("OfficialPresetTemplate"))
-    }
-
-    async fn ensure_plugin_authoring_actions(
-        &self,
-        owner: &UserId,
-        binding: &AgentBindingValueDto,
-    ) -> Result<(), ControlPlaneError> {
-        let binding: AgentBindingValue = wire_cast(binding)?;
-        let (revision, snapshot) = self.load_binding_artifacts(owner, &binding).await?;
-        let required = self.plugin_authoring_selection()?;
-        let configured = revision.payload.enabled_capabilities.iter()
-            .find(|selection| selection.capability == required.capability);
-        let compiled = snapshot.content.contributions()
-            .find(|selection| selection.capability == required.capability);
-        if configured.is_none_or(|selection| !required.action_allowlist.is_subset(&selection.action_allowlist))
-            || compiled.is_none_or(|selection| !required.action_allowlist.is_subset(&selection.action_allowlist))
-        {
-            return Err(ControlPlaneError::canonical("AGENT_LAUNCH_MODULE_REQUIRED",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "The selected Agent must enable every plugin.development creation action"));
-        }
-        Ok(())
-    }
-
     /// Global extensions belong to the Session, independent of the Agent's
     /// authored modules. Compile them through the same immutable artifacts.
     pub async fn resolve_agent_session_capabilities_binding(
@@ -761,7 +731,23 @@ impl AgentControlPlane {
             selection.skill_names.retain(|name| !package_names.contains(name));
             selection
         });
-        let resolved = resolver.resolve(owner, requested_library.as_ref()).await?;
+        let mut resolved = resolver.resolve(owner, requested_library.as_ref()).await?;
+        let mut authored_only_servers = BTreeSet::new();
+        // App sources are excluded from global defaults. An Agent's saved MCP
+        // grants are explicit choices and survive normal Session compilation.
+        if selection.is_none() && !source_snapshot.content.mcp_tool_locks.is_empty() {
+            let mut selected = resolved.mcp_server_ids.clone();
+            for lock in &source_snapshot.content.mcp_tool_locks {
+                let id = lock.server_id.as_ref().to_owned();
+                if !selected.contains(&id) { authored_only_servers.insert(id.clone()); }
+                selected.insert(id);
+            }
+            let explicit = nomifun_api_types::SessionCapabilitySelectionDto {
+                skill_names: resolved.selected_skill_names.iter().cloned().collect(),
+                mcp_server_ids: selected.into_iter().collect(),
+            };
+            resolved = resolver.resolve(owner, Some(&explicit)).await?;
+        }
         let source = self.owned_preset(owner, source_revision.reference.preset_id.as_ref()).await?;
         let catalog = self.catalog.snapshot()?;
         let mut payload = source_revision.payload.clone();
@@ -776,12 +762,17 @@ impl AgentControlPlane {
         for tool in &catalog.mcp_tools {
             let server_id = tool.mapping.server_id.as_ref();
             if !resolved.mcp_server_ids.contains(server_id) { continue; }
+            let authored = source_revision.payload.enabled_capabilities.iter()
+                .find(|selection| selection.capability == tool.mapping.capability);
+            if authored_only_servers.contains(server_id) && authored.is_none() { continue; }
             mapped_servers.insert(server_id.to_owned());
             let capability = catalog.capabilities.iter().find(|item| item.manifest.id == tool.mapping.capability.id)
                 .ok_or_else(|| ControlPlaneError::canonical("MCP_CATALOG_UNAVAILABLE", axum::http::StatusCode::UNPROCESSABLE_ENTITY, "the selected MCP tool is unavailable"))?;
             payload.enabled_capabilities.push(CapabilitySelection {
                 capability: tool.mapping.capability.clone(),
-                action_allowlist: capability.manifest.contributions.actions.iter().map(|action| action.action_id.clone()).collect(),
+                action_allowlist: if authored_only_servers.contains(server_id) {
+                    authored.expect("authored selection checked").action_allowlist.clone()
+                } else { capability.manifest.contributions.actions.iter().map(|action| action.action_id.clone()).collect() },
             });
         }
         if mapped_servers != resolved.mcp_server_ids {
@@ -798,7 +789,14 @@ impl AgentControlPlane {
         }
         payload.enabled_capabilities.sort_by(|left, right| left.capability.id.cmp(&right.capability.id));
         if payload.enabled_capabilities.len() > 128 {
-            return Err(ControlPlaneError::canonical("SESSION_CAPABILITY_LIMIT", axum::http::StatusCode::UNPROCESSABLE_ENTITY, "too many MCP tools selected; choose fewer servers for this Session"));
+            let selected = payload.enabled_capabilities.iter().map(|item|&item.capability.id).collect::<BTreeSet<_>>();
+            let mut counts = BTreeMap::<&str,usize>::new();
+            for tool in &catalog.mcp_tools {
+                if selected.contains(&tool.mapping.capability.id) { *counts.entry(tool.mapping.server_id.as_ref()).or_default() += 1; }
+            }
+            let sources = counts.into_iter().map(|(id,count)|format!("MCP source {id}={count}")).collect::<Vec<_>>().join(", ");
+            return Err(ControlPlaneError::canonical("SESSION_CAPABILITY_LIMIT", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!("selected {} capabilities exceeds limit 128; source counts: {sources}; choose fewer tools or sources for this Session",payload.enabled_capabilities.len())));
         }
         let mutable_roots = source_revision.payload.enabled_capabilities.iter()
             .chain(payload.enabled_capabilities.iter())
@@ -849,6 +847,74 @@ impl AgentControlPlane {
             },
         }, revision, snapshot).await?;
         binding.binding_version = current.binding_version;
+        self.validate_agent_binding(owner, &binding).await?;
+        wire_cast(&binding)
+    }
+
+    /// Prepare an explicit App workspace workflow update from the exact saved
+    /// binding. The caller still owns the ordinary idle/teardown/Effect fence
+    /// and must commit the returned target through the canonical transition.
+    /// This does not replace a binding or upgrade it while reading/reopening.
+    pub async fn resolve_app_development_workflow_binding(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let _guard = self.template_launch_lock.lock().await;
+        let current_contract: AgentBindingValue = wire_cast(current)?;
+        let (source_revision, source_snapshot) = self.load_binding_artifacts(owner, &current_contract).await?;
+        let source = self.owned_preset(owner, source_revision.reference.preset_id.as_ref()).await?;
+        if self.official_template_for_revision(&source, &source_revision)? != Some(OfficialPresetKey::AppDeveloper) {
+            return Err(ControlPlaneError::canonical("APP_DEVELOPMENT_SESSION_MISMATCH", axum::http::StatusCode::CONFLICT,
+                "The saved Session is not an official built-in application configuration; its instructions were preserved"));
+        }
+        if source_revision.payload.instructions == APP_DEVELOPMENT_INSTRUCTIONS {
+            return Ok(current.clone());
+        }
+        if !source_revision.payload.instructions.is_empty() {
+            return Err(ControlPlaneError::canonical("APP_DEVELOPMENT_SESSION_MISMATCH", axum::http::StatusCode::CONFLICT,
+                "The saved application instructions cannot be replaced by a product workflow update"));
+        }
+
+        let mut payload = source_revision.payload.clone();
+        payload.instructions = APP_DEVELOPMENT_INSTRUCTIONS.to_owned();
+        let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
+        let draft = AgentPresetDraftDto {
+            preset_id: preset_id.as_ref().to_owned(), display_name: OfficialPresetKey::AppDeveloper.as_str().to_owned(),
+            description: source.preset.description.clone(), source_template_key: None, current_revision: None,
+            document: payload_document(&payload)?,
+        };
+        let catalog = self.catalog.snapshot()?;
+        let compilation = self.authoring_compiler(owner).await?.compile_payload(
+            owner, &draft, payload.clone(), None, Some(&source_snapshot), &catalog,
+        )?;
+        let snapshot = compilation.snapshot.ok_or_else(|| ControlPlaneError::with_details(
+            "APP_DEVELOPMENT_WORKFLOW_UPDATE_FAILED", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "The built-in application workflow could not be compiled; the saved Session was preserved",
+            json!({"diagnostics":compilation.diagnostics}),
+        ))?;
+        // Refresh only the selected hosting contract used by this product
+        // command. All other frozen tools, roles, Skills, MCP and model remain
+        // exact; catalog changes cannot become new authority during this update.
+        if compilation.payload != payload || !same_app_workflow_snapshot_contract(&snapshot, &source_snapshot) {
+            return Err(ControlPlaneError::canonical("APP_DEVELOPMENT_WORKFLOW_CONTRACT_CHANGED", axum::http::StatusCode::CONFLICT,
+                "Updating application instructions would change another frozen contract; the saved Session was preserved"));
+        }
+        let revision = AgentPresetRevision {
+            reference: compilation.candidate_revision_ref, payload: compilation.payload,
+            contribution_locks: compilation.contribution_locks, created_by: owner.clone(),
+            created_at_ms: snapshot.created_at_ms, reason: Some("Explicit application development workflow update".into()),
+        };
+        revision.validate().map_err(|violation| ControlPlaneError::canonical(violation.code,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY, violation.message))?;
+        let mut binding = session_binding_from_stable_artifacts(revision.reference.clone(), Some(revision.clone()), Some(snapshot.clone()))?;
+        binding.binding_version = current_contract.binding_version;
+        binding.typed_resource_bindings = current_contract.typed_resource_bindings;
+        self.store.insert_preset_with_revision(StoredPreset { session_only: true, preset: AgentPreset {
+            preset_id, owner_user_id: Some(owner.clone()), source: source.preset.source.clone(),
+            display_name: draft.display_name, description: source.preset.description,
+            current_stable_revision: Some(revision.reference.clone()),
+        }}, revision, snapshot).await?;
         self.validate_agent_binding(owner, &binding).await?;
         wire_cast(&binding)
     }
@@ -1435,56 +1501,13 @@ impl AgentControlPlane {
     }
 
     fn official_template_for_revision(
-        &self, stored: &StoredPreset, revision: &AgentPresetRevision,
+        &self, stored: &StoredPreset, _revision: &AgentPresetRevision,
     ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
-        if let Some(key) = owned_official_key(stored) {
-            return Ok(Some(key));
-        }
-        if !stored.session_only || stored.preset.source != AgentPresetSource::User {
-            return Ok(None);
-        }
-        let key = parse_official_key(&stored.preset.display_name).or_else(|| {
-            // One-way repair of current-generation launch-cache metadata.
-            // These labels never become an identity source or an import path:
-            // the complete owned seed must still match below.
-            let old_creation_labels = [
-                "\u{591a}\u{6a21}", "\u{521b}\u{610f}\u{5de5}\u{574a}",
-                "Multimodal", "Creative Studio", "Creation", "创作",
-            ];
-            old_creation_labels.contains(&stored.preset.display_name.as_str())
-                .then_some(OfficialPresetKey::CreativeStudioDefault)
-        });
-        let Some(key) = key else { return Ok(None); };
-        let Some(seed) = self.templates.seed(key) else { return Ok(None); };
-        let payload = &revision.payload;
-        if !payload.persona.is_empty() || !payload.instructions.is_empty()
-            || !payload.starter_prompts.is_empty() || !payload.system_role_provider_overrides.is_empty()
-            || !payload.context_order.is_empty() || !payload.middleware_order.is_empty()
-        {
-            return Ok(None);
-        }
-        let catalog = self.catalog.snapshot()?;
-        let mut expected_capabilities = seed.enabled_capabilities.iter()
-            .map(|reference| template_selection(reference, &catalog))
-            .collect::<Result<Vec<_>, _>>()?;
-        expected_capabilities.retain(|item| !is_global_extension_module(item.capability.id.as_ref()));
-        expected_capabilities.sort_by(|left, right| left.capability.id.cmp(&right.capability.id));
-        let mut authored_capabilities = payload.enabled_capabilities.iter().filter(|item| !is_global_extension_module(item.capability.id.as_ref())).cloned().collect::<Vec<_>>();
-        authored_capabilities.sort_by(|left, right| left.capability.id.cmp(&right.capability.id));
-        let has_library = payload.skill_bindings.iter().any(|binding| binding.package_ref().is_none());
-        let skills_match = if has_library {
-            seed.skill_bindings.iter().all(|expected| payload.skill_bindings.iter().any(|binding| match binding {
-                nomifun_agent_contracts::AgentSkillBinding::Library { skill, .. } => skill.name == expected.id.as_ref(),
-                _ => false,
-            }))
-        } else {
-            payload.skill_bindings == seed.skill_bindings.iter().cloned().map(nomifun_agent_contracts::AgentSkillBinding::package).collect::<Vec<_>>()
-        };
-        if !skills_match || authored_capabilities != expected_capabilities
-        {
-            return Ok(None);
-        }
-        Ok(Some(key))
+        // Only the host-owned source and owner-scoped official identity confer
+        // a product template. Old User session caches contain random IDs and no
+        // persisted template provenance; a display name or matching seed must
+        // not promote their immutable history into an official product binding.
+        Ok(owned_official_key(stored))
     }
 
     /// Read-only admission check for product selectors. This uses the same
@@ -1976,6 +1999,26 @@ impl AgentControlPlane {
         self.store
             .delete_remote_binding(owner, &RemoteBindingId::from(binding_id.to_owned()))
             .await
+    }
+
+    pub async fn delete_remote_binding_if_current(&self, owner: &UserId, expected: &RemoteBindingDto) -> Result<(), ControlPlaneError> {
+        let expected: RemoteBinding = wire_cast(expected)?;
+        if &expected.owner_user_id != owner { return Err(not_found("RemoteBinding")); }
+        self.store.delete_remote_binding_if_current(&expected).await
+    }
+
+    /// Compensate a failed local configuration save using an exact captured
+    /// current definition. This is not a historical import or Session restore.
+    pub async fn restore_remote_binding_after_failed_local_change(&self, owner: &UserId, previous: &RemoteBindingDto) -> Result<(), ControlPlaneError> {
+        let previous: RemoteBinding = wire_cast(previous)?;
+        if &previous.owner_user_id != owner { return Err(not_found("RemoteBinding")); }
+        self.validate_agent_binding(owner,&previous.agent_binding).await?;
+        if self.store.get_remote_binding(&previous.remote_binding_id).await?.is_some() {
+            return Err(ControlPlaneError::canonical("REMOTE_BINDING_VERSION_CONFLICT", axum::http::StatusCode::CONFLICT,
+                "RemoteBinding was recreated while the local change was being compensated"));
+        }
+        self.store.insert_remote_binding(previous).await?;
+        Ok(())
     }
 
     async fn owned_remote_binding(
@@ -2643,6 +2686,43 @@ fn same_non_model_snapshot_contract(
         && candidate.scene == source.scene
         && candidate.surface == source.surface
         && candidate.audience == source.audience
+        && candidate.availability_evidence_revision == source.availability_evidence_revision
+}
+
+fn same_app_workflow_snapshot_contract(
+    candidate: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    source: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+) -> bool {
+    let Some(previous_hosting) = source.content.enabled_capabilities.iter().find(|value| value.capability.id.as_ref() == "app.hosting") else { return false; };
+    let mut normalized = candidate.content.clone();
+    let Some(hosting) = normalized.enabled_capabilities.iter_mut().find(|value| value.capability.id.as_ref() == "app.hosting") else { return false; };
+    if hosting.capability != previous_hosting.capability || hosting.action_allowlist != previous_hosting.action_allowlist
+        || hosting.source_package != previous_hosting.source_package || hosting.resolved_source != previous_hosting.resolved_source
+        || hosting.contribution_id != previous_hosting.contribution_id || hosting.resolved_mount_id != previous_hosting.resolved_mount_id
+        || hosting.consumption != previous_hosting.consumption || hosting.dependency_refs != previous_hosting.dependency_refs
+        || hosting.required_resource_kinds != previous_hosting.required_resource_kinds
+        || hosting.required_runtime_features != previous_hosting.required_runtime_features {
+        return false;
+    }
+    let current_actions = hosting.actions.iter().map(|value| (&value.action_id, value.effect_class, value.presentation)).collect::<Vec<_>>();
+    let prior_actions = previous_hosting.actions.iter().map(|value| (&value.action_id, value.effect_class, value.presentation)).collect::<Vec<_>>();
+    if current_actions != prior_actions { return false; }
+    if hosting.actions.iter().zip(&previous_hosting.actions).any(|(current, previous)|
+        current.output_schema != previous.output_schema
+            || current.action_id.as_ref() != "app.hosting/update" && current.input_schema != previous.input_schema) {
+        return false;
+    }
+    *hosting = previous_hosting.clone();
+    normalized.preset_revision_ref = source.content.preset_revision_ref.clone();
+    if let (Some(candidate_route), Some(previous_route)) = (&mut normalized.chat_route_identity, &source.content.chat_route_identity) {
+        // The same real model route is addressed by the new immutable Revision.
+        candidate_route.preset_revision_id = previous_route.preset_revision_id.clone();
+    }
+    normalized.compiled_runtime_profile_digest = source.content.compiled_runtime_profile_digest.clone();
+    normalized.canonical_schema_manifest_digest = source.content.canonical_schema_manifest_digest.clone();
+    normalized.target_contribution_manifest_digest = source.content.target_contribution_manifest_digest.clone();
+    normalized == source.content && candidate.actor == source.actor && candidate.scene == source.scene
+        && candidate.surface == source.surface && candidate.audience == source.audience
         && candidate.availability_evidence_revision == source.availability_evidence_revision
 }
 
@@ -3454,6 +3534,125 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn app_developer_authors_product_workflow_without_changing_other_template_roles() {
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        for key in [OfficialPresetKey::AppDeveloper, OfficialPresetKey::CodingCodex, OfficialPresetKey::AssistantGeneral] {
+            let store = Arc::new(InMemoryControlPlaneStore::new());
+            let control = template_control_plane(store, key, false);
+            let created = control.create_from_template(&owner, key.as_str(), official_launch_request(true)).await.unwrap();
+            let binding = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
+            let (_, revision, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+            assert!(revision.payload.persona.is_empty());
+            assert_eq!(revision.payload.instructions, official_template_instructions(key));
+            assert_eq!(control.saved_binding_presentation(&owner, &binding).await.unwrap().1, Some(key));
+            if key == OfficialPresetKey::AppDeveloper {
+                assert!(!revision.payload.instructions.is_empty());
+                assert_eq!(control.resolve_app_development_workflow_binding(&owner, &binding).await.unwrap(), binding,
+                    "a current workflow is an exact no-op, without a new hidden configuration or binding version");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn app_developer_workflow_target_preserves_exact_frozen_configuration_and_history() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let route = media_chat_route("user-selected-app-model");
+        let control = template_control_plane(store.clone(), OfficialPresetKey::AppDeveloper, false)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_from_template(&owner, "app.developer", official_launch_request(true)).await.unwrap();
+        // Materialize an exact current-generation pre-workflow Revision, rather
+        // than changing stored facts after a binding has been frozen.
+        let mut draft = created.draft;
+        draft.document.instructions.clear();
+        let old = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+        }).await.unwrap();
+        let reference: PresetRevisionRef = wire_cast(&old.revision.reference).unwrap();
+        let old_revision = store.get_revision(&reference).await.unwrap().unwrap();
+        let old_snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+        let mut saved = session_binding_from_stable_artifacts(reference.clone(), Some(old_revision.clone()), Some(old_snapshot.clone())).unwrap();
+        let mut resource: nomifun_agent_contracts::TypedResourceBinding = serde_json::from_value(json!({
+            "binding_id":"pending", "resource_kind":"workspace", "resource_id":"managed-workspace",
+            "owner_id":owner.as_ref(), "operations":["read","write"], "typed_parameters":{"workspace_root":"C:/owned/application","read_only":"false"},
+        })).unwrap();
+        resource.binding_id = nomifun_agent_contracts::resource_definition_id(&resource).unwrap();
+        saved.typed_resource_bindings = vec![resource];
+        saved.binding_version = 7;
+        let saved: AgentBindingValueDto = wire_cast(&saved).unwrap();
+        assert_eq!(control.saved_binding_presentation(&owner, &saved).await.unwrap().1, Some(OfficialPresetKey::AppDeveloper),
+            "an old empty role keeps its legal identity without acquiring new instructions on read");
+        assert!(control.saved_binding_artifacts(&owner, &saved).await.unwrap().1.payload.instructions.is_empty());
+
+        let target = control.resolve_app_development_workflow_binding(&owner, &saved).await.unwrap();
+        assert_ne!(target.preset_revision_ref, saved.preset_revision_ref);
+        assert_eq!(target.binding_version, saved.binding_version, "only the canonical owner commits the version advance");
+        assert_eq!(target.typed_resource_bindings, saved.typed_resource_bindings);
+        let (_, target_revision, target_snapshot) = control.saved_binding_artifacts(&owner, &target).await.unwrap();
+        let mut normalized = target_revision.payload.clone();
+        assert_eq!(normalized.instructions, APP_DEVELOPMENT_INSTRUCTIONS);
+        normalized.instructions.clear();
+        assert_eq!(normalized, old_revision.payload, "model, grants, extensions, policy and all other authored fields remain exact");
+        assert_eq!(target_revision.payload.chat_route_records[CHAT_MODEL_TASK], route);
+        assert_eq!(control.editor(&owner, &target.preset_revision_ref.preset_id, None).await.unwrap().preset.source,
+            nomifun_api_types::AgentPresetSourceDto::Official,
+            "a workflow derivation preserves the host-verified official Agent provenance");
+        assert_eq!(control.saved_binding_presentation(&owner, &target).await.unwrap().1,
+            Some(OfficialPresetKey::AppDeveloper));
+        assert!(same_app_workflow_snapshot_contract(&target_snapshot, &old_snapshot));
+        assert_eq!(store.get_revision(&reference).await.unwrap().unwrap(), old_revision);
+        assert_eq!(store.get_snapshot(&reference).await.unwrap().unwrap(), old_snapshot);
+        assert_eq!(control.resolve_app_development_workflow_binding(&owner, &target).await.unwrap(), target);
+    }
+
+    #[tokio::test]
+    async fn app_developer_workflow_rejects_custom_instructions_and_unrelated_agents() {
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        for key in [OfficialPresetKey::AppDeveloper, OfficialPresetKey::CodingCodex] {
+            let store = Arc::new(InMemoryControlPlaneStore::new());
+            let control = template_control_plane(store.clone(), key, false);
+            let created = control.create_from_template(&owner, key.as_str(), official_launch_request(true)).await.unwrap();
+            let mut draft = created.draft;
+            draft.document.instructions = "Preserve this user's explicit application-independent behavior".into();
+            let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+            }).await.unwrap();
+            let reference: PresetRevisionRef = wire_cast(&saved.revision.reference).unwrap();
+            let revision = store.get_revision(&reference).await.unwrap().unwrap();
+            let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+            let binding = session_binding_from_stable_artifacts(reference.clone(), Some(revision.clone()), Some(snapshot.clone())).unwrap();
+            let binding: AgentBindingValueDto = wire_cast(&binding).unwrap();
+            assert_eq!(control.resolve_app_development_workflow_binding(&owner, &binding).await.unwrap_err().code().as_ref(), "APP_DEVELOPMENT_SESSION_MISMATCH");
+            assert!(control.resolve_app_development_workflow_binding(&other, &binding).await.is_err());
+            assert_eq!(store.get_revision(&reference).await.unwrap().unwrap(), revision);
+            assert_eq!(store.get_snapshot(&reference).await.unwrap().unwrap(), snapshot);
+            assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1, "rejection does not create a replacement configuration");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_developer_workflow_snapshot_guard_rejects_authority_or_model_changes() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::AppDeveloper, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_from_template(&owner, "app.developer", official_launch_request(true)).await.unwrap();
+        let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+        let mut changed = snapshot.clone();
+        changed.content.enabled_capabilities.iter_mut().find(|value| value.capability.id.as_ref() == "app.hosting").unwrap()
+            .action_allowlist.insert("app.hosting/new-authority".into());
+        assert!(!same_app_workflow_snapshot_contract(&changed, &snapshot));
+        let mut changed = snapshot.clone();
+        changed.content.enabled_capabilities.iter_mut().find(|value| value.capability.id.as_ref() == "workspace.files").unwrap()
+            .schema_digest = "changed-workspace-contract".into();
+        assert!(!same_app_workflow_snapshot_contract(&changed, &snapshot));
+        let mut changed = snapshot.clone();
+        changed.content.model_route_refs.insert(CHAT_MODEL_TASK.into(), "another-model-route".into());
+        assert!(!same_app_workflow_snapshot_contract(&changed, &snapshot));
+    }
+
     #[test]
     fn official_launch_matches_default_route_facts_without_ignoring_configuration_changes() {
         let mut document = empty_document();
@@ -3594,6 +3793,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_session_cache_named_app_developer_keeps_history_without_official_product_authority() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::AppDeveloper, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut request = official_launch_request(false);
+        request.display_name = "app.developer".into();
+        let personal = control.create_from_template(&owner, "app.developer", request).await.unwrap();
+        let id = AgentPresetId::from(personal.preset.preset_id.clone());
+        let mut stored = store.get_preset(&id).await.unwrap().unwrap();
+        assert_eq!(stored.preset.source, AgentPresetSource::User);
+        stored.session_only = true;
+        store.update_preset_metadata(&stored).await.unwrap();
+        let binding = control.resolve_agent_session_binding(&owner, id.as_ref()).await.unwrap();
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, id.as_ref()).await.unwrap(), None);
+        assert_eq!(control.saved_binding_presentation(&owner, &binding).await.unwrap(),
+            ("app.developer".into(), None));
+        assert_eq!(control.resolve_app_development_workflow_binding(&owner, &binding).await.unwrap_err().code().as_ref(),
+            "APP_DEVELOPMENT_SESSION_MISMATCH");
+        let (_, retained_revision, retained_snapshot) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(retained_revision, revision);
+        assert_eq!(retained_snapshot, snapshot);
+        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1,
+            "a legacy User cache is neither promoted nor replaced during a history read");
+    }
+
+    #[tokio::test]
     async fn official_agent_edits_keep_identity_and_survive_launch_and_contract_refresh() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane_with_order_contributions(store.clone(), OfficialPresetKey::CompanionDefault, false, true);
@@ -3610,7 +3836,7 @@ mod tests {
         draft.document.instructions = "User-specific behavior".into();
         draft.document.persona = "My companion".into();
         draft.document.enabled_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
-            capability: nomifun_api_types::CapabilityRefDto { id: AUTHORING_TEST_MIDDLEWARE_ID.into() },
+            capability: nomifun_api_types::CapabilityRefDto { id: ORDER_TEST_MIDDLEWARE_ID.into() },
             action_allowlist: BTreeSet::from([nomifun_agent_contracts::tool_middleware::before_action().action_id.as_ref().to_owned()]),
         });
         let mut unsupported = draft.clone();
@@ -3639,7 +3865,7 @@ mod tests {
         let copy = refreshed.create_from_template(&owner, "companion.default", official_launch_request(false)).await.unwrap();
         assert_ne!(copy.preset.preset_id, *id);
         assert!(copy.draft.document.instructions.is_empty());
-        assert!(!copy.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == AUTHORING_TEST_MIDDLEWARE_ID));
+        assert!(!copy.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == ORDER_TEST_MIDDLEWARE_ID));
     }
 
     #[test]
@@ -3968,7 +4194,7 @@ mod tests {
         }
     }
 
-    const AUTHORING_TEST_MIDDLEWARE_ID: &str = "fixture.plugin-authoring.guard";
+    const ORDER_TEST_MIDDLEWARE_ID: &str = "fixture.order.guard";
 
     fn republish_catalog_capability(capability: &mut MaterializedCapability) -> CapabilityCatalogEntry {
         let contract_digest = digest_payload(&capability.manifest).unwrap();
@@ -3990,7 +4216,7 @@ mod tests {
         }).unwrap()
     }
 
-    fn plugin_authoring_control_plane(store: Arc<InMemoryControlPlaneStore>) -> AgentControlPlane {
+    fn global_extensions_control_plane(store: Arc<InMemoryControlPlaneStore>) -> AgentControlPlane {
         struct Routes;
         #[async_trait::async_trait]
         impl DefaultChatRouteResolver for Routes {
@@ -4097,8 +4323,9 @@ mod tests {
         for changed_authority in [None, Some(true), Some(false)] {
             let store = Arc::new(InMemoryControlPlaneStore::new());
             let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-            let mut control = plugin_authoring_control_plane(store.clone());
-            let current = control.resolve_plugin_authoring_template_binding(&owner, "assistant.general", None).await.unwrap();
+            let mut control = global_extensions_control_plane(store.clone());
+            let prepared = control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+            let current = control.resolve_agent_session_binding_with_model(&owner, &prepared.preset.preset_id, None).await.unwrap();
             let (_, source_revision, source_snapshot) = control.saved_binding_artifacts(&owner, &current).await.unwrap();
             assert!(!source_snapshot.content.mcp_tool_locks.is_empty());
             assert!(!source_snapshot.content.skill_locks.is_empty());
@@ -4157,137 +4384,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn plugin_authoring_template_uses_the_complete_template_and_normal_global_extensions() {
-        let store = Arc::new(InMemoryControlPlaneStore::new());
-        let control = plugin_authoring_control_plane(store.clone());
-        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let original_seed = control.templates.seed(OfficialPresetKey::AssistantGeneral).unwrap().clone();
-        let disabled = control.resolve_plugin_authoring_template_binding(&owner, "chat.minimal", None).await.unwrap_err();
-        assert_eq!(disabled.code().as_ref(), "AGENT_LAUNCH_MODULE_REQUIRED");
-        assert!(store.list_presets(&owner).await.unwrap().is_empty());
-        let model = nomifun_api_types::AgentChatModelSelectionDto { provider_id: "provider-selected".into(), model: "selected-model".into() };
-        let first = control.resolve_plugin_authoring_template_binding(&owner, "assistant.general", Some(&model)).await.unwrap();
-        let repeated = control.resolve_plugin_authoring_template_binding(&owner, "assistant.general", Some(&model)).await.unwrap();
-        assert_eq!(first, repeated, "normal immutable configuration reuse handles repeated launches");
-        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &first).await.unwrap();
-        for selection in &original_seed.enabled_capabilities {
-            assert!(revision.payload.enabled_capabilities.contains(selection));
-            assert!(snapshot.content.contributions().any(|compiled| compiled.capability == selection.capability
-                && compiled.action_allowlist == selection.action_allowlist));
-        }
-        assert!(snapshot.content.mcp_tool_locks.iter().any(|lock| lock.server_id.as_ref() == "fixture.authoring-server"));
-        assert!(snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
-            nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "authoring-guide")));
-        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK].primary.model, model.model);
-        assert!(control.library(&owner).await.unwrap().user_presets.is_empty(), "shared Session configurations remain internal");
-        assert_eq!(serde_json::to_value(control.templates.seed(OfficialPresetKey::AssistantGeneral).unwrap()).unwrap(),
-            serde_json::to_value(original_seed).unwrap());
-    }
-
-    #[tokio::test]
-    async fn plugin_authoring_preserves_the_user_agent_and_captures_global_skills_and_mcp() {
-        let store = Arc::new(InMemoryControlPlaneStore::new());
-        let control = plugin_authoring_control_plane(store.clone());
-        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
-        let mut draft = created.draft.clone();
-        draft.document.persona = "User-authored persona".into();
-        draft.document.instructions = "Keep this user-authored instruction".into();
-        draft.document.context_order = vec!["project.memory".into()];
-        draft.document.enabled_capabilities.push(wire_cast(&CapabilitySelection {
-            capability: CapabilityRef { id: AUTHORING_TEST_MIDDLEWARE_ID.into() },
-            action_allowlist: BTreeSet::from([nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID.into()]),
-        }).unwrap());
-        draft.document.middleware_order = vec![AUTHORING_TEST_MIDDLEWARE_ID.into()];
-        control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
-            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
-        }).await.unwrap();
-        let source = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
-        let source_revision = control.current_revision(&source).await.unwrap().unwrap();
-        let source_snapshot = control.current_snapshot(Some(&source_revision)).await.unwrap().unwrap();
-        assert!(source_revision.payload.enabled_capabilities.iter().any(|item| item.capability.id.as_ref() == "workspace.process"));
-        let selected_model = nomifun_api_types::AgentChatModelSelectionDto {
-            provider_id: "provider-selected".into(), model: "selected-model".into(),
-        };
-        let (first, repeated) = tokio::join!(
-            control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, Some(&selected_model)),
-            control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, Some(&selected_model)),
-        );
-        let first = first.unwrap();
-        assert_eq!(first, repeated.unwrap(), "the shared configuration cache also handles concurrent authoring opens");
-        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &first).await.unwrap();
-        for selection in &source_revision.payload.enabled_capabilities {
-            assert!(revision.payload.enabled_capabilities.contains(selection));
-            assert!(snapshot.content.contributions().any(|compiled| compiled.capability == selection.capability
-                && compiled.action_allowlist == selection.action_allowlist));
-        }
-        assert_eq!(revision.payload.context_order, source_revision.payload.context_order);
-        assert_eq!(revision.payload.middleware_order, source_revision.payload.middleware_order);
-        assert_eq!(revision.payload.system_role_provider_overrides, source_revision.payload.system_role_provider_overrides);
-        assert_eq!(snapshot.content.required_resource_kinds, source_snapshot.content.required_resource_kinds);
-        assert_eq!(snapshot.content.context_order, source_snapshot.content.context_order);
-        assert_eq!(snapshot.content.middleware_order, source_snapshot.content.middleware_order);
-        assert!(snapshot.content.mcp_tool_locks.iter().any(|lock| lock.server_id.as_ref() == "fixture.authoring-server"));
-        assert!(snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
-            nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "authoring-guide")));
-        assert_eq!(revision.payload.persona, source_revision.payload.persona);
-        assert_eq!(revision.payload.instructions, source_revision.payload.instructions);
-        assert_eq!(revision.payload.runtime_policy, source_revision.payload.runtime_policy);
-        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK].primary.model, selected_model.model);
-        let after = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
-        assert_eq!(after.preset, source.preset);
-        assert_eq!(control.current_revision(&after).await.unwrap().unwrap(), source_revision);
-        assert_eq!(control.current_snapshot(Some(&source_revision)).await.unwrap().unwrap(), source_snapshot);
-        assert_eq!(control.library(&owner).await.unwrap().user_presets.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn plugin_authoring_rejects_disabled_or_partial_creation_authority_before_creating_a_variant() {
-        for disabled in [true, false] {
-            let store = Arc::new(InMemoryControlPlaneStore::new());
-            let control = plugin_authoring_control_plane(store.clone());
-            let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-            let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
-            let mut draft = created.draft.clone();
-            if disabled {
-                draft.document.enabled_capabilities.retain(|item| item.capability.id != PLUGIN_AUTHORING_MODULE_ID);
-            } else {
-                draft.document.enabled_capabilities.iter_mut().find(|item|
-                    item.capability.id == PLUGIN_AUTHORING_MODULE_ID).unwrap().action_allowlist
-                    .retain(|action| action != "plugin.development/install");
-            }
-            control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
-                expected_current_revision: draft.current_revision.clone(), draft, reason: None,
-            }).await.unwrap();
-            let error = control.resolve_plugin_authoring_session_binding(
-                &owner, &created.preset.preset_id, None,
-            ).await.unwrap_err();
-            assert_eq!(error.code().as_ref(), "AGENT_LAUNCH_MODULE_REQUIRED");
-            assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1,
-                "denial may not create a model/configuration variant or re-enable the module");
-        }
-    }
-
-    #[tokio::test]
-    async fn plugin_authoring_preserves_the_saved_chat_route_without_an_override_and_enforces_ownership() {
-        let store = Arc::new(InMemoryControlPlaneStore::new());
-        let control = plugin_authoring_control_plane(store.clone());
-        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
-        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
-        let source = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
-        let original = control.current_revision(&source).await.unwrap().unwrap();
-        let binding = control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, None).await.unwrap();
-        let (_, resolved, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
-        assert_eq!(resolved.payload.chat_route_records, original.payload.chat_route_records);
-        assert_eq!(resolved.payload.model_route_refs, original.payload.model_route_refs);
-        assert_eq!(control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, None).await.unwrap(), binding);
-        assert_eq!(control.resolve_plugin_authoring_session_binding(&other, &created.preset.preset_id, None)
-            .await.unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
-        assert!(store.list_presets(&other).await.unwrap().is_empty());
-    }
-
     fn template_control_plane(store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey, updated_schema: bool) -> AgentControlPlane {
         template_control_plane_with_order_contributions(store, key, updated_schema, false)
     }
@@ -4318,7 +4414,7 @@ mod tests {
             catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
         }
         if order_contributions {
-            let (mut middleware, _) = catalog_capability(AUTHORING_TEST_MIDDLEWARE_ID,
+            let (mut middleware, _) = catalog_capability(ORDER_TEST_MIDDLEWARE_ID,
                 [CapabilityConsumer::Agent, CapabilityConsumer::PluginService]);
             middleware.manifest.kind = CapabilityKind::TurnMiddleware;
             middleware.manifest.supported_surfaces = nomifun_agent_contracts::capability_module_surface_declarations(
@@ -4583,6 +4679,61 @@ mod tests {
             .expect_err("official template seeds must not be deleted");
         assert_eq!(official_error.status(), axum::http::StatusCode::NOT_FOUND);
         assert_eq!(official_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn replaced_app_grants_retire_through_new_revisions_preserving_frozen_skills_history_and_unrelated_configuration() {
+        fn control(store: Arc<InMemoryControlPlaneStore>, old: bool) -> AgentControlPlane {
+            let mut registry = MaterializedRegistry::empty();
+            let mut catalog = CatalogSnapshot::default();
+            let modules = if old { vec!["plugin.development", "kept.module", "missing.other-module"] } else { vec!["kept.module"] };
+            for id in modules {
+                let (capability, entry) = catalog_capability_with_actions_schema(id, [CapabilityConsumer::Agent],
+                    [ActionId::from(format!("{id}/read"))], json!({"type":"object","additionalProperties":false}));
+                registry.capabilities.insert(id.into(), capability.clone());
+                catalog.capabilities.push(capability);
+                catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+            }
+            let compiler = test_compiler().with_materialized_registry(Arc::new(registry), CompilerEnvironment {
+                resolver_version:"1.0.0".into(), required_runtime_protocol_version:"1.0.0".into(),
+                required_runtime_profile:RuntimeProfileKind::ManagedMinimal, runtime_feature_inventory_digest:"runtime-features".into(),
+                available_runtime_features:BTreeSet::new(), installation_role_bindings:BTreeMap::new(), canonical_schema_manifest_digest:"schema".into(),
+                target_contribution_manifest_digest:"contributions".into(),host_target:"test".into(),host_surface:"desktop".into(),availability_evidence_revision:"fixture".into(),
+            });
+            AgentControlPlane::new(store,Arc::new(StaticCatalogProvider::new(catalog)),OfficialTemplateCatalog::load().unwrap(),compiler)
+        }
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner: UserId = "0190f5fe-7c00-7a00-8000-000000000001".into();
+        let old = control(store.clone(), true);
+        let mut payload = document_payload(&empty_document()).unwrap();
+        payload.instructions = "Preserve my ordinary application-independent instructions".into();
+        payload.enabled_capabilities = ["plugin.development", "kept.module"].into_iter().map(|id| CapabilitySelection {
+            capability:CapabilityRef {id:id.into()},action_allowlist:BTreeSet::from([format!("{id}/read").into()]),
+        }).collect();
+        let skill = nomifun_agent_contracts::FrozenLibrarySkill::new("frozen-skill".into(),"Frozen fixture".into(),
+            nomifun_agent_contracts::LibrarySkillSource::Custom,"Do not lose these immutable captured bytes".into(),BTreeMap::new()).unwrap();
+        payload.skill_bindings.push(nomifun_agent_contracts::AgentSkillBinding::library_selected(skill,true));
+        let good = old.create_configuration_with_payload(&owner,Uuid::now_v7().to_string().into(),"Personal Agent".into(),None,payload.clone(),None,true,None).await.unwrap();
+        payload.enabled_capabilities.push(CapabilitySelection {capability:CapabilityRef {id:"missing.other-module".into()},action_allowlist:BTreeSet::from(["missing.other-module/read".into()])});
+        let unavailable = old.create_configuration_with_payload(&owner,Uuid::now_v7().to_string().into(),"Needs correction".into(),None,payload,None,true,None).await.unwrap();
+        let good_ref: PresetRevisionRef = wire_cast(good.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let bad_ref: PresetRevisionRef = wire_cast(unavailable.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let previous_revision = store.get_revision(&good_ref).await.unwrap().unwrap();
+        let previous_snapshot = store.get_snapshot(&good_ref).await.unwrap().unwrap();
+        let current = control(store.clone(), false);
+        assert_eq!(current.retire_replaced_app_plugin_configuration(&owner).await.unwrap(),1,
+            "one unavailable Agent must not stop valid Agents from retiring replaced grants");
+        let good_stored = store.get_preset(&good_ref.preset_id).await.unwrap().unwrap();
+        let new_ref = good_stored.preset.current_stable_revision.unwrap();
+        assert_eq!(new_ref.revision,good_ref.revision+1);
+        let revision = store.get_revision(&new_ref).await.unwrap().unwrap();
+        assert_eq!(revision.payload.instructions, previous_revision.payload.instructions);
+        assert_eq!(revision.payload.skill_bindings, previous_revision.payload.skill_bindings);
+        assert_eq!(revision.payload.enabled_capabilities.iter().map(|item|item.capability.id.as_ref()).collect::<Vec<_>>(),vec!["kept.module"]);
+        assert_eq!(store.get_revision(&good_ref).await.unwrap().unwrap(),previous_revision);
+        assert_eq!(store.get_snapshot(&good_ref).await.unwrap().unwrap(),previous_snapshot);
+        assert_eq!(store.get_preset(&bad_ref.preset_id).await.unwrap().unwrap().preset.current_stable_revision,Some(bad_ref));
+        assert_eq!(current.retire_replaced_app_plugin_configuration(&owner).await.unwrap(),0);
     }
 
     #[tokio::test]

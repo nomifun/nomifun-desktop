@@ -61,12 +61,12 @@
 NomiFun 由四个运行时项目与 **NomiFun Portal** 组成。Portal 是整个产品家族的
 统一产品使用文档入口；**Desktop 是本地数据、模型、Agent、任务与工具中枢**；
 Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Infra 则提供可选的
-自托管跨网中继。Desktop 还承载 Agent 小程序，让 Agent 创建的应用继续复用同一套
-本地运行时与受治理能力，而不是沦为一个割裂的演示页面。
+自托管跨网中继。Desktop 还提供应用托管：将自己或 coding agent 写好的普通程序导入、预览并持续运行，
+需要时自动连接现有 NomiFun 能力。
 
 | 项目 | 定位 | 文档与入口 |
 |---|---|---|
-| **NomiFun Desktop**（本仓库；[GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [产品文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](https://www.nomifun.com/zh/docs/guides/webui-remote/) |
+| **NomiFun Desktop**（本仓库；[GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)） | 数据、模型、Agent、任务、Skill、知识库、应用托管、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [产品文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](https://www.nomifun.com/zh/docs/guides/webui-remote/) |
 | NomiFun Mobile（[GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)） | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [连接与设备指南](docs/guides/webui-remote-access.zh.md) · 在 Desktop 打开**连接与设备 → 连接手机**，选择同网或中继后扫码 |
 | NomiFun 小智云台（[GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)） | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智接入指南](https://www.nomifun.com/zh/docs/guides/xiaozhi-robot/) · 固件源码：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra（[GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)） | 自托管的 NomiRelay 网络中继，把 NAT 后的 Desktop 或其他 HTTP/WebSocket/TCP/UDP 服务提供给跨网络手机与 IoT 设备 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -89,7 +89,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 这不是几个恰好使用同一 Logo 的独立客户端。Desktop 保存持久状态并执行模型、Agent、
 需求、工具、知识库、伙伴记忆和 Skill；Mobile 是局域网直连的移动控制界面；小智是
-语音与运动硬件界面；小程序则是同一 Desktop 安装创建并托管的软件交互界面；Net Infra
+语音与运动硬件界面；托管应用则是同一 Desktop 安装运行的普通程序；Net Infra
 是可选网络承载层，而不是另一套业务后端。它们共享
 一张受治理的能力图，而不是各自创建云账号、凭据和用户数据副本。
 
@@ -213,7 +213,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 | 产品能力 | 带来的价值 |
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
-| **插件与小程序（Unified Plugins）** | 通过 Chat 创建或导入目录/ZIP 包，统一走 `install_artifact` 校验安装；可选 App/Service 入口，向 Agent、桌面与自动化暴露 Action/Binding 能力，并提供 generation 安全的存储、备份、恢复与删除。 |
+| **应用托管** | 导入源码或产物文件夹/ZIP，执行可修改的安装、预览、构建、启动命令；系统浏览器打开，单一进程树 owner，自动本机连接，可选 MCP 工具按 Agent 选择。 |
 | **创意工坊** | 提供持久化 Canvas 与媒体节点 Composer、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能，以及可选的桌面伙伴协同。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
@@ -240,17 +240,16 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**渠道与机器人 → 机器人连接**：
 复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
 
-### 🧩 插件与小程序（Unified Plugins）—— 创建并运行受治理的本地软件
+### 🧩 应用托管 —— 运行自己的普通程序
 
-通过 Chat 创建插件，或导入包目录/ZIP。两种来源进入同一套校验与 `install_artifact`
-路径。一个本地插件指向一个活跃的不可变 Artifact 与一个 generation DataRoot；可选的
-UI 与 Service 入口覆盖纯 UI、无头与混合形态，不需要额外的产品模型。Action 通过稳定
-的 `plugin:<plugin_id>/<action_id>` 身份直接绑定到 Agent、Desktop 与 Automation 挂载点。
+通过普通会话和 coding 工具创建应用，或导入已有源码、静态/服务端产物及 ZIP。
+NomiFun 保留原文件，把托管副本中的安装、预览、构建和前台启动命令串起来；
+有网页时在系统浏览器打开，无 UI 程序直接开始使用。修改当前文件后重新构建，
+停止和删除会结束受管进程树。
 
-统一 SDK 暴露 SQLite、KV、Files、内存态 Cache、Config、Credential 引用、Host 能力与
-跨插件 Action。Preview 复用同一套 Bridge 与存储适配器，落在临时 DataRoot 上。Package
-导出不含用户数据；Backup 携带当前数据与非机密配置，但绝不包含 Credential 明文。参见
-[插件平台架构](docs/architecture/plugin-platform.zh.md)。
+运行进程自动继承 Host 本机连接，无需 token 表单或 SDK；应用 MCP 工具由 Agent/会话
+明确选择，默认不全局注入。应用保留自己的文件、数据库和业务架构。
+参见[应用托管指南](docs/guides/app-hosting.zh.md)和[应用托管架构](docs/architecture/app-hosting.zh.md)。
 
 ### 🎨 创意工坊 —— 专注的无限画布创作
 
@@ -417,7 +416,7 @@ Desktop 中同一套会话、任务、需求、伙伴、模型和工具；Deskto
 
 一套 React 前端、一套 Rust 后端，**两种宿主模式** —— 同一套后端在两者中均为进程内运行。
 
-在产品家族层面，Desktop 同时也是 Mobile、小智、小程序和伙伴 IM 渠道的中枢。完整
+在产品家族层面，Desktop 同时也是 Mobile、小智、托管应用和伙伴 IM 渠道的中枢。完整
 通信、安全与创新模型见
 [`docs/architecture/product-ecosystem.zh.md`](docs/architecture/product-ecosystem.zh.md)。
 
@@ -620,7 +619,7 @@ AgentSession 数据与应用配置。签名建议见 [macOS 签名说明](apps/d
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
-| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 Unified Plugin 边界检查 |
+| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 应用托管边界检查 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:cloud` | 管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
@@ -636,7 +635,6 @@ AgentSession 数据与应用配置。签名建议见 [macOS 签名说明](apps/d
 | `bun run test:upgrade` | 运行启动、数据集兼容与升级定向 Rust 测试 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
-| `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
 | `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
 | `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
@@ -653,13 +651,13 @@ AgentSession 数据与应用配置。签名建议见 [macOS 签名说明](apps/d
 | `bun run check:nomi-core-live-provider` | Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
 | `bun run check:agent-reliability` | 读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过 |
-| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/Plugin边界及脚本登记检查 |
+| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/应用托管边界及脚本登记检查 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
 | `bun run check:dead-css` | 死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败） |
-| `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
+| `bun run check:app-hosting-boundary` | 校验普通应用托管唯一 owner、自动连接、MCP 选择和旧插件领域汰换 |
 | `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
 | `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
 | `bun run check:voice-boundary` | 校验可选Mobile语音的独立合同、核心port和供应商wire隔离 |

@@ -30,13 +30,12 @@ mod live_idmm_demo;
 #[path = "support/live_reasoning_lifecycle.rs"]
 mod live_reasoning_lifecycle;
 
+#[path = "support/live_app_hosting.rs"]
+mod live_app_hosting;
+
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
 mod live_general_desktop;
-#[cfg(all(feature = "browser-use", feature = "computer-use"))]
-#[path = "support/live_general_plugin.rs"]
-mod live_general_plugin;
-
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
 const STEPFUN_PLAN_MODELS: [&str; 2] = [STEPFUN_PLAN_MODEL, "step-5-preview"];
@@ -82,6 +81,8 @@ enum LiveCase {
     Companion,
     CreativeStudio,
     Idmm,
+    AppHosting,
+    AppWorkspaceUiFixture,
 }
 
 #[derive(Clone)]
@@ -221,7 +222,7 @@ fn live_model() -> Result<String, SmokeFailure> {
     }
 }
 
-async fn build_fixture(root: &TempDir) -> Result<LiveFixture, SmokeFailure> {
+async fn build_fixture(root: &TempDir, local_proof: Option<&str>) -> Result<LiveFixture, SmokeFailure> {
     let data_dir = root.path().join("data");
     let work_dir = root.path().join("work");
     let log_dir = root.path().join("logs");
@@ -245,7 +246,7 @@ async fn build_fixture(root: &TempDir) -> Result<LiveFixture, SmokeFailure> {
         log_level: Some("off".to_owned()),
         command: None,
     };
-    let environment = hard_deadline(
+    let mut environment = hard_deadline(
         "bootstrap",
         "ENVIRONMENT_BOOTSTRAP_DEADLINE_EXCEEDED",
         BOOT_DEADLINE,
@@ -260,6 +261,10 @@ async fn build_fixture(root: &TempDir) -> Result<LiveFixture, SmokeFailure> {
         },
     )
     .await?;
+    if let Some(proof) = local_proof {
+        environment.config.auth_policy = nomifun_auth::AuthPolicy::TrustLocalToken;
+        environment.config.local_trust_secret = Some(std::sync::Arc::from(proof));
+    }
     let application = hard_deadline(
         "bootstrap",
         "APPLICATION_COMPOSE_DEADLINE_EXCEEDED",
@@ -1802,12 +1807,11 @@ async fn assert_distinct_turn_message_identities(
     Ok(())
 }
 
-async fn assert_session_preset(
+async fn session_binding(
     router: &Router,
     phase: &'static str,
     session_id: &str,
-    preset_id: &str,
-) -> Result<(), SmokeFailure> {
+) -> Result<Value, SmokeFailure> {
     let response = successful_json(
         router,
         phase,
@@ -1819,14 +1823,15 @@ async fn assert_session_preset(
     )
     .await?;
     let observation = envelope_data(phase, response)?;
-    if observation
-        .pointer("/session/agent_binding/preset_revision_ref/preset_id")
-        .and_then(Value::as_str)
-        != Some(preset_id)
-    {
+    observation.pointer("/session/agent_binding").filter(|binding|binding.is_object()).cloned()
+        .ok_or_else(||SmokeFailure::new(phase,"SESSION_FROZEN_BINDING_MISSING",StatusCode::CONFLICT.as_u16()))
+}
+
+async fn assert_session_binding(router:&Router,phase:&'static str,session_id:&str,expected:&Value) -> Result<(),SmokeFailure> {
+    if &session_binding(router,phase,session_id).await? != expected {
         return Err(SmokeFailure::new(
             phase,
-            "SESSION_FROZEN_PRESET_CHANGED",
+            "SESSION_FROZEN_BINDING_CHANGED",
             StatusCode::CONFLICT.as_u16(),
         ));
     }
@@ -2213,6 +2218,10 @@ async fn run_selected_model_chain(
         create_agent_preset(router, &provider_id, model, &[]).await?;
     let (session_id, _) =
         create_session(router, &preset_id, &provider_id, model, json!([])).await?;
+    // Global Skill/MCP choices compile an immutable Session-only variant.
+    // Freeze the actual admitted definition, including Snapshot/resources and
+    // version, rather than guessing it has the library Preset's identity.
+    let original_binding = session_binding(router,"agent_switch.capture_original_binding",&session_id).await?;
     assert_session_runtime(router, &session_id).await?;
     let cursor =
         session_message_cursor(router, "model.cursor_before", &session_id).await?;
@@ -2266,18 +2275,19 @@ async fn run_selected_model_chain(
             StatusCode::CONFLICT.as_u16(),
         ));
     }
-    assert_session_preset(
+    let collaboration_binding = session_binding(router,"agent_switch.capture_new_binding",&collaboration_session_id).await?;
+    assert_session_binding(
         router,
         "agent_switch.original_binding",
         &session_id,
-        &preset_id,
+        &original_binding,
     )
     .await?;
-    assert_session_preset(
+    assert_session_binding(
         router,
         "agent_switch.new_binding",
         &collaboration_session_id,
-        &collaboration_preset_id,
+        &collaboration_binding,
     )
     .await?;
     run_live_agent_collaboration(router, &collaboration_session_id).await?;
@@ -2927,6 +2937,86 @@ async fn assert_session_runtime(router: &Router, session: &str) -> Result<(), Sm
     Ok(())
 }
 
+struct UiFixtureShutdownFile {
+    path: std::path::PathBuf,
+    bytes: Vec<u8>,
+}
+
+struct UiFixtureShutdownFiles {
+    app_count: usize,
+    files: Vec<UiFixtureShutdownFile>,
+}
+
+fn shutdown_probe_has_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.is_symlink() || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    { metadata.is_symlink() }
+}
+
+/// Probe only ordinary known application source files, never configuration or
+/// credential stores. This separates production close from the outer test's
+/// later TempDir destructor, which can partially reclaim a Windows directory.
+async fn snapshot_ui_fixture_shutdown_files(router: &Router, root: &Path) -> Result<UiFixtureShutdownFiles, SmokeFailure> {
+    let response = successful_json(router, "ui_fixture.shutdown_files", Method::GET, "/api/apps", None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let apps = envelope_data("ui_fixture.shutdown_files", response)?;
+    let apps = apps.as_array().ok_or_else(|| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_APPS_INVALID", 500))?;
+    let owned_root = std::fs::canonicalize(root.join("data/app-hosting/apps"))
+        .map_err(|_| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_APP_ROOT_UNAVAILABLE", 500))?;
+    let mut files = Vec::new();
+    for app in apps {
+        let id = required_string("ui_fixture.shutdown_files", app, "/id", "UI_FIXTURE_APP_ID_MISSING")?;
+        uuid::Uuid::parse_str(&id).map_err(|_| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_APP_ID_INVALID", 500))?;
+        let directory = std::path::PathBuf::from(required_string("ui_fixture.shutdown_files", app, "/directory", "UI_FIXTURE_APP_DIRECTORY_MISSING")?);
+        let metadata = std::fs::symlink_metadata(&directory)
+            .map_err(|_| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_APP_DIRECTORY_UNAVAILABLE", 500))?;
+        if shutdown_probe_has_link(&metadata) || std::fs::canonicalize(&directory).ok().as_deref() != Some(owned_root.join(&id).as_path()) {
+            return Err(SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_APP_DIRECTORY_OUTSIDE_OWNER", 500));
+        }
+        for relative in ["index.html", "snake-game/index.html", "server.cjs"] {
+            let path = directory.join(relative);
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_SOURCE_METADATA_FAILED", 500)),
+            };
+            let mut checked = directory.clone();
+            for component in Path::new(relative).components() {
+                checked.push(component);
+                if shutdown_probe_has_link(&std::fs::symlink_metadata(&checked)
+                    .map_err(|_| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_SOURCE_METADATA_FAILED", 500))?) {
+                    return Err(SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_SOURCE_LINK_REJECTED", 500));
+                }
+            }
+            if !metadata.is_file() || !std::fs::canonicalize(&path).ok().is_some_and(|canonical| canonical.starts_with(owned_root.join(&id))) {
+                return Err(SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_SOURCE_OUTSIDE_OWNER", 500));
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|_| SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_SOURCE_READ_FAILED", 500))?;
+            files.push(UiFixtureShutdownFile { path, bytes });
+        }
+    }
+    Ok(UiFixtureShutdownFiles { app_count: apps.len(), files })
+}
+
+fn assert_ui_fixture_shutdown_files(snapshot: UiFixtureShutdownFiles) -> Result<(), SmokeFailure> {
+    use sha2::{Digest, Sha256};
+    let mut digests = Vec::new();
+    for file in &snapshot.files {
+        if std::fs::read(&file.path).ok().as_deref() != Some(file.bytes.as_slice()) {
+            return Err(SmokeFailure::new("ui_fixture.shutdown_files", "UI_FIXTURE_PRODUCTION_CLOSE_CHANGED_SOURCE", 500));
+        }
+        digests.push(format!("{:x}", Sha256::digest(&file.bytes)));
+    }
+    eprintln!("NOMIFUN_LIVE_APP_WORKSPACE_SHUTDOWN_FILES_PRESERVED app_count={} file_count={} sha256={}",
+        snapshot.app_count, snapshot.files.len(), digests.join(","));
+    Ok(())
+}
+
 async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
@@ -2937,8 +3027,21 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
             StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
         )
     })?;
-    let fixture = build_fixture(&root).await?;
-    let router = fixture.application.router();
+    let local_proof = matches!(case, LiveCase::AppHosting | LiveCase::AppWorkspaceUiFixture).then(|| uuid::Uuid::new_v4().to_string());
+    let fixture = build_fixture(&root, local_proof.as_deref()).await?;
+    // Only the internal test driver receives a proof automatically. The actual
+    // HTTP listener in the app smoke uses the untouched authenticated router.
+    let router = if let Some(proof) = &local_proof {
+        let proof = axum::http::HeaderValue::from_str(proof)
+            .map_err(|_| SmokeFailure::new("bootstrap", "TEST_LOCAL_PROOF_INVALID", 500))?;
+        fixture.application.router().layer(axum::middleware::from_fn(move |mut request: Request<Body>, next: axum::middleware::Next| {
+            let proof = proof.clone();
+            async move {
+                request.headers_mut().insert("x-nomi-local-trust", proof);
+                next.run(request).await
+            }
+        }))
+    } else { fixture.application.router() };
     let result = AssertUnwindSafe(async {
         official_runtime_build(&router).await?;
         match case {
@@ -2958,8 +3061,16 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
         LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
         LiveCase::Idmm => live_idmm_demo::run(&router, api_key.as_str(), &model).await,
+        LiveCase::AppHosting => live_app_hosting::run(
+            &router, &fixture.application, api_key.as_str(), local_proof.as_deref().expect("application smoke has its isolated boot proof"),
+            &model).await,
+        LiveCase::AppWorkspaceUiFixture => live_app_hosting::run_ui_fixture(
+            &router, &fixture.application, api_key.as_str(), &model).await,
     }}).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
         "live.case", "LIVE_CASE_PANICKED", 500)));
+    let shutdown_files = if matches!(case, LiveCase::AppWorkspaceUiFixture) {
+        Some(snapshot_ui_fixture_shutdown_files(&router, root.path()).await)
+    } else { None };
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -2984,6 +3095,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     // credential audit so no buffered log write can occur after a clean scan.
     drop(environment);
     close_result?;
+    if let Some(snapshot) = shutdown_files { assert_ui_fixture_shutdown_files(snapshot?)?; }
     if result.is_err() || matches!(case, LiveCase::LongCoding) {
         emit_live_runtime_progress_trace(root.path()).await;
         emit_live_turn_failure_trace(root.path()).await;
@@ -2997,7 +3109,28 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     .await;
 
     audit_result?;
+    if let Some(proof) = local_proof {
+        ensure_secret_not_persisted(root.path(), proof.as_bytes()).await?;
+    }
     result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --app-hosting-smoke"]
+async fn nomi_core_app_generation_and_hosting_reaches_live_stepfun() {
+    if let Err(error) = run_live_provider_smoke(LiveCase::AppHosting).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated production UI Host; requires credential stdin and explicit finish"]
+async fn nomi_core_app_workspace_ui_fixture() {
+    if let Err(error) = run_live_provider_smoke(LiveCase::AppWorkspaceUiFixture).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3086,16 +3219,6 @@ async fn nomi_core_official_creative_studio_reaches_live_stepfun() {
 #[ignore = "requires a live credential on stdin; use the runner --general-desktop-smoke"]
 async fn nomi_core_general_desktop_reaches_live_stepfun() {
     if let Err(failure) = live_general_desktop::run().await {
-        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
-        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
-    }
-}
-
-#[cfg(all(feature = "browser-use", feature = "computer-use"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a live credential on stdin; use the runner --plugin-smoke"]
-async fn nomi_core_general_plugin_creation_reaches_live_stepfun() {
-    if let Err(failure) = live_general_plugin::run().await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

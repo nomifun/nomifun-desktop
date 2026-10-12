@@ -18,6 +18,54 @@ This is the current development entry point. Rust types, the Session event regis
 
 ## Runtime context
 
+Application workspaces use an ordinary Conversation with the fixed official
+`app.developer` Agent and user-selected model/reasoning policy. The application's
+owned directory is the frozen workspace. Its `development_session_id` is a verified
+navigation reference, not authority, exclusive ownership or another binding ledger.
+Reopening verifies the canonical owner, purpose, template and directory. Application
+deletion preserves the ordinary Session and valid history; the removed path cannot
+be reconstructed or executed merely because history remains.
+
+Each application owns one independent project directory. A project supports multiple
+ordinary Sessions, and different applications do not share project roots. History is queried by
+the exact owner, ordinary purpose and current explicitly selected workspace binding, including
+canonical archive metadata. Past resource definitions and the latest navigation
+reference are not membership or authority. Session content stays independent in
+the canonical store; source directories contain no copied transcript. New Sessions
+with an explicit directory first reuse an existing scoped project-memory identity
+for the same owner and canonical root; the first namespace uses their digest.
+They share existing project-memory state for that project, retain the logical identity
+across Agent switches and formal storage relocation, and leave prior default bindings intact.
+Project memory retains the current in-memory Host persistence contract; it does
+not survive a Host restart. Project files and canonical Session history persist.
+Installation-level placeholders for default Session-owned workspaces never identify
+an application's project directory.
+
+Only that built-in template defaults to all ten `app.hosting` actions. Other
+official templates leave NomiFun application development optional. Prior personal
+selections and frozen Sessions gain no actions automatically. The guide loads on
+demand; mutations use existing HostedEffectReceipts with exact canonical causation.
+Manual file imports, overwrites and deletion hold directory and current project
+Session admission fences and reject active Turns or pending/unknown effects.
+Creation, forks, binding changes, warmup and admission take a directory read fence
+in the existing transient lock registry. This prevents a new Session crossing the
+membership scan while files change, without another transcript or ledger.
+The existing typed deleting-session query also protects exact owner/project roots
+until normal cleanup completes; it grants no execution authority and does not put
+deleting Sessions back into ordinary history.
+An admitted Agent import takes the same project fences and existing native workspace
+mutation lock. It verifies its exact Session, Turn, Snapshot, operation, tool causation
+and pending Effect receipt; only that invocation's own pending effect is permitted.
+Other active work and unsettled effects remain blockers, and rejections settle through
+the existing pre-dispatch rejection contract.
+
+Within that fence, application deletion waits for normal Runtime teardown of its
+exact development Session and releases only the idle exact-root File/Artifact/VCS
+owner cache and native directory handles. Session, Turn, Event, Payload, Effect and
+resource-definition values remain unchanged. Another Session's active resources,
+retained invocations or unresolved Git outcomes block release; application deletion
+does not close unrelated Sessions or processes.
+
 Official Agents have stable, owner-scoped editable Presets and use the same immutable revision save path as personal Agents. Release seeds initialize unsaved defaults without overwriting saved customizations. Official product launches resolve the owner's saved configuration; model and extension variants continue through the existing Revision/Snapshot path. Historical official identity is validated from host-owned source, owner, and template identity rather than equality with today's seed or mutable configuration.
 
 `engine_history.rs` reads typed canonical events and resolved payloads. It does not read Message projections to determine model roles. Native closed turns replay their structured journal. Missing Runtime records fail closed rather than falling back to chat text.
@@ -70,8 +118,9 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | Preset | Default capability boundary |
 | --- | --- |
 | `chat.minimal` | No Modules or Actions; ordinary text chat gains no tool authority. |
-| `assistant.general` | Files, processes, version control, artifacts, project memory, research, schedules, browser and computer operations, media, assets, Office, plugin development, SSH, knowledge and Session management. |
-| `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, plugin development, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
+| `assistant.general` | Files, processes, version control, artifacts, project memory, research, schedules, browser and computer operations, media, assets, Office, SSH, knowledge and Session management. |
+| `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
+| `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
 | `companion.default` | Keeps persona, long-term memory, robot vision, channels and schedules; adds everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
@@ -90,7 +139,7 @@ Companion persona and historical memory never advertise retired `nomi_*` tools o
 
 The App's compilation surface remains desktop regardless of optional Browser/Computer adapters. Deferring physical availability in the resource ceiling requires an exact pinned bundled public Provider with one member, one resource kind, complete Action operation contracts, and no private implementation, dependencies, Context or Events. Unsupported physical members enter only the current compiled object's non-executable set, never Snapshot or checkpoint data; binding and invocation still reject them. Other Providers, incomplete contracts and direct non-Agent operations retain strict admission.
 
-The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 112 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches use a window of at most 117 authorized definitions, retain all latest matches, and leave evicted tools searchable. Canonical recovery and preactivation replay the same rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
+The authorized catalog is not truncated at 128 Modules or Actions. With ToolSearch, initial schema presentation projects within 24 KiB and 112 tools, reserving Runtime controls and five latest search matches while preserving every binding and schema in the original ToolPlan. Later searches protect the latest set of up to five matches, fill remaining space with older displayed tools, and leave omitted tools searchable. Explicit Host preactivation uses the final authorized frozen names and atomically presents the entire requested set; it does not split them into five-match searches that can evict earlier members. Both latest search results and explicit Host sets may exceed the soft 24 KiB target. The hard limits remain 117 authorized definitions, 128 visible tools including Runtime controls, and the whole-request context budget; an oversized set is rejected without partially changing activation. Canonical recovery rebuilds presentation from its original facts and applies the corresponding set rules. Without ToolSearch, only the actual assembled visible tool count is limited. This window is presentation state, not a second authority set or persistent ledger.
 
 ### Relocating the same current dataset
 
@@ -107,9 +156,26 @@ and sole `workspace_root` parameter match the source work root. Managed knowledg
 `knowledge_bases.managed` flag and exact registered root before their frozen `knowledge_root` changes; external
 knowledge roots remain unchanged.
 
+The hosting owner's pure offline registry validation supplies the application UUIDs
+for this relocation. The canonical writer also verifies the real installation owner
+and accepts only each registered `{source_data}/app-hosting/apps/{app_id}` root.
+Inspection never initializes HostingOwner or reconciles orphan processes; any
+unconfirmed process identity, PID, running state or operation blocks relocation.
+After the full copy is prepared, only `record.directory` in each staging registry
+changes to the final destination root. The publication coordinator compares every
+source registry with that exact location-only change and preserves all other fields;
+application source and other payloads still pass complete size and checksum validation.
+The final installed manifest includes rebased registries, so publication recovery
+does not replay relocation or obtain authority by reopening the old drive.
+Preparation retries accept either the exact original registry copy or its directory-only
+rewrite; publication still requires all registries to be rebased. Once a verified copy
+exists, retries do not reopen source SQLite and create WAL/SHM sidecars. Complete source
+checksums, pure App inspection and staging database validation remain mandatory.
+
 One canonical Store write transaction updates the complete affected Session resource sets, derives new definition
 IDs and appends `session/agent-binding-changed` with a typed `workspace_relocation` proof. The proof contains the source
-data/work roots, target data root, managed knowledge IDs and complete before/after resource definitions. Only managed
+data/work roots, target data root, managed knowledge IDs, optional `managed_app_workspace`
+application/owner proof, and complete before/after resource definitions. Only managed
 location parameters may change; owner, resource identity, grants, connection and all other parameters remain exact.
 This explicit location transition retains the same Revision/Snapshot and increments binding version. A same-Snapshot
 transition requires its exact proof and request digest; ordinary Agent/capability changes receive no such exception.
@@ -117,11 +183,20 @@ Every location change records the Session-owned `conversations/<Session ID>` nam
 resources and Sessions whose current Agent uses an external project. Optional `managed_session_namespace` references
 only the exact default Workspace definition in this Session's opening event; the writer and reader verify that origin
 and the complete location chain. A selected Workspace/Process root changes only when it exactly names that owned
-Session directory, preserving resource identity, grants and connection. The entire source work root or adjacent paths
-cannot be adopted. Authenticated canonical history responses attach transient `managed_file_paths` using the original
+Session directory. Registered applications use their own `managed_app_workspace` proof
+to update Workspace, Process Session and scoped project-memory location parameters
+at the exact application root. Their logical resource IDs, grants and connections stay
+unchanged; new Sessions in that project reuse the relocated memory identity.
+Unregistered, adjacent and external project roots remain unchanged. The entire source
+work root cannot be adopted. Authenticated canonical history responses attach transient `managed_file_paths` using the original
 source sequence, managed interval, exact Session root and canonical relative components. New explicit references to
 old locations, other Sessions and external projects remain unchanged. Timestamp-cleaned attachment names resolve
 only through the same accepted input's exact `files` receipts, without disk searches or historical text rewrites.
+Ordinary Sessions retained after application deletion grant no authority to relocate or
+recreate that application directory. After validating the complete location proof and
+exact current definitions, history treats a proved App root outside the active dataset
+as external and supplies no new App aliases. Corrupt proofs or current definitions still
+fail closed; default managed Session namespaces must still match the active data root.
 Image, attachment and tool-file previews/opening share this map and remain usable after the old location is offline.
 Existing events, payloads, immutable Snapshots and historical resource definitions stay unchanged. There is no second
 binding ledger; a retry verifies the original canonical transition and current binding directly.

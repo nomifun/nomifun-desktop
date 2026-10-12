@@ -1,4 +1,6 @@
 import { ipcBridge } from '@/common';
+import { appHosting } from '@/common/adapter/appHostingBridge';
+import { parseMcpServerId } from '@/common/types/ids';
 import { ensureBackendMcpCatalog, subscribeMcpCatalogChanged } from '@/renderer/hooks/mcp/catalog';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SessionCapabilityCatalog, SessionSkillOption } from './model';
@@ -38,6 +40,19 @@ const mergeSkills = (
   return { skills, autoSkillNames };
 };
 
+const loadAppSources = () => appHosting.mcpSources.invoke()
+  .then(sources => ({ sources, error: undefined as string | undefined }))
+  .catch((cause: unknown) => ({ sources: [], error: String(cause) }));
+const mergeMcpSources = (mcp: Awaited<ReturnType<typeof ensureBackendMcpCatalog>>, apps: Awaited<ReturnType<typeof loadAppSources>>) => [
+  ...mcp.allServers.filter(server => !server.builtin),
+  ...apps.sources.map(source => ({
+    mcp_server_id: parseMcpServerId(source.app_id), name: source.name, description: source.reason || undefined,
+    enabled: source.state === 'running', transport: { type: 'http' as const, url: source.url }, tools: source.tools,
+    last_test_status: source.connection_status === 'connected' ? 'connected' as const : source.connection_status === 'error' ? 'error' as const : 'disconnected' as const,
+    original_json: '{}', created_at: 0, updated_at: 0, appSource: true,
+  })),
+];
+
 export const useSessionCapabilityCatalog = () => {
   const [catalog, setCatalog] = useState<SessionCapabilityCatalog>(EMPTY_CATALOG);
   const [loading, setLoading] = useState(true);
@@ -59,24 +74,27 @@ export const useSessionCapabilityCatalog = () => {
       }
       try {
         if (mcpOnly && hasLoaded.current) {
-          const mcp = await ensureBackendMcpCatalog();
+          const [mcp, apps] = await Promise.all([ensureBackendMcpCatalog(), loadAppSources()]);
           if (!active || requestGeneration !== generation) return;
           setCatalog((previous) => ({
             ...previous,
-            mcpServers: mcp.allServers.filter((server) => !server.builtin),
+            appSourceError: apps.error,
+            mcpServers: mergeMcpSources(mcp, apps),
           }));
         } else {
-          const [available, auto, mcp] = await Promise.all([
+          const [available, auto, mcp, apps] = await Promise.all([
             ipcBridge.fs.listAvailableSkills.invoke(),
             ipcBridge.fs.listBuiltinAutoSkills.invoke(),
             ensureBackendMcpCatalog(),
+            loadAppSources(),
           ]);
           if (!active || requestGeneration !== generation) return;
           const merged = mergeSkills(available, auto);
           setCatalog({
             skills: merged.skills,
             autoSkillNames: merged.autoSkillNames,
-            mcpServers: mcp.allServers.filter((server) => !server.builtin),
+            appSourceError: apps.error,
+            mcpServers: mergeMcpSources(mcp, apps),
           });
         }
         hasLoaded.current = true;

@@ -20,6 +20,7 @@ not retained; use Git history.
 | Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
 | Connect providers, local models, and configure failover | [guides/model-routing.md](guides/model-routing.md) |
 | Create with the infinite canvas, assets, prompts, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
+| Host your own programs | [guides/app-hosting.md](guides/app-hosting.md) |
 | Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
 | Understand managed tools and attachment previews | [architecture/external-tools.md](architecture/external-tools.md) |
@@ -49,7 +50,7 @@ docs/
 Current top-level user surfaces include conversations, terminals, extensible
 model management, Creation (Canvas + asset library), the Agent workbench,
 skills, MCP, open capabilities, requirements/AutoWork, scheduled tasks,
-companions, knowledge, SSH hosts, and feature-gated plugin capabilities. The
+companions, knowledge, SSH hosts, and application hosting. The
 frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.
 

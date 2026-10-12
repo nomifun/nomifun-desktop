@@ -240,10 +240,13 @@ impl EngineToolInvoker for ComputerMediaTools {
 mod tests {
     use super::*;
     use nomifun_chat_model_broker::ToolCallId;
+    #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::runtime::{BrowserDialog, BrowserDialogKind, BrowserInteractionCapabilities, BrowserObservation, BrowserScreenshot, BrowserTabTarget};
 
+    #[cfg(feature = "browser-use")]
     const BROWSER_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZkAAAAASUVORK5CYII=";
 
+    #[cfg(feature = "browser-use")]
     fn browser_observation() -> BrowserObservation {
         BrowserObservation {
             target: BrowserTabTarget { tab_id: "tab".into(), runtime_generation: 1, document_generation: 2 },
@@ -253,10 +256,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "browser-use")]
     fn browser_screenshot(target: BrowserTabTarget, png_base64: String) -> BrowserScreenshot {
         BrowserScreenshot { target, width: 1, height: 1, viewport_width: 880., viewport_height: 600., png_base64 }
     }
 
+    #[cfg(feature = "browser-use")]
     fn encoded_browser_result(observation: BrowserObservation, screenshot: Option<BrowserScreenshot>) -> EngineToolResult {
         // Exercise the BrowserRoleOwner encoder and KernelToolInvoker's actual
         // output.0 serialization, rather than a Computer-shaped mock envelope.
@@ -267,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "browser-use")]
     fn browser_navigation_metadata_is_projected_before_entering_tool_history() {
         use nomifun_browser_platform::navigation::BrowserLoadSummary;
         let mut observation = browser_observation();
@@ -294,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "browser-use")]
     fn browser_projection_preserves_dom_metadata_and_removes_pixels_from_text() {
         let encoded = BROWSER_PNG.to_owned();
         let observation = browser_observation();
@@ -310,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "browser-use")]
     fn browser_projection_rejects_mismatched_page_and_malformed_image() {
         let observation = browser_observation();
         let mut old_target = observation.target.clone();
@@ -325,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "browser-use")]
     fn pending_dialog_returns_metadata_without_fabricated_pixels() {
         let mut observation = browser_observation();
         observation.script_dialog = Some(BrowserDialog {

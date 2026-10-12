@@ -11,11 +11,6 @@ const MAX_VISIBLE_TOOLS: usize = MAX_VISIBLE_TOOL_DEFINITIONS;
 // Shared runtime limits reserve the existing control tools and one complete
 // ToolSearch result. They bound presentation, never the authorized catalog.
 const INITIAL_VISIBLE_TOOLS: usize = INITIAL_VISIBLE_TOOL_DEFINITIONS;
-/// User-installed Plugin Actions are eligible for initial display while their
-/// own definitions fit this budget. They also share the overall presentation
-/// budget; beyond either bound they defer like other heavy tools.
-const PLUGIN_TOOL_BYTES: usize = 8 * 1024;
-
 pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<AgentToolPlan, AppError> {
     let definitions = plan.model_definitions();
     let visible = definitions.iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
@@ -32,28 +27,12 @@ pub(super) fn project(plan: AgentToolPlan, discovery_available: bool) -> Result<
     if visible.len() <= INITIAL_VISIBLE_TOOLS && bytes <= INITIAL_TOOL_BYTES {
         return Ok(plan);
     }
-    let plugin_bytes = serde_json::to_vec(&visible.iter()
-        .filter(|definition| plan.binding(&definition.name).is_some_and(|binding|
-            binding.capability_id.as_ref()
-                .starts_with(nomifun_agent_contracts::plugin::PLUGIN_ACTION_ID_PREFIX)))
-        .collect::<Vec<_>>())
-        .map_err(|error| AppError::Internal(error.to_string()))?.len();
-    let defer_plugins = plugin_bytes > PLUGIN_TOOL_BYTES;
     let mut bindings = definitions.iter().map(|definition| {
         let mut binding = plan.binding(&definition.name).expect("compiled tool has a binding").clone();
         // Keep ordinary workspace work and the general-purpose web/delegation
         // entry points ready. Heavy business/provider schemas remain in the
         // exact same plan and are revealed by the selected ToolSearch policy.
-        // User-installed Agent tools remain eligible within their own budget;
-        // the shared budget below can also defer them. Neither case changes
-        // their frozen binding identity.
-        let plugin_tool = binding.capability_id.as_ref()
-            .starts_with(nomifun_agent_contracts::plugin::PLUGIN_ACTION_ID_PREFIX);
-        if plugin_tool {
-            if defer_plugins {
-                binding.definition.deferred = true;
-            }
-        } else if !matches!(binding.capability_id.as_ref(),
+        if !matches!(binding.capability_id.as_ref(),
             "workspace.files" | "workspace.vcs" | "workspace.process" | "web.research" | "agent.collaboration") {
             binding.definition.deferred = true;
         }
@@ -96,7 +75,6 @@ fn initial_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding
         ("agent.collaboration", "agent/delegate" | "agent/fork" | "agent/request_user_decision") => 4,
         ("workspace.process", "workspace.process/start") => 5,
         ("workspace.files", "workspace.files/patch") | ("workspace.process", "workspace.process/resize") => 7,
-        _ if binding.capability_id.as_ref().starts_with(nomifun_agent_contracts::plugin::PLUGIN_ACTION_ID_PREFIX) => 6,
         _ => 5,
     }
 }
@@ -106,8 +84,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use nomifun_agent_contracts::{
-        ActionId, CanonicalSchemaRef, CapabilityId, DigestHex, PluginId, StrictJsonValue,
-        plugin::plugin_action_id,
+        ActionId, CanonicalSchemaRef, CapabilityId, DigestHex, StrictJsonValue,
     };
     use nomifun_chat_model_broker::ChatToolDefinition;
     use nomifun_engine_core::{
@@ -144,46 +121,19 @@ mod tests {
     }
 
     #[test]
-    fn plugin_actions_stay_directly_visible_on_a_deferred_surface() {
-        let plugin_capability = plugin_action_id(
-            &PluginId::from("019b0000-0000-7000-8000-000000000123"),
-            "trim_and_uppercase",
-        );
-        assert!(plugin_capability.starts_with("plugin:"));
+    fn large_catalog_preserves_every_exact_tool_and_defers_heavy_schemas() {
         let plan = AgentToolPlan::new([
-            binding("plugin_trim", &plugin_capability, "Plugin Action"),
+            binding("mcp_lookup", "nomi.mcp.v1.example", "Application MCP tool"),
             binding("crm_lookup", "crm.contacts", &"x".repeat(INITIAL_TOOL_BYTES)),
             binding("files_read", "workspace.files", "read"),
-        ])
-        .unwrap();
-        let projected = project(plan, true).unwrap();
-        assert!(!projected.binding("plugin_trim").unwrap().definition.deferred);
-        assert!(projected.binding("crm_lookup").unwrap().definition.deferred);
-        assert!(!projected.binding("files_read").unwrap().definition.deferred);
-    }
-
-    /// Beyond the plugin budget installed Plugin Actions defer like other
-    /// heavy tools; the frozen binding identity stays exact.
-    #[test]
-    fn plugin_actions_beyond_the_visible_budget_are_deferred() {
-        let plugin_capability = |action: &str| {
-            plugin_action_id(
-                &PluginId::from("019b0000-0000-7000-8000-000000000123"),
-                action,
-            )
-        };
-        let plan = AgentToolPlan::new([
-            binding("plugin_alpha", &plugin_capability("alpha"), &"a".repeat(PLUGIN_TOOL_BYTES)),
-            binding("plugin_beta", &plugin_capability("beta"), &"b".repeat(PLUGIN_TOOL_BYTES)),
-            binding("plugin_gamma", &plugin_capability("gamma"), &"g".repeat(PLUGIN_TOOL_BYTES)),
-            binding("files_read", "workspace.files", "read"),
-        ])
-        .unwrap();
-        let projected = project(plan, true).unwrap();
-        for name in ["plugin_alpha", "plugin_beta", "plugin_gamma"] {
-            let deferred = projected.binding(name).unwrap();
-            assert!(deferred.definition.deferred, "{name}");
-            assert!(deferred.capability_id.as_ref().starts_with("plugin:"));
+        ]).unwrap();
+        let projected = project(plan.clone(), true).unwrap();
+        assert_eq!(projected.len(), plan.len());
+        for name in ["mcp_lookup", "crm_lookup"] {
+            let mut binding = projected.binding(name).unwrap().clone();
+            assert!(binding.definition.deferred);
+            binding.definition.deferred = false;
+            assert_eq!(&binding, plan.binding(name).unwrap());
         }
         assert!(!projected.binding("files_read").unwrap().definition.deferred);
     }
@@ -194,9 +144,9 @@ mod tests {
 
         let manifest = official_preset_seed_manifest_payload();
         let general = &manifest.templates[&OfficialPresetKey::AssistantGeneral];
-        assert_eq!(general.enabled_capabilities.iter().map(|selection| selection.action_allowlist.len()).sum::<usize>(), 100);
+        assert_eq!(general.enabled_capabilities.iter().map(|selection| selection.action_allowlist.len()).sum::<usize>(), 89);
         // A normal installation may have no KB, SSH or desktop adapter yet.
-        // The other eighty-one Actions have automatic or zero resource needs.
+        // The other seventy Actions have automatic or zero resource needs.
         let mut bindings = general.enabled_capabilities.iter()
             .filter(|selection| !matches!(selection.capability.id.as_ref(), "knowledge" | "ssh" | "browser" | "computer"))
             .flat_map(|selection| selection.action_allowlist.iter().map(|action| {
@@ -209,7 +159,7 @@ mod tests {
                 native
             }))
             .collect::<Vec<_>>();
-        assert_eq!(bindings.len(), 81);
+        assert_eq!(bindings.len(), 70);
         bindings.extend((0..60).map(|index| binding(
             &format!("mcp_fixture_tool_{index:02}"),
             &format!("mcp.fixture.tool_{index:02}"),
@@ -217,7 +167,7 @@ mod tests {
         )));
         let original = AgentToolPlan::new(bindings).unwrap();
         let projected = project(original.clone(), true).unwrap();
-        assert_eq!(projected.len(), 141);
+        assert_eq!(projected.len(), 130);
         let visible = projected.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
         assert!(visible.len() <= INITIAL_VISIBLE_TOOLS);
         assert!(serde_json::to_vec(&visible).unwrap().len() <= INITIAL_TOOL_BYTES);
@@ -231,7 +181,7 @@ mod tests {
             after.definition.deferred = before.definition.deferred;
             assert_eq!(&after, before, "presentation must retain exact authority and schema for {}", definition.name);
         }
-        assert!(project(original, false).is_err(), "without discovery all 141 tools would be directly visible");
+        assert!(project(original, false).is_err(), "without discovery all 130 tools would be directly visible");
     }
 
     #[test]

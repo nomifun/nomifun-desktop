@@ -146,6 +146,23 @@
         ],
         "type": "string"
       },
+      "ManagedAppWorkspaceNamespaceV1": {
+        "additionalProperties": false,
+        "description": "An exact current application registry identity, supplied by the hosting\nowner to the offline coordinator. It proves only the location of that\napplication's existing project; Session authority remains canonical.",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "owner_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "owner_id"
+        ],
+        "type": "object"
+      },
       "ManagedSessionWorkspaceNamespaceV1": {
         "additionalProperties": false,
         "description": "The canonical event itself carries the exact before/after definitions.\nThis is bounded provenance, never another active resource binding ledger.",
@@ -167,6 +184,16 @@
       "ManagedStorageRelocationV1": {
         "additionalProperties": false,
         "properties": {
+          "managed_app_workspace": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ManagedAppWorkspaceNamespaceV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "managed_knowledge_ids": {
             "items": {
               "type": "string"
@@ -2590,11 +2617,19 @@
       },
       "SessionPurpose": {
         "description": "Immutable product ownership established by the canonical opening event.",
-        "enum": [
-          "conversation",
-          "plugin_authoring"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "conversation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "plugin_authoring",
+            "description": "Typed recognition of existing history only. Current product owners\nreject new creation, execution, forks and checkpoint recovery.",
+            "type": "string"
+          }
+        ]
       },
       "TypedResourceBinding": {
         "additionalProperties": false,
@@ -4471,6 +4506,9 @@
       "role_coverage": {
         "additionalProperties": false,
         "properties": {
+          "app.developer": {
+            "$ref": "#/$defs/OfficialPresetRoleCoverage"
+          },
           "assistant.general": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
           },
@@ -4501,6 +4539,9 @@
       "templates": {
         "additionalProperties": false,
         "properties": {
+          "app.developer": {
+            "$ref": "#/$defs/OfficialPresetSeed"
+          },
           "assistant.general": {
             "$ref": "#/$defs/OfficialPresetSeed"
           },
@@ -5710,585 +5751,6 @@
       "decision_fixture_refs"
     ],
     "title": "PlatformValidationManifestPayload",
-    "type": "object"
-  },
-  "plugin_action_publication": {
-    "$defs": {
-      "PluginActionEffect": {
-        "enum": [
-          "read",
-          "write",
-          "external"
-        ],
-        "type": "string"
-      },
-      "PluginActionManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "effect": {
-            "$ref": "#/$defs/PluginActionEffect"
-          },
-          "input": true,
-          "name": {
-            "type": "string"
-          },
-          "output": true
-        },
-        "required": [
-          "name",
-          "description",
-          "input",
-          "output",
-          "effect"
-        ],
-        "type": "object"
-      },
-      "PluginArtifactRef": {
-        "additionalProperties": false,
-        "properties": {
-          "digest": {
-            "type": "string"
-          },
-          "package_id": {
-            "type": "string"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "digest",
-          "package_id",
-          "version"
-        ],
-        "type": "object"
-      },
-      "PluginBindingPoint": {
-        "enum": [
-          "agent.tool",
-          "agent.context",
-          "agent.before_model",
-          "agent.before_tool",
-          "desktop.command",
-          "desktop.event",
-          "automation.action"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "action": {
-        "$ref": "#/$defs/PluginActionManifest"
-      },
-      "action_id": {
-        "type": "string"
-      },
-      "artifact": {
-        "$ref": "#/$defs/PluginArtifactRef"
-      },
-      "bindings": {
-        "items": {
-          "$ref": "#/$defs/PluginBindingPoint"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "plugin_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "plugin_id",
-      "artifact",
-      "action_id",
-      "action",
-      "bindings"
-    ],
-    "title": "PluginActionPublication",
-    "type": "object"
-  },
-  "plugin_artifact": {
-    "$defs": {
-      "PluginActionEffect": {
-        "enum": [
-          "read",
-          "write",
-          "external"
-        ],
-        "type": "string"
-      },
-      "PluginActionManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "effect": {
-            "$ref": "#/$defs/PluginActionEffect"
-          },
-          "input": true,
-          "name": {
-            "type": "string"
-          },
-          "output": true
-        },
-        "required": [
-          "name",
-          "description",
-          "input",
-          "output",
-          "effect"
-        ],
-        "type": "object"
-      },
-      "PluginArtifactFile": {
-        "additionalProperties": false,
-        "properties": {
-          "digest": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "size_bytes": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "path",
-          "digest",
-          "size_bytes"
-        ],
-        "type": "object"
-      },
-      "PluginBindingManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "type": "string"
-          },
-          "optional": {
-            "type": "boolean"
-          },
-          "point": {
-            "$ref": "#/$defs/PluginBindingPoint"
-          }
-        },
-        "required": [
-          "point",
-          "action"
-        ],
-        "type": "object"
-      },
-      "PluginBindingPoint": {
-        "enum": [
-          "agent.tool",
-          "agent.context",
-          "agent.before_model",
-          "agent.before_tool",
-          "desktop.command",
-          "desktop.event",
-          "automation.action"
-        ],
-        "type": "string"
-      },
-      "PluginEntrypoints": {
-        "additionalProperties": false,
-        "properties": {
-          "service": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "serviceMode": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PluginServiceMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "ui": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "PluginManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "actions": {
-            "additionalProperties": {
-              "$ref": "#/$defs/PluginActionManifest"
-            },
-            "default": {},
-            "type": "object"
-          },
-          "bindings": {
-            "default": [],
-            "items": {
-              "$ref": "#/$defs/PluginBindingManifest"
-            },
-            "type": "array"
-          },
-          "configSchema": {
-            "default": {
-              "type": "object"
-            }
-          },
-          "dataVersion": {
-            "default": 0,
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "description": {
-            "type": "string"
-          },
-          "entrypoints": {
-            "$ref": "#/$defs/PluginEntrypoints"
-          },
-          "extensions": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "hostApi": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "migrations": {
-            "default": [],
-            "items": {
-              "$ref": "#/$defs/PluginMigrationManifest"
-            },
-            "type": "array"
-          },
-          "name": {
-            "type": "string"
-          },
-          "permissions": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "schema": {
-            "type": "string"
-          },
-          "secrets": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "schema",
-          "id",
-          "version",
-          "name",
-          "description",
-          "hostApi",
-          "entrypoints"
-        ],
-        "type": "object"
-      },
-      "PluginMigrationManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "from": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "to": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "from",
-          "to",
-          "path"
-        ],
-        "type": "object"
-      },
-      "PluginServiceMode": {
-        "enum": [
-          "onDemand",
-          "continuous"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "artifact_digest": {
-        "type": "string"
-      },
-      "files": {
-        "items": {
-          "$ref": "#/$defs/PluginArtifactFile"
-        },
-        "type": "array"
-      },
-      "manifest": {
-        "$ref": "#/$defs/PluginManifest"
-      }
-    },
-    "required": [
-      "artifact_digest",
-      "manifest",
-      "files"
-    ],
-    "title": "PluginArtifact",
-    "type": "object"
-  },
-  "plugin_manifest": {
-    "$defs": {
-      "PluginActionEffect": {
-        "enum": [
-          "read",
-          "write",
-          "external"
-        ],
-        "type": "string"
-      },
-      "PluginActionManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "effect": {
-            "$ref": "#/$defs/PluginActionEffect"
-          },
-          "input": true,
-          "name": {
-            "type": "string"
-          },
-          "output": true
-        },
-        "required": [
-          "name",
-          "description",
-          "input",
-          "output",
-          "effect"
-        ],
-        "type": "object"
-      },
-      "PluginBindingManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "type": "string"
-          },
-          "optional": {
-            "type": "boolean"
-          },
-          "point": {
-            "$ref": "#/$defs/PluginBindingPoint"
-          }
-        },
-        "required": [
-          "point",
-          "action"
-        ],
-        "type": "object"
-      },
-      "PluginBindingPoint": {
-        "enum": [
-          "agent.tool",
-          "agent.context",
-          "agent.before_model",
-          "agent.before_tool",
-          "desktop.command",
-          "desktop.event",
-          "automation.action"
-        ],
-        "type": "string"
-      },
-      "PluginEntrypoints": {
-        "additionalProperties": false,
-        "properties": {
-          "service": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "serviceMode": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PluginServiceMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "ui": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "PluginMigrationManifest": {
-        "additionalProperties": false,
-        "properties": {
-          "from": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "to": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "from",
-          "to",
-          "path"
-        ],
-        "type": "object"
-      },
-      "PluginServiceMode": {
-        "enum": [
-          "onDemand",
-          "continuous"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "actions": {
-        "additionalProperties": {
-          "$ref": "#/$defs/PluginActionManifest"
-        },
-        "default": {},
-        "type": "object"
-      },
-      "bindings": {
-        "default": [],
-        "items": {
-          "$ref": "#/$defs/PluginBindingManifest"
-        },
-        "type": "array"
-      },
-      "configSchema": {
-        "default": {
-          "type": "object"
-        }
-      },
-      "dataVersion": {
-        "default": 0,
-        "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "description": {
-        "type": "string"
-      },
-      "entrypoints": {
-        "$ref": "#/$defs/PluginEntrypoints"
-      },
-      "extensions": {
-        "additionalProperties": true,
-        "type": "object"
-      },
-      "hostApi": {
-        "type": "string"
-      },
-      "id": {
-        "type": "string"
-      },
-      "migrations": {
-        "default": [],
-        "items": {
-          "$ref": "#/$defs/PluginMigrationManifest"
-        },
-        "type": "array"
-      },
-      "name": {
-        "type": "string"
-      },
-      "permissions": {
-        "default": [],
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "schema": {
-        "type": "string"
-      },
-      "secrets": {
-        "default": [],
-        "items": {
-          "type": "string"
-        },
-        "type": "array"
-      },
-      "version": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "schema",
-      "id",
-      "version",
-      "name",
-      "description",
-      "hostApi",
-      "entrypoints"
-    ],
-    "title": "PluginManifest",
     "type": "object"
   },
   "plugin_registration": {
@@ -8440,56 +7902,6 @@
       "unchanged_paths"
     ],
     "title": "TurnWorkspaceFilesObservedV1",
-    "type": "object"
-  },
-  "unified_plugin_contract_manifest": {
-    "$defs": {
-      "PluginBindingPoint": {
-        "enum": [
-          "agent.tool",
-          "agent.context",
-          "agent.before_model",
-          "agent.before_tool",
-          "desktop.command",
-          "desktop.event",
-          "automation.action"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "action_identity": {
-        "type": "string"
-      },
-      "binding_points": {
-        "items": {
-          "$ref": "#/$defs/PluginBindingPoint"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "host_api_major": {
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "manifest_path": {
-        "type": "string"
-      },
-      "manifest_schema": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "manifest_schema",
-      "manifest_path",
-      "host_api_major",
-      "action_identity",
-      "binding_points"
-    ],
-    "title": "UnifiedPluginContractManifest",
     "type": "object"
   }
 }

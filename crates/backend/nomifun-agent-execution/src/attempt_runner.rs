@@ -341,7 +341,6 @@ impl AgentSessionAttemptRunner {
                 operation_id,
                 authority,
                 SendMessageRequest {
-                    plugin_delivery: None,
                     content: content.to_owned(),
                     files: vec![],
                     inject_skills: vec![],

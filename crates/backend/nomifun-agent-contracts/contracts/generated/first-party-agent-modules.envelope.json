@@ -9,6 +9,26 @@
     "packages": [
       {
         "package": {
+          "id": "nomifun.app-hosting",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.app-hosting"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "app.hosting"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.knowledge-management",
           "version": "1.0.0"
         },
@@ -40,26 +60,6 @@
           {
             "capability": {
               "id": "session.management"
-            },
-            "kind": "tool"
-          }
-        ],
-        "skills": [],
-        "mcp_tools": []
-      },
-      {
-        "package": {
-          "id": "nomifun.plugin-development",
-          "version": "1.0.0"
-        },
-        "source": {
-          "source_kind": "bundled",
-          "source_identity": "nomifun.plugin-development"
-        },
-        "capabilities": [
-          {
-            "capability": {
-              "id": "plugin.development"
             },
             "kind": "tool"
           }
@@ -633,5 +633,5 @@
       }
     ]
   },
-  "payload_digest": "be4bf62a2ef8b40c6d7081f790c8149611bf5376a6f379fecb8ab0a5e2efbb0d"
+  "payload_digest": "ce4e5092be83893b21ceb31157a01d510b39618d5c7c9ddf65d637ffe3b3d844"
 }

@@ -203,7 +203,7 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(topLevelKeys(payload)).toEqual(['preset_id', 'title', 'model']);
     expect(payload.includes('provider_id: current_model.id')).toBe(true);
     expect(payload.includes('model: current_model.use_model')).toBe(true);
-    expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
+    expect(payload).toMatch(/preset_id:\s*launchPreset!?\.preset_id/);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
     expect(payload.includes('resource_selections: resourceSelections')).toBe(true);
 

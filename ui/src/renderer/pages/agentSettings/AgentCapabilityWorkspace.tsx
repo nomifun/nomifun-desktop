@@ -4,6 +4,8 @@ import type {
   CapabilityModuleAction,
   CapabilityModuleCatalogItem,
 } from '@/common/types/agentPlatform';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { appHosting } from '@/common/adapter/appHostingBridge';
 import { Button, Checkbox, Modal, Tag } from '@arco-design/web-react';
 import {
   Book,
@@ -19,7 +21,8 @@ import {
   Search,
   User,
 } from '@icon-park/react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import useSWR from 'swr';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -103,11 +106,20 @@ const effectTone = (effectClass: string): 'critical' | 'caution' | 'normal' => {
 
 const AgentCapabilityWorkspace: React.FC<Props> = ({
   document,
-  catalog,
+  catalog: suppliedCatalog,
   disabled = false,
   onChange,
 }) => {
   const { t, i18n } = useTranslation();
+  const { data: appSources = [], error: appSourceError, mutate: refreshSources } = useSWR('apps.mcp-sources', () => appHosting.mcpSources.invoke(), { refreshInterval: 2000 });
+  const [refreshedCatalog, setRefreshedCatalog] = useState<AgentCatalogResponse>();
+  const [refreshingSources, setRefreshingSources] = useState<Set<string>>(new Set());
+  const [sourceError, setSourceError] = useState('');
+  useEffect(() => setRefreshedCatalog(undefined), [suppliedCatalog]);
+  const catalog = refreshedCatalog ?? suppliedCatalog;
+  const appSourceById = useMemo(() => new Map(appSources.map((source) => [source.app_id, source])), [appSources]);
+  const appModuleSources = useMemo(() => new Map(catalog.mcp_tools.filter((tool) => appSourceById.has(tool.server_id))
+    .map((tool) => [capabilityReferenceKey(tool.capability), appSourceById.get(tool.server_id)!])), [catalog.mcp_tools, appSourceById]);
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<ModuleCategory | 'all'>('all');
@@ -238,7 +250,8 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     }
     return direct.filter((entry) =>
       String((entry.missing ? entry.module : entry.module.module).id) !== 'agent.tool-discovery'
-      && !String((entry.missing ? entry.module : entry.module.module).id).startsWith('nomi.mcp.v1.')
+      && (!String((entry.missing ? entry.module : entry.module.module).id).startsWith('nomi.mcp.v1.')
+        || appModuleSources.has(capabilityReferenceKey(entry.missing ? entry.module : entry.module.module)))
     ).sort((left, right) => {
       const leftRef = left.missing ? left.module : left.module.module;
       const rightRef = right.missing ? right.module : right.module.module;
@@ -246,12 +259,14 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
         MODULE_CATEGORIES.indexOf(moduleCategory(rightRef)) ||
         String(leftRef.id).localeCompare(String(rightRef.id));
     });
-  }, [catalog.modules, document.enabled_capabilities, moduleByKey, requiredByKey, requiredModules, selectionByKey, t]);
+  }, [catalog.modules, document.enabled_capabilities, moduleByKey, requiredByKey, requiredModules, selectionByKey, t, appModuleSources]);
 
   const referenceOf = (entry: ModuleEntry): ModuleReference =>
     entry.missing ? entry.module : entry.module.module;
   const copyOf = (entry: ModuleEntry): { name: string; description: string } => {
     if (entry.missing) return { name: entry.display_name, description: entry.description };
+    const appSource = appModuleSources.get(capabilityReferenceKey(entry.module.module));
+    if (appSource) return { name: `${appSource.name} / ${entry.module.display_name}`, description: entry.module.description };
     const key = moduleI18nKey(String(entry.module.module.id));
     if (!key) return { name: entry.module.display_name, description: entry.module.description };
     return {
@@ -261,10 +276,13 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
       }),
     };
   };
-  const materialized = (entry: ModuleEntry): boolean =>
-    !entry.missing && moduleIsAvailable(entry.module, catalog.capabilities);
+  const materialized = (entry: ModuleEntry): boolean => {
+    const source = appModuleSources.get(capabilityReferenceKey(referenceOf(entry)));
+    return !entry.missing && moduleIsAvailable(entry.module, catalog.capabilities)
+      && (!source || source.state === 'running' && source.connection_status === 'connected');
+  };
   const selectable = (entry: ModuleEntry): boolean =>
-    !entry.missing && moduleIsSelectable(entry.module, catalog.capabilities);
+    !entry.missing && materialized(entry) && moduleIsSelectable(entry.module, catalog.capabilities);
   const isSelected = (entry: ModuleEntry): boolean =>
     selectedKeys.has(capabilityReferenceKey(referenceOf(entry)));
   const dependencyProvided = (entry: ModuleEntry): boolean =>
@@ -292,9 +310,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   const needsAttention = (entry: ModuleEntry): boolean =>
     moduleNeedsAttention(entry) || permissionNeedsAttention(entry);
   const localizedActionName = (actionId: string): string => t(
-    actionId.startsWith('plugin.development/')
-      ? `pluginPlatform.authoring.operations.${actionId.slice('plugin.development/'.length)}`
-      : `agentSettings.actionLabels.${actionI18nKey(actionId)}`,
+    `agentSettings.actionLabels.${actionI18nKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
   );
   const resourceName = (value: string): string => {
@@ -390,6 +406,23 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
 
   return (
     <div className={styles.workspace}>
+      {(appSources.length > 0 || appSourceError || sourceError) && <section className={styles.appSources} aria-label={t('appHosting.tools.title')}>
+        <h3>{t('appHosting.tools.title')}</h3><p>{t('appHosting.tools.hint')}</p>
+        {(sourceError || appSourceError) && <p role='alert'>{sourceError || String(appSourceError)}</p>}
+        {appSources.map((source) => <div key={source.app_id} className={styles.appSource}>
+          <strong>{source.name}</strong><span>{t(`appHosting.state.${source.state}`)} · {t(`appHosting.tools.${source.connection_status}`)}</span>
+          <Button size='mini' disabled={disabled || source.state !== 'running' || refreshingSources.has(source.app_id)} loading={refreshingSources.has(source.app_id)}
+            onClick={() => {
+              setRefreshingSources((current) => new Set(current).add(source.app_id)); setSourceError('');
+              void appHosting.refreshMcpSource.invoke({ id: source.app_id }).then(async () => {
+                await refreshSources(); setRefreshedCatalog(await agentPlatform.catalog.invoke());
+              }).catch((e: unknown) => setSourceError(String(e))).finally(() => setRefreshingSources((current) => {
+                const next = new Set(current); next.delete(source.app_id); return next;
+              }));
+            }}>{t('appHosting.tools.refresh')}</Button>
+          {source.reason && <small>{source.reason}</small>}
+        </div>)}
+      </section>}
       <div className={styles.overview}>
         <div className={styles.metrics} aria-live='polite'>
           <span><i />{t('agentSettings.workbench.enabledModules')}<strong>{enabledCount}</strong></span>

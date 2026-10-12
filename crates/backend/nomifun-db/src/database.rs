@@ -436,6 +436,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         ));
     }
     crate::agent_store_clean_cut::clean_cut_agent_store(&mut conn, &DB_MIGRATOR).await?;
+    crate::retire_plugin_works::protect_before_retirement(&mut conn).await?;
     // SQLite cannot toggle foreign keys inside sqlx's migration transaction.
     // A table replacement keeps relationship names intact while copying rows;
     // disable enforcement only on this startup-owned connection, then restore

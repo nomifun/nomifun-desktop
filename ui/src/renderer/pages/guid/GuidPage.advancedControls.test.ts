@@ -47,7 +47,7 @@ describe('GuidPage advanced controls', () => {
     const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
     expect(source.includes("presetCapabilityIds.has('agent.collaboration')")).toBe(true);
-    expect(source.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
+    expect(source.includes('collaboration: !productEntry && collaborationEnabled ? collaboration.config : undefined')).toBe(true);
     expect(source.includes('{collaborationEnabled &&')).toBe(true);
     expect(source.includes('disabled={advancedConfig.autoWork.enabled}')).toBe(true);
   });
@@ -67,7 +67,7 @@ describe('GuidPage advanced controls', () => {
       page.includes('requiredKinds={resourcePickerKinds}')
     ).toBe(true);
     expect(page.includes('optionalKinds={optionalResourcePickerKinds}')).toBe(true);
-    expect(page.includes('{workspaceEnabled && <GuidWorkspaceFootnote')).toBe(true);
+    expect(page.includes('{!productEntry && workspaceEnabled && <GuidWorkspaceFootnote')).toBe(true);
     expect(page.includes('resourceSelections: sessionResourceSelections')).toBe(true);
     expect(page.includes('knowledgePolicy')).toBe(true);
     expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);
@@ -77,7 +77,7 @@ describe('GuidPage advanced controls', () => {
     expect(capabilityHook.includes('requiredResourceKindsForDocument')).toBe(true);
     expect(capabilityHook.includes('document.runtime_policy?.idmm')).toBe(true);
     expect(page.includes('presetCapabilities.idmm')).toBe(true);
-    expect(page.includes('const idmmControlEnabled = presetResourceResolutionReady;')).toBe(true);
+    expect(page.includes('const idmmControlEnabled = !productEntry && presetResourceResolutionReady;')).toBe(true);
     expect(page.includes('isCompanionAgent')).toBe(false);
   });
 

@@ -19,6 +19,12 @@ pub fn is_default_managed_workspace(resource: &TypedResourceBinding) -> bool {
         || (resource.resource_kind.as_ref() == "process_session" && resource.resource_id.as_ref() == MANAGED_PROCESS_SESSION_RESOURCE_ID)
 }
 
+pub fn is_app_project_location_resource(resource: &TypedResourceBinding) -> bool {
+    matches!(resource.resource_kind.as_ref(), "workspace" | "process_session")
+        || (resource.resource_kind.as_ref() == "project_memory"
+            && resource.resource_id.as_ref().starts_with("project-workspace-memory-"))
+}
+
 fn normalized_path(raw: &str) -> String {
     #[cfg(windows)]
     let raw = raw.replace('\\', "/");
@@ -75,6 +81,33 @@ pub struct ManagedSessionWorkspaceNamespaceV1 {
     pub opening_workspace: TypedResourceBinding,
 }
 
+/// An exact current application registry identity, supplied by the hosting
+/// owner to the offline coordinator. It proves only the location of that
+/// application's existing project; Session authority remains canonical.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedAppWorkspaceNamespaceV1 {
+    pub app_id: String,
+    pub owner_id: String,
+}
+
+impl ManagedAppWorkspaceNamespaceV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        let id = uuid::Uuid::parse_str(&self.app_id)
+            .map_err(|_| "managed application has no canonical UUIDv7 identity")?;
+        if id.get_version_num() != 7 || id.to_string() != self.app_id
+            || self.owner_id.is_empty() || self.owner_id.len() > 256
+            || self.owner_id.trim() != self.owner_id || self.owner_id.chars().any(char::is_control)
+        { return Err("managed application has no exact registry identity or owner".into()); }
+        Ok(())
+    }
+
+    pub fn workspace_root(&self, data_root: &str) -> String {
+        Path::new(data_root).join("app-hosting").join("apps").join(&self.app_id)
+            .to_string_lossy().into_owned()
+    }
+}
+
 impl ManagedSessionWorkspaceNamespaceV1 {
     pub fn validate(&self) -> Result<(), String> {
         if uuid::Uuid::parse_str(self.agent_session_id.as_ref()).ok().is_none_or(|id| id.get_version_num() != 7)
@@ -102,6 +135,8 @@ pub struct ManagedStorageRelocationV1 {
     pub managed_knowledge_ids: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_session_namespace: Option<ManagedSessionWorkspaceNamespaceV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_app_workspace: Option<ManagedAppWorkspaceNamespaceV1>,
     pub previous_resources: Vec<TypedResourceBinding>,
     pub next_resources: Vec<TypedResourceBinding>,
 }
@@ -114,6 +149,14 @@ impl ManagedStorageRelocationV1 {
             if self.previous_resources.iter().chain(&self.next_resources).any(|resource| resource.owner_id != namespace.opening_workspace.owner_id) {
                 return Err("managed Session namespace differs from current resource ownership".into());
             }
+        }
+        if let Some(app) = &self.managed_app_workspace {
+            app.validate()?;
+            if self.previous_resources.iter().chain(&self.next_resources).any(|resource| resource.owner_id != app.owner_id)
+                || !self.previous_resources.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
+                    && resource.typed_parameters.get("workspace_root").is_some_and(|root|
+                        storage_paths_equal(root, &app.workspace_root(&self.source_data_root))))
+            { return Err("managed application differs from exact current workspace authority".into()); }
         }
         if self.previous_resources.len() != self.next_resources.len()
             || self.previous_resources.len() > 128 || self.managed_knowledge_ids.len() > 128
@@ -135,11 +178,25 @@ impl ManagedStorageRelocationV1 {
                 || resource_definition_id(previous).map_err(|e| e.to_string())? != previous.binding_id
                 || resource_definition_id(next).map_err(|e| e.to_string())? != next.binding_id
             { return Err("storage transition changed resource identity or authority".into()); }
-            if previous == next { continue; }
+            if previous == next {
+                if is_app_project_location_resource(previous)
+                    && self.managed_app_workspace.as_ref().is_some_and(|app|
+                        previous.typed_parameters.get("workspace_root").is_some_and(|root|
+                            storage_paths_equal(root, &app.workspace_root(&self.source_data_root))))
+                    && !storage_paths_equal(&self.source_data_root, &self.target_data_root)
+                { return Err("application location transition left an owned current root behind".into()); }
+                continue;
+            }
             let mut expected = previous.clone();
             let namespace_source = self.managed_session_namespace.as_ref().map(|namespace|
                 Path::new(&self.source_work_root).join("conversations").join(namespace.agent_session_id.as_ref()));
-            if matches!(previous.resource_kind.as_ref(), "workspace" | "process_session")
+            if is_app_project_location_resource(previous)
+                && self.managed_app_workspace.as_ref().is_some_and(|app|
+                    previous.typed_parameters.get("workspace_root").is_some_and(|root|
+                        storage_paths_equal(root, &app.workspace_root(&self.source_data_root)))) {
+                let app = self.managed_app_workspace.as_ref().expect("matched application");
+                expected.typed_parameters.insert("workspace_root".into(), app.workspace_root(&self.target_data_root));
+            } else if matches!(previous.resource_kind.as_ref(), "workspace" | "process_session")
                 && namespace_source.as_ref().is_some_and(|source| previous.typed_parameters.get("workspace_root")
                     .is_some_and(|root| storage_paths_equal(root, &source.to_string_lossy()))) {
                 let namespace = self.managed_session_namespace.as_ref().expect("matched namespace");
@@ -164,5 +221,56 @@ impl ManagedStorageRelocationV1 {
             if expected != *next { return Err("storage transition differs from the exact location-only replacement".into()); }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_relocation_proof_changes_only_exact_owned_location_parameters() {
+        let source = std::env::temp_dir().join("proof-app-source").to_string_lossy().into_owned();
+        let target = std::env::temp_dir().join("proof-app-target").to_string_lossy().into_owned();
+        let app = ManagedAppWorkspaceNamespaceV1 { app_id: uuid::Uuid::now_v7().to_string(), owner_id: "current-owner".into() };
+        let previous = ["workspace", "process_session", "project_memory"].map(|kind| {
+            let mut binding = TypedResourceBinding {
+                binding_id: "unassigned".into(), resource_kind: kind.into(), resource_id: if kind == "project_memory" {
+                    "project-workspace-memory-original".into()
+                } else { format!("original-{kind}").into() },
+                owner_id: app.owner_id.clone(), operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+                typed_parameters: BTreeMap::from([("workspace_root".into(), app.workspace_root(&source))]),
+            };
+            binding.binding_id = resource_definition_id(&binding).unwrap();
+            binding
+        }).to_vec();
+        let next = previous.iter().map(|binding| {
+            let mut binding = binding.clone();
+            binding.typed_parameters.insert("workspace_root".into(), app.workspace_root(&target));
+            binding.binding_id = resource_definition_id(&binding).unwrap();
+            binding
+        }).collect();
+        let proof = ManagedStorageRelocationV1 { source_data_root: source.clone(), source_work_root: source, target_data_root: target,
+            managed_knowledge_ids: BTreeSet::new(), managed_session_namespace: None, managed_app_workspace: Some(app),
+            previous_resources: previous, next_resources: next };
+        proof.validate().unwrap();
+        for kind in ["identity", "operations", "parameter", "root", "partial", "app", "owner"] {
+            let mut tampered = proof.clone();
+            match kind {
+                "identity" => tampered.next_resources[0].resource_id = "new-workspace".into(),
+                "operations" => { tampered.next_resources[0].operations.insert("write".into()); }
+                "parameter" => { tampered.next_resources[0].typed_parameters.insert("extra".into(), "grant".into()); }
+                "root" => {
+                    let adjacent = format!("{}-adjacent", tampered.next_resources[0].typed_parameters["workspace_root"]);
+                    tampered.next_resources[0].typed_parameters.insert("workspace_root".into(), adjacent);
+                }
+                "partial" => tampered.next_resources[0] = tampered.previous_resources[0].clone(),
+                "app" => tampered.managed_app_workspace.as_mut().unwrap().app_id = uuid::Uuid::now_v7().to_string(),
+                "owner" => tampered.managed_app_workspace.as_mut().unwrap().owner_id = "different-owner".into(),
+                _ => unreachable!(),
+            }
+            tampered.next_resources[0].binding_id = resource_definition_id(&tampered.next_resources[0]).unwrap();
+            assert!(tampered.validate().is_err(), "{kind} changes must not obtain location-only authority");
+        }
     }
 }

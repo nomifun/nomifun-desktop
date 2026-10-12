@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub struct WorkspaceRelocationOutcome {
     pub changed_sessions: usize,
     pub managed_namespaces: Vec<nomifun_agent_contracts::ManagedSessionWorkspaceNamespaceV1>,
+    pub app_workspaces: BTreeMap<AgentSessionId, nomifun_agent_contracts::ManagedAppWorkspaceNamespaceV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

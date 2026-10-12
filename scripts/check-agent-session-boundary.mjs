@@ -79,7 +79,8 @@ const migrations = paths.filter((path) => path.startsWith('crates/backend/nomifu
 const baseline = 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql';
 const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplify_plugin_library.sql';
 const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remove_agent_handshake_cache.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration].includes(path))) {
+const hostingForwardMigration = 'crates/backend/nomifun-db/migrations/004_retire_plugin_hosting.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
 }
 if (migrations.includes(metadataForwardMigration)) {
@@ -93,10 +94,10 @@ if (migrations.includes(metadataForwardMigration)) {
     failures.push(`${metadataForwardMigration}: only the exact retired configuration cache columns may be dropped; canonical Agent facts and lineage receipts cannot change`);
   }
 }
-if (migrations.includes(pluginForwardMigration)) {
-  const source = readFileSync(resolve(ROOT, pluginForwardMigration), 'utf8');
+for (const migration of [pluginForwardMigration, hostingForwardMigration].filter(path => migrations.includes(path))) {
+  const source = readFileSync(resolve(ROOT, migration), 'utf8');
   if (/\b(?:agent_\w+|schema_metadata|_sqlx_migrations)\b/i.test(source)) {
-    failures.push(`${pluginForwardMigration}: a Plugin forward migration cannot alter canonical Agent data or lineage receipts`);
+    failures.push(`${migration}: a hosting forward migration cannot alter canonical Agent data or lineage receipts`);
   }
 }
 if (failures.length) {

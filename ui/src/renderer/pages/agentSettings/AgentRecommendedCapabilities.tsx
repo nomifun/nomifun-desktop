@@ -29,9 +29,7 @@ const AgentRecommendedCapabilities: React.FC<Props> = ({ recommendation, catalog
           const key = moduleI18nKey(id);
           const name = key ? t(`agentSettings.modules.${key}.name`, { defaultValue: module?.display_name ?? id }) : module?.display_name ?? id;
           const actionNames = (selection.action_allowlist ?? []).map(action => t(
-            action.startsWith('plugin.development/')
-              ? `pluginPlatform.authoring.operations.${action.slice('plugin.development/'.length)}`
-              : `agentSettings.actionLabels.${actionI18nKey(action)}`,
+            `agentSettings.actionLabels.${actionI18nKey(action)}`,
             { defaultValue: actionFallbackName(action) }
           ));
           return <li key={id}><strong>{name}</strong>{actionNames.length > 0 && <span>{actionNames.join(' · ')}</span>}</li>;

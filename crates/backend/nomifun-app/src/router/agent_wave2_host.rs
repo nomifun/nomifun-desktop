@@ -98,6 +98,14 @@ fn patch_failure_error(
 }
 
 impl Wave2ApplicationHost {
+    /// Application imports share the same physical workspace mutation lock
+    /// as file, artifact and VCS owners. A retained tool invocation keeps its
+    /// existing lock; imports never wait while holding Session admission.
+    pub(crate) fn try_guard_workspace_mutation(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, AppError> {
+        self.workspace_write_lock.clone().try_lock_owned()
+            .map_err(|_| AppError::Conflict("Application project has another physical workspace mutation in progress".into()))
+    }
+
     pub(crate) fn ensure_git_ready(&self) -> Result<(), AppError> {
         if let Some(Ok(owner)) = self.vcs_push_owner.get() {
             owner.ensure_idle().map_err(|error| AppError::Conflict(error.to_string()))?;

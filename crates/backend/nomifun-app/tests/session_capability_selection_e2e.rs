@@ -15,6 +15,7 @@ use nomifun_auth::AuthPolicy;
 use nomifun_skill_library::SkillPaths;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use futures_util::FutureExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
 
 const TRUST: &str = "session-capability-selection-fixture";
@@ -31,7 +32,9 @@ async fn response_with_idempotency(router: &Router, method: &str, uri: &str, bod
     let mut request = Request::builder().method(method).uri(uri)
         .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
     if let Some(key) = key { request = request.header("idempotency-key", key); }
-    let response = router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(35),
+        router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()))
+        .await.unwrap_or_else(|_| panic!("{method} {uri} did not settle within its fixture request budget")).unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await.unwrap();
     let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
@@ -212,6 +215,144 @@ fn chat_response(call: Option<(&str, &str, Value)>, text: &str) -> ResponseTempl
     let last = json!({ "id": "fixture-native-selection", "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }] });
     ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
         .set_body_string(format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n"))
+}
+
+#[tokio::test]
+async fn hosted_app_agent_selection_uses_rest_four_operations_and_preserves_shared_history() {
+    const REPLY: &str = "APP_REST_CANONICAL_RESULT";
+    let fixture = Fixture::new().await;
+    let preset = fixture.preset(false).await;
+    let shared = fixture.create(&preset, Some(selection(&[], &[])), false).await;
+    let shared_id = shared["agent_session_id"].as_str().unwrap();
+    let shared_before = fixture.binding(shared_id).await;
+    let source = fixture._directory.path().join("ordinary-application-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("README.md"), "The application's original files").unwrap();
+    let app = call(&fixture.router, "POST", "/api/apps/import", json!({
+        "source":source,"name":"REST Agent application","import_kind":"source"
+    })).await;
+    let app_id = app["id"].as_str().unwrap();
+    let mut settings = app["settings"].clone();
+    settings["agent_id"] = preset["preset"]["preset_id"].clone();
+    let configured = call(&fixture.router, "PUT", &format!("/api/apps/{app_id}"), json!({"name":app["name"],"settings":settings})).await;
+    let connection = configured["settings"]["agent_binding_id"].as_str().expect("the existing Agent owner must prepare the application's selected Agent connection");
+    assert!(!connection.is_empty());
+    let (status, opened) = response(&fixture.router, "POST", "/api/remote/open", json!({
+        "binding_id":connection,"idempotency_key":"app-agent-open"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    assert_eq!(opened["open_state"]["state"], "ready");
+    let id = opened["agent_session_id"].as_str().unwrap();
+    // This is a controlled HTTP model service exercising the real Broker,
+    // Runtime, REST owners and canonical terminal, not an external LLM claim.
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(|request: &wiremock::Request| {
+            let request: Value = request.body_json().unwrap();
+            assert!(request["messages"].to_string().contains("Return the application integration result"));
+            chat_response(None, REPLY)
+        }).mount(&fixture.chat).await;
+    let (status, admitted) = response(&fixture.router, "POST", "/api/remote/turn", json!({
+        "agent_session_id":id,"input":{"content":"Return the application integration result"},"idempotency_key":"app-agent-task"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{admitted}");
+    let operation: String = nomifun_db::sqlx::query_scalar("SELECT operation_id FROM agent_turns WHERE session_id = ?")
+        .bind(id).fetch_one(fixture.services.database.pool()).await.unwrap();
+    let session_id = AgentSessionId::from(id);
+    let operation = OperationId::from(operation);
+    let store = AgentSessionStore::from_pool(fixture.services.database.pool().clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let receipt = store.read_turn_receipt(&session_id, &operation).await.unwrap();
+            match receipt.status {
+                TurnReceiptStatus::Running => tokio::time::sleep(Duration::from_millis(20)).await,
+                TurnReceiptStatus::Completed => break,
+                other => panic!("the real App REST task did not complete: {other:?}"),
+            }
+        }
+    }).await.expect("App REST task must reach an actual canonical terminal");
+    let facts = store.turn_output_facts(&session_id, &operation).await.unwrap();
+    assert!(facts.events.iter().any(|event| event.kind.0 == "turn/completed"));
+    assert!(facts.event_payloads.values().any(|payload| payload.to_string().contains(REPLY)));
+    let (status, observed) = response(&fixture.router, "GET", &format!("/api/remote/observe?agent_session_id={id}&after_seq=0&limit=200"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{observed}");
+    assert!(!observed["events"].as_array().unwrap().is_empty());
+    assert!(observed["next_cursor"]["seq"].as_u64().unwrap() > opened["cursor"]["seq"].as_u64().unwrap());
+    let (status, cancelled) = response(&fixture.router, "POST", "/api/remote/cancel", json!({
+        "agent_session_id":id,"idempotency_key":"app-agent-close"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["session_status"], "cancelled");
+    assert_eq!(store.read_turn_receipt(&session_id, &operation).await.unwrap().status, TurnReceiptStatus::Completed,
+        "closing the app's Remote connection must not rewrite a completed canonical Turn");
+    call(&fixture.router, "DELETE", &format!("/api/apps/{app_id}"), Value::Null).await;
+    assert_eq!(fixture.binding(shared_id).await, shared_before, "App deletion must preserve the ordinary shared Session's immutable binding");
+    assert!(store.get_live_session(&session_id).await.is_ok(), "an App connection does not prove exclusive development-Session ownership");
+    let retained = store.turn_output_facts(&session_id,&operation).await.unwrap();
+    assert_eq!(retained.events,facts.events);
+    assert_eq!(retained.event_payloads,facts.event_payloads);
+    let remaining = call(&fixture.router, "GET", "/api/remote-bindings", Value::Null).await;
+    assert!(remaining.as_array().unwrap().iter().all(|binding| binding["remote_binding_id"] != connection));
+    assert!(source.join("README.md").exists());
+    fixture.finish_with_chat_count(1).await;
+}
+
+#[tokio::test]
+async fn hosted_mcp_is_selected_by_the_saved_agent_and_stopped_sources_do_not_block_other_agents() {
+    let fixture = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+    let original = fixture._directory.path().join("mcp-app-source");
+    fs::create_dir_all(&original).unwrap();
+    fs::write(original.join("server.cjs"), "setInterval(() => {}, 1000);").unwrap();
+    let app = call(&fixture.router, "POST", "/api/apps/import", json!({
+        "source":original,"name":"Selected App tools","import_kind":"source"
+    })).await;
+    let app_id = app["id"].as_str().unwrap();
+    let mut settings = app["settings"].clone();
+    settings["install_command"] = Value::Null; settings["build_command"] = Value::Null;
+    settings["preview_command"] = Value::Null; settings["start_command"] = json!("node server.cjs");
+    // Controlled HTTP MCP service; the source owner and protocol transaction
+    // are real. The separate AppMcpSources test uses an actual hosted Node MCP.
+    settings["mcp_url"] = json!(format!("{}/mcp",fixture._mcp.uri()));
+    call(&fixture.router, "PUT", &format!("/api/apps/{app_id}"), json!({"name":app["name"],"settings":settings})).await;
+    call(&fixture.router, "POST", &format!("/api/apps/{app_id}/operate"), json!({"operation":"use"})).await;
+    let sources = call(&fixture.router, "GET", "/api/app-hosting/mcp-sources", Value::Null).await;
+    assert_eq!(sources[0]["connection_status"], "connected", "{sources}");
+    let minimal = fixture.preset(false).await;
+    let ordinary = fixture.create(&minimal, None, false).await;
+    let ordinary_id = ordinary["agent_session_id"].as_str().unwrap();
+    assert!(!fixture.state(ordinary_id).await["selection"]["mcp_server_ids"].as_array().unwrap().contains(&json!(app_id)),
+        "the backend must exclude App tools from global defaults even when the UI does not supply a selection");
+    let source_id = nomifun_api_types::McpServerId::parse(app_id).unwrap();
+    let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&source_id, "lookup").unwrap();
+    let action = nomifun_mcp::canonical_mcp_tool_action_id(&capability).unwrap();
+    let mut document = minimal["draft"]["document"].clone();
+    document["enabled_capabilities"] = json!([{ "capability":{"id":capability}, "action_allowlist":[action] }]);
+    let selected_agent = call(&fixture.router, "POST", "/api/agent-presets", json!({
+        "display_name":"Agent with explicitly selected application tools","document":document
+    })).await;
+    let selected_session = fixture.create(&selected_agent, None, false).await;
+    let selected_id = selected_session["agent_session_id"].as_str().unwrap();
+    let selected_before = fixture.binding(selected_id).await;
+    assert!(fixture.state(selected_id).await["selection"]["mcp_server_ids"].as_array().unwrap().contains(&json!(app_id)),
+        "an Agent's explicit App grant must survive Session default compilation");
+    let raw_catalog_rows: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM mcp_servers WHERE mcp_server_id = ?")
+        .bind(app_id).fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_eq!(raw_catalog_rows, 0, "application configuration must remain the sole MCP source owner");
+    let (status, _) = response(&fixture.router, "PUT", &format!("/api/mcp/servers/{app_id}"), json!({"description":"must not override application settings"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the general MCP editor must not acquire an application-owned source");
+    call(&fixture.router, "POST", &format!("/api/apps/{app_id}/operate"), json!({"operation":"stop"})).await;
+    let (status, unavailable) = response(&fixture.router, "POST", "/api/agent-sessions", json!({
+        "preset_id":selected_agent["preset"]["preset_id"],"title":"Unavailable selected source"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{unavailable}");
+    assert_eq!(fixture.binding(selected_id).await, selected_before, "stopping an application must not rewrite admitted immutable authority");
+    fixture.create(&minimal, None, false).await;
+    call(&fixture.router, "DELETE", &format!("/api/apps/{app_id}"), Value::Null).await;
+    assert!(original.join("server.cjs").exists());
+    }).catch_unwind().await;
+    fixture.services.app_hosting.shutdown().await.unwrap();
+    fixture.finish().await;
+    if let Err(panic) = result { std::panic::resume_unwind(panic); }
 }
 
 #[tokio::test]

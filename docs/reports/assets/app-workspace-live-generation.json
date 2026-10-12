@@ -1,0 +1,364 @@
+{
+  "schema_version": 3,
+  "provider": "stepfun-plan",
+  "model": "step-3.7-flash",
+  "template": "app.developer",
+  "default_hosting_grant": true,
+  "fixed_app_agent": true,
+  "manual_create_before_model_configuration": true,
+  "ordinary_session": true,
+  "current_workspace": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpATpavK\\data\\app-hosting\\apps\\01a12660-e84e-79f0-b563-0232306e5ada",
+  "current_workspace_is_managed_directory": true,
+  "application_count": 1,
+  "application_id_preserved": true,
+  "session_id": "01a12660-ebf0-7c32-b487-5d6e49939164",
+  "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976",
+  "app_id": "01a12660-e84e-79f0-b563-0232306e5ada",
+  "app_name": "我的计数器",
+  "app_url": "http://127.0.0.1:61811",
+  "managed_pid": 32392,
+  "preview": true,
+  "runtime_terminal": "turn/completed",
+  "settlements": [
+    {
+      "action_id": "app.hosting/guide",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-af104b158872b7da",
+      "dispatch_seq": 77,
+      "result_seq": 79,
+      "result_success": true,
+      "result_sha256": "05aa81cd8dfa6ee9c1b61a3ba83a4de7aaeec42f4e1d59ac24b244fe0cbb870d",
+      "effect_succeeded_seq": null,
+      "app_id": null
+    },
+    {
+      "action_id": "app.hosting/current",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-a51e03afad9581b4",
+      "dispatch_seq": 83,
+      "result_seq": 85,
+      "result_success": true,
+      "result_sha256": "1e5fd0655cc4c79d2f0d1c7437ccdfda7cd421b9d2056db14c10a98c1a56c140",
+      "effect_succeeded_seq": null,
+      "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+    },
+    {
+      "action_id": "workspace.files/write",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-8a55adb56f618040",
+      "dispatch_seq": 126,
+      "result_seq": 130,
+      "result_success": true,
+      "result_sha256": "07a92d053d8bddc7e8f0da68b1f7e9d4ece7878a0b4d9fb6e591180577e80721",
+      "effect_succeeded_seq": 128,
+      "app_id": null
+    },
+    {
+      "action_id": "app.hosting/guide",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-886f6e11c3fde308",
+      "dispatch_seq": 164,
+      "result_seq": 166,
+      "result_success": true,
+      "result_sha256": "18c87b706b04379a774ada484d49308eb4060108fbcf1675e47b840bb6191c1c",
+      "effect_succeeded_seq": null,
+      "app_id": null
+    },
+    {
+      "action_id": "app.hosting/current",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-9eaf15fdaa1e9f9e",
+      "dispatch_seq": 170,
+      "result_seq": 172,
+      "result_success": true,
+      "result_sha256": "4bc7bf3ded0ffc9e55b9a9741b1a1759edaf208c2e5b74bc20156e2a45abdb69",
+      "effect_succeeded_seq": null,
+      "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+    },
+    {
+      "action_id": "workspace.files/write",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-8450be0a47a2e89d",
+      "dispatch_seq": 205,
+      "result_seq": 209,
+      "result_success": true,
+      "result_sha256": "926c9a2fa5a11b5c8c50b65c2a8736463b6314bed695af8abd7e27b57ef1e470",
+      "effect_succeeded_seq": 207,
+      "app_id": null
+    },
+    {
+      "action_id": "app.hosting/update",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-9cf4415c4017f352",
+      "dispatch_seq": 294,
+      "result_seq": 298,
+      "result_success": true,
+      "result_sha256": "2151cd5481ac1ecacf82fd3ea3739f026cf9655a7adcea4745fc1ee49cbe7a17",
+      "effect_succeeded_seq": 296,
+      "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+    },
+    {
+      "action_id": "app.hosting/preview",
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-bfb1a3acf796573e",
+      "dispatch_seq": 315,
+      "result_seq": 319,
+      "result_success": true,
+      "result_sha256": "17b03f4f6a6e4ec759a8ee40dae7b8d50cedc94af8071db07f3a5e46826f9aaf",
+      "effect_succeeded_seq": 317,
+      "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+    }
+  ],
+  "source_sha256": "278771bef8309a16f7ed9143c057d1a6dc2ba3b08db1e4339dc3d5473d57cc65",
+  "source_bytes": 4112,
+  "script_syntax_checked": true,
+  "backend_sha256": "a95b5b336d8424306c1b4db5e539f4be2ec42892c4e8b6399788b8d1d545f19c",
+  "external_unauthenticated_status": 403,
+  "connection": {
+    "connected": true,
+    "app_count": 1
+  },
+  "verified_host_requests": 1,
+  "stop": {
+    "returned_state": "stopped",
+    "returned_pid": null,
+    "observed_root_pid": 32392,
+    "root_pid_gone": true,
+    "direct_tcp_connect": false,
+    "no_proxy": true,
+    "fresh_http_connection": true,
+    "after_stop_response": null
+  },
+  "http_status": 200,
+  "http_bytes_equal": true,
+  "stop_verified": true,
+  "browser_qa": {
+    "independent_callback": true,
+    "increment": true,
+    "refresh_persisted": true,
+    "clear": true,
+    "connected": true
+  },
+  "turns": [
+    {
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976",
+      "runtime_terminal": "turn/completed",
+      "settlements": [
+        {
+          "action_id": "app.hosting/guide",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-af104b158872b7da",
+          "dispatch_seq": 77,
+          "result_seq": 79,
+          "result_success": true,
+          "result_sha256": "05aa81cd8dfa6ee9c1b61a3ba83a4de7aaeec42f4e1d59ac24b244fe0cbb870d",
+          "effect_succeeded_seq": null,
+          "app_id": null
+        },
+        {
+          "action_id": "app.hosting/current",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-a51e03afad9581b4",
+          "dispatch_seq": 83,
+          "result_seq": 85,
+          "result_success": true,
+          "result_sha256": "1e5fd0655cc4c79d2f0d1c7437ccdfda7cd421b9d2056db14c10a98c1a56c140",
+          "effect_succeeded_seq": null,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        },
+        {
+          "action_id": "workspace.files/write",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-8a55adb56f618040",
+          "dispatch_seq": 126,
+          "result_seq": 130,
+          "result_success": true,
+          "result_sha256": "07a92d053d8bddc7e8f0da68b1f7e9d4ece7878a0b4d9fb6e591180577e80721",
+          "effect_succeeded_seq": 128,
+          "app_id": null
+        },
+        {
+          "action_id": "app.hosting/guide",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-886f6e11c3fde308",
+          "dispatch_seq": 164,
+          "result_seq": 166,
+          "result_success": true,
+          "result_sha256": "18c87b706b04379a774ada484d49308eb4060108fbcf1675e47b840bb6191c1c",
+          "effect_succeeded_seq": null,
+          "app_id": null
+        },
+        {
+          "action_id": "app.hosting/current",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-9eaf15fdaa1e9f9e",
+          "dispatch_seq": 170,
+          "result_seq": 172,
+          "result_success": true,
+          "result_sha256": "4bc7bf3ded0ffc9e55b9a9741b1a1759edaf208c2e5b74bc20156e2a45abdb69",
+          "effect_succeeded_seq": null,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        },
+        {
+          "action_id": "workspace.files/write",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-8450be0a47a2e89d",
+          "dispatch_seq": 205,
+          "result_seq": 209,
+          "result_success": true,
+          "result_sha256": "926c9a2fa5a11b5c8c50b65c2a8736463b6314bed695af8abd7e27b57ef1e470",
+          "effect_succeeded_seq": 207,
+          "app_id": null
+        },
+        {
+          "action_id": "app.hosting/update",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-9cf4415c4017f352",
+          "dispatch_seq": 294,
+          "result_seq": 298,
+          "result_success": true,
+          "result_sha256": "2151cd5481ac1ecacf82fd3ea3739f026cf9655a7adcea4745fc1ee49cbe7a17",
+          "effect_succeeded_seq": 296,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        },
+        {
+          "action_id": "app.hosting/preview",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12660-ee1e-7cb3-94ed-1508ca9e0976:tool:chatcmpl-tool-bfb1a3acf796573e",
+          "dispatch_seq": 315,
+          "result_seq": 319,
+          "result_success": true,
+          "result_sha256": "17b03f4f6a6e4ec759a8ee40dae7b8d50cedc94af8071db07f3a5e46826f9aaf",
+          "effect_succeeded_seq": 317,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        }
+      ]
+    },
+    {
+      "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2",
+      "runtime_terminal": "turn/completed",
+      "settlements": [
+        {
+          "action_id": "app.hosting/current",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-aa83f618cd6b77d2",
+          "dispatch_seq": 511,
+          "result_seq": 513,
+          "result_success": true,
+          "result_sha256": "62ce6c41dfb081f3bdd207eb68b494a21799a5e6e9aeec5af015dc3faa6e354c",
+          "effect_succeeded_seq": null,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        },
+        {
+          "action_id": "app.hosting/stop",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-aa312c99b17f6538",
+          "dispatch_seq": 527,
+          "result_seq": 531,
+          "result_success": true,
+          "result_sha256": "f613ae7ab20db2c978547eec11ade24c42a2397d3c63a41ff5cb6515f129c431",
+          "effect_succeeded_seq": 529,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        },
+        {
+          "action_id": "workspace.files/write",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-b5b72d13f8d1c532",
+          "dispatch_seq": 583,
+          "result_seq": 587,
+          "result_success": true,
+          "result_sha256": "1d93dc6decc552fae0d56a1fca53b30bcc1d91860730cc2589e6e874f52dce09",
+          "effect_succeeded_seq": 585,
+          "app_id": null
+        },
+        {
+          "action_id": "app.hosting/preview",
+          "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-89ddd13e162ebed8",
+          "dispatch_seq": 662,
+          "result_seq": 666,
+          "result_success": true,
+          "result_sha256": "737705ef3c0d3e8572045f59f0a40aba936d601a84aebcd99e8ebd3dfcf80492",
+          "effect_succeeded_seq": 664,
+          "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+        }
+      ]
+    }
+  ],
+  "repair": {
+    "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2",
+    "runtime_terminal": "turn/completed",
+    "app_id_preserved": true,
+    "session_id_preserved": true,
+    "prior_history_unchanged": true,
+    "source_changed": true,
+    "original_pid_gone": true,
+    "managed_pid": 32392,
+    "settlements": [
+      {
+        "action_id": "app.hosting/current",
+        "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-aa83f618cd6b77d2",
+        "dispatch_seq": 511,
+        "result_seq": 513,
+        "result_success": true,
+        "result_sha256": "62ce6c41dfb081f3bdd207eb68b494a21799a5e6e9aeec5af015dc3faa6e354c",
+        "effect_succeeded_seq": null,
+        "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+      },
+      {
+        "action_id": "app.hosting/stop",
+        "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-aa312c99b17f6538",
+        "dispatch_seq": 527,
+        "result_seq": 531,
+        "result_success": true,
+        "result_sha256": "f613ae7ab20db2c978547eec11ade24c42a2397d3c63a41ff5cb6515f129c431",
+        "effect_succeeded_seq": 529,
+        "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+      },
+      {
+        "action_id": "workspace.files/write",
+        "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-b5b72d13f8d1c532",
+        "dispatch_seq": 583,
+        "result_seq": 587,
+        "result_success": true,
+        "result_sha256": "1d93dc6decc552fae0d56a1fca53b30bcc1d91860730cc2589e6e874f52dce09",
+        "effect_succeeded_seq": 585,
+        "app_id": null
+      },
+      {
+        "action_id": "app.hosting/preview",
+        "operation_id": "turn:user:01a12660-e65e-7540-a012-e7250869aa18:01a12660-ebf0-7c32-b487-5d6e49939164:01a12666-65b8-71e1-a7b4-b433bd6697b2:tool:chatcmpl-tool-89ddd13e162ebed8",
+        "dispatch_seq": 662,
+        "result_seq": 666,
+        "result_success": true,
+        "result_sha256": "737705ef3c0d3e8572045f59f0a40aba936d601a84aebcd99e8ebd3dfcf80492",
+        "effect_succeeded_seq": 664,
+        "app_id": "01a12660-e84e-79f0-b563-0232306e5ada"
+      }
+    ],
+    "upstream_failure": {
+      "injected_http_status": 503,
+      "app_http_status": 503,
+      "body": {
+        "connected": false,
+        "app_count": 0
+      },
+      "recovered_success": true,
+      "verified_injected_requests": 1,
+      "recovered_verified_requests": 1
+    },
+    "browser_qa": {
+      "independent_callback": true,
+      "increment": true,
+      "refresh_persisted": true,
+      "clear": true,
+      "connected": true
+    }
+  },
+  "generated_project": "C:\\Users\\rika0\\code\\nomifun\\bak\\mobile\\nomifun-desktop\\.git\\app-workspace-validation\\run-prototype-02\\generated-project",
+  "status": "pass",
+  "completed_at": "2026-10-10T15:35:02.784Z",
+  "scope": {
+    "case": "one application generated and edited through two real model Turns",
+    "application_count": "measured before independent extra manual UI QA",
+    "extra_product_qa": "manual application deletion OS32 is separate; not claimed as passing",
+    "build": "8aa8606b2c38dee0674644233a95154a8091fba1b552f829677fcdf78edf79fe",
+    "latest_cleanup": "this live binary predates the final removal of the empty exclusive_session_ids field"
+  },
+  "credentials_audit": {
+    "status": "pass",
+    "provider_key_plaintext_scan": "two consecutive clean scans after Host shutdown",
+    "local_trust_plaintext_scan": "two consecutive clean scans after Host shutdown",
+    "generated_source_files": "exact provider and LocalTrust secret bytes rejected before artifact copying",
+    "credential_transport": "Windows Credential Manager to trusted runner, then test stdin; not Cargo/build scripts/argv/files/logs",
+    "user_data": "isolated disposable fixture only"
+  },
+  "repaired_project": "C:\\Users\\rika0\\code\\nomifun\\bak\\mobile\\nomifun-desktop\\.git\\app-workspace-validation\\run-prototype-02\\generated-project-repaired",
+  "retained_artifacts": {
+    "initial": "C:\\Users\\rika0\\code\\nomifun\\bak\\mobile\\nomifun-desktop\\.git\\app-workspace-validation\\run-prototype-02\\generated-project",
+    "final": "C:\\Users\\rika0\\code\\nomifun\\bak\\mobile\\nomifun-desktop\\.git\\app-workspace-validation\\run-prototype-02\\generated-project-repaired",
+    "final_html_sha256": "278771bef8309a16f7ed9143c057d1a6dc2ba3b08db1e4339dc3d5473d57cc65",
+    "final_backend_sha256": "a95b5b336d8424306c1b4db5e539f4be2ec42892c4e8b6399788b8d1d545f19c",
+    "independent_digest_verification": "pass"
+  }
+}

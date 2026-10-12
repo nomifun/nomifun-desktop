@@ -5793,6 +5793,7 @@ dependencies = [
  "nomifun-agent-session",
  "nomifun-ai-agent",
  "nomifun-api-types",
+ "nomifun-app-hosting",
  "nomifun-assets",
  "nomifun-auth",
  "nomifun-browser-platform",
@@ -5809,14 +5810,11 @@ dependencies = [
  "nomifun-file",
  "nomifun-gateway",
  "nomifun-idmm",
- "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
- "nomifun-plugin-development",
- "nomifun-plugin-platform",
  "nomifun-public",
  "nomifun-realtime",
  "nomifun-requirement",
@@ -5860,6 +5858,26 @@ dependencies = [
  "windows-sys 0.61.2",
  "wiremock",
  "zeroize",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "nomifun-app-hosting"
+version = "0.8.5"
+dependencies = [
+ "dunce",
+ "junction",
+ "nomi-process-runtime",
+ "nomi-redact",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
  "zip 2.4.2",
 ]
 
@@ -6352,22 +6370,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomifun-js-runtime"
-version = "0.8.5"
-dependencies = [
- "async-trait",
- "dunce",
- "nomi-process-runtime",
- "nomifun-runtime",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
 name = "nomifun-knowledge"
 version = "0.8.5"
 dependencies = [
@@ -6512,47 +6514,6 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "nomifun-plugin-development"
-version = "0.8.5"
-dependencies = [
- "async-trait",
- "jsonschema",
- "nomifun-agent-contracts",
- "nomifun-agent-domain-support",
- "nomifun-agent-kernel",
- "serde_json",
-]
-
-[[package]]
-name = "nomifun-plugin-platform"
-version = "0.8.5"
-dependencies = [
- "async-trait",
- "fs2",
- "hex",
- "jsonschema",
- "junction",
- "nomi-process-runtime",
- "nomifun-agent-contracts",
- "nomifun-common",
- "nomifun-db",
- "nomifun-js-runtime",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "unicode-normalization",
- "uuid",
- "walkdir",
- "which 7.0.3",
  "zip 2.4.2",
 ]
 

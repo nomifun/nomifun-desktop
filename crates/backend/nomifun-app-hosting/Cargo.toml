@@ -1,0 +1,26 @@
+[package]
+name = "nomifun-app-hosting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-process-runtime.workspace = true
+nomi-redact.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+url.workspace = true
+zip.workspace = true
+dunce.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+reqwest.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1.4.2"

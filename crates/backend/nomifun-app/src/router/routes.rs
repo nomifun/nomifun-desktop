@@ -19,7 +19,7 @@ use nomifun_assets::asset_routes;
 use nomifun_auth::{
     AuthRouterState, AuthState, InstallationTokenTrustState, InstanceOwnerState, TrustState,
     auth_middleware, auth_routes, csrf_middleware, installation_token_trust_resolve_middleware,
-    require_instance_owner_middleware, require_local_product_trust_middleware,
+    require_instance_owner_middleware,
     require_local_trust_middleware, security_headers_middleware, trust_resolve_middleware,
 };
 use nomifun_channel::channel_routes;
@@ -266,15 +266,6 @@ fn admit_headless_installation_owner(
         state.clone(),
         installation_token_trust_resolve_middleware,
     ))
-}
-
-fn is_plugin_surface_asset_path(path: &str) -> bool {
-    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
-    matches!(segments.next(), Some("api"))
-        && matches!(segments.next(), Some("plugins" | "plugin-drafts"))
-        && segments.next().is_some()
-        && matches!(segments.next(), Some("surface"))
-        && matches!(segments.next(), Some("assets"))
 }
 
 /// The shell's packaged origin and its loopback dev server are cross-origin
@@ -777,7 +768,7 @@ fn create_nomi_core_router_with_all_state(
     let nomi_core_agent_authenticated = protect_instance_owner(
         super::nomi_core_session::build_nomi_core_agent_router(
             states.nomi_core_agent_api.clone(),
-        ).merge(super::plugin_development::preflight_routes(states.nomi_core_agent_api.clone())),
+        ),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -851,22 +842,9 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Unified Plugin reads require the installation owner identity. Mutations
-    // additionally require local product trust.
-    let plugin_assets_public = super::plugin::asset_routes(states.plugin.clone());
-    let plugin_read_authenticated = admit_headless_installation_owner(
+    let app_hosting_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin::read_routes(states.plugin.clone()),
-            &auth_mw_state,
-            &instance_owner_state,
-        ),
-        &installation_token_trust_state,
-    );
-    let plugin_write_local = admit_headless_installation_owner(
-        protect_instance_owner(
-            super::plugin::write_routes(states.plugin).route_layer(
-                middleware::from_fn(require_local_product_trust_middleware),
-            ),
+            super::app_hosting::routes(states.app_hosting),
             &auth_mw_state,
             &instance_owner_state,
         ),
@@ -1145,9 +1123,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(ssh_host_authenticated)
-        .merge(plugin_assets_public)
-        .merge(plugin_read_authenticated)
-        .merge(plugin_write_local)
+        .merge(app_hosting_authenticated)
         .merge(agent_authenticated)
         .merge(nomi_core_agent_authenticated)
         .merge(idmm_authenticated)
@@ -1259,21 +1235,12 @@ fn create_nomi_core_router_with_all_state(
         "startup: route tree build with states completed"
     );
 
-    // CORS for known packaged webview origins and HTTP(S) loopback development
-    // origins. Local trust still authorizes each privileged endpoint; CORS
-    // does not grant setup or credential authority. A Plugin Surface asset's
-    // sandboxed iframe has the opaque `null` origin, and its bearer URL must
-    // never be readable from an ordinary web origin even if that URL leaks.
-    // Remote browsers are served same-origin and do not rely on CORS.
+    // Packaged webviews and serialized loopback development origins may use
+    // CORS. Privileged endpoints retain their local trust or authentication
+    // authority; ordinary remote WebUI remains same-origin.
     if services.auth_policy.allows_local_webview() {
         let cors = CorsLayer::new()
-            .allow_origin(AllowOrigin::predicate(|origin, request| {
-                if is_plugin_surface_asset_path(request.uri.path()) {
-                    origin.as_bytes() == b"null"
-                } else {
-                    is_desktop_webview_origin(origin)
-                }
-            }))
+            .allow_origin(AllowOrigin::predicate(|origin, _request| is_desktop_webview_origin(origin)))
             .allow_methods([
                 Method::GET,
                 Method::POST,

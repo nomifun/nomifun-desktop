@@ -357,8 +357,8 @@ describe('normalizeToolCall', () => {
   });
 
   it('removes canonical platform routing hashes from labels without changing tool identity', () => {
-    const alias = 'platform__plugin_development_plugin_develo__0d897918b652be9c2802';
-    expect(formatToolDisplayName(alias)).toBe('platform/plugin_development_plugin_develo');
+    const alias = 'platform__app_hosting_app_hosting_list__0d897918b652be9c2802';
+    expect(formatToolDisplayName(alias)).toBe('platform/app_hosting_app_hosting_list');
     expect(formatToolDisplayName('platform__custom__not-a-routing-hash')).toBe('platform__custom__not-a-routing-hash');
     const tool = normalizeToolCall({ type: 'tool_call', content: { call_id: 'platform-call', name: alias, status: 'completed' } } as any);
     expect(tool?.name).toBe(alias);

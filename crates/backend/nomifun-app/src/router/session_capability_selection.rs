@@ -62,13 +62,65 @@ pub(super) async fn update_selection(
     let mcp = state.resource_bindings.resolve_mcp_for_saved_binding(&state.control_plane, &owner.0, &replacement).await?;
     replacement.typed_resource_bindings = current.typed_resource_bindings.iter().filter(|resource| resource.resource_kind != "mcp_server").cloned().chain(mcp).collect();
     replacement.typed_resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
-    replacement.binding_version = current.binding_version.checked_add(1).ok_or_else(|| AppError::Conflict("Session binding version overflow".into()))?;
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &replacement).await?;
-    state.product_agent_resolver.official_runtime.validate_agent(&snapshot)?;
     let previous_active = state.session_owner.canonical().active_capability_ids(&principal, &id).await?.into_iter().collect::<BTreeSet<_>>();
     let active = snapshot.content.contributions().filter(|capability| previous_active.contains(capability.capability.id.as_ref())
         || nomifun_agent_control_plane::is_global_extension_module(capability.capability.id.as_ref()))
         .map(|capability| capability.capability.id.as_ref().to_owned()).collect();
+    let changed = commit_context_binding(&state, &owner, &id, observation, replacement, active,
+        digest_payload(&request).map_err(|error| AppError::Internal(error.to_string()))?).await?;
+    let response = AgentSessionCapabilitySelectionDto { selection: selection(&snapshot), binding_version: changed.binding_version, editable: true };
+    state.session_owner.user_events.send_to_user(owner.as_ref(), WebSocketMessage::new("agentSession.capabilitiesChanged", json!({
+        "agent_session_id": id, "selection": response.selection, "binding_version": response.binding_version, "editable": true,
+    })));
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+/// Explicit application submission preparation uses the ordinary idle binding
+/// transition. It preserves the exact selected resources, grants and history;
+/// reads/reopening never call this command or replace a frozen Snapshot.
+pub(super) async fn refresh_app_workflow(
+    state: &NomiCoreAgentApiState, owner: &AuthenticatedOwner, id: &AgentSessionId,
+) -> Result<(), NomiCoreApiError> {
+    let _operation_fence = state.session_owner.session_operation_lock(id.as_ref()).try_write_owned()
+        .map_err(|_| NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_BUSY", "Wait for application development to finish before updating its workflow"))?;
+    let principal = authenticated_principal(owner);
+    let observation = state.session_owner.canonical().get(&principal, id).await?;
+    if !editable(state, &observation, id).await? {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_BUSY", "An active or fixed Session cannot update its application workflow"));
+    }
+    super::super::hosted_effect_receipts::HostedEffectReceipts::new(state.session_owner.pool.clone()).ensure_settled(owner.as_ref(), id.as_ref()).await?;
+    let execution = state.session_owner.canonical().store().inspect_latest_native_execution(&principal, id).await.map_err(agent_session_store_error)?;
+    if execution.is_some_and(|execution| execution.pending_effects > 0 || execution.unknown_effects > 0 || execution.producer_lease_live) {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_DEVELOPMENT_BUSY", "Resolve the application's pending native work before updating its workflow"));
+    }
+    let current = agent_binding_dto(&observation.session.agent_binding)?;
+    let replacement = state.control_plane.resolve_app_development_workflow_binding(&owner.0, &current).await?;
+    if replacement.resolved_snapshot_ref == current.resolved_snapshot_ref && replacement.preset_revision_ref == current.preset_revision_ref { return Ok(()); }
+    let active = state.session_owner.canonical().active_capability_ids(&principal, id).await?;
+    let request = json!({"command":"refresh_app_development_workflow","session_id":id,"expected_binding":current});
+    let changed = commit_context_binding(state, owner, id, observation, replacement, active,
+        digest_payload(&request).map_err(|error| AppError::Internal(error.to_string()))?).await?;
+    state.session_owner.user_events.send_to_user(owner.as_ref(), WebSocketMessage::new("conversation.listChanged", json!({
+        "conversation_id":id,"action":"updated",
+    })));
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &changed).await?;
+    state.session_owner.user_events.send_to_user(owner.as_ref(), WebSocketMessage::new("agentSession.capabilitiesChanged", json!({
+        "agent_session_id":id,"selection":selection(&snapshot),"binding_version":changed.binding_version,"editable":true,
+    })));
+    Ok(())
+}
+
+async fn commit_context_binding(
+    state: &NomiCoreAgentApiState, owner: &AuthenticatedOwner, id: &AgentSessionId,
+    observation: nomifun_agent_session::SessionObservation, mut replacement: AgentBindingValueDto,
+    active: Vec<String>, request_digest: nomifun_agent_contracts::DigestHex,
+) -> Result<AgentBindingValueDto, NomiCoreApiError> {
+    let principal = authenticated_principal(owner);
+    let current = agent_binding_dto(&observation.session.agent_binding)?;
+    replacement.binding_version = current.binding_version.checked_add(1).ok_or_else(|| AppError::Conflict("Session binding version overflow".into()))?;
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &replacement).await?;
+    state.product_agent_resolver.official_runtime.validate_agent(&snapshot)?;
     let label = state.control_plane.editor(&owner.0, &current.preset_revision_ref.preset_id, Some(current.preset_revision_ref.revision)).await?.preset.display_name;
     state.session_owner.settle_session_binding_runtime(owner.as_ref(), &id).await?;
     let transition = OperationId::from(Uuid::now_v7().to_string());
@@ -76,13 +128,9 @@ pub(super) async fn update_selection(
         nomifun_agent_session::ReplaceSessionAgentBinding {
             expected: observation.session.agent_binding, replacement: serde_json::from_value(serde_json::to_value(&replacement)?)?,
             previous_agent_label: label.clone(), next_agent_label: label, transition_id: transition.clone(),
-            request_digest: digest_payload(&request).map_err(|error| AppError::Internal(error.to_string()))?,
+            request_digest,
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(transition.as_ref().to_owned()),
             handoff_mode: AgentHandoffMode::ContextOnly, handoff: None, initial_active_capability_ids: active,
         }).await.map_err(agent_switch_store_error)?;
-    let response = AgentSessionCapabilitySelectionDto { selection: selection(&snapshot), binding_version: changed.session.agent_binding.binding_version, editable: true };
-    state.session_owner.user_events.send_to_user(owner.as_ref(), WebSocketMessage::new("agentSession.capabilitiesChanged", json!({
-        "agent_session_id": id, "selection": response.selection, "binding_version": response.binding_version, "editable": true,
-    })));
-    Ok(Json(ApiResponse::ok(response)))
+    agent_binding_dto(&changed.session.agent_binding)
 }

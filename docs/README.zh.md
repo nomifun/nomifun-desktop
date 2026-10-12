@@ -18,6 +18,7 @@ Git 历史。
 | 快速试用 | [getting-started/quick-start.zh.md](getting-started/quick-start.zh.md) |
 | 接入 provider、本地模型并配置故障转移 | [guides/model-routing.zh.md](guides/model-routing.zh.md) |
 | 使用无限画布、素材、提示词与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
+| 托管自己的程序 | [guides/app-hosting.zh.md](guides/app-hosting.zh.md) |
 | 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
 | 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
 | 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
@@ -46,7 +47,7 @@ docs/
 
 当前顶层用户界面包括会话、终端、可扩展模型管理、创作（Canvas + 素材库）、
 Agent 工作台、技能、MCP、连接与设备、需求/AutoWork、定时任务、伙伴、知识库、
-SSH 主机，以及 feature-gated 的插件能力。前端路由真相来源是
+SSH 主机和应用托管。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。
 
 ## 文档范围

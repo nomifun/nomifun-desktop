@@ -49,7 +49,7 @@ binary 存在，用于诊断、stdio MCP bridge、canonical Remote 调用和无�
 | 目录 | 前缀 | 数量 | 职责 |
 | --- | --- | --- | --- |
 | [`crates/agent/`](../../crates/agent) | `nomi-*` | 7 | 提供商、配置及桌面自动化基础实现，尽量保持独立。 |
-| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 54 | HTTP/WS 后端、数据层、认证、Agent Store、Unified Plugin、cron、knowledge、terminal、companion、public gateway 等。 |
+| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 当前清单 | HTTP/WS 后端、数据层、认证、Agent Store、应用托管、cron、knowledge、terminal、companion、public gateway 等。 |
 | [`crates/shared/`](../../crates/shared) | mixed | 4 | 真正跨 agent/backend 使用的共享工具。 |
 
 模型/工具循环位于 `nomifun-agent-runtime`。`nomifun-engine-core` 将已准入的

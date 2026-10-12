@@ -224,7 +224,6 @@ impl Host {
                     hidden: false,
                     origin: Some("agent".into()),
                     channel_platform: None,
-                    plugin_delivery: None,
                 };
                 // This is the existing owner-serialized idle admission, with
                 // Snapshot and context CAS inside the canonical write boundary.

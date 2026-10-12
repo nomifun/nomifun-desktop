@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "be4bf62a2ef8b40c6d7081f790c8149611bf5376a6f379fecb8ab0a5e2efbb0d",
+    "target_first_party_contribution_digest": "ce4e5092be83893b21ceb31157a01d510b39618d5c7c9ddf65d637ffe3b3d844",
     "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
@@ -167,24 +167,6 @@
               "creation.media/music",
               "creation.media/text",
               "creation.media/video"
-            ]
-          },
-          {
-            "capability": {
-              "id": "plugin.development"
-            },
-            "action_allowlist": [
-              "plugin.development/apply",
-              "plugin.development/check",
-              "plugin.development/inspect",
-              "plugin.development/install",
-              "plugin.development/list",
-              "plugin.development/open",
-              "plugin.development/plan",
-              "plugin.development/preview",
-              "plugin.development/read",
-              "plugin.development/test_action",
-              "plugin.development/test_ui"
             ]
           },
           {
@@ -358,20 +340,170 @@
           },
           {
             "capability": {
-              "id": "plugin.development"
+              "id": "ssh"
             },
             "action_allowlist": [
-              "plugin.development/apply",
-              "plugin.development/check",
-              "plugin.development/inspect",
-              "plugin.development/install",
-              "plugin.development/list",
-              "plugin.development/open",
-              "plugin.development/plan",
-              "plugin.development/preview",
-              "plugin.development/read",
-              "plugin.development/test_action",
-              "plugin.development/test_ui"
+              "ssh/exec",
+              "ssh/fs.read",
+              "ssh/fs.write",
+              "ssh/sudo"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge.management"
+            },
+            "action_allowlist": [
+              "knowledge.management/create",
+              "knowledge.management/delete",
+              "knowledge.management/inspect",
+              "knowledge.management/list",
+              "knowledge.management/update"
+            ]
+          },
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "action_allowlist": [
+              "session.management/cancel_turn",
+              "session.management/create",
+              "session.management/execution_adjust",
+              "session.management/execution_cancel",
+              "session.management/execution_list",
+              "session.management/execution_retry_step",
+              "session.management/execution_status",
+              "session.management/list",
+              "session.management/send_input",
+              "session.management/status",
+              "session.management/terminal_create",
+              "session.management/terminal_input",
+              "session.management/terminal_list",
+              "session.management/terminal_read",
+              "session.management/terminal_relaunch",
+              "session.management/terminal_stop"
+            ]
+          }
+        ],
+        "skill_bindings": [],
+        "required_resource_kinds": [
+          "knowledge_base",
+          "process_session",
+          "project_memory",
+          "ssh_host",
+          "workspace"
+        ],
+        "required_runtime_features": [
+          "code_mode",
+          "context.compact.automatic",
+          "context.compact.manual",
+          "multi_agent.coordinate",
+          "process.background_sessions",
+          "responses.native_reasoning",
+          "responses.prompt_cache",
+          "responses.stream_items",
+          "responses.tool_call_correlation",
+          "review.workflow",
+          "subagent.send",
+          "subagent.spawn",
+          "subagent.wait",
+          "thread.fork",
+          "thread.resume",
+          "thread.rollback",
+          "tool.parallel",
+          "tool.search",
+          "turn.cancel",
+          "turn.interrupt",
+          "turn.steer",
+          "validation.feedback"
+        ]
+      },
+      "app.developer": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/delete",
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.vcs"
+            },
+            "action_allowlist": [
+              "workspace.vcs/commit",
+              "workspace.vcs/diff",
+              "workspace.vcs/push",
+              "workspace.vcs/stage",
+              "workspace.vcs/status"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate",
+              "agent/fork",
+              "agent/request_user_decision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "action_allowlist": [
+              "knowledge/autogen",
+              "knowledge/read",
+              "knowledge/search",
+              "knowledge/write"
             ]
           },
           {
@@ -418,6 +550,23 @@
               "session.management/terminal_read",
               "session.management/terminal_relaunch",
               "session.management/terminal_stop"
+            ]
+          },
+          {
+            "capability": {
+              "id": "app.hosting"
+            },
+            "action_allowlist": [
+              "app.hosting/current",
+              "app.hosting/guide",
+              "app.hosting/import",
+              "app.hosting/list",
+              "app.hosting/preview",
+              "app.hosting/rebuild",
+              "app.hosting/start",
+              "app.hosting/status",
+              "app.hosting/stop",
+              "app.hosting/update"
             ]
           }
         ],
@@ -990,7 +1139,6 @@
           "knowledge.management",
           "model.management",
           "office",
-          "plugin.development",
           "project.memory",
           "requirements",
           "session.management",
@@ -1034,7 +1182,69 @@
           "agent.collaboration",
           "knowledge",
           "knowledge.management",
-          "plugin.development",
+          "project.memory",
+          "session.management",
+          "ssh",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process",
+          "workspace.vcs"
+        ],
+        "required_runtime_features": [
+          "code_mode",
+          "context.compact.automatic",
+          "context.compact.manual",
+          "multi_agent.coordinate",
+          "process.background_sessions",
+          "responses.native_reasoning",
+          "responses.prompt_cache",
+          "responses.stream_items",
+          "responses.tool_call_correlation",
+          "review.workflow",
+          "subagent.send",
+          "subagent.spawn",
+          "subagent.wait",
+          "thread.fork",
+          "thread.resume",
+          "thread.rollback",
+          "tool.parallel",
+          "tool.search",
+          "turn.cancel",
+          "turn.interrupt",
+          "turn.steer",
+          "validation.feedback"
+        ],
+        "required_resource_kinds": [
+          "knowledge_base",
+          "process_session",
+          "project_memory",
+          "ssh_host",
+          "workspace"
+        ]
+      },
+      "app.developer": {
+        "required_capability_categories": [
+          "agent_collaboration",
+          "app_development",
+          "file_operations",
+          "knowledge",
+          "knowledge_management",
+          "native_responses",
+          "project_memory",
+          "remote_execution",
+          "session_management",
+          "shell_process_pty",
+          "skills_plugins",
+          "vcs_review",
+          "web_research",
+          "workspace_repository"
+        ],
+        "required_capability_ids": [
+          "agent.collaboration",
+          "app.hosting",
+          "knowledge",
+          "knowledge.management",
           "project.memory",
           "session.management",
           "ssh",
@@ -1221,5 +1431,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "44be642e2f172f79740aba9d0667e63c1fe79f9a02b4408c1f6829fca83a9608"
+  "payload_digest": "d4f9e34056c8dbe2389f46c1f2a6683685665b4b28b8429d31f22589e18d2b3d"
 }

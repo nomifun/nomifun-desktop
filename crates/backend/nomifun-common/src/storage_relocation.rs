@@ -4,13 +4,14 @@
 //! The application holds both source work-root locks, closes every writer, then
 //! calls prepare. Its returned guard retains the control and destination locks
 //! while the application validates/rebinds the copied database. Only the main
-//! database may change at that boundary; every other copied payload is checked
+//! database and proven application-registry directory fields may change; every other copied payload is checked
 //! again before publication. No source directory is deleted, and external
 //! project directories are never traversed (only work/conversations is owned).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::collections::BTreeSet;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,13 @@ pub struct RelocationPlan {
     pub error: Option<String>,
     copied: Option<Vec<CopyEntry>>,
     installed: Option<Vec<CopyEntry>>,
+}
+
+impl RelocationPlan {
+    /// Read-only phase information derived from the existing copy manifest.
+    /// Preparation still revalidates that manifest; this grants no publication
+    /// or database-mutation authority and exposes no payload digest records.
+    pub fn has_verified_copy(&self) -> bool { self.copied.is_some() }
 }
 
 /// Keep this value alive until commit completes. The application must validate
@@ -711,9 +719,61 @@ fn descriptor(plan: &RelocationPlan, root: &Path) -> RootDescriptor {
 }
 
 fn verify_copy(plan: &RelocationPlan, root: &Path, allow_database_change: bool) -> Result<(), AppError> {
+    verify_copy_with_app_registries(plan, root, allow_database_change, &BTreeSet::new(), AppRegistryDirectoryCheck::Rebased)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppRegistryDirectoryCheck { CopiedOrRebased, Rebased }
+
+/// The hosting owner supplies its offline-validated IDs. The common
+/// coordinator independently proves the only allowed JSON change against
+/// the still-hashed source payload; it never trusts an arbitrary rewrite
+/// digest or exempts an application directory from copy verification.
+fn verify_copy_with_app_registries(plan: &RelocationPlan, root: &Path,
+    allow_database_change: bool, app_ids: &BTreeSet<String>, directory_check: AppRegistryDirectoryCheck) -> Result<(), AppError> {
     let expected = plan.copied.as_ref().ok_or_else(|| AppError::Internal("storage relocation has no verified source manifest".into()))?;
+    let mut registry_paths = BTreeSet::new();
+    for id in app_ids {
+        validate_uuidv7(id).map_err(|_| AppError::Conflict("invalid application identity in storage relocation".into()))?;
+        let relative = Path::new("app-hosting").join("registry").join(format!("{id}.json"));
+        let source_entry = expected.iter().find(|entry| entry.relative == relative && entry.base == CopyBase::Data && !entry.directory)
+            .ok_or_else(|| AppError::Conflict("application registry is absent from the exact copied source inventory".into()))?;
+        let source_path = plan.source.data_dir.join(&relative);
+        let target_path = root.join(&relative);
+        require_no_links(&source_path)?;
+        require_no_links(&target_path)?;
+        if fs::metadata(&source_path).map_err(|error| io_error("inspect source application registry", &source_path, error))?.len() != source_entry.bytes
+            || Some(file_digest(&source_path)?) != source_entry.digest {
+            return Err(AppError::Conflict("source application registry changed after the exact verified copy".into()));
+        }
+        let mut source: serde_json::Value = read_json(&source_path)?
+            .ok_or_else(|| io_error("read source application registry", &source_path, "missing"))?;
+        let target: serde_json::Value = read_json(&target_path)?
+            .ok_or_else(|| io_error("read copied application registry", &target_path, "missing"))?;
+        let original_copy = directory_check == AppRegistryDirectoryCheck::CopiedOrRebased && target == source;
+        let record = source.get_mut("record").and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| AppError::Conflict("source application registry has no record".into()))?;
+        let directory: PathBuf = serde_json::from_value(record.get("directory").cloned().unwrap_or_default())
+            .map_err(|_| AppError::Conflict("source application registry has no exact owned directory".into()))?;
+        if record.get("id").and_then(serde_json::Value::as_str) != Some(id.as_str())
+            || directory != plan.source.data_dir.join("app-hosting").join("apps").join(id) {
+            return Err(AppError::Conflict("source application registry identity or directory differs from the verified application".into()));
+        }
+        // Preparation may resume before, during or after the bounded registry
+        // callback. An original copy stays in the ordinary exact hash check;
+        // it is not exempted merely because its identity was validated.
+        if original_copy { continue; }
+        record.insert("directory".into(), serde_json::to_value(plan.destination.data_dir.join("app-hosting").join("apps").join(id))
+            .map_err(|error| io_error("serialize relocated application directory", &target_path, error))?);
+        if source != target {
+            return Err(AppError::Conflict("copied application registry changed fields other than its exact owned directory".into()));
+        }
+        registry_paths.insert(relative);
+    }
     let mut actual = Vec::new(); scan_tree(root, Path::new(""), CopyBase::Data, true, &mut actual, &|relative| payload_is_control(relative))?;
-    let normalize = |entries: &[CopyEntry]| { let mut normalized = entries.iter().filter(|e| !(allow_database_change && is_database_family(&e.relative))).cloned().collect::<Vec<_>>(); for entry in &mut normalized { entry.base = CopyBase::Data; } normalized.sort_by(|a,b| a.relative.cmp(&b.relative)); normalized };
+    let normalize = |entries: &[CopyEntry]| { let mut normalized = entries.iter().filter(|e|
+        !(allow_database_change && is_database_family(&e.relative)) && !registry_paths.contains(&e.relative))
+        .cloned().collect::<Vec<_>>(); for entry in &mut normalized { entry.base = CopyBase::Data; } normalized.sort_by(|a,b| a.relative.cmp(&b.relative)); normalized };
     if normalize(expected) != normalize(&actual) { return Err(AppError::Conflict("copied storage payload failed its size/checksum inventory; preserving the original dataset".into())); }
     Ok(())
 }
@@ -758,6 +818,15 @@ fn finalize_committed_locked(control: &Path, plan: &mut RelocationPlan) -> Resul
 /// Offline only: the application's source data/work locks must already be held
 /// and all SQLite pools, browsers, tasks and other dataset writers closed.
 pub fn prepare_pending_storage_relocation(control: &Path) -> Result<Option<PreparedRelocation>, AppError> {
+    prepare_pending_storage_relocation_with_app_registries(control, &BTreeSet::new())
+}
+
+/// Resume an unpublished copy after the hosting owner's offline validation.
+/// A registered application may still contain its exact original bytes or
+/// only the proved final directory rebase. Publication remains stricter and
+/// requires every validated application registry to have been rebased.
+pub fn prepare_pending_storage_relocation_with_app_registries(control: &Path,
+    app_ids: &BTreeSet<String>) -> Result<Option<PreparedRelocation>, AppError> {
     let (control, control_lock) = control_lock(control)?;
     let Some(mut plan) = pending_storage_relocation(&control)? else { return Ok(None); };
     if matches!(plan.phase, RelocationPhase::Prepared | RelocationPhase::Canceled | RelocationPhase::Completed)
@@ -766,7 +835,7 @@ pub fn prepare_pending_storage_relocation(control: &Path) -> Result<Option<Prepa
     let target_parent = real_directory(plan.destination.data_dir.parent().unwrap(), false)?;
     let target_hash = format!("{:x}", Sha256::digest(plan.destination.data_dir.to_string_lossy().as_bytes()));
     let target_lock = lock_file(&target_parent.join(format!(".nomifun-storage-target-{target_hash}.lock")))?;
-    let result = prepare_locked(&control, &mut plan);
+    let result = prepare_locked(&control, &mut plan, app_ids);
     if let Err(error) = result {
         plan.phase = RelocationPhase::Failed; plan.error = Some(error.to_string());
         plan.cancellable = plan.installed.is_none() && fs::symlink_metadata(plan.source.data_dir.join(SEALED_MARKER)).is_err();
@@ -776,7 +845,7 @@ pub fn prepare_pending_storage_relocation(control: &Path) -> Result<Option<Prepa
     Ok(Some(PreparedRelocation { source: plan.source.clone(), destination: plan.destination.clone(), staging_data_dir: if plan.installed.is_some() { plan.destination.data_dir.clone() } else { plan.staging_data_dir.clone() }, preparation_complete: plan.installed.is_some(), plan, _control_lock: control_lock, _target_lock: target_lock }))
 }
 
-fn prepare_locked(control: &Path, plan: &mut RelocationPlan) -> Result<(), AppError> {
+fn prepare_locked(control: &Path, plan: &mut RelocationPlan, app_ids: &BTreeSet<String>) -> Result<(), AppError> {
     // A replay cannot select a previous dataset after a later relocation.
     if read_json::<RelocationPlan>(&control.join("completed-storage-relocations").join(format!("{}.json", plan.operation_id)))?.is_some() {
         return Err(AppError::Conflict("this storage relocation has already completed; refusing to replay it".into()));
@@ -799,7 +868,7 @@ fn prepare_locked(control: &Path, plan: &mut RelocationPlan) -> Result<(), AppEr
     let inventory = source_inventory(plan, true)?;
     if let Some(previous) = &plan.copied {
         if previous != &inventory { return Err(AppError::Conflict("source data changed after the verified copy; prepare a new relocation".into())); }
-        verify_copy(plan, &plan.staging_data_dir, true)?;
+        verify_copy_with_app_registries(plan, &plan.staging_data_dir, true, app_ids, AppRegistryDirectoryCheck::CopiedOrRebased)?;
         plan.phase = RelocationPhase::Verifying; plan.cancellable = true; plan.error = None;
         write_json(&control.join(PLAN_FILE), plan, true)?;
         return Ok(());
@@ -899,6 +968,14 @@ fn consume_staging_marker(plan: &RelocationPlan) -> Result<(), AppError> {
 /// The application has proved and, if necessary, explicitly transitioned the
 /// current canonical bindings in the staged DB. Immutable history is untouched.
 pub fn commit_storage_relocation(control: &Path, prepared: &PreparedRelocation) -> Result<StorageLocation, AppError> {
+    commit_storage_relocation_with_app_registries(control, prepared, &BTreeSet::new())
+}
+
+/// Commit after the hosting owner has rebased only these exact registered
+/// application directories in the staged copy. Source data stays immutable;
+/// the final installed manifest also binds the rebased registries for recovery.
+pub fn commit_storage_relocation_with_app_registries(control: &Path, prepared: &PreparedRelocation,
+    app_ids: &BTreeSet<String>) -> Result<StorageLocation, AppError> {
     let control = real_directory(control, false)?;
     if !paths::paths_equivalent(&control, &prepared.plan.control_dir) { return Err(AppError::Conflict("prepared storage operation uses another control scope".into())); }
     let mut plan = require_operation(&control, &prepared.plan.operation_id)?;
@@ -918,7 +995,7 @@ pub fn commit_storage_relocation(control: &Path, prepared: &PreparedRelocation) 
     }
     if plan.installed.is_none() {
         if source_inventory(&plan, true)? != *plan.copied.as_ref().ok_or_else(|| AppError::Internal("relocation was not copied".into()))? { return Err(AppError::Conflict("source dataset changed while its copied database was being prepared".into())); }
-        verify_copy(&plan, &plan.staging_data_dir, true)?;
+        verify_copy_with_app_registries(&plan, &plan.staging_data_dir, true, app_ids, AppRegistryDirectoryCheck::Rebased)?;
         require_empty_target(&plan.destination.data_dir)?;
         if plan.destination.data_dir.exists() {
             fs::remove_dir(&plan.destination.data_dir).map_err(|e| io_error("reserve empty target", &plan.destination.data_dir, e))?;
@@ -988,6 +1065,165 @@ mod tests {
         fn stage(&self) -> PreparedRelocation {
             let plan = self.draft(); start_storage_relocation(&self.control, &plan.operation_id).unwrap();
             prepare_pending_storage_relocation(&self.control).unwrap().unwrap()
+        }
+    }
+
+    fn application_fixture(f: &Fixture) -> (String, PathBuf, serde_json::Value, Vec<u8>) {
+        let id = Uuid::now_v7().to_string();
+        let relative = Path::new("app-hosting").join("registry").join(format!("{id}.json"));
+        let record = serde_json::json!({"record":{"id":id,"name":"Application", "description":"preserved",
+            "directory":f.source.join("app-hosting").join("apps").join(&id),"settings":{"project_directory":"."}},"identity":null});
+        fs::create_dir_all(f.source.join("app-hosting").join("registry")).unwrap();
+        fs::create_dir_all(f.source.join("app-hosting").join("apps").join(&id)).unwrap();
+        fs::write(f.source.join("app-hosting").join("apps").join(&id).join("index.html"), b"actual application source").unwrap();
+        let bytes = serde_json::to_vec_pretty(&record).unwrap();
+        fs::write(f.source.join(&relative), &bytes).unwrap();
+        (id, relative, record, bytes)
+    }
+
+    fn rebase_application_registry(f: &Fixture, staged: &PreparedRelocation, id: &str,
+        relative: &Path, record: &serde_json::Value) -> serde_json::Value {
+        let mut relocated = record.clone();
+        relocated["record"]["directory"] = serde_json::to_value(f.target.join("app-hosting").join("apps").join(id)).unwrap();
+        fs::write(staged.staging_data_dir.join(relative), serde_json::to_vec_pretty(&relocated).unwrap()).unwrap();
+        relocated
+    }
+
+    #[test]
+    fn relocation_allows_only_proven_application_registry_directory_rebase() {
+        let f = Fixture::new(false);
+        let (id, relative, record, bytes) = application_fixture(&f);
+        let staged = f.stage();
+        let expected = rebase_application_registry(&f, &staged, &id, &relative, &record);
+        assert!(commit_storage_relocation(&f.control, &staged).is_err(), "unproven registry changes remain protected");
+        assert!(!f.target.exists());
+        commit_storage_relocation_with_app_registries(&f.control, &staged, &BTreeSet::from([id.clone()])).unwrap();
+        assert_eq!(fs::read(f.source.join(&relative)).unwrap(), bytes, "source registry bytes stay unchanged");
+        assert_eq!(read_json::<serde_json::Value>(&f.target.join(relative)).unwrap().unwrap(), expected);
+        assert_eq!(fs::read(f.target.join("app-hosting").join("apps").join(id).join("index.html")).unwrap(), b"actual application source");
+        assert!(require_storage_root_not_sealed(&f.source).is_err());
+    }
+
+    #[test]
+    fn relocation_rejects_other_application_fields_payloads_and_unknown_registry_changes() {
+        for tamper in ["name", "source", "unknown_registry"] {
+            let f = Fixture::new(false);
+            let (id, relative, record, bytes) = application_fixture(&f);
+            let second = application_fixture(&f);
+            let staged = f.stage();
+            let mut rebased = rebase_application_registry(&f, &staged, &id, &relative, &record);
+            match tamper {
+                "name" => {
+                    rebased["record"]["name"] = serde_json::json!("Changed authorial value");
+                    fs::write(staged.staging_data_dir.join(&relative), serde_json::to_vec(&rebased).unwrap()).unwrap();
+                }
+                "source" => {
+                    fs::write(staged.staging_data_dir.join("app-hosting").join("apps").join(&id).join("index.html"), b"unexpected source change").unwrap();
+                }
+                "unknown_registry" => {
+                    rebase_application_registry(&f, &staged, &second.0, &second.1, &second.2);
+                }
+                _ => unreachable!(),
+            }
+            assert!(commit_storage_relocation_with_app_registries(&f.control, &staged, &BTreeSet::from([id])).is_err(), "{tamper}");
+            assert!(!f.target.exists(), "rejected {tamper} cannot publish a partial dataset");
+            assert_eq!(fs::read(f.source.join(&relative)).unwrap(), bytes);
+            assert!(resolve_storage_location(&f.control).unwrap().is_none());
+            require_storage_root_not_sealed(&f.source).unwrap();
+        }
+    }
+
+    #[test]
+    fn relocation_recovery_binds_rebased_application_registry_in_installed_manifest() {
+        let f = Fixture::new(false);
+        let (id, relative, record, bytes) = application_fixture(&f);
+        let staged = f.stage();
+        let expected = rebase_application_registry(&f, &staged, &id, &relative, &record);
+        fs::create_dir(f.source.join(SEALED_MARKER)).unwrap();
+        assert!(commit_storage_relocation_with_app_registries(&f.control, &staged, &BTreeSet::from([id])).is_err());
+        assert!(f.target.exists());
+        drop(staged);
+        fs::remove_dir(f.source.join(SEALED_MARKER)).unwrap();
+        let recovered = prepare_pending_storage_relocation(&f.control).unwrap().unwrap();
+        assert!(recovered.preparation_complete);
+        commit_storage_relocation(&f.control, &recovered).unwrap();
+        assert_eq!(fs::read(f.source.join(&relative)).unwrap(), bytes);
+        assert_eq!(read_json::<serde_json::Value>(&f.target.join(relative)).unwrap().unwrap(), expected);
+    }
+
+    #[test]
+    fn relocation_prepare_resumes_partially_and_fully_rebased_app_registries_but_commit_requires_all_rebased() {
+        for partial in [false, true] {
+            let f = Fixture::new(false);
+            let (id, relative, record, bytes) = application_fixture(&f);
+            let (second_id, second_relative, second_record, second_bytes) = application_fixture(&f);
+            let ids = BTreeSet::from([id.clone(), second_id.clone()]);
+            let staged = f.stage();
+            let expected = rebase_application_registry(&f, &staged, &id, &relative, &record);
+            if !partial { rebase_application_registry(&f, &staged, &second_id, &second_relative, &second_record); }
+            // Simulate a real interruption after the copied canonical DB may
+            // already have been transitioned and one or all registries rebased.
+            fs::write(staged.staging_data_dir.join("nomifun-backend.db"), b"prepared canonical relocation transition").unwrap();
+            let first_rebased = fs::read(staged.staging_data_dir.join(&relative)).unwrap();
+            drop(staged);
+            let recovered = prepare_pending_storage_relocation_with_app_registries(&f.control, &ids).unwrap().unwrap();
+            assert!(!recovered.preparation_complete);
+            assert_eq!(fs::read(recovered.staging_data_dir.join(&relative)).unwrap(), first_rebased);
+            if partial {
+                assert_eq!(fs::read(recovered.staging_data_dir.join(&second_relative)).unwrap(), second_bytes);
+                assert!(commit_storage_relocation_with_app_registries(&f.control, &recovered, &ids).is_err(),
+                    "preparation permits an exact original copy, but publication must require its final directory");
+                assert!(!f.target.exists());
+                rebase_application_registry(&f, &recovered, &second_id, &second_relative, &second_record);
+            }
+            commit_storage_relocation_with_app_registries(&f.control, &recovered, &ids).unwrap();
+            assert_eq!(fs::read(f.source.join(&relative)).unwrap(), bytes);
+            assert_eq!(fs::read(f.source.join(&second_relative)).unwrap(), second_bytes);
+            assert_eq!(read_json::<serde_json::Value>(&f.target.join(&relative)).unwrap().unwrap(), expected);
+            assert_eq!(fs::read(f.target.join("nomifun-backend.db")).unwrap(), b"prepared canonical relocation transition");
+            assert_eq!(fs::read(f.target.join("app-hosting").join("apps").join(&id).join("index.html")).unwrap(), b"actual application source");
+        }
+    }
+
+    #[test]
+    fn relocation_prepare_app_allowlist_never_exempts_illegal_registry_payload_or_source_changes() {
+        for tamper in ["name", "source-file", "unknown-registry", "original-format", "source-registry"] {
+            let f = Fixture::new(false);
+            let (id, relative, record, bytes) = application_fixture(&f);
+            let second = application_fixture(&f);
+            let staged = f.stage();
+            let mut rebased = rebase_application_registry(&f, &staged, &id, &relative, &record);
+            match tamper {
+                "name" => {
+                    rebased["record"]["name"] = serde_json::json!("unexpected changed name");
+                    fs::write(staged.staging_data_dir.join(&relative), serde_json::to_vec_pretty(&rebased).unwrap()).unwrap();
+                }
+                "source-file" => {
+                    fs::write(staged.staging_data_dir.join("app-hosting").join("apps").join(&id).join("index.html"), b"unexpected source change").unwrap();
+                }
+                "unknown-registry" => { rebase_application_registry(&f, &staged, &second.0, &second.1, &second.2); }
+                "original-format" => {
+                    // JSON equality alone is not proof of the original copy:
+                    // that branch must still meet its exact manifest hash.
+                    fs::write(staged.staging_data_dir.join(&relative), serde_json::to_vec(&record).unwrap()).unwrap();
+                }
+                "source-registry" => {
+                    let mut changed = record.clone(); changed["record"]["description"] = serde_json::json!("source writer changed its registry");
+                    fs::write(f.source.join(&relative), serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let source_before = fs::read(f.source.join(&relative)).unwrap();
+            let staged_before = fs::read(staged.staging_data_dir.join(&relative)).unwrap();
+            drop(staged);
+            assert!(prepare_pending_storage_relocation_with_app_registries(&f.control, &BTreeSet::from([id])).is_err(), "{tamper}");
+            assert_eq!(fs::read(f.source.join(&relative)).unwrap(), source_before);
+            let plan = pending_storage_relocation(&f.control).unwrap().unwrap();
+            assert_eq!(fs::read(plan.staging_data_dir.join(&relative)).unwrap(), staged_before);
+            if tamper != "source-registry" { assert_eq!(source_before, bytes); }
+            assert!(!f.target.exists());
+            assert!(resolve_storage_location(&f.control).unwrap().is_none());
+            require_storage_root_not_sealed(&f.source).unwrap();
         }
     }
 

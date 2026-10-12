@@ -776,9 +776,14 @@ pub(crate) async fn run_turn(
         let review_has_running_processes = long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty());
         let account_repair = long_horizon.as_ref().is_some_and(|state| state.completion.review.account_repair);
         let report_only_locked = long_horizon.as_ref().is_some_and(|state| state.completion.review.is_report_only());
-        let continuing_complex_task = crate::delivery_review::multi_item_task(&retained_inputs)
-            && !account_repair && !report_only_locked && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
-                && (state.execution_plan.revision == 0 || state.execution_plan.is_open()));
+        // A source-bound open plan already records unfinished accepted work.
+        // A provider's text-only stop must not make ordinary unnumbered tasks
+        // report-only while those planned actions still need to run. Explicit
+        // report phases and settled failure accounting remain closed.
+        let continuing_planned_task = !account_repair && !report_only_locked
+            && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
+                && (state.execution_plan.revision > 0 && state.execution_plan.is_open()
+                    || state.execution_plan.revision == 0 && crate::delivery_review::multi_item_task(&retained_inputs)));
         let review_can_report = report_only_locked || (long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
             && !patch_recovery.pending() && !patch_recovery.unresolved()
             && (account_repair || !crate::delivery_review::multi_item_task(&retained_inputs)
@@ -797,7 +802,7 @@ pub(crate) async fn run_turn(
                     && state.execution_plan.steps.is_empty()));
         let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots,
             completion_review_used || account_repair || report_only_locked, review_can_report,
-            plan_blocks_report, review_has_running_processes, continuing_complex_task);
+            plan_blocks_report, review_has_running_processes, continuing_planned_task);
         let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
         if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
@@ -2059,10 +2064,12 @@ pub(crate) async fn run_turn(
                 && model_steps < total_model_limit
             {
                 completion_review_used = true;
-                event_sink.emit(AgentEngineEvent::CompletionReview {
-                    status: state.work_status.clone(),
-                }).await?;
-                model_request.input.messages.push(state.work_status.completion_review_message()?);
+                if !continuing_planned_task {
+                    event_sink.emit(AgentEngineEvent::CompletionReview {
+                        status: state.work_status.clone(),
+                    }).await?;
+                    model_request.input.messages.push(state.work_status.completion_review_message()?);
+                }
                 model_request.input.provider_round_parent = None;
                 continue;
             }
@@ -2303,7 +2310,7 @@ fn synchronize_completion_review(
     can_report: bool,
     plan_blocks_report: bool,
     has_running_processes: bool,
-    continuing_complex_task: bool,
+    continuing_planned_task: bool,
 ) -> AgentExecutionPhase {
     if active {
         if has_running_processes {
@@ -2314,9 +2321,9 @@ fn synchronize_completion_review(
                 "Execution remains unfinished for the same accepted task. A public progress reply does not complete it or authorize cancelling processes. Preserve the user's keep-alive/wait-for-input constraints, owned process IDs and output cursors; continue only the actions permitted by the accepted task. If the user requires keeping a helper until Stop, keep this turn active and poll that helper rather than cancel it to end a response. User cancellation and frozen execution budgets still apply. Unknown effects and pending recovery remain unresolved; this notice grants no verification, retry or wider scope. Claim completion only after the required work and owned processes have actually settled. Existing recovery policy may still permit a blocked partial account, which is never task success.".into());
             return AgentExecutionPhase::Execution;
         }
-        if continuing_complex_task {
+        if continuing_planned_task {
             upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
-                "A per-response stop can be a brief public progress update, not completion of this multi-item task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
+                "A per-response stop can be a brief public progress update, not completion of this planned task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
             return AgentExecutionPhase::Execution;
         }
         // The transcript review can be summarized with an oversized tool
@@ -7096,8 +7103,8 @@ mod tests {
     /// A host-verified delivery settles the final answer even while an
     /// incidental ledger plan stays open: this turn did no ledger-requiring
     /// work, so the host owns the outcome and the ledger's completion gates
-    /// do not apply. The same script under a plain Settle verdict still runs
-    /// review and fails on the open plan, proving the bypass is the verdict's.
+    /// do not apply. A plain Settle verdict keeps the open plan in execution
+    /// and fails after a second non-progress reply, proving the verdict's bypass.
     #[tokio::test]
     async fn host_verified_delivery_settles_an_incidental_ledger_without_an_account() {
         #[derive(Debug)]
@@ -7156,9 +7163,11 @@ mod tests {
             AgentContextBudget::default(),CancellationToken::new()).await;
         let error=result.expect_err("without the verdict the same open plan still fails");
         assert!(error.to_string().contains("execution plan remains unresolved"),"{error}");
-        assert!(sink.0.lock().unwrap().iter().any(|event|
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
             matches!(event,AgentEngineEvent::CompletionReview{..})),
-            "a neutral verdict keeps the ledger review gate");
+            "a neutral verdict cannot make unfinished planned work report-only");
+        assert!(model.requests.lock().unwrap()[3].input.tools.iter().any(|tool|tool.name=="read_file"),
+            "the one bounded progress continuation retains its existing tool surface");
     }
 
     /// A HostPause verdict likewise owns the outcome for a turn without
@@ -7202,8 +7211,8 @@ mod tests {
     }
 
     /// Once the turn did ledger-requiring work the ledger keeps its
-    /// completion gates even under a host verdict: the review runs and an
-    /// unresolved plan still fails.
+    /// completion gates even under a host verdict: an unresolved plan remains
+    /// executable and still fails when the model makes no further progress.
     #[tokio::test]
     async fn ledger_work_keeps_the_ledger_gates_under_a_host_verdict() {
         #[derive(Debug)]
@@ -7240,16 +7249,17 @@ mod tests {
             AgentContextBudget::default(),CancellationToken::new()).await;
         let error=result.expect_err("ledger work keeps the open-plan gate under a host verdict");
         assert!(error.to_string().contains("execution plan remains unresolved"),"{error}");
-        assert!(sink.0.lock().unwrap().iter().any(|event|
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
             matches!(event,AgentEngineEvent::CompletionReview{..})),
-            "ledger work still owes the one evidence review");
+            "an open plan cannot be recorded as having entered terminal review");
+        assert!(model.requests.lock().unwrap()[4].input.tools.iter().any(|tool|tool.name=="read_file"));
     }
 
     /// With an active ledger and an open plan the host settlement check runs
-    /// before the completion review, so actionable delivery feedback reaches
-    /// the model instead of review narrowing or the open-plan failure.
+    /// before the bounded progress continuation, so actionable delivery
+    /// feedback reaches the model while its frozen tools remain available.
     #[tokio::test]
-    async fn host_completion_check_precedes_ledger_completion_review() {
+    async fn host_completion_check_precedes_open_plan_progress_continuation() {
         #[derive(Debug)]
         struct Port(AtomicUsize);
         #[async_trait]
@@ -7293,9 +7303,11 @@ mod tests {
         let events=sink.0.lock().unwrap();
         let rejected=events.iter().position(|event|
             matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).unwrap();
-        let review=events.iter().position(|event|
-            matches!(event,AgentEngineEvent::CompletionReview{..})).unwrap();
-        assert!(rejected<review,"the host check precedes the ledger completion review");
+        let continuation_started=events.iter().position(|event|
+            matches!(event,AgentEngineEvent::ModelStepStarted{step:4,..})).unwrap();
+        assert!(rejected<continuation_started,"the host check precedes the next progress continuation");
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionReview{..})),
+            "unfinished actions keep their execution phase after host feedback");
         let requests=model.requests.lock().unwrap();
         let continuation=serde_json::to_string(&requests[3].input).unwrap();
         assert!(continuation.contains("Host completion check"),"the host feedback reaches the next request");
@@ -7424,7 +7436,7 @@ mod tests {
     fn restore_discovered_tools_replays_only_matching_deferred_names() {
         fn discovery_call(id:&str)->ChatToolCall {
             ChatToolCall { call_id:id.into(), name:crate::tool_discovery::TOOL_NAME.into(),
-                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"q":"plugin.development"})),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"q":"app.hosting"})),
                 provider_metadata:None }
         }
         fn other_call(id:&str)->ChatToolCall {
@@ -7897,6 +7909,75 @@ mod tests {
         assert_eq!(requests.len(),6);
         assert_eq!(model.steps.lock().unwrap().len(),1);
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn unnumbered_open_plan_progress_keeps_pending_tools_and_closed_plan_gets_review() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(workspace_result(invocation))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> { self.0.lock().unwrap().push(event); Ok(()) }
+        }
+        let quote = "把主题改为蓝色，并更新配置，然后检查结果";
+        let mut initial = request();
+        initial.input.messages[0] = crate::context_lifecycle::text_message(ChatRole::User, quote.into());
+        assert!(!crate::delivery_review::multi_item_task(&initial.input.messages), "this regression uses an ordinary unnumbered request");
+        let update_plan = |closed: bool| json!({"plan":[
+            {"step":"Change theme","status":"completed"},
+            {"step":"Update configuration","status":if closed {"completed"} else {"in_progress"}},
+            {"step":"Check the result","status":if closed {"completed"} else {"pending"}},
+        ],"requirements":[{"id":"request","description":quote,"source":{"input":0,"quote":quote}}]});
+        let mut initial_plan = update_plan(false);
+        initial_plan["plan"][0]["status"] = json!("in_progress");
+        initial_plan["plan"][1]["status"] = json!("pending");
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            control_step("activate-plan", "update_plan", initial_plan.clone()),
+            control_step("plan-accepted", "update_plan", initial_plan),
+            control_step("theme-write", "write_file", json!({"path":"a","content":"blue"})),
+            control_step("plan-pending", "update_plan", update_plan(false)),
+            text_step("主题已修改；接下来更新配置并检查结果。"),
+            control_step("configuration-write", "write_file", json!({"path":"b","content":"blue-theme"})),
+            control_step("configuration-read", "read_file", json!({"path":"b"})),
+            control_step("plan-finished", "update_plan", update_plan(true)),
+            text_step("请求的修改和检查已经结束。"),
+            control_step("completion", "report_completion", json!({"summary":"请求的修改和检查已经结束，未声称独立业务验证。",
+                "observed_tool_error_count":1,
+                "criteria":[{"disposition":"unverified","rationale":"修改和读取回执另行保留，没有把它们当作独立业务验证。"}]})),
+            text_step("must not repeat settled work"),
+        ]) });
+        let tools = Arc::new(Tools::default());
+        let sink = Arc::new(Sink::default());
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
+        ]).unwrap();
+        let outcome = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
+            AgentTurnRequest::new(initial, plan, principal(), 0), AgentContextBudget::default(), CancellationToken::new()).await;
+        let result = outcome.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*tools.0.lock().unwrap(), ["theme-write", "configuration-write", "configuration-read"]);
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[5].input.tools.iter().any(|tool| tool.name == "write_file"), "a public progress reply must retain the frozen execution surface for the pending configuration");
+        assert_eq!(requests[5].input.tool_choice, ChatToolChoice::Auto);
+        assert_eq!(requests[9].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), ["report_completion"],
+            "a closed plan's genuine final answer still receives the existing report-only review");
+        assert_eq!(requests.len(), 10);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+        let events = sink.0.lock().unwrap();
+        let reviews = events.iter().filter_map(|event| if let AgentEngineEvent::CompletionReview { status } = event { Some(status) } else { None }).collect::<Vec<_>>();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].successful_workspace_mutations, 2, "the first progress reply did not create a CompletionReview fact");
     }
 
     #[tokio::test]

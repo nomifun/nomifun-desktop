@@ -95,8 +95,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | 创作管理与生成 | `/api/creative-studio/*` 管理分组：画布、素材、提示词、模板/运行/草稿、任务、Agent session 与集合 | 仅实例 owner | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)、[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs) |
 | 创作媒体交付 | `GET /api/creative-studio/files/{asset_id}` | 公开的只读 capability URL；不提供列表或写操作 | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| Unified Plugin Core | `/api/plugins`、`/api/plugins/{plugin_id}/*` 与 `/api/plugin-drafts/*`：Library、Chat/Draft、目录/ZIP/Backup 共用导入、配置、生命周期、Package/Backup 导出和 Preview | 仅实例 owner；写操作还要求本地产品信任 | [`router/plugin.rs`](../../crates/backend/nomifun-app/src/router/plugin.rs) |
-| Plugin Surface 资源与 Bridge | descriptor-fenced 资源与 Bridge 路由，包含精确 session generation 与 Artifact digest | 实例 owner 且持有匹配的 live Surface descriptor | 同上 |
+| 应用 | `/api/apps*`：当前记录、元数据、创建、导入、普通开发 Session、命令、状态、覆盖和删除；`/api/app-hosting/mcp-sources*`：只读来源与发现刷新 | 已认证实例 owner；托管后端自动复用 LocalTrust | [`router/app_hosting.rs`](../../crates/backend/nomifun-app/src/router/app_hosting.rs)、[`router/app_mcp_sources.rs`](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | NomiFun Desktop 访问令牌 | `/api/webui/access-token` | 本地信任 / 安装 owner 流 | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
 | Agent session Browser Workspace | `/api/agent-sessions/{agent_session_id}/browser*` | 安装 owner + 本地产品信任；校验 agent session 所有权，并拒绝委派执行 step | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
@@ -112,11 +111,39 @@ NomiFun 启动时进入三种鉴权策略之一：
 | Shell 辅助 + STT | `/api/shell/*`、`/api/stt` | 已鉴权 | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | 公共资源（logo） | `/api/assets/logos/*` | 公共 | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
 | Canonical Remote MCP front door | `/mcp` | 安装令牌 | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
-| Canonical Remote REST API | `/api/remote/open`、`/api/remote/turn`、`/api/remote/observe`、`/api/remote/cancel` | 安装令牌 | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
+| Canonical Remote REST API | `/api/remote/open`、`/api/remote/turn`、`/api/remote/observe`、`/api/remote/cancel` | 外部安装令牌；托管后端可复用已验证 LocalTrust owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
 | 实时 WebSocket | `/ws` | 已鉴权（token 通过 `Sec-WebSocket-Protocol` 或查询串传递） | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 如需各路由具体支持的方法，请阅读对应的 `routes.rs` 文件——每个 router
 都在源文件内联声明自身的路由。
+
+### 当前应用与开发工作区
+
+应用 UI 与 Agent 工具调用同一个托管 owner。右侧手工导入和设置保存不要求模型；
+只有普通开发会话的创建需要可用模型。新记录不是草稿或版本，目录直接成为 canonical 工作区。
+
+| 方法 + 路径 | 用途 |
+| --- | --- |
+| `GET /api/apps` | 当前 `AppRecord` 列表，包含名称、说明、标签和运行状态，供搜索、分类与分页。 |
+| `POST /api/apps` | `{name?, description?, tags?}` 创建普通空 Source 应用及自有目录，缺省名称为“新应用”。 |
+| `POST /api/apps/import`、`/import-zip` | 从外部路径或 ZIP body 创建普通导入记录，保留原来源。 |
+| `GET /api/apps/{id}` | 读取当前应用及实际操作、输出。 |
+| `PUT /api/apps/{id}` | `{name, settings, description?, tags?, import_kind?}` 一次保存当前元数据与设置；省略新增字段保留原值，不允许作者开发会话或绑定引用。 |
+| `POST /api/apps/{id}/development-session` | `{model?, reasoning_effort?}` 验证并复用普通会话，或通过固定 `app.developer` 创建；返回 `{app, conversation}`，后者为同一 canonical Session 的普通投影。 |
+| `POST /api/apps/{id}/import`、`/import-zip` | 外部来源导入当前应用，保持 ID/目录/会话并重新识别命令；路径 body 为 `{source, name?, import_kind}`，ZIP 类型和名称用 query。 |
+| `POST /api/apps/{id}/overwrite`、`/overwrite-zip` | 覆盖当前文件、保留业务文件和当前设置；路径 body 为 `{source}`。 |
+| `POST /api/apps/{id}/operate` | `{operation: preview|use|start|stop|rebuild}` 使用唯一命令与进程 owner。 |
+| `POST /api/apps/environment` | 检测真实系统或指定的 Node、npm、Bun，不替换环境。 |
+| `DELETE /api/apps/{id}` | 停止并移除自有文件和记录，保留普通开发 Session 与合法历史。 |
+
+`model` 只选择 provider/model，路由与凭据由 Host 解析。已有会话的模型和推理变更仍走普通专用 API，
+重开应用不自动改写 frozen binding。开发引用仅导航，重开校验 owner、普通用途、固定模板和确切工作区。
+手工导入、覆盖与删除复用 Session 准入围栏，并在应用 gate 内复核引用；活动 Turn、未结算/未知效果
+或仍存活的 native producer 返回冲突。读取、元数据保存和停止应用仍可用。
+
+右侧 iframe 直接加载应用自己的 HTTP(S) 页面，不新增资产 Bridge 或预览代理 API；
+renderer 同源与远程不可达 loopback 由现役 UI 边界拒绝。托管后端使用运行时自动注入的 LocalTrust
+请求上述管理与既有 REST 接口；外部登录、CORS 和安装令牌流程保持原边界。
 
 ### Agent 工作台控制平面
 

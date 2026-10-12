@@ -1,0 +1,134 @@
+{
+  "host": "http://127.0.0.1:58842",
+  "appId": "01a12e17-51e0-7021-a463-502a75bd70f2",
+  "prompts": [
+    "帮我创建一个计数器应用",
+    "把应用名改为蓝色计数器",
+    "查看当前应用名和运行配置，不修改内容，也不要启停"
+  ],
+  "firstPreviewLoadedAutomatically": true,
+  "manualPreviewStartOrRefreshUsed": false,
+  "scopeIncludesSourceCodeRewrite": false,
+  "finalFields": [
+    {
+      "label": null,
+      "placeholder": "发送消息到 内置应用...  输入 / 唤起命令，@ 引用文件",
+      "value": ""
+    },
+    {
+      "label": "名称",
+      "placeholder": null,
+      "value": "蓝色计数器"
+    },
+    {
+      "label": "应用描述",
+      "placeholder": null,
+      "value": "我的计数备注（未保存）"
+    },
+    {
+      "label": "标签",
+      "placeholder": "用逗号分隔，例如：效率, 生活",
+      "value": ""
+    },
+    {
+      "label": "项目目录",
+      "placeholder": ".",
+      "value": "."
+    },
+    {
+      "label": "依赖安装命令",
+      "placeholder": "跳过此步骤",
+      "value": ""
+    },
+    {
+      "label": "预览启动命令",
+      "placeholder": "未单独配置，预览将使用生产启动命令",
+      "value": ""
+    },
+    {
+      "label": "打包命令",
+      "placeholder": "跳过此步骤",
+      "value": ""
+    },
+    {
+      "label": "生产启动命令",
+      "placeholder": "",
+      "value": "node \".nomifun-static-server.cjs\""
+    },
+    {
+      "label": "产物目录",
+      "placeholder": "",
+      "value": "."
+    },
+    {
+      "label": "网页地址（可选）",
+      "placeholder": "",
+      "value": "http://127.0.0.1:55424"
+    },
+    {
+      "label": "Node 可执行文件",
+      "placeholder": "自动使用系统 Node",
+      "value": ""
+    },
+    {
+      "label": "环境变量",
+      "placeholder": "PORT=4317\nDATA_DIR=./data",
+      "value": "PORT=55424"
+    },
+    {
+      "label": "MCP 地址（可选）",
+      "placeholder": "http://127.0.0.1:4317/mcp",
+      "value": ""
+    },
+    {
+      "label": null,
+      "placeholder": "未选择 Agent",
+      "value": ""
+    }
+  ],
+  "readonlyFrameBefore": [
+    {
+      "id": "BD35B494115956A6C2273BBAFC9CA41B",
+      "url": "http://127.0.0.1:55424/"
+    }
+  ],
+  "readonlyFrameAfter": [
+    {
+      "id": "BD35B494115956A6C2273BBAFC9CA41B",
+      "url": "http://127.0.0.1:55424/"
+    }
+  ],
+  "readonlyFramePreserved": true,
+  "countAfterTwoIncrements": "计数器\n2\n- 1\n归零\n+ 1\n点击按钮即可加减或重置",
+  "countAfterDecrement": "计数器\n1\n- 1\n归零\n+ 1\n点击按钮即可加减或重置",
+  "countAfterReset": "计数器\n0\n- 1\n归零\n+ 1\n点击按钮即可加减或重置",
+  "stopRemovedFrame": true,
+  "startRestoredInline": true,
+  "startWasNotModal": true,
+  "preStopFrame": [
+    {
+      "id": "BD35B494115956A6C2273BBAFC9CA41B",
+      "url": "http://127.0.0.1:55424/"
+    }
+  ],
+  "afterRestartFrame": [
+    {
+      "id": "5D0A06A86F4282DA44A8652B99B98A41",
+      "url": "http://127.0.0.1:55424/"
+    }
+  ],
+  "offlineAndOnlineNotes": [
+    "我的计数备注（未保存）",
+    "我的计数备注（未保存）"
+  ],
+  "offlineWorkspaceAndIframeStayedMounted": true,
+  "recoveryIframePreserved": true,
+  "offlineReadErrorWasVisible": true,
+  "recoveredReadErrorCleared": true,
+  "networkOverrideRestored": true,
+  "viewport": "1280x720 desktop",
+  "browserErrorsFromControlledOfflineTestExpected": true,
+  "modelFirstTurnReportedUnsuccessfulResults": 2,
+  "priorFailedFixturesRetained": true,
+  "guiProductChecksPass": true
+}

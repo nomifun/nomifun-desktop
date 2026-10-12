@@ -3659,7 +3659,7 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
 }
 
 #[tokio::test]
-async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
+async fn installation_token_is_limited_to_the_app_hosting_control_plane() {
     let trust_secret = "headless-product-local-trust";
     let installation_token = "headless-product-installation-token";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
@@ -3667,7 +3667,7 @@ async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
         .instance_token_validator
         .set_token(nomifun_auth::token_sha256_hex(installation_token));
 
-    for path in ["/api/plugins"] {
+    for path in ["/api/apps"] {
         let response = router
             .clone()
             .oneshot(
@@ -3690,7 +3690,7 @@ async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/import")
+                .uri("/api/apps/import")
                 .header(
                     "authorization",
                     format!("Bearer {installation_token}"),
@@ -3713,9 +3713,10 @@ async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
         .expect("sign owner JWT");
     // Read routes explicitly permit an authenticated installation owner JWT.
     for (path, token, expected) in [
-        ("/api/plugins", "wrong-installation-token", StatusCode::FORBIDDEN),
-        ("/api/plugins", owner_jwt.as_str(), StatusCode::OK),
+        ("/api/apps", "wrong-installation-token", StatusCode::FORBIDDEN),
+        ("/api/apps", owner_jwt.as_str(), StatusCode::OK),
         ("/api/capabilities", installation_token, StatusCode::FORBIDDEN),
+        ("/api/webui/access-token", installation_token, StatusCode::FORBIDDEN),
     ] {
         let response = router
             .clone()
@@ -3730,6 +3731,55 @@ async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
             .expect("dispatch rejected product request");
         assert_eq!(response.status(), expected, "route {path}");
     }
+
+    for local_proof in [None, Some("wrong-local-trust"), Some(trust_secret)] {
+        let mut request = Request::builder().uri("/api/apps");
+        if let Some(proof) = local_proof {
+            request = request.header("x-nomi-local-trust", proof);
+        }
+        let response = router.clone().oneshot(
+            request.body(Body::empty()).expect("build local-trust application request"),
+        ).await.expect("dispatch local-trust application request");
+        assert_eq!(
+            response.status(),
+            if local_proof == Some(trust_secret) { StatusCode::OK } else { StatusCode::FORBIDDEN },
+            "only the current Host's LocalTrust proof grants application access",
+        );
+    }
+
+    let source = tempfile::tempdir().expect("create application source fixture");
+    fs::write(source.path().join("index.html"), "<!doctype html><title>Ordinary application</title>")
+        .expect("write ordinary application fixture");
+    let imported = router.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/api/apps/import")
+            .header("authorization", format!("Bearer {installation_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({
+                "source": source.path(), "import_kind": "artifact", "name": "Ordinary application",
+            })).expect("serialize application import")))
+            .expect("build authenticated application import"),
+    ).await.expect("dispatch authenticated application import");
+    assert_eq!(imported.status(), StatusCode::OK, "the supported installation bearer must reach the real hosting owner");
+    let imported_body = axum::body::to_bytes(imported.into_body(), 4 * 1024 * 1024)
+        .await.expect("read imported application response");
+    let imported_value: Value = serde_json::from_slice(&imported_body).expect("imported application JSON");
+    let app_id = imported_value["data"]["id"].as_str().expect("real application identity");
+    let application = services.app_hosting.get(app_id).await.expect("get actual imported application");
+    assert_eq!(application.state, nomifun_app_hosting::AppState::Stopped);
+    assert!(source.path().join("index.html").is_file(), "import preserves the original source");
+
+    let deleted = router.clone().oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/apps/{app_id}"))
+            .header("x-nomi-local-trust", trust_secret)
+            .body(Body::empty())
+            .expect("build trusted application cleanup"),
+    ).await.expect("dispatch trusted application cleanup");
+    assert_eq!(deleted.status(), StatusCode::OK, "Host LocalTrust retains application control-plane grants");
+    assert!(source.path().join("index.html").is_file(), "cleanup preserves the original source");
 
     services
         .shutdown_browser_platform()

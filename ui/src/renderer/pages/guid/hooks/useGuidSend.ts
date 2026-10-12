@@ -6,7 +6,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { TProviderWithModel } from '@/common/config/storage';
+import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import {
   conversationTarget,
   parseConversationId,
@@ -76,6 +76,13 @@ export type GuidSendDeps = {
   t: TFunction;
   beginInitialMessage?: (message: PendingInitialMessage) => void;
   endInitialMessage?: (conversationId: ConversationId, idempotencyKey: string) => void;
+  /** Product ingress returns the same canonical ordinary conversation. */
+  createConversation?: (request: {
+    title: string;
+    model: { provider_id: string; model: string };
+    reasoning_effort?: SessionReasoningEffort;
+  }) => Promise<TChatConversation>;
+  onConversationCreated?: (conversation: TChatConversation) => void;
 };
 
 export type GuidSendResult = {
@@ -180,6 +187,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
     beginInitialMessage,
     endInitialMessage,
+    createConversation,
+    onConversationCreated,
   } = deps;
   const sendingRef = useRef(false);
 
@@ -201,7 +210,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     let initialMessage: PendingInitialMessage | undefined;
 
     let launchPreset = selectedPreset;
-    if (selection.kind === 'template') {
+    if (!createConversation && selection.kind === 'template') {
       if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
         throw new Error('AGENT_PRESET_REQUIRED');
       }
@@ -214,14 +223,22 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         throw new Error(officialAgentLaunchError(error, t));
       }
     }
-    if (
+    if (!createConversation && (
       !launchPreset?.current_stable_revision ||
       (selection.kind === 'preset' && launchPreset.preset_id !== selection.presetId)
-    ) {
+    )) {
       throw new Error('AGENT_PRESET_REQUIRED');
     }
+    if (createConversation) {
+      conversation = await createConversation({
+        title: entryPlan.conversationName,
+        model: { provider_id: current_model.id, model: current_model.use_model },
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      });
+      conversationId = parseConversationId(conversation.id);
+    } else {
     const session = await ipcBridge.agentPlatform.sessions.create.invoke({
-      preset_id: launchPreset.preset_id,
+      preset_id: launchPreset!.preset_id,
       title: entryPlan.conversationName,
       model: {
         provider_id: current_model.id,
@@ -234,8 +251,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
+    }
     try {
-      conversation = await ipcBridge.conversation.get.invoke({
+      conversation ??= await ipcBridge.conversation.get.invoke({
         conversation_id: conversationId,
       });
       if (!conversation?.id) {
@@ -286,16 +304,17 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       }
 
     } catch (error) {
-      await discardFailedGuidSession(conversationId);
+      if (!createConversation) await discardFailedGuidSession(conversationId);
       throw error;
     }
     emitter.emit('chat.history.refresh');
-    // Keep the welcome composer visible until both destination code and data
-    // are ready. The actual transcript owns preparation and the first Turn.
-    await Promise.all([seedConversationCache(conversation), loadConversationRoute()]);
+    // Keep the welcome composer visible until destination data is ready; the
+    // mounted transcript owns preparation and the first canonical Turn.
+    await Promise.all([seedConversationCache(conversation), ...(onConversationCreated ? [] : [loadConversationRoute()])]);
     if (initialMessage) beginInitialMessage?.(initialMessage);
     try {
-      await navigate(`/conversation/${conversationId}`);
+      if (onConversationCreated) onConversationCreated(conversation);
+      else await navigate(`/conversation/${conversationId}`);
     } catch (error) {
       if (initialMessage) endInitialMessage?.(conversationId, initialMessage.idempotency_key);
       throw error;
@@ -320,6 +339,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     knowledgePolicy,
     sessionCapabilities,
     workspaceEnabled,
+    createConversation,
+    onConversationCreated,
     t,
   ]);
 

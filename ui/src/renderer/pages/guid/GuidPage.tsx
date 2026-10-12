@@ -59,7 +59,7 @@ import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
-import { shouldStartGuidCollaboration, useGuidSend } from './hooks/useGuidSend';
+import { shouldStartGuidCollaboration, useGuidSend, type GuidSendDeps } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
@@ -89,7 +89,18 @@ type GuidNavigationState = {
   workspace?: string;
 };
 
-const GuidPage: React.FC = () => {
+export type GuidProductEntry = {
+  templateKey: OfficialPresetKey;
+  agentLabel: string;
+  workspace?: string;
+  placeholder: string;
+  createConversation: NonNullable<GuidSendDeps['createConversation']>;
+  onConversationCreated: NonNullable<GuidSendDeps['onConversationCreated']>;
+  onSubmittingChange?: (submitting: boolean) => void;
+  submissionDisabled?: boolean;
+};
+
+const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry }) => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -113,7 +124,9 @@ const GuidPage: React.FC = () => {
     void loadConversationRoute().catch(() => {});
   }, []);
 
-  const navigationState = location.state as GuidNavigationState | null;
+  // Product surfaces own their fixed Agent and workspace. Ordinary Guid route
+  // intents are one-shot navigation state, not the product's persistent setup.
+  const navigationState = productEntry ? null : location.state as GuidNavigationState | null;
   const resetAgentRequested =
     navigationState?.resetAgentSelection === true;
   const resetSessionOptionsRequested =
@@ -126,11 +139,12 @@ const GuidPage: React.FC = () => {
     selectedAgentPresetId: preselectedPresetId,
     selectedAgentTemplateKey: preselectedTemplateKey,
     locationKey: location.key,
+    fixedTemplateKey: productEntry?.templateKey,
   });
   const modelSelection = useGuidModelSelection('nomi');
   const collaboration = useGuidCollaboration(modelSelection.current_model);
   const guidInput = useGuidInput({
-    locationState: navigationState,
+    locationState: productEntry ? { workspace: productEntry.workspace } : navigationState,
   });
   const advancedConfig = useGuidSessionOptions();
   const clearSentInput = useCallback(() => {
@@ -169,7 +183,11 @@ const GuidPage: React.FC = () => {
     : presetCapabilities.actionIds;
   const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput, {
     config: collaboration.config, model: modelSelection.current_model, ready: collaboration.ready,
-  }, { requiredResourceKinds: presetResourceKinds, actionIds: presetActionIds, ready: presetResourceResolutionReady });
+  }, { requiredResourceKinds: presetResourceKinds, actionIds: presetActionIds, ready: presetResourceResolutionReady }, !productEntry);
+  useEffect(() => {
+    productEntry?.onSubmittingChange?.(guidInput.loading);
+    return () => productEntry?.onSubmittingChange?.(false);
+  }, [productEntry?.onSubmittingChange, guidInput.loading]);
   useEffect(() => {
     if (creation.draft.pendingPrompt === undefined) return;
     guidInput.setInput(creation.draft.pendingPrompt);
@@ -226,7 +244,7 @@ const GuidPage: React.FC = () => {
     0
   );
   const canConfigureCurrentModel = Boolean(modelSelection.current_model);
-  const collaborationEnabled = presetResourceResolutionReady
+  const collaborationEnabled = !productEntry && presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
   const knowledgeEnabled = presetResourceResolutionReady
     && presetResourceKinds.has('knowledge_base');
@@ -262,8 +280,8 @@ const GuidPage: React.FC = () => {
         writeback_eagerness: advancedConfig.knowledge.writeback_eagerness,
       }
     : undefined;
-  const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
-  const idmmControlEnabled = presetResourceResolutionReady;
+  const advancedControlsEnabled = !productEntry && presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const idmmControlEnabled = !productEntry && presetResourceResolutionReady;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const collaborationLaunchConfigured = collaborationEnabled
@@ -292,10 +310,12 @@ const GuidPage: React.FC = () => {
     : `preset:${agentSelection.selection.presetId}`;
   const appliedIdmmDefaultRef = useRef<string | undefined>(undefined);
   useEffect(() => {
+    if (productEntry) return;
     setResourceSelectionValue({});
     advancedConfig.setKnowledge(defaultKnowledgeBinding());
-  }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
+  }, [productEntry, advancedConfig.setKnowledge, selectedAgentResourceKey]);
   useEffect(() => {
+    if (productEntry) return;
     if (!presetResourceResolutionReady) return;
     const sourceKey = `${location.key}:${selectedAgentResourceKey}:${selectedCapabilityRevisionDigest ?? 'draft'}`;
     if (appliedIdmmDefaultRef.current === sourceKey) return;
@@ -304,6 +324,7 @@ const GuidPage: React.FC = () => {
     );
     appliedIdmmDefaultRef.current = sourceKey;
   }, [
+    productEntry,
     advancedConfig.setIdmmDefault,
     officialSeedFallback,
     location.key,
@@ -314,8 +335,8 @@ const GuidPage: React.FC = () => {
   ]);
 
   const mention = useGuidMention({
-    presets: agentSelection.presets,
-    officialTemplates: agentSelection.officialTemplates,
+    presets: productEntry ? [] : agentSelection.presets,
+    officialTemplates: productEntry ? [] : agentSelection.officialTemplates,
     selection: agentSelection.selection,
     setSelection: agentSelection.setSelection,
     selectedPreset: agentSelection.selectedPreset,
@@ -330,23 +351,23 @@ const GuidPage: React.FC = () => {
     dir: guidInput.dir,
     setDir: guidInput.setDir,
     setLoading: guidInput.setLoading,
-    loading: guidInput.loading,
+    loading: guidInput.loading || Boolean(productEntry?.submissionDisabled),
     selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
     selectedTemplate: agentSelection.selectedTemplate,
     current_model: modelSelection.current_model,
     reasoningEffort,
-    applyAdvancedConfig: (conversationId) =>
+    applyAdvancedConfig: productEntry ? undefined : (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowAutomation: advancedControlsEnabled || idmmControlEnabled,
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
-    resourceResolutionReady: selectedAgentModelCompatible
+    resourceResolutionReady: productEntry ? selectedAgentModelCompatible && hasAgentLaunchTarget : selectedAgentModelCompatible
       && resourceSelectionsReady
       && initializedCapabilities.current && !capabilityCatalog.loading && !capabilityCatalog.error
       && (!collaborationEnabled || collaboration.ready),
-    collaboration: collaborationEnabled ? collaboration.config : undefined,
+    collaboration: !productEntry && collaborationEnabled ? collaboration.config : undefined,
     resourceSelections: sessionResourceSelections,
     sessionCapabilities: toSessionCapabilitySelection(capabilityDraft),
     knowledgePolicy,
@@ -358,11 +379,14 @@ const GuidPage: React.FC = () => {
     t,
     beginInitialMessage: initialMessage.begin,
     endInitialMessage: initialMessage.end,
+    createConversation: productEntry?.createConversation,
+    onConversationCreated: productEntry?.onConversationCreated,
   });
 
   const handleInputChange = useCallback(
     (value: string) => {
       guidInput.setInput(value);
+      if (productEntry) return;
       const match = value.match(mention.mentionMatchRegex);
       if (match) {
         mention.setMentionQuery(match[1]);
@@ -374,6 +398,7 @@ const GuidPage: React.FC = () => {
     },
     [
       guidInput.setInput,
+      productEntry,
       mention.mentionMatchRegex,
       mention.setMentionOpen,
       mention.setMentionQuery,
@@ -672,17 +697,17 @@ const GuidPage: React.FC = () => {
   };
 
   return (
-    <CreationComposerContext.Provider value={creation}>
+    <CreationComposerContext.Provider value={productEntry ? null : creation}>
     <ConfigProvider
       getPopupContainer={() => guidContainerRef.current || document.body}
     >
-      <div ref={guidContainerRef} className={styles.guidContainer}>
+      <div ref={guidContainerRef} className={`${styles.guidContainer} ${productEntry ? styles.guidEmbedded : ''}`}>
         <div className={styles.guidAdvancedControls}>
-          {!creation.draft.mode && advancedControlsNode}
+          {!productEntry && !creation.draft.mode && advancedControlsNode}
         </div>
         <div className={styles.guidPrimaryStage}>
           <div className={styles.guidLayout}>
-            <GuidCompanionShowcase />
+            {!productEntry && <GuidCompanionShowcase />}
 
             {presetCapabilities.error && (
               <Alert
@@ -724,9 +749,9 @@ const GuidPage: React.FC = () => {
             )}
 
             <div className={styles.guidComposerGroup}>
-              {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
+              {!productEntry && workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
               <Composer
-                sideTools={
+                sideTools={!productEntry &&
                   <SessionCapabilityPicker
                     catalog={capabilityCatalog.catalog}
                     draft={capabilityDraft}
@@ -757,8 +782,8 @@ const GuidPage: React.FC = () => {
                 isFileDragging={guidInput.isFileDragging}
                 dragHandlers={guidInput.dragHandlers}
                 overlayOpen={mention.mentionOpen}
-                header={<ComposerSceneHeader agent={
-                  <GuidAgentSelector
+                header={<ComposerSceneHeader sceneSelectionEnabled={!productEntry} agent={
+                  productEntry ? <span data-testid='fixed-app-agent'>{productEntry.agentLabel}</span> : <GuidAgentSelector
                     presets={agentSelection.presets}
                     draftPresets={agentSelection.draftPresets}
                     officialTemplates={agentSelection.officialTemplates}
@@ -774,7 +799,7 @@ const GuidPage: React.FC = () => {
                     }
                   />
                 } />}
-                beforeInput={<MentionSelectorBadge
+                beforeInput={!productEntry && <MentionSelectorBadge
                   visible={mention.mentionSelectorVisible}
                   open={mention.mentionSelectorOpen}
                   onOpenChange={mention.setMentionSelectorOpen}
@@ -782,21 +807,21 @@ const GuidPage: React.FC = () => {
                   mentionMenu={mentionDropdownNode}
                   onResetQuery={() => mention.setMentionQuery(null)}
                 />}
-                overlays={mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
+                overlays={!productEntry && mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
                 inputProps={{
                   value: guidInput.input,
                   onChange: handleInputChange,
                   onKeyDown: handleInputKeyDown,
                   onPaste: guidInput.onPaste,
                   onFocus: guidInput.handleTextareaFocus,
-                  placeholder: creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder,
+                  placeholder: productEntry?.placeholder ?? (creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder),
                   'data-testid': 'guid-input',
                 }}
                 attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
                 tools={<div className='inline-flex items-center gap-6px'>
                   <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} />
                 </div>}
-                creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+                creationTools={!productEntry && <CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
                 rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
                 actions={<>
                   <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
@@ -813,7 +838,7 @@ const GuidPage: React.FC = () => {
               />
             </div>
 
-            {!creation.draft.mode && <AgentResourcePicker
+            {!productEntry && !creation.draft.mode && <AgentResourcePicker
               requiredKinds={resourcePickerKinds}
               optionalKinds={optionalResourcePickerKinds}
               capabilityIds={presetCapabilityIds}
@@ -824,7 +849,7 @@ const GuidPage: React.FC = () => {
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />}
 
-            <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />
+            {!productEntry && <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />}
           </div>
         </div>
 

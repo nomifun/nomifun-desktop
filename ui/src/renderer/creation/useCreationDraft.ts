@@ -73,16 +73,17 @@ function read(scope: string, key: string): CreationDraft {
   return emptyCreationDraft();
 }
 
-export function useCreationDraft(scope: string) {
-  const key = creationDraftStorageKey(scope);
-  const [entry, setEntry] = useState(() => ({ key, value: read(scope, key) }));
+export function useCreationDraft(scope: string, enabled = true) {
+  const key = enabled ? creationDraftStorageKey(scope) : null;
+  const [entry, setEntry] = useState(() => ({ key, value: key ? read(scope, key) : emptyCreationDraft() }));
   const current = useRef(entry);
-  const draft = entry.key === key ? entry.value : read(scope, key);
+  const draft = entry.key === key ? entry.value : key ? read(scope, key) : emptyCreationDraft();
   if (entry.key !== key) {
     current.current = { key, value: draft };
     setEntry(current.current);
   }
   const update = useCallback((change: (value: CreationDraft) => CreationDraft) => {
+    if (!enabled || !key) return;
     // A delayed callback from a retired dataset cannot seed its successor.
     if (creationDraftStorageKey(scope) !== key) return;
     const value = persist(scope, key, change(current.current.key === key ? current.current.value : read(scope, key)));
@@ -92,7 +93,7 @@ export function useCreationDraft(scope: string) {
       current.current = { key, value };
       setEntry(current.current);
     }
-  }, [key, scope]);
+  }, [enabled, key, scope]);
   const setMode = useCallback((mode: CreationMode | null) => update(value => ({ ...value, mode, lastMode: mode || value.lastMode })), [update]);
   return { draft, update, setMode };
 }

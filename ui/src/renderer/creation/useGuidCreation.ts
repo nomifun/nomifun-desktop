@@ -25,15 +25,15 @@ type GuidCreationCapabilityRequirements = {
   ready: boolean;
 };
 
-export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }, capabilityRequirements?: GuidCreationCapabilityRequirements) {
+export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }, capabilityRequirements?: GuidCreationCapabilityRequirements, enabled = true) {
   const { t } = useTranslation();
   // Generation admission is fully frozen by the Creative Studio Agent and its
   // asset-library resource. Workspace/collaboration drafts belong to chat
   // Sessions and must never mutate this immutable Session after creation.
   void workspace;
   void sessionCollaboration;
-  const creation = useCreationDraft('guid');
-  const model = useGenerationModel(creation, files);
+  const creation = useCreationDraft('guid', enabled);
+  const model = useGenerationModel(enabled ? creation : null, files);
   const location = useLocation();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
@@ -61,21 +61,25 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
         : resourceAdmission.missingKinds.length > 0 ? t('creation.resourcesUnavailable') : undefined
     : undefined;
   const selectMode = useCallback((mode: CreationMode) => {
+    if (!enabled) return;
     agent.setSelection({ kind: 'template', templateKey: 'creative-studio.default' });
     creation.setMode(mode);
-  }, [agent.setSelection, creation.setMode]);
+  }, [enabled, agent.setSelection, creation.setMode]);
   const exit = useCallback(() => {
+    if (!enabled) return;
     creation.setMode(null);
     agent.setSelection({ kind: 'template', templateKey: 'assistant.general' });
-  }, [agent.setSelection, creation.setMode]);
+  }, [enabled, agent.setSelection, creation.setMode]);
   const selectionKey = JSON.stringify(agent.selection);
   useEffect(() => {
+    if (!enabled) return;
     if (isCreative && !creation.draft.mode) creation.setMode(creation.draft.lastMode);
     else if (!isCreative) {
       creation.setMode(null);
     }
-  }, [selectionKey]);
+  }, [enabled, selectionKey]);
   useEffect(() => {
+    if (!enabled) return;
     const params = new URLSearchParams(location.search);
     const mode = params.get('creation');
     if (mode === 'image' || mode === 'video' || mode === 'music') {
@@ -84,8 +88,9 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       params.delete('creation');
       void navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash }, { replace: true, state: location.state });
     }
-  }, [location.key, location.search]);
+  }, [enabled, location.key, location.search]);
   const send = useCallback(async () => {
+    if (!enabled) return;
     if (sending.current) return;
     if (!isCreative || !capabilitiesReady) return;
     if (!creation.draft.mode) return;
@@ -124,8 +129,12 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await navigate(`/conversation/${id}`);
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { sending.current = false; setLoading(false); }
-  }, [template, isCreative, capabilitiesReady, disabledReason, resourceAdmission.selections, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
-  return { ...creation, selectMode, exit, send, loading, disabledReason,
-    ready: isCreative && model.ready && capabilitiesReady && actionAllowed && resourceAdmission.missingKinds.length === 0,
+  }, [enabled, template, isCreative, capabilitiesReady, disabledReason, resourceAdmission.selections, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
+  return { ...creation,
+    draft: enabled ? creation.draft : { ...creation.draft, mode: null, pendingPrompt: undefined, pendingFiles: undefined },
+    update: enabled ? creation.update : (() => {}),
+    setMode: enabled ? creation.setMode : (() => {}),
+    selectMode, exit, send, loading: enabled && loading, disabledReason: enabled ? disabledReason : undefined,
+    ready: enabled && isCreative && model.ready && capabilitiesReady && actionAllowed && resourceAdmission.missingKinds.length === 0,
   };
 }

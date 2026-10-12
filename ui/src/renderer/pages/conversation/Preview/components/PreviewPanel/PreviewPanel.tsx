@@ -267,10 +267,11 @@ const PreviewPanel: React.FC = () => {
     setContextMenu({ show: false, x: 0, y: 0, tabId: null });
   }, [tabs, closeTab]);
 
-  // 如果预览面板未打开，不渲染 / Don't render if preview panel is not open
-  if (!isOpen || !activeTab) return null;
-
-  const { content, content_type, metadata } = activeTab;
+  // File actions stay registered while the mounted panel opens or loses its
+  // last tab. A hidden panel has no actionable content.
+  const content = activeTab?.content ?? '';
+  const content_type = activeTab?.content_type ?? '';
+  const metadata = activeTab?.metadata;
   const isMarkdown = content_type === 'markdown';
   const isHTML = content_type === 'html';
   const isEditable = metadata?.editable !== false; // 默认可编辑 / Default editable
@@ -382,6 +383,9 @@ const PreviewPanel: React.FC = () => {
       }
     }
   }, [metadata?.file_path, messageApi, t]);
+
+  // Every hook above runs in every render, including closed/empty transitions.
+  if (!isOpen || !activeTab) return null;
 
   // 渲染历史下拉菜单 / Render history dropdown
   const renderHistoryDropdown = () => {

@@ -352,6 +352,8 @@ pub enum AgentSessionDeletedState {
 pub enum SessionPurpose {
     #[default]
     Conversation,
+    /// Typed recognition of existing history only. Current product owners
+    /// reject new creation, execution, forks and checkpoint recovery.
     PluginAuthoring,
 }
 

@@ -142,6 +142,10 @@ const NomiSendBox: React.FC<{
   creationEnabled?: boolean;
   /** Hide work-session configuration chrome on a dedicated product surface. */
   compactProductComposer?: boolean;
+  hideSessionCapabilities?: boolean;
+  submissionDisabled?: boolean;
+  /** Product-owned preparation only before a fresh idle user admission. */
+  onBeforeSubmit?: () => Promise<void>;
 }> = ({
   conversation_id,
   modelSelection,
@@ -156,12 +160,25 @@ const NomiSendBox: React.FC<{
   extraRightTools,
   creationEnabled = true,
   compactProductComposer = false,
+  hideSessionCapabilities = false,
+  submissionDisabled = false,
+  onBeforeSubmit,
 }) => {
+  const submissionDisabledRef = useLatestRef(submissionDisabled);
+  const preparingSubmissionRef = useRef(false);
+  const [preparingSubmission, setPreparingSubmission] = useState(false);
   const [workspacePath, setWorkspacePath] = useState('');
   const capabilityCatalog = useSessionCapabilityCatalog();
   const sessionCapabilities = useSessionCapabilitySelection(conversation_id);
   const taskPlan = useConversationTaskPlan(conversation_id, turnActivity.running);
   const { t } = useTranslation();
+  const prepareIdleSubmission = useCallback(async () => {
+    if (!onBeforeSubmit) return;
+    if (preparingSubmissionRef.current) throw new Error(t('common.processing'));
+    preparingSubmissionRef.current = true; setPreparingSubmission(true);
+    try { await onBeforeSubmit(); }
+    finally { preparingSubmissionRef.current = false; setPreparingSubmission(false); }
+  }, [onBeforeSubmit, t]);
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
   const [defaultVisionModel] = useConfig('models.default.vision');
@@ -266,6 +283,12 @@ const NomiSendBox: React.FC<{
   );
 
   const [initialDeliveryReady, setInitialDeliveryReady] = useState(false);
+  const [initialDeliveryRetry, setInitialDeliveryRetry] = useState(0);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {
       if (!res?.extra?.workspace) return;
@@ -374,8 +397,12 @@ const NomiSendBox: React.FC<{
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
-      deferLocalTurnUntilFresh = execution !== undefined
+      deferLocalTurnUntilFresh = execution !== undefined,
+      submission?: { isCurrent: () => boolean; onAdmissionStarted: () => void }
     ) => {
+      const canSubmit = () => mountedRef.current && requestConversationIdRef.current === conversation_id
+        && !submissionDisabledRef.current && (!submission || submission.isCurrent());
+      if (!canSubmit()) throw new Error(t('common.processing'));
       if (!current_model?.use_model) {
         reportRequestFailure(new Error('No model selected'), 'PROVIDER_UNAVAILABLE');
         throw new Error('No model selected');
@@ -389,8 +416,16 @@ const NomiSendBox: React.FC<{
       const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
       setRequestFailure(null);
       let msg_id: MessageId | null = null;
+      let admissionStarted = false;
       try {
+        // Restored/queued keys and initial-message handoffs retain their
+        // existing reconciliation. Steers do not pass through this path.
+        if (!execution && !initialOnly) await prepareIdleSubmission();
+        if (!canSubmit()) throw new Error(t('common.processing'));
         const selection = await sessionCapabilities.applyBeforeSend();
+        // Manual file work can begin while capability admission is awaiting a
+        // receipt. Read the live UI pause before sending an ordinary Turn.
+        if (!canSubmit()) throw new Error(t('common.processing'));
         if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
         if (!deferLocalTurnUntilFresh) {
           void checkAndUpdateTitle(conversation_id, input);
@@ -399,6 +434,8 @@ const NomiSendBox: React.FC<{
         // user bubble so the local row uses the same id as the DB row and
         // subsequent WebSocket stream events — avoids duplicate bubbles when
         // useMessageLstCache reloads.
+        admissionStarted = true;
+        submission?.onAdmissionStarted();
         const res = await ipcBridge.conversation.sendMessage.invoke({
           input: displayMessage,
           conversation_id,
@@ -441,6 +478,9 @@ const NomiSendBox: React.FC<{
         }
         return disposition;
       } catch (error) {
+        // A local pause before the POST leaves the composer/handoff untouched.
+        // Accepted or unknown backend admissions keep the existing reconciliation.
+        if (!admissionStarted && !canSubmit()) throw error;
         if (execution && !execution.isCurrent()) return;
         if (msg_id) removeMessageByMsgId(msg_id);
         setActiveMsgId(null);
@@ -465,6 +505,9 @@ const NomiSendBox: React.FC<{
       t,
       workspacePath,
       sessionCapabilities.applyBeforeSend,
+      submissionDisabledRef,
+      requestConversationIdRef,
+      prepareIdleSubmission,
     ]
   );
 
@@ -485,7 +528,7 @@ const NomiSendBox: React.FC<{
   } = useConversationCommandQueue({
     conversation_id: conversation_id,
     enabled: true,
-    isBusy: isBusy || pauseNotice !== null,
+    isBusy: isBusy || preparingSubmission || pauseNotice !== null || submissionDisabled,
     isHydrated: hasHydratedRunningState,
     onExecute: executeCommand,
   });
@@ -493,7 +536,7 @@ const NomiSendBox: React.FC<{
   // Handle the Guid handoff only after passive warmup has settled.
   // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model || !initialDeliveryReady || sessionCapabilities.loading || !sessionCapabilities.state) return;
+    if (submissionDisabled || !conversation_id || !current_model?.use_model || !initialDeliveryReady || sessionCapabilities.loading || !sessionCapabilities.state) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -517,11 +560,13 @@ const NomiSendBox: React.FC<{
 
     const storageKey = sessionStorageKey('initial-message-nomi', target);
     const processedKey = sessionStorageKey('initial-message-processed-nomi', target);
+    let cancelled = false;
 
     const processInitialMessage = async () => {
       if (!sessionStorage.getItem(storageKey) || !claimInitialMessageDelivery(storageKey)) return;
 
       let attemptedIdempotencyKey: string | null = null;
+      let admissionStarted = false;
       let waitsForAcceptedMessage = false;
       try {
         attemptedIdempotencyKey = readInitialMessageDelivery(sessionStorage, storageKey)?.idempotency_key ?? null;
@@ -531,6 +576,12 @@ const NomiSendBox: React.FC<{
           storageKey,
           conversation_id
         );
+        // Keep this same-key handoff for resumption if manual file work began
+        // during the authority read; an old effect must not start a Turn.
+        if (cancelled || submissionDisabledRef.current) {
+          releaseInitialMessageDelivery(storageKey);
+          return;
+        }
         if (!initialMessage) {
           releaseInitialMessageDelivery(storageKey);
           return;
@@ -540,7 +591,8 @@ const NomiSendBox: React.FC<{
         const disposition = await executeCommand(
           { id: idempotency_key, input, files, initialOnly: true },
           undefined,
-          true
+          true,
+          { isCurrent: () => !cancelled, onAdmissionStarted: () => { admissionStarted = true; } }
         );
         waitsForAcceptedMessage = disposition === 'fresh';
         completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key);
@@ -551,17 +603,25 @@ const NomiSendBox: React.FC<{
           attemptedIdempotencyKey,
           error
         );
-        console.error('[NomiSendBox] Failed to send initial message:', error);
+        if (!cancelled && !submissionDisabledRef.current) console.error('[NomiSendBox] Failed to send initial message:', error);
         sessionStorage.removeItem(processedKey);
       } finally {
-        if (attemptedIdempotencyKey && !waitsForAcceptedMessage) endInitialMessage(conversation_id, attemptedIdempotencyKey);
+        releaseInitialMessageDelivery(storageKey);
+        // A canceled authority read keeps the persisted same-key handoff.
+        if (cancelled && !admissionStarted && mountedRef.current && requestConversationIdRef.current === conversation_id
+          && !submissionDisabledRef.current && sessionStorage.getItem(storageKey)) {
+          setInitialDeliveryRetry(attempt => attempt + 1);
+        }
+        if (!cancelled && attemptedIdempotencyKey && !waitsForAcceptedMessage) endInitialMessage(conversation_id, attemptedIdempotencyKey);
       }
     };
 
     void processInitialMessage();
-  }, [conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, sessionCapabilities.loading, sessionCapabilities.state, setContent, endInitialMessage]);
+    return () => { cancelled = true; };
+  }, [submissionDisabled, submissionDisabledRef, conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, initialDeliveryRetry, sessionCapabilities.loading, sessionCapabilities.state, setContent, requestConversationIdRef, endInitialMessage]);
 
   const onSendHandler = async (message: string) => {
+    if (submissionDisabledRef.current || preparingSubmissionRef.current) throw new Error(t('common.processing'));
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
     if (creation?.draft.mode) {
       if (creationSubmittingRef.current) throw new Error('任务正在提交');
@@ -572,6 +632,7 @@ const NomiSendBox: React.FC<{
       const submittedReferences = creation.draft.references;
       try {
         const presetId = await creation.resolvePreset?.() ?? creation.presetId;
+        if (submissionDisabledRef.current) throw new Error(t('common.processing'));
         if (!presetId) throw new Error('请选择可用的创意 Agent');
         const request = buildCreationRequest(creation.draft, message, presetId, filesToSend, generation.selected);
         const key = creationAttempt(conversation_id, request);
@@ -620,6 +681,7 @@ const NomiSendBox: React.FC<{
   // accepted Session event chain.
   const handleEditResubmit = useCallback(
     async (_msgId: MessageId, _createdAt: number, message: string) => {
+      if (submissionDisabledRef.current) throw new Error(t('common.processing'));
       const filesToSend = collectSelectedFiles(uploadFile, atPath);
       if (!canSendFiles(filesToSend)) return;
       setWaitingResponse(true);
@@ -627,6 +689,8 @@ const NomiSendBox: React.FC<{
       const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
       setRequestFailure(null);
       try {
+        await prepareIdleSubmission();
+        if (!mountedRef.current || requestConversationIdRef.current !== conversation_id || submissionDisabledRef.current) throw new Error(t('common.processing'));
         const res = await ipcBridge.conversation.sendMessage.invoke({
           conversation_id,
           input: displayMessage,
@@ -665,6 +729,9 @@ const NomiSendBox: React.FC<{
     },
     [
       atPath,
+      submissionDisabledRef,
+      requestConversationIdRef,
+      prepareIdleSubmission,
       conversation_id,
       uploadFile,
       workspacePath,
@@ -893,7 +960,7 @@ const NomiSendBox: React.FC<{
       />
       <SendBox
         key={conversation_id}
-        sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker
+        sideTools={compactProductComposer || hideSessionCapabilities ? undefined : <SessionCapabilityPicker
           catalog={capabilityCatalog.catalog}
           draft={sessionCapabilities.draft}
           onChange={sessionCapabilities.setDraft}
@@ -915,7 +982,7 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
-        disabled={initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
+        disabled={submissionDisabled || preparingSubmission || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
         submitDisabled={!isCreating && sessionCapabilities.loading}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}

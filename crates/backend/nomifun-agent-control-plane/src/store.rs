@@ -111,6 +111,11 @@ pub trait ControlPlaneStore: Send + Sync {
         owner: &UserId,
         binding_id: &RemoteBindingId,
     ) -> Result<(), ControlPlaneError>;
+    async fn delete_remote_binding_if_current(&self, expected: &RemoteBinding) -> Result<(), ControlPlaneError> {
+        let _ = expected;
+        Err(ControlPlaneError::canonical("REMOTE_BINDING_COMPARE_DELETE_UNAVAILABLE", axum::http::StatusCode::CONFLICT,
+            "RemoteBinding owner does not support exact configuration deletion"))
+    }
 }
 
 #[derive(Default)]
@@ -541,6 +546,16 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
             .filter(|binding| &binding.owner_user_id == owner)
             .ok_or_else(remote_binding_not_found)?;
         state.remote_bindings.remove(binding_id);
+        Ok(())
+    }
+
+    async fn delete_remote_binding_if_current(&self, expected: &RemoteBinding) -> Result<(), ControlPlaneError> {
+        let mut state = self.state.write().await;
+        if state.remote_bindings.get(&expected.remote_binding_id) != Some(expected) {
+            return Err(ControlPlaneError::canonical("REMOTE_BINDING_VERSION_CONFLICT", axum::http::StatusCode::CONFLICT,
+                "RemoteBinding changed before its exact deletion"));
+        }
+        state.remote_bindings.remove(&expected.remote_binding_id);
         Ok(())
     }
 }

@@ -83,6 +83,7 @@ pub async fn run_nomi_core_server(
         actual_port,
     );
     application.publish_robot_endpoint(actual_port, robot_advertise);
+    application.publish_app_hosting_endpoint(actual_port, &env.config.host).await;
     info!(
         elapsed_ms = boot.elapsed().as_millis(),
         host = %env.config.host,
@@ -90,8 +91,14 @@ pub async fn run_nomi_core_server(
         "Nomi-core server listening"
     );
 
+    let shutdown_application = application.clone();
     let serve_result = axum::serve(listener, application.router())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            if let Err(error) = shutdown_application.stop_hosted_applications_for_shutdown().await {
+                tracing::error!(%error, "Hosted application cleanup before HTTP drain failed; final shutdown will retry");
+            }
+        })
         .await;
     let cleanup_result = application.close().await;
     drop(env);

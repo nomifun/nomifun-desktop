@@ -1,10 +1,7 @@
 //! Provider limits are platform facts, not an engine's context strategy.
 //! No credentials, mutable route selection or tokenizer claims are exposed.
 use nomifun_chat_model_broker::ChatRouteSelection;
-use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
 
-use super::engine_session_host::AdmittedEngineSession;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineModelLimits {
@@ -61,75 +58,6 @@ impl EngineRouteModelFacts {
     pub fn configured_output_ceiling(&self)->Option<u32> {
         self.primary_limits().and_then(|limits| limits.output_tokens)
     }
-}
-
-fn failure(message: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Engine model facts: {message}"))
-}
-
-pub(super) async fn load(
-    pool: &SqlitePool,
-    session: &AdmittedEngineSession,
-) -> Result<EngineRouteModelFacts, AppError> {
-    let route = session
-        .snapshot()
-        .content
-        .chat_route_identity
-        .as_ref()
-        .ok_or_else(|| failure("Session has no exact Chat route"))?;
-    let record = session
-        .revision()
-        .payload
-        .chat_route_records
-        .get(&route.model_task)
-        .ok_or_else(|| failure("exact route has no persisted model facts"))?;
-    record.validate_for(route).map_err(failure)?;
-    if record.failovers.len() > 32 {
-        return Err(failure("route candidate bound exceeded"));
-    }
-    let mut tx = pool.begin().await.map_err(failure)?;
-    let mut candidates = Vec::with_capacity(record.failovers.len() + 1);
-    for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
-        let row: Option<(Option<i64>, Option<i64>, Option<i64>, String)> = sqlx::query_as(
-            "SELECT context_limit, output_limit, compaction_threshold_pct, provider_params FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = 'chat'")
-            .bind(&candidate.provider_id).bind(&candidate.model)
-            .fetch_optional(&mut *tx).await.map_err(failure)?;
-        let (context, output, threshold, params) =
-            row.ok_or_else(|| failure("selected model capability no longer exists"))?;
-        let positive = |value: Option<i64>| -> Result<Option<u32>, AppError> {
-            value
-                .map(|value| {
-                    u32::try_from(value)
-                        .ok()
-                        .filter(|value| *value > 0)
-                        .ok_or_else(|| failure("invalid provider token limit"))
-                })
-                .transpose()
-        };
-        candidates.push(EngineRouteCandidateFacts {
-            provider_id: candidate.provider_id.clone(),
-            model: candidate.model.clone(),
-            limits: EngineModelLimits {
-                context_tokens: positive(context)?,
-                output_tokens: positive(output)?,
-                context_is_input_only: serde_json::from_str::<serde_json::Value>(&params)
-                    .map_err(failure)?.get("_nomifun_context_limit_kind").and_then(serde_json::Value::as_str) == Some("input_only"),
-                compaction_threshold_pct: threshold
-                    .map(|value| {
-                        u8::try_from(value)
-                            .ok()
-                            .filter(|value| (50..=95).contains(value))
-                            .ok_or_else(|| failure("invalid provider compaction threshold"))
-                    })
-                    .transpose()?,
-            },
-        });
-    }
-    tx.commit().await.map_err(failure)?;
-    Ok(EngineRouteModelFacts {
-        route: route.clone(),
-        candidates,
-    })
 }
 
 #[cfg(test)]

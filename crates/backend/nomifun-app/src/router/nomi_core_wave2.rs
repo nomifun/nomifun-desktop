@@ -303,6 +303,13 @@ impl Default for NomiCoreWave2Host {
 }
 
 impl NomiCoreWave2Host {
+    pub(crate) fn try_guard_workspace_mutation(&self, root: &Path) -> Result<WorkspaceMutationGuard, AppError> {
+        let owner = self.host_for_root(canonical_workspace_root(root)?)
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        let guard = owner.try_guard_workspace_mutation()?;
+        Ok(WorkspaceMutationGuard { _owner: owner, _guard: guard })
+    }
+
     fn new(user_events: Arc<dyn nomifun_realtime::UserEventSink>, file_inventory: nomifun_file::WorkspaceInventoryCache) -> Self {
         Self {
             user_events,
@@ -363,6 +370,23 @@ impl NomiCoreWave2Host {
         Ok(())
     }
 
+    /// Remove only an idle exact-root owner after its Session Runtime has
+    /// completed teardown. These cached file/artifact/VCS owners pin native
+    /// directory handles; dropping the Runtime alone does not close them.
+    /// A retained invocation or an unresolved Git outcome keeps the owner and
+    /// its in-process fence intact instead of authorizing physical deletion.
+    pub(crate) fn release_idle_workspace_host(&self, root: &Path) -> Result<(), AppError> {
+        let mut roots = self.roots.lock()
+            .map_err(|_| AppError::Conflict("workspace owners poisoned".into()))?;
+        let Some(owner) = roots.get(root) else { return Ok(()); };
+        if Arc::strong_count(owner) != 1 {
+            return Err(AppError::Conflict("Application workspace still has a retained capability invocation".into()));
+        }
+        owner.ensure_git_ready()?;
+        roots.remove(root);
+        Ok(())
+    }
+
     pub(crate) async fn invoke_mcp_tool(&self, context: nomifun_agent_kernel::CapabilityInvocationContext, input: StrictJsonValue) -> Result<StrictJsonValue, Wave2HostPortError> {
         self.mcp.as_ref().ok_or_else(|| Wave2HostPortError::unavailable("no current-product MCP owner is configured"))?
             .invoke(context.into(), input).await
@@ -373,16 +397,6 @@ impl NomiCoreWave2Host {
             None => Ok(()),
         }
     }
-    pub(crate) async fn runtime_processes_quiescent(&self, user: &str, session: &str) -> Result<bool, AppError> {
-        let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
-            .iter().filter(|((owner, id, _), _)| owner == user && id == session)
-            .map(|(_, scope)| scope.clone()).collect::<Vec<_>>();
-        for scope in scopes {
-            if !scope.is_quiescent().await { return Ok(false); }
-        }
-        Ok(true)
-    }
-
     pub(crate) fn open_runtime_turn(&self, user: &str, session: &str, operation: &str, root: &str, journal: super::engine_journal::EngineTurnJournal) -> Result<(), AppError> {
         let key = (user.to_owned(), session.to_owned(), operation.to_owned());
         let root = canonical_workspace_root(Path::new(root))?;
@@ -604,6 +618,17 @@ impl NomiCoreWave2Host {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+}
+
+pub(crate) struct WorkspaceMutationGuard {
+    _owner: Arc<Wave2ApplicationHost>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl std::fmt::Debug for WorkspaceMutationGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WorkspaceMutationGuard").finish_non_exhaustive()
     }
 }
 
@@ -1634,6 +1659,28 @@ mod tests {
             host.host_for_root(canonical).unwrap();
         }
         assert_eq!(host.cached_root_count(), 2);
+    }
+
+    #[test]
+    fn workspace_release_keeps_retained_invocations_and_unrelated_root_owners() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let host = NomiCoreWave2Host::default();
+        let first_root = canonical_workspace_root(first.path()).unwrap();
+        let second_root = canonical_workspace_root(second.path()).unwrap();
+        let retained = host.host_for_root(first_root.clone()).unwrap();
+        host.host_for_root(second_root.clone()).unwrap();
+        assert!(host.release_idle_workspace_host(&first_root).is_err(),
+            "a live invocation must keep its owner and native handles fenced");
+        assert_eq!(host.cached_root_count(), 2);
+        drop(retained);
+        host.release_idle_workspace_host(&first_root).unwrap();
+        assert_eq!(host.cached_root_count(), 1);
+        assert!(host.retained_workspace_host(&second_root).unwrap().is_some());
+        assert!(host.retained_workspace_host(&first_root).unwrap().is_none());
+        std::fs::remove_dir_all(first.path()).unwrap();
+        assert!(second.path().exists());
+        host.release_idle_workspace_host(&first_root).unwrap();
     }
 
     #[test]

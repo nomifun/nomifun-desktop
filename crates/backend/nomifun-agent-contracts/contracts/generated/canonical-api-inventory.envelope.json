@@ -36,41 +36,137 @@
         "canonical_errors": []
       },
       {
-        "operation_id": "plugins.authoring.preflight",
-        "method": "POST",
-        "path": "/api/plugins/authoring/preflight",
-        "request_schema": null,
-        "response_schema": null,
-        "canonical_errors": []
-      },
-      {
-        "operation_id": "plugins.authoring.sessions.create",
-        "method": "POST",
-        "path": "/api/plugins/authoring/sessions",
-        "request_schema": null,
-        "response_schema": null,
-        "canonical_errors": []
-      },
-      {
-        "operation_id": "plugins.authoring.sessions.list",
+        "operation_id": "apps.list",
         "method": "GET",
-        "path": "/api/plugins/authoring/sessions",
+        "path": "/api/apps",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
       },
       {
-        "operation_id": "plugins.authoring.sessions.get",
+        "operation_id": "apps.create",
+        "method": "POST",
+        "path": "/api/apps",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.import",
+        "method": "POST",
+        "path": "/api/apps/import",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.import_zip",
+        "method": "POST",
+        "path": "/api/apps/import-zip",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.environment",
+        "method": "POST",
+        "path": "/api/apps/environment",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.get",
         "method": "GET",
-        "path": "/api/plugins/authoring/sessions/{agent_session_id}",
+        "path": "/api/apps/{id}",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
       },
       {
-        "operation_id": "plugins.config.put",
+        "operation_id": "apps.update",
         "method": "PUT",
-        "path": "/api/plugins/{plugin_id}/config",
+        "path": "/api/apps/{id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.delete",
+        "method": "DELETE",
+        "path": "/api/apps/{id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.operate",
+        "method": "POST",
+        "path": "/api/apps/{id}/operate",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.development_session",
+        "method": "POST",
+        "path": "/api/apps/{id}/development-session",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.development_sessions",
+        "method": "GET",
+        "path": "/api/apps/{id}/development-sessions",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.import_into",
+        "method": "POST",
+        "path": "/api/apps/{id}/import",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.import_into_zip",
+        "method": "POST",
+        "path": "/api/apps/{id}/import-zip",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.overwrite",
+        "method": "POST",
+        "path": "/api/apps/{id}/overwrite",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "apps.overwrite_zip",
+        "method": "POST",
+        "path": "/api/apps/{id}/overwrite-zip",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "app_mcp_sources.list",
+        "method": "GET",
+        "path": "/api/app-hosting/mcp-sources",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "app_mcp_sources.refresh",
+        "method": "POST",
+        "path": "/api/app-hosting/mcp-sources/{id}/refresh",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
@@ -540,6 +636,9 @@
     ],
     "forbidden_paths": [
       "/api/conversations",
+      "/api/plugin-drafts",
+      "/api/plugins/authoring",
+      "/api/plugins/{plugin_id}/config",
       "/api/presets",
       "/api/remote/confirm",
       "/api/test",
@@ -549,5 +648,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "d0c72ee9991998476d622e32586b4bcc964005a11d946a2ff26293b464e43f3e"
+  "payload_digest": "71c737375ca6426a6004eb09ef27365a610d69c59bdad897828e849734caa39c"
 }

@@ -75,8 +75,7 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Knowledge bases | `/api/knowledge/*` | authenticated | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | Creation management and generation | `/api/creative-studio/*` management families: canvases, assets, prompts, templates/runs/drafts, tasks, agent sessions, and collections | instance owner only | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs), [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs) |
 | Creation media delivery | `GET /api/creative-studio/files/{asset_id}` | public read-only capability URL; no list or mutation surface | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| Unified Plugin Core | `/api/plugins`, `/api/plugins/{plugin_id}/*`, and `/api/plugin-drafts/*`: library, Chat/Draft authoring, shared directory/ZIP/Backup import, configuration, lifecycle, Package/Backup export, and Preview | instance owner; mutations additionally require local product trust | [`router/plugin.rs`](../../crates/backend/nomifun-app/src/router/plugin.rs) |
-| Plugin Surface assets and bridge | descriptor-fenced asset and bridge routes containing the exact session generation and Artifact digest | instance owner with the matching live Surface descriptor | same as above |
+| Applications | `/api/apps*`: current records, metadata, creation, imports, ordinary development Sessions, commands, state, overwrite and deletion; `/api/app-hosting/mcp-sources*`: source observations and refresh | authenticated installation owner; managed backends automatically reuse LocalTrust | [`router/app_hosting.rs`](../../crates/backend/nomifun-app/src/router/app_hosting.rs), [`router/app_mcp_sources.rs`](../../crates/backend/nomifun-app/src/router/app_mcp_sources.rs) |
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | NomiFun Desktop access token | `/api/webui/access-token` | local-trust installation-owner flow | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
 | Agent-session Browser Workspace | `/api/agent-sessions/{agent_session_id}/browser*` | installation owner with local product trust; agent-session ownership is checked and delegated execution steps are rejected | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
@@ -92,10 +91,43 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Shell helpers + STT | `/api/shell/*`, `/api/stt` | authenticated | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | Public assets (logos) | `/api/assets/logos/*` | public | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
 | Canonical Remote MCP front door | `/mcp` | installation token | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
-| Canonical Remote REST API | `/api/remote/open`, `/api/remote/turn`, `/api/remote/observe`, `/api/remote/cancel` | installation token | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
+| Canonical Remote REST API | `/api/remote/open`, `/api/remote/turn`, `/api/remote/observe`, `/api/remote/cancel` | external installation token; managed backends can reuse a verified LocalTrust owner | [`router/nomi_core_session.rs`](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) |
 | Realtime WebSocket | `/ws` | authenticated (token in `Sec-WebSocket-Protocol` or query) | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 For the exact set of methods on each route, read the corresponding `routes.rs` file — every router declares its routes inline.
+
+### Current applications and development workspaces
+
+The application UI and Agent tools share one hosting owner. Manual import and
+settings need no model. Development opens an ordinary Session using a usable
+model; the current application directory is its canonical workspace, not a draft.
+
+| Method + path | Purpose |
+| --- | --- |
+| `GET /api/apps` | Current records, including searchable descriptions/tags and actual runtime state. |
+| `POST /api/apps` | `{name?, description?, tags?}` creates an empty Source record and owned directory. |
+| `POST /api/apps/import`, `/import-zip` | Create an imported application from an external path or ZIP body, preserving originals. |
+| `GET /api/apps/{id}` | Read current settings, operations and output. |
+| `PUT /api/apps/{id}` | Atomically save `{name, settings, description?, tags?, import_kind?}`; omitted new fields retain values. Clients cannot author Session or binding references. |
+| `POST /api/apps/{id}/development-session` | `{model?, reasoning_effort?}` verifies/reuses a regular Session or opens one with fixed `app.developer`; returns `{app, conversation}`, the same canonical Session projection. |
+| `POST /api/apps/{id}/import`, `/import-zip` | Import into this ID/directory/Session and detect commands again. Path body is `{source, name?, import_kind}`; ZIP name/type use query parameters. |
+| `POST /api/apps/{id}/overwrite`, `/overwrite-zip` | Replace current files while preserving business files and settings. Path body is `{source}`. |
+| `POST /api/apps/{id}/operate` | `{operation: preview|use|start|stop|rebuild}` uses the single command/process owner. |
+| `POST /api/apps/environment` | Detect actual system/custom Node, npm and Bun without replacing the environment. |
+| `DELETE /api/apps/{id}` | Stop and remove owned files/registration; preserve ordinary development Sessions and valid history. |
+
+Model choices contain provider/model only; the Host resolves routes and credentials.
+Existing Session model/reasoning changes use their ordinary APIs. Reopening does
+not rewrite a frozen binding. Development references are navigation only and are
+verified against owner, purpose, fixed template and exact workspace. Manual imports,
+overwrites and deletion use the existing admission fence, recheck references under
+the application gate, and reject active Turns or unsettled/unknown effects. Reads,
+metadata saves and application stop remain available.
+
+The preview iframe loads the application's HTTP(S) page directly, with no asset
+Bridge or proxy API. Renderer-origin pages and unreachable remote loopback URLs
+are rejected by UI policy. Managed backends use injected LocalTrust for existing
+HTTP operations; external authentication, CORS and installation tokens stay intact.
 
 ### Selected auth endpoints
 

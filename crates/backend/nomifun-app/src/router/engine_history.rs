@@ -525,6 +525,7 @@ mod tests {
         resource.binding_id = resource_definition_id(&resource).unwrap();
         let mut current = previous.clone(); current.binding_version = 2; current.typed_resource_bindings = vec![resource];
         let proof = ManagedStorageRelocationV1 {
+            managed_app_workspace: None,
             managed_session_namespace: None,
             source_data_root: old.path().to_string_lossy().into_owned(), source_work_root: old.path().to_string_lossy().into_owned(),
             target_data_root: new.path().to_string_lossy().into_owned(), managed_knowledge_ids: Default::default(),

@@ -10,8 +10,11 @@ export type SessionSkillOption = Omit<SkillInfo, 'source'> & {
 export type SessionCapabilityCatalog = {
   skills: SessionSkillOption[];
   autoSkillNames: ReadonlySet<string>;
-  mcpServers: IMcpServer[];
+  mcpServers: SessionMcpOption[];
+  appSourceError?: string;
 };
+
+export type SessionMcpOption = IMcpServer & { appSource?: boolean };
 
 export type SessionCapabilityDraft = {
   skillNames: string[];
@@ -30,5 +33,5 @@ export const fromSessionCapabilitySelection = (selection: AgentSessionCapability
 
 export const defaultSessionCapabilityDraft = (catalog: SessionCapabilityCatalog): SessionCapabilityDraft => ({
   skillNames: catalog.skills.filter((skill) => skill.auto && skill.session_available !== false).map((skill) => skill.name),
-  mcpServerIds: catalog.mcpServers.filter((server) => server.enabled && server.last_test_status === 'connected' && Boolean(server.tools?.length)).map((server) => server.mcp_server_id),
+  mcpServerIds: catalog.mcpServers.filter((server) => !server.appSource && server.enabled && server.last_test_status === 'connected' && Boolean(server.tools?.length)).map((server) => server.mcp_server_id),
 });

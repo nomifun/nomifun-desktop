@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "scope": "final production backend and native dialog renderer; imported byte-identical real short-prompt-generated source, no new model Turn",
+  "host_url": "http://127.0.0.1:61240",
+  "app_id": "01a12ae4-bd7a-7d83-afe0-128283576727",
+  "session_id": "01a12ae8-1c57-7662-abbc-48a682ecc7cb",
+  "source_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+  "native_modal": true,
+  "background_controls_absent_from_modal_accessibility_tree": true,
+  "focus_trail": [
+    {
+      "tag": "BUTTON",
+      "text": "恢复大小",
+      "inside_dialog": true,
+      "modal": true
+    },
+    {
+      "tag": "IFRAME",
+      "text": "application iframe",
+      "inside_dialog": true,
+      "modal": true
+    },
+    {
+      "tag": "BODY",
+      "text": "browser focus boundary",
+      "inside_dialog": false,
+      "modal": true
+    },
+    {
+      "tag": "BUTTON",
+      "text": "独立打开",
+      "inside_dialog": true,
+      "modal": true
+    },
+    {
+      "tag": "BUTTON",
+      "text": "恢复大小",
+      "inside_dialog": true,
+      "modal": true
+    },
+    {
+      "tag": "IFRAME",
+      "text": "application iframe",
+      "inside_dialog": true,
+      "modal": true
+    }
+  ],
+  "background_controls_received_keyboard_focus": false,
+  "iframe_escape_collapses": false,
+  "toolbar_escape_collapses": true,
+  "same_frame_tree_after_toolbar_escape": true,
+  "same_frame_tree_after_expand": true,
+  "same_frame_after_restore_and_desktop_size_checks": true,
+  "real_restart_and_keyboard_pause": true,
+  "minimum_desktop": {
+    "bounds": {
+      "h": 552,
+      "w": 832,
+      "x": 24,
+      "y": 24
+    },
+    "documentWidth": 880,
+    "modal": true,
+    "viewport": [
+      880,
+      600
+    ]
+  },
+  "visible_agent": "内置应用",
+  "fixed_annotation": false,
+  "console_errors": [],
+  "captures": [
+    "app-preview-final-native-1280x720.jpg",
+    "app-preview-final-native-880x600.jpg"
+  ],
+  "limits": [
+    "Escape inside the application iframe stays in that document. The always-visible toolbar restores the preview; Escape on toolbar also restores.",
+    "Tab can reach the browser focus boundary; background renderer controls remain inert.",
+    "Native Tauri GUI not exercised."
+  ],
+  "shutdown": {
+    "finished_at": "2026-10-11T12:22:11.5583804Z",
+    "explicit_finish_http_status": 204,
+    "owned_runner_pid": 33568,
+    "owned_runner_exited": true,
+    "listeners_closed": [
+      61240,
+      53271
+    ],
+    "managed_apps": [
+      {
+        "app_id": "01a12ae4-bd7a-7d83-afe0-128283576727",
+        "pid_after": null,
+        "pid_before": 16876,
+        "state_after": "stopped"
+      }
+    ],
+    "canonical_sessions": [
+      {
+        "events_after": 3,
+        "session_id": "01a12ae8-1c57-7662-abbc-48a682ecc7cb",
+        "events_before": 3,
+        "model_turns": 0
+      }
+    ],
+    "source_hashes_before_production_close": [
+      {
+        "sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+        "app_id": "01a12ae4-bd7a-7d83-afe0-128283576727",
+        "path": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpuliTZs\\data\\app-hosting\\apps\\01a12ae4-bd7a-7d83-afe0-128283576727\\snake-game\\index.html"
+      }
+    ],
+    "production_close_sources_preserved": true,
+    "production_close_source_marker": "live_smoke_app_workspace_shutdown_files_preserved=app_count=1 file_count=1 sha256=24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+    "probe_before_outer_tempdir_drop": true,
+    "credential_audit": {
+      "browser_profile_audited": false,
+      "consecutive_clean_scans_per_secret": 2,
+      "scope": "built-in isolated fixture plaintext scan for real provider credential and LocalTrust",
+      "status": "pass"
+    },
+    "user_original_sha256_after": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+    "fixture_lifecycle_product_validation": null,
+    "exact_fixture_cleanup_evidence": "app-preview-fixture-cleanup.json",
+    "temporary_cleanup_status": "partial; old fixture cleanup blocked by automatic command policy"
+  }
+}

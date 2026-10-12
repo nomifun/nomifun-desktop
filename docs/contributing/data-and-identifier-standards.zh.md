@@ -104,14 +104,11 @@ credential_id
 
 ## 4. 用逻辑关联替代物理外键
 
-非 Agent 产品 DDL 禁止出现以下内容。基线冻结了两组明确例外：canonical Agent
-Store 表，以及 Unified Plugin 表（`plugins`、`plugin_drafts`、
-`plugin_credential_bindings`、`plugin_grants`、`plugin_mutations`、
-`plugin_artifacts` 及相关 plugin 自有表）可按基线声明使用物理外键和
-`ON DELETE`/`ON UPDATE` 动作。基线还在少数领域（channel、requirements、
-terminal、creation、plugin、Agent mutation guard）携带已注册的
-guard/validator trigger。这些例外不得扩散到其他领域；新增领域不得在
-未更新 schema 契约的情况下加入物理约束、级联或 trigger。
+非 Agent 产品 DDL 禁止出现以下内容。当前冻结例外为 canonical Agent Store 表，
+按基线声明保留物理键和级联动作。channel、requirements、terminal、creation 与
+Agent 领域已登记的 guard/validator trigger 仍属于明确的 schema 契约例外。
+已发布迁移文件不可改写；退役应用活动表通过正向迁移移除，不修改 checksum。
+新增领域不得在未更新 schema 契约的情况下加入物理约束、级联或 trigger。
 
 ```text
 FOREIGN KEY

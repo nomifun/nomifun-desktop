@@ -63,13 +63,13 @@ NomiFun has four runtime projects plus **NomiFun Portal**, the canonical
 documentation home. **Desktop is the local AI, data, model, Agent, task, and
 tool hub**; Mobile and the Xiaozhi robot connect to capabilities that you
 explicitly enable, while Net Infra provides an optional, self-hosted
-cross-network relay. Desktop also hosts Unified Plugins, so a locally authored
-Plugin can keep using the same governed runtime and capabilities instead of
-becoming an isolated demo.
+cross-network relay. Desktop also hosts ordinary applications: import programs written by you or
+a coding agent, preview and run them, with automatic local access to existing
+NomiFun capabilities when needed.
 
 | Project | Role | Start here |
 |---|---|---|
-| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Unified Plugins, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
+| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, application hosting, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
 | NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Connections & Devices guide](docs/guides/webui-remote-access.md) · Open **Connections & Devices → Connect a phone**, choose LAN or relay, then pair |
 | NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi guide](https://www.nomifun.com/docs/guides/xiaozhi-robot/) · Firmware source: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -102,8 +102,8 @@ document authentication, LAN exposure, and deployment boundaries.
 This is not a collection of unrelated clients that happen to share a logo. Desktop owns
 the durable state and executes models, Agents, requirements, tools, knowledge,
 companion memory, and Skills. Mobile is a direct LAN control surface; Xiaozhi is
-a voice-and-motion hardware surface; Unified Plugins are interactive software
-surfaces created and hosted by the same Desktop installation; Net Infra is an optional
+a voice-and-motion hardware surface; hosted applications are ordinary programs
+run by the same Desktop installation; Net Infra is an optional
 transport layer rather than another application backend. The result is one governed
 capability graph with multiple ways to reach it, rather than separate clouds,
 accounts, credentials, and copies of user data.
@@ -235,7 +235,7 @@ memory, tools, permissions, and execution runtime:
 | Product surface | What it adds |
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
-| **Unified Plugins** | Creates or imports one package, validates and installs one Artifact, runs optional App/Service entrypoints, exposes Action/Binding capabilities, and provides generation-safe storage, backup, restore, and deletion. |
+| **Application hosting** | Imports source or artifact folders/ZIPs, runs editable install/preview/build/start commands, opens the system browser, owns one process tree, automatically connects locally, and exposes optional MCP tools through explicit Agent selection. |
 | **Creative Studio** | Adds a persistent Canvas with media-node composers, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -264,21 +264,20 @@ sessions, and tool coordination. Setup is built into each companion's **Remote
 control → Robot connection** page: copy its OTA address, enter the six-digit
 activation code shown by the robot, and bind the device to that companion.
 
-### 🧩 Unified Plugins — create and run governed local software
+### 🧩 Application hosting — run your ordinary programs
 
-Create a Plugin through Chat or import a package directory/ZIP. Both sources
-enter the same validation and `install_artifact` path. A local Plugin points to
-one active immutable Artifact and one generation DataRoot; optional UI and
-Service entrypoints cover UI-only, headless, and mixed Plugins without separate
-product models. Actions bind directly to Agent, Desktop, and Automation points
-through stable `plugin:<plugin_id>/<action_id>` identities.
+Create an application through ordinary conversations and coding tools, or
+import existing source, static/server artifacts or ZIPs. NomiFun preserves the
+original and runs install, preview, build and foreground start commands in a
+managed copy. Web interfaces open in the system browser; background programs
+start directly. Edit current files and rebuild; stop/delete finish the managed
+process tree.
 
-The unified SDK exposes SQLite, KV, Files, memory-only Cache, Config,
-Credential references, Host capabilities, and cross-Plugin Actions. Preview
-uses the same Bridge and storage adapters against a temporary DataRoot. Package
-export excludes user data; Backup includes current data and non-secret config
-but never Credential plaintext. See the
-[Plugin Platform architecture](docs/architecture/plugin-platform.zh.md).
+Runtime processes receive automatic local Host access without a token form or
+SDK. Optional application MCP tools require explicit Agent/session selection
+and are excluded from global defaults. Applications keep their own files,
+databases and business architecture. See the [guide](docs/guides/app-hosting.md)
+and [architecture](docs/architecture/app-hosting.md).
 
 ### 🎨 Creative Studio — focused creation on an infinite canvas
 
@@ -470,7 +469,7 @@ Bind a companion to any of these and drive it from where you already chat:
 One React frontend, one Rust backend, **two host modes** — and the same backend runs in-process in both.
 
 At the product-family level, Desktop is also the hub for Mobile, Xiaozhi,
-Unified Plugins, and companion IM channels. See
+hosted applications, and companion IM channels. See
 [`docs/architecture/product-ecosystem.md`](docs/architecture/product-ecosystem.md)
 for the full communication, security, and innovation model.
 
@@ -737,7 +736,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
-| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 Unified Plugin 边界检查 |
+| `bun run release:win:signed-rc` | 串行构建并验收 Windows x64 签名 RC，绑定 immutable release lock 与 应用托管边界检查 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:cloud` | 管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
@@ -753,7 +752,6 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:upgrade` | 运行启动、数据集兼容与升级定向 Rust 测试 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
-| `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
 | `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
 | `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
@@ -770,13 +768,13 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run check:nomi-core-live-provider` | Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
 | `bun run check:agent-reliability` | 读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过 |
-| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/Plugin边界及脚本登记检查 |
+| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/应用托管边界及脚本登记检查 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
 | `bun run check:dead-css` | 死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败） |
-| `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
+| `bun run check:app-hosting-boundary` | 校验普通应用托管唯一 owner、自动连接、MCP 选择和旧插件领域汰换 |
 | `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
 | `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
 | `bun run check:voice-boundary` | 校验可选Mobile语音的独立合同、核心port和供应商wire隔离 |

@@ -226,7 +226,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
               );
             })
           ) : (
-            catalog.mcpServers.map((server) => {
+            <>{catalog.appSourceError && <p role='status'>{t('appHosting.tools.error')}: {catalog.appSourceError}</p>}{catalog.mcpServers.map((server) => {
               const checked = selectedMcp.has(server.mcp_server_id);
               const status = mcpStatus(server);
               const locked = lockedMcpServerIds.has(server.mcp_server_id);
@@ -247,6 +247,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                   />
                   <span className={styles.copy}>
                     <strong>{server.name}</strong>
+                    {server.appSource && <small>{t('appHosting.tools.title')}</small>}
                     <CapabilityDescription>{server.description || t('conversation.capabilityPicker.toolCount', {
                       count: server.tools?.length ?? 0,
                       defaultValue: '{{count}} 个工具',
@@ -260,7 +261,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                   </span>
                 </div>
               );
-            })
+            })}</>
           )}
           {!loading && !loadFailed && missing.map((id) => {
             const rowDisabled = disabled || readOnlyKinds.includes(kind);

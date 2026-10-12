@@ -1,6 +1,6 @@
 # Backend Crates
 
-The 54 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
+The `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
 the HTTP/WS server. Together they compile into the `nomifun-app` library crate
 and, via `nomifun-app/src/main.rs`, the **`nomicore`** binary. The two app hosts
 (`nomifun-desktop` and `nomifun-web`) link `nomifun-app` directly and call
@@ -36,7 +36,7 @@ Contributor changes must follow
 All backend crates follow the v3 data contract:
 
 - every NomiFun product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`,
-  except the canonical Agent Store tables and the Unified Plugin tables, which
+  except the canonical Agent Store tables, which
   use TEXT/composite keys as frozen in the baseline;
 - stable cross-dataset entities use named bare canonical UUIDv7 fields such as
   `user_id`, `conversation_id`, and `message_id`;
@@ -44,7 +44,7 @@ All backend crates follow the v3 data contract:
   and use owner UUIDv7, sequence, natural, or composite keys for relations;
 - one relationship has one reference field, with no `*_row_id` dual fields;
 - repositories and services maintain indexed logical references; product DDL
-  outside the Agent Store and Unified Plugin exception groups contains no
+  outside the Agent Store exception group contains no
   physical `FOREIGN KEY`, `REFERENCES`, `ON DELETE`, or `ON UPDATE` clauses,
   beyond the registered guard triggers shipped in the baseline;
 - v3 startup resets/quarantines an incompatible managed dataset as a whole
@@ -108,9 +108,7 @@ identifiers remain opaque.
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | Desktop companion state, figure/image assets, memory/persona data, companion public image serving, and robot/device binding integration. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | Knowledge bases, source ingestion, bound-base mount state, and scoped read-only knowledge MCP server. |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Canonical Creation domain: versioned project documents, assets, prompts, templates/runs, strict one-shot template drafts, Canvas ZIP archives, and most owner-only `/api/creative-studio/*` routes. Project documents, template state, and asset metadata live in SQLite; binary originals/thumbnails live under `{data_dir}/workshop/assets/`. The only public surface is read-only `GET /api/creative-studio/files/{asset_id}` for browser media elements. |
-| [`nomifun-plugin-platform`](../../crates/backend/nomifun-plugin-platform/) | Unified Plugin Core: one Manifest/Package/Plugin identity, content-addressed Artifacts, Drafts, generation DataRoots, Action/Binding registry, isolated Service processes, Surface Bridge, Package/Backup transfer, rollback, and the single `/api/plugins` + `/api/plugin-drafts` HTTP surface. |
-| [`nomifun-plugin-development`](../../crates/backend/nomifun-plugin-development/) | Optional Agent module for developing one Unified Plugin through ordinary conversation tools; Plugin instances and runtime remain owned by Plugin Core. |
-| [`nomifun-js-runtime`](../../crates/backend/nomifun-js-runtime/) | One immutable, process-wide genuine Node authority for Unified Plugin Core, supplied by the managed component resolver. |
+| [`nomifun-app-hosting`](../../crates/backend/nomifun-app-hosting/) | Single owner of ordinary application imports, current command settings, exact process trees, bounded output, overwrite and deletion; shared by HTTP and Agent management tools. |
 | [`nomifun-robot`](../../crates/backend/nomifun-robot/) | Robot gateway: LAN-attached physical robots (Xiaozhi firmware) acting as the physical embodiment of a desktop companion. |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | Media-generation engine behind Creation canvas nodes and template steps. Owns the canonical owner-only `/api/creative-studio/tasks*` queue (`queued → running → succeeded/failed/canceled`), exact provider/model/task/input identity, per-provider and global concurrency, cancellation, and boot reconciliation. Delegates model execution to `nomifun-model-invoke` and hands produced bytes to the Workshop `AssetSink`. |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | Standalone customer-service domain for serving strangers over IM channels. Shares no concepts with the companion/conversation system: dialogues are the domain's own aggregate and replies come from a disposable one-shot engine session with a fixed read-only tool registry. |

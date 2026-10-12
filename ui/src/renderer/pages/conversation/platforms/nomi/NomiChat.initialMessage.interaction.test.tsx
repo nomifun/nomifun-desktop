@@ -6,6 +6,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
+import { appHosting } from '@/common/adapter/appHostingBridge';
 import { mcpService, type IResponseMessage, type ISendMessageResult } from '@/common/adapter/ipcBridge';
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
@@ -63,6 +64,7 @@ beforeEach(() => {
   spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
   spyOn(mcpService.listServers, 'invoke').mockResolvedValue([]);
+  spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fileStream.contentUpdate, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.knowledge.onTreeChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.knowledge.onEntryContentUpdated, 'on').mockImplementation(() => () => {});

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "status": "partial; old fixture cleanup blocked by automatic command policy",
+  "checked_at": "2026-10-11T12:24:57.5147417Z",
+  "scope": "only exact known temporary roots from this validation",
+  "owned_process_ids_absent": [
+    33568,
+    40140,
+    16876,
+    38164,
+    22252,
+    14312,
+    42176
+  ],
+  "directories": [
+    {
+      "resolved_exact_owned_fixture_root": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpMHRubT",
+      "root_exists_after_cleanup_attempt": true,
+      "entries_before_attempt": 80,
+      "reparse_points": 0,
+      "manual_remove_item_performed": false,
+      "literal_native_powershell_cleanup_automatically_rejected": true
+    },
+    {
+      "resolved_exact_owned_fixture_root": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpuliTZs",
+      "root_exists_after_test_tempdir_drop": false,
+      "manual_remove_item_performed": false,
+      "production_close_source_preserved_before_tempdir_drop": true
+    }
+  ],
+  "rejected_literal_command": "Remove-Item -LiteralPath 'C:/Users/rika0/AppData/Local/Temp/.tmpMHRubT' -Recurse -Force",
+  "automatic_rejection_reason": "blocked by policy",
+  "alternative_shell_or_bypass_used": false,
+  "interrupted_62800_unknown_root": "not inspected or guessed for deletion",
+  "user_original_sha256_after": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+  "retained_generated_source_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+  "user_original_written": false,
+  "production_close_preservation_evidence": "app-preview-final-host-recovery-retry.json"
+}

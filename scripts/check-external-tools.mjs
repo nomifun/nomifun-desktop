@@ -48,6 +48,23 @@ export function validateComponents(manifest) {
   }
 }
 
+export function validateExecutionOwners({ managed, hosting, environment }) {
+  if (!/ToolId::Node\s+if\s+identity\.name\.as_deref\(\)\s*==\s*Some\("node"\)\s*&&\s*identity\.bun\.is_none\(\)/.test(managed)) {
+    throw new Error('Managed external Node must verify genuine Node independently of Bun');
+  }
+  if (!hosting.includes('nomi_process_runtime') || !hosting.includes('fn shell_command(')
+      || !hosting.includes('ChildProcessBuilder::clean_cli(')) {
+    throw new Error('Ordinary hosted application commands must use the shared managed process owner');
+  }
+  if (!environment.includes('resolve_command_path(name)')
+      || !environment.includes('ChildProcessBuilder::clean_cli(')
+      || !/executable\("node",\s*node_path\)/.test(environment)
+      || !/executable\("npm",\s*None\)/.test(environment)
+      || !/executable\("bun",\s*None\)/.test(environment)) {
+    throw new Error('Application environment must probe system/custom Node, npm and Bun separately through the shared process owner');
+  }
+}
+
 export function checkExternalTools(root = ROOT) {
   const read = path => readFileSync(resolve(root, path), 'utf8');
   const manifest = JSON.parse(read(MANIFEST));
@@ -90,8 +107,11 @@ export function checkExternalTools(root = ROOT) {
     if (runtimeInstructions !== undefined && runtimeInstructions !== instructions) throw new Error('Office Skill runtime instructions must share the same contract');
     runtimeInstructions = instructions;
   }
-  const node = read('crates/backend/nomifun-js-runtime/src/lib.rs');
-  if (/which::which\("node"\)/.test(node)) throw new Error('Plugin Node must use managed component admission');
+  validateExecutionOwners({
+    managed: read('crates/backend/nomifun-runtime/src/managed.rs').split(/#\[cfg\(test\)\]\s*mod\s+tests/)[0],
+    hosting: read('crates/backend/nomifun-app-hosting/src/owner.rs'),
+    environment: read('crates/backend/nomifun-app-hosting/src/environment.rs'),
+  });
   return { components: manifest.components.length, notices: notices.components.length, domain_components: manifest.domain_components?.length ?? 0 };
 }
 

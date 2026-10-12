@@ -2,6 +2,7 @@ import '../../../../test/setup-dom.ts';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
+import { appHosting } from '@/common/adapter/appHostingBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
 import { parseMcpServerId } from '@/common/types/ids';
@@ -31,6 +32,7 @@ const deferred = <T,>() => {
 };
 
 const mountCatalogs = () => {
+  track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]));
   track(spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]));
   return renderHook(() => ({ management: useMcpServers(), session: useSessionCapabilityCatalog() }));

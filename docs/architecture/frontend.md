@@ -81,7 +81,7 @@ The source of truth is
 | `/nomi/canvases/:canvasId` | Canvas editor. |
 | `/asset-library` | Redirects to `/asset-library/materials`. |
 | `/asset-library/materials`, `/asset-library/prompts`, `/asset-library/templates` | Asset library: materials, prompt catalog, private Template Studio. |
-| `/plugins`, `/plugins/run/:id` | Unified Plugin Library and Plugin App Surface (feature-gated). |
+| `/apps` | Application hosting list, current run settings, import, commands and system-browser links. |
 | `/settings/system`, `/settings/execution-engines`, `/settings/ssh-hosts`, `/settings/permissions`, `/settings/about` | Settings surfaces. |
 
 Legacy settings paths such as `/settings/model`, `/settings/capabilities`,

@@ -25,7 +25,6 @@ mod model_capability;
 pub mod model_protocol;
 pub mod model_task;
 mod office;
-mod plugin_platform;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -104,7 +103,7 @@ pub use conversation::{
     ConversationRuntimeSummary,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse,
     MessageResponse, MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
-    PluginDeliveryRequirement, SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
+    SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
 };
 pub use cron::{
     CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto,
@@ -182,7 +181,6 @@ pub use office::{
     OfficePreviewDocType, StartOfficePreviewRequest, StopOfficePreviewRequest,
     SaveSnapshotRequest, SnapshotContentResponse, is_preview_capability,
 };
-pub use plugin_platform::*;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus,

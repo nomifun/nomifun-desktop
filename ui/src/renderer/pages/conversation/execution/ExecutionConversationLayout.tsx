@@ -19,6 +19,10 @@ const ExecutionConversationLayout: React.FC<ChatLayoutProps> = ({ children, ...l
   const execution = useExecution();
   const status = execution.detail?.execution.status ?? '';
 
+  // Apps keep the ordinary conversation visible. Execution facts still come
+  // from the same provider; its canvas cannot take over this product surface.
+  if (layoutProps.embedded) return <ChatLayout {...layoutProps}>{children}</ChatLayout>;
+
   return (
     <ChatLayout
       {...layoutProps}

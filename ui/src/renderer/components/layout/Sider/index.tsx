@@ -5,7 +5,6 @@
  */
 
 import React, { Suspense, useCallback, useEffect, useRef } from 'react';
-import PluginPinnedEntries from '@/renderer/pages/plugins/PluginPinnedEntries';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { preloadResourceRoute } from '@renderer/components/layout/routePreload';
@@ -29,7 +28,7 @@ import {
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
-  SiderPluginEntry,
+  SiderAppEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -125,7 +124,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
   const handleSkillsClick = () => navTo('/skills');
-  const handlePluginClick = () => navTo('/plugins');
+  const handleAppClick = () => navTo('/apps');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/connections');
   const handleModelHubClick = () => navTo('/models');
@@ -269,13 +268,12 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
-            <SiderPluginEntry
-              isActive={pathname.startsWith('/plugins')}
+            <SiderAppEntry
+              isActive={pathname.startsWith('/apps')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handlePluginClick}
+              onClick={handleAppClick}
             />
-            <PluginPinnedEntries collapsed={collapsed} />
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
               isActive={pathname.startsWith('/mcp')}

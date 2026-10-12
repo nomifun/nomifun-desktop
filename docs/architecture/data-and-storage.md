@@ -122,7 +122,7 @@ Persisted identity follows the layered v3 contract in
 [`id-system.md`](id-system.md):
 
 - every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
-  frozen Agent Store and Unified Plugin exception groups (TEXT/composite
+  frozen Agent Store exception group (TEXT/composite
   keys);
 - stable cross-dataset entities add a named, bare canonical UUIDv7 field;
 - internal-only relation, singleton, cache, and event rows use the table `id`
@@ -203,9 +203,9 @@ the source and fail closed. More migration rows cannot identify a newer app. Bac
 The baseline contract is checked at runtime:
 
 - every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
-  Agent Store and Unified Plugin tables frozen with TEXT/composite keys;
+  Agent Store tables frozen with TEXT/composite keys;
 - stable business-ID columns contain bare canonical UUIDv7 strings;
-- outside those two exception groups the schema has no physical `FOREIGN KEY`,
+- outside that exception group the schema has no physical `FOREIGN KEY`,
   `REFERENCES`, database cascade, or `*_row_id`; the only triggers are the
   baseline's registered guard triggers;
 - every logical reference has its required index and registry entry.
@@ -245,7 +245,7 @@ renewable leases are process memory only and are never persisted.
 
 ### Logical-reference policy
 
-Outside the Agent Store and Unified Plugin exception groups, no product table
+Outside the Agent Store exception group, no product table
 has a physical foreign key. Stable-parent links such as
 `messages.conversation_id` and `cron_job_runs.cron_job_id` store the parent's
 bare UUIDv7 business ID. The repository layer validates the target and applies the

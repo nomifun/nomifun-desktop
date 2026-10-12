@@ -359,15 +359,22 @@ async fn serve(
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
     application.publish_robot_endpoint(actual_port, robot_advertise);
+    application.publish_app_hosting_endpoint(actual_port, &args.host).await;
     // ConnectInfo gives the rate limiter each client's real peer address. Without
     // it every browser in the deployment collapses into one shared "unknown"
     // bucket: a single user's login failures 429-lock everyone out, and aggregate
     // traffic trips the shared per-minute API quota (audit 2026-07-30, finding A).
+    let shutdown_application = application.clone();
     if let Err(error) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(nomifun_app::commands::shutdown_signal())
+    .with_graceful_shutdown(async move {
+        nomifun_app::commands::shutdown_signal().await;
+        if let Err(error) = shutdown_application.stop_hosted_applications_for_shutdown().await {
+            tracing::error!(%error, "Hosted application cleanup before HTTP drain failed; final shutdown will retry");
+        }
+    })
     .await
     {
         return Err(match application.close().await {

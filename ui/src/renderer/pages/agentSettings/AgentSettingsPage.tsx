@@ -284,7 +284,6 @@ const AgentSettingsPage: React.FC = () => {
               } : undefined}
               onDiscard={controller.discardChanges}
               onOpenModels={() => { void openKeepingEdits('/models'); }}
-              onOpenAuthor={openKeepingEdits}
               startConversationLabel={controller.editor.preset.source === 'official'
                 ? sourceTemplate?.template_key === 'companion.default' ? t('agentSettings.workbench.openCompanions')
                   : sourceTemplate?.template_key === 'customer-service.default' ? t('agentSettings.workbench.openCustomerService') : undefined

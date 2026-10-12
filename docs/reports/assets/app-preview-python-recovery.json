@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "completed_at": "2026-10-11T11:46:23.7882849Z",
+  "fixture_scope": "isolated production Host; real import, update and operation APIs; no simulated success",
+  "host_url": "http://127.0.0.1:64951",
+  "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+  "configured": {
+    "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+    "name": "Snake Python preview recovery",
+    "state": "stopped",
+    "pid": null,
+    "preview": false,
+    "prepared": false,
+    "web_url": null,
+    "project_directory": "snake-game",
+    "preview_command": "python -m http.server 63977",
+    "start_command": "python -m http.server 63977",
+    "development_session_id": null
+  },
+  "started": {
+    "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+    "name": "Snake Python preview recovery",
+    "state": "running",
+    "pid": 34496,
+    "preview": false,
+    "prepared": false,
+    "web_url": "http://127.0.0.1:63977/",
+    "project_directory": "snake-game",
+    "preview_command": "python -m http.server 63977",
+    "start_command": "python -m http.server 63977",
+    "development_session_id": null
+  },
+  "previewed": {
+    "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+    "name": "Snake Python preview recovery",
+    "state": "running",
+    "pid": 42176,
+    "preview": true,
+    "prepared": false,
+    "web_url": "http://127.0.0.1:63977/",
+    "project_directory": "snake-game",
+    "preview_command": "python -m http.server 63977",
+    "start_command": "python -m http.server 63977",
+    "development_session_id": null
+  },
+  "running_without_url": {
+    "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+    "name": "Snake Python preview recovery",
+    "state": "running",
+    "pid": 42176,
+    "preview": true,
+    "prepared": false,
+    "web_url": null,
+    "project_directory": "snake-game",
+    "preview_command": "python -m http.server 63977",
+    "start_command": "python -m http.server 63977",
+    "development_session_id": null
+  },
+  "repaired": {
+    "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+    "name": "Snake Python preview recovery",
+    "state": "running",
+    "pid": 42176,
+    "preview": true,
+    "prepared": false,
+    "web_url": "http://127.0.0.1:63977/",
+    "project_directory": "snake-game",
+    "preview_command": "python -m http.server 63977",
+    "start_command": "python -m http.server 63977",
+    "development_session_id": null
+  },
+  "missing_url_repaired_on_first_start": true,
+  "running_preview_pid_preserved_during_url_repair": true,
+  "real_http_status": 200,
+  "source_sha256": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+  "served_sha256": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+  "managed_sha256": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+  "original_after_sha256": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+  "user_data_and_canonical_history_written": false,
+  "browser_interaction": {
+    "evidence": "app-preview-browser-verification.json",
+    "scope": "actual original game start and pause on isolated read-only imported copy; original CSS defect preserved",
+    "status": "pass"
+  },
+  "shutdown": {
+    "finished_at": "2026-10-11T11:50:26.8637582Z",
+    "explicit_finish_http_status": 204,
+    "owned_runner_exited": true,
+    "managed_apps": [
+      {
+        "app_id": "01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+        "pid_before": 14312,
+        "state_after": "stopped",
+        "pid_after": null
+      },
+      {
+        "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+        "pid_before": 42176,
+        "state_after": "stopped",
+        "pid_after": null
+      }
+    ],
+    "canonical_events_before": 146,
+    "canonical_events_after": 146,
+    "user_original_sha256_after": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+    "fixture_lifecycle_product_validation": null,
+    "listeners_closed": [
+      64951,
+      58073,
+      63977
+    ],
+    "owned_processes_exited": [
+      22252,
+      14312,
+      42176
+    ],
+    "independent_browser_evidence": "app-preview-browser-verification.json",
+    "credential_audit": {
+      "browser_profile_audited": false,
+      "scope": "built-in isolated fixture root plaintext audit for real provider credential and boot LocalTrust",
+      "status": "pass",
+      "proof": "run_live_provider_smoke returns success only after both ensure_secret_not_persisted calls",
+      "consecutive_clean_scans_per_secret": 2
+    },
+    "post_fixture_tempdir_observation": "app-preview-fixture-shutdown-files.json"
+  },
+  "evidence_snapshot_capture": "Each operation response was frozen immediately before changing request settings; recovery repeated against the same existing fixture App."
+}

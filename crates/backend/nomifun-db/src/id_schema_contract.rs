@@ -62,19 +62,6 @@ pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
     "agent_messages",
 ];
 
-/// Unified Plugin Core tables use canonical TEXT identities, physical
-/// ownership foreign keys and composite keys. Plugin business data is outside
-/// the core database in generation DataRoots.
-pub(crate) const CANONICAL_PLUGIN_TABLES: &[&str] = &[
-    "plugins",
-    "plugin_artifacts",
-    "plugin_drafts",
-    "plugin_credential_bindings",
-    "plugin_grants",
-    "plugin_library_state",
-    "plugin_mutations",
-];
-
 /// Hard ceiling for product-owned SQLite B-trees on one table.
 ///
 /// `PRAGMA index_list` includes UNIQUE auto-indexes, so this is a physical
@@ -200,9 +187,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("plugins", "plugin_id"),
-    ("plugin_drafts", "draft_id"),
-    ("plugin_mutations", "mutation_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
     ("remote_bindings", "remote_binding_id"),
@@ -293,17 +277,12 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "operation_id"),
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("plugins", "plugin_id"),
-    ("plugins", "package_id"),
-    ("plugin_drafts", "draft_id"),
-    ("plugin_mutations", "mutation_id"),
     ("nomi_wave1_memory_action_receipts", "capability_id"),
     ("nomi_wave1_memory_action_receipts", "process_lease_id"),
     ("nomi_wave4_action_receipts", "capability_id"),
     ("nomi_wave4_action_receipts", "process_lease_id"),
     ("product_agent_selections", "target_id"),
     ("nomi_remote_events", "event_id"),
-    ("plugin_artifacts", "package_id"),
     ("remote_bindings", "remote_binding_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
@@ -440,12 +419,6 @@ const UPSERT_CONFLICT_KEYS: &[UniqueKeyContract] = &[
         "request_id"
     ),
     unique_key!("oauth_tokens", "server_url"),
-    unique_key!("plugin_artifacts", "artifact_digest"),
-    unique_key!("plugins", "owner_user_id", "package_id"),
-    unique_key!("plugin_credential_bindings", "owner_user_id", "plugin_id", "slot"),
-    unique_key!("plugin_grants", "owner_user_id", "plugin_id", "permission"),
-    unique_key!("plugin_library_state", "owner_user_id", "plugin_id"),
-    unique_key!("plugin_mutations", "owner_user_id", "plugin_id"),
     unique_key!(
         "product_agent_selections",
         "owner_user_id",
@@ -714,34 +687,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, KeepHistory),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugins", "owner_user_id" => "users", "user_id", false, Cascade),
-    opaque_text_ref!("plugins", "active_artifact_digest" => "plugin_artifacts", "artifact_digest", false, Restrict),
-    text_ref!("plugin_drafts", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_drafts", "plugin_id" => "plugins", "plugin_id", true, SetNull)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_drafts", "source_conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory)
-        .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_user_id"),
-    // The message is an event/projection identity validated at Turn admission.
-    // It is not the private composite agent_messages projection row key.
-    external_ref!("plugin_drafts", "source_message_id", Text, true, CanonicalUuidV7, KeepHistory),
-    text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_credential_bindings", "plugin_id" => "plugins", "plugin_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, KeepHistory),
-    text_ref!("plugin_grants", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_grants", "plugin_id" => "plugins", "plugin_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    opaque_text_ref!("plugin_grants", "confirmed_artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
-    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_library_state", "plugin_id" => "plugins", "plugin_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_mutations", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_mutations", "plugin_id" => "plugins", "plugin_id", false, KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    opaque_text_ref!("plugin_mutations", "old_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    opaque_text_ref!("plugin_mutations", "new_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),    // Delivery receipts intentionally survive Terminal/Requirement deletion so
+    // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, KeepHistory),
     text_ref!("terminal_turn_admissions", "requirement_id" => "requirements", "requirement_id", false, KeepHistory),
@@ -950,15 +896,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
 /// each entry yields one column named `value`, including one row per array
 /// element where necessary.
 pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
-    json_external_ref!(
-        "plugin_drafts", "verification_json", "$.task_message_id",
-        "SELECT json_extract(verification_json, '$.task_message_id') AS value FROM plugin_drafts WHERE json_extract(verification_json, '$.task_message_id') IS NOT NULL", KeepHistory
-    ),
-    json_text_ref!(
-        "plugin_mutations", "draft_association_json", "$.draft_id",
-        "SELECT json_extract(draft_association_json, '$.draft_id') AS value FROM plugin_mutations WHERE draft_association_json IS NOT NULL" =>
-        "plugin_drafts", "draft_id", KeepHistory, AllowMissingHistoricalParent
-    ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.fault_watch.bypass_model.provider_id",
         "SELECT json_extract(idmm, '$.fault_watch.bypass_model.provider_id') AS value FROM terminal_sessions WHERE idmm IS NOT NULL" =>
@@ -1107,7 +1044,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         .chain(std::iter::once(&CS_NOTES_FTS_TABLE))
         .chain(FTS_SHADOW_TABLES.iter())
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
-        .chain(CANONICAL_PLUGIN_TABLES.iter())
+
         .map(|value| (*value).to_owned())
         .collect();
     if actual_tables != expected_tables {
@@ -1609,80 +1546,6 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_plugin_artifacts_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGIN_ARTIFACTS",
-                "RAISE(ABORT, 'PLUGIN ARTIFACTS ARE IMMUTABLE')",
-            ],
-        ),
-        (
-            "trg_plugins_identity_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGINS",
-                "NEW.PLUGIN_ID IS NOT OLD.PLUGIN_ID",
-                "NEW.OWNER_USER_ID IS NOT OLD.OWNER_USER_ID",
-                "NEW.PACKAGE_ID IS NOT OLD.PACKAGE_ID",
-                "RAISE(ABORT, 'PLUGIN IDENTITY IS IMMUTABLE')",
-            ],
-        ),
-        (
-            "trg_plugins_revision_monotonic",
-            &[
-                "BEFORE UPDATE ON PLUGINS",
-                "NEW.REVISION <> OLD.REVISION + 1",
-                "RAISE(ABORT, 'PLUGIN REVISION MUST ADVANCE EXACTLY ONCE')",
-            ],
-        ),
-        (
-            "trg_plugin_drafts_identity_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGIN_DRAFTS",
-                "NEW.DRAFT_ID IS NOT OLD.DRAFT_ID",
-                "NEW.OWNER_USER_ID IS NOT OLD.OWNER_USER_ID",
-                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY AND TIME ARE IMMUTABLE')",
-            ],
-        ),
-        (
-            "trg_plugin_drafts_clear_base_before_plugin_delete",
-            &[
-                "BEFORE DELETE ON PLUGINS",
-                "UPDATE PLUGIN_DRAFTS SET BASE_REVISION = NULL, REVISION = REVISION + 1",
-                "WHERE PLUGIN_ID = OLD.PLUGIN_ID",
-            ],
-        ),
-        (
-            "trg_plugin_credential_bindings_updated_at_monotonic",
-            &[
-                "BEFORE UPDATE ON PLUGIN_CREDENTIAL_BINDINGS",
-                "NEW.UPDATED_AT_MS < OLD.UPDATED_AT_MS",
-                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING TIME IS MONOTONIC')",
-            ],
-        ),
-        (
-            "trg_plugin_grants_artifact_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_GRANTS",
-                "ARTIFACT.ARTIFACT_DIGEST = NEW.CONFIRMED_ARTIFACT_DIGEST",
-                "RAISE(ABORT, 'PLUGIN GRANT MUST REFERENCE A STORED ARTIFACT')",
-            ],
-        ),
-        (
-            "trg_plugin_grants_update_artifact_guard",
-            &[
-                "BEFORE UPDATE ON PLUGIN_GRANTS",
-                "ARTIFACT.ARTIFACT_DIGEST = NEW.CONFIRMED_ARTIFACT_DIGEST",
-                "RAISE(ABORT, 'PLUGIN GRANT MUST REFERENCE A STORED ARTIFACT')",
-            ],
-        ),
-        (
-            "trg_plugin_mutations_identity_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGIN_MUTATIONS",
-                "NEW.MUTATION_ID IS NOT OLD.MUTATION_ID",
-                "NEW.PLUGIN_ID IS NOT OLD.PLUGIN_ID",
-                "RAISE(ABORT, 'PLUGIN MUTATION IDENTITY IS IMMUTABLE AND TIME IS MONOTONIC')",
-            ],
-        ),        (
             "trg_requirements_absorb_done_cancelled",
             &[
                 "BEFORE UPDATE OF STATUS ON REQUIREMENTS",
@@ -1989,7 +1852,7 @@ async fn validate_index_budget(pool: &SqlitePool) -> Result<(), DbError> {
     for table in PRODUCT_TABLES
         .iter()
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
-        .chain(CANONICAL_PLUGIN_TABLES.iter())
+
     {
         let sql = format!("PRAGMA index_list({})", quote_sqlite_identifier(table));
         let rows = sqlx::query(&sql).fetch_all(pool).await?;
@@ -2075,7 +1938,7 @@ async fn validate_logical_reference_coverage(pool: &SqlitePool) -> Result<(), Db
         .collect();
     let exempt: BTreeSet<(&str, &str)> = NON_REFERENCE_ID_COLUMNS.iter().copied().collect();
     let mut missing = Vec::new();
-    for table in PRODUCT_TABLES.iter().chain(CANONICAL_PLUGIN_TABLES.iter()) {
+    for table in PRODUCT_TABLES.iter() {
         for column in table_info(pool, table).await? {
             if column.name != "id"
                 && column.name.ends_with("_id")

@@ -1,0 +1,11 @@
+{
+  "refresh_persisted": true,
+  "same_session_id": "01a12660-ebf0-7c32-b487-5d6e49939164",
+  "connected": true,
+  "clear": true,
+  "same_app_id": "01a12660-e84e-79f0-b563-0232306e5ada",
+  "actual_extra_manual_app_delete_failure": "Windows OS error 32; independent product QA, excluded from counter smoke success",
+  "increment": true,
+  "connected_app_count_before_extra_product_qa": 1,
+  "stage": "repaired"
+}

@@ -461,7 +461,7 @@ impl NomiCoreMcpHost {
         Self {
             receipts: super::mcp_effect_receipts::McpEffectReceipts::new(pool.clone()),
             source: NomiCoreMcpRuntimeBindingSource {
-                repository: Arc::new(nomifun_db::SqliteMcpServerRepository::new(pool)),
+                repository: services.app_mcp_sources.clone(),
                 installation_owner: services.authoritative_user_id.clone(),
             },
             owner: McpOwnerAdapter::new(Arc::new(McpOwner::new_dynamic(Arc::new(

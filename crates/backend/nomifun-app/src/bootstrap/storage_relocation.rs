@@ -5,8 +5,13 @@ use nomifun_agent_contracts::OperationId;
 use nomifun_agent_session::AgentSessionStore;
 use nomifun_common::storage_relocation::{self as storage, RelocationPhase, RelocationPlan};
 use nomifun_db::sqlx::{sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
+#[cfg(test)]
 use nomifun_db::relocate_storage_domain_paths as relocate_domain_paths;
 use super::environment::{ExistingV3DatabaseProbe, probe_existing_v3_database};
+
+#[cfg(test)]
+#[path = "app_storage_relocation_tests.rs"]
+mod app_storage_relocation_tests;
 
 fn executable(plan: &RelocationPlan) -> bool {
     matches!(plan.phase, RelocationPhase::AwaitingRestart | RelocationPhase::Copying | RelocationPhase::Verifying)
@@ -61,6 +66,7 @@ async fn require_current_database(path: &Path) -> Result<()> {
 
 async fn execute(control: &Path) -> Result<()> {
     let plan = storage::pending_storage_relocation(control)?.context("storage plan disappeared before offline preparation")?;
+    let mut application_ids = None;
     let committed = storage::resolve_storage_location(control)?.is_some_and(|location|
         nomifun_common::paths::paths_equivalent(&location.data_dir, &plan.destination.data_dir));
     // Final publication is governed by its durable verified manifest. A new
@@ -68,25 +74,45 @@ async fn execute(control: &Path) -> Result<()> {
     // own normal startup schema policy; it must not reopen or rewrite the
     // source database after publication has begun.
     if !committed && plan.cancellable {
-        let path = plan.source.data_dir.join("nomifun-backend.db");
-        require_current_database(&path).await?;
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(
-            SqliteConnectOptions::new().filename(&path).create_if_missing(false).read_only(true).foreign_keys(true)
-        ).await?;
-        let validation = async {
-            nomifun_db::validate_storage_relocation_paths(&pool, &plan.source.data_dir, &plan.source.work_dir).await?;
-            AgentSessionStore::from_pool(pool.clone()).await?
-                .validate_workspace_relocation(&plan.source.data_dir, &plan.source.work_dir).await?;
-            Ok::<(), anyhow::Error>(())
-        }.await;
-        pool.close().await;
-        validation?;
+        // Inspect stopped application registries under the same offline
+        // dataset locks. This never opens the hosting owner or reconciles a
+        // recorded process; an unproven process keeps the source untouched.
+        let inventory = nomifun_app_hosting::inspect_offline_hosted_apps(&plan.source.data_dir)?;
+        if !plan.has_verified_copy() {
+            let path = plan.source.data_dir.join("nomifun-backend.db");
+            require_current_database(&path).await?;
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(
+                SqliteConnectOptions::new().filename(&path).create_if_missing(false).read_only(true).foreign_keys(true)
+            ).await?;
+            let validation = async {
+                nomifun_db::validate_storage_relocation_paths(&pool, &plan.source.data_dir, &plan.source.work_dir).await?;
+                AgentSessionStore::from_pool(pool.clone()).await?
+                    .validate_workspace_relocation_with_app_workspaces(&plan.source.data_dir, &plan.source.work_dir, &inventory.app_ids).await?;
+                Ok::<(), anyhow::Error>(())
+            }.await;
+            pool.close().await;
+            validation?;
+        }
+        // Once copied, even a read-only SQLite connection can create or alter
+        // source WAL/SHM leaves. Recovery must leave that immutable inventory
+        // alone: common preparation still verifies every source byte, and the
+        // copied database below still proves schema, canonical idleness and
+        // every exact relocation transition before publication.
+        application_ids = Some(inventory.app_ids);
     }
-    let Some(prepared) = storage::prepare_pending_storage_relocation(control)? else { return Ok(()); };
+    let prepared = match application_ids.as_ref() {
+        Some(ids) => storage::prepare_pending_storage_relocation_with_app_registries(control, ids)?,
+        None => storage::prepare_pending_storage_relocation(control)?,
+    };
+    let Some(prepared) = prepared else { return Ok(()); };
     if prepared.preparation_complete {
         storage::commit_storage_relocation(control, &prepared)?;
         return Ok(());
     }
+    let application_ids = match application_ids {
+        Some(ids) => ids,
+        None => nomifun_app_hosting::inspect_offline_hosted_apps(&prepared.source.data_dir)?.app_ids,
+    };
     let database_path = prepared.staging_data_dir.join("nomifun-backend.db");
     require_current_database(&database_path).await?;
     let pool = SqlitePoolOptions::new().max_connections(1).connect_with(
@@ -96,11 +122,15 @@ async fn execute(control: &Path) -> Result<()> {
         let sessions = AgentSessionStore::from_pool(pool.clone()).await?;
         // Knowledge bindings must still reference the copied source domain
         // while the canonical writer proves its exact resource transition.
-        let outcome = sessions.relocate_managed_workspaces(&prepared.source.data_dir, &prepared.source.work_dir,
-            &prepared.destination.data_dir, &OperationId::from(prepared.plan.operation_id.clone())).await?;
-        relocate_domain_paths(&pool, &prepared.source.data_dir, &prepared.source.work_dir,
-            &prepared.destination.data_dir, &outcome.managed_namespaces).await?;
-        sessions.validate_workspace_relocation(&prepared.destination.data_dir, &prepared.destination.work_dir).await?;
+        let outcome = sessions.relocate_managed_workspaces_with_app_workspaces(&prepared.source.data_dir, &prepared.source.work_dir,
+            &prepared.destination.data_dir, &OperationId::from(prepared.plan.operation_id.clone()), &application_ids).await?;
+        nomifun_db::relocate_storage_domain_paths_with_app_workspaces(&pool, &prepared.source.data_dir, &prepared.source.work_dir,
+            &prepared.destination.data_dir, &outcome.managed_namespaces, &outcome.app_workspaces, &application_ids).await?;
+        let rebased = nomifun_app_hosting::rewrite_offline_hosted_app_registries(&prepared.source.data_dir,
+            &prepared.staging_data_dir, &prepared.destination.data_dir)?;
+        ensure!(rebased == application_ids, "copied application registry inventory changed during storage relocation");
+        sessions.validate_workspace_relocation_with_app_workspaces(&prepared.destination.data_dir,
+            &prepared.destination.work_dir, &application_ids).await?;
         nomifun_db::validate_id_data_contract(&pool).await?;
         let check: String = nomifun_db::sqlx::query_scalar("PRAGMA quick_check").fetch_one(&pool).await?;
         ensure!(check == "ok", "copied database failed SQLite integrity validation: {check}");
@@ -111,7 +141,7 @@ async fn execute(control: &Path) -> Result<()> {
     pool.close().await;
     transition?;
     require_current_database(&database_path).await?;
-    storage::commit_storage_relocation(control, &prepared)?;
+    storage::commit_storage_relocation_with_app_registries(control, &prepared, &application_ids)?;
     Ok(())
 }
 
@@ -136,6 +166,26 @@ mod tests {
             .map(|(offset, _)| offset).take(8).collect::<Vec<_>>();
         assert!(after == before, "offline relocation changed source DB: sizes {} / {}, first differing offsets {offsets:?}",
             before.len(), after.len());
+    }
+
+    fn source_payload_leaves(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(root: &Path, relative: &Path, leaves: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(root.join(relative)).unwrap() {
+                let entry = entry.unwrap();
+                let relative = relative.join(entry.file_name());
+                // Root lifecycle markers and locks belong to the coordinator;
+                // application files, registries and all DB leaves remain data.
+                if relative.components().count() == 1 && matches!(relative.to_str(),
+                    Some(".nomifun-work-root.lock" | "server.lock" | "server.lock.info" | "nomifun-backend.db.migrate.lock"
+                        | ".nomifun-storage-location.json" | ".nomifun-storage-relocated.json" | "dir-config.json"
+                        | "dataset-v3.json" | ".nomifun-work-root-owner.json" | ".nomifun-work-root-binding.json")) { continue; }
+                if entry.file_type().unwrap().is_dir() { collect(root, &relative, leaves); }
+                else { leaves.insert(relative.clone(), fs::read(root.join(relative)).unwrap()); }
+            }
+        }
+        let mut leaves = std::collections::BTreeMap::new();
+        collect(root, Path::new(""), &mut leaves);
+        leaves
     }
 
     async fn seed(source: &Path, work: &Path) {
@@ -213,6 +263,48 @@ mod tests {
         assert_eq!(fs::read(target.join("nomifun-backend.db")).unwrap(), copied);
         assert!(storage::require_storage_root_not_sealed(&source).is_err());
         require_current_database(&target.join("nomifun-backend.db")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_relocation_boot_resumes_copied_app_registry_rebase_before_publication() {
+        use nomifun_app_hosting::{AppRecord, AppSettings, AppState, ImportKind};
+        let fixture = tempfile::tempdir().unwrap();
+        let base = nomifun_common::paths::canonicalize_simplified(fixture.path()).unwrap();
+        let source = base.join("source"); let target = base.join("target"); let control = base.join("control");
+        seed(&source, &source).await;
+        let id = uuid::Uuid::now_v7().to_string();
+        let directory = source.join("app-hosting").join("apps").join(&id);
+        let registry = source.join("app-hosting").join("registry").join(format!("{id}.json"));
+        fs::create_dir_all(&directory).unwrap(); fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(directory.join("index.html"), b"retained application source").unwrap();
+        let app = AppRecord { id: id.clone(), name: "Interrupted application relocation".into(), description: "Preserved configuration".into(),
+            tags: Vec::new(), development_session_id: None, directory, import_kind: ImportKind::Source,
+            settings: AppSettings::default(), state: AppState::Stopped, operation: None, last_error: None,
+            output: String::new(), pid: None, preview: false, prepared: false };
+        fs::write(&registry, serde_json::to_vec_pretty(&serde_json::json!({"record":app,"identity":null})).unwrap()).unwrap();
+        let before_registry = fs::read(&registry).unwrap();
+        let before_database = fs::read(source.join("nomifun-backend.db")).unwrap();
+        let plan = storage::request_storage_relocation(&control, &source, &source, &target).unwrap();
+        storage::start_storage_relocation(&control, &plan.operation_id).unwrap();
+        let ids = nomifun_app_hosting::inspect_offline_hosted_apps(&source).unwrap().app_ids;
+        let prepared = storage::prepare_pending_storage_relocation_with_app_registries(&control, &ids).unwrap().unwrap();
+        assert_eq!(nomifun_app_hosting::rewrite_offline_hosted_app_registries(&source, &prepared.staging_data_dir, &target).unwrap(), ids);
+        // Dropping the prepared token models the caller exiting after its real
+        // registry callback and before commit. The next boot owns recovery.
+        drop(prepared);
+        assert!(!target.exists());
+        let source_leaves = source_payload_leaves(&source);
+        let resumed = prepare_startup_storage_root_async(source.clone(), None).await.unwrap();
+        let status = storage::storage_relocation_status(&control).unwrap();
+        assert_eq!(resumed, target, "the interrupted App relocation must publish successfully: {status:?}");
+        assert_eq!(source_payload_leaves(&source), source_leaves, "resume must not create source SQLite sidecars or change payload leaves");
+        assert_eq!(prepare_startup_storage_root_async(source.clone(), None).await.unwrap(), target);
+        assert_eq!(source_payload_leaves(&source), source_leaves, "a repeated committed boot must retain the same source payload leaves");
+        assert_source_database_unchanged(&source, &before_database);
+        assert_eq!(fs::read(registry).unwrap(), before_registry);
+        let relocated: serde_json::Value = serde_json::from_slice(&fs::read(target.join("app-hosting").join("registry").join(format!("{id}.json"))).unwrap()).unwrap();
+        assert_eq!(relocated["record"]["directory"], serde_json::json!(target.join("app-hosting").join("apps").join(&id)));
+        assert_eq!(fs::read(target.join("app-hosting").join("apps").join(id).join("index.html")).unwrap(), b"retained application source");
     }
 
     #[tokio::test]

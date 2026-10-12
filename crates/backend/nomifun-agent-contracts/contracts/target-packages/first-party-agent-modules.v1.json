@@ -6,23 +6,62 @@
   },
   "packages": [
     {
-      "package": { "id": "nomifun.knowledge-management", "version": "1.0.0" },
-      "source": { "source_kind": "bundled", "source_identity": "nomifun.knowledge-management" },
-      "capabilities": [{ "capability": { "id": "knowledge.management" }, "kind": "tool" }],
+      "package": {
+        "id": "nomifun.app-hosting",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.app-hosting"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "app.hosting"
+          },
+          "kind": "tool"
+        }
+      ],
       "skills": [],
       "mcp_tools": []
     },
     {
-      "package": { "id": "nomifun.session-management", "version": "1.0.0" },
-      "source": { "source_kind": "bundled", "source_identity": "nomifun.session-management" },
-      "capabilities": [{ "capability": { "id": "session.management" }, "kind": "tool" }],
+      "package": {
+        "id": "nomifun.knowledge-management",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.knowledge-management"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "knowledge.management"
+          },
+          "kind": "tool"
+        }
+      ],
       "skills": [],
       "mcp_tools": []
     },
     {
-      "package": { "id": "nomifun.plugin-development", "version": "1.0.0" },
-      "source": { "source_kind": "bundled", "source_identity": "nomifun.plugin-development" },
-      "capabilities": [{ "capability": { "id": "plugin.development" }, "kind": "tool" }],
+      "package": {
+        "id": "nomifun.session-management",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.session-management"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "session.management"
+          },
+          "kind": "tool"
+        }
+      ],
       "skills": [],
       "mcp_tools": []
     },
@@ -509,9 +548,18 @@
         }
       ],
       "skills": [
-        { "id": "creative-studio-canvas", "version": "1.0.0" },
-        { "id": "creative-studio-organize", "version": "1.0.0" },
-        { "id": "creative-studio-template", "version": "1.0.0" }
+        {
+          "id": "creative-studio-canvas",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creative-studio-organize",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creative-studio-template",
+          "version": "1.0.0"
+        }
       ],
       "mcp_tools": []
     },

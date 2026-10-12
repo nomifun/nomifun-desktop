@@ -1,8 +1,8 @@
 //! Offline current-dataset relocation through the canonical Session writer.
 use super::*;
 use crate::WorkspaceRelocationOutcome;
-use nomifun_agent_contracts::{AgentPatchRecoveryState, ManagedStorageRelocationV1, ManagedSessionWorkspaceNamespaceV1, NativeProcessWitness,
-    is_default_managed_workspace, managed_workspace_parameters, relocate_storage_path,
+use nomifun_agent_contracts::{AgentPatchRecoveryState, ManagedStorageRelocationV1, ManagedSessionWorkspaceNamespaceV1, ManagedAppWorkspaceNamespaceV1, NativeProcessWitness,
+    is_default_managed_workspace, is_app_project_location_resource, managed_workspace_parameters, relocate_storage_path,
     resource_definition_id, storage_paths_equal, validate_storage_root};
 
 impl AgentSessionStore {
@@ -23,7 +23,7 @@ impl AgentSessionStore {
             return Ok(BTreeMap::new());
         };
         let HistoryWorkspaceLocations { current_session_root, locations, first_agent_transition,
-            current_external, last_seq } = history;
+            current_external, last_seq, app, .. } = history;
         let mut resolved = BTreeMap::new();
         for (seq, paths) in candidates {
             if *seq == 0 || *seq > last_seq { return Err(conflict("historical workspace path source is outside committed Session history")); }
@@ -41,10 +41,7 @@ impl AgentSessionStore {
             // only transition that can turn an opening default into external
             // authority. Its first ordinary binding event ends that managed
             // historical interval; explicit external paths stay untouched.
-            if current_external && first_agent_transition.is_some_and(|transition| *seq >= transition) {
-                resolved.insert(*seq, aliases);
-                continue;
-            }
+            let managed_interval = !current_external || first_agent_transition.is_none_or(|transition| *seq < transition);
             for path in paths {
                 if path.len() > 4096 || path.chars().any(char::is_control) || !Path::new(path).is_absolute() { continue; }
                 // The private display marker removes a filename timestamp. Use
@@ -56,10 +53,19 @@ impl AgentSessionStore {
                     else if matching.len() == 1 { matching[0].as_str() }
                     else if matching.len() > 1 { continue; }
                     else { path.as_str() };
-                for (relocation_seq, source) in &locations {
-                    if seq >= relocation_seq { continue; }
-                    if let Some(moved) = relocate_storage_path(actual, source, &current_session_root.to_string_lossy()) {
-                        let Ok(relative) = Path::new(&moved).strip_prefix(&current_session_root) else { continue; };
+                let mut proven_locations = Vec::new();
+                if managed_interval {
+                    proven_locations.extend(locations.iter().map(|(boundary, source)|
+                        (*boundary, source.as_str(), current_session_root.as_path())));
+                }
+                if let Some(app) = &app && *seq > app.alias_after_seq {
+                    proven_locations.extend(app.locations.iter().map(|(boundary, source)|
+                        (*boundary, source.as_str(), app.current_root.as_path())));
+                }
+                for (relocation_seq, source, target) in proven_locations {
+                    if *seq >= relocation_seq { continue; }
+                    if let Some(moved) = relocate_storage_path(actual, source, &target.to_string_lossy()) {
+                        let Ok(relative) = Path::new(&moved).strip_prefix(target) else { continue; };
                         if relative.as_os_str().is_empty() || relative.components().any(|component| match component {
                             std::path::Component::Normal(name) => name.to_str().is_none_or(|name|
                                 name.trim() != name || name.contains(':') || name.contains('\\') || name.chars().any(char::is_control)),
@@ -121,7 +127,7 @@ impl AgentSessionStore {
                 if let Some(history) = &history {
                     let managed_interval = !history.current_external
                         || history.first_agent_transition.is_none_or(|boundary| *seq < boundary);
-                    if managed_interval {
+                    if managed_interval && history.has_default_namespace {
                         // Pick the exact stage containing the source cursor.
                         // A future relocation's root cannot supply old authority.
                         let stage = history.locations.iter().find(|(boundary, _)| seq < boundary)
@@ -129,6 +135,15 @@ impl AgentSessionStore {
                             .unwrap_or_else(|| history.current_session_root.to_string_lossy().into_owned());
                         if history_root_digest_matches(&stage, hash) {
                             roots.insert(hash.clone(), history.current_session_root.to_string_lossy().into_owned());
+                            continue;
+                        }
+                    }
+                    if let Some(app) = &history.app {
+                        let stage = app.locations.iter().find(|(boundary, _)| seq < boundary)
+                            .map(|(_, root)| root.clone())
+                            .unwrap_or_else(|| app.current_root.to_string_lossy().into_owned());
+                        if history_root_digest_matches(&stage, hash) {
+                            roots.insert(hash.clone(), app.current_root.to_string_lossy().into_owned());
                             continue;
                         }
                     }
@@ -148,9 +163,17 @@ impl AgentSessionStore {
     /// root locks, the SQLite snapshot and the filesystem commit point.
     pub async fn validate_workspace_relocation(&self, source_data_root: &Path, source_work_root: &Path)
         -> Result<(), SessionStoreError> {
+        self.validate_workspace_relocation_with_app_workspaces(source_data_root, source_work_root, &BTreeSet::new()).await
+    }
+
+    /// Application identities must come from the hosting owner's read-only
+    /// registry validation for this exact source dataset, never a path scan.
+    pub async fn validate_workspace_relocation_with_app_workspaces(&self, source_data_root: &Path,
+        source_work_root: &Path, app_ids: &BTreeSet<String>) -> Result<(), SessionStoreError> {
         let data = root_string(source_data_root)?;
         let work = root_string(source_work_root)?;
         let mut tx = self.pool.begin().await?;
+        let apps = managed_app_namespaces_tx(&mut tx, app_ids).await?;
         require_relocation_idle_tx(&mut tx).await?;
         require_native_storage_quiescent_tx(&mut tx).await?;
         for id in live_session_ids_tx(&mut tx).await? {
@@ -158,7 +181,7 @@ impl AgentSessionStore {
             let session = live_session_by_id_tx(&mut tx, &id).await?;
             let namespace = opening_workspace_namespace_tx(&mut tx, &session).await?;
             validate_namespace_location_tx(&mut tx, &session, namespace.as_ref(), &data, &work).await?;
-            prepare_resources_tx(&mut tx, &session, namespace.as_ref(), &data, &work, &data).await?;
+            prepare_resources_tx(&mut tx, &session, namespace.as_ref(), &apps, &data, &work, &data).await?;
         }
         tx.rollback().await?;
         Ok(())
@@ -169,15 +192,26 @@ impl AgentSessionStore {
     /// Replays prove their identity from the existing canonical event itself.
     pub async fn relocate_managed_workspaces(&self, source_data_root: &Path, source_work_root: &Path,
         target_data_root: &Path, relocation_id: &OperationId) -> Result<WorkspaceRelocationOutcome, SessionStoreError> {
+        self.relocate_managed_workspaces_with_app_workspaces(source_data_root, source_work_root,
+            target_data_root, relocation_id, &BTreeSet::new()).await
+    }
+
+    /// Extend the existing location boundary to exact registered application
+    /// projects. All Session resources still commit in the canonical owner.
+    pub async fn relocate_managed_workspaces_with_app_workspaces(&self, source_data_root: &Path, source_work_root: &Path,
+        target_data_root: &Path, relocation_id: &OperationId, app_ids: &BTreeSet<String>)
+        -> Result<WorkspaceRelocationOutcome, SessionStoreError> {
         let data = root_string(source_data_root)?;
         let work = root_string(source_work_root)?;
         let target = root_string(target_data_root)?;
         validate_uuidv7(relocation_id.as_ref(), "relocation_id")?;
         let mut tx = self.begin_write_transaction().await?;
+        let apps = managed_app_namespaces_tx(&mut tx, app_ids).await?;
         require_relocation_idle_tx(&mut tx).await?;
         require_native_storage_quiescent_tx(&mut tx).await?;
         let mut changed = 0;
         let mut managed_namespaces = Vec::new();
+        let mut app_workspaces = BTreeMap::new();
         for id in live_session_ids_tx(&mut tx).await? {
             require_settled_patch_history_tx(&mut tx, &id).await?;
             let session_id = AgentSessionId::from(id.clone());
@@ -196,9 +230,14 @@ impl AgentSessionStore {
                     || !storage_paths_equal(&proof.target_data_root, &target)
                     || payload.next_binding_ref != AgentHandoffBindingRefV1::from(&session.agent_binding)
                     || proof.next_resources != session.agent_binding.typed_resource_bindings
+                    || proof.managed_app_workspace.as_ref().is_some_and(|app| !apps.contains(app))
                 { return Err(conflict("storage relocation replay differs from its exact canonical transition")); }
                 validate_namespace_location_tx(&mut tx, &session,
                     proof.managed_session_namespace.as_ref(), &target, &target).await?;
+                if let Some(app) = &proof.managed_app_workspace {
+                    validate_app_location_tx(&mut tx, &session, app, &target).await?;
+                    app_workspaces.insert(session_id.clone(), app.clone());
+                }
                 if let Some(namespace) = &proof.managed_session_namespace {
                     managed_namespaces.push(namespace.clone());
                 }
@@ -206,7 +245,7 @@ impl AgentSessionStore {
             }
             let namespace = opening_workspace_namespace_tx(&mut tx, &session).await?;
             validate_namespace_location_tx(&mut tx, &session, namespace.as_ref(), &data, &work).await?;
-            let (replacement_resources, knowledge_ids) = prepare_resources_tx(&mut tx, &session, namespace.as_ref(), &data, &work, &target).await?;
+            let (replacement_resources, knowledge_ids, app_workspace) = prepare_resources_tx(&mut tx, &session, namespace.as_ref(), &apps, &data, &work, &target).await?;
             let unchanged_resources = replacement_resources == session.agent_binding.typed_resource_bindings;
             let managed_location_changed = !storage_paths_equal(&data, &target)
                 && (namespace.is_some() || (!replacement_resources.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
@@ -224,8 +263,12 @@ impl AgentSessionStore {
                 source_data_root: data.clone(), source_work_root: work.clone(), target_data_root: target.clone(),
                 managed_knowledge_ids: knowledge_ids, previous_resources: expected.typed_resource_bindings.clone(),
                 managed_session_namespace: namespace.clone(),
+                managed_app_workspace: app_workspace,
                 next_resources: replacement.typed_resource_bindings.clone(),
             };
+            if let Some(app) = &proof.managed_app_workspace {
+                app_workspaces.insert(session_id.clone(), app.clone());
+            }
             let head = head_by_id_tx(&mut tx, &id).await?;
             let payload = AgentBindingChangedPayloadV1 {
                 transition_id: relocation_id.clone(), request_digest: digest_payload(&proof)?,
@@ -254,7 +297,10 @@ impl AgentSessionStore {
             };
             let append = SessionEventAppend {
                 agent_session_id: session_id, event_id, producer_id: EventProducerId::from("session_api"),
-                idempotency_key: IdempotencyKey::from(format!("storage-relocation:{}", relocation_id.as_ref())),
+                // Event producer idempotency is globally unique in this
+                // canonical store. One dataset operation commits an exact
+                // location boundary in each affected Session stream.
+                idempotency_key: IdempotencyKey::from(format!("storage-relocation:{}:{id}", relocation_id.as_ref())),
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: SessionEventKind("session/agent-binding-changed".into()), kind_version: 1,
                     correlation_id: CorrelationId::from(relocation_id.as_ref()), causation_event_id: None,
@@ -268,7 +314,7 @@ impl AgentSessionStore {
             changed += 1;
         }
         tx.commit().await?;
-        Ok(WorkspaceRelocationOutcome { changed_sessions: changed, managed_namespaces })
+        Ok(WorkspaceRelocationOutcome { changed_sessions: changed, managed_namespaces, app_workspaces })
     }
 }
 
@@ -278,6 +324,16 @@ struct HistoryWorkspaceLocations {
     first_agent_transition: Option<u64>,
     current_external: bool,
     last_seq: u64,
+    has_default_namespace: bool,
+    app: Option<AppHistoryWorkspaceLocations>,
+}
+
+struct AppHistoryWorkspaceLocations {
+    current_root: std::path::PathBuf,
+    locations: Vec<(u64, String)>,
+    /// Text-only references need a proved opening App stage. For a later App
+    /// selection, the first formal location boundary starts the known stage.
+    alias_after_seq: u64,
 }
 
 fn history_root_digest_matches(root: &str, hash: &str) -> bool {
@@ -345,8 +401,15 @@ async fn history_workspace_locations_tx(tx: &mut Transaction<'_, Sqlite>,
     session: &AgentSessionLiveRecord, managed_workspace_root: &Path)
     -> Result<Option<HistoryWorkspaceLocations>, SessionStoreError> {
     let session_id = &session.agent_session_id;
+    let app = history_app_workspace_locations_tx(tx, session, managed_workspace_root).await?;
     let namespace = opening_workspace_namespace_tx(tx, session).await?;
-    let Some(namespace) = namespace else { return Ok(None); };
+    let Some(namespace) = namespace else {
+        if app.is_none() { return Ok(None); }
+        let head = head_by_id_tx(tx, session_id.as_ref()).await?;
+        return Ok(Some(HistoryWorkspaceLocations { current_session_root: managed_workspace_root.join(session_id.as_ref()),
+            locations: Vec::new(), first_agent_transition: None, current_external: true, last_seq: head.last_seq,
+            has_default_namespace: false, app }));
+    };
     validate_uuidv7(session_id.as_ref(), "managed Session")?;
     let current_root = root_string(managed_workspace_root)?;
     let current_session_root = managed_workspace_root.join(session_id.as_ref());
@@ -397,7 +460,85 @@ async fn history_workspace_locations_tx(tx: &mut Transaction<'_, Sqlite>,
             storage_paths_equal(root, &current_session_root.to_string_lossy())));
 
     Ok(Some(HistoryWorkspaceLocations { current_session_root, locations, first_agent_transition,
-        current_external, last_seq:head.last_seq }))
+        current_external, last_seq:head.last_seq, has_default_namespace: true, app }))
+}
+
+async fn history_app_workspace_locations_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionLiveRecord,
+    managed_workspace_root: &Path) -> Result<Option<AppHistoryWorkspaceLocations>, SessionStoreError> {
+    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed' ORDER BY seq DESC")
+        .bind(session.agent_session_id.as_ref()).fetch_all(&mut **tx).await?;
+    let mut latest = None;
+    for row in rows {
+        let event = event_from_row(row)?;
+        let value = payload_value_for_event_tx(tx, &event).await?;
+        if value.get("workspace_relocation").is_none_or(Value::is_null) { continue; }
+        let payload: AgentBindingChangedPayloadV1 = serde_json::from_value(value)?;
+        payload.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+        if let Some(app) = payload.workspace_relocation.as_ref().and_then(|proof| proof.managed_app_workspace.clone()) {
+            latest = Some((app, payload));
+            break;
+        }
+    }
+    let Some((app, latest_transition)) = latest else { return Ok(None); };
+    let history = app_relocation_history_tx(tx, session, &app).await?;
+    let (_, last) = history.last().ok_or_else(|| conflict("application location has no canonical transition"))?;
+    validate_current_app_location_resources_tx(tx, session, &latest_transition).await?;
+    let current_root = app.workspace_root(&last.target_data_root);
+    if !session.agent_binding.typed_resource_bindings.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
+        && resource.owner_id == app.owner_id && resource.typed_parameters.get("workspace_root")
+            .is_some_and(|root| storage_paths_equal(root, &current_root))) {
+        return Ok(None);
+    }
+    if session.agent_binding.typed_resource_bindings.iter().any(|resource| is_app_project_location_resource(resource)
+        && resource.typed_parameters.get("workspace_root").is_some_and(|root| !storage_paths_equal(root, &current_root)))
+    { return Err(conflict("historical application has inconsistent current project roots")); }
+    let expected_managed = Path::new(&last.target_data_root).join("conversations");
+    if !storage_paths_equal(&root_string(managed_workspace_root)?, &expected_managed.to_string_lossy()) {
+        // App deletion preserves its ordinary Session and exact frozen root.
+        // A later dataset relocation has no registered App authority to move
+        // that root. It is now external to the active dataset, so retain the
+        // original history without supplying aliases into a new App directory.
+        return Ok(None);
+    }
+    let opening: StoredEventRow = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='session/opening' ORDER BY seq LIMIT 1")
+        .bind(session.agent_session_id.as_ref()).fetch_one(&mut **tx).await?;
+    let opening = event_from_row(opening)?;
+    let payload = payload_value_for_event_tx(tx, &opening).await?;
+    let binding: AgentBindingValue = serde_json::from_value(payload.get("agent_binding").cloned()
+        .ok_or_else(|| conflict("application history has no canonical opening binding"))?)?;
+    let (first_seq, first) = history.first().expect("nonempty application history");
+    let opening_is_app = binding.typed_resource_bindings.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
+        && resource.owner_id == app.owner_id && resource.typed_parameters.get("workspace_root")
+            .is_some_and(|root| storage_paths_equal(root, &app.workspace_root(&first.source_data_root))));
+    let alias_after_seq = if opening_is_app { 0 } else { *first_seq };
+    let locations = history.into_iter().map(|(seq, proof)| (seq, app.workspace_root(&proof.source_data_root))).collect();
+    Ok(Some(AppHistoryWorkspaceLocations { current_root: Path::new(&current_root).to_path_buf(), locations, alias_after_seq }))
+}
+
+async fn validate_current_app_location_resources_tx(tx: &mut Transaction<'_, Sqlite>,
+    session: &AgentSessionLiveRecord, latest: &AgentBindingChangedPayloadV1) -> Result<(), SessionStoreError> {
+    let proof = latest.workspace_relocation.as_ref().expect("validated application proof");
+    if latest.next_binding_ref.binding_version > session.agent_binding.binding_version
+        || (latest.next_binding_ref.binding_version == session.agent_binding.binding_version
+            && (latest.next_binding_ref != AgentHandoffBindingRefV1::from(&session.agent_binding)
+                || proof.next_resources != session.agent_binding.typed_resource_bindings))
+    { return Err(conflict("historical application proof differs from its current frozen binding")); }
+    // A later ordinary Agent/model/resource choice may legitimately advance
+    // the binding. Its current definitions must still be exact canonical
+    // rows; neither an old proof nor an external classification forgives a
+    // modified or missing current resource definition.
+    for resource in &session.agent_binding.typed_resource_bindings {
+        if !is_app_project_location_resource(resource) { continue; }
+        let row: Option<StoredResourceRow> = sqlx::query_as("SELECT binding_id,resource_kind,resource_id,owner_id,operations_json,connection_config_ref,typed_parameters_json,binding_digest FROM agent_session_resources WHERE session_id=? AND binding_id=?")
+            .bind(session.agent_session_id.as_ref()).bind(resource.binding_id.as_ref()).fetch_optional(&mut **tx).await?;
+        let stored = row.map(resource_from_row).transpose()?
+            .ok_or_else(|| conflict("historical application has no current immutable project resource definition"))?;
+        if resource.owner_id != session.owner_ref.principal_id
+            || resource_definition_id(resource)? != resource.binding_id || stored != *resource {
+            return Err(conflict("historical application differs from its current immutable project resource definition"));
+        }
+    }
+    Ok(())
 }
 
 fn attachment_display_path(raw: &str) -> String {
@@ -432,6 +573,11 @@ async fn opening_workspace_namespace_tx(tx: &mut Transaction<'_, Sqlite>, sessio
 
 pub(super) async fn validate_namespace_proof_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionLiveRecord,
     proof: &ManagedStorageRelocationV1) -> Result<(), SessionStoreError> {
+    if let Some(app) = &proof.managed_app_workspace {
+        if app.owner_id != session.owner_ref.principal_id || session.owner_ref.principal_kind != "user"
+            || session.remote_binding_provenance.is_some()
+        { return Err(conflict("managed application proof differs from its local Session owner")); }
+    }
     if let Some(namespace) = &proof.managed_session_namespace {
         if namespace.agent_session_id != session.agent_session_id
             || opening_workspace_namespace_tx(tx, session).await?.as_ref() != Some(namespace)
@@ -480,6 +626,42 @@ async fn validate_namespace_location_tx(tx: &mut Transaction<'_, Sqlite>, sessio
     Ok(())
 }
 
+async fn app_relocation_history_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionLiveRecord,
+    app: &ManagedAppWorkspaceNamespaceV1) -> Result<Vec<(u64, ManagedStorageRelocationV1)>, SessionStoreError> {
+    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed' ORDER BY seq")
+        .bind(session.agent_session_id.as_ref()).fetch_all(&mut **tx).await?;
+    let mut history = Vec::new();
+    let mut previous_target: Option<String> = None;
+    for row in rows {
+        let event = event_from_row(row)?;
+        let value = payload_value_for_event_tx(tx, &event).await?;
+        if value.get("workspace_relocation").is_none_or(Value::is_null) { continue; }
+        let payload: AgentBindingChangedPayloadV1 = serde_json::from_value(value)?;
+        payload.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+        let proof = payload.workspace_relocation.as_ref().expect("validated relocation proof");
+        validate_namespace_proof_tx(tx, session, proof).await?;
+        if event.kind_version != 1 || event.correlation_id.as_ref() != payload.transition_id.as_ref()
+            || payload.effective_after_seq.checked_add(1) != Some(event.seq)
+            || event.event_id.as_ref() != format!("storage-relocation:{}:{}", payload.transition_id.as_ref(), session.agent_session_id.as_ref())
+        { return Err(conflict("application workspace location has invalid canonical operation provenance")); }
+        if proof.managed_app_workspace.as_ref() != Some(app) { continue; }
+        if previous_target.as_ref().is_some_and(|previous| !storage_paths_equal(previous, &proof.source_data_root)) {
+            return Err(conflict("application workspace locations do not form a committed relocation chain"));
+        }
+        previous_target = Some(proof.target_data_root.clone());
+        history.push((event.seq, proof.clone()));
+    }
+    Ok(history)
+}
+
+async fn validate_app_location_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionLiveRecord,
+    app: &ManagedAppWorkspaceNamespaceV1, data: &str) -> Result<(), SessionStoreError> {
+    if let Some((_, previous)) = app_relocation_history_tx(tx, session, app).await?.last()
+        && !storage_paths_equal(&previous.target_data_root, data)
+    { return Err(conflict("registered application source differs from its last canonical location")); }
+    Ok(())
+}
+
 fn conflict(message: &str) -> SessionStoreError { SessionStoreError::Conflict(message.into()) }
 fn root_string(root: &Path) -> Result<String, SessionStoreError> {
     let raw = root.to_str().ok_or_else(|| conflict("storage relocation root is not UTF-8"))?;
@@ -490,6 +672,18 @@ fn root_string(root: &Path) -> Result<String, SessionStoreError> {
 async fn live_session_ids_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<Vec<String>, SessionStoreError> {
     Ok(sqlx::query_scalar("SELECT agent_session_id FROM agent_sessions WHERE state='live' ORDER BY agent_session_id")
         .fetch_all(&mut **tx).await?)
+}
+
+async fn managed_app_namespaces_tx(tx: &mut Transaction<'_, Sqlite>, app_ids: &BTreeSet<String>)
+    -> Result<Vec<ManagedAppWorkspaceNamespaceV1>, SessionStoreError> {
+    if app_ids.is_empty() { return Ok(Vec::new()); }
+    let owner: String = sqlx::query_scalar("SELECT owner_user_id FROM installation_identity WHERE singleton_key='installation'")
+        .fetch_optional(&mut **tx).await?.ok_or_else(|| conflict("managed applications have no current installation owner"))?;
+    app_ids.iter().map(|app_id| {
+        let namespace = ManagedAppWorkspaceNamespaceV1 { app_id: app_id.clone(), owner_id: owner.clone() };
+        namespace.validate().map_err(SessionStoreError::InvalidPayload)?;
+        Ok(namespace)
+    }).collect()
 }
 
 async fn require_relocation_idle_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<(), SessionStoreError> {
@@ -576,7 +770,8 @@ async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_, Sqlite>) -
 
 async fn prepare_resources_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionLiveRecord,
     namespace: Option<&ManagedSessionWorkspaceNamespaceV1>,
-    data: &str, work: &str, target: &str) -> Result<(Vec<TypedResourceBinding>, BTreeSet<String>), SessionStoreError> {
+    apps: &[ManagedAppWorkspaceNamespaceV1], data: &str, work: &str, target: &str)
+    -> Result<(Vec<TypedResourceBinding>, BTreeSet<String>, Option<ManagedAppWorkspaceNamespaceV1>), SessionStoreError> {
     validate_uuidv7(session.agent_session_id.as_ref(), "managed Session")?;
     let mut resources = session.agent_binding.typed_resource_bindings.clone();
     let selected = resources.iter().any(|resource| resource.resource_kind.as_ref() == "workspace"
@@ -584,10 +779,28 @@ async fn prepare_resources_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentS
     let mut knowledge_ids = BTreeSet::new();
     let knowledge_source = Path::new(data).join("knowledge").to_string_lossy().into_owned();
     let knowledge_target = Path::new(target).join("knowledge").to_string_lossy().into_owned();
+    let app_workspace = apps.iter().find(|app| resources.iter().any(|resource|
+        resource.resource_kind.as_ref() == "workspace" && resource.typed_parameters.get("workspace_root")
+            .is_some_and(|root| storage_paths_equal(root, &app.workspace_root(data))))).cloned();
+    if let Some(app) = &app_workspace {
+        if app.owner_id != session.owner_ref.principal_id || session.owner_ref.principal_kind != "user"
+            || session.remote_binding_provenance.is_some()
+        { return Err(conflict("registered application project belongs to another or remote Session owner")); }
+        if resources.iter().any(|resource| is_app_project_location_resource(resource)
+            && resource.typed_parameters.get("workspace_root").is_some_and(|root|
+                !storage_paths_equal(root, &app.workspace_root(data))))
+        { return Err(conflict("registered application Session has inconsistent current project roots")); }
+        validate_app_location_tx(tx, session, app, data).await?;
+    }
     for resource in &mut resources {
         if resource.owner_id != session.owner_ref.principal_id { return Err(conflict("Session storage resource belongs to another owner")); }
         let owned_source = namespace.map(|namespace| Path::new(work).join("conversations").join(namespace.agent_session_id.as_ref()));
-        if matches!(resource.resource_kind.as_ref(), "workspace" | "process_session")
+        if is_app_project_location_resource(resource)
+            && app_workspace.as_ref().is_some_and(|app| resource.typed_parameters.get("workspace_root")
+                .is_some_and(|root| storage_paths_equal(root, &app.workspace_root(data)))) {
+            resource.typed_parameters.insert("workspace_root".into(), app_workspace.as_ref().expect("matched application").workspace_root(target));
+            resource.binding_id = resource_definition_id(resource)?;
+        } else if matches!(resource.resource_kind.as_ref(), "workspace" | "process_session")
             && owned_source.as_ref().is_some_and(|source| resource.typed_parameters.get("workspace_root")
                 .is_some_and(|root| storage_paths_equal(root, &source.to_string_lossy()))) {
             resource.typed_parameters.insert("workspace_root".into(), Path::new(target).join("conversations")
@@ -619,7 +832,7 @@ async fn prepare_resources_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentS
             resource.binding_id = resource_definition_id(resource)?;
         }
     }
-    Ok((resources, knowledge_ids))
+    Ok((resources, knowledge_ids, app_workspace))
 }
 
 async fn require_settled_patch_history_tx(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<(), SessionStoreError> {

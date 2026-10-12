@@ -104,6 +104,15 @@ pub(crate) fn activate_deferred_tools(
     activated: &mut BTreeSet<String>,
     names: &[String],
 ) -> Result<(), AgentEngineError> {
+    activate_window(plan, activated, names, MAX_MATCHES)
+}
+
+fn activate_window(
+    plan: &AgentToolPlan,
+    activated: &mut BTreeSet<String>,
+    names: &[String],
+    protected_limit: usize,
+) -> Result<(), AgentEngineError> {
     validate_window_base(plan)?;
     let definitions = plan.model_definitions();
     let by_name = definitions.iter().map(|definition| (definition.name.as_str(), definition))
@@ -114,7 +123,7 @@ pub(crate) fn activate_deferred_tools(
     if protected.is_empty() {
         return Ok(());
     }
-    if protected.len() > MAX_MATCHES {
+    if protected.len() > protected_limit {
         return Err(AgentEngineError::InvalidContract(
             "one deferred presentation update exceeds the ToolSearch match bound".into(),
         ));
@@ -128,6 +137,11 @@ pub(crate) fn activate_deferred_tools(
     for definition in definitions.iter().filter(|definition| !definition.deferred) {
         occupied += 1;
         byte_count = byte_count.saturating_add(bytes(definition)?);
+    }
+    if occupied + protected.len() > MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS {
+        return Err(AgentEngineError::InvalidContract(
+            "host pre-activation exceeds available presentation slots; defer more initial schemas while retaining the frozen authorized plan".into(),
+        ));
     }
     let mut window = protected.clone();
     for name in &protected {
@@ -149,9 +163,11 @@ pub(crate) fn activate_deferred_tools(
     Ok(())
 }
 
-/// Host pre-activation has no temporal ordering. Apply its stable name order
-/// in the same bounded batches as canonical ToolSearch results instead of
-/// unioning all historical schemas into one model request.
+/// Host pre-activation is one explicit set, not a sequence of search results.
+/// Preserve every requested frozen schema atomically; splitting it into search
+/// batches can evict the first schemas under the soft byte target. The hard
+/// wire count and whole-request context budget still apply, and older search
+/// activations only fill the remaining space.
 pub(crate) fn preactivate_deferred_tools(
     plan: &AgentToolPlan,
     activated: &mut BTreeSet<String>,
@@ -160,10 +176,7 @@ pub(crate) fn preactivate_deferred_tools(
     let names = names.iter().filter(|name| {
         plan.binding(name.as_str()).is_some_and(|binding| binding.definition.deferred)
     }).cloned().collect::<Vec<_>>();
-    for batch in names.chunks(MAX_MATCHES) {
-        activate_deferred_tools(plan, activated, batch)?;
-    }
-    Ok(())
+    activate_window(plan, activated, &names, MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS)
 }
 
 pub(crate) fn catalog(plan: &AgentToolPlan, activated: &BTreeSet<String>) -> Option<String> {
@@ -610,17 +623,43 @@ mod tests {
     }
 
     #[test]
-    fn host_preactivation_uses_the_same_bounded_window_and_retains_the_final_batch() {
+    fn oversized_host_preactivation_is_rejected_atomically_without_changing_authority() {
         let plan = large_plan(145);
         let frozen = plan.clone();
         let mut names = (0..145).map(|index| format!("deferred_{index:03}")).collect::<BTreeSet<_>>();
         names.insert("outside_plan".to_owned());
         names.insert("visible_000".to_owned());
-        let mut activated = BTreeSet::new();
-        preactivate_deferred_tools(&plan, &mut activated, &names).unwrap();
-        assert_eq!(activated, (140..145).map(|index| format!("deferred_{index:03}")).collect());
-        assert_eq!(definitions(&plan, &activated).len(), MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS);
+        let mut activated = BTreeSet::from(["deferred_000".to_owned()]);
+        let before = activated.clone();
+        assert!(preactivate_deferred_tools(&plan, &mut activated, &names).is_err());
+        assert_eq!(activated, before);
         assert_eq!(plan, frozen);
+    }
+
+    #[test]
+    fn explicit_host_schema_set_survives_the_soft_byte_target_as_one_set() {
+        let mut base = binding("always_visible", false);
+        base.definition.description = "x".repeat(VISIBLE_TOOL_DEFINITION_BYTE_BUDGET);
+        let names = (0..10).map(|index| format!("selected_{index:03}")).collect::<BTreeSet<_>>();
+        let plan = AgentToolPlan::new(std::iter::once(base)
+            .chain(names.iter().map(|name| binding(name, true)))
+            .chain(std::iter::once(binding("older_search", true)))).unwrap();
+        let frozen = plan.clone();
+        let mut activated = BTreeSet::from(["older_search".to_owned()]);
+        preactivate_deferred_tools(&plan, &mut activated, &names).unwrap();
+        assert_eq!(activated, names);
+        assert_eq!(definitions(&plan, &activated).len(), 11);
+        assert_eq!(plan, frozen);
+    }
+
+    #[test]
+    fn host_schema_set_cannot_exceed_the_remaining_hard_wire_slots() {
+        let plan = large_plan(10);
+        let names = (0..10).map(|index| format!("deferred_{index:03}")).collect();
+        let mut activated = BTreeSet::from(["deferred_000".to_owned()]);
+        let before = activated.clone();
+        assert!(preactivate_deferred_tools(&plan, &mut activated, &names).is_err());
+        assert_eq!(activated, before);
     }
 
     #[test]

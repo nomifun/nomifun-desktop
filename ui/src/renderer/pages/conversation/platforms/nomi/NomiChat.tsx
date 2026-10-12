@@ -52,6 +52,9 @@ const NomiChat: React.FC<{
   creationEnabled?: boolean;
   /** Product-owned compact composer; configuration is exposed outside chat. */
   compactProductComposer?: boolean;
+  hideSessionCapabilities?: boolean;
+  submissionDisabled?: boolean;
+  onBeforeSubmit?: () => Promise<void>;
   /** Keep a followed Turn's final reply visible on product chat surfaces. */
   followTurnCompletion?: boolean;
 }> = ({
@@ -75,6 +78,9 @@ const NomiChat: React.FC<{
   creationTasksEnabled = false,
   creationEnabled = true,
   compactProductComposer = false,
+  hideSessionCapabilities = false,
+  submissionDisabled = false,
+  onBeforeSubmit,
   followTurnCompletion = false,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
@@ -174,6 +180,9 @@ const NomiChat: React.FC<{
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}
               compactProductComposer={compactProductComposer}
+              hideSessionCapabilities={hideSessionCapabilities}
+              submissionDisabled={submissionDisabled}
+              onBeforeSubmit={onBeforeSubmit}
               turnActivity={turnActivity}
             />
           )}

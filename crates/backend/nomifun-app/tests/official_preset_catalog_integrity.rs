@@ -2,11 +2,10 @@
 //!
 //! Static seed validation is deliberately insufficient here. This test boots
 //! the current Nomi-core product graph, reads the authenticated HTTP catalog,
-//! then installs a real Unified Plugin so the production Action registry is
-//! exercised before the same Agent contract is checked again.
+//! then imports an ordinary application through the production hosting owner
+//! before the same Agent contract is checked again.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,8 +19,7 @@ use nomifun_api_types::{
     CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CapabilityRefDto, CatalogMaterializationStateDto,
     CreateAgentPresetFromTemplateRequest,
-    CreateAgentSessionResponseDto, InstallPluginImportRequest, InstallPluginImportResponseDto,
-    PluginImportKindDto, PluginInstallOutcomeDto, SkillCatalogItemDto,
+    CreateAgentSessionResponseDto, SaveAgentPresetRevisionResponse, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router_with_states,
@@ -89,11 +87,9 @@ async fn general_agent_compiles_when_browser_is_attachable_but_not_yet_connected
         },
     )
     .await;
-    let plugin_development = editor.draft.document.enabled_capabilities.iter()
-        .find(|selection| selection.capability.id == nomifun_plugin_development::MODULE_ID)
-        .expect("general Agent enables plugin development by default");
-    assert_eq!(plugin_development.action_allowlist,
-        nomifun_plugin_development::CREATE_ACTIONS.iter().map(|action| (*action).to_owned()).collect());
+    assert!(editor.draft.document.enabled_capabilities.iter()
+        .all(|selection| selection.capability.id != "app.hosting"),
+        "communicating application development is opt-in, including for the General Agent");
     assert_eq!(
         editor.revision.expect("general Agent revision").reference.revision,
         1
@@ -140,14 +136,7 @@ fn official_preset_action_safety_matrix_is_exact() {
         "session.management/terminal_list", "session.management/terminal_read",
         "session.management/terminal_relaunch", "session.management/terminal_stop",
     ];
-    const PLUGIN_DEVELOPMENT: &[&str] = &[
-        "plugin.development/apply", "plugin.development/check", "plugin.development/inspect",
-        "plugin.development/install", "plugin.development/list", "plugin.development/open",
-        "plugin.development/plan", "plugin.development/preview", "plugin.development/read",
-        "plugin.development/test_action", "plugin.development/test_ui",
-    ];
-
-    let expected = BTreeMap::from([
+    let mut expected = BTreeMap::from([
         (OfficialPresetKey::ChatMinimal, actions(&[])),
         (OfficialPresetKey::AssistantGeneral, actions(&[
             ("model.management", &["model.management/add_model", "model.management/create_provider", "model.management/inspect"]),
@@ -164,7 +153,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("agent.collaboration", COLLABORATION),
             ("requirements", &["requirements/claim", "requirements/read", "requirements/status", "requirements/write"]),
             ("creation.media", MEDIA),
-            ("plugin.development", PLUGIN_DEVELOPMENT),
             ("creative.workshop", ASSETS),
             ("office", OFFICE),
             ("ssh", SSH),
@@ -180,7 +168,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("web.research", WEB),
             ("agent.collaboration", COLLABORATION),
             ("knowledge", KNOWLEDGE),
-            ("plugin.development", PLUGIN_DEVELOPMENT),
             ("ssh", SSH),
             ("knowledge.management", KNOWLEDGE_MANAGEMENT),
             ("session.management", SESSION_MANAGEMENT),
@@ -231,6 +218,10 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("automation.schedule", SCHEDULE),
         ])),
     ]);
+    let mut app_expected = expected[&OfficialPresetKey::CodingCodex].clone();
+    app_expected.extend(actions(&[("app.hosting", &["app.hosting/guide", "app.hosting/current", "app.hosting/import", "app.hosting/list",
+        "app.hosting/update", "app.hosting/preview", "app.hosting/rebuild", "app.hosting/start", "app.hosting/status", "app.hosting/stop"])]));
+    expected.insert(OfficialPresetKey::AppDeveloper, app_expected);
     let manifest = official_preset_seed_manifest_payload();
     for key in OfficialPresetKey::ALL {
         let actual = manifest.templates[&key].enabled_capabilities.iter()
@@ -271,7 +262,125 @@ fn official_preset_action_safety_matrix_is_exact() {
 }
 
 #[tokio::test]
-async fn every_published_official_preset_stays_available_after_unified_plugin_install() {
+async fn nomifun_app_development_is_optional_and_preserves_personal_grants_and_frozen_sessions() {
+    let root = tempfile::tempdir().expect("allocate isolated coding Agent root");
+    let database = nomifun_db::init_database_memory().await.expect("initialize product database");
+    let services = AppServices::from_config(database, &AppConfig {
+        data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken,
+        local_trust_secret: Some(Arc::from(LOCAL_TRUST_SECRET)), ..AppConfig::default()
+    }).await.expect("compose product services");
+    let model = seed_search_and_vision_ready_chat_route(&services.database, &services.encryption_key).await;
+    let (states, _channel_components) = build_module_states(&services).await;
+    let router = create_router_with_states(&services, states);
+    let create = |name: &str| CreateAgentPresetFromTemplateRequest {
+        model: Some(model.clone()), reuse_existing: false, display_name: name.into(),
+        description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+    };
+    let personal: AgentPresetEditorResponse = post_data(&router,
+        "/api/agent-presets/from-template/coding.codex", &create("Personal coding Agent")).await;
+    assert!(personal.draft.document.enabled_capabilities.iter()
+        .all(|selection| selection.capability.id != "app.hosting"), "ordinary Coding Agents do not inject application tools by default");
+    let catalog: AgentCatalogResponse = get_data(&router, "/api/agent-catalog").await;
+    let candidate = catalog.modules.iter().find(|module| module.module.id == "app.hosting")
+        .expect("the application development module remains an optional workbench candidate");
+    let hosting = CapabilitySelectionDto {
+        capability: candidate.module.clone(),
+        action_allowlist: candidate.actions.iter().map(|action| action.action_id.clone()).collect(),
+    };
+    assert_eq!(hosting.action_allowlist, BTreeSet::from([
+        "app.hosting/guide", "app.hosting/current", "app.hosting/import", "app.hosting/list", "app.hosting/update", "app.hosting/preview", "app.hosting/rebuild", "app.hosting/start", "app.hosting/status", "app.hosting/stop"
+    ].map(str::to_owned)));
+    for capability in ["workspace.files", "workspace.process"] {
+        assert!(personal.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == capability));
+    }
+
+    // An ordinary saved personal Agent and Session start without the module.
+    let preset_id = &personal.preset.preset_id;
+    let open = |preset_id: &str| serde_json::json!({
+        "preset_id": preset_id, "title": "Coding application development",
+        "resource_selections": official_session_resources("coding.codex", "", ""),
+    });
+    let frozen: CreateAgentSessionResponseDto = post_data(&router, "/api/agent-sessions", &open(preset_id)).await;
+    let frozen_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", frozen.agent_session_id)).await;
+    let frozen_snapshot = frozen_projection.agent_snapshot.expect("persisted Session snapshot");
+    assert!(!frozen_snapshot.enabled_capability_actions.contains_key("app.hosting"));
+    let frozen_revision: AgentPresetRevisionDto = get_data(&router, &format!(
+        "/api/agent-presets/{}/revisions/{}", frozen.agent_binding.preset_revision_ref.preset_id,
+        frozen.agent_binding.preset_revision_ref.revision)).await;
+
+    let still_narrow: AgentPresetEditorResponse = get_data(&router,
+        &format!("/api/agent-presets/{preset_id}/editor")).await;
+    assert_eq!(still_narrow.revision, personal.revision);
+    assert!(!still_narrow.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == "app.hosting"));
+
+    // Preserve an explicit older five-Action selection when the candidate adds
+    // the optional guide Action. Catalog additions are not new user grants.
+    let prior_selection = CapabilitySelectionDto { capability: hosting.capability.clone(), action_allowlist: BTreeSet::from([
+        "app.hosting/import", "app.hosting/list", "app.hosting/start", "app.hosting/status", "app.hosting/stop"].map(str::to_owned)) };
+    let mut expanded_draft = still_narrow.draft;
+    expanded_draft.document.enabled_capabilities.push(prior_selection.clone());
+    let expanded: SaveAgentPresetRevisionResponse = post_data(&router, &format!("/api/agent-presets/{preset_id}/revisions"),
+        &serde_json::json!({
+            "expected_current_revision": still_narrow.revision.unwrap().reference,
+            "draft": expanded_draft,
+        })).await;
+    assert!(expanded.revision.document.enabled_capabilities.contains(&prior_selection));
+    let next: CreateAgentSessionResponseDto = post_data(&router, "/api/agent-sessions", &open(preset_id)).await;
+    let next_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", next.agent_session_id)).await;
+    let selected_snapshot = next_projection.agent_snapshot.unwrap();
+    assert_eq!(selected_snapshot.enabled_capability_actions.get("app.hosting"), Some(&prior_selection.action_allowlist));
+    let expanded_persisted: AgentPresetEditorResponse = get_data(&router,
+        &format!("/api/agent-presets/{preset_id}/editor")).await;
+    let stored_revision = expanded_persisted.revision.as_ref().unwrap();
+    assert_eq!(stored_revision.reference, expanded.revision.reference);
+    assert_eq!(stored_revision.document, expanded.revision.document);
+
+    // Publishing defaults without this module cannot revoke a user's explicit
+    // saved choice. New official Agents still require the same opt-in.
+    let current: AgentPresetEditorResponse = post_data(&router,
+        "/api/agent-presets/from-template/coding.codex", &create("Current official coding Agent")).await;
+    assert!(current.draft.document.enabled_capabilities.iter().all(|selection| selection.capability.id != "app.hosting"));
+    let still_expanded: AgentPresetEditorResponse = get_data(&router,
+        &format!("/api/agent-presets/{preset_id}/editor")).await;
+    assert_eq!(still_expanded.revision, expanded_persisted.revision,
+        "official defaults cannot revoke explicit personal grants or rewrite the stored Revision");
+    assert!(still_expanded.draft.document.enabled_capabilities.contains(&prior_selection));
+
+    // The optional guide is granted only by a subsequent explicit user save;
+    // that new Revision applies to a new Session while both older ones stay frozen.
+    let mut with_guide_draft = still_expanded.draft;
+    *with_guide_draft.document.enabled_capabilities.iter_mut()
+        .find(|selection| selection.capability.id == "app.hosting").unwrap() = hosting.clone();
+    let with_guide: SaveAgentPresetRevisionResponse = post_data(&router, &format!("/api/agent-presets/{preset_id}/revisions"),
+        &serde_json::json!({
+            "expected_current_revision": still_expanded.revision.unwrap().reference,
+            "draft": with_guide_draft,
+        })).await;
+    assert!(with_guide.revision.document.enabled_capabilities.contains(&hosting));
+    let guided: CreateAgentSessionResponseDto = post_data(&router, "/api/agent-sessions", &open(preset_id)).await;
+    let guided_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", guided.agent_session_id)).await;
+    assert_eq!(guided_projection.agent_snapshot.unwrap().enabled_capability_actions.get("app.hosting"), Some(&hosting.action_allowlist));
+    let unchanged_selected: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", next.agent_session_id)).await;
+    assert_eq!(unchanged_selected.agent_snapshot.unwrap(), selected_snapshot,
+        "explicitly adding a guide must not rewrite the earlier five-Action Session");
+    let unchanged_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", frozen.agent_session_id)).await;
+    assert_eq!(serde_json::to_value(unchanged_projection.agent_snapshot.unwrap()).unwrap(),
+        serde_json::to_value(frozen_snapshot).unwrap(), "saving an Agent must not expand or rewrite the frozen Session");
+    let unchanged_revision: AgentPresetRevisionDto = get_data(&router, &format!(
+        "/api/agent-presets/{}/revisions/{}", frozen.agent_binding.preset_revision_ref.preset_id,
+        frozen.agent_binding.preset_revision_ref.revision)).await;
+    assert_eq!(unchanged_revision, frozen_revision, "the exact Session-only immutable Revision is preserved");
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn every_published_official_preset_stays_available_after_ordinary_app_import() {
     let root = tempfile::tempdir().expect("allocate isolated product root");
     let database = nomifun_db::init_database_memory()
         .await
@@ -310,31 +419,30 @@ async fn every_published_official_preset_stays_available_after_unified_plugin_in
 
     assert_official_preset_catalog_integrity(&router, &services, &skill_paths, "startup catalog", &exact_model).await;
 
-    let source = root.path().join("catalog-refresh-plugin");
-    write_unified_plugin_package(&source);
-    let installed: InstallPluginImportResponseDto = post_data(
+    let source = root.path().join("catalog-hosted-app");
+    std::fs::create_dir_all(&source).expect("create ordinary application fixture");
+    std::fs::write(source.join("index.html"), "<!doctype html><title>Catalog application</title>")
+        .expect("write ordinary application fixture");
+    let imported: serde_json::Value = post_data(
         &router,
-        "/api/plugins/import",
-        &InstallPluginImportRequest {
-            source_path: source.display().to_string(),
-            kind: PluginImportKindDto::Directory,
-            expected_plugin_revision: None,
-            create_copy: false,
-            config: None,
-            credential_bindings: None,
-        },
+        "/api/apps/import",
+        &serde_json::json!({"source": source, "import_kind": "artifact", "name": "Catalog application"}),
     )
     .await;
-    assert!(matches!(installed.result, PluginInstallOutcomeDto::Installed { .. }));
+    let app_id = imported["id"].as_str().expect("ordinary application registration");
+    assert_eq!(services.app_hosting.get(app_id).await.unwrap().state, nomifun_app_hosting::AppState::Stopped);
 
     assert_official_preset_catalog_integrity(
         &router,
         &services,
         &skill_paths,
-        "catalog after Unified Plugin Action registry install",
+        "catalog after ordinary application import",
         &exact_model,
     )
     .await;
+
+    services.app_hosting.delete(app_id).await.expect("remove disposable application");
+    assert!(source.join("index.html").exists(), "application import and delete retain the source");
 
     services
         .shutdown_browser_platform()
@@ -674,7 +782,7 @@ fn official_session_resources(
             resource("scheduler", "installation-scheduler"),
             resource("workspace", "default-workspace"),
         ]),
-        "coding.codex" => serde_json::json!([
+        "coding.codex" | "app.developer" => serde_json::json!([
             resource("process_session", "managed-process-session"),
             resource("project_memory", "default-project-memory"),
             resource("workspace", "default-workspace"),
@@ -813,43 +921,4 @@ where
         serde_json::from_slice(&bytes).expect("decode typed POST response");
     assert!(response.success, "POST {path} returned an error envelope");
     response.data.expect("successful POST response data")
-}
-
-fn write_unified_plugin_package(root: &Path) {
-    std::fs::create_dir_all(root).expect("create Plugin fixture directory");
-    std::fs::write(
-        root.join("nomifun.plugin.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schema": "nomifun.plugin/v1",
-            "id": "test.release-gate.plugin",
-            "version": "1.0.0",
-            "name": "Release Gate Plugin",
-            "description": "Exercises the Unified Action registry",
-            "hostApi": "1.0.0",
-            "entrypoints": {"service": "service/main.mjs", "serviceMode": "onDemand"},
-            "actions": {
-                "echo": {
-                    "name": "Echo",
-                    "description": "Return the input",
-                    "input": {"type": "object"},
-                    "output": {"type": "object"},
-                    "effect": "read"
-                }
-            },
-            "bindings": [],
-            "dataVersion": 0,
-            "migrations": [],
-            "configSchema": {"type": "object"},
-            "secrets": [],
-            "permissions": []
-        }))
-        .expect("serialize Unified Plugin manifest"),
-    )
-    .expect("write Plugin manifest");
-    std::fs::create_dir_all(root.join("service")).expect("create Service directory");
-    std::fs::write(
-        root.join("service/main.mjs"),
-        "export async function activate() { return { async invoke(_action, input) { return input; } }; }",
-    )
-    .expect("write Plugin Service");
 }

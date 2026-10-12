@@ -93,15 +93,16 @@ What NomiFun itself does over the network:
 
 There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in the binary. The backend does not phone home on its own.
 
-## What about plugins and skills — what runs them?
+## What runs hosted applications and skills?
 
-Unified Plugins are local packages you import and enable yourself; they run
-under the Unified Plugin Core with their own credentials and lifecycle. Skills
-are bundles of prompts/instructions resolved into the agent's context
-per-conversation. Both live as local data under your data dir; there is no
-extension marketplace that downloads them automatically.
+Application hosting runs ordinary foreground commands in a managed copy.
+Applications keep their own stack and data and can receive automatic local
+Host access. Optional MCP tools require explicit Agent/session selection.
+Skills provide instructions and workflows to Agent context; they do not own
+application processes. See [application hosting](../guides/app-hosting.md).
 
-Agent CLI binaries are not plugins either — they are third-party CLIs you install yourself and run in an [in-app terminal](../guides/terminal.md).
+Third-party Agent CLIs remain programs you install and use in an
+[in-app terminal](../guides/terminal.md).
 
 ## Can I run agents on a different machine from the UI?
 

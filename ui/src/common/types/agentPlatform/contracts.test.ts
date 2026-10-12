@@ -25,6 +25,7 @@ describe('Agent Platform TypeScript contracts', () => {
       'companion.default',
       'customer-service.default',
       'creative-studio.default',
+      'app.developer',
     ]);
     expect(OFFICIAL_PRESET_KEYS.includes('research' as never)).toBe(false);
   });

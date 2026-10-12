@@ -102,8 +102,7 @@ pub struct ModuleStates {
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
-    /// Unified Plugin Library, Draft, Import, Surface and storage state.
-    pub plugin: super::plugin::PluginRouterState,
+    pub(crate) app_hosting: super::app_hosting::AppHostingRouterState,
     /// 生成引擎 (creation) media task queue.
     pub creation: CreationRouterState,
     pub webhook: WebhookRouterState,
@@ -209,74 +208,14 @@ pub(crate) async fn try_build_module_states(
     );
     conversation_owner.install_idmm(Arc::downgrade(&idmm_service))?;
     let idmm_state = IdmmRouterState::new(idmm_service.clone(), conversation_owner.clone());
-    let javascript_runtime_foundation =
-        super::javascript_runtime::build_javascript_runtime_foundation()
-        .await
-        .map_err(|error| anyhow::anyhow!("JavaScript Runtime foundation composition failed: {error:#}"))?;
-    let plugin_action_dispatcher = Arc::new(
-        super::plugin_ports::RegistryPluginActionDispatcher::default(),
-    );
-    let plugin_ports = super::plugin_ports::build_plugin_service_ports(
-        services.database.pool().clone(),
-        services.encryption_key,
-        plugin_action_dispatcher.clone(),
-    );
-    let plugin_surface_host = plugin_ports.host.clone();
-    let plugin_service_runtime = Arc::new(nomifun_plugin_platform::PluginServiceRuntime::new(
-        javascript_runtime_foundation.authority(),
-        services.plugin_artifacts.clone(),
-        plugin_ports,
-    ));
-    let plugin_binding_registry = nomifun_plugin_platform::InMemoryPluginBindingRegistry::new(
-        Arc::new(super::plugin_ports::PluginServiceActionRuntime::new(
-            plugin_service_runtime.clone(),
-        )),
-    );
-    super::plugin_ports::register_plugin_binding_owners(&plugin_binding_registry)
-        .map_err(|error| anyhow::anyhow!("Plugin Binding owner registration failed: {error}"))?;
-    plugin_action_dispatcher
-        .install(plugin_binding_registry.clone())
-        .map_err(anyhow::Error::msg)?;
-    let plugin_binding_consumers =
-        super::plugin_ports::PluginBindingConsumers::new(
-            plugin_binding_registry.clone(),
-            plugin_surface_host,
-        );
-    services
-        .plugin_service_runtime
-        .set(plugin_service_runtime.clone())
-        .map_err(|_| anyhow::anyhow!("Plugin Service runtime was installed more than once"))?;
-    let plugin_install = Arc::new(nomifun_plugin_platform::PluginInstallService::new(
-        services.plugin_repository.clone(),
-        services.plugin_artifacts.clone(),
-        services.plugin_data_roots.clone(),
-        plugin_service_runtime.clone(),
-        Arc::new(plugin_binding_registry),
-    ));
-    plugin_install
-        .recover()
-        .await
-        .map_err(|error| anyhow::anyhow!("Plugin mutation recovery failed: {error}"))?;
-    let plugin_state = super::plugin::PluginRouterState::new(
-        services,
-        plugin_install,
-        plugin_service_runtime,
-        plugin_binding_consumers,
-    );
-    plugin_state
-        .recover()
-        .await
-        .map_err(|error| anyhow::anyhow!("Plugin runtime recovery failed: {error}"))?;
     let (nomi_core_agent_api, nomi_core_wave4_owners, mcp_catalog_publisher, session_management_owner) =
         build_nomi_core_agent_api_state(
             services,
             conversation_owner.clone(),
             idmm_service.clone(),
-            plugin_state.agent.clone(),
-            plugin_state.clone(),
         )
         .await
-        .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
+        .map_err(|error| anyhow::anyhow!("Nomi-core Agent platform composition failed: {error:#}"))?;
     #[cfg(feature = "browser-use")]
     if let Some(attached_chrome) = services.attached_chrome.as_ref() {
         crate::browser_workspace_provider::install_attached_session_verifier(
@@ -398,7 +337,7 @@ pub(crate) async fn try_build_module_states(
         file: build_file_state(services),
         mcp: {
             let mut state = build_mcp_state(services);
-            state.config_service = state.config_service.with_catalog_publisher(mcp_catalog_publisher);
+            state.config_service = state.config_service.with_catalog_publisher(mcp_catalog_publisher.clone());
             state
         },
         skill: skill_state,
@@ -415,7 +354,7 @@ pub(crate) async fn try_build_module_states(
             )),
         },
         workshop: build_workshop_state(services),
-        plugin: plugin_state,
+        app_hosting: super::app_hosting::AppHostingRouterState::new(services, nomi_core_agent_api.clone(), mcp_catalog_publisher),
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
         // REST routes, model tools and AutoWork share this one engine and its
@@ -448,8 +387,6 @@ async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
     idmm: Arc<nomifun_idmm::IdmmService>,
-    agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
-    plugin: super::plugin::PluginRouterState,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
@@ -460,7 +397,7 @@ async fn build_nomi_core_agent_api_state(
     let builtin_plan = super::nomi_core_builtins::build(
         services,
         conversation_owner.canonical().store().clone(),
-        plugin.clone(),
+        Arc::downgrade(&conversation_owner),
     )
     .await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
@@ -482,10 +419,9 @@ async fn build_nomi_core_agent_api_state(
     policy.allowed_sources.insert(PluginSourceKind::ManagedLocal);
     policy.available_runtime_features =
         feature_inventory.runtime_features.clone();
-    // Kernel PluginState is an in-process capability-state cache. Durable
-    // owner data belongs to the Plugin repository/KV and Plugin data roots;
-    // this NomiCore composition does not own the Fresh-v4 `plugin_states`
-    // table and must not open it from the legacy application database.
+    // Kernel registration state is an in-process capability cache. Hosted
+    // application files and processes belong to the hosting owner; canonical
+    // Agent facts remain in the existing Agent Store.
     let state_persistence = Arc::new(InMemoryPluginStatePersistence::new());
     let kernel = Arc::new(KernelRegistry::new(
         policy,
@@ -554,9 +490,7 @@ async fn build_nomi_core_agent_api_state(
     let module_publisher = Arc::new(NomiCoreModuleCatalogPublisher::new(
         Arc::clone(&kernel),
         registrations,
-        Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-            services.database.pool().clone(),
-        )),
+        services.app_mcp_sources.clone(),
         Arc::clone(&builtin_plan.wave2_owner),
     ));
     #[cfg(feature="browser-use")]
@@ -566,6 +500,7 @@ async fn build_nomi_core_agent_api_state(
     }
     let mcp_catalog_publisher: Arc<dyn nomifun_mcp::service::McpCatalogPublisher> =
         module_publisher;
+    services.app_mcp_sources.set_publisher(mcp_catalog_publisher.clone())?;
     let schema_resolver: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver> =
         Arc::new(BuiltinToolSchemaAdapter {
             inner: Arc::clone(&builtin_plan.schema_resolver),
@@ -625,7 +560,8 @@ async fn build_nomi_core_agent_api_state(
     let session_capabilities = Arc::new(super::session_capabilities::GlobalSessionCapabilities {
         owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
         skills: Arc::clone(&services.skill_paths),
-        mcp: Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
+        mcp: services.app_mcp_sources.clone(),
+        app_mcp: services.app_mcp_sources.clone(),
     });
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
@@ -641,6 +577,9 @@ async fn build_nomi_core_agent_api_state(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     ))
     .with_session_capabilities_resolver(session_capabilities.clone()));
+    control_plane.retire_replaced_app_plugin_configuration(
+        &nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
+    ).await?;
     let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
         .map_err(|error| {
             anyhow::anyhow!("{}: {}", error.code(), error.message())
@@ -671,8 +610,6 @@ async fn build_nomi_core_agent_api_state(
                 services.database.pool().clone(),
             ),
             robot: robot_owner.clone(),
-            agent_plugins,
-            plugin_development: plugin,
         },
     )?);
     services
@@ -795,10 +732,223 @@ impl nomifun_mcp::service::McpCatalogPublisher for NomiCoreModuleCatalogPublishe
             .await
             .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?,
         );
+        let registrations = registrations
+            .iter()
+            .map(nomifun_agent_kernel::PluginRegistration::canonicalized)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        let current = self.kernel.snapshot()
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        let metadata = registrations.iter()
+            .map(|registration| (
+                registration.metadata.mount_id.clone(),
+                registration.metadata.clone(),
+            ))
+            .collect::<BTreeMap<_, _>>();
+        // A probe or application lifecycle notification can repeat the same
+        // catalog. Preserve the published generation and handlers when its
+        // complete typed contract is unchanged: running Sessions retain their
+        // exact Snapshot fence. Duplicate mounts still reach Kernel validation.
+        // Changes to tools, schemas, connection refs or source availability
+        // remain real publications and must obey the existing selection fences.
+        if metadata.len() == registrations.len() && metadata == current.plugins {
+            return Ok(());
+        }
         self.kernel
             .replace_all(registrations)
             .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod catalog_publisher_tests {
+    use super::*;
+    use nomifun_agent_contracts::{
+        AgentPresetRevision, AgentPresetRevisionPayload, CapabilityRef, CapabilitySelection,
+        PresetRevisionRef, PrincipalRef, TypedResourceBinding, UserId,
+    };
+    use nomifun_agent_kernel::{
+        AgentPresetCompiler, CompileRequest, CompiledSnapshot, MaterializedRegistry,
+        SessionCapabilityState,
+    };
+    use nomifun_db::{CreateMcpServerParams, IMcpServerRepository, UpdateMcpServerParams};
+    use nomifun_mcp::service::McpCatalogPublisher;
+    use serde_json::json;
+
+    async fn fixture() -> (
+        nomifun_db::Database,
+        Arc<dyn IMcpServerRepository>,
+        Arc<KernelRegistry>,
+        NomiCoreModuleCatalogPublisher,
+    ) {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let repository: Arc<dyn IMcpServerRepository> = Arc::new(
+            nomifun_db::SqliteMcpServerRepository::new(database.pool().clone()),
+        );
+        let mut policy = MaterializationPolicy::stable("1.0.0");
+        policy.available_runtime_features = platform_feature_inventory_payload()
+            .unwrap().runtime_features;
+        let kernel = Arc::new(KernelRegistry::new(
+            policy,
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        ).unwrap());
+        let registrations = nomifun_agent_domain_wave2::registrations().unwrap();
+        kernel.replace_all(registrations.clone()).unwrap();
+        let publisher = NomiCoreModuleCatalogPublisher::new(
+            kernel.clone(), registrations, repository.clone(),
+            Arc::new(super::super::nomi_core_wave2::NomiCoreWave2Host::default()),
+        );
+        (database, repository, kernel, publisher)
+    }
+
+    fn ordinary_session_snapshot(registry: &MaterializedRegistry) -> CompiledSnapshot {
+        let principal = PrincipalRef {
+            principal_kind: "user".into(), principal_id: "catalog-owner".into(),
+        };
+        let payload = AgentPresetRevisionPayload {
+            schema_version: "1.0.0".into(),
+            context_order: Vec::new(), middleware_order: Vec::new(),
+            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+            enabled_capabilities: vec![CapabilitySelection {
+                capability: CapabilityRef { id: "workspace.files".into() },
+                action_allowlist: BTreeSet::from(["workspace.files/read".into()]),
+            }],
+            skill_bindings: Vec::new(), system_role_provider_overrides: BTreeMap::new(),
+            persona: "Ordinary coding Agent".into(), instructions: "Read one file".into(),
+            starter_prompts: Vec::new(), runtime_policy: Default::default(),
+        };
+        let mut revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: "catalog-refresh-session".into(), revision: 1,
+                revision_digest: digest_payload(&payload).unwrap(),
+            },
+            payload,
+            contribution_locks: vec![registry.capability(&"workspace.files".into())
+                .unwrap().contribution_lock.clone()],
+            created_by: UserId::from(principal.principal_id.clone()),
+            created_at_ms: 1, reason: None,
+        };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        AgentPresetCompiler::compile(registry, &CompilerEnvironment {
+            resolver_version: "1.0.0".into(),
+            required_runtime_protocol_version: "1.0.0".into(),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: "runtime".into(),
+            available_runtime_features: platform_feature_inventory_payload()
+                .unwrap().runtime_features,
+            installation_role_bindings: BTreeMap::new(),
+            canonical_schema_manifest_digest: "schema".into(),
+            target_contribution_manifest_digest: "target".into(),
+            host_target: "x86_64-pc-windows-msvc".into(), host_surface: "desktop".into(),
+            availability_evidence_revision: "catalog-refresh-test".into(),
+        }, CompileRequest {
+            revision, principal: principal.clone(), scene: "coding".into(),
+            surface: "desktop".into(), audience: "user".into(),
+            created_at_ms: 2, resolver_run_id: "catalog-refresh-resolve".into(),
+        }).unwrap().with_target_resource_bindings(&principal, vec![TypedResourceBinding {
+            binding_id: "workspace-binding".into(), resource_kind: "workspace".into(),
+            resource_id: "workspace-resource".into(), owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None, typed_parameters: BTreeMap::new(),
+        }]).unwrap()
+    }
+
+    fn ordinary_session_plan(
+        snapshot: &CompiledSnapshot,
+        registry: &MaterializedRegistry,
+    ) -> Result<nomifun_agent_runtime::AgentToolPlan, nomifun_agent_runtime::AgentEngineError> {
+        let active = SessionCapabilityState::new(snapshot).snapshot().unwrap();
+        let read = nomifun_agent_runtime::standard_agent_tool_exposures()
+            .into_iter().filter(|exposure| {
+                exposure.capability_id.as_ref() == "workspace.files"
+                    && exposure.action_id.as_ref() == "workspace.files/read"
+            });
+        nomifun_agent_runtime::compile_agent_tool_plan(snapshot, &active, registry, read)
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_catalog_refresh_preserves_the_running_session_registry() {
+        let (database, _, kernel, publisher) = fixture().await;
+        let before = kernel.snapshot().unwrap();
+        let snapshot = ordinary_session_snapshot(&before);
+        assert!(ordinary_session_plan(&snapshot, &before).unwrap().binding("read_file").is_some());
+        for _ in 0..3 {
+            publisher.refresh().await.unwrap();
+            let current = kernel.snapshot().unwrap();
+            assert!(Arc::ptr_eq(&before, &current), "no-op must preserve the actual publication");
+            assert_eq!(current.generation, snapshot.registry_generation);
+            assert_eq!(current.registry_digest, snapshot.registry_digest);
+            assert!(ordinary_session_plan(&snapshot, &current).unwrap().binding("read_file").is_some());
+        }
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn repeated_mcp_catalog_refresh_is_noop_but_actual_contract_changes_are_fenced() {
+        let (database, repository, kernel, publisher) = fixture().await;
+        let initial = kernel.snapshot().unwrap();
+        let initial_snapshot = ordinary_session_snapshot(&initial);
+        let tools = json!([
+            {"name":"lookup", "description":"Lookup one value", "input_schema":{
+                "type":"object", "additionalProperties":false,
+                "properties":{"query":{"type":"string"}}, "required":["query"]
+            }},
+            {"name":"ping", "description":"Check availability", "input_schema":{
+                "type":"object", "additionalProperties":false
+            }}
+        ]);
+        let row = repository.create(CreateMcpServerParams {
+            name: "Hosted source", description: None, enabled: true,
+            transport_type: "http", transport_config: r#"{"url":"http://127.0.0.1:38123/mcp"}"#,
+            tools: Some(&tools.to_string()), original_json: None, builtin: false,
+        }).await.unwrap();
+        publisher.refresh().await.unwrap();
+        let published = kernel.snapshot().unwrap();
+        assert_eq!(published.generation, initial.generation + 1);
+        assert_eq!(published.mcp_tools.len(), 2);
+        assert!(ordinary_session_plan(&initial_snapshot, &published).is_err(),
+            "a real source publication must retain the exact Snapshot fence");
+        let snapshot = ordinary_session_snapshot(&published);
+        let reversed = json!([tools[1].clone(), tools[0].clone()]);
+        repository.update_tools(&row.mcp_server_id, Some(&reversed.to_string())).await.unwrap();
+        repository.update_status(&row.mcp_server_id, "connected", None).await.unwrap();
+        for _ in 0..3 {
+            publisher.refresh().await.unwrap();
+            let current = kernel.snapshot().unwrap();
+            assert!(Arc::ptr_eq(&published, &current),
+                "probe state and discovery order do not change the typed catalog");
+            assert!(ordinary_session_plan(&snapshot, &current).unwrap().binding("read_file").is_some());
+        }
+
+        let mut changed = tools;
+        changed[0]["input_schema"]["properties"]["query"]["maxLength"] = json!(128);
+        repository.update_tools(&row.mcp_server_id, Some(&changed.to_string())).await.unwrap();
+        publisher.refresh().await.unwrap();
+        let schema_changed = kernel.snapshot().unwrap();
+        assert_eq!(schema_changed.generation, published.generation + 1);
+        assert_ne!(schema_changed.registry_digest, published.registry_digest);
+        assert!(ordinary_session_plan(&snapshot, &schema_changed).is_err());
+
+        repository.update(&row.mcp_server_id, UpdateMcpServerParams {
+            transport_config: Some(r#"{"url":"http://127.0.0.1:38124/mcp"}"#),
+            ..Default::default()
+        }).await.unwrap();
+        publisher.refresh().await.unwrap();
+        let connection_changed = kernel.snapshot().unwrap();
+        assert_eq!(connection_changed.generation, schema_changed.generation + 1);
+        assert_ne!(connection_changed.registry_digest, schema_changed.registry_digest);
+
+        repository.update(&row.mcp_server_id, UpdateMcpServerParams {
+            enabled: Some(false), ..Default::default()
+        }).await.unwrap();
+        publisher.refresh().await.unwrap();
+        let disabled = kernel.snapshot().unwrap();
+        assert_eq!(disabled.generation, connection_changed.generation + 1);
+        assert!(disabled.mcp_tools.is_empty());
+        publisher.refresh().await.unwrap();
+        assert!(Arc::ptr_eq(&disabled, &kernel.snapshot().unwrap()));
+        database.close().await;
     }
 }
 
@@ -995,8 +1145,11 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
 
 /// Build the default `McpRouterState` from application services.
 pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
-    let pool = services.database.pool().clone();
-    let repo: Arc<dyn nomifun_db::IMcpServerRepository> = Arc::new(nomifun_db::SqliteMcpServerRepository::new(pool));
+    // External CLI sync and editable MCP settings belong to ordinary MCP
+    // configuration. Hosted sources enter only the explicit Agent catalog.
+    let repo: Arc<dyn nomifun_db::IMcpServerRepository> = Arc::new(
+        nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),
+    );
 
     let adapters: Vec<Arc<dyn McpAgentAdapter>> = vec![
         Arc::new(ClaudeAdapter),

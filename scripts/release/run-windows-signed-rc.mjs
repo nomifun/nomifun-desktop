@@ -211,7 +211,7 @@ function run() {
     ],
     30 * 60 * 1000,
   );
-  runCommand('bun', ['run', 'check:unified-plugin-boundary']);
+  runCommand('bun', ['run', 'check:app-hosting-boundary']);
 
   return {
     schema_version: '1.0.0',
@@ -220,7 +220,7 @@ function run() {
     target: 'windows_desktop_x64',
     signed_rc_root: relative(REPO_ROOT, paths.root).replaceAll('\\', '/'),
     release_lock: relative(REPO_ROOT, paths.lock).replaceAll('\\', '/'),
-    unified_plugin_boundary: 'pass',
+    app_hosting_boundary: 'pass',
   };
 }
 

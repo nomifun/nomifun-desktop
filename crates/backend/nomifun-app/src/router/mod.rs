@@ -12,8 +12,6 @@ pub(crate) mod agent_wave3_creation_host;
 mod automatic_collaboration_route;
 mod automatic_creation_route;
 mod automatic_turn_intent;
-mod plugin_delivery_route;
-mod plugin_delivery_check;
 mod engine_creation_tools;
 pub(crate) mod agent_wave3_host;
 pub(crate) mod agent_wave3_template_runner;
@@ -32,9 +30,6 @@ mod mobile_voice_registry;
 mod mobile_voice_authority;
 mod mobile_voice_host;
 mod voice_work_host;
-mod plugin_development;
-mod plugin_authoring_sessions;
-mod plugin_authoring;
 pub(crate) mod nomi_core_tool_discovery;
 pub(crate) mod nomi_core_chat_route;
 pub(crate) mod nomi_core_control_plane;
@@ -50,7 +45,6 @@ pub mod engine_history;
 pub mod engine_model_facts;
 pub mod engine_tool_host;
 pub mod engine_kernel_session;
-mod engine_plugin_bindings;
 mod engine_tool_discovery;
 mod engine_robot_tools;
 #[cfg(feature = "browser-use")]
@@ -83,13 +77,10 @@ mod mcp_effect_receipts;
 mod hosted_effect_receipts;
 mod idmm;
 mod nomi_core_mcp_catalog;
-pub(crate) mod plugin;
-pub(crate) mod plugin_ports;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_workspace;
 mod computer_permissions;
 mod health;
-mod javascript_runtime;
 mod runtime_tools;
 mod knowledge_registration;
 mod model_failover;
@@ -107,3 +98,7 @@ pub use state::{
     ChannelMessageLoopComponents, ModuleStates, build_module_states, build_skill_state,
     build_ws_state,
 };
+
+mod app_hosting;
+pub(crate) mod app_mcp_sources;
+mod app_hosting_tools;

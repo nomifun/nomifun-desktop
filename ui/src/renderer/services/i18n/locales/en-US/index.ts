@@ -33,7 +33,7 @@ import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
 import browserWorkspace from './browserWorkspace.json';
 import ssh from './ssh.json';
-import pluginPlatform from './pluginPlatform.json';
+import appHosting from './appHosting.json';
 import agentSettings from './agentSettings.json';
 import idmm from './idmm.json';
 
@@ -68,7 +68,7 @@ export default {
   creativeStudio,
   browserWorkspace,
   ssh,
-  pluginPlatform,
+  appHosting,
   agentSettings,
   idmm,
 };

@@ -21,12 +21,12 @@ const flattenKeys = (value: unknown, prefix = ''): string[] => {
 };
 
 describe('Agent Settings locale contract', () => {
-  test('does not advertise replacing conversation pages while execution extension authoring remains', () => {
+  test('does not advertise retired dedicated extension authoring', () => {
     for (const locale of [en, zh]) {
       expect(Object.hasOwn(locale, 'page')).toBe(false);
       expect(Object.hasOwn(locale, 'view')).toBe(false);
       expect(Object.hasOwn(locale, 'session')).toBe(false);
-      expect(locale.middlewareOrder.createBeforeTool.length).toBeGreaterThan(0);
+      expect(Object.hasOwn(locale.middlewareOrder, 'createBeforeTool')).toBe(false);
       expect(locale.workbench.configureChatModel.length).toBeGreaterThan(0);
     }
   });
@@ -34,11 +34,22 @@ describe('Agent Settings locale contract', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });
 
+  test('names the App workspace capability explicitly and keeps connection guidance on demand', () => {
+    expect(en.modules.appHosting.name).toBe('NomiFun app development');
+    expect(zh.modules.appHosting.name).toBe('NomiFun 应用开发');
+    expect(en.modules.appHosting.description).toContain('when needed');
+    expect(zh.modules.appHosting.description).toContain('按需读取平台连接指南');
+    expect(zh.template.app.developer.name).toBe('内置应用');
+    expect(en.actionLabels.guide).toBe('Read app guide');
+    expect(zh.actionLabels.guide).toBe('读取应用开发指南');
+  });
+
   test('uses concise official preset names', () => {
     expect(zh.template.chat.minimal.name).toBe('最简');
     expect(zh.template.assistant.general.name).toBe('通用');
     expect(zh.template.coding.codex.name).toBe('编程');
     expect(zh.template.creativeStudio.default.name).toBe('创作');
+    expect(zh.template.app.developer.name).toBe('内置应用');
     expect(en.template.chat.minimal.name).toBe('Minimal');
     expect(en.template.assistant.general.name).toBe('General');
     expect(en.template.coding.codex.name).toBe('Coding');

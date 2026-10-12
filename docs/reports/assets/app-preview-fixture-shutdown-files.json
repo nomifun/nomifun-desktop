@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "observed; cleanup call source not yet disambiguated",
+  "observed_at": "2026-10-11T11:55:22.9094278Z",
+  "fixture_root": "C:/Users/rika0/AppData/Local/Temp/.tmpMHRubT",
+  "fixture_root_exists": true,
+  "app_id": "01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+  "session_id": "01a12ac7-3799-7f53-ac09-1e0845af33d8",
+  "typed_session_workspace_root": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpMHRubT\\data\\app-hosting\\apps\\01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+  "managed_generated_file": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpMHRubT\\data\\app-hosting\\apps\\01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6\\snake-game\\index.html",
+  "managed_generated_file_verified_before_finish_at": "2026-10-11T11:47:54.6389549Z",
+  "managed_generated_file_verified_before_finish_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+  "managed_generated_file_exists_after_finish": false,
+  "managed_registry_file": "C:\\Users\\rika0\\AppData\\Local\\Temp\\.tmpMHRubT\\data\\app-hosting\\registry\\01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6.json",
+  "managed_registry_exists_after_finish": true,
+  "imported_python_copy_file_exists_after_finish": true,
+  "retained_generated_source": ".git/preview-bug-validation/generated-source/snake-game/index.html",
+  "retained_generated_source_origin": "byte-identical actual HTTP capture made before finish; managed original unavailable after finish",
+  "retained_generated_source_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+  "manual_remove_item_performed": false,
+  "fixture_close_calls": "Production application.close then provider and LocalTrust credential audit, followed by root TempDir Drop in the outer live smoke test.",
+  "credential_audit": "Runner pass confirms built-in consecutive clean plaintext scans for provider credential and LocalTrust in the isolated fixture root; this is not a browser-profile audit.",
+  "limitation": "Observation alone does not determine whether production application close or partial Windows TempDir Drop removed this test file. No claim of production deletion is made.",
+  "later_production_close_probe": {
+    "evidence": "app-preview-final-host-recovery-retry.json",
+    "scope": "same source bytes on fresh imported App with ordinary Session but without a second model Turn",
+    "inference": "supports test TempDir cleanup rather than production close as explanation; no retroactive claim of probing the earlier close",
+    "source_preserved": true
+  }
+}

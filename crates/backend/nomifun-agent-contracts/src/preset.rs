@@ -1105,6 +1105,8 @@ pub enum OfficialPresetKey {
     AssistantGeneral,
     #[serde(rename = "coding.codex")]
     CodingCodex,
+    #[serde(rename = "app.developer")]
+    AppDeveloper,
     #[serde(rename = "companion.default")]
     CompanionDefault,
     #[serde(rename = "customer-service.default")]
@@ -1114,10 +1116,11 @@ pub enum OfficialPresetKey {
 }
 
 impl OfficialPresetKey {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ChatMinimal,
         Self::AssistantGeneral,
         Self::CodingCodex,
+        Self::AppDeveloper,
         Self::CompanionDefault,
         Self::CustomerServiceDefault,
         Self::CreativeStudioDefault,
@@ -1128,6 +1131,7 @@ impl OfficialPresetKey {
             Self::ChatMinimal => "chat.minimal",
             Self::AssistantGeneral => "assistant.general",
             Self::CodingCodex => "coding.codex",
+            Self::AppDeveloper => "app.developer",
             Self::CompanionDefault => "companion.default",
             Self::CustomerServiceDefault => "customer-service.default",
             Self::CreativeStudioDefault => "creative-studio.default",
@@ -1187,13 +1191,21 @@ impl OfficialPresetSeedManifestPayload {
         if actual != expected || coverage != expected {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(OFFICIAL_PRESET_KEY_SET_MISMATCH),
-                message: "official template and role-coverage maps must contain exactly six keys"
+                message: "official template and role-coverage maps must contain exactly the current official keys"
                     .into(),
             });
         }
 
         for (key, seed) in &self.templates {
             validate_capability_selections(&seed.enabled_capabilities)?;
+            if seed.enabled_capabilities.iter().any(|selection|
+                selection.capability.id.as_ref() == "plugin.development")
+            {
+                return Err(PresetContractViolation {
+                    code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
+                    message: "official templates cannot select the retired plugin development domain".into(),
+                });
+            }
             let coverage = &self.role_coverage[key];
             let selected = seed
                 .enabled_capabilities
@@ -1249,6 +1261,32 @@ impl OfficialPresetSeedManifestPayload {
                 message:
                     "coding.codex must not require Browser/Computer capabilities on headless hosts"
                         .into(),
+            });
+        }
+
+        let app_developer = &self.templates[&OfficialPresetKey::AppDeveloper];
+        let app_actions = BTreeSet::from([
+            "app.hosting/guide", "app.hosting/current", "app.hosting/import", "app.hosting/list",
+            "app.hosting/update", "app.hosting/preview", "app.hosting/rebuild", "app.hosting/start",
+            "app.hosting/status", "app.hosting/stop",
+        ].map(crate::ActionId::from));
+        let app_selection = app_developer.enabled_capabilities.iter()
+            .find(|selection| selection.capability.id.as_ref() == "app.hosting");
+        let coding_selections = coding.enabled_capabilities.iter().map(|selection| (&selection.capability.id, &selection.action_allowlist)).collect::<BTreeMap<_,_>>();
+        let app_coding_selections = app_developer.enabled_capabilities.iter()
+            .filter(|selection| selection.capability.id.as_ref() != "app.hosting")
+            .map(|selection| (&selection.capability.id, &selection.action_allowlist)).collect::<BTreeMap<_,_>>();
+        if app_selection.is_none_or(|selection| selection.action_allowlist != app_actions)
+            || app_coding_selections != coding_selections
+            || app_developer.skill_bindings != coding.skill_bindings
+            || app_developer.required_resource_kinds != coding.required_resource_kinds
+            || app_developer.required_runtime_features != coding.required_runtime_features
+            || self.templates.iter().any(|(key, seed)| *key != OfficialPresetKey::AppDeveloper
+                && seed.enabled_capabilities.iter().any(|selection| selection.capability.id.as_ref() == "app.hosting"))
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
+                message: "app.developer must reuse the coding seed with exact app hosting actions; other official templates keep application development optional".into(),
             });
         }
 
@@ -2013,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn official_key_type_is_the_exact_six_key_set() {
+    fn official_key_type_is_the_exact_current_key_set() {
         let actual = OfficialPresetKey::ALL
             .into_iter()
             .map(OfficialPresetKey::as_str)
@@ -2021,6 +2059,7 @@ mod tests {
         assert_eq!(
             actual,
             BTreeSet::from([
+                "app.developer",
                 "assistant.general",
                 "chat.minimal",
                 "coding.codex",
@@ -2204,22 +2243,15 @@ mod tests {
     }
 
     #[test]
-    fn coding_can_finish_plugin_work_and_authorized_publication_without_gui() {
+    fn coding_can_finish_workspace_work_and_authorized_publication_without_gui() {
         let manifest = official_preset_seed_manifest_payload();
         let coding = &manifest.templates[&OfficialPresetKey::CodingCodex];
         let actions = official_actions(&manifest, OfficialPresetKey::CodingCodex);
         for action in [
-            "plugin.development/plan",
-            "plugin.development/apply",
-            "plugin.development/inspect",
-            "plugin.development/read",
-            "plugin.development/list",
-            "plugin.development/check",
-            "plugin.development/preview",
-            "plugin.development/test_action",
-            "plugin.development/test_ui",
-            "plugin.development/open",
-            "plugin.development/install",
+            "workspace.files/read",
+            "workspace.files/write",
+            "workspace.files/patch",
+            "workspace.process/exec",
             "workspace.vcs/push",
             "knowledge/search",
             "knowledge/read",
@@ -2262,7 +2294,6 @@ mod tests {
         }
         assert!(!actions.contains("knowledge/write"));
         assert!(!actions.contains("knowledge/autogen"));
-        assert!(!actions.contains("plugin.development/install"));
         assert!(!actions.contains("model.management/create_provider"));
     }
 
@@ -2342,7 +2373,7 @@ mod tests {
         for (key, removed) in [
             (OfficialPresetKey::AssistantGeneral, "office"),
             (OfficialPresetKey::CompanionDefault, "workspace.files"),
-            (OfficialPresetKey::CodingCodex, "plugin.development"),
+            (OfficialPresetKey::CodingCodex, "workspace.files"),
             (OfficialPresetKey::CustomerServiceDefault, "workspace.artifacts"),
             (OfficialPresetKey::CreativeStudioDefault, "browser"),
             (OfficialPresetKey::AssistantGeneral, "knowledge.management"),
@@ -2354,6 +2385,31 @@ mod tests {
                 .retain(|selection| selection.capability.id.as_ref() != removed);
             assert_eq!(manifest.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);
         }
+    }
+
+    #[test]
+    fn app_developer_is_the_only_official_default_with_exact_application_actions() {
+        let manifest = official_preset_seed_manifest_payload();
+        let application = manifest.templates[&OfficialPresetKey::AppDeveloper].enabled_capabilities.iter()
+            .find(|selection| selection.capability.id.as_ref() == "app.hosting").unwrap().clone();
+        let mut overbroad = manifest.clone();
+        overbroad.templates.get_mut(&OfficialPresetKey::AssistantGeneral).unwrap().enabled_capabilities.push(application.clone());
+        assert!(overbroad.validate().is_err(),"application context must stay out of other official Agent defaults");
+        let mut incomplete = manifest;
+        incomplete.templates.get_mut(&OfficialPresetKey::AppDeveloper).unwrap().enabled_capabilities.iter_mut()
+            .find(|selection| selection.capability.id.as_ref() == "app.hosting").unwrap().action_allowlist.remove(&crate::ActionId::from("app.hosting/update"));
+        assert!(incomplete.validate().is_err(),"the application workspace must not silently omit configuration tools");
+    }
+
+    #[test]
+    fn retired_plugin_development_cannot_return_through_official_defaults() {
+        let mut manifest = official_preset_seed_manifest_payload();
+        manifest.templates.get_mut(&OfficialPresetKey::AssistantGeneral).unwrap()
+            .enabled_capabilities.push(CapabilitySelection {
+                capability: CapabilityRef { id: "plugin.development".into() },
+                action_allowlist: BTreeSet::from(["plugin.development/install".into()]),
+            });
+        assert_eq!(manifest.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);
     }
 
     #[test]

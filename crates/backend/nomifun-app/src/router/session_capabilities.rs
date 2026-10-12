@@ -8,6 +8,7 @@ pub(crate) struct GlobalSessionCapabilities {
     pub owner: UserId,
     pub skills: Arc<nomifun_skill_library::SkillPaths>,
     pub mcp: Arc<dyn nomifun_db::IMcpServerRepository>,
+    pub app_mcp: Arc<super::app_mcp_sources::AppMcpSources>,
 }
 
 impl GlobalSessionCapabilities {
@@ -19,8 +20,8 @@ impl GlobalSessionCapabilities {
         owner: &UserId,
         selection: &SessionCapabilitySelectionDto,
     ) -> Result<SessionCapabilitySelectionDto, ControlPlaneError> {
-        let mut skill_names = canonical_names(&selection.skill_names).map_err(selection_failure)?;
-        let mut mcp_server_ids = canonical_names(&selection.mcp_server_ids).map_err(selection_failure)?;
+        let mut skill_names = canonical_names(&selection.skill_names, "Skills").map_err(selection_failure)?;
+        let mut mcp_server_ids = canonical_names(&selection.mcp_server_ids, "MCP sources").map_err(selection_failure)?;
         let (inventory, ready) = self.inventory(owner).await?;
         let available = inventory.skills.iter().map(|skill| skill.name.as_str()).collect::<BTreeSet<_>>();
         skill_names.retain(|name| available.contains(name.as_str()));
@@ -58,7 +59,7 @@ impl SessionCapabilitiesResolver for GlobalSessionCapabilities {
         let skills = inventory.skills;
         let available = skills.iter().map(|skill| skill.name.as_str()).collect::<BTreeSet<_>>();
         let selected_skill_names = match selection {
-            Some(selection) => canonical_names(&selection.skill_names).map_err(failure)?,
+            Some(selection) => canonical_names(&selection.skill_names,"Skills").map_err(failure)?,
             None => nomifun_skill_library::frozen::default_skill_names(&self.skills).await.map_err(|error| failure(error.to_string()))?.into_iter().filter(|name| available.contains(name.as_str())).collect(),
         };
         if let Some(unavailable) = inventory.unavailable.iter().find(|skill| selected_skill_names.contains(&skill.name)) {
@@ -68,8 +69,14 @@ impl SessionCapabilitiesResolver for GlobalSessionCapabilities {
             return Err(failure("a selected Skill is no longer installed; refresh the global library".into()));
         }
         let mcp_server_ids = match selection {
-            Some(selection) => canonical_names(&selection.mcp_server_ids).map_err(failure)?,
-            None => ready.clone(),
+            Some(selection) => canonical_names(&selection.mcp_server_ids,"MCP sources").map_err(failure)?,
+            None => {
+                let mut defaults = BTreeSet::new();
+                for id in &ready {
+                    if !self.app_mcp.is_app_source(id).await { defaults.insert(id.clone()); }
+                }
+                defaults
+            },
         };
         if !mcp_server_ids.is_subset(&ready) {
             return Err(failure("a selected MCP server is disabled or has no tested tools; test its connection or deselect it".into()));
@@ -82,10 +89,30 @@ fn selection_failure(message: String) -> ControlPlaneError {
     ControlPlaneError::canonical("SESSION_CAPABILITIES_INVALID", axum::http::StatusCode::UNPROCESSABLE_ENTITY, message)
 }
 
-fn canonical_names(names: &[String]) -> Result<BTreeSet<String>, String> {
+fn canonical_names(names: &[String], label: &str) -> Result<BTreeSet<String>, String> {
     let set = names.iter().cloned().collect::<BTreeSet<_>>();
-    if names.len() > 128 || set.len() != names.len() || names.iter().any(|name| name.is_empty() || name != name.trim() || name.len() > 256) {
-        return Err("extension selections must contain distinct nonempty names within the Session limit".into());
+    if names.len() > 128 {
+        let mut counts = std::collections::BTreeMap::<&str,usize>::new();
+        for name in names { *counts.entry(name).or_default() += 1; }
+        let counts = counts.into_iter().map(|(source,count)|format!("{source}={count}")).collect::<Vec<_>>().join(", ");
+        return Err(format!("{label} selection contains {} entries ({} distinct), exceeding the Session limit 128; selected source counts: {counts}",names.len(),set.len()));
+    }
+    if set.len() != names.len() || names.iter().any(|name| name.is_empty() || name != name.trim() || name.len() > 256) {
+        return Err(format!("{label} selections must contain distinct nonempty names within the Session limit"));
     }
     Ok(set)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_selection_capacity_names_the_source_and_exact_count() {
+        let id = "0190f5fe-7c00-7a00-8000-000000000001";
+        let diagnostic = canonical_names(&vec![id.to_owned();129],"MCP sources").unwrap_err();
+        assert!(diagnostic.contains("129 entries"));
+        assert!(diagnostic.contains(&format!("{id}=129")));
+        assert!(diagnostic.contains("limit 128"));
+    }
 }

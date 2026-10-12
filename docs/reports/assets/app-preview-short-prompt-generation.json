@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "collected_at": "2026-10-11T11:47:54.6389549Z",
+  "fixture_scope": "real production Host, UI-created application and UI-submitted ordinary short prompt, configured real StepFun model",
+  "simulated_model_or_success": false,
+  "host_url": "http://127.0.0.1:64951",
+  "app_id": "01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+  "session_id": "01a12ac7-3799-7f53-ac09-1e0845af33d8",
+  "prompt": "帮我创建一个贪吃蛇游戏",
+  "user_event_seq": 4,
+  "user_input_count": 1,
+  "model": {
+    "provider_id": "01a12ac5-cd76-7e40-8550-0f93ecec8dde",
+    "model": "step-3.7-flash"
+  },
+  "canonical_head": {
+    "session_id": "01a12ac7-3799-7f53-ac09-1e0845af33d8",
+    "status": "ready",
+    "last_seq": 146,
+    "active_turn_id": null
+  },
+  "canonical_events_count": 146,
+  "turn_terminal": {
+    "seq": 146,
+    "event_id": "turn-terminal:01a12ac7-3799-7f53-ac09-1e0845af33d8:turn:user:01a12ac5-cb6c-77b1-bf12-4859120e1e24:01a12ac7-3799-7f53-ac09-1e0845af33d8:01a12ac7-3889-773b-b0fc-1488bae65aa3",
+    "kind": "turn/completed",
+    "result": {
+      "model_steps": 4,
+      "finish_reason": "completed",
+      "finished_at_ms": 1791719088200
+    }
+  },
+  "tool_results": [
+    {
+      "seq": 42,
+      "event_id": "tool-result:01a12ac7-3799-7f53-ac09-1e0845af33d8:turn:user:01a12ac5-cb6c-77b1-bf12-4859120e1e24:01a12ac7-3799-7f53-ac09-1e0845af33d8:01a12ac7-3889-773b-b0fc-1488bae65aa3:tool:chatcmpl-tool-ac3a5ce4ab621d8b",
+      "call_id": "chatcmpl-tool-ac3a5ce4ab621d8b",
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/read",
+      "name": "read_file",
+      "is_error": false,
+      "error": null,
+      "outputs": [
+        {
+          "observation_kind": "instruction_scope",
+          "is_directory_listing": false,
+          "path": ".",
+          "canonical_path": "",
+          "kind": "directory",
+          "recursive": false,
+          "directories": [
+            ""
+          ],
+          "complete": true,
+          "incomplete_reasons": [],
+          "entries_scanned": 0,
+          "notice": "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible."
+        }
+      ]
+    },
+    {
+      "seq": 87,
+      "event_id": "tool-result:01a12ac7-3799-7f53-ac09-1e0845af33d8:turn:user:01a12ac5-cb6c-77b1-bf12-4859120e1e24:01a12ac7-3799-7f53-ac09-1e0845af33d8:01a12ac7-3889-773b-b0fc-1488bae65aa3:tool:chatcmpl-tool-bda0492e001a0b2a",
+      "call_id": "chatcmpl-tool-bda0492e001a0b2a",
+      "capability_id": "workspace.files",
+      "action_id": "workspace.files/write",
+      "name": "write_file",
+      "is_error": false,
+      "error": null,
+      "outputs": [
+        {
+          "path": "snake-game/index.html",
+          "written": true,
+          "created": true,
+          "workspace_path": {
+            "root_sha256": "8ceec8a922ca3e632dcf6a734c46a551a4c56055f074b81ed26a1dfda5f2be11",
+            "path": "snake-game/index.html",
+            "case_resolved": true
+          },
+          "bytes": 11581,
+          "line_count": 391,
+          "sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2"
+        }
+      ]
+    }
+  ],
+  "model_app_hosting_actions": [],
+  "model_automatically_configured_or_started_application": false,
+  "generated_file": {
+    "path": "snake-game/index.html",
+    "bytes": 11581,
+    "sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+    "canonical_write_event_seq": 87
+  },
+  "current_owner_after_user_preview": {
+    "app_id": "01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+    "name": "新应用",
+    "state": "running",
+    "pid": 14312,
+    "preview": true,
+    "prepared": false,
+    "web_url": "http://127.0.0.1:58073",
+    "project_directory": "snake-game",
+    "preview_command": null,
+    "start_command": "node \".nomifun-static-server.cjs\"",
+    "development_session_id": "01a12ac7-3799-7f53-ac09-1e0845af33d8"
+  },
+  "actual_http": {
+    "status": 200,
+    "url": "http://127.0.0.1:58073",
+    "served_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2",
+    "source_receipt_sha256": "24afaaa2b622787b4247887c0d5e39a9f781662c578883c681951867955f21d2"
+  },
+  "limitation": "The model wrote the real game source but did not call current/guide/update/preview. The user explicitly selected Preview in the App UI; the production owner discovered the generated static project and started its ordinary managed HTTP command. This is not evidence of model auto-configuration.",
+  "independent_browser_interaction": {
+    "evidence": "app-preview-browser-verification.json",
+    "scope": "actual generated game restart, keyboard pause, preview resize preserves one iframe, desktop 880x600",
+    "status": "pass"
+  },
+  "shutdown": {
+    "finished_at": "2026-10-11T11:50:26.8637582Z",
+    "explicit_finish_http_status": 204,
+    "owned_runner_exited": true,
+    "managed_apps": [
+      {
+        "app_id": "01a12ac7-15e6-7953-b8bf-f8c22e5a4ec6",
+        "pid_before": 14312,
+        "state_after": "stopped",
+        "pid_after": null
+      },
+      {
+        "app_id": "01a12ac7-39c9-74d2-a094-ce2fc478a0c7",
+        "pid_before": 42176,
+        "state_after": "stopped",
+        "pid_after": null
+      }
+    ],
+    "canonical_events_before": 146,
+    "canonical_events_after": 146,
+    "user_original_sha256_after": "bde848bcbc15286a1434d0154666cc5d58a70a4aa05808f7b3841a6f30f3b319",
+    "fixture_lifecycle_product_validation": null,
+    "listeners_closed": [
+      64951,
+      58073,
+      63977
+    ],
+    "owned_processes_exited": [
+      22252,
+      14312,
+      42176
+    ],
+    "independent_browser_evidence": "app-preview-browser-verification.json",
+    "credential_audit": {
+      "browser_profile_audited": false,
+      "scope": "built-in isolated fixture root plaintext audit for real provider credential and boot LocalTrust",
+      "status": "pass",
+      "proof": "run_live_provider_smoke returns success only after both ensure_secret_not_persisted calls",
+      "consecutive_clean_scans_per_secret": 2
+    },
+    "post_fixture_tempdir_observation": "app-preview-fixture-shutdown-files.json"
+  }
+}
