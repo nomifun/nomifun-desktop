@@ -35,6 +35,7 @@
     {"operation_id":"agent_sessions.turns.create","method":"POST","path":"/api/agent-sessions/{agent_session_id}/turns","request_schema":null,"response_schema":null,"canonical_errors":["CAPABILITY_NOT_ACTIVE","CAPABILITY_NOT_IN_PRESET","SESSION_DELETED","SNAPSHOT_EXECUTOR_UNAVAILABLE"]},
     {"operation_id":"agent_sessions.events","method":"GET","path":"/api/agent-sessions/{agent_session_id}/events?after_seq={seq}&limit={limit}","request_schema":null,"response_schema":null,"canonical_errors":["SESSION_DELETED"]},
     {"operation_id":"agent_sessions.messages","method":"GET","path":"/api/agent-sessions/{agent_session_id}/messages?after_seq={seq}&limit={limit}","request_schema":null,"response_schema":null,"canonical_errors":["SESSION_DELETED"]},
+    {"operation_id":"agent_sessions.turn_files","method":"GET","path":"/api/agent-sessions/{agent_session_id}/turn-files?turn_ids={turn_ids}","request_schema":null,"response_schema":null,"canonical_errors":["SESSION_DELETED"]},
     {"operation_id":"agent_sessions.forks.create","method":"POST","path":"/api/agent-sessions/{agent_session_id}/forks","request_schema":null,"response_schema":null,"canonical_errors":["SESSION_DELETED","SNAPSHOT_EXECUTOR_UNAVAILABLE"]},
     {"operation_id":"agent_sessions.delete","method":"DELETE","path":"/api/agent-sessions/{agent_session_id}","request_schema":null,"response_schema":null,"canonical_errors":["SESSION_DELETED"]},
     {"operation_id":"remote_bindings.list","method":"GET","path":"/api/remote-bindings","request_schema":null,"response_schema":null,"canonical_errors":[]},

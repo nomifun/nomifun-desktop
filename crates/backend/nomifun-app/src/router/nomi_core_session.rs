@@ -17,6 +17,9 @@ mod session_contract_evolution;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
+#[path = "turn_files_api.rs"]
+mod turn_files_api;
+
 #[cfg(test)]
 #[path = "idmm_message_tests.rs"]
 mod idmm_message_tests;
@@ -7984,6 +7987,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/workspace",
             get(browse_nomi_core_agent_session_workspace),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/turn-files",
+            get(turn_files_api::get),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/delete-override",

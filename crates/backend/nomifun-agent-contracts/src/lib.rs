@@ -11,6 +11,8 @@ pub mod chat_model;
 pub mod chat_provider_reasoning;
 pub mod digest;
 pub mod event;
+pub mod turn_files;
+pub use turn_files::*;
 pub mod engine_features;
 pub mod impact;
 pub mod idmm;

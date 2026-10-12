@@ -60,6 +60,9 @@ pub use runtime_state::RuntimeStateObservation;
 #[path = "storage_relocation.rs"]
 mod storage_relocation;
 
+#[path = "turn_files.rs"]
+mod turn_files;
+
 #[path = "history_transition_projection.rs"]
 mod history_transition_projection;
 
@@ -503,6 +506,9 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
+        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
         if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
             reject_unleased_native_turn_tx(&mut tx, &append.agent_session_id,
                 &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
@@ -2436,7 +2442,8 @@ impl AgentSessionStore {
                 "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key, \
                  e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
                  JOIN agent_turns t ON t.session_id=e.session_id AND t.operation_id=? JOIN agent_events s ON s.event_id=t.started_event_id \
-                 WHERE e.session_id=? AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
+                 WHERE e.session_id=? AND e.kind <> 'turn/workspace-files-observed' \
+                 AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
                 .bind(turn_operation_id.as_ref()).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("native recovery fact budget exceeded".into())); }
             rows
@@ -2456,7 +2463,11 @@ impl AgentSessionStore {
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("Turn output fact budget exceeded".into())); }
             rows
             }
-            CausalityFactScope::SessionHistory => event_rows_for_session_tx(&mut tx, session_id.as_ref()).await?,
+            CausalityFactScope::SessionHistory => sqlx::query_as::<_, StoredEventRow>(
+                "SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version, \
+                 correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
+                 WHERE session_id=? AND kind <> 'turn/workspace-files-observed' ORDER BY seq",
+            ).bind(session_id.as_ref()).fetch_all(&mut *tx).await?,
         };
 
         let mut events = Vec::with_capacity(rows.len());
@@ -5582,6 +5593,21 @@ async fn validate_semantic_event_tx(
     event: &SessionEventRecord,
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
+    if event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+        let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(payload.clone())?;
+        observation.validate().map_err(SessionStoreError::InvalidPayload)?;
+        let identity: Option<(String, i64, String)> = sqlx::query_as(
+            "SELECT started_event_id,execution_generation,state FROM agent_turns WHERE session_id=? AND operation_id=?",
+        ).bind(event.agent_session_id.as_ref()).bind(observation.operation_id.as_ref()).fetch_optional(&mut **tx).await?;
+        if event.correlation_id.as_ref() != observation.operation_id.as_ref()
+            || identity.is_none_or(|(started, generation, state)| {
+                event.causation_event_id.as_ref().map(EventId::as_ref) != Some(started.as_str())
+                    || generation < 0 || generation as u64 != observation.execution_generation
+                    || !matches!(state.as_str(), "running" | "paused")
+            }) {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+    }
     if event.kind.0 == "compaction/completed" {
         validate_compaction_payload_tx(tx, event, payload).await?;
     }

@@ -35,6 +35,7 @@ import { useTranslation } from 'react-i18next';
 import {
   isVerifiedImageDeliverable,
   type TurnDeliverableItem,
+  type VerifiedImageDeliverableItem,
 } from '../turnDeliverablesModel';
 import VerifiedImageArtifactCard from './VerifiedImageArtifactCard';
 
@@ -72,87 +73,92 @@ const DeliverableIcon: React.FC<{ fileName: string }> = ({ fileName }) => {
   }
 };
 
-type ResolvedDeliverable = TurnDeliverableItem & { statPath?: string };
+type ResolvedDeliverable = TurnDeliverableItem & { statPath?: string; available: boolean };
 
-/**
- * A reported deliverable may only be presented as available after the backend
- * confirms the file still exists inside an allowed root. Results are cached
- * per app session; a rejected probe is retried on the next mount instead of
- * being cached, so transient transport failures cannot permanently hide a card.
- */
-const availabilityCache = new Map<string, Promise<number | null>>();
-
-const probeAvailability = (statPath: string, workspace?: string): Promise<number | null> => {
-  const key = `${workspace ?? ''}|${statPath}`;
-  const cached = availabilityCache.get(key);
-  if (cached) return cached;
-
-  const probe = ipcBridge.fs.getFileMetadata
-    .invoke({ path: statPath, workspace })
-    .then((metadata) => (metadata && metadata.isDirectory !== true ? metadata.size : null))
-    .catch((error) => {
-      availabilityCache.delete(key);
-      throw error;
-    });
-  availabilityCache.set(key, probe);
-  return probe;
+// All mounted Turn cards share the same small read budget. This is only an
+// in-flight scheduler; no positive or negative filesystem result is cached.
+let activeMetadataProbes = 0;
+const metadataProbeQueue: Array<() => void> = [];
+const drainMetadataProbes = () => {
+  while (activeMetadataProbes < 4 && metadataProbeQueue.length) metadataProbeQueue.shift()?.();
 };
+const probeMetadataAvailability = (
+  path: string,
+  workspace: string | undefined,
+  isCurrent: () => boolean
+): Promise<boolean> => new Promise((resolve) => {
+  metadataProbeQueue.push(() => {
+    if (!isCurrent()) { resolve(false); return; }
+    activeMetadataProbes += 1;
+    void ipcBridge.fs.getFileMetadata.invoke({ path, workspace })
+      .then((metadata) => resolve(Boolean(metadata && metadata.isDirectory !== true)))
+      .catch(() => resolve(false))
+      .finally(() => { activeMetadataProbes -= 1; drainMetadataProbes(); });
+  });
+  drainMetadataProbes();
+});
 
 const getStatPath = (item: TurnDeliverableItem, workspace?: string): string | undefined => {
+  if (item.operation === 'delete') return undefined;
   if (item.absolutePath) return item.absolutePath;
-  if (workspace) return joinPath(workspace, item.relativePath);
+  // Canonical file queries may deliberately omit a locator when the historic
+  // workspace cannot be resolved. Never guess a same-name current-workspace file.
+  if (isVerifiedImageDeliverable(item) && workspace) return joinPath(workspace, item.relativePath);
   return undefined;
 };
 
+/** Availability controls actions only. Historical changes never disappear. */
 export const useTurnDeliverableAvailability = (
   items: TurnDeliverableItem[],
-  workspace?: string
-): { pending: boolean; available: ResolvedDeliverable[] } => {
-  const [state, setState] = useState<{ key: string; available: ResolvedDeliverable[] } | null>(null);
-
+  workspace?: string,
+  visibleFileCount = DEFAULT_VISIBLE_COUNT
+): ResolvedDeliverable[] => {
+  const [state, setState] = useState<{ key: string; items: ResolvedDeliverable[] } | null>(null);
   const itemsKey = useMemo(
-    () => `${workspace ?? ''}|${items.map((item) => `${item.tier}:${item.relativePath}`).join(',')}`,
-    [items, workspace]
+    () => JSON.stringify([workspace, visibleFileCount, items.map((item) => [item.identity, item.absolutePath, item.operation, item.sizeBytes, item.sha256, item.tier, item.artifactId, item.artifactKind, item.mimeType])]),
+    [items, workspace, visibleFileCount]
   );
-  // Cards exist only for closed turns, so item content is stable once the key
-  // is. Reading through a ref keeps streaming re-renders (new array identity,
-  // same key) from re-probing the backend on every token.
   const itemsRef = useRef(items);
   itemsRef.current = items;
+  const initial = () => itemsRef.current.map((item): ResolvedDeliverable => ({
+    ...item, statPath: getStatPath(item, workspace), available: isVerifiedImageDeliverable(item),
+  }));
 
   useEffect(() => {
     let alive = true;
-
-    void Promise.all(
-      itemsRef.current.map(async (item): Promise<ResolvedDeliverable | null> => {
-        const statPath = getStatPath(item, workspace);
-        // Committed receipts are already integrity-audited by the backend on
-        // both commit and history read; never re-gate them on a client probe.
-        if (item.tier === 'receipt') return { ...item, statPath };
-        if (!statPath) return null;
-        try {
-          const size = await probeAvailability(statPath, workspace);
-          if (size === null) return null;
-          return { ...item, statPath, sizeBytes: item.sizeBytes ?? size };
-        } catch {
-          return null;
+    let generation = 0;
+    const refresh = () => {
+      const currentGeneration = ++generation;
+      const resolved = initial();
+      const targets = resolved.map((item, index) => ({ item, index }))
+        .filter(({ item }) => !isVerifiedImageDeliverable(item)).slice(0, visibleFileCount);
+      let next = 0;
+      // Hidden files need no filesystem requests. Expanded lists use a small
+      // worker pool, so a large Turn cannot flood the host's metadata route.
+      const probe = async () => {
+        while (alive && currentGeneration === generation && next < targets.length) {
+          const { item, index } = targets[next++];
+          if (!item.statPath) continue;
+          const available = await probeMetadataAvailability(item.statPath, workspace,
+            () => alive && currentGeneration === generation);
+          if (alive && currentGeneration === generation) {
+            resolved[index] = { ...item, available };
+            setState({ key: itemsKey, items: [...resolved] });
+          }
         }
-      })
-    ).then((resolved) => {
-      if (!alive) return;
-      setState({
-        key: itemsKey,
-        available: resolved.filter((item): item is ResolvedDeliverable => item !== null),
-      });
-    });
-
+      };
+      void Promise.all(Array.from({ length: Math.min(4, targets.length) }, probe));
+      setState({ key: itemsKey, items: [...resolved] });
+    };
+    window.addEventListener('focus', refresh);
+    refresh();
     return () => {
       alive = false;
+      window.removeEventListener('focus', refresh);
     };
-  }, [itemsKey, workspace]);
+  }, [itemsKey, workspace, visibleFileCount]);
 
-  if (!state || state.key !== itemsKey) return { pending: true, available: [] };
-  return { pending: false, available: state.available };
+  return state?.key === itemsKey ? state.items : initial();
 };
 
 const DeliverableRow: React.FC<{
@@ -160,9 +166,9 @@ const DeliverableRow: React.FC<{
 }> = ({ item }) => {
   const { t } = useTranslation();
   const { launchPreview, canPreview } = usePreviewLauncher();
-  const showShellActions = isDesktopShell() && Boolean(item.statPath);
+  const showShellActions = isDesktopShell() && item.available && Boolean(item.statPath);
   const displayPath = splitFileDisplayPath(item.relativePath, item.fileName);
-  const previewSupported = canPreview && isPreviewSupportedExt(item.fileName);
+  const previewSupported = item.available && canPreview && isPreviewSupportedExt(item.fileName);
 
   const handlePreview = () => {
     const { contentType, editable, language } = getFileTypeInfo(item.fileName);
@@ -173,18 +179,6 @@ const DeliverableRow: React.FC<{
       contentType,
       editable,
       language,
-      diffContent: item.diff,
-    });
-  };
-
-  const handleDiffPreview = () => {
-    if (!item.diff) return;
-    void launchPreview({
-      file_name: item.fileName,
-      contentType: 'diff',
-      editable: false,
-      language: 'diff',
-      diffContent: item.diff,
     });
   };
 
@@ -227,27 +221,11 @@ const DeliverableRow: React.FC<{
       </div>
 
       <div className='flex items-center gap-8px shrink-0'>
-        {item.sizeBytes !== undefined && item.sizeBytes > 0 && (
-          <span className='text-12px text-t-secondary'>{formatBytes(item.sizeBytes)}</span>
-        )}
-        {((item.insertions ?? 0) > 0 || (item.deletions ?? 0) > 0) && (
-          <span
-            className={classNames(
-              'flex items-center gap-4px rd-4px px-4px py-2px',
-              item.diff && 'cursor-pointer hover:bg-4 transition-colors'
-            )}
-            title={item.diff ? t('messages.turnDeliverables.viewDiff', { defaultValue: 'View changes' }) : undefined}
-            onClick={item.diff ? handleDiffPreview : undefined}
-          >
-            {(item.insertions ?? 0) > 0 && (
-              <span className='text-13px font-medium' style={{ color: diffColors.addition }}>
-                +{item.insertions}
-              </span>
-            )}
-            {(item.deletions ?? 0) > 0 && (
-              <span className='text-13px font-medium' style={{ color: diffColors.deletion }}>
-                -{item.deletions}
-              </span>
+        {(item.operation || item.sizeBytes !== undefined) && (
+          <span className='text-12px text-t-secondary'>
+            {item.operation && t(`messages.turnDeliverables.${item.operation}`)}
+            {item.operation !== 'delete' && item.sizeBytes !== undefined && (
+              <>{item.operation ? ' · ' : ''}{formatBytes(item.sizeBytes)}</>
             )}
           </span>
         )}
@@ -285,30 +263,18 @@ const DeliverableRow: React.FC<{
   );
 };
 
-/**
- * Per-turn deliverables card: every verified file artifact of one successfully
- * completed turn, rendered right below that turn's final assistant reply.
- * Renders nothing while availability is being confirmed and nothing when no
- * trustworthy deliverable remains — an empty card must never appear.
- *
- * `partial` marks a turn whose file events may extend past the loaded history
- * window. The card is a projection over hydrated messages, so a turn with more
- * tool events than the window silently lost items after a reload (an observed
- * turn showed 4 files live and 3 after refresh, while the workspace Changes
- * panel — which reads a snapshot rather than messages — still showed 4). A count
- * that cannot be trusted must not be presented as a settled total.
- */
+/** Turn-scoped file facts render in the existing list and verified media layout. */
 const TurnDeliverablesCard: React.FC<{
   items: TurnDeliverableItem[];
   workspace?: string;
   partial?: boolean;
 }> = ({ items, workspace, partial = false }) => {
   const { t } = useTranslation();
-  const { pending, available } = useTurnDeliverableAvailability(items, workspace);
   const [showAll, setShowAll] = useState(false);
+  const resolved = useTurnDeliverableAvailability(items, workspace, showAll ? items.length : DEFAULT_VISIBLE_COUNT);
   const [showAllImages, setShowAllImages] = useState(false);
-  const verifiedImages = available.filter(isVerifiedImageDeliverable);
-  const fileDeliverables = available.filter((item) => !isVerifiedImageDeliverable(item));
+  const verifiedImages = resolved.filter((item): item is ResolvedDeliverable & VerifiedImageDeliverableItem => isVerifiedImageDeliverable(item));
+  const fileDeliverables = resolved.filter((item) => !isVerifiedImageDeliverable(item));
   const imageIdentity = verifiedImages.map((item) => item.artifactId).join('|');
   const [selectedImageId, setSelectedImageId] = useState<string | undefined>();
 
@@ -324,7 +290,7 @@ const TurnDeliverablesCard: React.FC<{
     );
   }, [imageIdentity]);
 
-  if (pending || available.length === 0) return null;
+  if (resolved.length === 0 && !partial) return null;
 
   const visibleImages = showAllImages
     ? verifiedImages
@@ -392,21 +358,21 @@ const TurnDeliverablesCard: React.FC<{
         </button>
       )}
 
-      {fileDeliverables.length > 0 && (
+      {(fileDeliverables.length > 0 || partial) && (
         <div className='turn-deliverables__files'>
           <div className='turn-deliverables__files-title'>
             {partial
               ? t('messages.turnDeliverables.partialTitle', {
                   count: fileDeliverables.length,
-                  defaultValue: 'Showing {{count}} changed files from this turn (scroll up to load the rest)',
+                  defaultValue: 'This turn involves {{count}} files (list incomplete)',
                 })
               : t('messages.turnDeliverables.title', {
                   count: fileDeliverables.length,
-                  defaultValue: 'Generated {{count}} files',
+                  defaultValue: 'This turn involves {{count}} files',
                 })}
           </div>
           {visible.map((item) => (
-            <DeliverableRow key={item.absolutePath ?? item.relativePath} item={item} />
+            <DeliverableRow key={item.identity} item={item} />
           ))}
           {(hiddenCount > 0 || showAll) && (
             <button

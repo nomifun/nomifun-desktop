@@ -64,8 +64,7 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('shouldShowToolRowDetail')).toBe(true);
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
     expect(source.includes('messages.processReceipt.readFiles')).toBe(true);
-    expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
-    expect(source.includes('turn-process-trace-file-list__button')).toBe(true);
+    expect(source.includes('messages.processReceipt.fileEdits')).toBe(true);
   });
 
   test('gives system and tool process rows a consistent icon slot', () => {

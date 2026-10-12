@@ -3,10 +3,10 @@
   "payload": {
     "ledger_version": "1.0.0",
     "artifacts": {
-      "canonical_api_inventory": "6cec82b61998d1f7fda54e3c448def72bb2721175116e0c4144e4b95f999df8f",
-      "canonical_schema_manifest": "6e96faf4162541604a5f1d3a4149bfefd8000c9183ce261eca73b153ad8e42b1",
+      "canonical_api_inventory": "11700ce52f136a433f84f523c21b034b324b61533e1fb9329850e548dcc64e02",
+      "canonical_schema_manifest": "5e166db7a234b9c41b094053d860281f705ecafd4513fb47f3c8e0ee6c21a737",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
-      "cargo_lock": "a61362553c56e9f90b45cb5219748af3bd55fc2e42aac02e92f748e30791465d",
+      "cargo_lock": "b808cc2f0fe201fdb291ff8cff1ca2aeb978072162cf5962347a0c842084d288",
       "coding_codex_native_contract": "a0d2527993a9a1c987c0f024faa7883872fd7e0b3a807fa92dba5baf9f9e569b",
       "confirmed_decision_contract": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
       "database_schema": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
@@ -14,15 +14,15 @@
       "official_preset_seed_manifest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb",
       "package_schema": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
       "platform_validation_contract": "2ad5072bfff0fb80034265b1e6a93f7eb036fceeec4a4515c13075bbb828c97a",
-      "platform_validation_fixture": "efce0463c1ffc732c105c741edef5ef9137180857787c7e2db558ad70d6d7b2b",
+      "platform_validation_fixture": "402a1e1ba340e17394f705a0a3cc9c9812697730906a021b1f7d28659a463fa8",
       "plugin_contract": "aed271dcd6570f0352d3657c657ecfbc21c4d53569c16d4a8e13443b050b3c25",
       "plugin_schema": "5d69c74023d5ad1dfdce99d8b81b3253eb86c4fda1f085de3d7a97c02744d609",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
       "runtime_protocol": "9032de7b801199422b5193b854f26b4db2eb793c1bd2e490f045c62cbaa88489",
-      "rust_contract_schema": "71d1da2a5af394ca7445a195b2450a267d8ce96f4d77d5d7a9064bd833feba1f",
-      "session_event_registry": "db152ee7b650513c4ff7654f279495ce0f5d0628a9e5b388ce206841772eadba",
+      "rust_contract_schema": "4318b7cd3710e8b8fa3b4755a94a736d966c9cc1b2b49521fe9d4c3d833460e9",
+      "session_event_registry": "98e2cfaf32e713eef69137c80c7eb6bb73898196b71804aedf099cb8f60ddc45",
       "target_first_party_inventory": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
     }
   },
-  "payload_digest": "82fdd2721c444757ceadb682827158f0eed7d222922d7a424919078ce0d4fe64"
+  "payload_digest": "4066a7903985979043ea6c09ef5fe5fb514c0998d8ef02c296bccd93f0964339"
 }
