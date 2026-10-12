@@ -1,6 +1,6 @@
 import type { AppProjectSession } from '@/common/types/appHosting';
 import { Alert, Button, Spin, Tag } from '@arco-design/web-react';
-import { Add, Down } from '@icon-park/react';
+import { Add, Down, Refresh } from '@icon-park/react';
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isAppProjectSessionBusy } from './appHostingModel';
@@ -52,7 +52,11 @@ export default function AppProjectHistory({ items, selectedSessionId, selectedNa
           <Down size={14} aria-hidden />
         </summary>
         <div className={styles.projectHistoryMenu}>
-          <p className={styles.muted}>{t('appHosting.project.historyHint')}</p>
+          <div className={styles.projectHistoryMenuHeader}>
+            <p className={styles.muted}>{t('appHosting.project.historyHint')}</p>
+            <Button type='text' size='small' icon={<Refresh size={14} aria-hidden />}
+              aria-label={t('appHosting.project.refresh')} title={t('appHosting.project.refresh')} onClick={onRefresh} />
+          </div>
           {error && <Alert type='warning' content={error} />}
           {loading && items.length === 0 ? <Spin /> : items.length === 0 && <p className={styles.muted}>{t('appHosting.project.empty')}</p>}
           <ul aria-label={t('appHosting.project.history')}>
@@ -70,10 +74,9 @@ export default function AppProjectHistory({ items, selectedSessionId, selectedNa
               </button>
             </li>)}
           </ul>
-          <div className={styles.actions}>
-            {hasMore && <Button size='small' loading={loading} onClick={onLoadMore}>{t('appHosting.project.loadMore')}</Button>}
-            <Button type='text' size='small' aria-label={t('appHosting.project.refresh')} onClick={onRefresh}>{t('appHosting.actions.refresh')}</Button>
-          </div>
+          {hasMore && <div className={styles.actions}>
+            <Button size='small' loading={loading} onClick={onLoadMore}>{t('appHosting.project.loadMore')}</Button>
+          </div>}
         </div>
       </details>
       <Button size='small' icon={<Add />} disabled={newSessionDisabled} onClick={onNewSession}>{t('appHosting.project.newSession')}</Button>

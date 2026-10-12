@@ -58,10 +58,14 @@
 .projectHistoryDisclosure > summary > span { flex-shrink: 0; }
 .projectHistoryDisclosure > summary small { margin-left: 5px; color: var(--color-text-3); }
 .projectHistoryDisclosure > summary strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--color-text-1); }
-.projectHistoryMenu { position: absolute; top: calc(100% + 5px); left: 0; right: 0; min-width: 240px; padding: 12px; box-sizing: border-box; z-index: 12; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); box-shadow: var(--shadow-2-down); max-height: min(400px, calc(100vh - 160px)); overflow-y: auto; }
-.projectHistoryMenu ul { list-style: none; padding: 0; margin: 10px 0; }
-.projectHistoryMenu li + li { margin-top: 4px; }
-.projectHistoryMenu li > button { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 10px; text-align: left; color: var(--color-text-1); background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
+.projectHistoryMenu { position: absolute; top: calc(100% + 5px); left: 0; right: 0; min-width: 240px; padding: 8px 10px; box-sizing: border-box; z-index: 12; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); box-shadow: var(--shadow-2-down); max-height: min(400px, calc(100vh - 160px)); overflow-y: auto; }
+.projectHistoryMenuHeader { display: flex; align-items: flex-start; gap: 8px; }
+.projectHistoryMenuHeader > p { flex: 1; min-width: 0; }
+.projectHistoryMenu .projectHistoryMenuHeader > button { flex-shrink: 0; width: 22px; height: 22px; padding: 0; }
+.projectHistoryMenu ul { list-style: none; padding: 0; margin: 4px 0 0; }
+.projectHistoryMenu li + li { margin-top: 2px; }
+.projectHistoryMenu li > button { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 6px 8px; text-align: left; color: var(--color-text-1); background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
+.projectHistoryMenu > .actions { margin-top: 6px; }
 .projectHistoryMenu li > button:hover { background: var(--color-fill-2); }
 .projectHistoryMenu li > button[aria-current='true'] { background: rgb(var(--primary-1)); }
 .projectHistoryName { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13px; overflow-wrap: anywhere; }
