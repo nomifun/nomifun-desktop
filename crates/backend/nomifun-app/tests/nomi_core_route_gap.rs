@@ -4678,7 +4678,13 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     assert_eq!(resource("companion"), Some(companion_id));
     assert_eq!(resource("companion_memory"), Some(companion_id));
     assert_eq!(resource("scheduler"), Some("installation-scheduler"));
-    for absent in ["channel", "robot", "knowledge_base"] {
+    for kind in ["workspace", "process_session", "project_memory", "asset_library"] {
+        assert!(resource(kind).is_some(), "full Companion must receive host-owned {kind}");
+    }
+    let workspace = resources.iter().find(|value| value["resource_kind"] == "workspace").unwrap();
+    let process = resources.iter().find(|value| value["resource_kind"] == "process_session").unwrap();
+    assert_eq!(workspace["typed_parameters"]["workspace_root"], process["typed_parameters"]["workspace_root"]);
+    for absent in ["channel", "robot", "knowledge_base", "ssh_host", "canvas"] {
         assert_eq!(resource(absent), None, "optional {absent} must not be invented");
     }
     let (status, unrelated) = call(router.clone(), "POST", "/api/companion/companions",
@@ -4795,6 +4801,28 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
+    // Simulate an owner who saved the earlier, incomplete official recipe.
+    // The new seed must not silently overwrite this saved configuration.
+    let (status, original_library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{original_library}");
+    let official_id = original_library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
+    let (status, original_editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{original_editor}");
+    let mut old_draft = original_editor["data"]["draft"].clone();
+    old_draft["document"]["enabled_capabilities"] = json!([
+        {"capability":{"id":"companion"},"action_allowlist":["companion/evolve","companion/learn"]},
+        {"capability":{"id":"companion.memory"},"action_allowlist":["companion.memory/recall","companion.memory/write"]},
+        {"capability":{"id":"knowledge"},"action_allowlist":["knowledge/read","knowledge/search"]},
+        {"capability":{"id":"channel.messaging"},"action_allowlist":["channel.messaging/reply"]},
+        {"capability":{"id":"robot"},"action_allowlist":["robot/vision"]},
+        {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/create","automation.schedule/delete","automation.schedule/list","automation.schedule/update"]}
+    ]);
+    let (status, old_saved) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision":original_editor["data"]["revision"]["reference"], "draft":old_draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{old_saved}");
     let (status, selected_default) = call(router.clone(), "PUT",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
             "selection": { "kind": "template", "template_key": "companion.default" },
@@ -5026,12 +5054,15 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{editor}");
     assert_eq!(editor["data"]["preset"]["source"], "official");
-    let mut draft = editor["data"]["draft"].clone();
+    let (status, recommendation) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{official_id}/recommended-capabilities"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{recommendation}");
+    let mut draft = recommendation["data"]["draft"].clone();
+    let gained_modules = recommendation["data"]["added_capabilities"].as_array().unwrap().iter()
+        .map(|selection| selection["capability"]["id"].as_str().unwrap())
+        .filter(|id| !enabled.contains(id)).collect::<std::collections::BTreeSet<_>>();
     let original_instructions = draft["document"]["instructions"].as_str().unwrap().to_owned();
     draft["document"]["instructions"] = json!(format!("{original_instructions}\nOFFICIAL_COMPANION_EXTENDED_RULES_V1"));
-    draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
-        "capability": {"id": "web.research"}, "action_allowlist": ["web.research/search"]
-    }));
     let (status, saved) = call(router.clone(), "POST",
         &format!("/api/agent-presets/{official_id}/revisions"), json!({
             "expected_current_revision": editor["data"]["revision"]["reference"], "draft": draft,
@@ -5058,7 +5089,8 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         json!({"selection": selection})).await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     assert_eq!(preview["data"]["can_apply"], true, "{preview}");
-    assert_eq!(preview["data"]["capabilities"]["gained"], json!(["web.research"]));
+    assert_eq!(preview["data"]["capabilities"]["gained"].as_array().unwrap().iter()
+        .map(|value| value.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>(), gained_modules);
     assert_eq!(preview["data"]["model"]["preserved"], true);
     assert_eq!(preview["data"]["model"]["provider_id"], provider_id);
     assert_eq!(preview["data"]["model"]["model"], "step-3.7-flash");
@@ -5108,12 +5140,25 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
     let new_binding = &refreshed["canonical_binding"];
     assert_eq!(new_binding["binding_version"].as_u64(),
         Some(old_binding["binding_version"].as_u64().unwrap() + 1));
-    assert_eq!(new_binding["typed_resource_bindings"], old_binding["typed_resource_bindings"],
-        "refresh must retain the exact Companion, Memory and Scheduler definitions");
+    let new_resources = new_binding["typed_resource_bindings"].as_array().unwrap();
+    for previous in old_binding["typed_resource_bindings"].as_array().unwrap() {
+        let next = new_resources.iter().find(|resource|
+            resource["resource_kind"] == previous["resource_kind"]).unwrap();
+        for field in ["resource_id", "owner_id", "typed_parameters", "connection_config_ref"] {
+            assert_eq!(next[field], previous[field], "refresh must keep the original resource choice: {field}");
+        }
+    }
+    for kind in ["workspace", "process_session", "project_memory", "asset_library", "scheduler"] {
+        assert!(new_resources.iter().any(|resource| resource["resource_kind"] == kind),
+            "an upgraded Companion must automatically receive {kind}");
+    }
+    let workspace = new_resources.iter().find(|resource| resource["resource_kind"] == "workspace").unwrap();
+    let process = new_resources.iter().find(|resource| resource["resource_kind"] == "process_session").unwrap();
+    assert_eq!(workspace["typed_parameters"]["workspace_root"], process["typed_parameters"]["workspace_root"]);
     assert_eq!(new_binding["resolved_snapshot_ref"], current_preview["data"]["target"]["resolved_snapshot_ref"]);
     assert_eq!(new_binding["preset_revision_ref"]["preset_id"], current_preview["data"]["target"]["preset_id"]);
     assert_eq!(new_binding["preset_revision_ref"]["revision"], current_preview["data"]["target"]["preset_revision"]);
-    assert_eq!(refreshed["enabled_capability_actions"]["web.research"], json!(["web.research/search"]));
+    assert_eq!(refreshed["enabled_capability_actions"]["web.research"], json!(["web.research/fetch","web.research/search"]));
     let (status, preserved_history) = call(router.clone(), "GET",
         &format!("{session_path}/message-history?page_size=50"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{preserved_history}");

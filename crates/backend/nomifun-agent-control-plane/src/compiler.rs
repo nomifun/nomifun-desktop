@@ -10,7 +10,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler as KernelAgentPresetCompiler, CompileRequest, CompilerEnvironment,
-    KernelError, KernelRegistry, MaterializedRegistry,
+    CompileResourceCeilingPolicy, KernelError, KernelRegistry, MaterializedRegistry,
 };
 use nomifun_api_types::{AgentPresetDraftDto, AgentPresetRevisionDto};
 use serde::Serialize;
@@ -78,6 +78,7 @@ pub struct PresetRevisionCompiler {
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
     consumer_validator: Option<Arc<ConsumerValidator>>,
+    resource_ceiling_policy: CompileResourceCeilingPolicy,
 }
 
 type ConsumerValidator = dyn Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync;
@@ -145,8 +146,9 @@ impl PresetRevisionCompiler {
         let (registry, environment) = self.canonical_inputs()?;
         let contribution_locks = contribution_locks_for_payload(&payload, catalog, &registry)?;
         let revision = derived_revision(owner, preset_id, payload, contribution_locks, reason)?;
-        let snapshot = KernelAgentPresetCompiler::compile_with_frozen_role_providers(
+        let snapshot = KernelAgentPresetCompiler::compile_with_frozen_role_providers_and_resource_ceiling(
             &registry, &environment, saved_snapshot_request(revision.clone(), source_snapshot), source_snapshot,
+            &self.resource_ceiling_policy,
         ).map_err(kernel_compile_error)?.envelope;
         if let Some(validate) = &self.consumer_validator { validate(&registry, &snapshot)?; }
         Ok((revision, snapshot))
@@ -192,7 +194,8 @@ impl PresetRevisionCompiler {
         selection: &nomifun_agent_contracts::RoleProviderSelection,
     ) -> Result<(), ControlPlaneError> {
         let (registry, environment) = self.canonical_inputs()?;
-        KernelAgentPresetCompiler::validate_role_default(&registry, &environment, selection)
+        KernelAgentPresetCompiler::validate_role_default_with_resource_ceiling(&registry, &environment, selection,
+            &self.resource_ceiling_policy, "desktop")
             .map_err(|error| ControlPlaneError::canonical(
                 error.canonical_code(), axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string(),
             ))
@@ -203,6 +206,7 @@ impl PresetRevisionCompiler {
             canonical_registry: None,
             canonical_environment: None,
             consumer_validator: None,
+            resource_ceiling_policy: Default::default(),
         }
     }
 
@@ -214,6 +218,27 @@ impl PresetRevisionCompiler {
     where F: Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync + 'static {
         self.consumer_validator = Some(Arc::new(validate));
         self
+    }
+
+    pub fn with_resource_ceiling_policy(mut self, policy: CompileResourceCeilingPolicy) -> Self {
+        self.resource_ceiling_policy = policy;
+        self
+    }
+
+    pub(crate) fn validate_catalog_availability(
+        &self,
+        payload: &AgentPresetRevisionPayload,
+        catalog: &CatalogSnapshot,
+        diagnostics: &mut Vec<CompilationDiagnostic>,
+    ) -> Result<(), ControlPlaneError> {
+        let deferred = if self.resource_ceiling_policy.optional_resources.is_empty() {
+            BTreeSet::new()
+        } else {
+            let (registry, _) = self.canonical_inputs()?;
+            nomifun_agent_kernel::deferred_resource_ceiling_capabilities(&registry, &self.resource_ceiling_policy)
+        };
+        validate_catalog_availability(payload, catalog, diagnostics, &deferred);
+        Ok(())
     }
 
     /// Bind revision saves to the exact registry and environment used by
@@ -279,8 +304,9 @@ impl PresetRevisionCompiler {
                     && snapshot.content.context_order == revision.payload.context_order
                     && snapshot.content.middleware_order == revision.payload.middleware_order
                     && KernelAgentPresetCompiler::skills_unchanged(registry, revision, snapshot)
-                    && KernelAgentPresetCompiler::role_providers_unchanged(
+                    && KernelAgentPresetCompiler::role_providers_unchanged_with_resource_ceiling(
                         registry, environment, revision, snapshot,
+                        &self.resource_ceiling_policy,
                     )
             }
             _ => true,
@@ -350,7 +376,7 @@ impl PresetRevisionCompiler {
                 None,
             ));
         }
-        validate_direct_catalog_availability(&payload, catalog, &mut diagnostics);
+        self.validate_catalog_availability(&payload, catalog, &mut diagnostics)?;
         if clean && current_snapshot.is_none() {
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
@@ -376,7 +402,7 @@ impl PresetRevisionCompiler {
                 created_at_ms: now_ms(),
                 resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
             };
-            match KernelAgentPresetCompiler::compile(&registry, &environment, request) {
+            match KernelAgentPresetCompiler::compile_with_resource_ceiling(&registry, &environment, request, &self.resource_ceiling_policy) {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
                     diagnostics.push(kernel_error_diagnostic(&error));
@@ -505,10 +531,11 @@ fn has_errors(diagnostics: &[CompilationDiagnostic]) -> bool {
     !diagnostics.is_empty()
 }
 
-pub(crate) fn validate_direct_catalog_availability(
+fn validate_catalog_availability(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
     diagnostics: &mut Vec<CompilationDiagnostic>,
+    deferred: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
 ) {
     let mut seen = BTreeSet::new();
     for selection in payload
@@ -539,6 +566,9 @@ pub(crate) fn validate_direct_catalog_availability(
                     .and_then(availability_code)
             });
         if let Some(code) = unavailable_code {
+            if code.as_ref() == "CAPABILITY_UNAVAILABLE" && deferred.contains(&reference.id) {
+                continue;
+            }
             diagnostics.push(error_diagnostic(
                 code,
                 format!("capability {} is unavailable on this host", reference.id.as_ref()),

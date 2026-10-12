@@ -1,4 +1,7 @@
 //! Authoring reuse checks. Execution/Node dispatch is covered by adapter tests.
+#[path = "compiler_resource_ceiling_tests.rs"]
+mod resource_ceiling_tests;
+
 use super::*;
 use nomifun_agent_contracts::{
     CapabilityCatalogMaterialization, CapabilityCatalogMaterializer, CapabilityContributions,

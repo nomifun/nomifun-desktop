@@ -509,6 +509,18 @@ pub struct AgentPresetEditorResponse {
     pub draft: AgentPresetDraftDto,
 }
 
+/// An additive, reviewable proposal for an owned official Agent. Reading this
+/// response never saves a Revision or changes a Session binding. The caller
+/// commits `draft` through the normal expected-current-Revision save boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetRecommendedCapabilitiesResponse {
+    pub draft: AgentPresetDraftDto,
+    /// Only missing Actions; a new module includes its complete default grant.
+    pub added_capabilities: Vec<CapabilitySelectionDto>,
+    pub added_skills: Vec<ExactCatalogRefDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetRevisionDto {

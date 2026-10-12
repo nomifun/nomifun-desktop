@@ -2713,6 +2713,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4540,6 +4554,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [
@@ -6318,6 +6346,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [

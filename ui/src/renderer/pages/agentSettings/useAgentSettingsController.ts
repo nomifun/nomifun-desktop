@@ -5,6 +5,7 @@ import type {
   AgentPresetDocument,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
+  AgentPresetRecommendedCapabilitiesResponse,
   AgentPresetSummary,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
@@ -21,7 +22,7 @@ import {
   type AgentEditorReturn,
 } from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSWRConfig } from 'swr';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/renderer/hooks/context/AuthContext';
@@ -32,7 +33,7 @@ type Selection =
   | { kind: 'preset'; preset: AgentPresetSummary }
   | null;
 
-type BusyAction = 'save' | 'create' | 'open' | 'delete' | null;
+type BusyAction = 'save' | 'create' | 'open' | 'delete' | 'recommend' | null;
 
 const emptyCatalog: AgentCatalogResponse = {
   modules: [],
@@ -86,6 +87,9 @@ export function useAgentSettingsController() {
   const [editor, setEditor] = useState<AgentPresetEditorResponse | null>(null);
   const [draft, setDraftState] = useState<AgentPresetDraft | null>(null);
   const [savedDraft, setSavedDraft] = useState<AgentPresetDraft | null>(null);
+  const [recommendation, setRecommendation] = useState<AgentPresetRecommendedCapabilitiesResponse | null>(null);
+  const editorGenerationRef = useRef(0);
+  const recommendingRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [openingPresetId, setOpeningPresetId] = useState<string | null>(null);
@@ -106,9 +110,11 @@ export function useAgentSettingsController() {
   }, [setError, t]);
 
   const clearEditorState = useCallback(() => {
+    editorGenerationRef.current += 1;
     setEditor(null);
     setDraftState(null);
     setSavedDraft(null);
+    setRecommendation(null);
   }, []);
 
   const load = useCallback(async () => {
@@ -173,6 +179,8 @@ export function useAgentSettingsController() {
   }, [mutate]);
 
   const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
+    editorGenerationRef.current += 1;
+    setRecommendation(null);
     editingDrafts?.rememberSelection({ kind: 'preset', preset_id: response.preset.preset_id });
     const nextDraft = cloneDraft(response.draft);
     if (response.preset.source === 'official' && nextDraft.source_template_key &&
@@ -284,6 +292,7 @@ export function useAgentSettingsController() {
   }, [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError, t]);
 
   const discardChanges = useCallback(() => {
+    setRecommendation(null);
     if (draft) editingDrafts?.removePreset(draft.preset_id);
     if (savedDraft) setDraftState(cloneDraft(savedDraft));
     else if (editor) setDraftState(cloneDraft(editor.draft));
@@ -317,29 +326,31 @@ export function useAgentSettingsController() {
   );
 
   const setDraft = useCallback((next: AgentPresetDraft) => {
+    setRecommendation(null);
     editingDrafts?.writePreset(next);
     setDraftState(next);
   }, [editingDrafts]);
 
-  const saveRevision = useCallback(async () => {
-    if (!draft) return null;
+  const saveRevision = useCallback(async (draftToSave = draft) => {
+    if (!draftToSave) return null;
     setBusyAction('save');
     setError(null);
     try {
       const saved = await agentPlatform.saveRevision.invoke({
-        preset_id: draft.preset_id,
+        preset_id: draftToSave.preset_id,
         request: {
-          expected_current_revision: draft.current_revision,
-          draft,
+          expected_current_revision: draftToSave.current_revision,
+          draft: draftToSave,
         },
       });
-      editingDrafts?.removePreset(draft.preset_id);
+      editingDrafts?.removePreset(draftToSave.preset_id);
       const nextDraft: AgentPresetDraft = {
-        ...draft,
+        ...draftToSave,
         current_revision: saved.revision.reference,
       };
       setDraftState(nextDraft);
       setSavedDraft(cloneDraft(nextDraft));
+      setRecommendation(null);
       setEditor((current) =>
         current
           ? {
@@ -373,6 +384,43 @@ export function useAgentSettingsController() {
     [draft, savedDraft]
   );
 
+  const previewRecommendedCapabilities = useCallback(async () => {
+    if (!draft?.source_template_key || editor?.preset.source !== 'official' || dirty || busyAction || recommendingRef.current) return;
+    recommendingRef.current = true;
+    const generation = editorGenerationRef.current;
+    setBusyAction('recommend');
+    setError(null);
+    setRecommendation(null);
+    try {
+      const preview = await agentPlatform.recommendedCapabilities.invoke({ preset_id: draft.preset_id });
+      if (generation !== editorGenerationRef.current) return;
+      // Do not adopt another editor's metadata without refreshing our saved baseline.
+      if (preview.draft.preset_id !== draft.preset_id ||
+          preview.draft.current_revision?.preset_id !== draft.current_revision?.preset_id ||
+          preview.draft.current_revision?.revision !== draft.current_revision?.revision ||
+          preview.draft.current_revision?.revision_digest !== draft.current_revision?.revision_digest) {
+        reportError({ status: 409 }, 'open');
+        return;
+      }
+      setRecommendation(preview);
+    } catch (previewError) {
+      if (generation === editorGenerationRef.current) reportError(previewError, 'open');
+    } finally {
+      recommendingRef.current = false;
+      if (generation === editorGenerationRef.current) setBusyAction(null);
+    }
+  }, [draft, editor?.preset.source, dirty, busyAction, setError, reportError]);
+
+  const applyRecommendedCapabilities = useCallback(async () => {
+    if (!recommendation || recommendation.draft.preset_id !== draft?.preset_id || dirty || busyAction || recommendingRef.current) return null;
+    recommendingRef.current = true;
+    try {
+      return await saveRevision(recommendation.draft);
+    } finally {
+      recommendingRef.current = false;
+    }
+  }, [recommendation, draft?.preset_id, dirty, busyAction, saveRevision]);
+
   return {
     editingDrafts,
     library,
@@ -388,6 +436,10 @@ export function useAgentSettingsController() {
     errorSubjects,
     modelConfigurationMissing,
     dirty,
+    recommendation,
+    previewRecommendedCapabilities,
+    applyRecommendedCapabilities,
+    dismissRecommendation: () => setRecommendation(null),
     load,
     openTemplate,
     openPreset,

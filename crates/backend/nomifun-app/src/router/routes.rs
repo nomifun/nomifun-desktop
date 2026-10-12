@@ -1229,6 +1229,9 @@ fn create_nomi_core_router_with_all_state(
 
     let router = router.layer(middleware::from_fn_with_state(services.data_dir.clone(), storage_maintenance_admission));
     let router = router.layer(middleware::from_fn(security_headers_middleware));
+    // Retain the management host's weak Session owner for the router lifetime.
+    // Handlers retain only Weak references, so this lease creates no runtime cycle.
+    let router = router.layer(axum::Extension(states._session_management_state));
 
     // Raise the default request body limit from axum's 2MB default to
     // `BODY_LIMIT` (10MB). Routes that need a larger cap (e.g. `/api/fs/upload`)

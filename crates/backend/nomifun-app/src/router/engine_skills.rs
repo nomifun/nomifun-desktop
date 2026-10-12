@@ -200,7 +200,7 @@ mod tests {
             content,actor:PrincipalRef { principal_kind:"user".into(),principal_id:"test-owner".into() },scene:"test".into(),surface:"desktop".into(),audience:"user".into(),
             created_at_ms:1,resolver_run_id:"test-resolver".into(),availability_evidence_revision:"test".into() };
         envelope.validate().unwrap();
-        let compiled=CompiledSnapshot { envelope,authority_policies:BTreeMap::new(),target_resource_bindings:vec![],registry_generation:registry.generation,registry_digest:registry.registry_digest.clone() };
+        let compiled=CompiledSnapshot { envelope,authority_policies:BTreeMap::new(),target_resource_bindings:vec![],registry_generation:registry.generation,registry_digest:registry.registry_digest.clone(),non_executable_capability_ids:Default::default() };
         compile(&compiled,&registry).await.unwrap()
     }
 

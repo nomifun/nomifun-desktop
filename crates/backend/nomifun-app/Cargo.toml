@@ -58,6 +58,10 @@ path = "tests/official_preset_catalog_integrity.rs"
 required-features = ["browser-use", "computer-use"]
 
 [[test]]
+name = "official_companion_resource_supply"
+path = "tests/official_companion_resource_supply.rs"
+
+[[test]]
 name = "connection_test_e2e"
 path = "tests/connection_test_e2e.rs"
 

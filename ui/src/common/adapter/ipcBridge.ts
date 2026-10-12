@@ -154,6 +154,7 @@ import type {
   AgentBindingValue,
   AgentPresetId,
   AgentPresetEditorResponse,
+  AgentPresetRecommendedCapabilitiesResponse,
   AgentPresetLibraryResponse,
   AgentPresetRevision,
   AgentResolvedSnapshot,
@@ -653,6 +654,10 @@ export const agentPlatform = {
     (params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions`,
     (params) => params.request
   ),
+  recommendedCapabilities: httpGet<
+    AgentPresetRecommendedCapabilitiesResponse,
+    { preset_id: string }
+  >((params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/recommended-capabilities`),
   getRevision: httpGet<
     AgentPresetRevision,
     { preset_id: string; revision: number }

@@ -147,7 +147,17 @@
 
 .capabilityBody { overflow:hidden; display:flex; flex-direction:column; }
 .capabilityPanel { flex:1; min-height:0; }
+.recommendation { flex-shrink:0; min-width:0; max-height:260px; overflow-y:auto; margin:0 0 12px; padding:12px; border:1px solid var(--agent-border); border-radius:10px; background:var(--color-fill-1); font-size:12px; color:var(--color-text-2); }
+.recommendation > strong { color:var(--color-text-1); }
+.recommendation p { margin:6px 0; line-height:1.6; }
+.recommendationList { list-style:none; display:grid; gap:8px; margin:10px 0; padding:0; }
+.recommendationList li { display:flex; flex-direction:column; gap:3px; }
+.recommendationList span { color:var(--color-text-3); line-height:1.6; overflow-wrap:anywhere; }
+.recommendationActions { display:flex; justify-content:flex-end; gap:8px; }
 @container agent-editor (max-width:720px) {
+  .editorHeader { align-items:flex-start; flex-wrap:wrap; }
+  .editorHeaderCopy { flex-basis:100%; }
+  .editorHeaderActions { min-width:0; max-width:100%; flex-shrink:1; flex-wrap:wrap; justify-content:flex-start; }
   .capabilityBody { overflow-y:auto; }
   .capabilityPanel { height:auto; flex:none; }
   .actionBar { flex-wrap:wrap; padding:12px; gap:8px; }

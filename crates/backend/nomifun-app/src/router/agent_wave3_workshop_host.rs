@@ -414,6 +414,48 @@ mod tests {
             .await
             .expect("patch asset");
         assert_eq!(patched.0["title"], "After");
+        let read = host
+            .invoke(request(
+                &owner_id,
+                ASSET_LIBRARY_RESOURCE_KIND,
+                CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
+                &["read"],
+                "creative.workshop/asset.read",
+                Wave3CapabilityOperation::WorkshopAssetRead {
+                    input: StrictJsonValue(json!({"asset_id": asset.asset_id})),
+                },
+            ))
+            .await
+            .expect("asset read needs no Canvas binding");
+        assert_eq!(read.0["title"], "After");
+        let canvas_without_binding = host
+            .invoke(request(
+                &owner_id,
+                ASSET_LIBRARY_RESOURCE_KIND,
+                CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
+                &["read", "write"],
+                "creative.workshop/canvas.read",
+                Wave3CapabilityOperation::WorkshopCanvasRead {
+                    input: StrictJsonValue(json!({})),
+                },
+            ))
+            .await
+            .expect_err("asset-library authority cannot authorize a Canvas read");
+        assert_eq!(canvas_without_binding.code, "WAVE3_RESOURCE_NOT_BOUND");
+        let write_with_read_grant = host
+            .invoke(request(
+                &owner_id,
+                ASSET_LIBRARY_RESOURCE_KIND,
+                CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
+                &["read"],
+                "creative.workshop/asset.write",
+                Wave3CapabilityOperation::WorkshopAssetWrite {
+                    input: StrictJsonValue(json!({"asset_id": asset.asset_id, "title": "Denied"})),
+                },
+            ))
+            .await
+            .expect_err("a read resource cannot authorize asset writes");
+        assert_eq!(write_with_read_grant.code, "WAVE3_RESOURCE_BINDING_INVALID");
         assert_eq!(
             service
                 .get_asset(patched.0["asset_id"].as_str().expect("asset id"))

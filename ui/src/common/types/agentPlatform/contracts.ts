@@ -376,6 +376,13 @@ export interface AgentPresetEditorResponse {
   draft: AgentPresetDraft;
 }
 
+/** Explicit recommendation preview; saving still uses the ordinary revision CAS. */
+export interface AgentPresetRecommendedCapabilitiesResponse {
+  draft: AgentPresetDraft;
+  added_capabilities: CapabilitySelection[];
+  added_skills: ExactCatalogRef<'skill'>[];
+}
+
 export interface CreateAgentPresetRequest {
   display_name: string;
   description?: string;

@@ -124,6 +124,8 @@ export const humanizeResourceKind = (resourceKind: string): string =>
 export const MODULE_I18N_KEYS: Readonly<Record<string, string>> = {
   'agent.collaboration': 'agentCollaboration',
   'model.management': 'modelManagement',
+  'knowledge.management': 'knowledgeManagement',
+  'session.management': 'sessionManagement',
   'plugin.development': 'pluginDevelopment',
   'automation.schedule': 'automationSchedule',
   browser: 'browser',
@@ -148,6 +150,14 @@ export const MODULE_I18N_KEYS: Readonly<Record<string, string>> = {
 };
 
 export const moduleI18nKey = (moduleId: string): string | undefined => MODULE_I18N_KEYS[moduleId];
+
+export const actionI18nKey = (actionId: string): string => {
+  const [moduleId, leaf] = actionId.split('/');
+  const key = (leaf ?? moduleId).replace(/[^a-zA-Z0-9]+/g, '_');
+  return ['knowledge.management', 'session.management'].includes(moduleId)
+    ? `${moduleId.replaceAll('.', '_')}_${key}`
+    : key;
+};
 
 export function moduleMatchesSearch(
   module: CapabilityModuleCatalogItem,

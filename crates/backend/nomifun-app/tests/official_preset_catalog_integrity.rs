@@ -111,56 +111,124 @@ fn official_preset_action_safety_matrix_is_exact() {
         )).collect()
     }
 
+    // Independent release expectations describe the complete supported tasks.
+    // Reading the seed or production catalog to build this matrix would let a
+    // missing default Action silently weaken both sides of the assertion.
+    const FILES: &[&str] = &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"];
+    const PROCESS: &[&str] = &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"];
+    const ARTIFACTS: &[&str] = &["workspace.artifacts/publish", "workspace.artifacts/read"];
+    const VCS: &[&str] = &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/push", "workspace.vcs/stage", "workspace.vcs/status"];
+    const PROJECT_MEMORY: &[&str] = &["project.memory/read", "project.memory/write"];
+    const WEB: &[&str] = &["web.research/fetch", "web.research/search"];
+    const KNOWLEDGE: &[&str] = &["knowledge/autogen", "knowledge/read", "knowledge/search", "knowledge/write"];
+    const SCHEDULE: &[&str] = &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"];
+    const BROWSER: &[&str] = &["browser/act", "browser/download", "browser/evaluate", "browser/navigate", "browser/observe", "browser/render_content", "browser/upload"];
+    const COMPUTER: &[&str] = &["computer/a11y.observe", "computer/input", "computer/launch", "computer/observe"];
+    const COLLABORATION: &[&str] = &["agent/delegate", "agent/fork", "agent/request_user_decision"];
+    const MEDIA: &[&str] = &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/text", "creation.media/video"];
+    const OFFICE: &[&str] = &["office/document.edit", "office/preview", "office/sheet.edit", "office/slides.edit"];
+    const ASSETS: &[&str] = &["creative.workshop/asset.read", "creative.workshop/asset.write"];
+    const SSH: &[&str] = &["ssh/exec", "ssh/fs.read", "ssh/fs.write", "ssh/sudo"];
+    const KNOWLEDGE_MANAGEMENT: &[&str] = &["knowledge.management/create", "knowledge.management/delete", "knowledge.management/inspect", "knowledge.management/list", "knowledge.management/update"];
+    const SESSION_MANAGEMENT: &[&str] = &[
+        "session.management/cancel_turn", "session.management/create",
+        "session.management/execution_adjust", "session.management/execution_cancel",
+        "session.management/execution_list", "session.management/execution_retry_step",
+        "session.management/execution_status", "session.management/list",
+        "session.management/send_input", "session.management/status",
+        "session.management/terminal_create", "session.management/terminal_input",
+        "session.management/terminal_list", "session.management/terminal_read",
+        "session.management/terminal_relaunch", "session.management/terminal_stop",
+    ];
+    const PLUGIN_DEVELOPMENT: &[&str] = &[
+        "plugin.development/apply", "plugin.development/check", "plugin.development/inspect",
+        "plugin.development/install", "plugin.development/list", "plugin.development/open",
+        "plugin.development/plan", "plugin.development/preview", "plugin.development/read",
+        "plugin.development/test_action", "plugin.development/test_ui",
+    ];
+
     let expected = BTreeMap::from([
         (OfficialPresetKey::ChatMinimal, actions(&[])),
         (OfficialPresetKey::AssistantGeneral, actions(&[
             ("model.management", &["model.management/add_model", "model.management/create_provider", "model.management/inspect"]),
-            ("knowledge", &["knowledge/autogen", "knowledge/read", "knowledge/search", "knowledge/write"]),
-            ("project.memory", &["project.memory/read", "project.memory/write"]),
-            ("web.research", &["web.research/fetch", "web.research/search"]),
-            ("automation.schedule", &["automation.schedule/list"]),
-            ("browser", &["browser/navigate", "browser/observe", "browser/render_content"]),
-            ("computer", &["computer/a11y.observe", "computer/observe"]),
-            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
-            ("workspace.files", &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
-            ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
-            ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
-            ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
+            ("knowledge", KNOWLEDGE),
+            ("project.memory", PROJECT_MEMORY),
+            ("web.research", WEB),
+            ("automation.schedule", SCHEDULE),
+            ("browser", BROWSER),
+            ("computer", COMPUTER),
+            ("workspace.artifacts", ARTIFACTS),
+            ("workspace.files", FILES),
+            ("workspace.process", PROCESS),
+            ("workspace.vcs", VCS),
+            ("agent.collaboration", COLLABORATION),
             ("requirements", &["requirements/claim", "requirements/read", "requirements/status", "requirements/write"]),
-            ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/video"]),
-            ("plugin.development", nomifun_plugin_development::CREATE_ACTIONS),
+            ("creation.media", MEDIA),
+            ("plugin.development", PLUGIN_DEVELOPMENT),
+            ("creative.workshop", ASSETS),
+            ("office", OFFICE),
+            ("ssh", SSH),
+            ("knowledge.management", KNOWLEDGE_MANAGEMENT),
+            ("session.management", SESSION_MANAGEMENT),
         ])),
         (OfficialPresetKey::CodingCodex, actions(&[
-            ("workspace.files", &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
-            ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
-            ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
-            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
-            ("project.memory", &["project.memory/read", "project.memory/write"]),
-            ("web.research", &["web.research/fetch", "web.research/search"]),
-            ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
+            ("workspace.files", FILES),
+            ("workspace.vcs", VCS),
+            ("workspace.process", PROCESS),
+            ("workspace.artifacts", ARTIFACTS),
+            ("project.memory", PROJECT_MEMORY),
+            ("web.research", WEB),
+            ("agent.collaboration", COLLABORATION),
+            ("knowledge", KNOWLEDGE),
+            ("plugin.development", PLUGIN_DEVELOPMENT),
+            ("ssh", SSH),
+            ("knowledge.management", KNOWLEDGE_MANAGEMENT),
+            ("session.management", SESSION_MANAGEMENT),
         ])),
         (OfficialPresetKey::CompanionDefault, actions(&[
             ("companion", &["companion/evolve", "companion/learn"]),
             ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
-            ("knowledge", &["knowledge/read", "knowledge/search"]),
-            ("channel.messaging", &["channel.messaging/reply"]),
+            ("knowledge", KNOWLEDGE),
+            ("channel.messaging", &["channel.messaging/reply", "channel.messaging/send"]),
             ("robot", &["robot/vision"]),
-            ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"]),
+            ("automation.schedule", SCHEDULE),
+            ("workspace.files", FILES),
+            ("workspace.process", PROCESS),
+            ("workspace.artifacts", ARTIFACTS),
+            ("project.memory", PROJECT_MEMORY),
+            ("web.research", WEB),
+            ("browser", BROWSER),
+            ("computer", COMPUTER),
+            ("creation.media", MEDIA),
+            ("creative.workshop", ASSETS),
+            ("office", OFFICE),
+            ("ssh", SSH),
+            ("agent.collaboration", COLLABORATION),
+            ("knowledge.management", KNOWLEDGE_MANAGEMENT),
+            ("session.management", SESSION_MANAGEMENT),
         ])),
         (OfficialPresetKey::CustomerServiceDefault, actions(&[
-            ("customer.service", &["customer.service/handoff", "customer.service/notes.read"]),
+            ("customer.service", &["customer.service/handoff", "customer.service/notes.read", "customer.service/notes.write"]),
             ("knowledge", &["knowledge/read", "knowledge/search"]),
-            ("channel.messaging", &["channel.messaging/reply"]),
+            ("channel.messaging", &["channel.messaging/reply", "channel.messaging/send"]),
+            ("workspace.files", FILES),
+            ("workspace.process", PROCESS),
+            ("workspace.artifacts", ARTIFACTS),
+            ("automation.schedule", SCHEDULE),
+            ("web.research", WEB),
         ])),
         (OfficialPresetKey::CreativeStudioDefault, actions(&[
-            ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/text", "creation.media/video"]),
+            ("creation.media", MEDIA),
             ("creative.workshop", &["creative.workshop/asset.read", "creative.workshop/asset.write", "creative.workshop/canvas.edit", "creative.workshop/canvas.read", "creative.workshop/template.run"]),
-            ("office", &["office/document.edit", "office/preview", "office/sheet.edit", "office/slides.edit"]),
-            ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
-            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
-            ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
-            ("project.memory", &["project.memory/read", "project.memory/write"]),
-            ("web.research", &["web.research/fetch", "web.research/search"]),
+            ("office", OFFICE),
+            ("workspace.files", FILES),
+            ("workspace.artifacts", ARTIFACTS),
+            ("workspace.process", PROCESS),
+            ("project.memory", PROJECT_MEMORY),
+            ("web.research", WEB),
+            ("browser", BROWSER),
+            ("agent.collaboration", COLLABORATION),
+            ("automation.schedule", SCHEDULE),
         ])),
     ]);
     let manifest = official_preset_seed_manifest_payload();
@@ -188,6 +256,18 @@ fn official_preset_action_safety_matrix_is_exact() {
         };
         assert_eq!(skill_ids, expected_skills, "{} default Skill selection changed", key.as_str());
     }
+
+    let minimal = &manifest.templates[&OfficialPresetKey::ChatMinimal];
+    assert!(minimal.required_resource_kinds.is_empty());
+    assert!(minimal.required_runtime_features.is_empty());
+    let coding = &manifest.templates[&OfficialPresetKey::CodingCodex];
+    assert!(coding.enabled_capabilities.iter().all(|selection| {
+        !matches!(selection.capability.id.as_ref(), "browser" | "computer")
+    }), "Coding's default contract must remain usable on a headless host");
+    assert!(coding.required_resource_kinds.iter().all(|kind| {
+        !matches!(kind.as_ref(), "browser" | "computer")
+    }));
+    assert!(coding.required_runtime_features.iter().any(|feature| feature.as_ref() == "code_mode"));
 }
 
 #[tokio::test]
@@ -557,15 +637,16 @@ async fn assert_official_preset_catalog_integrity(
             assert!(resource.connection_config_ref.is_none());
             let operations = match resource.resource_kind.as_str() {
                 "process_session" => ["execute"].as_slice(),
-                "computer" => ["observe"].as_slice(),
-                "scheduler" if template_key == "assistant.general" => ["read"].as_slice(),
+                "browser" => ["act", "download", "evaluate", "navigate", "observe", "render_content", "upload"].as_slice(),
+                "computer" => ["observe", "input", "launch"].as_slice(),
                 "scheduler" => ["read", "write", "delete"].as_slice(),
                 "workspace" | "project_memory" | "companion" | "companion_memory" | "asset_library" | "customer" => ["read", "write"].as_slice(),
                 kind => panic!("unaccounted resource kind {kind}"),
             };
             assert_eq!(resource.operations, operations.iter().map(|operation| (*operation).to_owned()).collect());
             let parameters = match resource.resource_kind.as_str() {
-                "workspace" | "process_session" => BTreeMap::from([("workspace_root".to_owned(), services.work_dir.to_string_lossy().into_owned())]),
+                "workspace" | "process_session" => BTreeMap::from([("workspace_location".to_owned(), "managed-session".to_owned())]),
+                "browser" => BTreeMap::from([("provider_kind".to_owned(), "managed".to_owned())]),
                 "computer" => BTreeMap::from([("scope".to_owned(), "local_desktop".to_owned())]),
                 _ => BTreeMap::new(),
             };
@@ -585,6 +666,8 @@ fn official_session_resources(
     match template_key {
         "chat.minimal" => serde_json::json!([]),
         "assistant.general" => serde_json::json!([
+            resource("asset_library", "creative-studio-assets"),
+            resource("browser", "managed-browser"),
             resource("computer", "local-desktop"),
             resource("process_session", "managed-process-session"),
             resource("project_memory", "default-project-memory"),
@@ -597,15 +680,28 @@ fn official_session_resources(
             resource("workspace", "default-workspace"),
         ]),
         "companion.default" => serde_json::json!([
+            resource("asset_library", "creative-studio-assets"),
+            resource("browser", "managed-browser"),
             resource("companion", companion_id),
             resource("companion_memory", companion_id),
-            resource("scheduler", "installation-scheduler"),
-        ]),
-        "customer-service.default" => serde_json::json!([resource("customer", customer_id)]),
-        "creative-studio.default" => serde_json::json!([
-            resource("asset_library", "creative-studio-assets"),
+            resource("computer", "local-desktop"),
             resource("process_session", "managed-process-session"),
             resource("project_memory", "default-project-memory"),
+            resource("scheduler", "installation-scheduler"),
+            resource("workspace", "default-workspace"),
+        ]),
+        "customer-service.default" => serde_json::json!([
+            resource("customer", customer_id),
+            resource("process_session", "managed-process-session"),
+            resource("scheduler", "installation-scheduler"),
+            resource("workspace", "default-workspace"),
+        ]),
+        "creative-studio.default" => serde_json::json!([
+            resource("asset_library", "creative-studio-assets"),
+            resource("browser", "managed-browser"),
+            resource("process_session", "managed-process-session"),
+            resource("project_memory", "default-project-memory"),
+            resource("scheduler", "installation-scheduler"),
             resource("workspace", "default-workspace"),
         ]),
         other => panic!("published official template {other} needs a session resource fixture"),

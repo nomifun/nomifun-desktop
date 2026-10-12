@@ -1,0 +1,6 @@
+.controls { min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.update { flex-basis:100%; min-width:0; max-height:220px; overflow:auto; padding:10px 12px; border:1px solid var(--color-border-2); border-radius:9px; background:var(--color-fill-1); color:var(--color-text-2); font-size:12px; line-height:1.6; }
+.update strong { color:var(--color-text-1); font-weight:500; }
+.update p { margin:5px 0; overflow-wrap:anywhere; }
+.update p[role='alert'] { color:rgb(var(--danger-6)); }
+.actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; margin-top:6px; }

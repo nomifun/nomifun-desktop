@@ -159,6 +159,7 @@ fn action(
         ),
         effect_class: EffectClass::Pure,
         presentation,
+        required_resource_operations: Some(Default::default()),
     }
 }
 

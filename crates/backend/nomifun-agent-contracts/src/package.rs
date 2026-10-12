@@ -650,6 +650,13 @@ pub struct CapabilityActionDescriptor {
     pub output_schema: CanonicalSchemaRef,
     pub effect_class: EffectClass,
     pub presentation: ToolPresentationKind,
+    /// Exact resource operations consumed by this Action. The Module's
+    /// resource kinds continue to describe its complete contribution surface;
+    /// a selected Action only requires the resource slots declared here.
+    /// None means the Action did not publish an exact resource contract;
+    /// Some(empty) explicitly declares that it consumes no resource slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_resource_operations: Option<BTreeMap<ResourceKind, BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -875,6 +882,19 @@ impl CapabilityManifest {
                     self.id.as_ref(),
                     action.action_id.as_ref()
                 ));
+            }
+            for (kind, operations) in action.required_resource_operations.iter().flatten() {
+                if !self.contributions.resource_kinds.contains(kind)
+                    || kind.as_ref().trim().is_empty()
+                    || kind.as_ref() != kind.as_ref().trim()
+                    || operations.is_empty()
+                    || operations.iter().any(|operation| operation.trim().is_empty() || operation != operation.trim())
+                {
+                    return Err(format!(
+                        "capability {} action {} declares invalid resource operations",
+                        self.id.as_ref(), action.action_id.as_ref(),
+                    ));
+                }
             }
         }
         for (field, values) in [
@@ -1414,6 +1434,7 @@ mod tests {
                         output_schema: CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/output")),
                         effect_class: EffectClass::ReadSensitive,
                         presentation: ToolPresentationKind::FunctionTool,
+                        required_resource_operations: Default::default(),
                     })
                     .collect(),
                 context_schema_refs: vec![CanonicalSchemaRef::from("schema://workspace.files/context")],
@@ -1445,6 +1466,18 @@ mod tests {
             module
                 .validate_module_contract()
                 .expect("display kind must not change explicit Module authority");
+        }
+        module.contributions.actions[0].required_resource_operations = Some(BTreeMap::from([
+            (ResourceKind::from("workspace"), BTreeSet::from(["read".to_owned()])),
+        ]));
+        module.validate_module_contract().expect("resource operations use a declared Module slot");
+        for requirements in [
+            BTreeMap::from([(ResourceKind::from("undeclared"), BTreeSet::from(["read".to_owned()]))]),
+            BTreeMap::from([(ResourceKind::from("workspace"), BTreeSet::new())]),
+            BTreeMap::from([(ResourceKind::from("workspace"), BTreeSet::from([String::new()]))]),
+        ] {
+            module.contributions.actions[0].required_resource_operations = Some(requirements);
+            assert!(module.validate_module_contract().is_err());
         }
     }
 

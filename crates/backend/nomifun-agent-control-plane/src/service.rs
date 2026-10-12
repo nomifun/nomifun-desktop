@@ -1322,6 +1322,25 @@ impl AgentControlPlane {
         editor_response(stored, revision, document, template_key)
     }
 
+    /// Propose only missing defaults for this owner's stable official Agent.
+    /// There is no trustworthy persisted seed baseline for an authored Revision;
+    /// absence may be an intentional user removal and must remain reviewable.
+    /// Saving the proposal uses the existing immutable Revision and CAS path.
+    pub async fn recommended_capabilities(
+        &self, owner: &UserId, preset_id: &str,
+    ) -> Result<nomifun_api_types::AgentPresetRecommendedCapabilitiesResponse, ControlPlaneError> {
+        let stored = self.owned_preset(owner, preset_id).await?;
+        let key = owned_official_key(&stored)
+            .filter(|_| !stored.session_only && stored.preset.source == AgentPresetSource::Official)
+            .ok_or_else(|| not_found("AgentPreset"))?;
+        let mut draft = self.editor(owner, preset_id, None).await?.draft;
+        let recommended = self.official_seed_document(key, self.catalog.snapshot()?.as_ref())?;
+        let (added_capabilities, added_skills) = add_recommended_capabilities(&mut draft.document, &recommended);
+        Ok(nomifun_api_types::AgentPresetRecommendedCapabilitiesResponse {
+            draft, added_capabilities, added_skills,
+        })
+    }
+
     /// Official identities and their host-derived variants retain their key.
     /// Older internal user configurations require the complete current seed;
     /// neither a name nor a personal model variant proves official identity.
@@ -1454,7 +1473,7 @@ impl AgentControlPlane {
                 axum::http::StatusCode::BAD_REQUEST, "select exactly one Agent")),
         };
         let mut diagnostics = Vec::new();
-        crate::compiler::validate_direct_catalog_availability(&document_payload(&document)?, &catalog, &mut diagnostics);
+        self.compiler.validate_catalog_availability(&document_payload(&document)?, &catalog, &mut diagnostics)?;
         if !diagnostics.is_empty() {
             return Err(ControlPlaneError::with_details("CAPABILITY_NOT_MATERIALIZED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent capability is unavailable",
@@ -2360,6 +2379,40 @@ fn binding_record_api(
     })
 }
 
+fn add_recommended_capabilities(
+    document: &mut nomifun_api_types::AgentPresetDocumentDto,
+    recommended: &nomifun_api_types::AgentPresetDocumentDto,
+) -> (Vec<nomifun_api_types::CapabilitySelectionDto>, Vec<ExactCatalogRefDto>) {
+    let mut added_capabilities = Vec::new();
+    for selection in &recommended.enabled_capabilities {
+        if let Some(existing) = document.enabled_capabilities.iter_mut()
+            .find(|existing| existing.capability.id == selection.capability.id)
+        {
+            let missing = selection.action_allowlist.difference(&existing.action_allowlist)
+                .cloned().collect::<BTreeSet<_>>();
+            if !missing.is_empty() {
+                existing.action_allowlist.extend(missing.iter().cloned());
+                added_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
+                    capability: selection.capability.clone(), action_allowlist: missing,
+                });
+            }
+        } else {
+            document.enabled_capabilities.push(selection.clone());
+            added_capabilities.push(selection.clone());
+        }
+    }
+    let mut added_skills = Vec::new();
+    for skill in &recommended.skill_bindings {
+        // A user-pinned version of a bundled Skill is an authored choice.
+        // Add absent identities, never overwrite the selected version.
+        if !document.skill_bindings.iter().any(|existing| existing.id == skill.id) {
+            document.skill_bindings.push(skill.clone());
+            added_skills.push(skill.clone());
+        }
+    }
+    (added_capabilities, added_skills)
+}
+
 fn template_selection(
     selection: &CapabilitySelection,
     catalog: &CatalogSnapshot,
@@ -2890,6 +2943,7 @@ mod tests {
                         action_id,
                         effect_class: EffectClass::ReadLocal,
                         presentation: ToolPresentationKind::FunctionTool,
+                        required_resource_operations: Default::default(),
                     })
                     .collect(),
                 ..CapabilityContributions::default()
@@ -3530,6 +3584,101 @@ mod tests {
         assert_ne!(copy.preset.preset_id, *id);
         assert!(copy.draft.document.instructions.is_empty());
         assert!(!copy.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == AUTHORING_TEST_MIDDLEWARE_ID));
+    }
+
+    #[test]
+    fn recommended_capabilities_add_only_missing_authority_and_preserve_authored_fields() {
+        let selection = |id: &str, actions: &[&str]| nomifun_api_types::CapabilitySelectionDto {
+            capability: nomifun_api_types::CapabilityRefDto { id: id.into() },
+            action_allowlist: actions.iter().map(|action| (*action).to_owned()).collect(),
+        };
+        let mut document = empty_document();
+        document.enabled_capabilities = vec![
+            selection("workspace.files", &["workspace.files/read", "workspace.files/custom"]),
+            selection("user.module", &["user.module/run"]),
+        ];
+        document.skill_bindings = vec![ExactCatalogRefDto { id: "chosen.skill".into(), version: "1.0.0".into() }];
+        document.persona = "My companion".into();
+        document.instructions = "Keep this personal instruction".into();
+        document.starter_prompts = vec!["Personal starter".into()];
+        document.context_order = vec!["user.context".into()];
+        document.middleware_order = vec!["user.middleware".into()];
+        document.model_route_refs.insert(CHAT_MODEL_TASK.into(), "selected-route".into());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.into(), json!({"primary":{"model":"selected-model"}}));
+        let original = document.clone();
+        let mut recommended = empty_document();
+        recommended.enabled_capabilities = vec![
+            selection("workspace.files", &["workspace.files/read", "workspace.files/write"]),
+            selection("workspace.process", &["workspace.process/exec"]),
+        ];
+        recommended.skill_bindings = vec![
+            ExactCatalogRefDto { id: "chosen.skill".into(), version: "2.0.0".into() },
+            ExactCatalogRefDto { id: "new.skill".into(), version: "1.0.0".into() },
+        ];
+        let (added, added_skills) = add_recommended_capabilities(&mut document, &recommended);
+        assert_eq!(added, vec![
+            selection("workspace.files", &["workspace.files/write"]),
+            selection("workspace.process", &["workspace.process/exec"]),
+        ]);
+        assert_eq!(added_skills, vec![recommended.skill_bindings[1].clone()]);
+        assert_eq!(document.skill_bindings[0], original.skill_bindings[0], "pinned Skill versions stay authored");
+        assert!(document.enabled_capabilities[0].action_allowlist.contains("workspace.files/custom"));
+        assert!(document.enabled_capabilities.contains(&original.enabled_capabilities[1]));
+        let mut without_additions = document.clone();
+        without_additions.enabled_capabilities = original.enabled_capabilities.clone();
+        without_additions.skill_bindings = original.skill_bindings.clone();
+        assert_eq!(without_additions, original, "only capabilities and absent Skills may change");
+        assert_eq!(add_recommended_capabilities(&mut document, &recommended), (vec![], vec![]));
+    }
+
+    #[tokio::test]
+    async fn recommended_capabilities_are_owner_scoped_reviewable_and_save_with_existing_revision_fence() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::AssistantGeneral, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        let id = &created.preset.preset_id;
+        let initial_ref: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let initial = store.get_revision(&initial_ref).await.unwrap().unwrap();
+        let initial_snapshot = store.get_snapshot(&initial_ref).await.unwrap().unwrap();
+        let mut draft = created.draft;
+        draft.display_name = "My edited General".into();
+        draft.document.persona = "My chosen persona".into();
+        draft.document.instructions = "User-specific behavior".into();
+        draft.document.enabled_capabilities.retain(|selection| selection.capability.id != "workspace.process");
+        draft.document.enabled_capabilities.iter_mut().find(|selection| selection.capability.id == "workspace.files")
+            .unwrap().action_allowlist.remove("workspace.files/write");
+        control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: Some("Explicit user choices".into()),
+        }).await.unwrap();
+        let before = control.editor(&owner, id, None).await.unwrap();
+        let preview = control.recommended_capabilities(&owner, id).await.unwrap();
+        assert_eq!(preview.draft.display_name, before.draft.display_name);
+        assert_eq!(preview.draft.document.persona, before.draft.document.persona);
+        assert_eq!(preview.draft.document.instructions, before.draft.document.instructions);
+        assert_eq!(preview.draft.document.chat_route_records, before.draft.document.chat_route_records);
+        assert_eq!(preview.draft.current_revision, before.draft.current_revision);
+        assert_eq!(preview.added_capabilities.len(), 2);
+        assert!(preview.added_capabilities.iter().any(|selection| selection.capability.id == "workspace.files"
+            && selection.action_allowlist == BTreeSet::from(["workspace.files/write".into()])));
+        assert_eq!(control.editor(&owner, id, None).await.unwrap(), before, "inspection must never save the proposal");
+        assert_eq!(control.recommended_capabilities(&other, id).await.unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        let saved = control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: preview.draft.current_revision.clone(),
+            draft: preview.draft.clone(), reason: Some("Complete recommended capabilities".into()),
+        }).await.unwrap();
+        assert_eq!(saved.revision.reference.revision, before.revision.unwrap().reference.revision + 1);
+        assert_eq!(control.save_revision(&owner, id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: preview.draft.current_revision.clone(), draft: preview.draft, reason: None,
+        }).await.unwrap_err().code().as_ref(), "PRESET_REVISION_DIGEST_MISMATCH");
+        let complete = control.recommended_capabilities(&owner, id).await.unwrap();
+        assert!(complete.added_capabilities.is_empty());
+        assert!(complete.added_skills.is_empty());
+        assert_eq!(store.get_revision(&initial_ref).await.unwrap().unwrap(), initial);
+        assert_eq!(store.get_snapshot(&initial_ref).await.unwrap().unwrap(), initial_snapshot);
+        let personal = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        assert_eq!(control.recommended_capabilities(&owner, &personal.preset.preset_id).await.unwrap_err().status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

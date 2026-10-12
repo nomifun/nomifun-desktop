@@ -126,7 +126,7 @@ fn bundled_evolution_accepts_forward_schemas_but_rejects_authority_and_source_dr
     capability.actions[0].input_schema = "schema://new-input".into();
     refresh_snapshot(&mut target);
     validate_bundled_contract_evolution(&revision, &source, &target_revision, &target).unwrap();
-    for case in 0..9 {
+    for case in 0..10 {
         let mut invalid = target.clone();
         let capability = &mut invalid.content.enabled_capabilities[0];
         match case {
@@ -143,6 +143,9 @@ fn bundled_evolution_accepts_forward_schemas_but_rejects_authority_and_source_dr
                 capability.actions.push(action);
             },
             8 => { capability.contribution_lock.source_identity = "another-lock-owner".into(); },
+            9 => { capability.actions[0].required_resource_operations.get_or_insert_with(BTreeMap::new).insert(
+                SAMPLE_RESOURCE_KIND.into(), BTreeSet::from(["new-operation".to_owned()]),
+            ); },
             _ => unreachable!(),
         };
         refresh_snapshot(&mut invalid);

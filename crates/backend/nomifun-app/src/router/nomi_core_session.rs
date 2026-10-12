@@ -334,6 +334,61 @@ impl ProductAgentSelection {
     }
 }
 
+/// Product-owned identity and installation-owned infrastructure are enough to
+/// open a Session. Connections (Knowledge, channels, SSH and devices) are only
+/// inherited from an actual selection; missing optional targets stay unbound.
+fn product_agent_resource_selections(
+    target: &ProductAgentTarget,
+    required_kinds: &BTreeSet<String>,
+    previous: &[TypedResourceBindingDto],
+    explicit: Option<&[AgentResourceSelectionDto]>,
+) -> Vec<AgentResourceSelectionDto> {
+    let mut selections = explicit.map(<[_]>::to_vec).unwrap_or_else(|| previous.iter()
+        .filter(|resource| required_kinds.contains(&resource.resource_kind))
+        .map(|resource| AgentResourceSelectionDto {
+            resource_kind: resource.resource_kind.clone(),
+            resource_id: if resource.resource_kind == "workspace"
+                && resource.typed_parameters.contains_key("workspace_root") {
+                super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID.to_owned()
+            } else { resource.resource_id.clone() },
+        }).collect());
+    let exact_identity_kinds: &[&str] = match target.target_kind.as_str() {
+        "companion" => &["companion", "companion_memory"],
+        "creative_studio_canvas" => &["canvas"],
+        "customer" => &["customer"],
+        _ => &[],
+    };
+    for &kind in exact_identity_kinds {
+        if required_kinds.contains(kind) {
+            selections.retain(|selection| selection.resource_kind != kind);
+            selections.push(AgentResourceSelectionDto {
+                resource_kind: kind.to_owned(),
+                resource_id: target.target_id.clone(),
+            });
+        }
+    }
+    complete_automatic_agent_resource_selections(&mut selections, required_kinds);
+    selections
+}
+
+fn complete_automatic_agent_resource_selections(
+    selections: &mut Vec<AgentResourceSelectionDto>,
+    required_kinds: &BTreeSet<String>,
+) {
+    for kind in required_kinds {
+        if !selections.iter().any(|selection| &selection.resource_kind == kind)
+            && let Some(resource_id) = automatic_agent_resource_id(kind)
+        {
+            selections.push(AgentResourceSelectionDto {
+                resource_kind: kind.clone(),
+                resource_id: resource_id.to_owned(),
+            });
+        }
+    }
+    selections.sort_by(|left, right| left.resource_kind.cmp(&right.resource_kind)
+        .then_with(|| left.resource_id.cmp(&right.resource_id)));
+}
+
 pub(crate) struct NomiCoreProductAgentResolver {
     control_plane: Arc<AgentControlPlane>,
     official_runtime: Arc<super::official_runtime::OfficialRuntimeHost>,
@@ -428,91 +483,32 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 .saved_binding_artifacts(&owner, &binding)
                 .await
                 .map_err(control_plane_error_to_app)?;
-            // Product identity resources belong to the target, never to an
-            // older saved choice for that target. Other resource choices are
-            // inherited only if the next Snapshot still requires their kind.
-            let exact_target_resources = match target.target_kind.as_str() {
-                "companion" => vec![
-                    ("companion", target.target_id.as_str()),
-                    ("companion_memory", target.target_id.as_str()),
-                    ("scheduler", super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID),
-                ],
-                "creative_studio_canvas" => vec![
-                    ("canvas", target.target_id.as_str()),
-                    ("asset_library", super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID),
-                ],
-                _ => Vec::new(),
-            }.into_iter().filter(|(kind, _)| next_snapshot.content.required_resource_kinds.iter()
-                .any(|required| required.as_ref() == *kind)).collect::<Vec<_>>();
-            let target_resources_ready = existing.as_ref().is_some_and(|record| {
-                exact_target_resources.iter().all(|(kind, id)| {
-                    let mut bindings = record.agent_binding.typed_resource_bindings.iter()
-                        .filter(|resource| resource.resource_kind == *kind);
-                    matches!(bindings.next(), Some(resource) if resource.resource_id == *id)
-                        && bindings.next().is_none()
-                })
-            });
-            if target_resources_ready && existing.as_ref().is_some_and(|record|
+            let required_kinds = next_snapshot.content.required_resource_kinds.iter()
+                .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
+            let previous_resources = existing.as_ref().map(|record|
+                record.agent_binding.typed_resource_bindings.as_slice()).unwrap_or_default();
+            let selections = product_agent_resource_selections(
+                target, &required_kinds, previous_resources, None,
+            );
+            binding = self.resource_bindings.resolve_for_agent_switch(
+                &self.control_plane, &owner, binding, &selections,
+            ).await.map_err(|error| AppError::UnprocessableEntity(format!(
+                "{}: {}", error.code(), error.message(),
+            )))?;
+            if target.target_kind == "companion" && let Some(previous) = existing.as_ref() {
+                if let Some(workspace) = previous_resources.iter()
+                    .find(|resource| resource.resource_kind == "workspace")
+                    .and_then(|resource| resource.typed_parameters.get("workspace_root")) {
+                    freeze_carried_agent_switch_workspace(&mut binding, owner_id, workspace, true)?;
+                }
+                preserve_companion_refresh_resource_choices(&mut binding, &previous.agent_binding)?;
+            }
+            if existing.as_ref().is_some_and(|record|
                 record.agent_binding.preset_revision_ref == binding.preset_revision_ref
-                && record.agent_binding.resolved_snapshot_ref == binding.resolved_snapshot_ref) {
+                && record.agent_binding.resolved_snapshot_ref == binding.resolved_snapshot_ref
+                && record.agent_binding.typed_resource_bindings == binding.typed_resource_bindings) {
                 existing.unwrap().agent_binding
             } else {
-                if !exact_target_resources.is_empty() || existing.as_ref().is_some_and(|previous|
-                    !previous.agent_binding.typed_resource_bindings.is_empty()) {
-                    let mut selections = existing.as_ref().into_iter()
-                        .flat_map(|previous| previous.agent_binding.typed_resource_bindings.iter())
-                        .filter(|resource| next_snapshot.content.required_resource_kinds.iter()
-                            .any(|kind| kind.as_ref() == resource.resource_kind))
-                        .map(|resource| AgentResourceSelectionDto {
-                            resource_kind: resource.resource_kind.clone(),
-                            resource_id: resource.resource_id.clone(),
-                        })
-                        .collect::<Vec<_>>();
-                    for (kind, id) in &exact_target_resources {
-                        selections.retain(|resource| resource.resource_kind != *kind);
-                        selections.push(AgentResourceSelectionDto {
-                            resource_kind: (*kind).to_owned(),
-                            resource_id: (*id).to_owned(),
-                        });
-                    }
-                    if target.target_kind == "creative_studio_canvas"
-                        && matches!(&selection, ProductAgentSelection::Template { template_key }
-                            if template_key == "creative-studio.default")
-                        && existing.as_ref().is_none_or(|record|
-                            record.agent_binding.typed_resource_bindings.is_empty())
-                    {
-                        // A model-first Canvas selection may have no prior
-                        // binding. Supply only the same deterministic owner
-                        // infrastructure used by the implicit product entry.
-                        for (kind, id) in [
-                            ("workspace", super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID),
-                            ("process_session", super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID),
-                            ("project_memory", super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID),
-                        ] {
-                            if next_snapshot.content.required_resource_kinds.iter()
-                                .any(|required| required.as_ref() == kind)
-                                && !selections.iter().any(|resource| resource.resource_kind == kind) {
-                                selections.push(AgentResourceSelectionDto {
-                                    resource_kind: kind.to_owned(),
-                                    resource_id: id.to_owned(),
-                                });
-                            }
-                        }
-                    }
-                    binding = self.resource_bindings
-                        .resolve_for_saved_binding(
-                            &self.control_plane,
-                            &owner,
-                            binding,
-                            &selections,
-                        )
-                        .await
-                        .map_err(|error| AppError::UnprocessableEntity(format!(
-                            "{}: {}",
-                            error.code(),
-                            error.message(),
-                        )))?;
-                }
                 let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
                 binding.binding_version = previous.unwrap_or(0) + 1;
                 self.control_plane.put_agent_binding(&owner, target.target_kind.clone(), target.target_id.clone(),
@@ -565,56 +561,12 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 .saved_binding_artifacts(&owner, &binding)
                 .await
                 .map_err(control_plane_error_to_app)?;
-            // Product-owned entry points already carry the authoritative
-            // target identity. Materialize only resource kinds whose identity
-            // is deterministic from that target; every other required kind
-            // still fails closed in the resource resolver.
-            let selections = unbound_snapshot
-                .content
-                .required_resource_kinds
-                .iter()
-                .filter_map(|kind| {
-                    let resource_id = match (target.target_kind.as_str(), kind.as_ref()) {
-                        (_, "workspace") => {
-                            super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID
-                                .to_owned()
-                        }
-                        (_, "project_memory") => {
-                            super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID
-                                .to_owned()
-                        }
-                        (_, "process_session") => {
-                            super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID
-                                .to_owned()
-                        }
-                        (_, "terminal") => {
-                            super::nomi_core_resource_bindings::MANAGED_TERMINAL_RESOURCE_ID
-                                .to_owned()
-                        }
-                        (_, "scheduler") => {
-                            super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID
-                                .to_owned()
-                        }
-                        ("creative_studio_canvas", "canvas") => target.target_id.clone(),
-                        ("creative_studio_canvas", "asset_library") => {
-                            super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID
-                                .to_owned()
-                        }
-                        ("companion", "companion" | "companion_memory") => {
-                            target.target_id.clone()
-                        }
-                        ("customer", "customer") => target.target_id.clone(),
-                        _ => return None,
-                    };
-                    Some(AgentResourceSelectionDto {
-                        resource_kind: kind.as_ref().to_owned(),
-                        resource_id,
-                    })
-                })
-                .collect::<Vec<_>>();
+            let required_kinds = unbound_snapshot.content.required_resource_kinds.iter()
+                .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
+            let selections = product_agent_resource_selections(target, &required_kinds, &[], None);
             let mut binding = self
                 .resource_bindings
-                .resolve_for_saved_binding(
+                .resolve_for_agent_switch(
                     &self.control_plane,
                     &owner,
                     binding,
@@ -2738,6 +2690,73 @@ impl NomiCoreSessionOwner {
         self.dispatch_canonical_turn_locked(owner,session,key,request,false,Some(version),Some(context_floor),Some(stop),supersede,None).await.map(Some)
     }
 
+    /// A management send may replay only its own exact, fully compared input.
+    /// New inputs require the same idle/runtime/effect proof as direct voice
+    /// admission; a settled keyed receipt never admits another target Turn.
+    pub(crate) async fn management_send_input_idempotent(
+        &self,
+        owner: &str,
+        session: &AgentSessionId,
+        key: &str,
+        request: SendMessageRequest,
+        expected_binding_version: u64,
+        expected_context_floor: u64,
+    ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
+        let _guard = self.session_operation_lock(session.as_ref()).write_owned().await;
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner.into() };
+        let observation = self.canonical.get(&principal, session).await?;
+        if observation.session.metadata.purpose != nomifun_agent_contracts::SessionPurpose::Conversation
+            || observation.session.remote_binding_provenance.is_some()
+            || fixed_product_agent_switch_resource(&observation.session.agent_binding, false).is_some() {
+            return Err(AppError::Forbidden("Session management input requires an ordinary local conversation".into()));
+        }
+        // Product/automation ownership is a domain fact, not a presentation
+        // flag. Canvas/channel assets alone do not make an ordinary Session a
+        // product Session; the actual exclusive mapping or Attempt link does.
+        let product_bound: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversation_execution_links WHERE conversation_id=? AND relation IN ('attempt','automation')) \
+             OR EXISTS(SELECT 1 FROM cron_jobs WHERE conversation_id=?) \
+             OR EXISTS(SELECT 1 FROM creative_studio_agent_sessions WHERE conversation_id=?) \
+             OR EXISTS(SELECT 1 FROM conversation_execution_links link \
+                JOIN agent_executions execution ON execution.execution_id=link.execution_id \
+                WHERE link.conversation_id=? AND link.relation='lead' AND link.active=1 \
+                  AND execution.user_id=? AND execution.deleted_at IS NULL \
+                  AND execution.status NOT IN ('completed','completed_with_failures','failed','cancelled'))",
+        ).bind(session.as_ref()).bind(session.as_ref()).bind(session.as_ref())
+            .bind(session.as_ref()).bind(owner).fetch_one(&self.pool).await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        if product_bound {
+            return Err(AppError::Forbidden("Session management input cannot enter a product-owned or active execution Session".into()));
+        }
+        let receipt = self.canonical.turn_receipt(&principal, session,
+            &Self::turn_operation_id(owner, session.as_ref(), key)).await?;
+        if receipt.status != nomifun_agent_session::TurnReceiptStatus::NotFound {
+            // The existing dispatcher reconstructs the original admission and
+            // the Store compares the complete accepted payload plus fence.
+            // Its duplicate branch returns the original receipt without
+            // opening, superseding or dispatching any Runtime work.
+            return self.dispatch_canonical_turn_locked(owner, session, key, request, false,
+                Some(expected_binding_version), Some(expected_context_floor), None, false, None).await.map(Some);
+        }
+        if observation.session.agent_binding.binding_version != expected_binding_version {
+            return Err(AppError::Conflict("Session management input binding changed before admission".into()));
+        }
+        if observation.head.status != "ready" || observation.head.active_turn_id.is_some() {
+            return Ok(None);
+        }
+        let idle = self.runtime_sessions.active_turn_generation(session.as_ref()).is_none()
+            && match self.runtime_sessions.get_runtime(session.as_ref()) {
+                Some(runtime) => runtime.is_transport_healthy() && matches!(runtime.status(),
+                    None | Some(nomifun_common::ConversationStatus::Pending | nomifun_common::ConversationStatus::Finished)),
+                None => !self.runtime_sessions.has_owned_runtime(session.as_ref()),
+            };
+        if !idle || self.canonical.store().has_unsettled_effects(session).await.map_err(agent_session_store_error)? {
+            return Ok(None);
+        }
+        self.dispatch_canonical_turn_locked(owner, session, key, request, false,
+            Some(expected_binding_version), Some(expected_context_floor), None, false, None).await.map(Some)
+    }
+
     pub(crate) async fn voice_operation_receipt(&self,owner:&str,session:&AgentSessionId,key:&str)->Result<nomifun_agent_session::TurnReceipt,AppError> {
         self.canonical.turn_receipt(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()},session,&Self::turn_operation_id(owner,session.as_ref(),key)).await
     }
@@ -2829,6 +2848,24 @@ impl NomiCoreSessionOwner {
         ).await?;
         self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
         Ok(receipt)
+    }
+
+    pub(crate) async fn cancel_management_exact_turn(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        target_operation_id: &OperationId,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        let _guard = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        let observation = self.canonical.get(&PrincipalRef {
+            principal_kind: "user".into(), principal_id: owner_id.into(),
+        }, session_id).await?;
+        if observation.session.remote_binding_provenance.is_some() {
+            return Err(AppError::Forbidden("Remote Session cancellation requires its dedicated ingress lifecycle".into()));
+        }
+        self.cancel_exact_turn(owner_id, session_id, idempotency_key, target_operation_id,
+            nomifun_common::AgentKillReason::UserCancelled).await
     }
 
     async fn cancel_accepted_input_turn(
@@ -3011,7 +3048,9 @@ pub(super) fn compile_nomi_plugin_snapshot(
     environment.host_surface = persisted.surface.clone();
     environment.availability_evidence_revision =
         persisted.availability_evidence_revision.clone();
-    let compiled = AgentPresetCompiler::compile_with_frozen_role_providers(
+    let resource_ceiling_policy = super::nomi_core_wave2::resource_ceiling_policy(&registry)
+        .map_err(|error| AppError::Internal(format!("Optional native resource ceiling is invalid: {error}")))?;
+    let compiled = AgentPresetCompiler::compile_with_frozen_role_providers_and_resource_ceiling(
         &registry,
         &environment,
         CompileRequest {
@@ -3024,6 +3063,7 @@ pub(super) fn compile_nomi_plugin_snapshot(
             resolver_run_id: persisted.resolver_run_id.clone(),
         },
         &persisted,
+        &resource_ceiling_policy,
     )
     .map_err(kernel_error_to_app)?;
     // Existing Sessions must enforce the same source-aware consumer admission
@@ -8210,38 +8250,29 @@ async fn select_product_agent_binding(
         let existing = state.control_plane
             .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
             .await?;
-        let inherit_existing_resources = resource_selections.is_none()
-            && existing.as_ref().is_some_and(|record|
-                !record.agent_binding.typed_resource_bindings.is_empty());
-        let inherited_selections;
-        let selections = if let Some(selections) = resource_selections.as_deref() {
-            Some(selections)
-        } else if inherit_existing_resources {
-            let (_, _, next_snapshot) = state.control_plane
-                .saved_binding_artifacts(&owner, &binding)
-                .await?;
-            inherited_selections = existing.as_ref().into_iter()
-                .flat_map(|record| record.agent_binding.typed_resource_bindings.iter())
-                .filter(|resource| next_snapshot.content.required_resource_kinds.iter()
-                    .any(|kind| kind.as_ref() == resource.resource_kind))
-                .map(|resource| AgentResourceSelectionDto {
-                    resource_kind: resource.resource_kind.clone(),
-                    resource_id: resource.resource_id.clone(),
-                })
-                .collect::<Vec<_>>();
-            Some(inherited_selections.as_slice())
-        } else {
-            None
+        let (_, _, next_snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
+        let required_kinds = next_snapshot.content.required_resource_kinds.iter()
+            .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
+        let previous_resources = existing.as_ref().map(|record|
+            record.agent_binding.typed_resource_bindings.as_slice()).unwrap_or_default();
+        let target = ProductAgentTarget {
+            target_kind: target_kind.clone(), target_id: target_id.clone(),
+            default_template_key: default.to_owned(),
         };
-        if let Some(selections) = selections {
-            binding = state.product_agent_resolver.resource_bindings
-                .resolve_for_saved_binding(
-                    &state.control_plane,
-                    &owner,
-                    binding,
-                    selections,
-                )
-                .await?;
+        let selections = product_agent_resource_selections(
+            &target, &required_kinds, previous_resources, resource_selections.as_deref(),
+        );
+        binding = state.product_agent_resolver.resource_bindings.resolve_for_agent_switch(
+            &state.control_plane, &owner, binding, &selections,
+        ).await?;
+        if target_kind == "companion" && resource_selections.is_none()
+            && let Some(previous) = existing.as_ref() {
+            if let Some(workspace) = previous_resources.iter()
+                .find(|resource| resource.resource_kind == "workspace")
+                .and_then(|resource| resource.typed_parameters.get("workspace_root")) {
+                freeze_carried_agent_switch_workspace(&mut binding, owner.as_ref(), workspace, true)?;
+            }
+            preserve_companion_refresh_resource_choices(&mut binding, &previous.agent_binding)?;
         }
         let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
         binding.binding_version = previous.unwrap_or(0) + 1;
@@ -10667,6 +10698,40 @@ async fn resolve_canonical_creative_studio_canvas_agent_session(
     ))
 }
 
+/// Agent management uses the same owned Preset resolution and canonical create
+/// admission as the UI. It supplies no caller resources or frozen authority.
+pub(crate) async fn management_create_agent_session(
+    state: NomiCoreAgentApiState,
+    owner_id: &str,
+    preset_id: &str,
+    model: Option<AgentChatModelSelectionDto>,
+    title: Option<String>,
+    idempotency_key: &str,
+) -> Result<CreateAgentSessionResponseDto, NomiCoreApiError> {
+    nomifun_common::UserId::parse(owner_id.to_owned())
+        .map_err(|error| AppError::Forbidden(format!("invalid Session management owner: {error}")))?;
+    nomifun_common::validate_uuidv7(preset_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid Agent preset identity: {error}")))?;
+    let mut headers = HeaderMap::new();
+    headers.insert("idempotency-key", axum::http::HeaderValue::from_str(idempotency_key)
+        .map_err(|error| AppError::BadRequest(format!("invalid Session creation key: {error}")))?);
+    let request = CreateAgentSessionRequestDto {
+        session_capabilities: None,
+        required_modules: BTreeSet::new(),
+        model,
+        preset_id: preset_id.to_owned(),
+        title,
+        reasoning_effort: None,
+        resource_selections: Vec::new(),
+        knowledge_policy: None,
+        workspace: None,
+    };
+    create_nomi_core_agent_session(State(state), Extension(AuthenticatedOwner(UserId::from(owner_id.to_owned()))),
+        headers, Json(request)).await?.0.data.ok_or_else(|| NomiCoreApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR, "NOMIFUN_STATE_INCONSISTENT", "Session creation returned no canonical receipt",
+        ))
+}
+
 async fn create_nomi_core_agent_session(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -10677,13 +10742,18 @@ async fn create_nomi_core_agent_session(
         .control_plane
         .resolve_agent_session_binding_with_capabilities(&owner.0, &request.preset_id, request.model.as_ref(), request.session_capabilities.as_ref())
         .await?;
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &binding).await?;
+    let required_kinds = snapshot.content.required_resource_kinds.iter()
+        .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
+    let mut selections = request.resource_selections.clone();
+    complete_automatic_agent_resource_selections(&mut selections, &required_kinds);
     let mut binding = state
         .resource_bindings
-        .resolve_for_saved_binding(
+        .resolve_for_agent_switch(
             &state.control_plane,
             &owner.0,
             binding,
-            &request.resource_selections,
+            &selections,
         )
         .await?;
     freeze_agent_session_knowledge_policy(
@@ -12263,31 +12333,29 @@ async fn prepare_agent_session_switch(
                 error.into()
             }
         })?;
-    let mut preserved_extensions = session_capability_selection::selection(&current_snapshot);
-    if !companion_refresh {
-        preserved_extensions = state.session_capabilities
-            .retain_available_selection(&owner.0, &preserved_extensions).await?;
-        let catalog = state.control_plane.catalog()?;
-        let (_, target_base_revision, _) = state.control_plane
-            .saved_binding_artifacts(&owner.0, &raw_target).await?;
-        // Package Skills use their registered IDs rather than Library names.
-        // Preserve only IDs still published in the current authoritative catalog.
-        for skill in &catalog.skills {
-            if target_base_revision.payload.skill_bindings.iter().any(|binding|
-                binding.package_ref().is_some_and(|reference| reference.id.as_ref() == skill.skill.id))
-                && current_snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
-                nomifun_agent_contracts::ResolvedSkillLock::Package(lock)
-                    if lock.skill.id.as_ref() == skill.skill.id))
-                && !preserved_extensions.skill_names.contains(&skill.skill.id)
-            {
-                preserved_extensions.skill_names.push(skill.skill.id.clone());
-            }
+    let extensions = session_capability_selection::selection(&current_snapshot);
+    let mut preserved_extensions = state.session_capabilities
+        .retain_available_selection(&owner.0, &extensions).await?;
+    let catalog = state.control_plane.catalog()?;
+    let (_, target_base_revision, _) = state.control_plane
+        .saved_binding_artifacts(&owner.0, &raw_target).await?;
+    // Package Skills use their registered IDs rather than Library names.
+    // Preserve only IDs still published in the current authoritative catalog.
+    for skill in &catalog.skills {
+        if target_base_revision.payload.skill_bindings.iter().any(|binding|
+            binding.package_ref().is_some_and(|reference| reference.id.as_ref() == skill.skill.id))
+            && current_snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
+            nomifun_agent_contracts::ResolvedSkillLock::Package(lock)
+                if lock.skill.id.as_ref() == skill.skill.id))
+            && !preserved_extensions.skill_names.contains(&skill.skill.id)
+        {
+            preserved_extensions.skill_names.push(skill.skill.id.clone());
         }
-        preserved_extensions.skill_names.sort();
-        let available_mcp_servers = catalog.mcp_tools.iter()
-            .map(|tool| tool.server_id.as_str()).collect::<BTreeSet<_>>();
-        preserved_extensions.mcp_server_ids.retain(|id| available_mcp_servers.contains(id.as_str()));
     }
+    preserved_extensions.skill_names.sort();
+    let available_mcp_servers = catalog.mcp_tools.iter()
+        .map(|tool| tool.server_id.as_str()).collect::<BTreeSet<_>>();
+    preserved_extensions.mcp_server_ids.retain(|id| available_mcp_servers.contains(id.as_str()));
     let raw_target = state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &raw_target, Some(&preserved_extensions)).await?;
     if raw_target.preset_revision_ref == current_dto.preset_revision_ref && raw_target.resolved_snapshot_ref == current_dto.resolved_snapshot_ref {
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_SESSION_AGENT_UNCHANGED", "the selected Agent and Session extensions are already active"));
@@ -12344,7 +12412,7 @@ async fn prepare_agent_session_switch(
         if !target_kinds.contains(kind) {
             continue;
         }
-        if !companion_refresh && kind == "mcp_server"
+        if kind == "mcp_server"
             && !target_mcp_servers.contains(binding.resource_id.as_ref()) {
             continue;
         }
@@ -12360,39 +12428,15 @@ async fn prepare_agent_session_switch(
             });
         }
     }
-    for kind in &target_kinds {
-        if selections
-            .iter()
-            .any(|selection| selection.resource_kind == *kind)
-        {
-            continue;
-        }
-        if let Some(resource_id) = automatic_agent_resource_id(kind) {
-            selections.push(AgentResourceSelectionDto {
-                resource_kind: kind.clone(),
-                resource_id: resource_id.to_owned(),
-            });
-        }
-    }
-    selections.sort_by(|left, right| {
-        left.resource_kind
-            .cmp(&right.resource_kind)
-            .then_with(|| left.resource_id.cmp(&right.resource_id))
-    });
+    complete_automatic_agent_resource_selections(&mut selections, &target_kinds);
 
     let mut blockers = Vec::new();
-    let mut replacement_dto = if companion_refresh {
-        state.resource_bindings.resolve_for_saved_binding(
-            &state.control_plane, &owner.0, raw_target.clone(), &selections,
-        ).await?
-    } else {
-        state.resource_bindings.resolve_for_agent_switch(
+    let mut replacement_dto = state.resource_bindings.resolve_for_agent_switch(
             &state.control_plane,
             &owner.0,
             raw_target.clone(),
             &selections,
-        ).await?
-    };
+        ).await?;
     if let Some(workspace) = selected_workspace.as_deref() {
         freeze_carried_agent_switch_workspace(
             &mut replacement_dto,
@@ -12439,6 +12483,7 @@ async fn prepare_agent_session_switch(
         preserve_companion_refresh_resource_choices(&mut replacement_dto, &current_dto)?;
         let unavailable_selected_resources = current_dto.typed_resource_bindings.iter()
             .filter(|previous| target_kinds.contains(&previous.resource_kind)
+                && !super::nomi_core_resource_bindings::optional_unbound_resource_kind(&previous.resource_kind)
                 && !replacement_dto.typed_resource_bindings.iter().any(|next|
                     next.resource_kind == previous.resource_kind
                         && next.resource_id == previous.resource_id))

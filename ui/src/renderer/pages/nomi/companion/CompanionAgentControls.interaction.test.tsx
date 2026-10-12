@@ -59,14 +59,15 @@ test('opens the official editor and applies a previewed update to the same Sessi
 
   expect(view.getByRole('link', { name: 'Edit Agent' }).getAttribute('href')).toBe('/agent?template=companion.default');
   expect(apply).not.toHaveBeenCalled();
-  fireEvent.click(view.getByRole('button', { name: 'Apply saved updates' }));
-  const dialog = within(await view.findByTestId('agent-switch-dialog'));
-  await waitFor(() => expect(dialog.queryByText('workspace.files')).toBeTruthy());
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  const panel = within(await view.findByTestId('companion-agent-update'));
+  await waitFor(() => expect(panel.queryByText(/Workspace I\/O/)).toBeTruthy());
+  expect(view.queryByRole('dialog')).toBeNull();
   expect(current).toHaveBeenCalledWith({ companion_id: companionId });
   expect(check).toHaveBeenCalledWith({ agent_session_id: sessionId, request: { selection: { kind: 'template', template_key: 'companion.default' } } });
   expect(apply).not.toHaveBeenCalled();
-  expect(dialog.getByText('Keep the current model: current-model')).toBeTruthy();
-  fireEvent.click(within(within(document.body).getByRole('dialog')).getByRole('button', { name: 'Apply saved updates' }));
+  expect(panel.getByText(nomi.chat.agentUpdateHint)).toBeTruthy();
+  fireEvent.click(panel.getByRole('button', { name: nomi.chat.confirmAgentUpdates }));
   await waitFor(() => expect(success).toHaveBeenCalledWith(nomi.chat.agentUpdateSuccess));
   expect(apply.mock.calls[0][0]).toMatchObject({
     agent_session_id: sessionId,
@@ -84,9 +85,9 @@ test('keeps a busy Session unchanged and shows its canonical blocker', async () 
   });
   const apply = spyOn(ipcBridge.agentPlatform.sessions.applyAgentSwitch, 'invoke');
   const view = mount(sessionId);
-  fireEvent.click(view.getByRole('button', { name: 'Apply saved updates' }));
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
   await waitFor(() => expect(within(document.body).getByText(/Wait for the current response to finish/)).toBeTruthy());
-  const confirm = within(within(document.body).getByRole('dialog')).getByRole('button', { name: 'Apply saved updates' }) as HTMLButtonElement;
+  const confirm = view.getByRole('button', { name: nomi.chat.confirmAgentUpdates }) as HTMLButtonElement;
   expect(confirm.disabled).toBe(true);
   fireEvent.click(confirm);
   expect(current).not.toHaveBeenCalled();
@@ -99,7 +100,7 @@ test('does not create a companion conversation just to apply a future default', 
   const check = spyOn(ipcBridge.agentPlatform.sessions.previewAgentSwitch, 'invoke');
   const info = spyOn(Message, 'info').mockImplementation(() => () => {});
   const view = mount();
-  fireEvent.click(view.getByRole('button', { name: 'Apply saved updates' }));
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
   await waitFor(() => expect(info).toHaveBeenCalledWith(nomi.chat.agentNoSession));
   expect(ensure).not.toHaveBeenCalled();
   expect(check).not.toHaveBeenCalled();
@@ -111,11 +112,11 @@ test('a failed apply retains the exact preview and command key for an explicit r
     .mockRejectedValueOnce(new Error('temporary disconnect')).mockResolvedValueOnce(result);
   spyOn(Message, 'success').mockImplementation(() => () => {});
   const view = mount(sessionId);
-  fireEvent.click(view.getByRole('button', { name: 'Apply saved updates' }));
-  await waitFor(() => expect(view.getByTestId('agent-switch-dialog').textContent).toContain('workspace.files'));
-  await act(async () => { fireEvent.click(within(within(document.body).getByRole('dialog')).getByRole('button', { name: 'Apply saved updates' })); });
-  await waitFor(() => expect(view.getByTestId('agent-switch-dialog').textContent).toContain('temporary disconnect'));
-  fireEvent.click(within(within(document.body).getByRole('dialog')).getByRole('button', { name: 'Apply saved updates' }));
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  await waitFor(() => expect(view.getByTestId('companion-agent-update').textContent).toContain('Workspace I/O'));
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: nomi.chat.confirmAgentUpdates })); });
+  await waitFor(() => expect(view.getByTestId('companion-agent-update').textContent).toContain('temporary disconnect'));
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.confirmAgentUpdates }));
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
   expect(apply.mock.calls[1][0]).toEqual(apply.mock.calls[0][0]);
 });
@@ -137,21 +138,62 @@ test('a stale target disables the old confirmation and requires a fresh preview 
     })).mockResolvedValueOnce(result);
   spyOn(Message, 'success').mockImplementation(() => () => {});
   const view = mount(sessionId);
-  fireEvent.click(view.getByRole('button', { name: 'Apply saved updates' }));
-  await waitFor(() => expect(view.getByTestId('agent-switch-dialog').textContent).toContain('workspace.files'));
-  const modal = () => within(within(document.body).getByRole('dialog'));
-  fireEvent.click(modal().getByRole('button', { name: 'Apply saved updates' }));
-  await waitFor(() => expect(modal().getByRole('button', { name: 'Preview updates again' })).toBeTruthy());
-  const oldConfirm = modal().getByRole('button', { name: 'Apply saved updates' }) as HTMLButtonElement;
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  await waitFor(() => expect(view.getByTestId('companion-agent-update').textContent).toContain('Workspace I/O'));
+  const panel = () => within(view.getByTestId('companion-agent-update'));
+  fireEvent.click(panel().getByRole('button', { name: nomi.chat.confirmAgentUpdates }));
+  await waitFor(() => expect(panel().getByRole('button', { name: 'Preview updates again' })).toBeTruthy());
+  const oldConfirm = panel().getByRole('button', { name: nomi.chat.confirmAgentUpdates }) as HTMLButtonElement;
   expect(oldConfirm.disabled).toBe(true);
   fireEvent.click(oldConfirm);
   expect(apply).toHaveBeenCalledTimes(1);
-  fireEvent.click(modal().getByRole('button', { name: 'Preview updates again' }));
-  await waitFor(() => expect(view.getByTestId('agent-switch-dialog').textContent).toContain('web.research'));
+  fireEvent.click(panel().getByRole('button', { name: 'Preview updates again' }));
+  await waitFor(() => expect(view.getByTestId('companion-agent-update').textContent).toContain('Web research'));
   expect(check).toHaveBeenCalledTimes(2);
   expect(apply).toHaveBeenCalledTimes(1);
-  fireEvent.click(modal().getByRole('button', { name: 'Apply saved updates' }));
+  fireEvent.click(panel().getByRole('button', { name: nomi.chat.confirmAgentUpdates }));
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
   expect(apply.mock.calls[1][0].idempotency_key).not.toBe(apply.mock.calls[0][0].idempotency_key);
   expect(apply.mock.calls[1][0].request.expected_resolved_snapshot_ref).toEqual(refreshedPreview.target.resolved_snapshot_ref);
+});
+
+test('uses the available canonical task handoff automatically without a mode dialog', async () => {
+  spyOn(ipcBridge.agentPlatform.sessions.previewAgentSwitch, 'invoke').mockResolvedValue({ ...preview,
+    handoff: { ...preview.handoff, available: true },
+  });
+  const apply = spyOn(ipcBridge.agentPlatform.sessions.applyAgentSwitch, 'invoke').mockResolvedValue(result);
+  spyOn(Message, 'success').mockImplementation(() => () => {});
+  const view = mount(sessionId);
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  fireEvent.click(await view.findByRole('button', { name: nomi.chat.confirmAgentUpdates }));
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  expect(apply.mock.calls[0][0].request.handoff_mode).toBe('continue_task');
+  expect(view.queryByRole('dialog')).toBeNull();
+});
+
+test('closing an in-flight preview prevents its late response from reopening the update panel', async () => {
+  let resolvePreview!: (value: PreviewAgentSessionSwitchResponse) => void;
+  spyOn(ipcBridge.agentPlatform.sessions.previewAgentSwitch, 'invoke').mockImplementation(() => new Promise(resolve => { resolvePreview = resolve; }));
+  const apply = spyOn(ipcBridge.agentPlatform.sessions.applyAgentSwitch, 'invoke');
+  const view = mount(sessionId);
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  fireEvent.click(within(await view.findByTestId('companion-agent-update')).getByRole('button', { name: common.close }));
+  await act(async () => { resolvePreview(preview); });
+  expect(view.queryByTestId('companion-agent-update')).toBeNull();
+  expect((view.getByRole('button', { name: nomi.chat.applyAgentUpdates }) as HTMLButtonElement).disabled).toBe(false);
+  expect(apply).not.toHaveBeenCalled();
+});
+
+test('an already current conversation shows a brief informational message without an error panel', async () => {
+  spyOn(ipcBridge.agentPlatform.sessions.previewAgentSwitch, 'invoke').mockRejectedValue(new BackendHttpError({ method: 'POST',
+    path: `/api/agent-sessions/${sessionId}/agent-switch/preview`, status: 409,
+    body: { code: 'AGENT_SESSION_AGENT_UNCHANGED', error: 'Already current' },
+  }));
+  const info = spyOn(Message, 'info').mockImplementation(() => () => {});
+  const apply = spyOn(ipcBridge.agentPlatform.sessions.applyAgentSwitch, 'invoke');
+  const view = mount(sessionId);
+  fireEvent.click(view.getByRole('button', { name: nomi.chat.applyAgentUpdates }));
+  await waitFor(() => expect(info).toHaveBeenCalledWith(nomi.chat.agentAlreadyCurrent));
+  expect(view.queryByTestId('companion-agent-update')).toBeNull();
+  expect(apply).not.toHaveBeenCalled();
 });

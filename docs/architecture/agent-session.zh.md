@@ -93,6 +93,35 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 切换继承仍可用的全局 Skill 与 MCP 选择，已移除的 Skill、已停用或不再发布工具的 MCP 不带入目标。Package Skill 还须由目标 Agent 自身声明。保留的选择通过原编译器形成新的精确 Snapshot 与资源定义，不复用旧 MCP authority，也不修改旧 Snapshot。普通会话挂载 Canvas 或 Channel 资产不等于固定产品身份；实际 Canvas 业务会话、Companion、Customer 与 Cron 等归属继续遵循各自绑定边界。
 
+### 官方预设的能力与资源补齐
+
+官方 seed 按真实业务 Action 配置六种预设，不以人格文案或模块名称替代授权。各预设的职责保持明确：
+
+| 预设 | 默认能力边界 |
+| --- | --- |
+| `chat.minimal` | 保持零模块、零 Action；普通文字对话不因本次补齐而获得工具权限。 |
+| `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及插件开发、SSH、知识库和会话管理。 |
+| `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、插件开发、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
+| `companion.default` | 保留伙伴人格、长期记忆、机器人视觉、渠道和计划任务；补齐日常文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理能力。 |
+| `customer-service.default` | 客服笔记读写与交接、知识检索、渠道发送和回复，以及文件、进程、产物、研究和计划任务；不默认授予全局知识库或跨会话、终端管理。 |
+| `creative-studio.default` | 媒体、Canvas、素材、模板、Office、文件、进程、产物、项目记忆、研究、浏览器、协作和计划任务；保留三个创作 Package Skill。 |
+
+`assistant.general` 和 `companion.default` 的 `creative.workshop` 只授予素材读写，不能因为没有 Canvas 而隐藏素材操作。Office 原生工具处理素材库中的文档、表格、演示和预览；普通本地文件处理继续使用已授权的文件与进程工具。Skill 与 MCP 仍使用统一的全局选择及精确编译路径，不代替缺失的原生 Action grant。
+
+每个冻结 `CapabilityActionDescriptor` 可以发布 `required_resource_operations`。`None` 或字段缺省表示未发布精确 Action 资源合同，继续使用完整模块资源门槛；不能从其他 Action 推断它不需要资源。`Some(empty)` 明确声明该 Action 不消费资源槽，`Some(map)` 则要求相应 kind 的绑定包含全部指定 operations。模型工具目录和 Kernel 准入使用同一冻结检查；Context/Event 消费继续校验模块资源，Role Provider 继续保留自身精确实现槽位。缺少可选目标仅使依赖它的 Action 不可用，不能用展示过滤绕过 owner、Snapshot、活动能力或实际调用的权限校验。
+
+普通新建和产品入口从目标冻结授权补齐宿主可提供的确定性资源：Workspace、Process Session、项目记忆、素材库、Scheduler，以及适用的 Terminal、Browser 和 Computer。伙伴、客户、Canvas 等产品身份只取真实目标 ID；Workspace 和 Process 使用同一工作根。Browser/Computer 的已发布 Role 合同可以冻结而设备环境仍未绑定，宿主环境不可用时省略该可选资源。知识库、渠道、SSH 主机和机器人只继承实际选项，不补造连接或凭证。真实 owner 不匹配、存储 I/O/损坏、合同或 Provider 不一致，以及 native checkpoint 和未知效果等执行安全问题继续拒绝操作。
+
+已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；已有伙伴会话可在会话内的更新入口，经空闲、已结算边界通过原 canonical preview/apply 使用最新配置。转换验证精确目标 Snapshot 和 binding version，保留 Session 与旧历史，不增加配置升级或绑定账本。
+
+`knowledge.management` 使用现有知识领域服务提供列表、详情、托管建库、元数据与 URL 来源更新、删除。建库后来源或文档失败返回已创建的真实 ID 与各项状态，重试针对该库处理；新库必须在空闲边界通过现有知识选择器挂载，不能修改当前 Turn 的冻结绑定。`session.management` 提供 canonical 会话查询和创建、向其他空闲普通本地会话发送输入、取消精确 Turn，以及真实 PTY 和关联 AgentExecution 的管理。输入沿用原 canonical 幂等与 binding/context 围栏；终端写入、重启和停止核验 owner、行版本与 PTY epoch；协作修改继续要求当前 lead/attempt 关系及精确版本。查询结果和终端输出是数据，不授予目标会话权限，不重放未知效果，也不新增效果账本。
+
+伙伴人格与历史记忆只影响交互，不声明退役 `nomi_*` 工具或未经授权的完整能力。实际名称、参数、目标范围及完成状态来自当前 Runtime 工具目录和真实回执；延迟展示的工具通过已授权目录检索，不能因为首轮未展开就断言能力缺失。
+
+App 的编译消费面始终是 desktop，不由 Browser/Computer 适配器是否编译决定。可选设备授权上限只对精确固定的 bundled 公开 Provider 延迟物理平台判断：必须是单公开成员、单资源种类、完整 Action 操作合同，且没有私有实现、依赖、Context 或 Event。物理平台不支持的成员只记为当前编译对象内的不可执行集合，不写入 Snapshot 或 checkpoint；资源绑定和调用仍拒绝它。其他 Provider、缺失合同和非 Agent 直接操作继续使用严格准入。
+
+授权目录不按模块或动作总数 128 截断。启用 ToolSearch 时，初始 schema 展示按 24 KiB 和 112 个工具投影，给 Runtime 控制和一次五个搜索匹配留位；完整绑定及 schema 保留在原 ToolPlan。后继搜索使用最多 117 个授权工具的展示窗口，最新匹配完整保留，旧工具仍能再次搜索。canonical 恢复和预激活采用相同规则；没有 ToolSearch 时只检查实际组装后的可见工具数。搜索窗口是展示状态，不是第二套授权或持久账本。
+
 ### 同一现役数据集的位置迁移
 
 数据存储位置变更保留 installation owner、storage generation、Session/Turn 身份、密钥及现役历史，
@@ -220,7 +249,7 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 
 内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
 
-伙伴始终使用 `companion.default`。保存官方伙伴配置不自动更新已有 Session；用户可显式预览并应用同一个伙伴 Agent 的最新配置。此入口复用 canonical Agent switch 的版本围栏、空闲校验、Runtime 清理与效果结算，只允许伙伴模板，保留模型、资源身份及其已选参数，操作授权由新配置重新校验。活动或暂停回合及缺失资源阻止更新，不新建另一份伙伴会话或绑定账本。
+伙伴始终使用 `companion.default`。保存官方伙伴配置不自动更新已有 Session；用户可在会话内预览并应用同一个伙伴 Agent 的最新配置。此入口复用 canonical Agent switch 的版本围栏、空闲校验、Runtime 清理与效果结算，只允许伙伴模板，保留模型，按新授权协调仍可用的资源身份与已选参数并补齐宿主默认资源。缺少可选目标仅关闭对应 Action；活动或暂停回合、未结算效果及必要资源或合同校验失败继续阻止更新，不新建另一份伙伴会话或绑定账本。
 
 已有会话的创作模式、模型选择、参数与素材草稿按会话 ID 保存到持久浏览器存储；完整 key 同时隔离 backend dataset 与 Agent data generation。重启恢复用户最后选择的模式，包括明确选择的“日常对话”，不从最近生成任务反推或覆盖选择。欢迎页草稿及待提交准入状态仍使用会话级临时存储。新建创作会话的状态移交与后续编辑使用同一 writer，权威会话删除通知同时清理其草稿；这些界面编辑偏好不授予 Agent 权限，也不改变 canonical 事实链。
 
@@ -283,7 +312,12 @@ checkpoint 不通过字段回退重建审核状态。
 | Journal 与 history | [engine_journal.rs](../../crates/backend/nomifun-app/src/router/engine_journal.rs)、[engine_history.rs](../../crates/backend/nomifun-app/src/router/engine_history.rs)、[unified_runtime_history.rs](../../crates/backend/nomifun-app/src/router/unified_runtime_history.rs) |
 | Runtime | [nomifun-agent-runtime](../../crates/backend/nomifun-agent-runtime/src/lib.rs) |
 | 合同与 schema | [nomifun-agent-contracts](../../crates/backend/nomifun-agent-contracts/src/lib.rs)、[Agent schema](../../crates/backend/nomifun-db/migrations/001_canonical_baseline.sql) |
+| 官方 seed 与补齐草稿 | [official-agent-seed-manifest.payload.json](../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json)、[control-plane service.rs](../../crates/backend/nomifun-agent-control-plane/src/service.rs) |
+| Action 资源准入 | [package.rs](../../crates/backend/nomifun-agent-contracts/src/package.rs)、[compiler.rs](../../crates/backend/nomifun-agent-kernel/src/compiler.rs)、[authority.rs](../../crates/backend/nomifun-agent-kernel/src/authority.rs)、[nomi_core_resource_bindings.rs](../../crates/backend/nomifun-app/src/router/nomi_core_resource_bindings.rs) |
+| 原生知识库与会话管理 | [knowledge_management.rs](../../crates/backend/nomifun-app/src/router/knowledge_management.rs)、[session_management.rs](../../crates/backend/nomifun-app/src/router/session_management.rs) |
 
 运行受影响的 Rust 与 UI 定向测试、contract generator check、`bun run check:agent-session-boundary` 和 `bun run check:uarc-boundary`。renderer 变更还需 `bun run check:desktop-ui-boundary`；支持的最小桌面窗口为 880×600。
 
 新建、连续 Turn、准入失败后继续、显式 Agent 切换、上下文清空、取消、进程重启、暂停恢复、未知效果及删除需要覆盖。结构化日志缺失必须拒绝继续，不能通过投影读者把测试修成绿色。
+
+预设补齐还须覆盖真实伙伴首次文件写入与产物回执、没有 Canvas 的素材/Office Action、可选环境缺失时的其余工具、推荐接口只读与 SaveRevision CAS、旧 Session 应用最新配置后下一 Turn，以及管理工具的跨 owner、版本与 PTY epoch 围栏。临时目录和模拟 HTTP 验证不能替代外部生成服务、真实设备或生产环境证明。

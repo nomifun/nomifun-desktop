@@ -41,6 +41,7 @@ import {
 } from './capabilityGroups';
 import {
   actionFallbackName,
+  actionI18nKey,
   capabilityReferenceKey,
   humanizeResourceKind,
   moduleI18nKey,
@@ -93,9 +94,6 @@ type Props = {
   disabled?: boolean;
   onChange: (document: AgentPresetDocument) => void;
 };
-
-const actionTranslationKey = (actionId: string): string =>
-  actionId.slice(actionId.indexOf('/') + 1).replace(/[^a-zA-Z0-9]+/g, '_');
 
 const effectTone = (effectClass: string): 'critical' | 'caution' | 'normal' => {
   if (['destructive', 'irreversible', 'physical'].includes(effectClass)) return 'critical';
@@ -296,7 +294,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   const localizedActionName = (actionId: string): string => t(
     actionId.startsWith('plugin.development/')
       ? `pluginPlatform.authoring.operations.${actionId.slice('plugin.development/'.length)}`
-      : `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
+      : `agentSettings.actionLabels.${actionI18nKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
   );
   const resourceName = (value: string): string => {

@@ -9,6 +9,46 @@
     "packages": [
       {
         "package": {
+          "id": "nomifun.knowledge-management",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.knowledge-management"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "knowledge.management"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.session-management",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.session-management"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.plugin-development",
           "version": "1.0.0"
         },
@@ -235,7 +275,7 @@
                 "capability": {
                   "id": "browser"
                 },
-                "capability_manifest_digest": "0b4f260dee2707c98834d458ce50a84423c69c7ce7def6e3077bc86c7876294a",
+                "capability_manifest_digest": "549956c1d2bcfabe7113fce99f5299da05002172d35953776a4b812a7a9039a8",
                 "requirement": "required"
               }
             ],
@@ -249,7 +289,7 @@
                 "role_id": "system.browser_use",
                 "contract_version": "2.0.0"
               },
-              "contract_digest": "d126627d165f2f8572a34c3e7e2bbe556ec522618f8e73b299b4f2866280cb36"
+              "contract_digest": "aade2aee4dd642c5d14e46baf383f8b7dd2e8a054ee24af098467a06b8c6eff9"
             },
             "display": {
               "name": "Browser Use",
@@ -309,7 +349,7 @@
                 "capability": {
                   "id": "computer"
                 },
-                "capability_manifest_digest": "0fbc3af16699c855cd934d74a47f3d78fe6f0f338d1a45b6c371a2ecb82d6941",
+                "capability_manifest_digest": "69b67849aa7157cf82e370685f994dce9ebaf696e70a315b100f2fe69e76eb62",
                 "requirement": "required"
               }
             ],
@@ -323,7 +363,7 @@
                 "role_id": "system.computer_use",
                 "contract_version": "1.0.0"
               },
-              "contract_digest": "92e2fbccfd92cb82cabef53f9f6df582e4af2dcfea161ecb05d2cbc71d19827b"
+              "contract_digest": "54e1c49ac6475498e538f7527fe20cc3e4f78bbc2e20bdad54a7840b50a4cf6b"
             },
             "display": {
               "name": "Computer Use",
@@ -593,5 +633,5 @@
       }
     ]
   },
-  "payload_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
+  "payload_digest": "be4bf62a2ef8b40c6d7081f790c8149611bf5376a6f379fecb8ab0a5e2efbb0d"
 }

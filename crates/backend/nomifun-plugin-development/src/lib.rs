@@ -106,6 +106,7 @@ pub fn registration(host: Arc<dyn PluginDevelopmentHost>) -> Result<PluginRegist
                 _ => EffectClass::WriteDurable,
             },
             presentation: ToolPresentationKind::FunctionTool,
+            required_resource_operations: Some(Default::default()),
         }
     }).collect();
     metadata.manifest = ArtifactEnvelope::new(metadata.manifest.payload).map_err(|error| error.to_string())?;

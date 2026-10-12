@@ -100,6 +100,7 @@ mod kind_invariance_tests {
                     output_schema: schema_ref("action-output"),
                     effect_class: EffectClass::ReadLocal,
                     presentation: ToolPresentationKind::FunctionTool,
+                    required_resource_operations: Default::default(),
                 }],
                 context_schema_refs: vec![schema_ref("context")],
                 event_schema_refs: vec![schema_ref("event")],

@@ -59,6 +59,16 @@
     "startConversation": "开始对话",
     "saveRevision": "保存配置"
   },
+  "recommendation": {
+    "preview": "补齐推荐能力",
+    "title": "推荐新增能力",
+    "current": "推荐能力已完整",
+    "reviewHint": "核对缺少的模块、操作和 Skill。补齐会重新启用你此前关闭的推荐能力，其他设置保持。",
+    "sessionHint": "保存后用于新会话。已有伙伴会话可单独应用已保存的更新。",
+    "saveFirst": "请先保存或放弃当前修改，再查看推荐新增能力。",
+    "apply": "补齐并保存",
+    "skill": "Skill · v{{version}}"
+  },
   "defaults": {
     "untitledName": "未命名 Agent",
     "forkName": "{{name}} 副本"
@@ -126,37 +136,39 @@
     "assistant": {
       "general": {
         "name": "通用",
-        "description": "预选调研、知识、工作区、协作与扩展能力，并可继续定制。"
+        "description": "集合调研、文件、办公、媒体、浏览器与电脑操作、知识、日程、协作和插件开发能力。"
       }
     },
     "coding": {
       "codex": {
         "name": "编程",
-        "description": "组合工作区读写、版本控制、进程、交付产物、项目记忆、调研与协作；电脑控制可按需添加。"
+        "description": "组合文件、命令、Git 与发布、项目记忆、知识、调研、协作、插件开发及 SSH；桌面任务可按需添加浏览器与电脑工具。"
       }
     },
     "companion": {
       "default": {
         "name": "伙伴",
-        "description": "结合伙伴身份、长期记忆、知识库与定时任务；渠道、机器人和电脑控制可按需接入。"
+        "description": "保留伙伴身份与记忆，配备调研、文件、办公、媒体、浏览器、应用操作、知识、日程、消息和协作等日常办事能力。"
       }
     },
     "customerService": {
       "default": {
         "name": "客户服务",
-        "description": "整合知识查询、沟通和客户记录，适配服务工作。"
+        "description": "整合知识查询、客户备注、回复与跟进、附件处理、交付产物和日程，适配服务工作。"
       }
     },
     "creativeStudio": {
       "default": {
         "name": "创作",
-        "description": "面向专业多模态任务，组合媒体、画布、办公、工作区、项目记忆与 Web 调研能力。"
+        "description": "组合媒体、画布、素材、办公、文件、项目记忆、调研与浏览器参考资料、协作和日程，适配创作任务。"
       }
     }
   },
   "modules": {
     "pluginDevelopment": { "name": "插件与小程序（Beta）", "description": "在会话中创建、修改、验证并保存插件与小程序。开启的是整个开发功能；已安装插件保持独立运行。" },
     "modelManagement": { "name": "模型管理", "description": "根据会话中提供的配置添加提供商和模型，查询协议要求与已有配置。不会覆盖已有模型或切换默认模型。" },
+    "knowledgeManagement": { "name": "知识库管理", "description": "新建和管理知识库、初始资料及网页来源。仅本机安装的所有者可用，新建的库可按需在会话中选择。" },
+    "sessionManagement": { "name": "会话与终端管理", "description": "查询和管理会话、终端及协作任务，向指定空闲会话发送明确请求。仅本机安装的所有者可用。" },
     "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。" },
     "automationSchedule": { "name": "定时任务", "description": "创建和管理持久计划，不暴露调度器内部机制。" },
     "browser": { "name": "浏览器", "description": "观察和操作已绑定的浏览器。可用动作取决于浏览器：macOS 支持普通网页和表单操作，暂不支持高阶手势及自动文件传输；Provider 不会扩大权限。" },
@@ -180,6 +192,10 @@
     "workspaceVcs": { "name": "版本控制", "description": "检查并明确修改所选工作区的版本控制状态。" }
   },
   "actionLabels": {
+    "knowledge_management_list": "列出知识库", "knowledge_management_inspect": "查看库信息与文档目录", "knowledge_management_create": "新建知识库", "knowledge_management_update": "更新库信息与网页来源", "knowledge_management_delete": "删除知识库",
+    "session_management_list": "列出会话", "session_management_status": "查看会话状态", "session_management_create": "创建会话", "session_management_send_input": "向其他会话发送请求", "session_management_cancel_turn": "取消会话当前任务",
+    "session_management_terminal_list": "列出终端", "session_management_terminal_create": "创建终端", "session_management_terminal_read": "读取终端输出", "session_management_terminal_input": "发送终端输入", "session_management_terminal_relaunch": "重新启动终端", "session_management_terminal_stop": "停止终端",
+    "session_management_execution_list": "列出协作任务", "session_management_execution_status": "查看协作任务状态", "session_management_execution_retry_step": "重试协作任务步骤", "session_management_execution_adjust": "调整协作任务", "session_management_execution_cancel": "取消协作任务",
     "inspect": "查询配置与协议", "create_provider": "添加提供商", "add_model": "添加模型",
     "search": "搜索", "fetch": "读取网页", "read": "读取", "write": "写入", "autogen": "生成知识",
     "recall": "回忆", "delegate": "委派", "fork": "派生", "request_user_decision": "询问用户", "list": "查看列表", "create": "创建", "update": "更新", "delete": "删除", "edit": "编辑", "launch": "启动应用",

@@ -2,7 +2,7 @@
 //! fixtures use the production Session, model protocol, Runtime, Kernel,
 //! Creation worker and Workshop asset bridge. Only the provider HTTP is mocked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -354,14 +354,67 @@ impl Fixture {
         let session_id = session["agent_session_id"].as_str().unwrap().to_owned();
         let projection = call(&self.router, "GET", &format!("/api/agent-sessions/{session_id}/projection"), Value::Null).await;
         let snapshot = &projection["agent_snapshot"];
-        assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter().any(|capability|capability == "creative.workshop"),
-            "media creation needs no creative.workshop grant");
+        if general {
+            assert_eq!(snapshot["enabled_capability_actions"]["creative.workshop"],
+                json!(["creative.workshop/asset.read", "creative.workshop/asset.write"]),
+                "General may manage media assets without Canvas authority");
+            assert!(!session["agent_binding"]["typed_resource_bindings"].as_array().unwrap().iter()
+                .any(|resource| resource["resource_kind"] == "canvas"),
+                "General media creation must not bind a Canvas");
+        } else {
+            assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter()
+                .any(|capability| capability == "creative.workshop"),
+                "a media-only Agent needs no creative.workshop grant");
+        }
         if !general {
             let capabilities = snapshot["enabled_capabilities"].as_array().unwrap();
-            assert_eq!(capabilities.len(), usize::from(!actions.is_empty()));
-            if !actions.is_empty() {
-                assert_eq!(capabilities[0], "creation.media");
-                assert_eq!(snapshot["enabled_capability_actions"]["creation.media"], json!(actions));
+            // The Session adds the exact bundled Tool Discovery policy to a
+            // nonempty authored tool grant. It does not add any media Action,
+            // workflow module, Skill or external MCP authority.
+            let expected_actions: BTreeMap<&str, BTreeSet<String>> = if actions.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([
+                    ("creation.media", actions.iter().cloned().collect()),
+                    ("agent.tool-discovery", BTreeSet::from(["tool.discovery.rank".to_owned()])),
+                ])
+            };
+            let expected_ids = expected_actions.keys().copied().collect::<BTreeSet<_>>();
+            assert_eq!(capabilities.iter().map(|capability| capability.as_str().unwrap())
+                .collect::<BTreeSet<_>>(), expected_ids, "unexpected media Session authority: {snapshot}");
+            assert_eq!(capabilities.len(), expected_ids.len(), "duplicate capability projection: {snapshot}");
+            let projected_actions = snapshot.get("enabled_capability_actions").cloned().unwrap_or_else(|| json!({}));
+            assert_eq!(projected_actions, json!(expected_actions),
+                "media-only authority must contain exactly the authored media Actions and discovery: {snapshot}");
+
+            let reference = &session["agent_binding"]["resolved_snapshot_ref"];
+            let envelope_json: String = nomifun_db::sqlx::query_scalar(
+                "SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=? AND snapshot_digest=?",
+            ).bind(reference["snapshot_id"].as_str().unwrap())
+                .bind(reference["snapshot_digest"].as_str().unwrap())
+                .fetch_one(self.services.database.pool()).await.unwrap();
+            let canonical: nomifun_agent_contracts::ResolvedSnapshotEnvelope =
+                serde_json::from_str(&envelope_json).unwrap();
+            canonical.validate().unwrap();
+            let provenance = canonical.content.enabled_capabilities.iter().map(|capability| (
+                capability.capability.id.as_ref(), capability.source_package.id.as_ref(),
+                &capability.resolved_source.source_kind, &capability.consumption,
+            )).collect::<Vec<_>>();
+            eprintln!("MEDIA_SESSION_AUTHORITY {provenance:?}");
+            assert_eq!(canonical.content.enabled_capabilities.len(), expected_ids.len(),
+                "canonical media plan contains unexpected members: {provenance:?}");
+            for capability in &canonical.content.enabled_capabilities {
+                let id = capability.capability.id.as_ref();
+                let package = match id {
+                    "creation.media" => "nomifun.creation",
+                    "agent.tool-discovery" => "nomifun.tool-discovery",
+                    other => panic!("unexpected canonical media plan member {other}: {provenance:?}"),
+                };
+                assert_eq!(capability.source_package.id.as_ref(), package);
+                assert_eq!(capability.resolved_source.source_kind, nomifun_agent_contracts::PluginSourceKind::Bundled);
+                assert_eq!(capability.consumption, nomifun_agent_contracts::CapabilityConsumption::Contribution);
+                assert_eq!(capability.action_allowlist.iter().map(|action| action.as_ref().to_owned())
+                    .collect::<BTreeSet<_>>(), expected_actions[id]);
             }
         }
         (session_id, preset_id)

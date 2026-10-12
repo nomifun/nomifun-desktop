@@ -43,15 +43,16 @@ const MAX_RESOURCE_FIELD_BYTES: usize = 512;
 // Enhancement Modules remain part of the frozen Agent grant even when a
 // concrete target is absent. Session materialization omits their resource-
 // backed Actions until a target is selected. Identity/infrastructure resources
-// and Computer remain mandatory. Live Browser/Computer environment checks are
+// remain mandatory. Live Browser/Computer environment checks are
 // action-time facts and never grant authority by themselves.
-const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 6] = [
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 7] = [
     "knowledge_base",
     "channel",
     "robot",
     "canvas",
     "ssh_host",
     "browser",
+    "computer",
 ];
 
 pub(crate) fn optional_unbound_resource_kind(kind: &str) -> bool {
@@ -497,8 +498,12 @@ impl NomiCoreResourceBindingResolverRegistry {
                 // when the Agent also grants knowledge/write; the per-Session
                 // write-back policy below decides whether write authority is
                 // required for this exact selection.
+                let needs_operation = !operations.is_empty();
                 operations.retain(|operation| resolved.allowed_operations.contains(operation));
-                if operations.is_empty() {
+                // A Context-only slot carries owned metadata and no document
+                // authority. Reject a lost executable grant, never manufacture
+                // read/search/write just to keep that metadata slot present.
+                if needs_operation && operations.is_empty() {
                     if omit_unusable_optional_selections {
                         continue;
                     }
@@ -617,6 +622,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                 )
             })
             .collect::<FrozenActionAllowlists>();
+        validate_frozen_action_resource_contracts(&snapshot.content)?;
         let derived_kinds = required_operations(&capability_ids, &action_allowlists)?
             .into_keys()
             .map(ResourceKind::from)
@@ -766,6 +772,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                 )
             })
             .collect::<FrozenActionAllowlists>();
+        validate_frozen_action_resource_contracts(&snapshot.content)?;
         let derived_kinds = required_operations(&capability_ids, &action_allowlists)?
             .into_keys()
             .map(ResourceKind::from)
@@ -865,16 +872,65 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 17] = [
     "scheduler",
 ];
 
+/// A current domain owner may not infer authority absent from the immutable
+/// Snapshot. In particular, a published Action resource contract must match
+/// the frozen descriptor before product resources can be resolved.
+pub(super) fn validate_frozen_action_resource_contracts(
+    snapshot: &nomifun_agent_contracts::ResolvedSnapshotContent,
+) -> Result<(), ResourceSelectionResolutionError> {
+    for capability in &snapshot.enabled_capabilities {
+        let id = capability.capability.id.as_ref();
+        for action_id in &capability.action_allowlist {
+            let operations = if nomifun_agent_domain_wave1::CAPABILITY_IDS.contains(&id) {
+                nomifun_agent_domain_wave1::required_action_resource_operations(id, action_id.as_ref())
+            } else if nomifun_agent_domain_wave3::TARGET_CAPABILITY_IDS.contains(&id) {
+                nomifun_agent_domain_wave3::required_action_resource_operations(id, action_id.as_ref())
+            } else if nomifun_agent_domain_wave4::CONVERSATION_MODULE_IDS.contains(&id)
+                || id == nomifun_agent_domain_wave4::ROBOT_MODULE_ID
+            {
+                nomifun_agent_domain_wave4::required_action_resource_operations(id, action_id.as_ref())
+            } else if nomifun_agent_domain_wave5::TARGET_CAPABILITY_IDS.contains(&id) {
+                nomifun_agent_domain_wave5::required_action_resource_operations(id, action_id.as_ref())
+            } else if nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS.contains(&id)
+                || [nomifun_agent_domain_wave2::SSH_MODULE_ID, nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+                    nomifun_agent_domain_wave2::COMPUTER_MODULE_ID].contains(&id)
+            {
+                nomifun_agent_domain_wave2::required_action_resource_operation(&capability.capability.id, action_id)
+                    .and_then(|operation| nomifun_agent_domain_wave2::required_resource_kinds(id)
+                        .map(|kinds| kinds.into_iter().map(|kind| (kind, operation.to_owned())).collect()))
+            } else {
+                continue;
+            };
+            let expected = operations.ok_or_else(|| ResourceSelectionResolutionError::new(
+                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH", "a frozen Action has no current resource contract",
+                json!({"capability_id": id, "action_id": action_id.as_ref()}),
+            ))?.into_iter().fold(BTreeMap::<ResourceKind, BTreeSet<String>>::new(), |mut required, (kind, operation)| {
+                required.entry(kind).or_default().insert(operation);
+                required
+            });
+            if !capability.actions.iter().find(|action| &action.action_id == action_id)
+                .is_some_and(|action| action.required_resource_operations.as_ref() == Some(&expected))
+            {
+                return Err(ResourceSelectionResolutionError::new(
+                    "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH", "the frozen Action resource operations differ from the current owner contract",
+                    json!({"capability_id": id, "action_id": action_id.as_ref()}),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn required_operations(
     capability_ids: &BTreeSet<String>,
     action_allowlists: &FrozenActionAllowlists,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, ResourceSelectionResolutionError> {
     let mut required = BTreeMap::<String, BTreeSet<String>>::new();
     let mut grant = |kind: &str, operation: &str| {
-        required
-            .entry(kind.to_owned())
-            .or_default()
-            .insert(operation.to_owned());
+        let operations = required.entry(kind.to_owned()).or_default();
+        if !operation.is_empty() {
+            operations.insert(operation.to_owned());
+        }
     };
     for capability in capability_ids {
         if nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS
@@ -909,6 +965,10 @@ fn required_operations(
                 .iter()
                 .next()
                 .expect("exactly one Wave 2 resource kind");
+            // The selected execution Provider still owns its resource slot
+            // when no Action is granted. Keep the slot without inventing an
+            // operation; Events may use it but cannot grant tool authority.
+            grant(resource_kind.as_ref(), "");
             let capability_id = CapabilityId::from(capability.clone());
             for action_id in actions {
                 let operation =
@@ -933,6 +993,11 @@ fn required_operations(
         let module_resource_operations = if nomifun_agent_domain_wave1::CAPABILITY_IDS
             .contains(&capability.as_str())
         {
+            if capability == nomifun_agent_domain_wave1::KNOWLEDGE_MODULE_ID {
+                // Knowledge Context lists mounted metadata independently of
+                // executable Action authority.
+                grant(nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND, "");
+            }
             Some(
                 action_allowlists
                     .get(capability)
@@ -1229,6 +1294,11 @@ impl ProductResourceAuthority {
         &self,
         request: &ResourceAuthorityRequest,
     ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        if !cfg!(feature = "computer-use") || !cfg!(any(target_os = "windows", target_os = "macos")) {
+            return Err(ResourceSelectionResolutionError::unavailable(
+                self.kind, &request.resource_id, "Computer control is unavailable in this build or on this host",
+            ));
+        }
         self.fixed(
             request,
             LOCAL_COMPUTER_RESOURCE_ID,
@@ -1701,6 +1771,22 @@ mod tests {
     const MCP_SERVER_A: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
     const MCP_SERVER_B: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ac";
 
+    #[tokio::test]
+    async fn context_and_execution_slots_without_actions_receive_no_operations() {
+        for (module, kind) in [("knowledge", "knowledge_base"), ("workspace.files", "workspace")] {
+            let modules = BTreeSet::from([module.to_owned()]);
+            let grants = BTreeMap::from([(module.to_owned(), BTreeSet::new())]);
+            assert_eq!(required_operations(&modules, &grants).unwrap(),
+                BTreeMap::from([(kind.to_owned(), BTreeSet::new())]));
+            let bindings = registry(kind, &["read", "search", "write"])
+                .resolve_selected("owner-1", &[AgentResourceSelectionDto {
+                    resource_kind: kind.to_owned(), resource_id: "metadata-slot".into(),
+                }], &modules, &grants, &[]).await.unwrap();
+            assert_eq!(bindings.len(), 1);
+            assert!(bindings[0].operations.is_empty());
+        }
+    }
+
     fn mcp_lock(server_id: &str, tool: &str) -> ResolvedMcpToolLock {
         let id = nomifun_api_types::McpServerId::parse(server_id).unwrap();
         let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&id, tool).unwrap();
@@ -2156,9 +2242,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn computer_resource_binding_remains_a_hard_session_requirement() {
+    async fn computer_actions_can_wait_for_a_selected_environment() {
         let capability = nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.to_owned();
-        let error = registry("computer", &["observe"])
+        let bindings = registry("computer", &["observe"])
             .resolve_selected(
                 "owner-1",
                 &[],
@@ -2170,8 +2256,8 @@ mod tests {
                 &[],
             )
             .await
-            .unwrap_err();
-        assert_eq!(error.code(), "RESOURCE_SELECTION_REQUIRED");
+            .unwrap();
+        assert!(bindings.is_empty());
     }
 
     #[tokio::test]

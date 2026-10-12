@@ -547,6 +547,15 @@ impl ResolvedCapability {
                     "actions must have unique non-empty identities and schemas",
                 ));
             }
+            for (kind, operations) in action.required_resource_operations.iter().flatten() {
+                if kind.as_ref().trim().is_empty() || kind.as_ref() != kind.as_ref().trim()
+                    || operations.is_empty()
+                    || operations.iter().any(|operation| operation.trim().is_empty() || operation != operation.trim())
+                {
+                    return Err(snapshot_capability_violation(&self.capability.id,
+                        "actions must publish valid exact resource operations"));
+                }
+            }
         }
         if let Some(action_id) = self
             .action_allowlist
@@ -1746,6 +1755,7 @@ mod tests {
                 output_schema: crate::CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/output")),
                 effect_class: crate::EffectClass::ReadSensitive,
                 presentation: crate::ToolPresentationKind::FunctionTool,
+                required_resource_operations: Default::default(),
             })
             .collect();
         module.action_allowlist = BTreeSet::from([crate::ActionId::from("workspace.files/read")]);
@@ -2067,6 +2077,283 @@ mod tests {
     #[test]
     fn official_seed_fixture_is_the_valid_target_contract() {
         official_preset_seed_manifest_payload().validate().unwrap();
+    }
+
+    fn official_actions(
+        manifest: &OfficialPresetSeedManifestPayload,
+        key: OfficialPresetKey,
+    ) -> BTreeSet<&str> {
+        manifest.templates[&key]
+            .enabled_capabilities
+            .iter()
+            .flat_map(|selection| &selection.action_allowlist)
+            .map(AsRef::as_ref)
+            .collect()
+    }
+
+    #[test]
+    fn general_and_companion_can_complete_everyday_tasks() {
+        let manifest = official_preset_seed_manifest_payload();
+        // These actions cover an actual task from researching a source through
+        // processing files, editing an Office asset and delivering the result.
+        for key in [
+            OfficialPresetKey::AssistantGeneral,
+            OfficialPresetKey::CompanionDefault,
+        ] {
+            let actions = official_actions(&manifest, key);
+            for action in [
+                "web.research/search",
+                "web.research/fetch",
+                "workspace.files/read",
+                "workspace.files/search",
+                "workspace.files/write",
+                "workspace.files/patch",
+                "workspace.process/exec",
+                "workspace.process/start",
+                "workspace.process/poll",
+                "workspace.process/input",
+                "workspace.process/cancel",
+                "workspace.artifacts/publish",
+                "workspace.artifacts/read",
+                "office/preview",
+                "office/document.edit",
+                "office/sheet.edit",
+                "office/slides.edit",
+                "creative.workshop/asset.read",
+                "creative.workshop/asset.write",
+                "creation.media/image",
+                "creation.media/image_edit",
+                "creation.media/audio",
+                "creation.media/music",
+                "creation.media/video",
+                "knowledge/read",
+                "knowledge/search",
+                "knowledge/write",
+                "knowledge/autogen",
+                "agent/delegate",
+                "agent/fork",
+                "agent/request_user_decision",
+                "computer/observe",
+                "computer/a11y.observe",
+                "computer/input",
+                "computer/launch",
+                "ssh/fs.read",
+                "ssh/fs.write",
+                "ssh/exec",
+            ] {
+                assert!(actions.contains(action), "{} cannot use {action}", key.as_str());
+            }
+            assert!(manifest.templates[&key]
+                .required_resource_kinds.contains(&ResourceKind::from("asset_library")));
+            assert!(!manifest.templates[&key]
+                .required_resource_kinds.contains(&ResourceKind::from("canvas")));
+            assert!(!actions.contains("creative.workshop/canvas.edit"));
+        }
+
+        let companion = official_actions(&manifest, OfficialPresetKey::CompanionDefault);
+        for action in [
+            "companion/learn",
+            "companion/evolve",
+            "companion.memory/recall",
+            "companion.memory/write",
+            "channel.messaging/reply",
+            "channel.messaging/send",
+            "robot/vision",
+        ] {
+            assert!(companion.contains(action), "Companion identity or follow-up lost {action}");
+        }
+    }
+
+    #[test]
+    fn task_agents_can_manage_reminders_and_browser_workflows() {
+        let manifest = official_preset_seed_manifest_payload();
+        for key in [
+            OfficialPresetKey::AssistantGeneral,
+            OfficialPresetKey::CompanionDefault,
+            OfficialPresetKey::CustomerServiceDefault,
+            OfficialPresetKey::CreativeStudioDefault,
+        ] {
+            let actions = official_actions(&manifest, key);
+            for action in [
+                "automation.schedule/create",
+                "automation.schedule/list",
+                "automation.schedule/update",
+                "automation.schedule/delete",
+            ] {
+                assert!(actions.contains(action), "{} cannot manage follow-up: {action}", key.as_str());
+            }
+        }
+        for key in [
+            OfficialPresetKey::AssistantGeneral,
+            OfficialPresetKey::CompanionDefault,
+            OfficialPresetKey::CreativeStudioDefault,
+        ] {
+            let actions = official_actions(&manifest, key);
+            for action in [
+                "browser/observe",
+                "browser/navigate",
+                "browser/act",
+                "browser/render_content",
+                "browser/download",
+                "browser/upload",
+                "browser/evaluate",
+            ] {
+                assert!(actions.contains(action), "{} cannot complete a browser task: {action}", key.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn coding_can_finish_plugin_work_and_authorized_publication_without_gui() {
+        let manifest = official_preset_seed_manifest_payload();
+        let coding = &manifest.templates[&OfficialPresetKey::CodingCodex];
+        let actions = official_actions(&manifest, OfficialPresetKey::CodingCodex);
+        for action in [
+            "plugin.development/plan",
+            "plugin.development/apply",
+            "plugin.development/inspect",
+            "plugin.development/read",
+            "plugin.development/list",
+            "plugin.development/check",
+            "plugin.development/preview",
+            "plugin.development/test_action",
+            "plugin.development/test_ui",
+            "plugin.development/open",
+            "plugin.development/install",
+            "workspace.vcs/push",
+            "knowledge/search",
+            "knowledge/read",
+            "knowledge/write",
+            "knowledge/autogen",
+        ] {
+            assert!(actions.contains(action), "Coding cannot finish {action}");
+        }
+        assert!(official_actions(&manifest, OfficialPresetKey::AssistantGeneral).contains("workspace.vcs/push"));
+        assert!(coding.required_runtime_features.contains(&RuntimeFeatureId::from("code_mode")));
+        assert!(coding.required_runtime_features.contains(&RuntimeFeatureId::from("subagent.spawn")));
+        assert!(coding.enabled_capabilities.iter().all(|selection| {
+            !matches!(selection.capability.id.as_ref(), "browser" | "computer")
+        }));
+        assert!(!coding.required_resource_kinds.contains(&ResourceKind::from("browser")));
+        assert!(!coding.required_resource_kinds.contains(&ResourceKind::from("computer")));
+    }
+
+    #[test]
+    fn customer_can_process_attachments_and_follow_up_without_writing_shared_knowledge() {
+        let manifest = official_preset_seed_manifest_payload();
+        let actions = official_actions(&manifest, OfficialPresetKey::CustomerServiceDefault);
+        for action in [
+            "customer.service/notes.read",
+            "customer.service/notes.write",
+            "customer.service/handoff",
+            "workspace.files/read",
+            "workspace.files/write",
+            "workspace.process/exec",
+            "workspace.artifacts/publish",
+            "workspace.artifacts/read",
+            "web.research/search",
+            "web.research/fetch",
+            "channel.messaging/reply",
+            "channel.messaging/send",
+            "knowledge/read",
+            "knowledge/search",
+        ] {
+            assert!(actions.contains(action), "Customer service cannot complete {action}");
+        }
+        assert!(!actions.contains("knowledge/write"));
+        assert!(!actions.contains("knowledge/autogen"));
+        assert!(!actions.contains("plugin.development/install"));
+        assert!(!actions.contains("model.management/create_provider"));
+    }
+
+    #[test]
+    fn creative_can_collect_assets_delegate_and_manage_its_workspace() {
+        let manifest = official_preset_seed_manifest_payload();
+        let seed = &manifest.templates[&OfficialPresetKey::CreativeStudioDefault];
+        let actions = official_actions(&manifest, OfficialPresetKey::CreativeStudioDefault);
+        for action in [
+            "creative.workshop/asset.read",
+            "creative.workshop/asset.write",
+            "creative.workshop/canvas.read",
+            "creative.workshop/canvas.edit",
+            "creative.workshop/template.run",
+            "agent/delegate",
+            "agent/fork",
+            "agent/request_user_decision",
+            "workspace.files/delete",
+            "workspace.artifacts/publish",
+        ] {
+            assert!(actions.contains(action), "Creative Studio cannot complete {action}");
+        }
+        assert_eq!(seed.skill_bindings.len(), 3);
+    }
+
+    #[test]
+    fn general_companion_and_coding_can_manage_owned_knowledge_sessions_and_terminals() {
+        let manifest = official_preset_seed_manifest_payload();
+        for key in [
+            OfficialPresetKey::AssistantGeneral,
+            OfficialPresetKey::CompanionDefault,
+            OfficialPresetKey::CodingCodex,
+        ] {
+            let actions = official_actions(&manifest, key);
+            // Starting a knowledge base, sending work to another owned Session,
+            // operating its terminal and reconciling an Execution are actual
+            // management tasks, rather than unsupported persona promises.
+            for action in [
+                "knowledge.management/list",
+                "knowledge.management/inspect",
+                "knowledge.management/create",
+                "knowledge.management/update",
+                "knowledge.management/delete",
+                "session.management/list",
+                "session.management/status",
+                "session.management/create",
+                "session.management/send_input",
+                "session.management/cancel_turn",
+                "session.management/terminal_list",
+                "session.management/terminal_create",
+                "session.management/terminal_read",
+                "session.management/terminal_input",
+                "session.management/terminal_relaunch",
+                "session.management/terminal_stop",
+                "session.management/execution_list",
+                "session.management/execution_status",
+                "session.management/execution_retry_step",
+                "session.management/execution_adjust",
+                "session.management/execution_cancel",
+            ] {
+                assert!(actions.contains(action), "{} cannot complete {action}", key.as_str());
+            }
+        }
+        for key in [
+            OfficialPresetKey::ChatMinimal,
+            OfficialPresetKey::CustomerServiceDefault,
+            OfficialPresetKey::CreativeStudioDefault,
+        ] {
+            assert!(manifest.templates[&key].enabled_capabilities.iter().all(|selection| {
+                !matches!(selection.capability.id.as_ref(), "knowledge.management" | "session.management")
+            }), "{} should not default to platform management", key.as_str());
+        }
+    }
+
+    #[test]
+    fn expanded_role_coverage_rejects_removing_office_and_attachment_capabilities() {
+        for (key, removed) in [
+            (OfficialPresetKey::AssistantGeneral, "office"),
+            (OfficialPresetKey::CompanionDefault, "workspace.files"),
+            (OfficialPresetKey::CodingCodex, "plugin.development"),
+            (OfficialPresetKey::CustomerServiceDefault, "workspace.artifacts"),
+            (OfficialPresetKey::CreativeStudioDefault, "browser"),
+            (OfficialPresetKey::AssistantGeneral, "knowledge.management"),
+            (OfficialPresetKey::CompanionDefault, "session.management"),
+            (OfficialPresetKey::CodingCodex, "session.management"),
+        ] {
+            let mut manifest = official_preset_seed_manifest_payload();
+            manifest.templates.get_mut(&key).unwrap().enabled_capabilities
+                .retain(|selection| selection.capability.id.as_ref() != removed);
+            assert_eq!(manifest.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);
+        }
     }
 
     #[test]

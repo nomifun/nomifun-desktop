@@ -238,7 +238,9 @@ const AgentSettingsPage: React.FC = () => {
                 type='text'
                 size='mini'
                 icon={<Refresh theme='outline' size='14' />}
-                onClick={() => void controller.load()}
+                onClick={() => void (controller.editor && !controller.dirty
+                  ? controller.openPreset(controller.editor.preset)
+                  : controller.load())}
               >
                 {t('agentSettings.actions.retry')}
               </Button>
@@ -270,6 +272,10 @@ const AgentSettingsPage: React.FC = () => {
               sourceTemplate={sourceTemplate}
               busyAction={controller.busyAction}
               dirty={controller.dirty}
+              recommendation={controller.recommendation}
+              onRecommend={() => void controller.previewRecommendedCapabilities()}
+              onApplyRecommendation={() => void controller.applyRecommendedCapabilities()}
+              onDismissRecommendation={controller.dismissRecommendation}
               onDraftChange={controller.setDraft}
               onSave={() => void controller.saveRevision()}
               onCopy={controller.editor.preset.source === 'official' ? () => {

@@ -1,6 +1,6 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { useEffect } from 'react';
 import { createInstance } from 'i18next';
@@ -568,4 +568,104 @@ test('personal Agent plugin grants survive sidebar navigation until explicitly d
   await v.findByRole('heading', { name: 'Saved Agent' });
   expect(v.getByRole('switch', { name: `Enable ${pluginName}` })).toBeTruthy();
   expect(v.save).not.toHaveBeenCalled();
+});
+
+const customizedOfficialEditor = (): AgentPresetEditorResponse => {
+  const document = documentWithModel();
+  document.persona = 'Keep my personal style';
+  document.instructions = 'Keep my instructions';
+  document.starter_prompts = ['Keep this prompt'];
+  document.context_order = [asCapabilityId('plugin.development')];
+  document.middleware_order = [asCapabilityId('plugin.development')];
+  document.enabled_capabilities = [{ capability: { id: asCapabilityId('plugin.development') }, action_allowlist: [PLUGIN_CREATE_ACTIONS[0]] }];
+  return { preset: { preset_id: presetId, source: 'official', display_name: 'My Coding Agent', description: 'My description',
+    bound_target_count: 1, current_stable_revision: revision },
+    draft: { preset_id: presetId, source_template_key: 'coding.codex', display_name: 'My Coding Agent', description: 'My description', document, current_revision: revision },
+    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
+};
+
+test('recommended additions are explicitly reviewed and saved with the preview CAS while preserving custom settings', async () => {
+  const original = customizedOfficialEditor();
+  const merged = structuredClone(original.draft);
+  merged.document.enabled_capabilities[0].action_allowlist = [...PLUGIN_CREATE_ACTIONS];
+  merged.document.enabled_capabilities.push({ capability: capability.capability, action_allowlist: ['business.check/run'] });
+  const preview = spyOn(agentPlatform.recommendedCapabilities, 'invoke').mockResolvedValue({ draft: merged,
+    added_capabilities: [
+      { capability: { id: asCapabilityId('plugin.development') }, action_allowlist: PLUGIN_CREATE_ACTIONS.slice(1) },
+      { capability: capability.capability, action_allowlist: ['business.check/run'] },
+    ], added_skills: [] });
+  const v = await mount(undefined, original);
+  expect(preview).not.toHaveBeenCalled();
+  expect(v.save).not.toHaveBeenCalled();
+  fireEvent.click(v.getByRole('button', { name: en.recommendation.preview }));
+  const additions = within(await v.findByRole('region', { name: en.recommendation.title }));
+  expect(additions.getByText('Business check')).toBeTruthy();
+  expect(additions.getByText(en.recommendation.reviewHint)).toBeTruthy();
+  expect(v.save).not.toHaveBeenCalled();
+  fireEvent.click(additions.getByRole('button', { name: en.recommendation.apply }));
+  await waitFor(() => expect(v.save).toHaveBeenCalledTimes(1));
+  expect(v.save.mock.calls[0][0]).toEqual({ preset_id: presetId, request: { expected_current_revision: revision, draft: merged } });
+  await waitFor(() => expect(v.queryByRole('region', { name: en.recommendation.title })).toBeNull());
+  expect(v.getByRole('heading', { name: original.draft.display_name })).toBeTruthy();
+  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
+  expect(v.create).not.toHaveBeenCalled();
+  expect(v.turn).not.toHaveBeenCalled();
+});
+
+test('unsaved custom changes disable recommended completion and are not replaced', async () => {
+  const preview = spyOn(agentPlatform.recommendedCapabilities, 'invoke');
+  const v = await mount(undefined, customizedOfficialEditor());
+  fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
+  const complete = v.getByRole('button', { name: en.recommendation.preview }) as HTMLButtonElement;
+  expect(complete.disabled).toBe(true);
+  expect(complete.title).toBe(en.recommendation.saveFirst);
+  fireEvent.click(complete);
+  expect(preview).not.toHaveBeenCalled();
+  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
+  expect(v.save).not.toHaveBeenCalled();
+});
+
+test('an already complete recommendation does not create a revision', async () => {
+  const original = customizedOfficialEditor();
+  spyOn(agentPlatform.recommendedCapabilities, 'invoke').mockResolvedValue({ draft: original.draft, added_capabilities: [], added_skills: [] });
+  const v = await mount(undefined, original);
+  fireEvent.click(v.getByRole('button', { name: en.recommendation.preview }));
+  await v.findByText(en.recommendation.current);
+  expect(v.queryByRole('button', { name: en.recommendation.apply })).toBeNull();
+  expect(v.save).not.toHaveBeenCalled();
+});
+
+test('a recommendation from a newer saved revision requires refreshing instead of replacing the editor', async () => {
+  const original = customizedOfficialEditor();
+  const newer = { ...original.draft, display_name: 'Another saved edit', current_revision: { ...revision, revision: 2 } };
+  spyOn(agentPlatform.recommendedCapabilities, 'invoke').mockResolvedValue({ draft: newer, added_capabilities: [], added_skills: [] });
+  const v = await mount(undefined, original);
+  fireEvent.click(v.getByRole('button', { name: en.recommendation.preview }));
+  await v.findByText(en.errors.conflict);
+  expect(v.getByRole('heading', { name: original.draft.display_name })).toBeTruthy();
+  expect(v.queryByRole('region', { name: en.recommendation.title })).toBeNull();
+  expect(v.save).not.toHaveBeenCalled();
+  v.getEditor.mockResolvedValue({ ...original, draft: newer, preset: { ...original.preset,
+    display_name: newer.display_name, current_stable_revision: newer.current_revision }, revision: { ...original.revision!, reference: newer.current_revision } });
+  fireEvent.click(v.getByRole('button', { name: en.actions.retry }));
+  await v.findByRole('heading', { name: newer.display_name });
+  fireEvent.click(v.getByRole('button', { name: en.recommendation.preview }));
+  await v.findByText(en.recommendation.current);
+  expect(v.save).not.toHaveBeenCalled();
+});
+
+test('failed recommended completion keeps the reviewed additions and does not change the saved capabilities', async () => {
+  const original = customizedOfficialEditor();
+  const merged = structuredClone(original.draft);
+  merged.document.enabled_capabilities.push({ capability: capability.capability, action_allowlist: ['business.check/run'] });
+  spyOn(agentPlatform.recommendedCapabilities, 'invoke').mockResolvedValue({ draft: merged,
+    added_capabilities: [{ capability: capability.capability, action_allowlist: ['business.check/run'] }], added_skills: [] });
+  const v = await mount({ status: 409 }, original);
+  fireEvent.click(v.getByRole('button', { name: en.recommendation.preview }));
+  const additions = within(await v.findByRole('region', { name: en.recommendation.title }));
+  fireEvent.click(additions.getByRole('button', { name: en.recommendation.apply }));
+  await v.findByText(en.errors.conflict);
+  expect(v.getByRole('region', { name: en.recommendation.title })).toBeTruthy();
+  expect(v.getByRole('switch', { name: 'Enable Business check' })).toBeTruthy();
+  expect(v.save).toHaveBeenCalledTimes(1);
 });

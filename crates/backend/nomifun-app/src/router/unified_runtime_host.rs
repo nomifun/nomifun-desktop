@@ -346,7 +346,6 @@ pub(crate) fn factory(
             }))?;
             let full_plan = full_plan.merged(&resources.plugin_action_tool_plan().await?).map_err(error)?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
-            if full_plan.len() > 128 { return Err(error("Nomi tool surface exceeds 128 actions")); }
             let full_plan = super::agent_tool_presentation::project(
                 full_plan, resources.tool_discovery_port()?.is_some(),
             )?;

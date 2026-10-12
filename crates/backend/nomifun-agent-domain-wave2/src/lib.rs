@@ -8,7 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -1299,6 +1299,12 @@ fn build_capability(
                 output_schema: schema_ref(action.id, "output")?,
                 effect_class: action.effect_class,
                 presentation: action.presentation,
+                required_resource_operations: Some(definition.resource_kinds.iter().map(|kind| {
+                    let operation = required_action_resource_operation(
+                        &CapabilityId::from(definition.id), &ActionId::from(action.id),
+                    ).ok_or_else(|| format!("{} has no resource operation contract", action.id))?;
+                    Ok((ResourceKind::from(*kind), BTreeSet::from([operation.to_owned()])))
+                }).collect::<Result<BTreeMap<_, _>, String>>()?),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -3509,6 +3515,129 @@ mod tests {
         registry
             .replace_all(registrations)
             .expect("all action handlers are declared");
+    }
+
+    #[test]
+    fn bundled_role_inventory_matches_native_action_resource_contracts() {
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../nomifun-agent-contracts/contracts/target-packages/first-party-agent-modules.v1.json"
+        )).unwrap();
+        for registration in registrations().unwrap() {
+            let manifest = registration.metadata.manifest.payload;
+            if manifest.contributions.role_contracts.is_empty() {
+                continue;
+            }
+            let package = inventory["packages"].as_array().unwrap().iter()
+                .find(|package| package["package"]["id"].as_str() == Some(manifest.package_id.as_ref())).unwrap();
+            let declared: Vec<RoleContractManifest> = serde_json::from_value(package["role_contracts"].clone()).unwrap();
+            assert_eq!(declared, manifest.contributions.role_contracts,
+                "{} must freeze the exact native Action resource contract", manifest.package_id.as_ref());
+            for provider in manifest.contributions.role_providers {
+                let declared_provider = package["role_providers"].as_array().unwrap().iter()
+                    .find(|value| value["role"]["key"]["role_id"].as_str() == Some(provider.role.key.role_id.as_ref())).unwrap();
+                let declared_role: ExactRoleContractRef = serde_json::from_value(declared_provider["role"].clone()).unwrap();
+                assert_eq!(declared_role, provider.role);
+            }
+        }
+    }
+
+    #[test]
+    fn optional_resource_ceiling_preserves_authority_and_cannot_bind_or_invoke_unsupported_devices() {
+        use nomifun_agent_kernel::{CompileResourceCeilingPolicy, OptionalResourceCeiling};
+        use nomifun_agent_contracts::InstallationRoleBinding;
+        let kernel = KernelRegistry::new(MaterializationPolicy::stable(CONTRACT_VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
+        let registry = kernel.replace_all(registrations().unwrap()).unwrap();
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: "optional-device-owner".into() };
+        let mut policy = CompileResourceCeilingPolicy::default();
+        let mut bindings = BTreeMap::new();
+        for (module, kind, role, mount) in [
+            (BROWSER_MODULE_ID, "browser", BROWSER_EXECUTION_ROLE_ID, BROWSER_MOUNT_ID),
+            (COMPUTER_MODULE_ID, "computer", COMPUTER_EXECUTION_ROLE_ID, COMPUTER_A11Y_MOUNT_ID),
+        ] {
+            let provider = registry.role_provider(&role.into(), &mount.into()).unwrap();
+            policy.optional_resources.insert(module.into(), OptionalResourceCeiling {
+                resource_kind: kind.into(), provider: provider.provider.clone(),
+            });
+            bindings.insert(role.into(), InstallationRoleBinding {
+                selection: RoleProviderSelection { role: provider.provider.role.clone(), provider_mount_id: mount.into() },
+                binding_version: 1, updated_at_ms: 0,
+            });
+        }
+        let mut revision = AgentPresetRevision {
+            reference: PresetRevisionRef { preset_id: "optional-device-fixture".into(), revision: 1, revision_digest: "".into() },
+            payload: AgentPresetRevisionPayload {
+                context_order: vec![], middleware_order: vec![], schema_version: CONTRACT_VERSION.into(),
+                model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+                enabled_capabilities: [BROWSER_MODULE_ID, COMPUTER_MODULE_ID].into_iter().map(|id| CapabilitySelection {
+                    capability: CapabilityRef { id: id.into() }, action_allowlist: action_ids(id),
+                }).collect(), skill_bindings: vec![], system_role_provider_overrides: BTreeMap::new(),
+                persona: "Optional devices".into(), instructions: "Use only supplied device authority.".into(),
+                starter_prompts: vec![], runtime_policy: Default::default(),
+            },
+            contribution_locks: [BROWSER_MODULE_ID, COMPUTER_MODULE_ID].into_iter().map(|id|
+                registry.capability(&id.into()).unwrap().contribution_lock.clone()).collect(),
+            created_by: principal.principal_id.clone().into(), created_at_ms: 1, reason: None,
+        };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let request = CompileRequest { revision: revision.clone(), principal: principal.clone(), scene: "optional-devices".into(),
+            surface: "desktop".into(), audience: "owner".into(), created_at_ms: 1, resolver_run_id: "optional-device-resolve".into() };
+        let mut environment = CompilerEnvironment {
+            resolver_version: CONTRACT_VERSION.into(), required_runtime_protocol_version: CONTRACT_VERSION.into(),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal, runtime_feature_inventory_digest: "runtime".into(),
+            available_runtime_features: BTreeSet::new(), installation_role_bindings: bindings,
+            canonical_schema_manifest_digest: "schema".into(), target_contribution_manifest_digest: "target".into(),
+            host_target: "x86_64-pc-windows-msvc".into(), host_surface: "desktop".into(), availability_evidence_revision: "fixture".into(),
+        };
+        let strict = AgentPresetCompiler::compile(&registry, &environment, request.clone()).unwrap();
+        assert!(strict.non_executable_capability_ids.is_empty());
+        for (target, surface, non_executable) in [
+            ("x86_64-pc-windows-msvc", "headless", BTreeSet::from([CapabilityId::from(BROWSER_MODULE_ID), CapabilityId::from(COMPUTER_MODULE_ID)])),
+            ("x86_64-unknown-linux-gnu", "desktop", BTreeSet::from([CapabilityId::from(COMPUTER_MODULE_ID)])),
+        ] {
+            environment.host_target = target.into();
+            environment.host_surface = surface.into();
+            assert!(AgentPresetCompiler::compile(&registry, &environment, request.clone()).is_err(), "default compiler remains strict");
+            let compiled = AgentPresetCompiler::compile_with_resource_ceiling(&registry, &environment, request.clone(), &policy).unwrap();
+            assert_eq!(compiled.envelope, strict.envelope, "readiness cannot rewrite immutable authority");
+            assert_eq!(compiled.non_executable_capability_ids, non_executable);
+            assert!(AgentPresetCompiler::role_providers_unchanged_with_resource_ceiling(&registry, &environment, &revision,
+                &compiled.envelope, &policy));
+            for id in &non_executable {
+                assert!(!compiled.capability_resources_bound(id).unwrap());
+                let action = compiled.policy(id).unwrap().allowed_actions.iter().next().unwrap();
+                assert!(!compiled.action_resources_bound(id, action).unwrap());
+                let fake = TypedResourceBinding {
+                    binding_id: "fake-device".into(), resource_kind: id.as_ref().into(), resource_id: "fake-device".into(),
+                    owner_id: principal.principal_id.clone(), operations: ["read", "observe", "input", "navigate"].into_iter().map(str::to_owned).collect(),
+                    connection_config_ref: None, typed_parameters: BTreeMap::new(),
+                };
+                assert!(compiled.clone().with_target_resource_bindings(&principal, vec![fake.clone()]).is_err());
+                let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();
+                let invocation = CapabilityInvocationRequest {
+                    principal: principal.clone(), session_owner: principal.clone(), agent_session_id: "optional-device-session".into(),
+                    turn_id: "optional-device-turn".into(), operation_id: "optional-device-operation".into(),
+                    idempotency_key: "optional-device-key".into(), correlation_id: "optional-device-correlation".into(),
+                    resolved_snapshot_ref: compiled.snapshot_ref().clone(), active_set_generation: active.generation,
+                    capability_id: id.clone(), action_id: action.clone(), resource_binding_ids: BTreeSet::new(),
+                    state_scope_key: "session:optional-devices".into(), input: StrictJsonValue(json!({})),
+                };
+                assert!(kernel.preflight_invocation(&compiled, &active, &invocation).is_err());
+                assert!(poll_ready(kernel.invoke(&compiled, &active, invocation)).is_err(),
+                    "unsupported physical authority cannot reach the handler");
+                let optional = &policy.optional_resources[id];
+                assert!(nomifun_agent_kernel::resolve_exact_role_provider_lock(&registry, &optional.provider.role.key.role_id,
+                    &RoleProviderSelection { role: optional.provider.role.clone(), provider_mount_id: optional.provider.mount_id.clone() },
+                    &BTreeSet::from([id.clone()]), &BTreeMap::from([(fake.binding_id.clone(), fake)]), &environment).is_err());
+            }
+            let mut wrong_provider = policy.clone();
+            wrong_provider.optional_resources.get_mut(&CapabilityId::from(COMPUTER_MODULE_ID)).unwrap().provider.mount_id = "unapproved-private-provider".into();
+            assert!(AgentPresetCompiler::compile_with_resource_ceiling(&registry, &environment, request.clone(), &wrong_provider).is_err());
+            let mut absent_contract = (*registry).clone();
+            absent_contract.capabilities.get_mut(&CapabilityId::from(COMPUTER_MODULE_ID)).unwrap().manifest.contributions.actions[0]
+                .required_resource_operations = None;
+            assert!(AgentPresetCompiler::compile_with_resource_ceiling(&absent_contract, &environment, request.clone(), &policy).is_err());
+        }
     }
 
     #[test]

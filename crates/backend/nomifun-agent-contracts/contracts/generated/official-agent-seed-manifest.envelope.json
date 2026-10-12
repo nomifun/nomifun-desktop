@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43",
+    "target_first_party_contribution_digest": "be4bf62a2ef8b40c6d7081f790c8149611bf5376a6f379fecb8ab0a5e2efbb0d",
     "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
@@ -57,7 +57,10 @@
               "id": "automation.schedule"
             },
             "action_allowlist": [
-              "automation.schedule/list"
+              "automation.schedule/create",
+              "automation.schedule/delete",
+              "automation.schedule/list",
+              "automation.schedule/update"
             ]
           },
           {
@@ -65,9 +68,13 @@
               "id": "browser"
             },
             "action_allowlist": [
+              "browser/act",
+              "browser/download",
+              "browser/evaluate",
               "browser/navigate",
               "browser/observe",
-              "browser/render_content"
+              "browser/render_content",
+              "browser/upload"
             ]
           },
           {
@@ -76,6 +83,8 @@
             },
             "action_allowlist": [
               "computer/a11y.observe",
+              "computer/input",
+              "computer/launch",
               "computer/observe"
             ]
           },
@@ -121,6 +130,7 @@
             "action_allowlist": [
               "workspace.vcs/commit",
               "workspace.vcs/diff",
+              "workspace.vcs/push",
               "workspace.vcs/stage",
               "workspace.vcs/status"
             ]
@@ -155,6 +165,7 @@
               "creation.media/image",
               "creation.media/image_edit",
               "creation.media/music",
+              "creation.media/text",
               "creation.media/video"
             ]
           },
@@ -175,16 +186,84 @@
               "plugin.development/test_action",
               "plugin.development/test_ui"
             ]
+          },
+          {
+            "capability": {
+              "id": "creative.workshop"
+            },
+            "action_allowlist": [
+              "creative.workshop/asset.read",
+              "creative.workshop/asset.write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "office"
+            },
+            "action_allowlist": [
+              "office/document.edit",
+              "office/preview",
+              "office/sheet.edit",
+              "office/slides.edit"
+            ]
+          },
+          {
+            "capability": {
+              "id": "ssh"
+            },
+            "action_allowlist": [
+              "ssh/exec",
+              "ssh/fs.read",
+              "ssh/fs.write",
+              "ssh/sudo"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge.management"
+            },
+            "action_allowlist": [
+              "knowledge.management/create",
+              "knowledge.management/delete",
+              "knowledge.management/inspect",
+              "knowledge.management/list",
+              "knowledge.management/update"
+            ]
+          },
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "action_allowlist": [
+              "session.management/cancel_turn",
+              "session.management/create",
+              "session.management/execution_adjust",
+              "session.management/execution_cancel",
+              "session.management/execution_list",
+              "session.management/execution_retry_step",
+              "session.management/execution_status",
+              "session.management/list",
+              "session.management/send_input",
+              "session.management/status",
+              "session.management/terminal_create",
+              "session.management/terminal_input",
+              "session.management/terminal_list",
+              "session.management/terminal_read",
+              "session.management/terminal_relaunch",
+              "session.management/terminal_stop"
+            ]
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
+          "asset_library",
           "browser",
           "computer",
           "knowledge_base",
           "process_session",
           "project_memory",
           "scheduler",
+          "ssh_host",
           "workspace"
         ],
         "required_runtime_features": []
@@ -210,6 +289,7 @@
             "action_allowlist": [
               "workspace.vcs/commit",
               "workspace.vcs/diff",
+              "workspace.vcs/push",
               "workspace.vcs/stage",
               "workspace.vcs/status"
             ]
@@ -264,12 +344,89 @@
               "agent/fork",
               "agent/request_user_decision"
             ]
+          },
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "action_allowlist": [
+              "knowledge/autogen",
+              "knowledge/read",
+              "knowledge/search",
+              "knowledge/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "plugin.development"
+            },
+            "action_allowlist": [
+              "plugin.development/apply",
+              "plugin.development/check",
+              "plugin.development/inspect",
+              "plugin.development/install",
+              "plugin.development/list",
+              "plugin.development/open",
+              "plugin.development/plan",
+              "plugin.development/preview",
+              "plugin.development/read",
+              "plugin.development/test_action",
+              "plugin.development/test_ui"
+            ]
+          },
+          {
+            "capability": {
+              "id": "ssh"
+            },
+            "action_allowlist": [
+              "ssh/exec",
+              "ssh/fs.read",
+              "ssh/fs.write",
+              "ssh/sudo"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge.management"
+            },
+            "action_allowlist": [
+              "knowledge.management/create",
+              "knowledge.management/delete",
+              "knowledge.management/inspect",
+              "knowledge.management/list",
+              "knowledge.management/update"
+            ]
+          },
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "action_allowlist": [
+              "session.management/cancel_turn",
+              "session.management/create",
+              "session.management/execution_adjust",
+              "session.management/execution_cancel",
+              "session.management/execution_list",
+              "session.management/execution_retry_step",
+              "session.management/execution_status",
+              "session.management/list",
+              "session.management/send_input",
+              "session.management/status",
+              "session.management/terminal_create",
+              "session.management/terminal_input",
+              "session.management/terminal_list",
+              "session.management/terminal_read",
+              "session.management/terminal_relaunch",
+              "session.management/terminal_stop"
+            ]
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
+          "knowledge_base",
           "process_session",
           "project_memory",
+          "ssh_host",
           "workspace"
         ],
         "required_runtime_features": [
@@ -322,8 +479,10 @@
               "id": "knowledge"
             },
             "action_allowlist": [
+              "knowledge/autogen",
               "knowledge/read",
-              "knowledge/search"
+              "knowledge/search",
+              "knowledge/write"
             ]
           },
           {
@@ -331,7 +490,8 @@
               "id": "channel.messaging"
             },
             "action_allowlist": [
-              "channel.messaging/reply"
+              "channel.messaging/reply",
+              "channel.messaging/send"
             ]
           },
           {
@@ -352,16 +512,190 @@
               "automation.schedule/list",
               "automation.schedule/update"
             ]
+          },
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/delete",
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "browser"
+            },
+            "action_allowlist": [
+              "browser/act",
+              "browser/download",
+              "browser/evaluate",
+              "browser/navigate",
+              "browser/observe",
+              "browser/render_content",
+              "browser/upload"
+            ]
+          },
+          {
+            "capability": {
+              "id": "computer"
+            },
+            "action_allowlist": [
+              "computer/a11y.observe",
+              "computer/input",
+              "computer/launch",
+              "computer/observe"
+            ]
+          },
+          {
+            "capability": {
+              "id": "creation.media"
+            },
+            "action_allowlist": [
+              "creation.media/audio",
+              "creation.media/image",
+              "creation.media/image_edit",
+              "creation.media/music",
+              "creation.media/text",
+              "creation.media/video"
+            ]
+          },
+          {
+            "capability": {
+              "id": "creative.workshop"
+            },
+            "action_allowlist": [
+              "creative.workshop/asset.read",
+              "creative.workshop/asset.write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "office"
+            },
+            "action_allowlist": [
+              "office/document.edit",
+              "office/preview",
+              "office/sheet.edit",
+              "office/slides.edit"
+            ]
+          },
+          {
+            "capability": {
+              "id": "ssh"
+            },
+            "action_allowlist": [
+              "ssh/exec",
+              "ssh/fs.read",
+              "ssh/fs.write",
+              "ssh/sudo"
+            ]
+          },
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate",
+              "agent/fork",
+              "agent/request_user_decision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge.management"
+            },
+            "action_allowlist": [
+              "knowledge.management/create",
+              "knowledge.management/delete",
+              "knowledge.management/inspect",
+              "knowledge.management/list",
+              "knowledge.management/update"
+            ]
+          },
+          {
+            "capability": {
+              "id": "session.management"
+            },
+            "action_allowlist": [
+              "session.management/cancel_turn",
+              "session.management/create",
+              "session.management/execution_adjust",
+              "session.management/execution_cancel",
+              "session.management/execution_list",
+              "session.management/execution_retry_step",
+              "session.management/execution_status",
+              "session.management/list",
+              "session.management/send_input",
+              "session.management/status",
+              "session.management/terminal_create",
+              "session.management/terminal_input",
+              "session.management/terminal_list",
+              "session.management/terminal_read",
+              "session.management/terminal_relaunch",
+              "session.management/terminal_stop"
+            ]
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
+          "asset_library",
+          "browser",
           "channel",
           "companion",
           "companion_memory",
+          "computer",
           "knowledge_base",
+          "process_session",
+          "project_memory",
           "robot",
-          "scheduler"
+          "scheduler",
+          "ssh_host",
+          "workspace"
         ],
         "required_runtime_features": []
       },
@@ -373,7 +707,8 @@
             },
             "action_allowlist": [
               "customer.service/handoff",
-              "customer.service/notes.read"
+              "customer.service/notes.read",
+              "customer.service/notes.write"
             ]
           },
           {
@@ -390,7 +725,63 @@
               "id": "channel.messaging"
             },
             "action_allowlist": [
-              "channel.messaging/reply"
+              "channel.messaging/reply",
+              "channel.messaging/send"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/delete",
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "automation.schedule"
+            },
+            "action_allowlist": [
+              "automation.schedule/create",
+              "automation.schedule/delete",
+              "automation.schedule/list",
+              "automation.schedule/update"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
             ]
           }
         ],
@@ -398,7 +789,10 @@
         "required_resource_kinds": [
           "channel",
           "customer",
-          "knowledge_base"
+          "knowledge_base",
+          "process_session",
+          "scheduler",
+          "workspace"
         ],
         "required_runtime_features": []
       },
@@ -445,6 +839,7 @@
               "id": "workspace.files"
             },
             "action_allowlist": [
+              "workspace.files/delete",
               "workspace.files/patch",
               "workspace.files/read",
               "workspace.files/search",
@@ -491,6 +886,41 @@
               "web.research/fetch",
               "web.research/search"
             ]
+          },
+          {
+            "capability": {
+              "id": "browser"
+            },
+            "action_allowlist": [
+              "browser/act",
+              "browser/download",
+              "browser/evaluate",
+              "browser/navigate",
+              "browser/observe",
+              "browser/render_content",
+              "browser/upload"
+            ]
+          },
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate",
+              "agent/fork",
+              "agent/request_user_decision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "automation.schedule"
+            },
+            "action_allowlist": [
+              "automation.schedule/create",
+              "automation.schedule/delete",
+              "automation.schedule/list",
+              "automation.schedule/update"
+            ]
           }
         ],
         "skill_bindings": [
@@ -509,9 +939,11 @@
         ],
         "required_resource_kinds": [
           "asset_library",
+          "browser",
           "canvas",
           "process_session",
           "project_memory",
+          "scheduler",
           "workspace"
         ],
         "required_runtime_features": []
@@ -527,15 +959,22 @@
       "assistant.general": {
         "required_capability_categories": [
           "agent_collaboration",
+          "attachments",
           "automation",
           "browser",
           "computer",
+          "editing",
           "file_operations",
           "generation",
           "knowledge",
+          "knowledge_management",
+          "model_management",
           "project_memory",
+          "remote_execution",
           "requirements",
+          "session_management",
           "shell_process_pty",
+          "skills_plugins",
           "vcs_review",
           "web_research",
           "workspace_repository"
@@ -546,9 +985,16 @@
           "browser",
           "computer",
           "creation.media",
+          "creative.workshop",
           "knowledge",
+          "knowledge.management",
+          "model.management",
+          "office",
+          "plugin.development",
           "project.memory",
           "requirements",
+          "session.management",
+          "ssh",
           "web.research",
           "workspace.artifacts",
           "workspace.files",
@@ -557,12 +1003,14 @@
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
+          "asset_library",
           "browser",
           "computer",
           "knowledge_base",
           "process_session",
           "project_memory",
           "scheduler",
+          "ssh_host",
           "workspace"
         ]
       },
@@ -570,8 +1018,12 @@
         "required_capability_categories": [
           "agent_collaboration",
           "file_operations",
+          "knowledge",
+          "knowledge_management",
           "native_responses",
           "project_memory",
+          "remote_execution",
+          "session_management",
           "shell_process_pty",
           "skills_plugins",
           "vcs_review",
@@ -580,7 +1032,12 @@
         ],
         "required_capability_ids": [
           "agent.collaboration",
+          "knowledge",
+          "knowledge.management",
+          "plugin.development",
           "project.memory",
+          "session.management",
+          "ssh",
           "web.research",
           "workspace.artifacts",
           "workspace.files",
@@ -612,61 +1069,115 @@
           "validation.feedback"
         ],
         "required_resource_kinds": [
+          "knowledge_base",
           "process_session",
           "project_memory",
+          "ssh_host",
           "workspace"
         ]
       },
       "companion.default": {
         "required_capability_categories": [
+          "agent_collaboration",
+          "attachments",
           "automation",
+          "browser",
           "companion_memory",
+          "computer",
+          "editing",
+          "file_operations",
+          "generation",
           "im_channel",
           "knowledge",
+          "knowledge_management",
           "learning_evolution",
-          "persona"
+          "persona",
+          "project_memory",
+          "remote_execution",
+          "session_management",
+          "shell_process_pty",
+          "web_research",
+          "workspace_repository"
         ],
         "required_capability_ids": [
+          "agent.collaboration",
           "automation.schedule",
+          "browser",
           "channel.messaging",
           "companion",
           "companion.memory",
+          "computer",
+          "creation.media",
+          "creative.workshop",
           "knowledge",
-          "robot"
+          "knowledge.management",
+          "office",
+          "project.memory",
+          "robot",
+          "session.management",
+          "ssh",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
+          "asset_library",
+          "browser",
           "channel",
           "companion",
           "companion_memory",
+          "computer",
           "knowledge_base",
+          "process_session",
+          "project_memory",
           "robot",
-          "scheduler"
+          "scheduler",
+          "ssh_host",
+          "workspace"
         ]
       },
       "customer-service.default": {
         "required_capability_categories": [
+          "attachments",
+          "automation",
           "channel",
           "dialogue",
+          "file_operations",
           "handoff",
           "knowledge",
-          "notes"
+          "notes",
+          "shell_process_pty",
+          "web_research",
+          "workspace_repository"
         ],
         "required_capability_ids": [
+          "automation.schedule",
           "channel.messaging",
           "customer.service",
-          "knowledge"
+          "knowledge",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
           "channel",
           "customer",
-          "knowledge_base"
+          "knowledge_base",
+          "process_session",
+          "scheduler",
+          "workspace"
         ]
       },
       "creative-studio.default": {
         "required_capability_categories": [
+          "agent_collaboration",
           "attachments",
+          "automation",
+          "browser",
           "editing",
           "file_operations",
           "generation",
@@ -676,6 +1187,9 @@
           "workspace_repository"
         ],
         "required_capability_ids": [
+          "agent.collaboration",
+          "automation.schedule",
+          "browser",
           "creation.media",
           "creative.workshop",
           "office",
@@ -688,9 +1202,11 @@
         "required_runtime_features": [],
         "required_resource_kinds": [
           "asset_library",
+          "browser",
           "canvas",
           "process_session",
           "project_memory",
+          "scheduler",
           "workspace"
         ]
       }
@@ -705,5 +1221,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb"
+  "payload_digest": "44be642e2f172f79740aba9d0667e63c1fe79f9a02b4408c1f6829fca83a9608"
 }

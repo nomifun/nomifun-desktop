@@ -3,6 +3,7 @@ import type {
   AgentPresetDraft,
   AgentPresetEditorResponse,
   AgentPresetSummary,
+  AgentPresetRecommendedCapabilitiesResponse,
   ChatRouteCandidate,
   ChatRouteRecord,
   OfficialPresetTemplate,
@@ -43,6 +44,7 @@ import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActi
 import AgentEditorTabs from './AgentEditorTabs';
 import AgentInlineNameEditor from './AgentInlineNameEditor';
 import AgentRuntimePolicyPanel from './AgentRuntimePolicyPanel';
+import AgentRecommendedCapabilities from './AgentRecommendedCapabilities';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -54,8 +56,13 @@ type AgentPresetEditorProps = {
     | 'create'
     | 'open'
     | 'delete'
+    | 'recommend'
     | null;
   dirty: boolean;
+  recommendation?: AgentPresetRecommendedCapabilitiesResponse | null;
+  onRecommend?: () => void;
+  onApplyRecommendation?: () => void;
+  onDismissRecommendation?: () => void;
   onDraftChange: (draft: AgentPresetDraft) => void;
   onSave: () => void;
   saveLabel?: string;
@@ -139,6 +146,7 @@ const AgentChatModelPicker: React.FC<{
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor, draft, catalog, sourceTemplate, busyAction, dirty, onDraftChange,
   onSave, saveLabel, onDiscard, onOpenModels, onOpenAuthor, onCopy, onStartConversation, startConversationLabel,
+  recommendation, onRecommend, onApplyRecommendation, onDismissRecommendation,
 }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
@@ -189,6 +197,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       <div className={styles.editorHeaderActions}>
         {sourceTemplate && <Tag size='small'>{t(`agentSettings.template.${TEMPLATE_I18N_PATH[sourceTemplate.template_key]}.name`)}</Tag>}
         {onCopy && <Button type='text' size='small' disabled={busy} onClick={onCopy}>{t('agentSettings.workbench.createCopy')}</Button>}
+        {editor.preset.source === 'official' && sourceTemplate && onRecommend && <Button type='text' size='small'
+          disabled={busy || dirty || !editor.preset.current_stable_revision}
+          loading={busyAction === 'recommend'}
+          title={dirty ? t('agentSettings.recommendation.saveFirst') : undefined}
+          onClick={onRecommend}>{t('agentSettings.recommendation.preview')}</Button>}
         <Button
           className={styles.identityEdit}
           type='text'
@@ -206,6 +219,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     </header>
     <AgentEditorTabs tabs={tabs} active={activeTab} onChange={setActiveTab} idPrefix='agent' label={t('agentSettings.title')} />
     <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''}`}>
+      {recommendation && onApplyRecommendation && onDismissRecommendation && <AgentRecommendedCapabilities
+        recommendation={recommendation} catalog={catalog} busy={busy || dirty} saving={busyAction === 'save'}
+        onApply={onApplyRecommendation} onDismiss={onDismissRecommendation} />}
       {activeTab === 'capabilities' && <div className={styles.capabilityPanel} role='tabpanel' id='agent-panel-capabilities' aria-labelledby='agent-tab-capabilities'>
         <AgentCapabilityWorkspace document={draft.document} catalog={catalog} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}

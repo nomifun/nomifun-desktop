@@ -76,15 +76,13 @@ pub(crate) async fn set_active_thread_ptr(
     }
 }
 
-/// Build the persona system prompt for a companion conversation. The prompt
-/// persists on the conversation row for its whole life, so it only embeds
-/// durable facts (persona + a memory digest snapshot); volatile state
-/// (level/mood) is described in relative terms and the model is pointed at
-/// `recall_memory` for anything newer than the snapshot.
+/// Build the companion persona and historical memory context. Tool authority and
+/// calling conventions come from the Runtime's frozen authorized catalog,
+/// never from the companion persona or its product configuration.
 ///
 /// `channel_platform` flavors the prompt for remote IM Channel Agent
 /// sessions: the companion acknowledges it is serving the owner through that
-/// platform and that it can drive the whole desktop via the `nomi_*` tools.
+/// platform and preserves the current-request boundary for remote actions.
 pub async fn build_companion_system_prompt(
     store: &CompanionStore,
     profile: &CompanionProfileConfig,
@@ -117,29 +115,32 @@ pub async fn build_companion_system_prompt(
     // 「用中文」 here would freeze the persisted prompt and reintroduce the
     // always-Chinese bug.
     let mut system = format!(
-        "你是 {name}，一只住在主人电脑里的电子伙伴伙伴。{flavor}\n\
+        "你是 {name}，一只住在主人电脑里的电子伙伴。{flavor}\n\
          你和主人对话时语气符合你的人格；回复简洁直接，先结论后细节。\n\
-         你拥有完整的工具能力（读写文件、执行命令、技能、计划模式等），主人请你做事时大胆去做。\n\
+         主人请你做事时，主动使用当前运行时实际提供的工具完成任务。\
+         能力范围、工具名称、参数和执行方式以当前运行时的已授权工具目录和工具说明为准；人格设定和历史记忆不增加工具权限。\
+         已选择且当前可用的 Skill 与 MCP 也可按其实际说明使用。\
+         部分工具会延迟展示；需要某项能力时，先通过当前提供的工具检索查找完整已授权目录，不能仅因首轮未显示就断言无法完成。\
+         某个资源暂不可用时，继续完成可以执行的部分，简短说明剩余工作需要的条件。\n\
          但行事前遵守两条规则：\
-         ① 任何创建类操作（会话/定时任务/需求等）之前，先用对应的 list 工具查重；已有同名或同义的项就不要重复创建，除非主人在本轮对话中明确要求再建一个。\
-         ② 主人的请求缺少必要配置（如模型供应商/模型）时，先用列表类工具查可用项，自动选一个合理默认（比如第一个可用供应商）并告知主人，或用一句话向主人确认——不要带着空配置硬创建，也不要长篇追问。\n\
-         在已授权的伙伴记忆能力中，recall_memory 可以读取你对主人的长期记忆，write_memory 可以记住主人告诉你的重要事。\
-         当主人提到值得长期记住的偏好/约定/计划时主动 write_memory，宁缺毋滥；\
-         下面的记忆节选是开聊时的快照，拿不准时先 recall_memory 查最新。"
+         ① 创建会话、定时任务或其他持久项目时，若提供对应的查询工具，先查询查重；已有同名或同义的项就不要重复创建，除非主人在本轮对话中明确要求再建一个。\
+         ② 主人的请求缺少必要配置（如模型供应商/模型）时，若提供配置查询工具，先查可用项，自动选一个合理默认并告知主人，或用一句话向主人确认——不要带着空配置硬创建，也不要长篇追问。\n\
+         当前提供长期记忆读取工具时，可以查询你对主人的最新记忆；提供写入工具时，可以记住主人告诉你的重要事。\
+         当主人提到值得长期记住的偏好或约定，且当前提供记忆写入工具时，主动保存，宁缺毋滥；\
+         下面的记忆节选是历史快照，拿不准时使用当前可用的记忆读取能力查最新。"
     );
     if let Some(platform) = channel_platform.filter(|p| !p.is_empty()) {
         system.push_str(&format!(
             "\n\n主人此刻正通过 {platform} 远程和你说话。此刻你是一个通过 IM 陪主人聊天、答疑、出主意的对话助手：\
-             你可以用 nomi_list_conversations / nomi_conversation_status 等只读工具帮主人了解桌面上正在跑的会话状态并转述，\
-             也可以用 nomi_memory_* 维护你的长期记忆。\
+             当前提供查询工具时，可以帮主人了解会话状态；提供长期记忆工具时，按其实际权限读取或保存。\
              远程消息排版要适合 IM 阅读：短段落，少用大型 markdown 结构。\n\
              【硬性规则】除非主人在本轮消息中明确要求，否则禁止创建会话、向其他会话派发任务、创建定时任务或需求；\
              禁止依据历史记忆主动执行任何操作。你的默认动作是回答与建议，不是替主人去办事。"
         ));
     } else {
         system.push_str(
-            "\n\n你还是整台 Nomi 桌面的总管家：用 nomi_* 工具可以查看/操作所有会话、定时任务、长期记忆和需求平台。\
-             删除类操作先向主人复述目标确认后再执行。",
+            "\n\n你也是主人的日常办事伙伴。操作会话、定时任务、终端或应用时，按当前工具提供的目标范围和流程执行。\
+             删除类操作应确认目标与主人的授权；主人已经明确指定并授权时，不必重复询问。",
         );
     }
     if !profile.persona.custom.trim().is_empty() {
@@ -147,47 +148,28 @@ pub async fn build_companion_system_prompt(
     }
     system.push_str(
         "\n\n## 知识沉淀技巧\n\
-         除了轻量的全局记忆，你还能把成体系的资料沉淀为知识库，让会话/终端长期受益：\n\
+         当前提供相应知识库工具时，可以把成体系的资料整理为可检索的知识：\n\
          - 何时沉淀：某领域的问题反复出现、主人明确想留存一批资料、或遇到值得长期参考的 URL 资料源。\n\
-         - 动作序列：nomi_knowledge_create_base 建库（可直接带 urls，snapshot 模式会在后台抓快照并生成梗概，\
-         立即返回不必等待、切勿重复建库）→ \
-         nomi_knowledge_write_file 写入你整理好的 markdown → nomi_knowledge_autogen 刷新梗概 → \
-         nomi_knowledge_set_binding 把库绑定到目标会话/终端/你自己（kind=\"companion\"）。绑定变更对运行中的终端会话即时生效，其余目标在下次任务启动时生效。\n\
-         - 分工边界：全局记忆（nomi_memory_*）只放轻量的个人事实与偏好；知识库放成体系、可检索的领域资料。闲聊琐事不要建库。",
+         - 先查询已有资料和知识库，复用合适的库；需要创建、写入、刷新梗概或挂载时，分别确认当前工具支持该操作，再按工具说明执行。\
+         工具返回任务已开始时，按实际回执查看结果；完成前不要声称资料已经入库或可以检索。\n\
+         - 分工边界：长期记忆只放轻量的个人事实与偏好；知识库放成体系、可检索的领域资料。闲聊琐事不要建库。",
     );
-    // 终端操作能力（本地会话；远程 IM 走 PROFILE_LITE，无 terminal 域，不注入）。
-    if !remote {
-        system.push_str(
-            "\n\n## 操作终端会话\n\
-             主人电脑上还有「终端会话」(PTY，跑 shell 或 claude/codex/gemini 等 CLI)，你可以直接驱动：\n\
-             - nomi_list_terminals 看有哪些终端及状态(running/exited)；nomi_create_terminal 新建(preset: shell|claude|codex|gemini)。\n\
-             - nomi_terminal_send(id, text) 把命令或一段话发进去并【直接执行】——不用自己补回车、不用 base64，agent CLI 的粘贴提交也已处理好；\
-             要等它跑完并拿结果时带 wait=true(可选 timeout_secs)，会回执 settle_reason 与输出尾巴。\n\
-             - nomi_terminal_read_output(id) 读终端最近输出(已去除控制符)，用来查看命令结果或排查。\n\
-             - 目标终端已退出(exited)时先 nomi_terminal_relaunch 再发送；kill/delete 这类破坏性操作会要你确认后再做。\n\
-             主人在终端页能实时看到你的输入与执行，放心大胆地用。",
-        );
-    }
-    // 智能协作提示只注入本地会话；远程 IM 不具备持久 Agent 委派权限。
+    // The product preference suggests delegation; only the frozen Runtime
+    // catalog can establish whether delegation is actually available.
     if smart_collaboration && !remote {
         system.push_str(
             "\n\n## 复杂任务：Agent 协作\n\
-             统一用 nomi_delegate 委派：并行交给多个 Agent 时传 strategy=parallel 和 tasks，\
-             不经规划直接并行开工；任务真正复杂、需要有依赖关系的任务图时，传 strategy=planned 和 goal，\
-             交给执行引擎自动拆解并行。主人能在画布上实时看到每个协作 Agent 的状态与产出。\
-             派发后直接告诉主人已在后台执行、进度见画布，然后正常继续——不必守着轮询：全部完成\
-             或失败时系统会自动把结果回执给你，届时你再向主人汇总产出；若失败，先用 nomi_execution_get \
-             看清哪个节点与 last_error，再用 nomi_execution_update 的 adjust/configure/retry 操作恢复。\
-             试过几种仍不成就如实问主人怎么办。这样你全程在场，重活也不会挤占你和主人的对话上下文。\
-             主人若中途问进度，才用 nomi_execution_get 查一次。\
+             当前提供委派工具时，可以将适合拆分的复杂任务交给协作 Agent，按工具实际支持的执行方式、参数和结果回执协作。\
+             告知主人已经派发的工作与当前状态，只有获得真实完成回执后才汇总产出；\
+             工具提供进度查询或恢复操作时，按需查询和处理失败，不承诺未经工具证明的自动回执或恢复能力。\
              简单、单步、几句话能答的事，直接自己做，别为小事创建持久执行。",
         );
     }
     if !memories.is_empty() {
         system.push_str(
-            "\n\n## 你对主人的记忆（节选，可用 recall_memory 查更多）\n\
+            "\n\n## 你对主人的记忆（历史节选）\n\
              下面是带日期的历史记忆快照，只用来帮你理解主人。注意：任务/需求类条目（task 等）可能早已完成或过期——\
-             无论该记忆来自本快照，还是运行中通过 recall_memory 等工具检索到的结果，都适用同一条规则：\
+             无论该记忆来自本快照，还是运行中通过记忆工具检索到的结果，都适用同一条规则：\
              未经主人在本轮对话中明确要求，禁止据此主动创建会话/定时任务/需求，也禁止重复执行任何历史请求。\n",
         );
         for m in &memories {
@@ -666,22 +648,19 @@ mod tests {
             "persona custom must come before the knowledge-curation section"
         );
         assert!(prompt.contains("主人喜欢中文回复"));
-        assert!(prompt.contains("write_memory"));
-        assert!(prompt.contains("recall_memory"));
-        for retired in ["recall_memories", "save_memory", "list_recent_events"] {
-            assert!(!prompt.contains(retired), "retired memory tool advertised: {retired}");
-        }
+        assert!(prompt.contains("当前提供长期记忆读取工具时"));
+        assert!(prompt.contains("且当前提供记忆写入工具时"));
         // Anti-replay guardrails: dated memories + the "history snapshot, do
-        // not re-execute" clause (covering recall_memory tool results too)
+        // not re-execute" clause (covering memory tool results too)
         // + the dedup/config behavior rules.
         let today = format_date(nomifun_common::now_ms());
         assert!(prompt.contains(&format!("[{today}|preference]")), "memories must carry their date");
         assert!(prompt.contains("禁止据此主动创建"));
         assert!(
-            prompt.contains("recall_memory 等工具检索到的结果"),
+            prompt.contains("记忆工具检索到的结果"),
             "guardrail must explicitly cover tool-retrieved memories"
         );
-        assert!(prompt.contains("list 工具查重"));
+        assert!(prompt.contains("先查询查重"));
         assert!(prompt.contains("合理默认"));
     }
 
@@ -721,56 +700,71 @@ mod tests {
         let off = build_companion_system_prompt(&store, &profile, None, false).await;
         assert!(!off.contains("协作 Agent"), "no nudge when smart collaboration is off");
 
-        // On + local → nudge present, teaching the unified delegation surface.
+        // On + local → nudge present, conditional on actual Runtime tools.
         let on = build_companion_system_prompt(&store, &profile, None, true).await;
         assert!(on.contains("协作 Agent"), "local prompt must teach Agent delegation when enabled");
-        assert!(on.contains("nomi_delegate"));
-        assert!(on.contains("strategy=parallel"));
-        assert!(on.contains("strategy=planned"));
-        assert!(on.contains("nomi_execution_get"));
-        assert!(on.contains("nomi_execution_update"));
+        assert!(on.contains("当前提供委派工具时"));
+        assert!(on.contains("真实完成回执"));
+        assert!(on.contains("工具提供进度查询或恢复操作时"));
 
-        // On + remote → still no nudge (collaboration tools deny Remote).
+        // On + remote → no automatic delegation nudge; actions still require
+        // the owner's explicit current message.
         let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), true).await;
         assert!(!remote.contains("协作 Agent"), "remote must never get the collaboration nudge");
     }
 
     #[tokio::test]
-    async fn local_prompt_teaches_terminal_tools_remote_does_not() {
-        // Local companion threads carry the terminal domain (nomi_terminal_*),
-        // so their prompt must teach driving PTY sessions. Remote (IM) sessions
-        // run PROFILE_LITE with no terminal domain, so they must NOT be taught
-        // the terminal tools (would advertise capabilities that hard-deny).
+    async fn companion_persona_defers_capability_claims_to_the_runtime_catalog() {
+        // The same persona can be selected by presets with different grants,
+        // resources and Skill/MCP selections. Its product settings cannot
+        // establish any of those permissions or pin old calling conventions.
         let store = CompanionStore::open_memory().await.unwrap();
         let profile = CompanionProfileConfig::new("毛球", "ink", 1);
-        let local = build_companion_system_prompt(&store, &profile, None, false).await;
-        assert!(local.contains("nomi_terminal_send"), "local prompt must teach terminal send");
-        assert!(local.contains("nomi_terminal_read_output"));
-
-        let remote = build_companion_system_prompt(&store, &profile, Some("wecom"), false).await;
-        assert!(!remote.contains("nomi_terminal_send"), "remote (IM) prompt must not teach terminal tools");
+        for platform in [None, Some("wecom")] {
+            for smart_collaboration in [false, true] {
+                let prompt = build_companion_system_prompt(
+                    &store,
+                    &profile,
+                    platform,
+                    smart_collaboration,
+                )
+                .await;
+                assert!(prompt.contains("当前运行时的已授权工具目录和工具说明为准"));
+                assert!(prompt.contains("人格设定和历史记忆不增加工具权限"));
+                assert!(prompt.contains("已选择且当前可用的 Skill 与 MCP"));
+                assert!(prompt.contains("工具检索查找完整已授权目录"));
+                assert!(!prompt.contains("完整的工具能力"));
+                assert!(!prompt.contains("查看/操作所有会话"));
+                for retired in [
+                    "nomi_",
+                    "recall_memories",
+                    "save_memory",
+                    "list_recent_events",
+                    "strategy=parallel",
+                    "strategy=planned",
+                ] {
+                    assert!(
+                        !prompt.contains(retired),
+                        "{platform:?}: persona advertised retired calling convention {retired}",
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
     async fn companion_system_prompt_teaches_knowledge_curation() {
         let store = CompanionStore::open_memory().await.unwrap();
         let profile = CompanionProfileConfig::new("毛球", "ink", 1);
-        // Both local companion threads and remote (IM) master sessions carry
-        // the gateway tools, so both flavors must teach the curation flow.
+        // Knowledge curation is strategy, not a capability grant. It must stay
+        // useful with either read-only or writable knowledge tools and cannot
+        // promise platform creation/binding actions absent from the Runtime.
         for platform in [None, Some("telegram")] {
             let prompt = build_companion_system_prompt(&store, &profile, platform, false).await;
             assert!(prompt.contains("## 知识沉淀技巧"), "{platform:?}");
-            // The action sequence names every tool in pipeline order.
-            let seq = ["nomi_knowledge_create_base", "nomi_knowledge_write_file", "nomi_knowledge_autogen", "nomi_knowledge_set_binding"];
-            let mut last = 0;
-            for tool in seq {
-                let pos = prompt.find(tool).unwrap_or_else(|| panic!("{platform:?}: prompt must mention {tool}"));
-                assert!(pos > last, "{platform:?}: {tool} out of pipeline order");
-                last = pos;
-            }
-            // Binding to itself uses kind="companion"; changes apply at next task start.
-            assert!(prompt.contains("kind=\"companion\""), "{platform:?}");
-            assert!(prompt.contains("下次任务"), "{platform:?}");
+            assert!(prompt.contains("当前提供相应知识库工具时"), "{platform:?}");
+            assert!(prompt.contains("分别确认当前工具支持该操作"), "{platform:?}");
+            assert!(prompt.contains("完成前不要声称资料已经入库或可以检索"), "{platform:?}");
             // Division of labor: global memory vs knowledge bases.
             assert!(prompt.contains("闲聊琐事"), "{platform:?}");
         }
@@ -802,9 +796,10 @@ mod tests {
         assert!(!remote.contains("上周让你做导出功能"), "task memory must be filtered out of the remote snapshot");
         assert!(!remote.contains("昨天聊了部署"), "episode memory must be filtered out of the remote snapshot");
 
-        // Local mode is unchanged: still the 总管家, full snapshot incl. task.
+        // Local mode retains the active work-partner behavior and full snapshot.
         let local = build_companion_system_prompt(&store, &profile, None, false).await;
-        assert!(local.contains("总管家"), "local desktop companion stays the 总管家");
+        assert!(local.contains("日常办事伙伴"));
+        assert!(local.contains("主人已经明确指定并授权时，不必重复询问"));
         assert!(local.contains("上周让你做导出功能"), "local snapshot still includes task memories");
     }
 

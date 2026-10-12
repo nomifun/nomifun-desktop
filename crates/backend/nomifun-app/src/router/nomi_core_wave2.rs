@@ -57,37 +57,91 @@ const MAX_DEBOUNCE_IDENTITIES: usize = 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
-    let capabilities = [
+    [
         WORKSPACE_FILES,
         WORKSPACE_VCS,
         WORKSPACE_PROCESS,
         WORKSPACE_ARTIFACTS,
         nomifun_agent_domain_wave2::SSH_MODULE_ID,
+        nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+        nomifun_agent_domain_wave2::COMPUTER_MODULE_ID,
     ]
         .into_iter()
         .map(CapabilityId::from)
-        .collect::<BTreeSet<_>>();
-    #[cfg(feature = "computer-use")]
-    let capabilities = {
-        let mut capabilities = capabilities;
-        capabilities.insert(CapabilityId::from(
-            nomifun_agent_domain_wave2::COMPUTER_MODULE_ID,
-        ));
-        capabilities
-    };
-    #[cfg(feature = "browser-use")]
-    let capabilities = {
-        let mut capabilities = capabilities;
-        capabilities.insert(CapabilityId::from(
-            nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
-        ));
-        capabilities
-    };
-    capabilities
+        .collect()
+}
+
+/// Freeze the host's exact published facade contracts even when this build has
+/// no live desktop adapters. This selects compile-time authority, never a
+/// Browser connection, desktop permission or executable resource. Action
+/// materialization still requires a resource supplied by its physical owner.
+pub(crate) fn declared_role_bindings(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+) -> anyhow::Result<BTreeMap<nomifun_agent_contracts::ExecutionRoleId, nomifun_agent_contracts::InstallationRoleBinding>> {
+    use nomifun_agent_contracts::{InstallationRoleBinding, PluginSourceKind, RoleProviderSelection};
+    let mut bindings = BTreeMap::new();
+    for (role, mount, package) in [
+        (nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID,
+            nomifun_agent_domain_wave2::BROWSER_MOUNT_ID,
+            nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID),
+        (nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID,
+            nomifun_agent_domain_wave2::COMPUTER_A11Y_MOUNT_ID,
+            nomifun_agent_domain_wave2::COMPUTER_A11Y_PACKAGE_ID),
+    ] {
+        let role_id = nomifun_agent_contracts::ExecutionRoleId::from(role);
+        let mount_id = nomifun_agent_contracts::AgentModuleId::from(mount);
+        let contract = registry.role_contract(&role_id)
+            .ok_or_else(|| anyhow::anyhow!("published desktop Role contract is missing: {role}"))?;
+        let installed = registry.role_provider(&role_id, &mount_id)
+            .ok_or_else(|| anyhow::anyhow!("published desktop Role Provider is missing: {role}/{mount}"))?;
+        anyhow::ensure!(installed.source.source_kind == PluginSourceKind::Bundled
+            && installed.provider.package.id.as_ref() == package
+            && installed.provider.mount_id == mount_id
+            && installed.provider.role.key == contract.manifest.key
+            && installed.provider.role.contract_digest == contract.contract_digest,
+            "published desktop Role Provider does not match its bundled contract: {role}");
+        bindings.insert(role_id, InstallationRoleBinding {
+            selection: RoleProviderSelection {
+                role: installed.provider.role.clone(),
+                provider_mount_id: installed.provider.mount_id.clone(),
+            },
+            binding_version: 1,
+            updated_at_ms: 0,
+        });
+    }
+    Ok(bindings)
 }
 
 pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {
     BTreeSet::from([CapabilityId::from(WORKSPACE_FILES)])
+}
+
+/// Keep optional native grants in the product's permission ceiling without
+/// claiming that this host can execute them. The policy pins the exact bundled
+/// Provider; concrete resource admission and the Kernel's execution gate remain
+/// authoritative for every action.
+pub(crate) fn resource_ceiling_policy(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+) -> anyhow::Result<nomifun_agent_kernel::CompileResourceCeilingPolicy> {
+    let bindings = declared_role_bindings(registry)?;
+    let mut policy = nomifun_agent_kernel::CompileResourceCeilingPolicy::default();
+    for (capability, role, kind) in [
+        (nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+            nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID, "browser"),
+        (nomifun_agent_domain_wave2::COMPUTER_MODULE_ID,
+            nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID, "computer"),
+    ] {
+        let role_id = nomifun_agent_contracts::ExecutionRoleId::from(role);
+        let selection = &bindings[&role_id].selection;
+        let provider = registry.role_provider(&role_id, &selection.provider_mount_id)
+            .ok_or_else(|| anyhow::anyhow!("bundled optional resource Provider disappeared: {role}"))?;
+        policy.optional_resources.insert(CapabilityId::from(capability),
+            nomifun_agent_kernel::OptionalResourceCeiling {
+                resource_kind: nomifun_agent_contracts::ResourceKind::from(kind),
+                provider: provider.provider.clone(),
+            });
+    }
+    Ok(policy)
 }
 
 pub(crate) fn action_host_port(
@@ -1403,12 +1457,31 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "browser-use")]
     #[test]
-    fn desktop_browser_module_is_an_official_kernel_tool_target() {
-        assert!(tool_capability_ids().contains(&CapabilityId::from(
-            nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
-        )));
+    fn published_desktop_modules_keep_first_party_tool_identity_without_live_adapters() {
+        for id in [nomifun_agent_domain_wave2::BROWSER_MODULE_ID, nomifun_agent_domain_wave2::COMPUTER_MODULE_ID] {
+            assert!(tool_capability_ids().contains(&CapabilityId::from(id)));
+        }
+    }
+
+    #[test]
+    fn declared_desktop_roles_use_exact_bundled_contracts_without_creating_resources() {
+        let registry = nomifun_agent_kernel::Materializer::materialize(
+            &nomifun_agent_kernel::MaterializationPolicy::stable("1.0.0"),
+            &nomifun_agent_domain_wave2::registrations().unwrap(), 1,
+        ).unwrap();
+        let bindings = declared_role_bindings(&registry).unwrap();
+        assert_eq!(bindings.len(), 2);
+        for (role, binding) in &bindings {
+            let declared = registry.role_provider(role, &binding.selection.provider_mount_id).unwrap();
+            assert_eq!(binding.selection.role, declared.provider.role);
+            assert_eq!(binding.binding_version, 1);
+            assert_eq!(binding.updated_at_ms, 0);
+        }
+        let mut changed = registry.clone();
+        changed.role_providers.values_mut().next().unwrap().provider.role.contract_digest = "a".repeat(64).into();
+        assert!(declared_role_bindings(&changed).is_err(), "a missing or changed contract cannot be treated as environment absence");
+        assert!(declared_role_bindings(&nomifun_agent_kernel::MaterializedRegistry::empty()).is_err());
     }
 
     fn authority(principal: &PrincipalRef) -> TypedResourceBinding {

@@ -47,6 +47,19 @@ pub struct CompileRequest {
     pub resolver_run_id: OperationId,
 }
 
+/// Host-owned authoring policy, never persisted as Agent authority. Only exact
+/// bundled public exports listed here may defer physical platform readiness.
+#[derive(Clone, Debug, Default)]
+pub struct CompileResourceCeilingPolicy {
+    pub optional_resources: BTreeMap<CapabilityId, OptionalResourceCeiling>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OptionalResourceCeiling {
+    pub resource_kind: ResourceKind,
+    pub provider: nomifun_agent_contracts::ExactRoleProviderRef,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CompiledCapabilityPolicy {
     pub allowed_actions: BTreeSet<ActionId>,
@@ -61,6 +74,9 @@ pub struct CompiledSnapshot {
     pub target_resource_bindings: Vec<TypedResourceBinding>,
     pub registry_generation: u64,
     pub registry_digest: DigestHex,
+    /// Current physical host disposition, recomputed on runtime compilation.
+    /// It does not enter the immutable Snapshot, profile digest or checkpoint.
+    pub non_executable_capability_ids: BTreeSet<CapabilityId>,
 }
 
 impl CompiledSnapshot {
@@ -94,8 +110,9 @@ impl CompiledSnapshot {
 
     /// Whether every resource kind required by a selected capability has a
     /// concrete target binding for this Session. A false result is not a
-    /// compilation error: enhancement capabilities remain frozen but their
-    /// Actions and lifecycle contributions must not be materialized.
+    /// compilation error: enhancement capabilities remain frozen. Context
+    /// and lifecycle consumers use this Module gate; each Action uses its
+    /// independent exact resource contract below.
     pub fn capability_resources_bound(
         &self,
         capability_id: &CapabilityId,
@@ -105,6 +122,9 @@ impl CompiledSnapshot {
                 capability_id: capability_id.clone(),
             }
         })?;
+        if self.non_executable_capability_ids.contains(capability_id) {
+            return Ok(false);
+        }
         let mut bound_kinds = BTreeSet::new();
         for binding_id in &policy.resource_binding_ids {
             let binding = self.binding(binding_id).ok_or_else(|| {
@@ -119,6 +139,53 @@ impl CompiledSnapshot {
             bound_kinds.insert(binding.resource_kind.clone());
         }
         Ok(policy.required_resource_kinds.is_subset(&bound_kinds))
+    }
+
+    /// Check the exact selected Action's resource operations, independently of
+    /// other Actions in the same Module. Context and Event consumers retain
+    /// their separate Module check; a Role Provider keeps its implementation
+    /// slots. Missing metadata retains the complete Module resource gate.
+    pub fn action_resources_bound(
+        &self,
+        capability_id: &CapabilityId,
+        action_id: &ActionId,
+    ) -> Result<bool, KernelError> {
+        let policy = self.policy(capability_id).ok_or_else(|| {
+            KernelError::CapabilityNotInPreset { capability_id: capability_id.clone() }
+        })?;
+        if !policy.allowed_actions.contains(action_id) {
+            return Ok(false);
+        }
+        if self.non_executable_capability_ids.contains(capability_id) {
+            return Ok(false);
+        }
+        let capability = self.resolved_capability(capability_id).ok_or_else(|| {
+            KernelError::CapabilityNotInPreset { capability_id: capability_id.clone() }
+        })?;
+        let action = capability.actions.iter().find(|action| &action.action_id == action_id)
+            .ok_or_else(|| KernelError::InvalidPresetRevision {
+                reason: format!("{} has no frozen Action {}", capability_id.as_ref(), action_id.as_ref()),
+            })?;
+        let Some(requirements) = &action.required_resource_operations else {
+            return self.capability_resources_bound(capability_id);
+        };
+        let mut bindings = Vec::new();
+        for binding_id in &policy.resource_binding_ids {
+            bindings.push(self.binding(binding_id).ok_or_else(|| KernelError::InvalidPresetRevision {
+                reason: format!("{} references missing resource binding {}", capability_id.as_ref(), binding_id.as_ref()),
+            })?);
+        }
+        let is_role_member = self.content().resolved_role_providers.values()
+            .any(|provider| provider.supported_members.contains(capability_id));
+        if is_role_member && policy.required_resource_kinds.iter().any(|kind| {
+            !bindings.iter().any(|binding| &binding.resource_kind == kind)
+        }) {
+            return Ok(false);
+        }
+        Ok(requirements.iter().all(|(kind, operations)| {
+            bindings.iter().any(|binding| &binding.resource_kind == kind
+                && operations.is_subset(&binding.operations))
+        }))
     }
 
     pub fn resolved_capability(
@@ -176,6 +243,14 @@ impl CompiledSnapshot {
         }
         for ids in by_kind.values_mut() {
             ids.sort();
+        }
+        for capability_id in &self.non_executable_capability_ids {
+            let policy = &self.authority_policies[capability_id];
+            if let Some(kind) = policy.required_resource_kinds.iter().find(|kind| by_kind.contains_key(*kind)) {
+                return Err(KernelError::CapabilityResourceNotBound {
+                    capability_id: capability_id.clone(), resource_kind: kind.as_ref().to_owned(),
+                });
+            }
         }
         for (capability_id, policy) in &mut self.authority_policies {
             policy.resource_binding_ids.clear();
@@ -283,6 +358,18 @@ impl AgentPresetCompiler {
         request: CompileRequest,
         source: &ResolvedSnapshotEnvelope,
     ) -> Result<CompiledSnapshot, KernelError> {
+        Self::compile_with_frozen_role_providers_and_resource_ceiling(
+            registry, environment, request, source, &CompileResourceCeilingPolicy::default(),
+        )
+    }
+
+    pub fn compile_with_frozen_role_providers_and_resource_ceiling(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        request: CompileRequest,
+        source: &ResolvedSnapshotEnvelope,
+        resource_ceiling: &CompileResourceCeilingPolicy,
+    ) -> Result<CompiledSnapshot, KernelError> {
         source.validate().map_err(|error| KernelError::SnapshotValidation { reason: error.message })?;
         let mut resolution_revision = request.revision.clone();
         for (role_id, frozen) in &source.content.resolved_role_providers {
@@ -299,7 +386,7 @@ impl AgentPresetCompiler {
                 provider_mount_id: frozen.provider.mount_id.clone(),
             });
         }
-        Self::compile_resolved(registry, environment, request, &resolution_revision)
+        Self::compile_resolved(registry, environment, request, &resolution_revision, resource_ceiling)
     }
 
     /// Authoring reuse uses the same Skill resolver as compilation. Artifact
@@ -323,13 +410,25 @@ impl AgentPresetCompiler {
         environment: &CompilerEnvironment,
         selection: &RoleProviderSelection,
     ) -> Result<(), KernelError> {
+        Self::validate_role_default_with_resource_ceiling(registry, environment, selection,
+            &CompileResourceCeilingPolicy::default(), &environment.host_surface)
+    }
+
+    pub fn validate_role_default_with_resource_ceiling(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        selection: &RoleProviderSelection,
+        resource_ceiling: &CompileResourceCeilingPolicy,
+        contribution_surface: &str,
+    ) -> Result<(), KernelError> {
         let role_id = &selection.role.key.role_id;
         let contract = registry.role_contract(role_id)
             .ok_or_else(|| KernelError::RoleProviderNotBound { role_id: role_id.clone() })?;
         let required = contract.manifest.members.iter()
             .filter(|member| member.requirement == nomifun_agent_contracts::RoleMemberRequirement::Required)
             .map(|member| member.capability.id.clone()).collect();
-        resolve_role_provider_lock(registry, role_id, selection, &required, None, environment).map(|_| ())
+        resolve_role_provider_lock(registry, role_id, selection, &required, None, environment,
+            resource_ceiling, contribution_surface).map(|_| ())
     }
 
     /// Check the Role portion of an unchanged draft using the canonical resolver.
@@ -345,11 +444,22 @@ impl AgentPresetCompiler {
         revision: &AgentPresetRevision,
         snapshot: &ResolvedSnapshotEnvelope,
     ) -> bool {
+        Self::role_providers_unchanged_with_resource_ceiling(registry, environment, revision, snapshot,
+            &CompileResourceCeilingPolicy::default())
+    }
+
+    pub fn role_providers_unchanged_with_resource_ceiling(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        revision: &AgentPresetRevision,
+        snapshot: &ResolvedSnapshotEnvelope,
+        resource_ceiling: &CompileResourceCeilingPolicy,
+    ) -> bool {
         let external = BTreeSet::new();
         let roots = revision.payload.enabled_capabilities.iter()
             .map(|selection| selection.capability.id.clone())
             .filter(|id| !external.contains(id)).collect();
-        let Ok(graph) = dependencies::resolve(registry, environment, revision, &roots)
+        let Ok(graph) = dependencies::resolve(registry, environment, revision, &roots, resource_ceiling, &snapshot.surface)
             else { return false; };
         if graph.roles != snapshot.content.resolved_role_providers {
             return false;
@@ -384,8 +494,17 @@ impl AgentPresetCompiler {
         environment: &CompilerEnvironment,
         request: CompileRequest,
     ) -> Result<CompiledSnapshot, KernelError> {
+        Self::compile_with_resource_ceiling(registry, environment, request, &CompileResourceCeilingPolicy::default())
+    }
+
+    pub fn compile_with_resource_ceiling(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        request: CompileRequest,
+        resource_ceiling: &CompileResourceCeilingPolicy,
+    ) -> Result<CompiledSnapshot, KernelError> {
         let resolution_revision = request.revision.clone();
-        Self::compile_resolved(registry, environment, request, &resolution_revision)
+        Self::compile_resolved(registry, environment, request, &resolution_revision, resource_ceiling)
     }
 
     fn compile_resolved(
@@ -393,6 +512,7 @@ impl AgentPresetCompiler {
         environment: &CompilerEnvironment,
         request: CompileRequest,
         resolution_revision: &AgentPresetRevision,
+        resource_ceiling: &CompileResourceCeilingPolicy,
     ) -> Result<CompiledSnapshot, KernelError> {
         request
             .revision
@@ -439,7 +559,7 @@ impl AgentPresetCompiler {
         validate_revision_contribution_locks(registry, &request.revision)?;
 
         let graph = dependencies::resolve(registry, environment, resolution_revision,
-            &initial_direct.keys().cloned().collect())?;
+            &initial_direct.keys().cloned().collect(), resource_ceiling, &request.surface)?;
         let ceiling = graph.edges.keys().cloned().collect::<BTreeSet<_>>();
 
         validate_capability_ceiling(registry, environment, &request.surface, &ceiling)?;
@@ -473,6 +593,9 @@ impl AgentPresetCompiler {
         )?;
         let mcp_tool_locks = compile_mcp_locks(registry, &direct_ids);
         let resolved_role_providers = graph.roles;
+        let non_executable_capability_ids = non_executable_role_members(
+            registry, environment, &resolved_role_providers, &ceiling, resource_ceiling,
+        );
         validate_conflicts(
             registry,
             &ceiling,
@@ -579,6 +702,7 @@ impl AgentPresetCompiler {
             target_resource_bindings: Vec::new(),
             registry_generation: registry.generation,
             registry_digest: registry.registry_digest.clone(),
+            non_executable_capability_ids,
         })
     }
 }
@@ -874,13 +998,42 @@ fn compile_authority_policies(
             .get(capability_id)
             .map(|direct| direct.action_allowlist.clone())
             .unwrap_or(declared_actions);
+        let required_resource_kinds = selected_resource_kinds(capability, &allowed_actions);
         policies.insert(capability_id.clone(), CompiledCapabilityPolicy {
             allowed_actions,
             resource_binding_ids: BTreeSet::new(),
-            required_resource_kinds: capability.contributions.resource_kinds.clone(),
+            required_resource_kinds,
         });
     }
     Ok(policies)
+}
+
+fn selected_resource_kinds(
+    capability: &nomifun_agent_contracts::CapabilityManifest,
+    allowed_actions: &BTreeSet<ActionId>,
+) -> BTreeSet<ResourceKind> {
+    let action_kinds = capability.contributions.actions.iter()
+        .filter_map(|action| action.required_resource_operations.as_ref())
+        .flat_map(|requirements| requirements.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    // Context and Event consumers use the complete Module resource contract.
+    // For Action-only Modules, keep non-Action slots and only the selected
+    // Actions' requirements. Missing metadata therefore preserves the former
+    // strict Module requirements rather than guessing resource authority.
+    let missing_contract = capability.contributions.actions.iter()
+        .any(|action| allowed_actions.contains(&action.action_id) && action.required_resource_operations.is_none());
+    let mut required = if !missing_contract && capability.contributions.context_schema_refs.is_empty()
+        && capability.contributions.event_schema_refs.is_empty()
+    {
+        capability.contributions.resource_kinds.difference(&action_kinds).cloned().collect()
+    } else {
+        capability.contributions.resource_kinds.clone()
+    };
+    required.extend(capability.contributions.actions.iter()
+        .filter(|action| allowed_actions.contains(&action.action_id))
+        .filter_map(|action| action.required_resource_operations.as_ref())
+        .flat_map(|requirements| requirements.keys().cloned()));
+    required
 }
 
 fn resolved_capabilities(
@@ -924,7 +1077,7 @@ fn resolved_capabilities(
                 display_name: None,
                 description: None,
                 actions: capability.manifest.contributions.actions.clone(),
-                required_resource_kinds: capability.manifest.contributions.resource_kinds.clone(),
+                required_resource_kinds: policy.required_resource_kinds.clone(),
                 action_allowlist: policy.allowed_actions.clone(),
             })
         })
@@ -1098,6 +1251,8 @@ fn compile_role_provider_locks(
     installation_bindings: &BTreeMap<ExecutionRoleId, InstallationRoleBinding>,
     ceiling: &BTreeSet<CapabilityId>,
     environment: &CompilerEnvironment,
+    resource_ceiling: &CompileResourceCeilingPolicy,
+    contribution_surface: &str,
 ) -> Result<
     BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
     KernelError,
@@ -1134,6 +1289,8 @@ fn compile_role_provider_locks(
                 &selected_members,
                 None,
                 environment,
+                resource_ceiling,
+                contribution_surface,
             )?,
         );
     }
@@ -1160,6 +1317,8 @@ pub fn resolve_exact_role_provider_lock(
         selected_members,
         Some(bindings),
         environment,
+        &CompileResourceCeilingPolicy::default(),
+        &environment.host_surface,
     )?;
     // Non-Agent admission has an actual selected member set too. A default
     // binding alone is not a plan to consume every required member together.
@@ -1179,6 +1338,8 @@ fn resolve_role_provider_lock(
     selected_members: &BTreeSet<CapabilityId>,
     bindings: Option<&BTreeMap<ResourceBindingId, TypedResourceBinding>>,
     environment: &CompilerEnvironment,
+    resource_ceiling: &CompileResourceCeilingPolicy,
+    contribution_surface: &str,
 ) -> Result<ResolvedRoleProviderLock, KernelError> {
     let contract = registry
         .role_contract(role_id)
@@ -1223,9 +1384,6 @@ fn resolve_role_provider_lock(
         consumed_members.extend(registry.role_resource_members(provider, id)
             .into_iter().map(|(id, _)| id.clone()));
     }
-    validate_capability_ceiling(
-        registry, environment, &environment.host_surface, &consumed_members,
-    )?;
     for capability_id in &consumed_members {
         let member = provider
             .contribution
@@ -1235,6 +1393,12 @@ fn resolve_role_provider_lock(
                 role_id: role_id.clone(),
                 capability_id: capability_id.clone(),
             })?;
+        let defer_physical_platform = bindings.is_none()
+            && selected_members.contains(capability_id)
+            && optional_public_resource_ceiling(registry, provider, capability_id, member, resource_ceiling);
+        validate_capability_ceiling(registry, environment,
+            if defer_physical_platform { contribution_surface } else { &environment.host_surface },
+            &BTreeSet::from([capability_id.clone()]))?;
         if let Some(implementation) = &member.implementation {
             // The selected facade's availability cannot stand in for the
             // implementation's platform/surface/features. Validation does not
@@ -1246,7 +1410,7 @@ fn resolve_role_provider_lock(
                 &BTreeSet::from([implementation.id.clone()]),
             )?;
         }
-        if !member.supported_platforms.is_empty()
+        if !defer_physical_platform && !member.supported_platforms.is_empty()
             && !member.supported_platforms.iter().any(|constraint| {
                 provider_platform_supported(
                     constraint,
@@ -1290,6 +1454,70 @@ fn resolve_role_provider_lock(
         source: provider.source.clone(),
         supported_members: provider.contribution.members.keys().cloned().collect(),
     })
+}
+
+fn optional_public_resource_ceiling(
+    registry: &MaterializedRegistry,
+    provider: &crate::MaterializedRoleProvider,
+    capability_id: &CapabilityId,
+    member: &nomifun_agent_contracts::RoleProviderMemberContribution,
+    policy: &CompileResourceCeilingPolicy,
+) -> bool {
+    let Some(optional) = policy.optional_resources.get(capability_id) else { return false; };
+    let Some(capability) = registry.capability(capability_id) else { return false; };
+    let manifest = &capability.manifest;
+    let kinds = BTreeSet::from([optional.resource_kind.clone()]);
+    provider.provider == optional.provider
+        && provider.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+        && capability.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+        && registry.role_for_capability(capability_id) == Some(&provider.provider.role.key.role_id)
+        && provider.contribution.members.len() == 1
+        && member.implementation.is_none()
+        && member.required_resource_kinds == kinds
+        && manifest.contributions.resource_kinds == kinds
+        && manifest.supports_consumer(CapabilityConsumer::Agent)
+        && manifest.authoring_policy().is_ok_and(|policy| policy == CapabilityAuthoringPolicy::Direct)
+        && manifest.requires.is_empty()
+        && manifest.contributions.context_schema_refs.is_empty()
+        && manifest.contributions.event_schema_refs.is_empty()
+        && registry.role_resource_members(provider, capability_id).is_empty()
+        && !manifest.contributions.actions.is_empty()
+        && manifest.contributions.actions.iter().all(|action|
+            action.required_resource_operations.as_ref().is_some_and(|requirements|
+                requirements.len() == 1 && requirements.get(&optional.resource_kind).is_some_and(|operations| !operations.is_empty())))
+}
+
+/// Prove the public declarations eligible for authoring-only readiness
+/// diagnostics. A caller's requested Provider is still validated by compile.
+pub fn deferred_resource_ceiling_capabilities(
+    registry: &MaterializedRegistry,
+    policy: &CompileResourceCeilingPolicy,
+) -> BTreeSet<CapabilityId> {
+    policy.optional_resources.iter().filter_map(|(capability_id, optional)| {
+        let provider = registry.role_provider(&optional.provider.role.key.role_id, &optional.provider.mount_id)?;
+        let member = provider.contribution.members.get(capability_id)?;
+        optional_public_resource_ceiling(registry, provider, capability_id, member, policy).then(|| capability_id.clone())
+    }).collect()
+}
+
+fn non_executable_role_members(
+    registry: &MaterializedRegistry,
+    environment: &CompilerEnvironment,
+    roles: &BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
+    ceiling: &BTreeSet<CapabilityId>,
+    policy: &CompileResourceCeilingPolicy,
+) -> BTreeSet<CapabilityId> {
+    ceiling.iter().filter_map(|capability_id| {
+        let role_id = registry.role_for_capability(capability_id)?;
+        let lock = roles.get(role_id)?;
+        let provider = registry.role_provider(role_id, &lock.provider.mount_id)?;
+        let member = provider.contribution.members.get(capability_id)?;
+        (optional_public_resource_ceiling(registry, provider, capability_id, member, policy)
+            && !member.supported_platforms.is_empty()
+            && !member.supported_platforms.iter().any(|constraint| provider_platform_supported(
+                constraint, &environment.host_target, &environment.host_surface)))
+            .then(|| capability_id.clone())
+    }).collect()
 }
 
 fn provider_platform_supported(

@@ -15,6 +15,8 @@ pub(super) fn resolve(
     environment: &CompilerEnvironment,
     revision: &AgentPresetRevision,
     roots: &BTreeSet<CapabilityId>,
+    resource_ceiling: &CompileResourceCeilingPolicy,
+    contribution_surface: &str,
 ) -> Result<DependencyGraph, KernelError> {
     let mut graph = DependencyGraph::default();
     let mut visiting = BTreeSet::new();
@@ -53,6 +55,8 @@ pub(super) fn resolve(
                 &environment.installation_role_bindings,
                 &BTreeSet::from([id.clone()]),
                 environment,
+                resource_ceiling,
+                contribution_surface,
             )?;
             let lock = &locks[role_id];
             let provider = registry

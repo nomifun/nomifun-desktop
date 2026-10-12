@@ -27,6 +27,7 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    pub(super) session_management_owner: Arc<super::session_management::Host>,
     #[cfg(feature = "browser-use")]
     pub browser_owner: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
@@ -41,6 +42,11 @@ pub(crate) async fn build(
     registrations.push(super::nomi_core_tool_discovery::registration()?);
     registrations.push(super::model_management::registration(services)?);
     let model_management_tools = super::model_management::capability_ids();
+    registrations.push(super::knowledge_management::registration(services)?);
+    let knowledge_management_tools = super::knowledge_management::capability_ids();
+    let session_management_owner = Arc::new(super::session_management::Host::new(services));
+    registrations.push(super::session_management::registration(session_management_owner.clone())?);
+    let session_management_tools = super::session_management::capability_ids();
     registrations.push(nomifun_plugin_development::registration(Arc::new(
         super::plugin_development::Host::new(plugin, services),
     )).map_err(anyhow::Error::msg)?);
@@ -231,6 +237,16 @@ pub(crate) async fn build(
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
         ),
         (
+            knowledge_management_tools.clone(),
+            Arc::new(super::knowledge_management::SchemaResolver)
+                as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+        ),
+        (
+            session_management_tools.clone(),
+            Arc::new(super::session_management::SchemaResolver)
+                as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+        ),
+        (
             wave1_tools.clone(),
             Arc::new(NomiWave1SchemaResolver)
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
@@ -257,6 +273,8 @@ pub(crate) async fn build(
     let tool_capability_ids = wave1_tools
         .into_iter()
         .chain(model_management_tools)
+        .chain(knowledge_management_tools)
+        .chain(session_management_tools)
         .chain(plugin_development_tools)
         .chain(wave2_tools)
         .chain(wave3_tools)
@@ -285,6 +303,7 @@ pub(crate) async fn build(
         wave4_owners: wave4,
         wave5_owner,
         wave2_owner,
+        session_management_owner,
         #[cfg(feature = "browser-use")]
         browser_owner,
         robot_owner,

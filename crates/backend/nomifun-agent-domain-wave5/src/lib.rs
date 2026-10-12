@@ -1495,6 +1495,11 @@ fn capability_manifest(
             output_schema: action_schema_ref(action.id, "output", &object_schema(true)),
             effect_class: action.effect,
             presentation: nomifun_agent_contracts::ToolPresentationKind::FunctionTool,
+            required_resource_operations: Some(action.requirements.iter().fold(BTreeMap::new(), |mut requirements, requirement| {
+                    requirements.entry(ResourceKind::from(requirement.resource_kind))
+                        .or_insert_with(BTreeSet::new).insert(requirement.operation.to_owned());
+                    requirements
+                })),
         })
         .collect();
     CapabilityManifest {

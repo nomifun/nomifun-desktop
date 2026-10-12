@@ -26,6 +26,8 @@ pub(crate) mod remote_runtime;
 pub(crate) mod agent_binding_projection;
 pub(crate) mod nomi_core_builtins;
 mod model_management;
+mod knowledge_management;
+mod session_management;
 mod mobile_voice_registry;
 mod mobile_voice_authority;
 mod mobile_voice_host;
