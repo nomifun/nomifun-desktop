@@ -16,13 +16,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Button,
   Checkbox,
   Form,
   Input,
   Message,
   Modal,
-  Result,
   Tooltip,
   Typography,
 } from '@arco-design/web-react';
@@ -34,11 +32,11 @@ import { preloadKnowledgeDetailRoute } from '@/renderer/components/layout/routeP
 import type { KnowledgeKindShortcut } from '../KnowledgeEmptyState';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import {
-  knowledgeErrorText,
   prefetchKnowledgeBaseOpen,
   useKnowledgeBases,
 } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
+import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 import KnowledgeEmptyState from '../KnowledgeEmptyState';
 import KnowledgeCard from '../KnowledgeCard';
 import KnowledgeTagFilterBar, {
@@ -107,7 +105,7 @@ const KnowledgeListPage: React.FC = () => {
 
   // Data
   const { bases, loading, error, refresh } = useKnowledgeBases();
-  const { tags, createTag, updateTag, deleteTag } = useKnowledgeTags();
+  const { tags, error: tagsError, refresh: refreshTags, createTag, updateTag, deleteTag } = useKnowledgeTags();
   const [tagModalVisible, setTagModalVisible] = useState(false);
   const [retrievalModalVisible, setRetrievalModalVisible] = useState(false);
   const openingBaseIdRef = useRef<string | null>(null);
@@ -235,7 +233,8 @@ const KnowledgeListPage: React.FC = () => {
       closeEditModal();
       void refresh();
     } catch (e) {
-      if (e instanceof Error || typeof e === 'string') Message.error(knowledgeErrorText(e));
+      // Arco validation errors are already rendered next to their fields.
+      if (e instanceof Error || typeof e === 'string') showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setSaving(false);
     }
@@ -257,7 +256,7 @@ const KnowledgeListPage: React.FC = () => {
       purgeRef.current = false;
       void refresh();
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -298,7 +297,7 @@ const KnowledgeListPage: React.FC = () => {
       Message.success(t('knowledge.empty.importOk', { defaultValue: '导入成功' }));
       void refresh();
     } catch (e) {
-      Message.error(knowledgeErrorText(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -486,16 +485,10 @@ const KnowledgeListPage: React.FC = () => {
         />
 
         {/* Error state */}
-        {error ? (
-          <Result
-            status='error'
-            title={t('knowledge.loadError', { defaultValue: '加载失败' })}
-            subTitle={error}
-            extra={<Button onClick={() => void refresh()}>{t('knowledge.retry', { defaultValue: '重试' })}</Button>}
-          />
-        ) : bases.length === 0 && !loading ? (
+        {error && <KnowledgeErrorNotice error={error} onRetry={() => void refresh()} />}
+        {bases.length === 0 && !loading && !error ? (
           <KnowledgeEmptyState onCreate={openStudio} onImport={() => void handleImport()} />
-        ) : (
+        ) : bases.length > 0 || !error ? (
           <>
             {/* Card grid */}
             <div className='grid gap-16px' style={{ gridTemplateColumns: KNOWLEDGE_CARD_GRID_COLUMNS }}>
@@ -551,7 +544,7 @@ const KnowledgeListPage: React.FC = () => {
               </div>
             )}
           </>
-        )}
+        ) : null}
       </div>
 
       {/* ─── CreateStudio (replaces old create Modal) ────────────────────────── */}
@@ -594,6 +587,8 @@ const KnowledgeListPage: React.FC = () => {
         visible={tagModalVisible}
         onClose={() => setTagModalVisible(false)}
         tags={tags}
+        loadError={tagsError}
+        onRetryLoad={() => void refreshTags()}
         createTag={createTag}
         updateTag={updateTag}
         deleteTag={deleteTag}

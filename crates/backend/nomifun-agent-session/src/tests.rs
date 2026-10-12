@@ -227,6 +227,35 @@ fn projection_event(
     }
 }
 
+#[test]
+fn agent_transition_projection_preserves_the_exact_typed_reference() {
+    let expected = binding();
+    let switch = agent_switch(expected.clone(), agent_replacement(&expected, "projection"), "projection");
+    let transition = nomifun_agent_contracts::AgentBindingChangedPayloadV1 {
+        transition_id: switch.transition_id,
+        request_digest: switch.request_digest,
+        previous_binding_ref: AgentHandoffBindingRefV1::from(&switch.expected),
+        next_binding_ref: AgentHandoffBindingRefV1::from(&switch.replacement),
+        previous_agent_label: switch.previous_agent_label,
+        next_agent_label: switch.next_agent_label,
+        handoff_mode: switch.handoff_mode,
+        handoff_payload_id: None,
+        handoff_payload_digest: None,
+        completion_gate_inherited: false,
+        effective_after_seq: 2,
+        workspace_relocation: None,
+    };
+    let payload = serde_json::to_value(&transition).unwrap();
+    let event = projection_event(&session_id(), 3, "projection-transition-event",
+        "session/agent-binding-changed", transition.transition_id.as_ref(), payload.clone());
+    let projected = reduce_agent_messages(None, &event, &payload).unwrap();
+    assert_eq!(projected.projection["reference"], payload,
+        "diagnostic fields must not contaminate the canonical typed payload");
+    let decoded: nomifun_agent_contracts::AgentBindingChangedPayloadV1 =
+        serde_json::from_value(projected.projection["reference"].clone()).unwrap();
+    assert_eq!(decoded, transition);
+}
+
 async fn create_ready(store: &AgentSessionStore, key: &str) -> (AgentSessionLiveRecord, EventId) {
     let session = live_session(session_id());
     let created = store
@@ -245,6 +274,210 @@ async fn create_ready(store: &AgentSessionStore, key: &str) -> (AgentSessionLive
     );
     let ready_ack = store.append_event(&ready).await.unwrap().ack.unwrap();
     (created.session, ready_ack.event_id)
+}
+
+async fn transition_read_fixture(
+    store: &AgentSessionStore, key: &str, relocation: bool, stored_proof: bool,
+) -> (AgentSessionId, SessionEventRecord, serde_json::Value) {
+    let mut session = live_session(session_id());
+    let source = std::env::temp_dir().join(format!("transition-source-{key}"));
+    let target = std::env::temp_dir().join(format!("transition-target-{key}"));
+    if relocation {
+        let mut workspace = TypedResourceBinding {
+            binding_id: "unassigned".into(), resource_kind: "workspace".into(),
+            resource_id: "default-workspace".into(), owner_id: owner().principal_id,
+            operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+            typed_parameters: BTreeMap::from([("workspace_root".into(), source.to_str().unwrap().into())]),
+        };
+        workspace.binding_id = nomifun_agent_contracts::resource_definition_id(&workspace).unwrap();
+        session.agent_binding.typed_resource_bindings.push(workspace);
+        if stored_proof {
+            for index in 0..2 {
+                let knowledge_id = Uuid::now_v7().to_string();
+                let external_root = std::env::temp_dir().join(format!("external-knowledge-{index}"));
+                sqlx::query("INSERT INTO knowledge_bases(knowledge_base_id,name,root_path,managed,created_at,updated_at) VALUES(?,'external fixture',?,0,1,1)")
+                    .bind(&knowledge_id).bind(external_root.to_str().unwrap()).execute(store.test_pool()).await.unwrap();
+                let mut retained = TypedResourceBinding {
+                    binding_id: "unassigned".into(), resource_kind: "knowledge_base".into(),
+                    resource_id: knowledge_id.into(), owner_id: owner().principal_id,
+                    operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+                    typed_parameters: BTreeMap::from([
+                        ("knowledge_root".into(), external_root.to_str().unwrap().into()),
+                        ("retained_policy".into(), "x".repeat(18_000)),
+                    ]),
+                };
+                retained.binding_id = nomifun_agent_contracts::resource_definition_id(&retained).unwrap();
+                session.agent_binding.typed_resource_bindings.push(retained);
+            }
+        }
+    }
+    let created = store.create_session(create_request(session, key)).await.unwrap();
+    let id = created.session.agent_session_id;
+    store.append_event(&append(&id, &format!("event-ready-{key}"), "runtime-supervisor",
+        &format!("ready-{key}"), "session/ready", key, Some(created.opening_ack.event_id), json!({}))).await.unwrap();
+    if relocation {
+        store.relocate_managed_workspaces(&source, &source, &target,
+            &OperationId::from(Uuid::now_v7().to_string())).await.unwrap();
+    } else {
+        let expected = created.session.agent_binding;
+        store.replace_session_agent_binding(&owner(), &id,
+            agent_switch(expected.clone(), agent_replacement(&expected, key), key)).await.unwrap();
+    }
+    let event = store.read_events(&id, None, 100).await.unwrap().events.into_iter()
+        .find(|event| event.kind.0 == "session/agent-binding-changed").unwrap();
+    let payload = match &event.payload {
+        SessionEventPayloadRef::InlineJson(value) => {
+            assert!(!stored_proof, "large fixture must exercise canonical Stored payload resolution");
+            value.0.clone()
+        }
+        SessionEventPayloadRef::Stored(payload_id) => {
+            assert!(stored_proof);
+            let bytes: Vec<u8> = sqlx::query_scalar("SELECT body FROM agent_payloads WHERE payload_id=?")
+                .bind(payload_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+            match serde_json::from_slice::<SessionPayloadBody>(&bytes).unwrap() {
+                SessionPayloadBody::Json(value) => value.0,
+                _ => panic!("relocation proof must be a canonical JSON payload"),
+            }
+        }
+        SessionEventPayloadRef::Empty => panic!("transition lost its canonical payload"),
+    };
+    (id, event, payload)
+}
+
+async fn persist_contaminated_transition_projection(
+    store: &AgentSessionStore, event: &SessionEventRecord, payload: &serde_json::Value,
+) -> (crate::MessageProjection, String, String) {
+    let expected = reduce_agent_messages(None, event, payload).unwrap();
+    let mut contaminated = expected.projection.clone();
+    contaminated["reference"]["last_event_id"] = json!(event.event_id);
+    let serialized = serde_json::to_string(&contaminated).unwrap();
+    let semantic_digest = nomifun_agent_contracts::digest_payload(&contaminated).unwrap().0;
+    let result = sqlx::query("UPDATE agent_messages SET projection_json=?,semantic_digest=? WHERE session_id=? AND projection_id=?")
+        .bind(&serialized).bind(&semantic_digest).bind(event.agent_session_id.as_ref())
+        .bind(&expected.projection_id).execute(store.test_pool()).await.unwrap();
+    assert_eq!(result.rows_affected(), 1);
+    (expected, serialized, semantic_digest)
+}
+
+async fn assert_transition_reads_fail_closed(store: &AgentSessionStore, id: &AgentSessionId, case: &str) {
+    assert!(store.messages_after(id, 0).await.is_err(), "forward messages must reject {case}");
+    assert!(store.messages_before(id, None, 100).await.is_err(), "backward messages must reject {case}");
+    assert!(store.message_history_before(id, None, 100).await.is_err(), "renderer history must reject {case}");
+    assert!(store.observe(id, None, 100).await.is_err(), "observation deltas must reject {case}");
+}
+
+#[tokio::test]
+async fn agent_transition_reads_rederive_old_contaminated_references_without_rewriting_facts() {
+    for (key, relocation, stored_proof) in [("ordinary", false, false), ("relocation", true, false), ("stored-relocation", true, true)] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (id, event, payload) = transition_read_fixture(&store, key, relocation, stored_proof).await;
+        let (expected, serialized, semantic_digest) = persist_contaminated_transition_projection(&store, &event, &payload).await;
+        let before_head = store.head(&id).await.unwrap();
+        let before_events = store.read_events(&id, None, 100).await.unwrap().events;
+        let pages = [store.messages_after(&id, 0).await.unwrap(),
+            store.messages_before(&id, None, 100).await.unwrap().0,
+            store.message_history_before(&id, None, 100).await.unwrap().0,
+            store.observe(&id, None, 100).await.unwrap().messages];
+        for page in pages {
+            let actual = page.into_iter().find(|row| row.projection_id == expected.projection_id).unwrap();
+            assert_eq!(actual, expected, "{key} must resolve the same canonical projection through every reader");
+            let typed: nomifun_agent_contracts::AgentBindingChangedPayloadV1 =
+                serde_json::from_value(actual.projection["reference"].clone()).unwrap();
+            if relocation { typed.validate_storage_relocation().unwrap(); }
+        }
+        let persisted: (String, String) = sqlx::query_as("SELECT projection_json,semantic_digest FROM agent_messages WHERE session_id=? AND projection_id=?")
+            .bind(id.as_ref()).bind(&expected.projection_id).fetch_one(store.test_pool()).await.unwrap();
+        assert_eq!(persisted, (serialized, semantic_digest), "hydration is a read-model derivation, not a database rewrite");
+        assert_eq!(store.head(&id).await.unwrap(), before_head);
+        assert_eq!(store.read_events(&id, None, 100).await.unwrap().events, before_events);
+        assert_eq!(payload, match &event.payload {
+            SessionEventPayloadRef::InlineJson(value) => value.0.clone(),
+            SessionEventPayloadRef::Stored(payload_id) => {
+                let bytes: Vec<u8> = sqlx::query_scalar("SELECT body FROM agent_payloads WHERE payload_id=?")
+                    .bind(payload_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+                let SessionPayloadBody::Json(value) = serde_json::from_slice(&bytes).unwrap() else { panic!("lost JSON proof") };
+                value.0
+            }
+            _ => panic!("lost canonical transition payload"),
+        });
+    }
+}
+
+#[tokio::test]
+async fn agent_transition_reads_fail_closed_on_invalid_canonical_provenance() {
+    for case in ["unknown canonical field", "wrong transition identity", "invalid relocation proof", "wrong event kind",
+        "wrong event version", "wrong sequence bounds", "wrong projection identity", "invalid projection digest"] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (id, event, mut payload) = transition_read_fixture(&store, case, true, false).await;
+        let (expected, _, _) = persist_contaminated_transition_projection(&store, &event, &payload).await;
+        match case {
+            "unknown canonical field" | "wrong transition identity" | "invalid relocation proof" => {
+                match case {
+                    "unknown canonical field" => payload["last_event_id"] = json!(event.event_id),
+                    "wrong transition identity" => payload["transition_id"] = json!(Uuid::now_v7().to_string()),
+                    _ => payload["request_digest"] = json!("0".repeat(64)),
+                }
+                sqlx::query("UPDATE agent_events SET inline_json=? WHERE session_id=? AND seq=?")
+                    .bind(serde_json::to_string(&payload).unwrap()).bind(id.as_ref()).bind(event.seq as i64)
+                    .execute(store.test_pool()).await.unwrap();
+            }
+            "wrong event kind" => {
+                sqlx::query("UPDATE agent_events SET kind='message/user-accepted' WHERE session_id=? AND seq=?")
+                    .bind(id.as_ref()).bind(event.seq as i64).execute(store.test_pool()).await.unwrap();
+            }
+            "wrong event version" => {
+                sqlx::query("UPDATE agent_events SET kind_version=2 WHERE session_id=? AND seq=?")
+                    .bind(id.as_ref()).bind(event.seq as i64).execute(store.test_pool()).await.unwrap();
+            }
+            "wrong sequence bounds" => {
+                sqlx::query("UPDATE agent_messages SET first_seq=first_seq-1 WHERE session_id=? AND projection_id=?")
+                    .bind(id.as_ref()).bind(&expected.projection_id).execute(store.test_pool()).await.unwrap();
+            }
+            "wrong projection identity" => {
+                let mut document = expected.projection;
+                document["projection_id"] = json!("agent-transition:another-transition");
+                let digest = nomifun_agent_contracts::digest_payload(&document).unwrap().0;
+                sqlx::query("UPDATE agent_messages SET projection_json=?,semantic_digest=? WHERE session_id=? AND projection_id=?")
+                    .bind(serde_json::to_string(&document).unwrap()).bind(digest).bind(id.as_ref())
+                    .bind(&expected.projection_id).execute(store.test_pool()).await.unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE agent_messages SET semantic_digest=? WHERE session_id=? AND projection_id=?")
+                    .bind("0".repeat(64)).bind(id.as_ref()).bind(&expected.projection_id).execute(store.test_pool()).await.unwrap();
+            }
+        }
+        assert_transition_reads_fail_closed(&store, &id, case).await;
+    }
+}
+
+#[tokio::test]
+async fn agent_transition_reads_reject_stored_payload_damage_and_foreign_session_ownership() {
+    for case in ["digest damage", "length damage", "foreign Session ownership"] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (id, event, payload) = transition_read_fixture(&store, "stored-invalid", true, true).await;
+        persist_contaminated_transition_projection(&store, &event, &payload).await;
+        let SessionEventPayloadRef::Stored(payload_id) = &event.payload else { panic!("expected stored proof") };
+        if case == "foreign Session ownership" {
+            let (foreign, _) = create_ready(&store, "foreign-payload-owner").await;
+            sqlx::query("UPDATE agent_payloads SET session_id=? WHERE payload_id=?")
+                .bind(foreign.agent_session_id.as_ref()).bind(payload_id.as_ref()).execute(store.test_pool()).await.unwrap();
+        } else if case == "digest damage" {
+            let mut damaged_payload = payload.clone();
+            damaged_payload["previous_agent_label"] = json!("Other");
+            damaged_payload["next_agent_label"] = json!("Other");
+            let typed: nomifun_agent_contracts::AgentBindingChangedPayloadV1 = serde_json::from_value(damaged_payload.clone()).unwrap();
+            typed.validate_storage_relocation().unwrap();
+            assert_eq!(canonical_json_bytes(&damaged_payload).unwrap().len(), canonical_json_bytes(&payload).unwrap().len(),
+                "valid same-length payload mutation must isolate the SHA256 guard");
+            let damaged = serde_json::to_vec(&SessionPayloadBody::Json(StrictJsonValue(damaged_payload))).unwrap();
+            sqlx::query("UPDATE agent_payloads SET body=? WHERE payload_id=?")
+                .bind(damaged).bind(payload_id.as_ref()).execute(store.test_pool()).await.unwrap();
+        } else {
+            sqlx::query("UPDATE agent_payloads SET byte_len=byte_len+1 WHERE payload_id=?")
+                .bind(payload_id.as_ref()).execute(store.test_pool()).await.unwrap();
+        }
+        assert_transition_reads_fail_closed(&store, &id, case).await;
+    }
 }
 
 #[tokio::test]

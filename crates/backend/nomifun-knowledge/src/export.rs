@@ -80,10 +80,12 @@ struct ExportMeta {
 
 /// Package the base `kb_id` into a zip at `dest_path` (written atomically
 /// via a securely-created same-directory tempfile).
+/// Replacing an existing package requires explicit `overwrite` authorization.
 pub async fn export_base(
     service: &KnowledgeService,
     kb_id: &str,
     dest_path: &Path,
+    overwrite: bool,
 ) -> Result<ExportSummary, AppError> {
     let info = service.get_base_info(kb_id).await?;
     if !info.root_exists {
@@ -92,17 +94,13 @@ pub async fn export_base(
             info.root_path
         )));
     }
-    if !dest_path.is_absolute() {
-        return Err(AppError::BadRequest("dest_path must be absolute".into()));
-    }
-
     let root = PathBuf::from(&info.root_path);
     let meta = ExportMeta {
         name: info.name,
         description: info.description,
     };
     let dest = dest_path.to_path_buf();
-    let (file_count, total_bytes) = tokio::task::spawn_blocking(move || build_zip(&root, &meta, &dest))
+    let (file_count, total_bytes) = tokio::task::spawn_blocking(move || build_zip(&root, &meta, &dest, overwrite))
         .await
         .map_err(|e| AppError::Internal(format!("export task join error: {e}")))??;
 
@@ -115,29 +113,64 @@ pub async fn export_base(
 
 /// Blocking core of the export: walk `root` for `.md` files and write the
 /// package to `dest` via a unique tempfile. Returns `(file_count, total_bytes)`.
-fn build_zip(root: &Path, meta: &ExportMeta, dest: &Path) -> Result<(u64, u64), AppError> {
+fn build_zip(root: &Path, meta: &ExportMeta, dest: &Path, overwrite: bool) -> Result<(u64, u64), AppError> {
+    validate_export_destination(dest, overwrite)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| AppError::Internal(format!("failed to create export dir: {e}")))?;
+            .map_err(|source| export_io_error("create_directory", source))?;
     }
     let mut tmp = tempfile::Builder::new()
         .prefix(".nomifun-export.")
         .tempfile_in(dest.parent().unwrap_or_else(|| Path::new(".")))
-        .map_err(|e| AppError::Internal(format!("failed to create export tempfile: {e}")))?;
+        .map_err(|source| export_io_error("create_tempfile", source))?;
     let counts = write_zip_to(root, meta, tmp.as_file_mut())?;
     tmp.as_file().sync_all()
-        .map_err(|e| AppError::Internal(format!("failed to sync export file: {e}")))?;
-    tmp.persist(dest)
-        .map_err(|e| AppError::Internal(format!("failed to finalize export file: {}", e.error)))?;
+        .map_err(|source| export_io_error("sync_file", source))?;
+    let persisted = if overwrite { tmp.persist(dest) } else { tmp.persist_noclobber(dest) };
+    persisted.map_err(|error| {
+        if !overwrite && error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::KnowledgeExportDestinationExists(dest.display().to_string())
+        } else {
+            export_io_error("finalize_file", error.error)
+        }
+    })?;
     Ok(counts)
 }
 
+/// `dest_path` is always a complete ZIP file path, never a selected folder.
+/// Validate before creating temporary files; `persist_noclobber` still checks
+/// the no-overwrite contract atomically in case another writer wins the race.
+fn validate_export_destination(dest: &Path, overwrite: bool) -> Result<(), AppError> {
+    if !dest.is_absolute() || dest.file_name().is_none() {
+        return Err(AppError::KnowledgeExportDestinationInvalid(
+            "select an absolute ZIP file path".into(),
+        ));
+    }
+    if !dest.extension().is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("zip")) {
+        return Err(AppError::KnowledgeExportDestinationInvalid(
+            "destination filename must end with .zip".into(),
+        ));
+    }
+    match std::fs::metadata(dest) {
+        Ok(metadata) if !metadata.is_file() => Err(AppError::KnowledgeExportDestinationInvalid(
+            "destination must be a file, not a directory".into(),
+        )),
+        Ok(_) if !overwrite => Err(AppError::KnowledgeExportDestinationExists(dest.display().to_string())),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(export_io_error("inspect_destination", source)),
+    }
+}
+
+fn export_io_error(stage: &'static str, source: std::io::Error) -> AppError {
+    AppError::KnowledgeExportIo { stage, source }
+}
+
 fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Result<(u64, u64), AppError> {
-    let io_err = |what: &str| {
-        let what = what.to_owned();
-        move |e: std::io::Error| AppError::Internal(format!("{what}: {e}"))
+    let zip_err = |error: zip::result::ZipError| match error {
+        zip::result::ZipError::Io(source) => export_io_error("write_archive", source),
+        error => AppError::Internal(format!("failed to write zip: {error}")),
     };
-    let zip_err = |e: zip::result::ZipError| AppError::Internal(format!("failed to write zip: {e}"));
 
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
@@ -151,10 +184,10 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Res
     };
     zip.start_file("manifest.json", options).map_err(zip_err)?;
     zip.write_all(&serde_json::to_vec_pretty(&manifest).map_err(|e| AppError::Internal(e.to_string()))?)
-        .map_err(io_err("failed to write manifest"))?;
+        .map_err(|source| export_io_error("write_archive", source))?;
     zip.start_file("meta.json", options).map_err(zip_err)?;
     zip.write_all(&serde_json::to_vec_pretty(meta).map_err(|e| AppError::Internal(e.to_string()))?)
-        .map_err(io_err("failed to write meta"))?;
+        .map_err(|source| export_io_error("write_archive", source))?;
 
     // Sorted relative paths → deterministic packages (friendlier diffing).
     let mut rels = Vec::new();
@@ -162,7 +195,10 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Res
         .into_iter()
         .filter_entry(|entry| !crate::service::is_machinery_dir(entry))
     {
-        let entry = entry.map_err(|e| AppError::Internal(format!("failed to walk export files: {e}")))?;
+        let entry = entry.map_err(|error| match error.into_io_error() {
+            Some(source) => export_io_error("read_files", source),
+            None => AppError::Internal("failed to walk export files".into()),
+        })?;
         if entry.file_type().is_file() && is_md(entry.path()) {
             let rel = entry.path().strip_prefix(root)
                 .map_err(|e| AppError::Internal(format!("failed to relativize export file: {e}")))?;
@@ -174,10 +210,11 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Res
     let mut file_count = 0u64;
     let mut total_bytes = 0u64;
     for rel in rels {
-        let mut input = std::fs::File::open(root.join(&rel)).map_err(io_err(&format!("failed to read {rel}")))?;
+        let mut input = std::fs::File::open(root.join(&rel))
+            .map_err(|source| export_io_error("read_files", source))?;
         zip.start_file(format!("files/{rel}"), options).map_err(zip_err)?;
         total_bytes += std::io::copy(&mut input, &mut zip)
-            .map_err(io_err(&format!("failed to package {rel}")))?;
+            .map_err(|source| export_io_error("write_archive", source))?;
         file_count += 1;
     }
 
@@ -441,7 +478,7 @@ mod tests {
         let dest = dir.path().join("bundle.zip");
         let sibling = dir.path().join("bundle.zip.tmp");
         std::fs::write(&sibling, "unrelated work").unwrap();
-        assert_eq!(build_zip(&source, &ExportMeta::default(), &dest).unwrap(), (1, 4));
+        assert_eq!(build_zip(&source, &ExportMeta::default(), &dest, false).unwrap(), (1, 4));
         assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated work");
         assert!(zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).is_ok());
     }
@@ -451,8 +488,73 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("bundle.zip");
         std::fs::write(&dest, "previous package").unwrap();
-        assert!(build_zip(&dir.path().join("missing"), &ExportMeta::default(), &dest).is_err());
+        assert!(build_zip(&dir.path().join("missing"), &ExportMeta::default(), &dest, true).is_err());
         assert_eq!(std::fs::read(dest).unwrap(), b"previous package");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn export_rejects_directory_destinations_without_creating_a_tempfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("note.md"), "note").unwrap();
+        let destination = dir.path().join("selected-folder.zip");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep.md"), "unrelated work").unwrap();
+
+        let error = build_zip(&source, &ExportMeta::default(), &destination, true).unwrap_err();
+        assert_eq!(error.error_code(), "KNOWLEDGE_EXPORT_DESTINATION_INVALID");
+        assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read(destination.join("keep.md")).unwrap(), b"unrelated work");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn export_rejects_relative_paths_and_non_zip_filenames() {
+        assert_eq!(
+            validate_export_destination(Path::new("bundle.zip"), false).unwrap_err().error_code(),
+            "KNOWLEDGE_EXPORT_DESTINATION_INVALID",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            validate_export_destination(&dir.path().join("bundle.md"), false).unwrap_err().error_code(),
+            "KNOWLEDGE_EXPORT_DESTINATION_INVALID",
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn export_replaces_an_existing_package_only_after_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("note.md"), "note").unwrap();
+        let dest = dir.path().join("bundle.zip");
+        std::fs::write(&dest, "previous package").unwrap();
+
+        let error = build_zip(&source, &ExportMeta::default(), &dest, false).unwrap_err();
+        assert_eq!(error.error_code(), "KNOWLEDGE_EXPORT_DESTINATION_EXISTS");
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous package");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+
+        assert_eq!(build_zip(&source, &ExportMeta::default(), &dest, true).unwrap(), (1, 4));
+        assert!(zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).is_ok());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn export_io_failure_preserves_unrelated_files_and_has_a_stable_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_file = dir.path().join("existing-file");
+        std::fs::write(&parent_file, "unrelated work").unwrap();
+        let error = build_zip(
+            dir.path(), &ExportMeta::default(), &parent_file.join("bundle.zip"), false,
+        ).unwrap_err();
+        assert_eq!(error.error_code(), "KNOWLEDGE_EXPORT_WRITE_FAILED");
+        assert_eq!(error.error_details().unwrap()["operation"], "knowledge.export");
+        assert_eq!(std::fs::read(&parent_file).unwrap(), b"unrelated work");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
@@ -499,7 +601,7 @@ mod tests {
             .unwrap();
 
         let zip_path = dir.path().join("out").join("kb.zip");
-        let summary = export_base(&source, &kb.knowledge_base_id, &zip_path).await.unwrap();
+        let summary = export_base(&source, &kb.knowledge_base_id, &zip_path, false).await.unwrap();
         assert_eq!(summary.file_count, 3);
         assert!(summary.total_bytes > 0);
         assert!(zip_path.is_file());

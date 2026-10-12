@@ -17,7 +17,9 @@ import { useTranslation } from 'react-i18next';
 import { Button, Message, Modal, Popconfirm, Tooltip } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
-import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
+import { isAutogenNoProviderError, notifySourceFetchResult } from '../useKnowledge';
+import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
+import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from '../knowledgeError';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
 import { parseKnowledgeUrlDrafts } from '../knowledgeUrlEntries';
@@ -83,9 +85,11 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
 
   // Submission
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<KnowledgeErrorPresentation | null>(null);
+  const configPanelRef = useRef<HTMLDivElement>(null);
 
   // Tags
-  const { tags, createTag } = useKnowledgeTags();
+  const { tags, error: tagsError, refresh: refreshTags, createTag } = useKnowledgeTags();
 
   // ─── Reset state when dialog opens ────────────────────────────────────────
 
@@ -96,6 +100,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       setName('');
       setDescription('');
       setSelectedTags([]);
+      setSubmitError(null);
       aiSessionRef.current += 1;
     }
   }, [visible, initialKind]);
@@ -105,9 +110,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
   }, []);
 
   // ─── AI Description Helpers (migrated from old modal) ─────────────────────
-
-  const aiErrorText = (e: unknown) =>
-    isAutogenNoProviderError(e) ? t('knowledge.actions.autogenNoProvider') : knowledgeErrorText(e);
 
   const runDescriptionAi = async <T extends { description: string }>(
     busy: boolean,
@@ -123,7 +125,8 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       setDescription(res.description);
       return res;
     } catch (e) {
-      Message.error(aiErrorText(e));
+      if (isAutogenNoProviderError(e)) Message.error(t('knowledge.actions.autogenNoProvider'));
+      else showKnowledgeErrorMessage(e, 'operation', t);
       return undefined;
     } finally {
       setBusy(false);
@@ -186,6 +189,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       return;
     }
     setSubmitting(true);
+    setSubmitError(null);
     try {
       const desc = description.trim() || undefined;
       const tagKeys = selectedTags.length > 0 ? selectedTags : undefined;
@@ -286,8 +290,9 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       Message.success(t('knowledge.studio.createOk', { defaultValue: '知识库创建成功' }));
       onCreated(created);
     } catch (e) {
-      if (e instanceof Error || typeof e === 'string') Message.error(knowledgeErrorText(e));
-      else Message.error(String(e));
+      const presentation = normalizeKnowledgeError(e, 'operation', t);
+      setSubmitError(presentation.handled ? null : presentation);
+      if (!presentation.handled && configPanelRef.current) configPanelRef.current.scrollTop = 0;
     } finally {
       setSubmitting(false);
     }
@@ -363,7 +368,8 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
           <TypeRail value={sourceType} onChange={setSourceType} />
 
           {/* Right config area */}
-          <div className='knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px'>
+          <div ref={configPanelRef} className='knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px'>
+            {submitError && <KnowledgeErrorNotice error={submitError} />}
             {/* ─── Basic Info Section ──────────────────────────────────────── */}
             <div className='knowledge-studio-basic-card mb-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.04)]'>
               <div className='mb-10px flex items-start justify-between gap-10px'>
@@ -477,6 +483,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
                     {t('knowledge.studio.tagHint', { defaultValue: '可选，方便分类筛选' })}
                   </span>
                 </label>
+                {tagsError && <KnowledgeErrorNotice error={tagsError} onRetry={() => void refreshTags()} />}
                 <TagPicker
                   value={selectedTags}
                   onChange={setSelectedTags}

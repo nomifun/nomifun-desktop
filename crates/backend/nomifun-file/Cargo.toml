@@ -31,6 +31,7 @@ dashmap.workspace = true
 dirs.workspace = true
 uuid.workspace = true
 unicode-normalization.workspace = true
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -40,7 +41,6 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [dev-dependencies]
 log = "0.4"
-tempfile = "3"
 base64.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }

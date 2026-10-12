@@ -1426,9 +1426,15 @@ export const fromApiFileMetadata = (metadata: RawFileMetadata): IFileMetadata =>
   isDirectory: metadata.isDirectory ?? metadata.is_directory,
 });
 
+/** A ZIP entry carries exactly one source, using the backend wire field names. */
+export type IZipFile = { name: string } & (
+  | { content: string; file_path?: never }
+  | { file_path: string; content?: never }
+);
+
 export const fs = {
   listWorkspaceFiles: withResponseMap(
-    httpPost<Array<RawWorkspaceFlatFile>, { root: string }>('/api/fs/list'),
+    httpPost<Array<RawWorkspaceFlatFile>, { root: string; workspace?: string }>('/api/fs/list'),
     fromBackendWorkspaceFlatFiles
   ),
   getImageBase64: httpPost<string | null, { path: string; workspace?: string }>('/api/fs/image-base64'),
@@ -1440,11 +1446,8 @@ export const fs = {
     {
       path: string;
       request_id?: string;
-      files: Array<{
-        name: string;
-        content?: string | Uint8Array;
-        source_path?: string;
-      }>;
+      workspaces?: string[];
+      files: IZipFile[];
     }
   >('/api/fs/zip'),
   cancelZip: httpPost<boolean, { request_id: string }>('/api/fs/zip/cancel'),
@@ -2262,6 +2265,8 @@ export type PaginatedResult<T> = {
   items: T[];
   total: number;
   has_more: boolean;
+  /** History cursor includes processed rows omitted from the display projection. */
+  next_cursor?: string;
 };
 
 export const database = {
@@ -2274,10 +2279,9 @@ export const database = {
         page_size?: number;
         order?: string;
         content_mode?: 'compact' | 'full';
-        // Keyset cursor for incremental history loading: '' = newest window,
-        // '<created_at>:<message_id>' = the page strictly older than that
-        // persisted message. When
-        // set (incl. ''), the backend ignores page/offset pagination.
+        // Backward canonical history cursor: '' = newest window. Use the
+        // response's next_cursor for the next raw projection window, including
+        // windows whose rows were filtered from the visible items.
         cursor?: string;
         // One LOCAL calendar day (`YYYYMMDD`), oldest-first and complete: the
         // backend decides the day boundary (the same one that partitions
@@ -6377,9 +6381,9 @@ export const knowledge = {
     }
   ), fromApiKnowledgeBinding),
   // ── Import / export (spec 2026-06-11 §4.8: zip with manifest.kind="knowledge-base") ──
-  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string }>(
+  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string; overwrite?: boolean }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/export`,
-    (p) => ({ dest_path: p.dest_path })
+    (p) => ({ dest_path: p.dest_path, overwrite: p.overwrite ?? false })
   ),
   /** Import a knowledge-base bundle — a new managed base is provisioned (name conflicts get a "(2)" suffix). */
   importBase: withResponseMap(httpPost<IKnowledgeBase, { src_path: string }>('/api/knowledge/bases/import'), fromApiKnowledgeBase),

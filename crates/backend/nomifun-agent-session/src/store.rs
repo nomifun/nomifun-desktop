@@ -60,6 +60,9 @@ pub use runtime_state::RuntimeStateObservation;
 #[path = "storage_relocation.rs"]
 mod storage_relocation;
 
+#[path = "history_transition_projection.rs"]
+mod history_transition_projection;
+
 #[path = "native_execution.rs"]
 mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
@@ -2738,11 +2741,12 @@ impl AgentSessionStore {
         .fetch_all(&mut *tx)
         .await?;
         let has_more = rows.len() > limit as usize;
-        let messages = rows
+        let mut messages = rows
             .into_iter()
             .take(limit as usize)
             .map(projection_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        history_transition_projection::hydrate(&mut tx, session_id, &mut messages).await?;
         let total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
                AND presentation_intent IN ('message', 'tool', 'agent_transition')",
@@ -2878,6 +2882,7 @@ impl AgentSessionStore {
         });
         let has_more = history.len() > limit as usize;
         history.truncate(limit as usize);
+        history_transition_projection::hydrate(&mut tx, session_id, &mut history).await?;
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
@@ -2925,7 +2930,14 @@ impl AgentSessionStore {
         .bind(as_i64(after_seq, "after_seq")?)
         .fetch_all(&mut **tx)
         .await?;
-        rows.into_iter().map(projection_from_row).collect()
+        let mut messages = rows.into_iter().map(projection_from_row).collect::<Result<Vec<_>, _>>()?;
+        if messages.iter().any(|projection| projection.last_seq > last_seq) {
+            return Err(SessionStoreError::InvalidEvent(
+                "message projection is ahead of the committed AgentSession sequence".into(),
+            ));
+        }
+        history_transition_projection::hydrate(tx, session_id, &mut messages).await?;
+        Ok(messages)
     }
 
     pub async fn rebuild_projections(
@@ -7059,7 +7071,19 @@ async fn payload_value_for_event_tx(
                         payload_id.as_ref()
                     ))
                 })?;
-            payload_body_to_value(&payload_from_row(row)?.body)
+            let payload = payload_from_row(row)?;
+            if payload.agent_session_id != event.agent_session_id {
+                return Err(SessionStoreError::InvalidPayload(
+                    "event payload belongs to another AgentSession".into(),
+                ));
+            }
+            let bytes = logical_payload_bytes(&payload.body)?;
+            if payload.byte_len != bytes.len() as u64 || payload.digest != digest_bytes(&bytes) {
+                return Err(SessionStoreError::InvalidPayload(
+                    "event payload differs from its recorded length or digest".into(),
+                ));
+            }
+            payload_body_to_value(&payload.body)
         }
     }
 }

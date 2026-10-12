@@ -2610,7 +2610,7 @@ fn parse_official_key(value: &str) -> Option<OfficialPresetKey> {
         .find(|key| key.as_str() == value)
 }
 
-/// Stable, owner-scoped UUID derived from a namespaced canonical identity.
+/// Stable, owner-scoped UUIDv7 derived from a namespaced canonical identity.
 /// Authored fields and the bundled seed cannot change this identity.
 fn official_preset_id(owner: &UserId, key: OfficialPresetKey) -> AgentPresetId {
     let digest = nomifun_agent_contracts::digest_payload(&(
@@ -2618,7 +2618,17 @@ fn official_preset_id(owner: &UserId, key: OfficialPresetKey) -> AgentPresetId {
     )).expect("official Agent identity is serializable");
     let mut bytes = *Uuid::parse_str(&digest.as_ref()[..32])
         .expect("canonical digest is hexadecimal").as_bytes();
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    // Authenticated owners carry the UUIDv7 timestamp. Opaque internal
+    // fixtures use a fixed epoch while retaining their owner-scoped digest.
+    let timestamp = Uuid::parse_str(owner.as_ref()).ok()
+        .filter(|id| id.get_version_num() == 7)
+        .map_or([0; 6], |id| {
+            let mut timestamp = [0; 6];
+            timestamp.copy_from_slice(&id.as_bytes()[..6]);
+            timestamp
+        });
+    bytes[..6].copy_from_slice(&timestamp);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     AgentPresetId::from(Uuid::from_bytes(bytes).to_string())
 }
@@ -3382,6 +3392,10 @@ mod tests {
         let second = second.unwrap();
         assert_eq!(first.preset.preset_id, second.preset.preset_id);
         assert_eq!(first.preset.current_stable_revision, second.preset.current_stable_revision);
+        let session_request = serde_json::from_value::<nomifun_api_types::CreateAgentSessionRequestDto>(
+            json!({"preset_id": first.preset.preset_id}),
+        ).expect("the official Agent must be accepted by the canonical Session request contract");
+        assert_eq!(session_request.preset_id, first.preset.preset_id);
         assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1);
         assert!(control_plane.library(&owner).await.unwrap().user_presets.is_empty());
         let other_copy = control_plane.create_from_template(&other, "chat.minimal", official_launch_request(true)).await.unwrap();

@@ -240,8 +240,8 @@ pub struct FileService {
     allowed_roots: Vec<std::path::PathBuf>,
     /// In-memory cache for `list_workspace_files`, keyed by canonical root.
     workspace_files_cache: Arc<DashMap<String, Arc<WorkspaceInventory>>>,
-    /// Cancellation flags for in-progress ZIP operations, keyed by request_id.
-    zip_cancellations: DashMap<String, Arc<AtomicBool>>,
+    /// One bounded in-memory lifecycle for active and early-canceled exports.
+    zip_requests: crate::zip_cancellation::ZipRequestRegistry,
     /// Serializes multi-file AgentSession patch commits within this service.
     /// Individual file operations remain independently usable by the UI, but
     /// one patch must not interleave with another patch's prepare/commit
@@ -263,7 +263,7 @@ impl FileService {
             user_events,
             allowed_roots,
             workspace_files_cache: inventory.entries,
-            zip_cancellations: DashMap::new(),
+            zip_requests: crate::zip_cancellation::ZipRequestRegistry::default(),
             agent_patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -2748,27 +2748,20 @@ async fn read_remote_image_body(mut response: reqwest::Response) -> Result<Vec<u
     Ok(bytes)
 }
 
-struct ZipCancellationGuard<'a> {
-    cancellations: &'a DashMap<String, Arc<AtomicBool>>,
-    request_id: Option<&'a str>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl Drop for ZipCancellationGuard<'_> {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(id) = self.request_id {
-            self.cancellations.remove_if(id, |_, flag| Arc::ptr_eq(flag, &self.cancelled));
-        }
-    }
-}
-
 /// Synchronous ZIP creation (runs in blocking thread pool).
 ///
-/// Writes entries into a ZIP archive at `output_path`. Checks the
-/// `cancelled` flag between entries and aborts early if set.
-/// On cancellation, the partial ZIP file is removed.
+/// Builds the archive in a sibling temporary file, then publishes it without
+/// replacing an existing target. Failed/cancelled archives never occupy the
+/// requested export name; the temporary owner removes them on every exit.
+#[cfg(test)]
 fn create_zip_sync(output_path: &Path, entries: &[ZipEntry], cancelled: &AtomicBool) -> Result<bool, AppError> {
+    create_zip_sync_scoped(output_path, entries, cancelled, &PathAuthority::Unrestricted, |_| {}, |_| {})
+}
+
+fn create_zip_sync_scoped(
+    output_path: &Path, entries: &[ZipEntry], cancelled: &AtomicBool, source_authority: &PathAuthority,
+    mut before_source_open: impl FnMut(&Path), mut after_source_open: impl FnMut(&Path),
+) -> Result<bool, AppError> {
     if cancelled.load(Ordering::Relaxed) {
         return Ok(false);
     }
@@ -2781,30 +2774,36 @@ fn create_zip_sync(output_path: &Path, entries: &[ZipEntry], cancelled: &AtomicB
         })?;
     }
 
-    let file = std::fs::File::create(output_path)
-        .map_err(|e| AppError::Internal(format!("cannot create ZIP file '{}': {e}", output_path.display())))?;
+    let parent = output_path.parent()
+        .ok_or_else(|| AppError::BadRequest("ZIP output has no parent directory".into()))?;
+    let temporary = tempfile::Builder::new().prefix(".nomifun-export-").suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|e| AppError::Internal(format!("cannot create temporary ZIP in '{}': {e}", parent.display())))?;
+    let file = temporary.as_file().try_clone()
+        .map_err(|e| AppError::Internal(format!("cannot open temporary ZIP: {e}")))?;
 
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let result = write_zip_entries(&mut zip, entries, cancelled, options);
-
-    if let Err(e) = result {
-        drop(zip);
-        let _ = std::fs::remove_file(output_path);
-        return Err(e);
-    }
-
-    // write_zip_entries returned Ok(false) means cancelled
-    if !result.unwrap() {
-        drop(zip);
-        let _ = std::fs::remove_file(output_path);
+    if !write_zip_entries(&mut zip, entries, cancelled, options, source_authority, &mut before_source_open, &mut after_source_open)? {
         return Ok(false);
     }
 
-    zip.finish().map_err(|e| {
-        let _ = std::fs::remove_file(output_path);
-        AppError::Internal(format!("ZIP: failed to finalize '{}': {e}", output_path.display()))
+    let finished = zip.finish()
+        .map_err(|e| AppError::Internal(format!("ZIP: failed to finalize '{}': {e}", output_path.display())))?;
+    finished.sync_all()
+        .map_err(|e| AppError::Internal(format!("ZIP: failed to flush '{}': {e}", output_path.display())))?;
+    drop(finished);
+
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(false);
+    }
+    temporary.persist_noclobber(output_path).map_err(|error| {
+        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::Conflict(format!("ZIP output '{}' already exists", output_path.display()))
+        } else {
+            AppError::Internal(format!("cannot publish ZIP '{}': {}", output_path.display(), error.error))
+        }
     })?;
 
     Ok(true)
@@ -2817,6 +2816,9 @@ fn write_zip_entries(
     entries: &[ZipEntry],
     cancelled: &AtomicBool,
     options: zip::write::SimpleFileOptions,
+    source_authority: &PathAuthority,
+    before_source_open: &mut impl FnMut(&Path),
+    after_source_open: &mut impl FnMut(&Path),
 ) -> Result<bool, AppError> {
     for entry in entries {
         if cancelled.load(Ordering::Relaxed) {
@@ -2825,22 +2827,21 @@ fn write_zip_entries(
 
         match entry {
             ZipEntry::Text { name, content } => {
-                if !write_zip_entry(zip, name, content.as_bytes(), cancelled, options)? {
+                if write_zip_entry(zip, name, content.as_bytes(), cancelled, options)?.is_none() {
                     return Ok(false);
                 }
             }
             ZipEntry::Disk { name, file_path } => {
-                let source = std::fs::File::open(file_path)
-                    .map_err(|e| AppError::Internal(format!("ZIP: cannot read source file '{file_path}': {e}")))?;
-                let metadata = source.metadata()
-                    .map_err(|e| AppError::Internal(format!("ZIP: cannot inspect source file '{file_path}': {e}")))?;
-                if !metadata.is_file() {
-                    return Err(AppError::BadRequest("ZIP source must be a regular file".into()));
-                }
-                // A growing source must not keep the export running forever.
-                if !write_zip_entry(zip, name, source.take(metadata.len()), cancelled, options)? {
+                let mut source = crate::zip_source::ZipSource::open(file_path, source_authority,
+                    || before_source_open(Path::new(file_path)))?;
+                after_source_open(Path::new(file_path));
+                // Bound growth, but read one extra byte so both shrinking and
+                // growing sources fail instead of publishing truncated bytes.
+                let length = source.length;
+                let Some(copied_bytes) = write_zip_entry(zip, name, (&mut source.file).take(length.saturating_add(1)), cancelled, options)? else {
                     return Ok(false);
-                }
+                };
+                source.verify(copied_bytes, source_authority)?;
             }
         }
     }
@@ -2859,23 +2860,25 @@ fn write_zip_entry(
     mut source: impl Read,
     cancelled: &AtomicBool,
     options: zip::write::SimpleFileOptions,
-) -> Result<bool, AppError> {
+) -> Result<Option<u64>, AppError> {
     zip.start_file(name, options)
         .map_err(|e| AppError::Internal(format!("ZIP: failed to start entry '{name}': {e}")))?;
     let mut buffer = [0u8; 64 * 1024];
+    let mut copied_bytes = 0;
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            return Ok(false);
+            return Ok(None);
         }
         let count = match source.read(&mut buffer) {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             result => result.map_err(|e| AppError::Internal(format!("ZIP: failed to read entry '{name}': {e}")))?,
         };
         if count == 0 {
-            return Ok(true);
+            return Ok(Some(copied_bytes));
         }
         zip.write_all(&buffer[..count])
             .map_err(|e| AppError::Internal(format!("ZIP: failed to write entry '{name}': {e}")))?;
+        copied_bytes += count as u64;
     }
 }
 
@@ -3221,56 +3224,68 @@ impl crate::traits::IFileService for FileService {
     async fn create_zip(
         &self,
         path: &str,
-        mut entries: Vec<ZipEntry>,
+        entries: Vec<ZipEntry>,
         request_id: Option<String>,
     ) -> Result<bool, AppError> {
-        // Validate output path is within the sandbox
-        let roots = self.allowed_roots_refs();
-        let output = validate_path_for_write(path, &roots)?;
+        let authority = self.base_authority(None);
+        self.create_zip_scoped(path, entries, request_id, &authority, &authority).await
+    }
 
-        // Validate all Disk entry source paths are within the sandbox
-        for entry in &mut entries {
-            if let ZipEntry::Disk { file_path, .. } = entry {
-                let source = validate_path(file_path, &roots)?;
-                if source == output || !source.is_file() {
-                    return Err(AppError::BadRequest("ZIP source must be a regular file distinct from the output".into()));
-                }
-                *file_path = source.to_string_lossy().into_owned();
-            }
-        }
-
-        let cancelled = Arc::new(AtomicBool::new(false));
-
-        if let Some(ref id) = request_id {
-            match self.zip_cancellations.entry(id.clone()) {
-                dashmap::mapref::entry::Entry::Occupied(_) => {
-                    return Err(AppError::Conflict("ZIP request is already in progress".into()));
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(Arc::clone(&cancelled));
-                }
-            }
-        }
-        // Dropping the caller future must cancel its blocking worker and release
-        // the registration, just like an I/O error or successful completion.
-        let _registration = ZipCancellationGuard {
-            cancellations: &self.zip_cancellations,
-            request_id: request_id.as_deref(),
-            cancelled: Arc::clone(&cancelled),
+    async fn create_zip_scoped(
+        &self,
+        path: &str,
+        mut entries: Vec<ZipEntry>,
+        request_id: Option<String>,
+        output_authority: &PathAuthority,
+        source_authority: &PathAuthority,
+    ) -> Result<bool, AppError> {
+        let Some(_registration) = self.zip_requests.register(request_id.as_deref())? else {
+            return Ok(false);
         };
-
-        tokio::task::spawn_blocking(move || create_zip_sync(&output, &entries, &cancelled))
+        let cancelled = _registration.flag.clone();
+        // Registration spans validation and the worker, so cancellation during
+        // a large source inventory cannot be lost before packaging starts.
+        let path = path.to_owned();
+        let output_authority = output_authority.clone();
+        let source_authority = source_authority.clone();
+        tokio::task::spawn_blocking(move || {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let output = validate_path_for_write_authority(&path, &output_authority)?;
+            let mut names = HashSet::new();
+            for entry in &mut entries {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Ok(false);
+                }
+                let name = match entry {
+                    ZipEntry::Text { name, .. } | ZipEntry::Disk { name, .. } => name,
+                };
+                // ZIP names are relative, slash-separated file paths.
+                // Reject archive traversal and ambiguous duplicate destinations.
+                if name.is_empty() || name.contains(['\\', '\0']) || name.starts_with('/')
+                    || name.split('/').any(|part| part.is_empty() || matches!(part, "." | ".."))
+                    || name.split('/').next().is_some_and(|part| part.contains(':'))
+                    || !names.insert(name.clone())
+                {
+                    return Err(AppError::BadRequest("ZIP entry name must be a unique relative file path".into()));
+                }
+                if let ZipEntry::Disk { file_path, .. } = entry {
+                    let source = validate_path_authority(file_path, &source_authority)?;
+                    if source == output || !source.is_file() {
+                        return Err(AppError::BadRequest("ZIP source must be a regular file distinct from the output".into()));
+                    }
+                    *file_path = source.to_string_lossy().into_owned();
+                }
+            }
+            create_zip_sync_scoped(&output, &entries, &cancelled, &source_authority, |_| {}, |_| {})
+        })
             .await
             .map_err(|e| AppError::Internal(format!("ZIP creation task failed: {e}")))?
     }
 
     async fn cancel_zip(&self, request_id: &str) -> bool {
-        if let Some((_, flag)) = self.zip_cancellations.remove(request_id) {
-            flag.store(true, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
+        self.zip_requests.cancel(request_id)
     }
 }
 
@@ -4848,29 +4863,22 @@ mod tests {
         assert!(svc.create_zip(output.to_str().unwrap(), vec![], Some("id".into())).await.is_err());
         assert!(!svc.cancel_zip("id").await);
 
-        let old_flag = Arc::new(AtomicBool::new(false));
-        svc.zip_cancellations.insert("id".into(), old_flag.clone());
-        let guard = ZipCancellationGuard {
-            cancellations: &svc.zip_cancellations,
-            request_id: Some("id"),
-            cancelled: old_flag.clone(),
-        };
-        let result = svc.create_zip(output.to_str().unwrap(), vec![], Some("id".into())).await;
+        let guard = svc.zip_requests.register(Some("active")).unwrap().unwrap();
+        let old_flag = guard.flag.clone();
+        let result = svc.create_zip(output.to_str().unwrap(), vec![], Some("active".into())).await;
         assert!(matches!(result, Err(AppError::Conflict(_))));
-        assert!(svc.cancel_zip("id").await);
-        let new_flag = Arc::new(AtomicBool::new(false));
-        svc.zip_cancellations.insert("id".into(), new_flag.clone());
+        assert!(svc.cancel_zip("active").await);
+        assert!(matches!(svc.zip_requests.register(Some("active")), Err(AppError::Conflict(_))));
         drop(guard);
         assert!(old_flag.load(Ordering::Relaxed));
+        let reused = svc.zip_requests.register(Some("active")).unwrap().unwrap();
+        let new_flag = reused.flag.clone();
         assert!(!new_flag.load(Ordering::Relaxed));
-        assert!(svc.cancel_zip("id").await);
+        assert!(svc.cancel_zip("active").await);
         assert!(new_flag.load(Ordering::Relaxed));
-        let detached_flag = Arc::new(AtomicBool::new(false));
-        drop(ZipCancellationGuard {
-            cancellations: &svc.zip_cancellations,
-            request_id: None,
-            cancelled: detached_flag.clone(),
-        });
+        let detached = svc.zip_requests.register(None).unwrap().unwrap();
+        let detached_flag = detached.flag.clone();
+        drop(detached);
         assert!(detached_flag.load(Ordering::Relaxed));
 
         let source = dir.path().join("source.txt");
@@ -4880,6 +4888,57 @@ mod tests {
         }];
         assert!(svc.create_zip(source.to_str().unwrap(), entries, None).await.is_err());
         assert_eq!(fs::read(&source).unwrap(), b"preserve source");
+    }
+
+    #[test]
+    fn zip_cancel_before_create_prevents_validation_and_publication() {
+        use crate::traits::IFileService;
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("early-canceled.zip");
+        let svc = FileService::new(Arc::new(NullBroadcaster), vec![root.path().to_path_buf()]);
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            assert!(!svc.cancel_zip("not-yet-parsed").await);
+            assert!(!svc.create_zip(output.to_str().unwrap(), vec![ZipEntry::Disk {
+                name: "missing.bin".into(), file_path: root.path().join("missing.bin").to_string_lossy().into_owned(),
+            }], Some("not-yet-parsed".into())).await.unwrap());
+        });
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn zip_cancellation_is_registered_before_source_validation_starts() {
+        use crate::traits::IFileService;
+        use std::future::Future;
+        use std::task::Poll;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("cancel-before-validation.zip");
+        let svc = FileService::new(Arc::new(NullBroadcaster), vec![root.path().to_path_buf()]);
+        runtime.block_on(async {
+            let export = svc.create_zip(output.to_str().unwrap(), vec![ZipEntry::Disk {
+                name: "missing.bin".into(), file_path: root.path().join("missing.bin").to_string_lossy().into_owned(),
+            }], Some("before-validation".into()));
+            tokio::pin!(export);
+            std::future::poll_fn(|cx| {
+                assert!(export.as_mut().poll(cx).is_pending(), "filesystem validation must wait for the worker");
+                Poll::Ready(())
+            }).await;
+            assert!(svc.cancel_zip("before-validation").await);
+            release_tx.send(()).unwrap();
+            assert!(!export.await.unwrap());
+            blocker.await.unwrap();
+            assert!(!svc.cancel_zip("before-validation").await);
+        });
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -4899,10 +4958,10 @@ mod tests {
         let file = fs::File::create(dir.path().join("chunked.zip")).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let cancelled = AtomicBool::new(false);
-        assert!(!write_zip_entry(
+        assert!(write_zip_entry(
             &mut zip, "data", CancellingReader(&cancelled, 0), &cancelled,
             zip::write::SimpleFileOptions::default(),
-        ).unwrap());
+        ).unwrap().is_none());
     }
 
     #[cfg(unix)]
@@ -6323,6 +6382,78 @@ mod tests {
         let result = create_zip_sync(&zip_path, &entries, &cancelled);
         assert!(result.is_err());
         assert!(!zip_path.exists(), "partial ZIP should be cleaned up on error");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "only the source file may remain");
+
+        fs::write(&zip_path, "existing archive").unwrap();
+        assert!(create_zip_sync(&zip_path, &entries, &cancelled).is_err());
+        assert_eq!(fs::read(&zip_path).unwrap(), b"existing archive", "failure must preserve a prior export");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn zip_changed_source_never_publishes_truncated_or_growing_bytes() {
+        for replacement in [b"short".as_slice(), &[b'x'; 256]] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source.bin");
+            fs::write(&source, [b'a'; 128]).unwrap();
+            let output = root.path().join("changed.zip");
+            let entries = [ZipEntry::Disk { name: "source.bin".into(), file_path: source.to_string_lossy().into_owned() }];
+            let result = create_zip_sync_scoped(&output, &entries, &AtomicBool::new(false),
+                &PathAuthority::Confined(vec![root.path().to_path_buf()]), |_| {},
+                |path| fs::write(path, replacement).unwrap());
+            assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+            assert!(!output.exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "no temporary archive may remain");
+        }
+    }
+
+    #[test]
+    fn zip_replaced_source_identity_is_rejected_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.bin");
+        fs::write(&source, b"original bytes").unwrap();
+        let backup = root.path().join("original.bin");
+        let output = root.path().join("replaced.zip");
+        let entries = [ZipEntry::Disk { name: "source.bin".into(), file_path: source.to_string_lossy().into_owned() }];
+        let result = create_zip_sync_scoped(&output, &entries, &AtomicBool::new(false),
+            &PathAuthority::Confined(vec![root.path().to_path_buf()]), |_| {}, |path| {
+                fs::rename(path, &backup).unwrap();
+                fs::write(path, b"replaced bytes").unwrap();
+            });
+        assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+        assert!(!output.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"replaced bytes");
+        assert_eq!(fs::read(&backup).unwrap(), b"original bytes");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn zip_parent_swap_cannot_open_sources_outside_authority() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let inside = workspace.join("inside");
+        let outside = fixture.path().join("outside");
+        let moved = outside.join("moved");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let source = inside.join("data.bin");
+        fs::write(&source, b"inside bytes").unwrap();
+        fs::write(outside.join("data.bin"), b"outside bytes").unwrap();
+        let output = workspace.join("swapped.zip");
+        let entries = [ZipEntry::Disk { name: "data.bin".into(), file_path: source.to_string_lossy().into_owned() }];
+        let result = create_zip_sync_scoped(&output, &entries, &AtomicBool::new(false),
+            &PathAuthority::Confined(vec![workspace.clone()]), |_| {
+                fs::rename(&inside, &moved).unwrap();
+                #[cfg(windows)]
+                junction::create(&outside, &inside).unwrap();
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&outside, &inside).unwrap();
+            }, |_| panic!("an escaped source must not open"));
+        assert!(result.is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(&workspace).unwrap().count(), 1, "only the substituted directory remains");
+        assert_eq!(fs::read(outside.join("data.bin")).unwrap(), b"outside bytes");
     }
 
     #[test]
