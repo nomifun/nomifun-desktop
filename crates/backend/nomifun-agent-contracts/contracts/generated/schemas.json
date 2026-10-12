@@ -8347,6 +8347,101 @@
     "title": "TargetPackageInventoryPayload",
     "type": "object"
   },
+  "turn_workspace_files_observed": {
+    "$defs": {
+      "ObservedFileOperation": {
+        "enum": [
+          "create",
+          "modify",
+          "delete"
+        ],
+        "type": "string"
+      },
+      "ObservedWorkspaceFile": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/$defs/ObservedFileOperation"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source_sha256": {
+            "description": "Captured start-side fingerprint; this is presentation data, not effect evidence.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "complete": {
+        "type": "boolean"
+      },
+      "execution_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "files": {
+        "items": {
+          "$ref": "#/$defs/ObservedWorkspaceFile"
+        },
+        "type": "array"
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "unchanged_paths": {
+        "description": "Owner-mutated paths whose included start/end fingerprints are equal.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "workspace_root": {
+        "description": "Exact root observed during this Turn; relocation is resolved on presentation reads.",
+        "type": "string"
+      },
+      "workspace_root_sha256": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation_id",
+      "execution_generation",
+      "workspace_root",
+      "workspace_root_sha256",
+      "complete",
+      "files",
+      "unchanged_paths"
+    ],
+    "title": "TurnWorkspaceFilesObservedV1",
+    "type": "object"
+  },
   "unified_plugin_contract_manifest": {
     "$defs": {
       "PluginBindingPoint": {

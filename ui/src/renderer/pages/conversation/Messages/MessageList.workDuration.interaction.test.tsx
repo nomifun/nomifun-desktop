@@ -38,6 +38,9 @@ const olderRoot = messageId(CURSOR, 2);
 const products: Array<'companion' | 'nomi'> = ['companion', 'nomi'];
 
 beforeEach(() => {
+  spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
+  spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
   spyOn(ipcBridge.fileStream.contentUpdate, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.knowledge.onTreeChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.knowledge.onEntryContentUpdated, 'on').mockImplementation(() => () => {});

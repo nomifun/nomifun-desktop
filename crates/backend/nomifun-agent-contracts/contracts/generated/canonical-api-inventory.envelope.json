@@ -319,6 +319,16 @@
         ]
       },
       {
+        "operation_id": "agent_sessions.turn_files",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/turn-files?turn_ids={turn_ids}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
         "operation_id": "agent_sessions.forks.create",
         "method": "POST",
         "path": "/api/agent-sessions/{agent_session_id}/forks",
@@ -539,5 +549,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "3bc3bc5da2e449caa05d27c47f5c2a497e24258b831a92df929fb96346c048d5"
+  "payload_digest": "d0c72ee9991998476d622e32586b4bcc964005a11d946a2ff26293b464e43f3e"
 }

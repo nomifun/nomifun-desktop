@@ -206,6 +206,40 @@ fn canonical_event_payload(
 }
 
 impl EngineTurnJournal {
+    /// Persist a presentation observation without extending the native journal.
+    pub(super) async fn observe_workspace_files(
+        &self,
+        observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1,
+    ) -> Result<(), AppError> {
+        observation.validate().map_err(failure)?;
+        let journal = &self.0;
+        let (payload, stored) = canonical_event_payload(&journal.session,
+            serde_json::to_value(&observation).map_err(failure)?)?;
+        let identity = format!("workspace-files:{}:{}:{}", journal.session.as_ref(),
+            journal.operation.as_ref(), journal.lease.generation());
+        journal.store.append_native_observation(&journal.lease, &SessionEventAppend {
+            agent_session_id: journal.session.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(identity),
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind(nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED.into()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(journal.operation.as_ref()),
+                causation_event_id: Some(journal.turn_started.clone()),
+                payload,
+            },
+        }, stored.as_ref()).await.map_err(failure)?;
+        Ok(())
+    }
+
+    pub(super) async fn workspace_mutation_paths(&self, root_sha256: &str) -> Result<Vec<String>, AppError> {
+        let journal = &self.0;
+        let facts = journal.store.turn_output_facts(&journal.session, &journal.operation).await.map_err(failure)?;
+        super::turn_files::mutation_paths(&facts, root_sha256)
+    }
+
+    pub(super) fn turn_operation(&self) -> &OperationId { &self.0.operation }
     pub(super) async fn require_claimed_model(
         &self,
         causality: &ChatCausality,

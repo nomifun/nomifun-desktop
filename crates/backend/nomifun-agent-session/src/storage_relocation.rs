@@ -17,63 +17,16 @@ impl AgentSessionStore {
         }
         let mut tx = self.pool.begin().await?;
         let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let namespace = opening_workspace_namespace_tx(&mut tx, &session).await?;
-        if namespace.is_none() || candidates.is_empty() {
+        if candidates.is_empty() { tx.rollback().await?; return Ok(BTreeMap::new()); }
+        let Some(history) = history_workspace_locations_tx(&mut tx, &session, managed_workspace_root).await? else {
             tx.rollback().await?;
             return Ok(BTreeMap::new());
-        }
-        let namespace = namespace.expect("checked namespace");
-        validate_uuidv7(session_id.as_ref(), "managed Session")?;
-        let current_root = root_string(managed_workspace_root)?;
-        let current_session_root = managed_workspace_root.join(session_id.as_ref());
-        let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed' ORDER BY seq")
-            .bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
-        let mut locations: Vec<(u64, String)> = Vec::new();
-        let mut previous_target: Option<String> = None;
-        let mut first_agent_transition = None;
-        for row in rows {
-            let event = event_from_row(row)?;
-            let value = payload_value_for_event_tx(&mut tx, &event).await?;
-            if value.get("workspace_relocation").is_none_or(Value::is_null) {
-                first_agent_transition.get_or_insert(event.seq);
-                continue;
-            }
-            let payload: AgentBindingChangedPayloadV1 = serde_json::from_value(value)?;
-            payload.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
-            let proof = payload.workspace_relocation.as_ref().expect("validated relocation proof");
-            if event.kind_version != 1 || event.correlation_id.as_ref() != payload.transition_id.as_ref()
-                || payload.effective_after_seq.checked_add(1) != Some(event.seq)
-                || event.event_id.as_ref() != format!("storage-relocation:{}:{}", payload.transition_id.as_ref(), session_id.as_ref())
-                || proof.previous_resources.iter().chain(&proof.next_resources)
-                    .any(|resource| resource.owner_id != session.owner_ref.principal_id)
-                || proof.managed_session_namespace.as_ref() != Some(&namespace)
-            { return Err(conflict("historical workspace location has invalid canonical provenance")); }
-            if let Some(previous) = &previous_target {
-                if !storage_paths_equal(previous, &proof.source_data_root)
-                    || !storage_paths_equal(previous, &proof.source_work_root)
-                { return Err(conflict("historical workspace relocation locations do not form one committed chain")); }
-            } else if namespace.opening_workspace.typed_parameters.get("workspace_root")
-                .is_some_and(|root| !storage_paths_equal(root, &proof.source_work_root)) {
-                return Err(conflict("historical workspace relocation differs from its opening work root"));
-            }
-            locations.push((event.seq, Path::new(&proof.source_work_root).join("conversations")
-                .join(session_id.as_ref()).to_string_lossy().into_owned()));
-            previous_target = Some(proof.target_data_root.clone());
-        }
-        if let Some(target) = previous_target {
-            let expected = Path::new(&target).join("conversations");
-            if !storage_paths_equal(&current_root, &expected.to_string_lossy()) {
-                return Err(conflict("historical workspace location differs from the active managed root"));
-            }
-        }
-        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let current_external = session.agent_binding.typed_resource_bindings.iter().any(|resource|
-            resource.resource_kind.as_ref() == "workspace" && !is_default_managed_workspace(resource)
-                && !resource.typed_parameters.get("workspace_root").is_some_and(|root|
-                    storage_paths_equal(root, &current_session_root.to_string_lossy())));
+        };
+        let HistoryWorkspaceLocations { current_session_root, locations, first_agent_transition,
+            current_external, last_seq } = history;
         let mut resolved = BTreeMap::new();
         for (seq, paths) in candidates {
-            if *seq == 0 || *seq > head.last_seq { return Err(conflict("historical workspace path source is outside committed Session history")); }
+            if *seq == 0 || *seq > last_seq { return Err(conflict("historical workspace path source is outside committed Session history")); }
             let source: Option<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND seq=?")
                 .bind(session_id.as_ref()).bind(as_i64(*seq, "historical path source")?).fetch_optional(&mut *tx).await?;
             let source = source.ok_or_else(|| conflict("historical workspace path has no committed source event"))?;
@@ -118,6 +71,74 @@ impl AgentSessionStore {
                 }
             }
             resolved.insert(*seq, aliases);
+        }
+        tx.rollback().await?;
+        Ok(resolved)
+    }
+
+    /// Resolve root-only file-owner observations without probing old disks or
+    /// borrowing a later selected workspace. The source is a settled file
+    /// effect or native observation; managed locations use the namespace/proof reader,
+    /// and external roots use that effect's immutable resource definition.
+    pub async fn history_workspace_roots(&self, session_id: &AgentSessionId,
+        managed_workspace_root: &Path, candidates: &BTreeMap<u64, BTreeSet<String>>)
+        -> Result<BTreeMap<u64, BTreeMap<String, String>>, SessionStoreError> {
+        if candidates.len() > MAX_EVENT_PAGE_SIZE as usize {
+            return Err(conflict("too many historical workspace root sources"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if candidates.is_empty() { tx.rollback().await?; return Ok(BTreeMap::new()); }
+        let history = history_workspace_locations_tx(&mut tx, &session, managed_workspace_root).await?;
+        let last_seq = if let Some(history) = &history { history.last_seq }
+            else { head_by_id_tx(&mut tx, session_id.as_ref()).await?.last_seq };
+        let mut resolved = BTreeMap::new();
+        for (seq, hashes) in candidates {
+            if *seq == 0 || *seq > last_seq { return Err(conflict("historical workspace root source is outside committed Session history")); }
+            let row: StoredEventRow = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND seq=?")
+                .bind(session_id.as_ref()).bind(as_i64(*seq, "historical root source")?).fetch_optional(&mut *tx).await?
+                .ok_or_else(|| conflict("historical workspace root has no committed source event"))?;
+            let event = event_from_row(row)?;
+            let value = payload_value_for_event_tx(&mut tx, &event).await?;
+            let witnessed = file_owner_root_hashes(&event, &value)?;
+            let external = if event.kind.0 == "effect/succeeded" {
+                if let Some(binding_id) = value.get("resource_binding_id").and_then(Value::as_str) {
+                    let row: Option<StoredResourceRow> = sqlx::query_as("SELECT binding_id,resource_kind,resource_id,owner_id,operations_json,connection_config_ref,typed_parameters_json,binding_digest FROM agent_session_resources WHERE session_id=? AND binding_id=?")
+                        .bind(session_id.as_ref()).bind(binding_id).fetch_optional(&mut *tx).await?;
+                    let resource = row.map(resource_from_row).transpose()?
+                        .ok_or_else(|| conflict("historical file effect has no immutable resource definition"))?;
+                    if resource.owner_id != session.owner_ref.principal_id {
+                        return Err(conflict("historical file resource belongs to another owner"));
+                    }
+                    if resource.resource_kind.as_ref() == "workspace" && !is_default_managed_workspace(&resource) {
+                        resource.typed_parameters.get("workspace_root").cloned()
+                    } else { None }
+                } else { None }
+            } else { None };
+            let mut roots = BTreeMap::new();
+            for hash in hashes {
+                if witnessed.as_ref().is_some_and(|roots| !roots.contains(hash)) { continue; }
+                if let Some(history) = &history {
+                    let managed_interval = !history.current_external
+                        || history.first_agent_transition.is_none_or(|boundary| *seq < boundary);
+                    if managed_interval {
+                        // Pick the exact stage containing the source cursor.
+                        // A future relocation's root cannot supply old authority.
+                        let stage = history.locations.iter().find(|(boundary, _)| seq < boundary)
+                            .map(|(_, root)| root.clone())
+                            .unwrap_or_else(|| history.current_session_root.to_string_lossy().into_owned());
+                        if history_root_digest_matches(&stage, hash) {
+                            roots.insert(hash.clone(), history.current_session_root.to_string_lossy().into_owned());
+                            continue;
+                        }
+                    }
+                }
+                if let Some(root) = &external {
+                    root_string(Path::new(root))?;
+                    if history_root_digest_matches(root, hash) { roots.insert(hash.clone(), root.clone()); }
+                }
+            }
+            resolved.insert(*seq, roots);
         }
         tx.rollback().await?;
         Ok(resolved)
@@ -249,6 +270,134 @@ impl AgentSessionStore {
         tx.commit().await?;
         Ok(WorkspaceRelocationOutcome { changed_sessions: changed, managed_namespaces })
     }
+}
+
+struct HistoryWorkspaceLocations {
+    current_session_root: std::path::PathBuf,
+    locations: Vec<(u64, String)>,
+    first_agent_transition: Option<u64>,
+    current_external: bool,
+    last_seq: u64,
+}
+
+fn history_root_digest_matches(root: &str, hash: &str) -> bool {
+    if digest_bytes(root.as_bytes()).as_ref() == hash { return true; }
+    #[cfg(windows)]
+    {
+        // File-owner observations historically hash std::fs canonical paths;
+        // frozen resource roots use the common simplified Windows form. These
+        // are deterministic prefix spellings of one already-witnessed root,
+        // not case guesses or filesystem discovery against an old volume.
+        let native = root.replace('/', "\\");
+        let alternate = if let Some(unc) = native.strip_prefix("\\\\?\\UNC\\") {
+            format!("\\\\{unc}")
+        } else if let Some(plain) = native.strip_prefix("\\\\?\\") {
+            plain.to_owned()
+        } else if let Some(unc) = native.strip_prefix("\\\\") {
+            format!("\\\\?\\UNC\\{unc}")
+        } else if native.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && native.as_bytes().get(1) == Some(&b':') && native.as_bytes().get(2) == Some(&b'\\') {
+            format!("\\\\?\\{native}")
+        } else { return false; };
+        return digest_bytes(alternate.as_bytes()).as_ref() == hash;
+    }
+    #[cfg(not(windows))]
+    { false }
+}
+
+fn file_owner_root_hashes(event: &SessionEventRecord, value: &Value) -> Result<Option<BTreeSet<String>>, SessionStoreError> {
+    if event.kind_version != 1 { return Err(conflict("historical file root source version is unsupported")); }
+    let mut roots = BTreeSet::new();
+    if event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+        let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(value.clone())?;
+        observation.validate().map_err(SessionStoreError::InvalidPayload)?;
+        roots.insert(observation.workspace_root_sha256);
+    } else if event.kind.0 == "effect/succeeded" {
+        if !matches!(value.get("action_id").and_then(Value::as_str),
+            Some("workspace.files/write" | "workspace.files/patch" | "workspace.files/delete" | "workspace.artifacts/publish")) {
+            return Ok(Some(roots));
+        }
+        if let Some(result) = value.get("result") {
+            roots.extend(result.pointer("/workspace_path/root_sha256").and_then(Value::as_str).map(str::to_owned));
+            roots.extend(result.get("workspace_root_sha256").and_then(Value::as_str).map(str::to_owned));
+            if let Some(files) = result.get("files").and_then(Value::as_array) {
+                roots.extend(files.iter().filter_map(|file| file.pointer("/workspace_path/root_sha256")
+                    .and_then(Value::as_str)).map(str::to_owned));
+            }
+        } else if value.get("observation_truncated").and_then(Value::as_bool) == Some(true) {
+            let digest = value.get("observation_digest").and_then(Value::as_str)
+                .ok_or_else(|| conflict("truncated file receipt has no observation digest"))?;
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+                return Err(conflict("truncated file receipt digest is invalid"));
+            }
+            // The app has already verified expanded native output against this
+            // digest. This port resolves only a matching canonical workspace
+            // stage/resource root; it supplies neither paths nor byte evidence.
+            return Ok(None);
+        }
+    }
+    Ok(Some(roots))
+}
+
+/// Both absolute attachment aliases and hashed file-owner observations use the
+/// same validated managed namespace and ordered relocation proof chain.
+async fn history_workspace_locations_tx(tx: &mut Transaction<'_, Sqlite>,
+    session: &AgentSessionLiveRecord, managed_workspace_root: &Path)
+    -> Result<Option<HistoryWorkspaceLocations>, SessionStoreError> {
+    let session_id = &session.agent_session_id;
+    let namespace = opening_workspace_namespace_tx(tx, session).await?;
+    let Some(namespace) = namespace else { return Ok(None); };
+    validate_uuidv7(session_id.as_ref(), "managed Session")?;
+    let current_root = root_string(managed_workspace_root)?;
+    let current_session_root = managed_workspace_root.join(session_id.as_ref());
+    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed' ORDER BY seq")
+        .bind(session_id.as_ref()).fetch_all(&mut **tx).await?;
+    let mut locations: Vec<(u64, String)> = Vec::new();
+    let mut previous_target: Option<String> = None;
+    let mut first_agent_transition = None;
+    for row in rows {
+        let event = event_from_row(row)?;
+        let value = payload_value_for_event_tx(tx, &event).await?;
+        if value.get("workspace_relocation").is_none_or(Value::is_null) {
+            first_agent_transition.get_or_insert(event.seq);
+            continue;
+        }
+        let payload: AgentBindingChangedPayloadV1 = serde_json::from_value(value)?;
+        payload.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+        let proof = payload.workspace_relocation.as_ref().expect("validated relocation proof");
+        if event.kind_version != 1 || event.correlation_id.as_ref() != payload.transition_id.as_ref()
+            || payload.effective_after_seq.checked_add(1) != Some(event.seq)
+            || event.event_id.as_ref() != format!("storage-relocation:{}:{}", payload.transition_id.as_ref(), session_id.as_ref())
+            || proof.previous_resources.iter().chain(&proof.next_resources)
+                .any(|resource| resource.owner_id != session.owner_ref.principal_id)
+            || proof.managed_session_namespace.as_ref() != Some(&namespace)
+        { return Err(conflict("historical workspace location has invalid canonical provenance")); }
+        if let Some(previous) = &previous_target {
+            if !storage_paths_equal(previous, &proof.source_data_root)
+                || !storage_paths_equal(previous, &proof.source_work_root)
+            { return Err(conflict("historical workspace relocation locations do not form one committed chain")); }
+        } else if namespace.opening_workspace.typed_parameters.get("workspace_root")
+            .is_some_and(|root| !storage_paths_equal(root, &proof.source_work_root)) {
+            return Err(conflict("historical workspace relocation differs from its opening work root"));
+        }
+        locations.push((event.seq, Path::new(&proof.source_work_root).join("conversations")
+            .join(session_id.as_ref()).to_string_lossy().into_owned()));
+        previous_target = Some(proof.target_data_root.clone());
+    }
+    if let Some(target) = previous_target {
+        let expected = Path::new(&target).join("conversations");
+        if !storage_paths_equal(&current_root, &expected.to_string_lossy()) {
+            return Err(conflict("historical workspace location differs from the active managed root"));
+        }
+    }
+    let head = head_by_id_tx(tx, session_id.as_ref()).await?;
+    let current_external = session.agent_binding.typed_resource_bindings.iter().any(|resource|
+        resource.resource_kind.as_ref() == "workspace" && !is_default_managed_workspace(resource)
+        && !resource.typed_parameters.get("workspace_root").is_some_and(|root|
+            storage_paths_equal(root, &current_session_root.to_string_lossy())));
+
+    Ok(Some(HistoryWorkspaceLocations { current_session_root, locations, first_agent_transition,
+        current_external, last_seq:head.last_seq }))
 }
 
 fn attachment_display_path(raw: &str) -> String {
@@ -503,4 +652,19 @@ async fn require_settled_patch_history_tx(tx: &mut Transaction<'_, Sqlite>, id: 
         || dispatched > recovery.as_ref().map_or(0, |(seq, _)| *seq)
     { return Err(conflict("resolve pending or uncovered Patch recovery before relocation")); }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod root_digest_tests {
+    use super::*;
+
+    #[test]
+    fn history_file_root_hash_tolerates_only_known_windows_prefix_spellings() {
+        for (plain, native) in [(r"C:\Work\Session", r"\\?\C:\Work\Session"),
+            (r"\\server\share\Session", r"\\?\UNC\server\share\Session")] {
+            assert!(history_root_digest_matches(plain, digest_bytes(native.as_bytes()).as_ref()));
+            assert!(history_root_digest_matches(native, digest_bytes(plain.as_bytes()).as_ref()));
+            assert!(!history_root_digest_matches(plain, digest_bytes(plain.to_lowercase().as_bytes()).as_ref()));
+        }
+    }
 }

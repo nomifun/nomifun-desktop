@@ -1077,6 +1077,29 @@
         "replay_rule": "rehydrate_runtime_input"
       },
       {
+        "kind": "turn/workspace-files-observed",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/turn-workspace-files-observed/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "cache_metadata_only"
+      },
+      {
         "kind": "compaction/completed",
         "version": 1,
         "persistence": "persistent",
@@ -1132,5 +1155,5 @@
       }
     ]
   },
-  "payload_digest": "db152ee7b650513c4ff7654f279495ce0f5d0628a9e5b388ce206841772eadba"
+  "payload_digest": "98e2cfaf32e713eef69137c80c7eb6bb73898196b71804aedf099cb8f60ddc45"
 }

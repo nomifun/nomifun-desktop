@@ -4,7 +4,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
-import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
@@ -18,6 +18,7 @@ import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
 import idmmLocale from '@/renderer/services/i18n/locales/en-US/idmm.json';
 import { useState } from 'react';
 import { dispatchChatMessageJump } from '@/renderer/utils/chat/chatMinimapEvents';
+import { emitter } from '@/renderer/utils/emitter';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { ExecutionProvider, useExecutionSafe } from '../execution/ExecutionContext';
 import { executionId, leadConversation, leadConversationId, makeAttempt, makeDetail, makeStep, requestId } from '../../../../../test/fixtures/conversationDelegation';
@@ -30,18 +31,23 @@ const messageId = (index: number) => parseMessageId(`0190f5fe-7c00-7a00-8000-${S
 
 let restoreListeners = () => {};
 beforeEach(() => {
+  const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
+  const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
+  const reconnected = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
   const content = spyOn(ipcBridge.fileStream.contentUpdate, 'on').mockImplementation(() => () => {});
   const tree = spyOn(ipcBridge.knowledge.onTreeChanged, 'on').mockImplementation(() => () => {});
   const entry = spyOn(ipcBridge.knowledge.onEntryContentUpdated, 'on').mockImplementation(() => () => {});
   const metadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockImplementation(async ({ path }) => ({
     name: 'app.ts', path, size: 42, type: 'text/plain', lastModified: 0, isDirectory: false,
   }));
+  const image = spyOn(ipcBridge.fs.getImageBase64, 'invoke').mockResolvedValue('data:image/png;base64,AAAA');
   const watchStart = spyOn(ipcBridge.workspaceOfficeWatch.start, 'invoke').mockResolvedValue(undefined);
   const watchStop = spyOn(ipcBridge.workspaceOfficeWatch.stop, 'invoke').mockResolvedValue(undefined);
   const watchFiles = spyOn(ipcBridge.workspaceOfficeWatch.fileAdded, 'on').mockImplementation(() => () => {});
   const files = spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   restoreListeners = () => {
-    content.mockRestore(); tree.mockRestore(); entry.mockRestore(); metadata.mockRestore();
+    turnFiles.mockRestore(); completed.mockRestore(); reconnected.mockRestore();
+    content.mockRestore(); tree.mockRestore(); entry.mockRestore(); metadata.mockRestore(); image.mockRestore();
     watchStart.mockRestore(); watchStop.mockRestore(); watchFiles.mockRestore(); files.mockRestore();
   };
 });
@@ -457,4 +463,131 @@ test('finished root reply keeps the collaboration clock live, opens tasks, and c
     expect(page.getByTestId('conversation-delegation').textContent).toContain(i18n.t('agentExecution.progress.summary', { done: 2, total: 2 }));
     expect(page.getByTestId('root-processing').textContent).toBe('false');
   } finally { cleanup(); get.mockRestore(); changed.mockRestore(); thinking.mockRestore(); reconnect.mockRestore(); }
+});
+
+test.each(['completed', 'failed', 'canceled'] as const)('canonical file list survives %s outcome and partial message history without changing its placement', async (outcome) => {
+  const query = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([{ turn_id: turnId, complete: true, files: [
+    { identity: 'workspace:script', relative_path: 'build_docx.py', file_name: 'build_docx.py', path: '/workspace/build_docx.py', operation: 'create', size_bytes: 42 },
+    { identity: 'workspace:document', relative_path: 'report.docx', file_name: 'report.docx', path: '/workspace/report.docx', operation: 'create', size_bytes: 128 },
+    { identity: 'workspace:deleted', relative_path: 'old.txt', file_name: 'old.txt', path: '/workspace/old.txt', operation: 'delete' },
+  ] }]);
+  // Tool/process messages are deliberately outside the loaded history window.
+  const initial: TMessage[] = [
+    { id: 'file-request', type: 'text', position: 'right', conversation_id: conversationId, message_id: turnId, msg_id: turnId, created_at: 100,
+      content: { content: 'Write a document' } },
+    { id: 'file-answer', type: 'text', position: 'left', conversation_id: conversationId, message_id: messageId(500), msg_id: messageId(500), turn_id: turnId,
+      created_at: 200, content: { content: 'The files are ready.' } },
+  ];
+  if (outcome === 'failed') initial.push({ id: 'terminal-file-error', type: 'tips', conversation_id: conversationId,
+    message_id: messageId(501), msg_id: messageId(501), turn_id: turnId, created_at: 300,
+    content: { type: 'error', content: 'Execution failed', finished_at_ms: 300 } });
+  if (outcome === 'canceled') initial.push({ id: 'terminal-file-canceled', type: 'agent_status', conversation_id: conversationId,
+    message_id: messageId(501), msg_id: messageId(501), turn_id: turnId, created_at: 300,
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'cancelled', started_at_ms: 100, finished_at_ms: 300 } });
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+    <PreviewProvider persistNamespace='canonical-turn-files-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, workspace: '/workspace', type: 'nomi', readOnly: true,
+        isProcessing: false, isTurnStateHydrated: true }}>
+        <MessageListProvider initialValue={initial}><MessageList hasMoreOlder /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </ThemeProvider></I18nextProvider></MemoryRouter>);
+  await waitFor(() => expect(page.getByText('This turn involves 3 files')).toBeTruthy());
+  const card = page.getByTestId('turn-deliverables-card');
+  expect(card.getAttribute('data-partial')).toBeNull();
+  expect(card.querySelectorAll('[data-deliverable-path]')).toHaveLength(3);
+  expect(page.getByText('report.docx')).toBeTruthy();
+  expect(page.getByText('Deleted')).toBeTruthy();
+  expect(query).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [turnId] });
+  const reply = page.getByText('The files are ready.');
+  expect(reply.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const actions = page.getByTestId('turn-actions');
+  expect(card.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test('a closed Turn distinguishes unknown empty file coverage from pending and confirmed empty queries', async () => {
+  let resolveInitial!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.turnFiles.invoke>>) => void;
+  const query = spyOn(ipcBridge.conversation.turnFiles, 'invoke')
+    .mockImplementationOnce(() => new Promise(resolve => { resolveInitial = resolve; }))
+    .mockResolvedValue([{ turn_id: turnId, complete: false, files: [] }]);
+  const initial: TMessage[] = [
+    { id: 'empty-file-request', type: 'text', position: 'right', conversation_id: conversationId, message_id: turnId, msg_id: turnId,
+      created_at: 100, content: { content: 'Check the workspace' } },
+    { id: 'empty-file-answer', type: 'text', position: 'left', conversation_id: conversationId, message_id: messageId(510), msg_id: messageId(510),
+      turn_id: turnId, created_at: 200, content: { content: 'The task has ended.' } },
+  ];
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='empty-canonical-turn-files-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, workspace: '/workspace', type: 'nomi', readOnly: true,
+        isProcessing: false, isTurnStateHydrated: true }}>
+        <MessageListProvider initialValue={initial}><MessageList /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  expect(page.queryByTestId('turn-deliverables-card')).toBeNull();
+  await act(async () => { resolveInitial([{ turn_id: turnId, complete: true, files: [] }]); });
+  expect(page.queryByTestId('turn-deliverables-card')).toBeNull();
+  act(() => { emitter.emit('conversation.turn.settled', conversationId); });
+  await waitFor(() => expect(page.getByText('This turn involves 0 files (list incomplete)')).toBeTruthy());
+  const card = page.getByTestId('turn-deliverables-card');
+  expect(card.getAttribute('data-partial')).toBe('true');
+  expect(card.querySelectorAll('[data-deliverable-path]')).toHaveLength(0);
+  expect(query).toHaveBeenCalledTimes(2);
+  expect(card.compareDocumentPosition(page.getByTestId('turn-actions')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test('paused and resumed Turns hide file headings and image gallery until canonical finish overrides stale pause', async () => {
+  const query = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([{ turn_id: turnId, complete: true, files: [
+    { identity: 'workspace:report', relative_path: 'report.docx', file_name: 'report.docx', path: '/workspace/report.docx', operation: 'create', size_bytes: 22 },
+  ] }]);
+  const initial: TMessage[] = [
+    { id: 'pause-file-request', type: 'text', position: 'right', conversation_id: conversationId, message_id: turnId, msg_id: turnId,
+      created_at: 100, content: { content: 'Generate an image and document' } },
+    { id: 'pause-file-image', type: 'tool_call', conversation_id: conversationId, message_id: messageId(520), msg_id: messageId(520), turn_id: turnId,
+      created_at: 150, content: { call_id: 'image-call', name: 'image', status: 'completed', artifacts: [
+        { id: parsePersistedArtifactId('0190f5fe-7c00-7a00-8000-000000000521'), kind: 'image', mime_type: 'image/png', path: '/workspace/generated.png',
+          relative_path: 'generated.png', size_bytes: 100, sha256: 'a'.repeat(64) },
+      ] } },
+    { id: 'pause-file-answer', type: 'text', position: 'left', conversation_id: conversationId, message_id: messageId(522), msg_id: messageId(522), turn_id: turnId,
+      created_at: 200, content: { content: 'The image is ready.' } },
+  ];
+  const Timeline = () => {
+    const [phase, setPhase] = useState<'paused' | 'resumed' | 'finished'>('paused');
+    const update = useUpdateMessageList();
+    const pause = { turnId, reason: 'EXECUTION_USER_REQUESTED', cleanupProven: true, pausedAt: 250 };
+    return <ConversationProvider value={{ conversation_id: conversationId, workspace: '/workspace', type: 'nomi', readOnly: true,
+      isProcessing: phase === 'resumed', isTurnStateHydrated: true, activeTurnId: turnId,
+      executionPause: phase === 'resumed' ? null : pause }}>
+      <MessageList />
+      <button onClick={() => update(current => [...current, { id: 'invalid-file-finish', type: 'agent_status', conversation_id: conversationId,
+        message_id: messageId(523), msg_id: messageId(523), turn_id: turnId, created_at: 260,
+        content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', finished_at_ms: Number.NaN } }])}>Invalid finish</button>
+      <button onClick={() => setPhase('resumed')}>Resume files</button>
+      <button onClick={() => {
+        update(current => [...current, { id: 'canonical-file-finish', type: 'agent_status', conversation_id: conversationId,
+          message_id: messageId(524), msg_id: messageId(524), turn_id: turnId, created_at: 300,
+          content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 100, finished_at_ms: 300 } }]);
+        setPhase('finished');
+      }}>Finish files</button>
+    </ConversationProvider>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='paused-canonical-turn-files-test' subscribeGlobalOpen={false}>
+      <MessageListProvider initialValue={initial}><Timeline /></MessageListProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  expect(query).not.toHaveBeenCalled();
+  expect(page.queryByTestId('turn-deliverables-card')).toBeNull();
+  expect(page.queryByTestId('turn-deliverables-images')).toBeNull();
+  fireEvent.click(page.getByText('Invalid finish'));
+  expect(query).not.toHaveBeenCalled();
+  expect(page.queryByTestId('turn-deliverables-card')).toBeNull();
+  fireEvent.click(page.getByText('Resume files'));
+  expect(query).not.toHaveBeenCalled();
+  expect(page.queryByTestId('turn-deliverables-images')).toBeNull();
+  fireEvent.click(page.getByText('Finish files'));
+  await waitFor(() => expect(page.getByText('This turn involves 1 files')).toBeTruthy());
+  expect(page.getByText('report.docx')).toBeTruthy();
+  expect(page.getByTestId('turn-deliverables-images')).toBeTruthy();
+  expect(query).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [turnId] });
 });

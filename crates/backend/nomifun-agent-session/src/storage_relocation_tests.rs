@@ -341,3 +341,130 @@ async fn storage_relocation_requires_owner_settlement_or_cleanup_for_native_invo
     assert!(validate_terminal_native_storage(vec![tool.clone(), resource, cleanup.clone()]).await.is_ok());
     assert!(validate_terminal_native_storage(vec![cleanup, tool]).await.is_err());
 }
+
+async fn historical_file_receipt(store: &AgentSessionStore, session: &AgentSessionLiveRecord,
+    workspace: &str, key: &str) -> SessionEventRecord {
+    let turn = OperationId::from(format!("file-history:{key}"));
+    let (_, started) = store.start_turn(&session.agent_session_id, "session_api".into(),
+        key.into(), turn.clone(), StrictJsonValue(json!({"content":"write a report"}))).await.unwrap();
+    let started = started.record.unwrap();
+    let tool = store.append_event(&append(&session.agent_session_id, &format!("file-tool:{key}"),
+        "runtime-supervisor", &format!("file-tool:{key}"), "tool/call-started", key,
+        Some(started.event_id.clone()), json!({"operation_id":key,"call_id":key,
+            "capability_id":"workspace.files","action_id":"workspace.files/write"}))).await.unwrap().ack.unwrap();
+    let request = EffectEventRequest {
+        agent_session_id:session.agent_session_id.clone(), effect_id:format!("file-effect:{key}"),
+        turn_id:turn.clone(), operation_id:key.into(), owner_domain:"workspace".into(),
+        capability_module:"workspace.files".into(), action_id:"workspace.files/write".into(),
+        resource_binding_id:Some(session.agent_binding.typed_resource_bindings[0].binding_id.clone()),
+        resource_key:Some(format!("workspace:{key}")), input_digest:digest('7'), recorded_at:1000,
+        event_id:format!("file-effect-start:{key}").into(), producer_id:"capability_host".into(),
+        idempotency_key:format!("file-effect:{key}").into(), correlation_id:format!("file-effect:{key}").into(),
+        strategy:EffectStrategy::ManagedEffect, causation_event_id:Some(tool.event_id),
+        payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let effect = store.record_effect_started(request.clone()).await.unwrap().ack.unwrap();
+    let receipt = store.record_effect_terminal(EffectEventRequest {
+        event_id:format!("file-effect-return:{key}").into(), producer_id:"owning_plugin".into(),
+        causation_event_id:Some(effect.event_id), recorded_at:1001,
+        payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"result":{
+            "path":"report.docx","written":true,"created":true,"bytes":42,"sha256":"d".repeat(64),
+            "workspace_path":{"root_sha256":digest_bytes(workspace.as_bytes()),"path":"report.docx","case_resolved":false},
+        }}))), ..request
+    }, EffectTerminalState::Succeeded).await.unwrap().record.unwrap();
+    store.append_event(&append(&session.agent_session_id, &format!("file-turn-end:{key}"),
+        "runtime-supervisor", &format!("file-turn-end:{key}"), "turn/completed", turn.as_ref(),
+        Some(started.event_id), json!({}))).await.unwrap();
+    receipt
+}
+
+#[tokio::test]
+async fn storage_relocation_resolves_pre_observation_file_receipts_without_old_disk_or_history_rewrite() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let old = tempfile::tempdir().unwrap(); let new = tempfile::tempdir().unwrap();
+    let old_root = old.path().to_path_buf();
+    let session = ready_with_resources(&store, vec![resource("workspace", "default-workspace",
+        "workspace_root", old_root.to_str().unwrap())], "old-file-receipt").await;
+    let source = old_root.join("conversations").join(session.agent_session_id.as_ref()).to_string_lossy().into_owned();
+    let receipt = historical_file_receipt(&store, &session, &source, "before-relocation").await;
+    let retained = receipt.payload.clone();
+    store.relocate_managed_workspaces(&old_root, &old_root, new.path(), &OperationId::from(Uuid::now_v7().to_string())).await.unwrap();
+    old.close().unwrap();
+    assert!(!old_root.exists());
+    let hash = digest_bytes(source.as_bytes()).as_ref().to_owned();
+    let candidates = BTreeMap::from([(receipt.seq, BTreeSet::from([hash.clone(), "f".repeat(64)]))]);
+    let current = new.path().join("conversations");
+    let roots = store.history_workspace_roots(&session.agent_session_id, &current, &candidates).await.unwrap();
+    assert_eq!(roots[&receipt.seq][&hash], current.join(session.agent_session_id.as_ref()).to_string_lossy());
+    assert!(!roots[&receipt.seq].contains_key(&"f".repeat(64)));
+    let original = store.read_events(&session.agent_session_id, None, 100).await.unwrap().events.into_iter()
+        .find(|event| event.event_id == receipt.event_id).unwrap();
+    assert_eq!(original.payload, retained);
+    assert!(store.history_workspace_roots(&session.agent_session_id, &old_root.join("conversations"), &candidates).await.is_err());
+}
+
+#[tokio::test]
+async fn history_file_root_uses_original_effect_resource_after_external_workspace_selection_changes() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let original = tempfile::tempdir().unwrap(); let later = tempfile::tempdir().unwrap();
+    let original_root = std::fs::canonicalize(original.path()).unwrap().to_string_lossy().into_owned();
+    let session = ready_with_resources(&store, vec![resource("workspace", "selected-workspace:original",
+        "workspace_root", &original_root)], "external-file-receipt").await;
+    let receipt = historical_file_receipt(&store, &session, &original_root, "external-before-switch").await;
+    let mut replacement = session.agent_binding.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings = vec![resource("workspace", "selected-workspace:later",
+        "workspace_root", later.path().to_str().unwrap())];
+    store.replace_session_resource_bindings(&owner(), &session.agent_session_id, &session.agent_binding,
+        replacement, "workspace").await.unwrap();
+    original.close().unwrap();
+    let hash = digest_bytes(original_root.as_bytes()).as_ref().to_owned();
+    let candidates = BTreeMap::from([(receipt.seq, BTreeSet::from([hash.clone()]))]);
+    let roots = store.history_workspace_roots(&session.agent_session_id, &later.path().join("conversations"), &candidates).await.unwrap();
+    assert_eq!(roots[&receipt.seq][&hash], original_root);
+}
+
+#[tokio::test]
+async fn storage_relocation_resolves_native_observation_roots_with_the_same_proof_chain() {
+    use nomifun_agent_contracts::{ObservedFileOperation, ObservedWorkspaceFile, TurnWorkspaceFilesObservedV1, TURN_WORKSPACE_FILES_OBSERVED};
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let old = tempfile::tempdir().unwrap(); let new = tempfile::tempdir().unwrap();
+    let session = ready_with_resources(&store, vec![resource("workspace", "default-workspace",
+        "workspace_root", old.path().to_str().unwrap())], "new-observation-relocation").await;
+    let root = old.path().join("conversations").join(session.agent_session_id.as_ref()).to_string_lossy().into_owned();
+    let operation = OperationId::from("observed-before-relocation");
+    let (_, started) = store.start_turn(&session.agent_session_id, "session_api".into(), operation.as_ref().into(),
+        operation.clone(), StrictJsonValue(json!({"content":"create a document","admission":{
+            "route_identity":ChatRouteIdentity::new("coding.codex@1", nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT, "chat-route".into(),4),
+            "resolved_snapshot_ref":session.agent_binding.resolved_snapshot_ref,
+        }}))).await.unwrap();
+    let started = started.record.unwrap();
+    let lease = store.claim_native_execution(crate::NativeExecutionClaim {
+        owner:owner(), agent_session_id:session.agent_session_id.clone(), operation_id:operation.clone(),
+        snapshot:session.agent_binding.resolved_snapshot_ref.clone(), active_set_generation:0,
+        holder:"file-observer".into(), expected_fence:0, checkpoint:None,
+    }).await.unwrap();
+    let observation = append(&session.agent_session_id, "observed-workspace", "runtime_supervisor", "observed-workspace",
+        TURN_WORKSPACE_FILES_OBSERVED, operation.as_ref(), Some(started.event_id.clone()),
+        serde_json::to_value(TurnWorkspaceFilesObservedV1 {
+            operation_id:operation.clone(), execution_generation:lease.generation(),
+            workspace_root:root.clone(), workspace_root_sha256:digest_bytes(root.as_bytes()).as_ref().into(),
+            complete:true, unchanged_paths:vec![], files:vec![ObservedWorkspaceFile {
+                path:"report.docx".into(), operation:ObservedFileOperation::Create, size_bytes:Some(42), sha256:Some("d".repeat(64)), source_sha256:None,
+            }],
+        }).unwrap());
+    let observed = store.append_native_observation(&lease, &observation, None).await.unwrap().record.unwrap();
+    store.append_native_event(&lease, &append(&session.agent_session_id, "observed-cleanup", "runtime_supervisor", "observed-cleanup",
+        "runtime/progress-recorded", operation.as_ref(), Some(started.event_id.clone()),
+        json!({"producer_seq":1,"event":{"event":"host_cleanup_proven"}})), None).await.unwrap();
+    let completion = append(&session.agent_session_id, "observed-completion", "runtime_supervisor", "observed-completion",
+        "message/completed", "observed-assistant", Some(started.event_id.clone()), json!({"part_count":0,"content_digest":digest_bytes(b"")}));
+    let terminal = append(&session.agent_session_id, "observed-terminal", "runtime_supervisor", "observed-terminal",
+        "turn/completed", operation.as_ref(), Some(started.event_id), json!({}));
+    store.append_native_chat_completion(&lease, &completion, &terminal).await.unwrap();
+    store.relocate_managed_workspaces(old.path(), old.path(), new.path(), &OperationId::from(Uuid::now_v7().to_string())).await.unwrap();
+    let candidates = BTreeMap::from([(observed.seq, BTreeSet::from([digest_bytes(root.as_bytes()).as_ref().to_owned()]))]);
+    let current = new.path().join("conversations");
+    let resolved = store.history_workspace_roots(&session.agent_session_id, &current, &candidates).await.unwrap();
+    assert_eq!(resolved[&observed.seq].values().next().unwrap(), &current.join(session.agent_session_id.as_ref()).to_string_lossy());
+}

@@ -52,7 +52,6 @@
     "editingFiles": "正在编辑 {{count}} 个文件",
     "fileEditOperations": "已编辑文件 {{count}} 次",
     "editingFileOperations": "正在编辑文件（{{count}} 次操作）",
-    "fileEditTargets": "已编辑 {{count}} 个文件：{{target}}",
     "editingFileTargets": "正在编辑 {{count}} 个文件：{{target}}",
     "runCommands": "已运行 {{count}} 条命令",
     "runningCommands": "正在运行 {{count}} 条命令",
@@ -142,10 +141,9 @@
   "fileChanges": "文件变更",
   "fileChangesCount": "{{count}} 个文件变更",
   "turnDeliverables": {
-    "title": "已生成 {{count}} 个文件",
-    "partialTitle": "显示本轮的 {{count}} 个改动文件（向上滚动加载其余）",
+    "title": "本轮涉及 {{count}} 个文件",
+    "partialTitle": "本轮涉及 {{count}} 个文件（清单不完整）",
     "imagesTitle": "已生成 {{count}} 张图片",
-    "mixedTitle": "已生成 {{count}} 个结果",
     "showMore": "再显示 {{count}} 个文件",
     "showLess": "收起",
     "showMoreImages": "再显示 {{count}} 张图片",
@@ -157,7 +155,9 @@
     "saveImage": "保存图片",
     "copyImagePath": "复制图片路径",
     "reveal": "在文件夹中显示",
-    "viewDiff": "查看改动"
+    "create": "新增",
+    "modify": "修改",
+    "delete": "已删除"
   },
   "conversationInProgress": "当前正在进行对话中...",
   "canceledExecution": "已取消执行",

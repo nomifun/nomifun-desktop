@@ -24,6 +24,9 @@ pub mod resource;
 pub mod routes;
 pub mod service;
 pub mod snapshot_service;
+mod turn_changes;
+pub use turn_changes::{TurnChangeLimits, WorkspaceFileChange, WorkspaceFileChanges,
+    WorkspaceFileSnapshot, capture_workspace_files, compare_workspace_files, unchanged_workspace_paths};
 pub mod traits;
 pub mod types;
 pub mod watch_service;

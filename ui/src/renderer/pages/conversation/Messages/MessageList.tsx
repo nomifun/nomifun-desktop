@@ -31,7 +31,6 @@ import './messages.css';
 import contentStyles from '../components/ConversationContentColumn.module.css';
 import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
-import type { FileChangeInfo } from './MessageFileChanges';
 import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
@@ -55,7 +54,6 @@ import { isContextCompressionTip } from './processTipModel';
 import {
   selectJournalProcessItems,
 } from './processTraceDisplayModel';
-import { formatFileTargetPreview } from './processFileTargetLabel';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
 import SelectionReplyButton from './components/SelectionReplyButton';
@@ -69,12 +67,14 @@ import {
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
 import {
-  collectTurnDeliverables,
-  type TurnDeliverableCandidate,
+  buildTurnFileItems,
+  collectVerifiedTurnImages,
+  type TurnImageCandidate,
   type TurnDeliverableItem,
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
+import { useTurnFiles } from './useTurnFiles';
 import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
@@ -87,15 +87,6 @@ type SourceMessageId = MessageId;
 
 type IMessageVO =
   | TMessage
-  | {
-      type: 'file_summary';
-      id: string;
-      msg_id?: MessageId;
-      turn_id?: MessageId;
-      diffs: FileChangeInfo[];
-      sourceMessageIds: SourceMessageId[];
-      created_at: number;
-    }
   | {
       type: 'tool_summary';
       id: string;
@@ -142,6 +133,7 @@ type ITurnDeliverablesVO = {
   id: string;
   turn_id: MessageId;
   items: TurnDeliverableItem[];
+  partial: boolean;
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
@@ -188,9 +180,6 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
   if ('type' in item && item.type === 'tool_summary') {
     return item.sourceMessageIds;
   }
-  if ('type' in item && item.type === 'file_summary') {
-    return item.sourceMessageIds;
-  }
   const message = item as TMessage;
   const businessId = message.message_id ?? message.msg_id;
   return businessId ? [businessId] : [];
@@ -214,7 +203,6 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
   if (
     'type' in item &&
     [
-      'file_summary',
       'tool_summary',
       'turn_process_disclosure',
       'process_receipt',
@@ -289,9 +277,6 @@ const isHiddenProcessItem = (item: IRenderableItem): boolean => {
 };
 
 const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => {
-  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
-    return item.msg_id;
-  }
   return item.msg_id;
 };
 
@@ -300,7 +285,7 @@ const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined =>
 };
 
 const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['role'] => {
-  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
+  if ('type' in item && item.type === 'tool_summary') {
     return 'process';
   }
   switch (item.type) {
@@ -531,28 +516,6 @@ const buildProcessReceiptSummary = (
     };
   }
 
-  if ('type' in item && item.type === 'file_summary') {
-    const targets = item.diffs
-      .map((file) => file.fullPath || file.file_name)
-      .filter((target): target is string => Boolean(target));
-    const targetPreview = targets.length ? formatFileTargetPreview(targets, { workspaceRoots }) : '';
-    return {
-      label: targetPreview
-        ? t('messages.processReceipt.fileEditTargets', {
-            count: item.diffs.length,
-            target: targetPreview,
-            defaultValue: 'Edited {{count}} files: {{target}}',
-          })
-        : t('messages.processReceipt.fileEdits', {
-            count: item.diffs.length,
-            defaultValue: 'Edited {{count}} files',
-          }),
-      icon: 'edit',
-      defaultExpanded: false,
-      hasDetail: item.diffs.length > 1,
-    };
-  }
-
   switch (item.type) {
     case 'agent_status':
       return {
@@ -674,7 +637,7 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   if ('type' in item && item.type === 'thinking') return 'thinking';
   if (
     'type' in item &&
-    ['tool_summary', 'file_summary', 'tool_call', 'tool_group'].includes(item.type)
+    ['tool_summary', 'tool_call', 'tool_group'].includes(item.type)
   ) {
     return 'tool';
   }
@@ -881,7 +844,17 @@ const MessageList: React.FC<{
       activeRequestMessageId: conversationContext?.activeRequestMessageId,
     })), [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, list]);
 
-  const displayList = useMemo<IProcessedItem[]>(() => {
+  const pausedFileTurnId = useMemo(() => {
+    const pausedTurnId = conversationContext?.executionPause?.turnId;
+    if (!pausedTurnId) return undefined;
+    // A pause is not a closed Turn. Only typed terminal metadata can override
+    // a stale pause projection; provisional text and tail position cannot.
+    const finished = list.some((message) => message.turn_id === pausedTurnId && getMessageBusinessIdentity(message) &&
+      getProcessedItemTurnEndedAt(message) !== undefined);
+    return finished ? undefined : pausedTurnId;
+  }, [conversationContext?.executionPause?.turnId, list]);
+
+  const turnPresentation = useMemo(() => {
     const itemById = new Map<string, IRenderableItem>();
     const rawModelInput: TurnDisclosureInputItem[] = processedList.map((item) => {
       const id = getProcessedItemAnchorId(item);
@@ -992,35 +965,50 @@ const MessageList: React.FC<{
       })
       .filter((item): item is IProcessedItem => Boolean(item));
 
-    // ── Turn deliverables: aggregate each successfully closed turn's verified
-    // file artifacts and surface them as one card below that turn's last item
-    // (its final assistant reply, when one exists). ──
     const turnGates = new Map<string, TurnGateInfo>();
     for (const entry of disclosureItems) {
       if ('type' in entry && entry.type === 'turn_process_disclosure') {
         turnGates.set(entry.msg_id, { running: entry.running, state: entry.state });
       }
     }
-
-    const candidates: TurnDeliverableCandidate[] = [];
+    const fileTurnGates = new Map([...turnGates].filter(([id]) => id !== pausedFileTurnId));
+    const imageCandidates: TurnImageCandidate[] = [];
     for (const entry of modelInput) {
       const item = itemById.get(entry.id);
-      if (!item) continue;
-      const candidate: TurnDeliverableCandidate = {
-        turnId: entry.turnId,
-        role: entry.role,
-        processState: entry.processState ?? 'completed',
-      };
-      if ('type' in item && item.type === 'tool_summary') {
-        candidate.toolMessages = item.messages;
-      } else if ('type' in item && item.type === 'file_summary') {
-        candidate.fileDiffs = item.diffs;
-        candidate.fileDiffSourceMessageIds = item.sourceMessageIds;
-      }
-      candidates.push(candidate);
+      if (item?.type === 'tool_summary') imageCandidates.push({ turnId: entry.turnId, toolMessages: item.messages });
     }
+    const verifiedImagesByTurn = collectVerifiedTurnImages(imageCandidates, fileTurnGates, workspaceRoots);
+    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn };
+  }, [
+    conversationContext?.activeRequestMessageId,
+    conversationContext?.activeTurnId,
+    conversationContext?.activeTurnStartedAt,
+    conversationContext?.isTurnStateHydrated,
+    conversationContext?.isProcessing,
+    conversationContext?.stopNotice,
+    creationTaskOwnerMessageIds,
+    processedList,
+    pausedFileTurnId,
+    t,
+    toolLanguage,
+    workspaceRoots,
+  ]);
 
-    const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
+  const closedTurnIds = useMemo(() => [...turnPresentation.fileTurnGates]
+    .filter(([, gate]) => !gate.running)
+    .map(([turnId]) => turnId as MessageId), [turnPresentation.fileTurnGates]);
+  const turnFileSummaries = useTurnFiles(conversationContext?.conversation_id, closedTurnIds);
+
+  const displayList = useMemo<IProcessedItem[]>(() => {
+    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn } = turnPresentation;
+    const deliverablesByTurn = new Map<MessageId, TurnDeliverableItem[]>();
+    for (const [id, gate] of fileTurnGates) {
+      if (gate.running) continue;
+      const turnId = id as MessageId;
+      const summary = turnFileSummaries.get(turnId);
+      const items = buildTurnFileItems(summary, verifiedImagesByTurn.get(turnId));
+      if (items.length || summary?.complete === false) deliverablesByTurn.set(turnId, items);
+    }
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
     const getDisplayItemTurnId = (entry: IProcessedItem): MessageId | undefined => {
@@ -1061,8 +1049,9 @@ const MessageList: React.FC<{
           id: `turn-deliverables-${turnId}`,
           turn_id: turnId,
           items,
+          partial: turnFileSummaries.get(turnId)?.complete === false,
           sourceMessageIds: Array.from(
-            new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
+            new Set(items.flatMap((item) => item.sourceMessageIds))
           ),
           created_at: getProcessedItemCreatedAt(entry),
         });
@@ -1091,19 +1080,7 @@ const MessageList: React.FC<{
       }
     });
     return withOutputs;
-  }, [
-    conversationContext?.activeRequestMessageId,
-    conversationContext?.activeTurnId,
-    conversationContext?.activeTurnStartedAt,
-    conversationContext?.isTurnStateHydrated,
-    conversationContext?.isProcessing,
-    conversationContext?.stopNotice,
-    creationTaskOwnerMessageIds,
-    processedList,
-    t,
-    toolLanguage,
-    workspaceRoots,
-  ]);
+  }, [turnPresentation, turnFileSummaries]);
 
   const lastUserTextIndex = useMemo(
     () =>
@@ -1454,7 +1431,7 @@ const MessageList: React.FC<{
           <TurnDeliverablesCard
             items={item.items}
             workspace={conversationContext?.workspace}
-            partial={hasMoreOlder === true}
+            partial={item.partial}
           />
         </div>
       );
@@ -1475,7 +1452,7 @@ const MessageList: React.FC<{
         </div>
       );
     }
-    if ('type' in item && ['file_summary', 'tool_summary'].includes(item.type)) {
+    if ('type' in item && item.type === 'tool_summary') {
       return (
         <div
           key={item.id}

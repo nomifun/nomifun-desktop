@@ -13,6 +13,7 @@
  */
 
 import { bridge } from '@/platform';
+import type { TurnFileSummary } from '@/common/types/platform/turnFiles';
 import type { PrepareStorageRelocationRequest } from '@/common/protocolBindings/PrepareStorageRelocationRequest';
 import type { StorageRelocationOperationRequest } from '@/common/protocolBindings/StorageRelocationOperationRequest';
 import type { StorageRelocationResponse } from '@/common/protocolBindings/StorageRelocationResponse';
@@ -1002,6 +1003,17 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
 };
 
 export const conversation = {
+  /** Complete Turn-scoped file projection, independent of message pagination. */
+  turnFiles: withResponseMap(
+    httpGet<TurnFileSummary[], { conversation_id: ConversationId; turn_ids: MessageId[] }>((p) => {
+      const query = new URLSearchParams({ turn_ids: p.turn_ids.join(',') });
+      return `/api/agent-sessions/${encodeURIComponent(p.conversation_id)}/turn-files?${query}`;
+    }),
+    (summaries) => summaries.map((summary) => ({
+      ...summary,
+      turn_id: parseMessageId(summary.turn_id),
+    }))
+  ),
   get: withResponseMap(
     httpGet<unknown, { conversation_id: ConversationId }>(
       (p) => `/api/agent-sessions/${p.conversation_id}/projection`,

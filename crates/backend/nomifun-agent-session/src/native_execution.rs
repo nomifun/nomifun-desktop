@@ -48,8 +48,10 @@ impl AgentSessionStore {
     pub async fn native_payload_bytes(&self, lease: &NativeExecutionLease) -> Result<u64, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         check_native_lease_tx(&mut tx, lease, false).await?;
-        let bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(byte_len),0) FROM agent_payloads WHERE session_id=?")
-            .bind(lease.session_id.as_ref()).fetch_one(&mut *tx).await?;
+        let bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(p.byte_len),0) FROM agent_payloads p WHERE p.session_id=? \
+            AND p.payload_id NOT IN(SELECT e.payload_id FROM agent_events e WHERE e.session_id=? \
+            AND e.kind='turn/workspace-files-observed' AND e.payload_id IS NOT NULL)")
+            .bind(lease.session_id.as_ref()).bind(lease.session_id.as_ref()).fetch_one(&mut *tx).await?;
         as_u64(bytes, "native Session payload bytes")
     }
 
@@ -199,8 +201,24 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>) -> Result<SessionEventAppendResult, SessionStoreError> {
         if append.agent_session_id != lease.session_id || append.producer_id.as_ref() != "runtime_supervisor"
             || !matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "thinking/content-part"
-                | "message/content-part" | "message/completed" | "tool/result-recorded") {
+                | "message/content-part" | "message/completed" | "tool/result-recorded" | nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED) {
             return Err(SessionStoreError::ExecutionFenced);
+        }
+        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+            let value = match &append.semantic_event.payload {
+                SessionEventPayloadRef::InlineJson(value) => value.0.clone(),
+                SessionEventPayloadRef::Stored(_) => match payload.map(|value| &value.body) {
+                    Some(SessionPayloadBody::Json(value)) => value.0.clone(),
+                    _ => return Err(SessionStoreError::InvalidPayload("workspace observation payload missing".into())),
+                },
+                _ => return Err(SessionStoreError::InvalidPayload("workspace observation payload missing".into())),
+            };
+            let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(value)?;
+            observation.validate().map_err(SessionStoreError::InvalidPayload)?;
+            if observation.operation_id != lease.operation_id || observation.execution_generation != lease.generation()
+                || append.semantic_event.correlation_id.as_ref() != lease.operation_id.as_ref() {
+                return Err(SessionStoreError::ExecutionFenced);
+            }
         }
         if append.semantic_event.kind.0 == "runtime/progress-recorded" {
             let data = match &append.semantic_event.payload {
@@ -223,7 +241,11 @@ impl AgentSessionStore {
             )) { return Err(SessionStoreError::ExecutionFenced); }
         }
         let mut tx = self.begin_write_transaction().await?;
-        check_native_identity_tx(&mut tx, lease).await?;
+        let state = check_native_identity_tx(&mut tx, lease).await?;
+        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
+            && !matches!(state.as_str(), "running" | "paused") {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
         let result = self.append_event_tx(&mut tx, append, payload).await?;
         tx.commit().await?;
         Ok(result)

@@ -8,17 +8,13 @@ import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/cha
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { usePreviewLauncher } from '@/renderer/hooks/file/usePreviewLauncher';
-import { extractContentFromDiff } from '@/renderer/utils/file/diffUtils';
-import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
 import MarkdownView from '@renderer/components/Markdown';
 import { hasSkillSuggest, stripSkillSuggest } from '@renderer/utils/chat/skillSuggestParser';
 import { hasThinkTags, stripThinkTags } from '@renderer/utils/chat/thinkTagFilter';
 import { Attention, Code, Edit, Info, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useId, useMemo, useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { FileChangeInfo } from '../MessageFileChanges';
 import { isContextCompressionTip } from '../processTipModel';
 import { formatFileTargetPreview, formatWorkspaceFileTarget } from '../processFileTargetLabel';
 import {
@@ -43,14 +39,6 @@ type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
 export type ProcessTraceRenderableItem =
   | TMessage
-  | {
-      type: 'file_summary';
-      id: string;
-      msg_id?: MessageId;
-      diffs: FileChangeInfo[];
-      sourceMessageIds: string[];
-      created_at: number;
-    }
   | {
       type: 'tool_summary';
       id: string;
@@ -291,12 +279,6 @@ const getToolErrorPreview = (row: ToolReceiptDetailRow): string | undefined => {
   const characters = Array.from(preview);
   return characters.slice(0, 160).join('') + (characters.length > 160 ? '…' : '');
 };
-
-const formatFileChangeStats = (file: FileChangeInfo): string =>
-  joinCompactText([
-    file.insertions > 0 ? `+${file.insertions}` : undefined,
-    file.deletions > 0 ? `-${file.deletions}` : undefined,
-  ]);
 
 const formatTargetPreview = (targets: string[], workspaceRoots: string[]): string =>
   formatFileTargetPreview(targets, { workspaceRoots });
@@ -750,91 +732,6 @@ const ToolProcessTraceRows: React.FC<{
   );
 };
 
-const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[]; workspaceRoots: string[] }> = ({
-  diffs,
-  workspaceRoots,
-}) => {
-  const { t } = useTranslation();
-  const { launchPreview } = usePreviewLauncher();
-  const [expanded, setExpanded] = useState(false);
-  const files = useMemo(() => Array.from(new Map(diffs.map((file) => [file.fullPath, file])).values()), [diffs]);
-
-  const openFile = useCallback(
-    (file: FileChangeInfo) => {
-      const { contentType, editable, language } = getFileTypeInfo(file.file_name);
-      void launchPreview({
-        relativePath: file.fullPath,
-        file_name: file.file_name,
-        contentType,
-        editable,
-        language,
-        fallbackContent: editable ? extractContentFromDiff(file.diff) : undefined,
-        diffContent: file.diff,
-      });
-    },
-    [launchPreview]
-  );
-
-  if (!files.length) return null;
-  const targets = files.map((file) => file.fullPath);
-  const targetPreview = formatTargetPreview(targets, workspaceRoots);
-  const label = files.length === 1
-    ? t('messages.processReceipt.fileChanged', {
-        target: formatWorkspaceFileTarget(files[0].fullPath, { workspaceRoots }).label,
-        stats: '',
-        defaultValue: 'Edited {{target}}',
-      })
-    : t('messages.processReceipt.fileEditTargets', {
-        count: files.length,
-        target: targetPreview,
-        defaultValue: 'Edited {{count}} files: {{target}}',
-      });
-
-  return (
-    <div className='turn-process-trace-tool'>
-      <button
-        type='button'
-        className='turn-process-trace__row turn-process-trace-tool__toggle turn-process-trace__row--completed'
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-      >
-        <TraceRowIcon kind='edit' />
-        <span className='turn-process-trace__text' title={targets.join('\n')}>
-          {compactReceiptText(label, targetPreview)}
-        </span>
-        <Right
-          theme='outline'
-          size='12'
-          className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')}
-        />
-      </button>
-      {expanded && (
-        <div className='turn-process-trace-detail'>
-          <ul className='turn-process-trace-file-list'>
-            {files.map((file) => {
-              const target = formatWorkspaceFileTarget(file.fullPath, { workspaceRoots });
-              const stats = formatFileChangeStats(file);
-              return (
-                <li key={file.fullPath} className='turn-process-trace-file-list__item'>
-                  <button
-                    type='button'
-                    className='turn-process-trace-file-list__button'
-                    title={file.fullPath}
-                    onClick={() => openFile(file)}
-                  >
-                    <span>{target.label}</span>
-                    {stats && <span className='turn-process-trace-file-list__stats'>{stats}</span>}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-};
-
 const getUnhandledMessageType = (_message: never): string => 'unknown';
 
 const ProcessTraceItem: React.FC<{
@@ -862,10 +759,6 @@ const ProcessTraceItem: React.FC<{
           : [],
     [conversationContext?.workspace, workspaceRoots]
   );
-
-  if ('type' in item && item.type === 'file_summary') {
-    return <FileProcessTraceRows diffs={item.diffs} workspaceRoots={resolvedWorkspaceRoots} />;
-  }
 
   if ('type' in item && item.type === 'tool_summary') {
     return (
