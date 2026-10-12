@@ -155,6 +155,12 @@ async fn submit_edits(
             "images/edits requires at least one input image (role != 'mask')",
         ));
     }
+    if req.inputs.iter().filter(|input| input.role == "mask").count() > 1 {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "images/edits accepts at most one mask; multiple masks cannot be preserved",
+        ));
+    }
     // Single image → `image`; multiple → `image[]` (gpt-image-1 multi-ref).
     let image_field = if images.len() == 1 { "image" } else { "image[]" };
 
@@ -393,6 +399,22 @@ mod tests {
 
     fn image_input(role: &str, bytes: &[u8], mime: &str) -> InputAsset {
         InputAsset { id: None, role: role.into(), bytes: bytes.to_vec(), mime: mime.into() }
+    }
+
+    #[tokio::test]
+    async fn edits_reject_multiple_masks_before_sending_instead_of_dropping_input() {
+        let server = MockServer::start().await;
+        let call = edit_call(&server.uri(), "opaque-gateway-image", TaskRequest::ImageEdit(ImageEditRequest {
+            prompt: "preserve all inputs".into(), count: 1, size: None, quality: None,
+            inputs: vec![
+                image_input("image", b"image", "image/png"),
+                image_input("mask", b"first-mask", "image/png"),
+                image_input("mask", b"second-mask", "image/png"),
+            ], extra: json!({}),
+        }));
+        let error = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]

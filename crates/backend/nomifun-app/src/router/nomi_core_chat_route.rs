@@ -402,16 +402,16 @@ fn features_for(
     for (adapter_feature, route_feature) in [
         (ChatModelFeature::ImageInput, ChatRouteFeature::ImageInput),
         (ChatModelFeature::AudioInput, ChatRouteFeature::AudioInput),
+        (ChatModelFeature::AudioOutput, ChatRouteFeature::AudioOutput),
+        (ChatModelFeature::ReasoningSignature, ChatRouteFeature::ReasoningSignature),
+        (ChatModelFeature::PromptCache, ChatRouteFeature::PromptCache),
+        (ChatModelFeature::StructuredOutput, ChatRouteFeature::StructuredOutput),
+        (ChatModelFeature::ProviderRoundState, ChatRouteFeature::ProviderRoundState),
+        (ChatModelFeature::NativeResponsesItems, ChatRouteFeature::NativeResponsesItems),
     ] {
         if representable.contains(&adapter_feature) {
             features.insert(route_feature);
         }
-    }
-    if protocol == ChatRouteProtocol::OpenaiResponses {
-        features.extend([
-            ChatRouteFeature::AudioOutput,
-            ChatRouteFeature::ProviderRoundState,
-        ]);
     }
     let unsupported = health
         .map(serde_json::from_str::<CapabilityHealth>)
@@ -489,6 +489,28 @@ mod tests {
         for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses, ChatRouteProtocol::Gemini] {
             assert!(features_for(protocol, None).unwrap().contains(&ChatRouteFeature::AudioInput));
         }
+    }
+
+    #[test]
+    fn native_continuation_features_follow_protocol_without_catalog_tags() {
+        for protocol in [ChatRouteProtocol::Anthropic, ChatRouteProtocol::Gemini,
+            ChatRouteProtocol::Bedrock, ChatRouteProtocol::Vertex] {
+            let features = features_for(protocol, None).unwrap();
+            assert!(features.contains(&ChatRouteFeature::ReasoningSignature));
+            assert!(features.contains(&ChatRouteFeature::PromptCache));
+        }
+        let responses = features_for(ChatRouteProtocol::OpenaiResponses, None).unwrap();
+        assert!(responses.contains(&ChatRouteFeature::NativeResponsesItems));
+        assert!(responses.contains(&ChatRouteFeature::PromptCache));
+        assert!(responses.contains(&ChatRouteFeature::StructuredOutput));
+        let chat = features_for(ChatRouteProtocol::OpenaiChat, None).unwrap();
+        assert!(!chat.contains(&ChatRouteFeature::ReasoningSignature));
+        assert!(!chat.contains(&ChatRouteFeature::PromptCache));
+        let unsupported = features_for(ChatRouteProtocol::Anthropic,
+            Some(r#"{"status":"unknown","unsupported_technical_capabilities":["reasoning","function_calling","streaming"]}"#)).unwrap();
+        assert!(!unsupported.contains(&ChatRouteFeature::Reasoning));
+        assert!(!unsupported.contains(&ChatRouteFeature::ToolCalls));
+        assert!(!unsupported.contains(&ChatRouteFeature::Streaming));
     }
 
     async fn create_chat_provider(

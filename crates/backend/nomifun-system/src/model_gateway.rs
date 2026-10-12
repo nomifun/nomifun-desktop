@@ -163,8 +163,6 @@ fn endpoint_protocol(task: ModelTask, endpoint: &str) -> Result<(&'static str, &
         (ImageGeneration | ImageEdit, "image-generation") => ("openai.images", "default"),
         (Embedding, "embeddings") => ("openai.embeddings", "default"),
         (Rerank, "jina-rerank") => ("generic.rerank", "default"),
-        (SpeechSynthesis, "audio-speech") => ("openai.audio_speech", "default"),
-        (SpeechRecognition, "audio-transcription") => ("openai.audio_transcriptions", "default"),
         _ => return Err(invalid("unknown or task-incompatible preferred endpoint")),
     })
 }

@@ -264,7 +264,7 @@ impl ModelInvokeService {
         m: &ModelRef,
         req: TaskRequest,
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
-        self.invoke_with_expected_revision(m, req, None).await
+        self.invoke_with_expected_configuration(m, req, None, None).await
     }
 
     /// Invoke only when the provider's complete invocation graph still has the
@@ -276,19 +276,36 @@ impl ModelInvokeService {
         expected_config_revision: i64,
         req: TaskRequest,
     ) -> Result<TaskOutcome, InvokeError> {
-        self.invoke_with_expected_revision(m, req, Some(expected_config_revision))
+        self.invoke_with_expected_configuration(m, req, Some(expected_config_revision), None)
             .await
             .map(|(outcome, _context)| outcome)
     }
 
-    async fn invoke_with_expected_revision(
+    /// Guard a multi-call operation with its already resolved task authority.
+    /// Fresh canonical resolution still checks provider/model enablement and
+    /// credentials before comparing the exact task, then submitting once.
+    /// Unrelated catalog changes do not invalidate this ephemeral comparison.
+    pub async fn invoke_at_task_configuration(
+        &self,
+        m: &ModelRef,
+        expected: &crate::ResolvedTaskConfig,
+        req: TaskRequest,
+    ) -> Result<TaskOutcome, InvokeError> {
+        self.invoke_with_expected_configuration(m, req, None, Some(expected))
+            .await.map(|(outcome, _context)| outcome)
+    }
+
+    async fn invoke_with_expected_configuration(
         &self,
         m: &ModelRef,
         req: TaskRequest,
         expected_config_revision: Option<i64>,
+        expected_task_configuration: Option<&crate::ResolvedTaskConfig>,
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
-        let (call, adapter) = self.resolve(m, task, req).await?;
+        let (call, adapter) = self.resolve_with_expected_task_configuration(
+            m, task, req, expected_task_configuration,
+        ).await?;
         validate_typed_task_controls(&call.protocol, &call.request)?;
 
         if expected_config_revision
@@ -1019,6 +1036,42 @@ mod tests {
     }
 
     // -- invoke --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn task_configuration_guard_ignores_unrelated_models_and_rejects_changed_authority_before_network() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/images/generations"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"b64_json":"aGk="}]})))
+            .expect(1).mount(&server).await;
+        let (service, pool) = setup().await;
+        let provider_id = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &provider_id, "selected", r#"["image_generation"]"#, "{}", true).await;
+        let selected = mref(&provider_id, "selected");
+        let expected = service.resolve_task_config(&selected, ModelTask::ImageGeneration).await.unwrap();
+        seed_model(&pool, &provider_id, "unrelated", r#"["image_generation"]"#, "{}", true).await;
+        assert_ne!(provider_revision(&pool, &provider_id).await, expected.config_revision);
+        service.invoke_at_task_configuration(&selected, &expected, image_request("preserve chosen route"))
+            .await.unwrap();
+
+        let repo = SqliteProviderRepository::new(pool.clone());
+        let current = repo.find_by_id(&provider_id).await.unwrap().unwrap();
+        let rotated = encrypt_string(r#"{"api_keys":["changed-synthetic-key"]}"#, &TEST_KEY).unwrap();
+        repo.update(&provider_id, current.config_revision, UpdateProviderParams {
+            credentials_encrypted: Some(&rotated), ..Default::default()
+        }).await.unwrap();
+        let changed = service.invoke_at_task_configuration(&selected, &expected, image_request("reject changed key"))
+            .await.unwrap_err();
+        assert!(changed.is_task_configuration_changed());
+        assert!(matches!(nomifun_common::AppError::from(changed), nomifun_common::AppError::Conflict(_)));
+
+        let current_config = service.resolve_task_config(&selected, ModelTask::ImageGeneration).await.unwrap();
+        seed_model(&pool, &provider_id, "selected", r#"["image_generation"]"#, "{}", false).await;
+        let disabled = service.invoke_at_task_configuration(&selected, &current_config, image_request("reject disabled model"))
+            .await.unwrap_err();
+        assert_eq!(disabled.kind, InvokeErrorKind::UnsupportedTask);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1, "changed credentials and disabled models must not dispatch");
+    }
 
     #[tokio::test]
     async fn invoke_image_generation_end_to_end() {

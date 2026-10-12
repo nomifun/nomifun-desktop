@@ -35,7 +35,7 @@ describe('atomic gateway connection edit', () => {
     fireEvent.click(page.getByRole('button', { name: common.save }));
     await waitFor(() => expect(close.mock.calls).toHaveLength(1));
     expect(update.mock.calls).toEqual([[{ provider_id: provider.id, base_url: 'https://gateway.example', name: 'Partner', api_key: 'synthetic-replacement' }]]);
-    expect(onChanged.mock.calls).toHaveLength(1); expect(read.mock.calls).toHaveLength(0);
+    expect(onChanged.mock.calls).toEqual([[provider]]); expect(read.mock.calls).toHaveLength(0);
   });
   test('requires an explicit key before saving a changed address', async () => {
     const update = spyOn(ipcBridge.modelGateway.updateConnection, 'invoke').mockResolvedValue(provider);

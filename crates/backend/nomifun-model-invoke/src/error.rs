@@ -63,6 +63,7 @@ pub struct InvokeError {
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
     pub(crate) catalog_failure: bool,
+    pub(crate) task_configuration_changed: bool,
     /// Set only from a complete, bounded provider error envelope, never from
     /// a diagnostic substring. Legacy callers retain the HTTP-based kind.
     pub(crate) context_length_rejected: bool,
@@ -112,6 +113,7 @@ impl InvokeError {
             http_status: None,
             retry_after_ms: None,
             catalog_failure: false,
+            task_configuration_changed: false,
             context_length_rejected: false,
             unsupported_technical_capability: None,
             gateway_business_error: None,
@@ -177,6 +179,17 @@ impl InvokeError {
     /// A local-configuration error ([`InvokeErrorKind::Config`]).
     pub fn config(msg: impl Into<String>) -> Self {
         Self::new(InvokeErrorKind::Config, msg)
+    }
+
+    /// A resolved task changed before a guarded dispatch. Keep the existing
+    /// Config classification while allowing consumers to preserve Conflict
+    /// without interpreting provider-controlled error text.
+    pub(crate) fn task_configuration_changed(msg: impl Into<String>) -> Self {
+        Self { task_configuration_changed: true, ..Self::config(msg) }
+    }
+
+    pub fn is_task_configuration_changed(&self) -> bool {
+        self.task_configuration_changed
     }
 
     /// A local catalog/repository read failure. It remains `Config` for legacy
@@ -339,6 +352,9 @@ impl From<InvokeError> for nomifun_common::AppError {
         use InvokeErrorKind::*;
         use nomifun_common::AppError;
         let msg = e.to_string();
+        if e.is_task_configuration_changed() {
+            return AppError::Conflict(msg);
+        }
         match e.kind {
             // Upstream rejected our stored credentials — an operator problem, surfaced as a gateway failure.
             Auth => AppError::BadGateway(msg),

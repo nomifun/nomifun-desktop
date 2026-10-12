@@ -903,8 +903,14 @@ const ModelModalContent: React.FC = () => {
     },
   });
 
+  const [gatewayRefreshTokens, setGatewayRefreshTokens] = useState<Partial<Record<ProviderId, number>>>({});
   const [editGatewayCtrl, editGatewayContext] = EditModelGatewayModal.useModal({
-    onChanged: () => mutate(),
+    onChanged: async (provider) => {
+      await mutate();
+      // A key-only update leaves public provider fields unchanged. Refresh the
+      // affected account explicitly after the aggregate connection save.
+      setGatewayRefreshTokens((current) => ({ ...current, [provider.id]: (current[provider.id] ?? 0) + 1 }));
+    },
   });
   const editProvider = (provider: IProvider) => {
     if (provider.platform === 'nomifun-model-gateway') editGatewayCtrl.open({ data: provider });
@@ -1108,7 +1114,7 @@ const ModelModalContent: React.FC = () => {
                       </div>
                     }
                   >
-                    {platform.platform === 'nomifun-model-gateway' && isExpanded && <ModelGatewayDetails provider={platform} onChanged={() => mutate()} />}
+                    {platform.platform === 'nomifun-model-gateway' && isExpanded && <ModelGatewayDetails provider={platform} onChanged={() => mutate()} refreshToken={gatewayRefreshTokens[platform.id]} />}
                     <SortableContext
                       items={modelRows.map((row) => modelSortableId(platform.id, row.model))}
                       strategy={verticalListSortingStrategy}
