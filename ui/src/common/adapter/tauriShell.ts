@@ -362,10 +362,25 @@ export interface TauriRelayPairingBootstrapRequest {
   pairingEnvelope: string;
 }
 
-export type TauriRelayPairingState = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type TauriRelayPairingState = 'disconnected' | 'paused' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 export interface TauriRelayPairingStatus {
   state: TauriRelayPairingState;
+  enabled?: boolean;
+  pendingBootstrap?: boolean;
+  relayState?: string | null;
+  relayReason?: string | null;
+  protocolVersion?: number;
+  ticketId?: string;
+  qrState?: 'absent' | 'ready' | 'used' | 'failed' | 'expired';
+  errorCode?: string | null;
+  actionErrorCode?: string | null;
+  operation?: string | null;
+  health?: {
+    backendReachable: boolean;
+    tunnelReachable: boolean;
+    checkedAtMs: number | null;
+  };
   pairUrl?: string;
   relay?: string;
   businessUrl?: string;
@@ -403,9 +418,19 @@ export function tauriRelayPairingRestart(): Promise<TauriRelayPairingStatus> {
   return invokeCommand<TauriRelayPairingStatus>('relay_pairing_restart');
 }
 
+/** Refresh a short-lived Mobile pairing ticket through the connected relay. */
+export function tauriRelayPairingRefreshQr(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_refresh_qr');
+}
+
 /** Stop the agent and remove all local Relay pairing state. */
 export function tauriRelayPairingDisconnect(): Promise<TauriRelayPairingStatus> {
   return invokeCommand<TauriRelayPairingStatus>('relay_pairing_disconnect');
+}
+
+/** Forget local Relay pairing state without contacting the Relay. */
+export function tauriRelayPairingForgetLocal(): Promise<TauriRelayPairingStatus> {
+  return invokeCommand<TauriRelayPairingStatus>('relay_pairing_forget_local');
 }
 
 /**

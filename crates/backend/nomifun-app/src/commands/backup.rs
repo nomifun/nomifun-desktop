@@ -59,6 +59,8 @@ pub async fn run_backup(cli: &Cli, output: PathBuf) -> Result<ExitCode> {
         output.display(),
         manifest.files.iter().map(|file| file.bytes).sum::<u64>()
     );
+    #[cfg(target_os = "macos")]
+    println!("note: macOS website login data is managed by WebKit and is not included in this backup; a restored dataset uses new isolated website stores");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -76,6 +78,8 @@ pub async fn run_restore(bundle: PathBuf, destination_data_dir: PathBuf) -> Resu
          unless you intentionally relocate the restored managed workspaces",
         destination_data_dir.display()
     );
+    #[cfg(target_os = "macos")]
+    println!("note: the restored dataset uses new isolated WK website stores; sign in to websites again. The source installation's website data is unchanged");
     Ok(ExitCode::SUCCESS)
 }
 

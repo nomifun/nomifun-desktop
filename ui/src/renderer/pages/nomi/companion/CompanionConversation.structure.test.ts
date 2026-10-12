@@ -17,15 +17,17 @@ describe('CompanionConversation structure', () => {
     expect(source.includes('ExecutionConversationLayout')).toBe(false);
   });
 
-  test('uses the fixed Companion Agent and keeps the composer chat-only', () => {
+  test('uses the companion-owned Agent selector and keeps the composer chat-only', () => {
     const conversation = readSource('./CompanionConversation.tsx');
     const models = readSource('../workspace/tabs/OverviewTab/ModelsSection.tsx');
 
-    expect(conversation.includes('<CompanionAgentIndicator')).toBe(true);
+    expect(conversation.includes('<ProductAgentBindingSelect')).toBe(true);
+    expect(conversation.includes("targetKind='companion'")).toBe(true);
+    expect(conversation.includes('conversationId={conversation.id}')).toBe(true);
+    expect(conversation.includes('onChanged={refreshSession}')).toBe(true);
     expect(conversation.includes('creationEnabled={false}')).toBe(true);
     expect(conversation.includes("creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}")).toBe(true);
-    expect(conversation.includes('ProductAgentBindingSelect')).toBe(false);
-    expect(models.includes('<CompanionAgentIndicator')).toBe(true);
-    expect(models.includes('ProductAgentBindingSelect')).toBe(false);
+    expect(models.includes('<ProductAgentBindingSelect')).toBe(true);
+    expect(models.includes('targetId={profile.companion_id}')).toBe(true);
   });
 });

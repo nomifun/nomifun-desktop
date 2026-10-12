@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 
 use nomifun_common::AppError;
+use nomifun_api_types::{DevicePairingStatus, DevicePairingTicket};
 
 /// QR token time-to-live: 5 minutes.
 const QR_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
@@ -30,6 +31,42 @@ impl QrTokenData {
 /// Thread-safe via `DashMap`.
 pub struct QrTokenStore {
     tokens: DashMap<String, QrTokenData>,
+    device_tickets: DashMap<String, DeviceTicketData>,
+    /// Serializes supersede+insert so concurrent generates cannot leave two
+    /// Ready tickets for one installation.
+    device_ticket_generation: std::sync::Mutex<()>,
+}
+
+/// A device ticket only reports `used` after the credential was issued;
+/// a claimed-but-unfinished redemption is `redeeming` and an explicitly
+/// failed issuance is `failed` with a stable reason code.
+enum DeviceTicketState {
+    Ready,
+    Redeeming,
+    Used { device_id: String },
+    Failed { code: &'static str },
+}
+
+struct DeviceTicketData {
+    ticket_id: String,
+    created_at: Instant,
+    expires_at_ms: i64,
+    state: DeviceTicketState,
+}
+
+/// Stable error codes for the Mobile pairing flow.
+#[derive(Debug)]
+pub struct DevicePairingError(pub &'static str);
+
+impl axum::response::IntoResponse for DevicePairingError {
+    fn into_response(self) -> axum::response::Response {
+        let message = match self.0 {
+            "DEVICE_PAIRING_USED" => "This pairing code has already been used. Create a new code on Desktop.",
+            "DEVICE_PAIRING_EXPIRED" => "This pairing code has expired. Create a new code on Desktop.",
+            _ => "This is not a valid Mobile pairing code. Create a code in Connect phone on Desktop.",
+        };
+        (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"success":false,"code":self.0,"error":message}))).into_response()
+    }
 }
 
 impl Default for QrTokenStore {
@@ -40,7 +77,69 @@ impl Default for QrTokenStore {
 
 impl QrTokenStore {
     pub fn new() -> Self {
-        Self { tokens: DashMap::new() }
+        Self { tokens: DashMap::new(), device_tickets: DashMap::new(), device_ticket_generation: std::sync::Mutex::new(()) }
+    }
+
+    /// One installation keeps a single active code: every earlier still-Ready
+    /// ticket is removed before the new one is inserted. LAN and relay codes
+    /// share this store; claimed (Redeeming/Used/Failed) receipts stay until
+    /// the regular cleanup so Desktop can explain what happened to them.
+    pub fn generate_device_ticket(&self) -> DevicePairingTicket {
+        let _generation = self.device_ticket_generation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.device_tickets.retain(|_, data| !matches!(data.state, DeviceTicketState::Ready));
+        let ticket = DevicePairingTicket {
+            ticket_id: crate::generate_random_hex_secret(),
+            qr_token: crate::generate_random_hex_secret(),
+            expires_at_ms: nomifun_common::now_ms().saturating_add(QR_TOKEN_TTL.as_millis() as i64),
+        };
+        self.device_tickets.insert(ticket.qr_token.clone(), DeviceTicketData {
+            ticket_id: ticket.ticket_id.clone(), created_at: Instant::now(),
+            expires_at_ms: ticket.expires_at_ms, state: DeviceTicketState::Ready,
+        });
+        ticket
+    }
+
+    pub fn device_ticket_status(&self, ticket_id: &str) -> Option<DevicePairingStatus> {
+        let ticket = self.device_tickets.iter().find(|entry| entry.value().ticket_id == ticket_id)?;
+        let data = ticket.value();
+        let (state, device_id, failure_code) = match &data.state {
+            DeviceTicketState::Ready if data.created_at.elapsed() >= QR_TOKEN_TTL => ("expired", None, None),
+            DeviceTicketState::Ready => ("ready", None, None),
+            DeviceTicketState::Redeeming => ("redeeming", None, None),
+            DeviceTicketState::Used { device_id } => ("used", Some(device_id.clone()), None),
+            DeviceTicketState::Failed { code } => ("failed", None, Some(code.to_string())),
+        };
+        Some(DevicePairingStatus {
+            ticket_id: data.ticket_id.clone(),
+            state: state.into(),
+            device_id, failure_code, expires_at_ms: data.expires_at_ms,
+        })
+    }
+
+    /// A Ready, unexpired ticket moves to Redeeming so a second consumer (or a
+    /// retry of a failed/completed redemption) always sees USED.
+    pub fn consume_device_ticket(&self, qr_token: &str) -> Result<(), DevicePairingError> {
+        let Some(mut data) = self.device_tickets.get_mut(qr_token) else { return Err(DevicePairingError("DEVICE_PAIRING_INVALID")); };
+        match data.state {
+            DeviceTicketState::Ready => {
+                if data.created_at.elapsed() >= QR_TOKEN_TTL { return Err(DevicePairingError("DEVICE_PAIRING_EXPIRED")); }
+                data.state = DeviceTicketState::Redeeming;
+                Ok(())
+            }
+            _ => Err(DevicePairingError("DEVICE_PAIRING_USED")),
+        }
+    }
+
+    pub fn complete_device_ticket(&self, qr_token: &str, device_id: &str) {
+        if let Some(mut data) = self.device_tickets.get_mut(qr_token) {
+            data.state = DeviceTicketState::Used { device_id: device_id.to_owned() };
+        }
+    }
+
+    pub fn fail_device_ticket(&self, qr_token: &str, code: &'static str) {
+        if let Some(mut data) = self.device_tickets.get_mut(qr_token) {
+            data.state = DeviceTicketState::Failed { code };
+        }
     }
 
     /// Generate a new QR login token and store it.
@@ -103,6 +202,8 @@ impl QrTokenStore {
         let now = Instant::now();
         self.tokens
             .retain(|_, data| !data.is_expired(now));
+        // Keep the used/expired receipt briefly so the Desktop can explain it.
+        self.device_tickets.retain(|_, data| now.duration_since(data.created_at) < QR_TOKEN_TTL * 2);
     }
 
     /// Start a background task that cleans up expired tokens periodically.
@@ -247,6 +348,69 @@ mod tests {
             }).count();
             assert_eq!(winners, 1);
         });
+    }
+
+    #[test]
+    fn device_invitation_has_expiry_and_exactly_one_consumer() {
+        let store = QrTokenStore::new();
+        let ticket = store.generate_device_ticket();
+        assert!(store.validate_and_consume(&ticket.qr_token).is_err(), "Mobile invitation must not log into a browser");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                barrier.wait();
+                store.consume_device_ticket(&ticket.qr_token).is_ok()
+            })).collect();
+            assert_eq!(workers.into_iter().filter_map(|worker| worker.join().unwrap().then_some(())).count(), 1);
+        });
+        let ticket = store.generate_device_ticket();
+        store.device_tickets.get_mut(&ticket.qr_token).unwrap().created_at = Instant::now() - QR_TOKEN_TTL;
+        assert_eq!(store.consume_device_ticket(&ticket.qr_token).unwrap_err().0, "DEVICE_PAIRING_EXPIRED");
+        assert_eq!(store.device_ticket_status(&ticket.ticket_id).unwrap().state, "expired");
+    }
+
+    #[test]
+    fn device_ticket_claim_complete_fail_report_exact_statuses() {
+        let store = QrTokenStore::new();
+        let ticket = store.generate_device_ticket();
+        assert_eq!(store.device_ticket_status(&ticket.ticket_id).unwrap().state, "ready");
+        store.consume_device_ticket(&ticket.qr_token).unwrap();
+        assert_eq!(store.device_ticket_status(&ticket.ticket_id).unwrap().state, "redeeming");
+        assert_eq!(store.consume_device_ticket(&ticket.qr_token).unwrap_err().0, "DEVICE_PAIRING_USED");
+        store.complete_device_ticket(&ticket.qr_token, "device-1");
+        let status = store.device_ticket_status(&ticket.ticket_id).unwrap();
+        assert_eq!(status.state, "used");
+        assert_eq!(status.device_id.as_deref(), Some("device-1"));
+        assert_eq!(status.failure_code, None);
+    }
+
+    #[test]
+    fn device_ticket_failed_and_redeeming_receipts_cannot_be_reclaimed() {
+        let store = QrTokenStore::new();
+        let ticket = store.generate_device_ticket();
+        store.consume_device_ticket(&ticket.qr_token).unwrap();
+        store.fail_device_ticket(&ticket.qr_token, "DEVICE_PAIRING_FAILED");
+        let status = store.device_ticket_status(&ticket.ticket_id).unwrap();
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.failure_code.as_deref(), Some("DEVICE_PAIRING_FAILED"));
+        assert_eq!(status.device_id, None);
+        assert_eq!(store.consume_device_ticket(&ticket.qr_token).unwrap_err().0, "DEVICE_PAIRING_USED");
+    }
+
+    #[test]
+    fn a_new_ticket_supersedes_only_ready_ones() {
+        let store = QrTokenStore::new();
+        let a = store.generate_device_ticket();
+        let b = store.generate_device_ticket();
+        assert_eq!(store.consume_device_ticket(&a.qr_token).unwrap_err().0, "DEVICE_PAIRING_INVALID");
+        assert!(store.device_ticket_status(&a.ticket_id).is_none());
+        store.consume_device_ticket(&b.qr_token).unwrap();
+        store.complete_device_ticket(&b.qr_token, "kept");
+        let c = store.generate_device_ticket();
+        let used = store.device_ticket_status(&b.ticket_id).unwrap();
+        assert_eq!(used.state, "used");
+        assert_eq!(used.device_id.as_deref(), Some("kept"));
+        assert!(store.consume_device_ticket(&c.qr_token).is_ok());
     }
 
     #[tokio::test]

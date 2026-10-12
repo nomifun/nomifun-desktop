@@ -80,7 +80,7 @@ const ChatConversationIndex: React.FC = () => {
     navigate('/', { replace: true });
   }, [id, isLoading, data, navigate, t]);
 
-  if (isLoading) return <MessageListSkeleton />;
+  if (isLoading && !data) return <MessageListSkeleton />;
   return <ChatConversation conversation={data ?? undefined}></ChatConversation>;
 };
 

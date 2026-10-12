@@ -258,6 +258,8 @@ export interface AgentBindingSummary {
 
 export interface AgentPresetLibraryResponse {
   official_templates: OfficialPresetTemplate[];
+  /** Stable, owner-scoped editable configurations; templates remain copy baselines. */
+  official_presets: Partial<Record<OfficialPresetKey, AgentPresetSummary>>;
   user_presets: AgentPresetSummary[];
   active_bindings: AgentBindingSummary[];
   fresh_start: {
@@ -375,6 +377,13 @@ export interface AgentPresetEditorResponse {
   draft: AgentPresetDraft;
 }
 
+/** Explicit recommendation preview; saving still uses the ordinary revision CAS. */
+export interface AgentPresetRecommendedCapabilitiesResponse {
+  draft: AgentPresetDraft;
+  added_capabilities: CapabilitySelection[];
+  added_skills: ExactCatalogRef<'skill'>[];
+}
+
 export interface CreateAgentPresetRequest {
   display_name: string;
   description?: string;
@@ -431,7 +440,7 @@ export type ProductAgentSelection =
   | { kind: 'template'; template_key: OfficialPresetKey }
   | { kind: 'preset'; preset_id: string };
 
-export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'removed';
+export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'companion' | 'removed';
 
 export interface ProductAgentOptions {
   selection: ProductAgentSelection;
@@ -652,6 +661,8 @@ export interface ApplyAgentSessionSwitchRequest {
   selection: AgentSwitchSelection;
   handoff_mode: AgentHandoffMode;
   expected_binding_version: number;
+  /** Concurrency precondition from preview, never an authorization grant. */
+  expected_resolved_snapshot_ref?: ResolvedSnapshotRef;
   model?: { provider_id: ProviderId; model: string };
 }
 

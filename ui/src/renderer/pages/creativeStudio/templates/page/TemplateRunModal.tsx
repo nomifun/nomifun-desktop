@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Input, InputNumber, Message, Modal, Select, Switch } from '@arco-design/web-react';
+import { Button, Input, Message, Modal, Switch } from '@arco-design/web-react';
 import { Copy, Play } from '@icon-park/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+
+import NomiInput from '@renderer/components/base/NomiInput';
+import NomiInputNumber from '@renderer/components/base/NomiInputNumber';
+import NomiSelect from '@renderer/components/base/NomiSelect';
 
 import {
   renderCreativePromptTemplate,
@@ -17,7 +21,7 @@ import {
   type CreativeTemplateInputValue,
   type CreativeTemplateVariable,
 } from '../domain';
-import styles from './CreativeTemplateWorkspacePage.module.css';
+import styles from './TemplateWorkspaceDialogs.module.css';
 import { draftPromptsStep, generationStep } from './templateViewModel';
 import {
   formatTemplateValidationError,
@@ -112,12 +116,12 @@ const TemplateInputControl: React.FC<{
     return variable.type === 'multiline-text' ? (
       <Input.TextArea {...control} autoSize={{ minRows: 3, maxRows: 6 }} />
     ) : (
-      <Input {...control} />
+      <NomiInput {...control} />
     );
   }
   if (variable.type === 'number' && input.type === 'number') {
     return (
-      <InputNumber
+      <NomiInputNumber
         value={input.value}
         min={variable.minimum ?? undefined}
         max={variable.maximum ?? undefined}
@@ -140,7 +144,7 @@ const TemplateInputControl: React.FC<{
   }
   if (variable.type === 'choice' && input.type === 'choice') {
     return (
-      <Select
+      <NomiSelect
         value={input.value || undefined}
         placeholder={
           variable.options.length > 0
@@ -376,11 +380,34 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
           defaultValue: 'Run template',
         })
       }
-      footer={null}
+      footer={
+        <div className={styles.runFooter}>
+          <Button disabled={submitting} onClick={onClose}>
+            {t('common.cancel', { defaultValue: 'Cancel' })}
+          </Button>
+          <Button
+            type='primary'
+            loading={submitting}
+            disabled={!canSubmit}
+            icon={<Play theme='outline' size={16} fill='currentColor' />}
+            onClick={() => void submit()}
+          >
+            {template.output.kind === 'multi-image-series'
+              ? t('creativeStudio.templates.runModal.generatePrompts', {
+                  defaultValue: 'Generate prompts',
+                })
+              : t('creativeStudio.templates.runModal.startTask', {
+                  defaultValue: 'Start task',
+                })}
+          </Button>
+        </div>
+      }
       autoFocus={false}
       unmountOnExit
+      maskClosable={!submitting}
+      closable={!submitting}
       getPopupContainer={() => document.body}
-      onCancel={onClose}
+      onCancel={() => !submitting && onClose()}
     >
       <div className={styles.runGrid} data-template-runner>
         <div className={styles.runColumn}>
@@ -531,24 +558,6 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
               {formatTemplateValidationError(validation.error, t)}
             </div>
           ) : null}
-
-          <Button
-            long
-            size='large'
-            type='primary'
-            loading={submitting}
-            disabled={!canSubmit}
-            icon={<Play theme='outline' size={16} fill='currentColor' />}
-            onClick={() => void submit()}
-          >
-            {template.output.kind === 'multi-image-series'
-              ? t('creativeStudio.templates.runModal.generatePrompts', {
-                  defaultValue: 'Generate prompts',
-                })
-              : t('creativeStudio.templates.runModal.startTask', {
-                  defaultValue: 'Start task',
-                })}
-          </Button>
         </div>
 
         <div className={styles.runColumn}>

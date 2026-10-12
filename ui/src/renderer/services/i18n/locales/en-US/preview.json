@@ -66,42 +66,33 @@
     "emptySnapshot": "Snapshot content is empty"
   },
   "office": {
-    "installLinkText": "Open officecli install guide",
+    "queued": "Preparing preview…",
+    "rendering": "Processing document…",
+    "displaying": "Displaying preview…",
+    "updating": "The file changed. Updating preview…",
+    "updateFailed": "Preview update failed. Showing the previous version. {{message}}",
     "errors": {
-      "officecliNotFound": "officecli is not installed.",
-      "installFailed": "Failed to install officecli automatically. Check backend logs and retry.",
-      "portTimeout": "Preview service started but did not become ready in time. Retry.",
-      "startFailed": "Failed to start the Office preview service.",
-      "outsideSandbox": "This file is outside the current project sandbox."
-    }
-  },
-  "word": {
-    "title": "Word Document",
-    "loading": "Loading Word document...",
-    "invalid": "Please confirm the file is a valid Word document",
-    "loadFailed": "Failed to load Word document",
-    "watch": {
-      "loading": "Loading Word document...",
-      "installing": "Installing officecli...",
-      "startFailed": "Failed to start Word preview",
-      "installHint": "Requires officecli. It will be installed automatically."
-    }
-  },
-  "excel": {
-    "title": "Excel Spreadsheet",
-    "loading": "Loading Excel workbook...",
-    "invalid": "Please confirm the file is a valid Excel document",
-    "noSheets": "No worksheets found in this Excel file",
-    "sheetCount": "{{count}} worksheet(s)",
-    "convertFailed": "Excel conversion failed",
-    "loadFailed": "Failed to load Excel workbook",
-    "emptySheet": "This worksheet has no data",
-    "emptySheetHint": "Check whether the sheet contains data or images",
-    "watch": {
-      "loading": "Loading Excel file...",
-      "installing": "Installing officecli...",
-      "startFailed": "Failed to start Excel preview",
-      "installHint": "Requires officecli. It will be installed automatically."
+      "componentUnavailable": "The preview component is unavailable. Check the app installation or update the app.",
+      "unsupportedFormat": "This file format is not supported. Open it in a system app.",
+      "fileUnstable": "The file is still being written. Try again shortly.",
+      "renderFailed": "The document preview could not be generated. Open it in a system app.",
+      "renderTimeout": "Document processing took too long. Retry or open it in a system app.",
+      "invalidArtifact": "The generated preview could not be verified. Check for an app update.",
+      "displayFailed": "The preview could not be displayed. Retry or open it in a system app.",
+      "connectionFailed": "The preview feature could not be reached. Try again.",
+      "fileNotFound": "The file does not exist or was moved.",
+      "outsideSandbox": "This file is outside the current project sandbox.",
+      "failed": "The document preview could not be generated. Open it in a system app.",
+      "fileUnavailable": "The document could not be read or its preview saved. Check that the file is accessible.",
+      "documentInvalid": "The document is incomplete, encrypted, or damaged. Check the file or open it in a system app.",
+      "preparationTimeout": "Document preparation took too long. Try again shortly.",
+      "resourceLimit": "The document exceeds the built-in preview limits. Open it in a system app.",
+      "cacheBusy": "Other open documents are using the preview cache. Close some previews and retry.",
+      "cleanupFailed": "The preview task could not stop safely. Restart the app before opening it again.",
+      "cancelled": "The preview task was cancelled.",
+      "requestUnavailable": "This preview request is no longer available. Reopen the file.",
+      "permissionDenied": "This file cannot be previewed with the current access permissions. Check its project path and access.",
+      "invalidRequest": "This file could not be prepared for preview. Check its path and format."
     }
   },
   "pdf": {
@@ -122,11 +113,5 @@
     "copyElementHtml": "Copy element HTML",
     "viewElementInfo": "View element info",
     "printedToConsole": "Element info logged to console"
-  },
-  "ppt": {
-    "loading": "Starting PPT preview...",
-    "installing": "Installing preview component...",
-    "startFailed": "Failed to start PPT preview",
-    "installHint": "Make sure officecli is installed: npm run postinstall"
   }
 }

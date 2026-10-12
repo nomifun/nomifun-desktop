@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
+  <img src="docs/images/readme/en/home.png" alt="NomiFun Desktop home with two custom companions" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
@@ -70,7 +70,7 @@ NomiFun capabilities when needed.
 | Project | Role | Start here |
 |---|---|---|
 | **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, application hosting, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
-| NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile guide](https://www.nomifun.com/docs/guides/mobile-bridge/) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
+| NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Connections & Devices guide](docs/guides/webui-remote-access.md) · Open **Connections & Devices → Connect a phone**, choose LAN or relay, then pair |
 | NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi guide](https://www.nomifun.com/docs/guides/xiaozhi-robot/) · Firmware source: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 | **NomiFun Portal** ([GitHub](https://github.com/nomifun/nomifun-protal)) | Canonical product-use documentation, onboarding, screenshots, walkthroughs, and end-user troubleshooting for the ecosystem | [English docs](https://www.nomifun.com/docs/) · [中文文档](https://www.nomifun.com/zh/docs/) |
@@ -79,15 +79,19 @@ NomiFun capabilities when needed.
 
 1. Run Desktop, configure the models/companions you need, and keep all data on
    that machine.
-2. For Mobile, open **Remote & Open → WebUI access**, start the listener, and
-   scan the short-lived, one-time QR code from the Mobile app. On a LAN, Mobile
+2. Open **Connections & Devices → Connect a phone → Same network**, enable access,
+   and generate a phone pairing code. In Mobile, select **Add Desktop** and scan
+   the code or paste the link. On a LAN, Mobile
    connects directly to Desktop with **no NomiFun cloud relay**. Desktop remains
    the authority and server; the phone is an authenticated client, so model
    credentials and the durable data set do not need to be copied to the phone.
 3. For Xiaozhi, build and flash the Yuntai firmware, then follow the companion
-   **Remote control → Robot connection** flow in Desktop to bind the device.
-4. When access must cross networks, self-host NomiRelay and `nfagent`, then
-   point Mobile at the relay business endpoint. Mobile never receives relay
+   **Channels & Robots → Robot connection** flow in Desktop to bind the device.
+4. For other networks, open **Connections & Devices → Connect a phone → Across networks (relay)**,
+   connect using a one-time enrollment code from your self-hosted Relay Console,
+   then generate a phone pairing code. Manage individual phones and revoke them
+   from the same page. Pausing cross-network access persists after Desktop restarts.
+   Mobile never receives relay
    admin credentials, and Desktop remains the application-data authority.
 
 Only enable remote interfaces on networks you trust. The Desktop guides above
@@ -152,27 +156,27 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
+  <img src="docs/images/readme/en/workspace.jpg" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
   <br/><sub><b>Workspace · conversations, Agents, tasks, tools, and connected devices in one desktop</b></sub>
 </p>
 
 <p>
-  <img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="NomiFun Creative Studio Canvas library" width="100%">
+  <img src="docs/images/creative-studio/en-US/02-canvas-workspace.jpg" alt="NomiFun 0.8.0 Canvas workspace with generated coffee-brand visuals" width="100%">
   <br/><sub><b>Creative Studio · persistent Canvases, media node composers, reusable prompts and assets, and templates</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/companions.png" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/models.jpg" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/companions.jpg" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/skills.jpg" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
     <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, asset libraries, templates, Assistant, skills, and companion workflow.</sub></td>
   </tr>
 </table>
 
-<sub>Freshly captured from the current NomiFun product build. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source, synchronization, and usage details.</sub>
+<sub>Captured from NomiFun Desktop 0.8.0 on October 8, 2026, with example conversations, generated images, assets, and templates. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source, synchronization, and usage details.</sub>
 
 </div>
 
@@ -189,26 +193,28 @@ and an optional native desktop companion.
 
 <table>
   <tr>
-    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/02-canvas-workspace.jpg" alt="Creative Studio coffee-brand example canvas"><br/><sub><b>Canvas workspace</b> · a brand brief and three generated visuals, ready to reuse in assets and templates</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.png" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · a searchable, attributed prompt catalog with categories, tags, copy, and save-to-assets actions</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.png" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio assets with filters, collections, tags, and pickers</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.jpg" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.png" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private single-image and multi-image-series templates with variables and exact model settings</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio AI Create template editor"><br/><sub><b>AI Create + Template Editor</b> · review one bounded draft, edit it, and explicitly Save before reuse</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.jpg" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · a searchable, attributed prompt catalog with categories, tags, copy, and save-to-assets actions</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.jpg" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio assets with filters, collections, tags, and pickers</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.png" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/12-companion-workspace.png" alt="NomiFun desktop companion beside Creative Studio"><br/><sub><b>Desktop companion collaboration</b> · the native companion can stay visible while you create</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.jpg" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private single-image and multi-image-series templates with variables and exact model settings</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.jpg" alt="Creative Studio AI Create template editor"><br/><sub><b>Template Editor</b> · reusable variables, prompts, exact models, aspect ratios, and resolution</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.jpg" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/12-native-companion.jpg" alt="NomiFun native desktop companion with a generated brand tagline"><br/><sub><b>Native desktop companion</b> · quick replies and a real coffee-brand tagline</sub></td>
   </tr>
 </table>
 
-The retained numbered paths are the stable README contract for the Creative Studio
-gallery: `01`, `05`–`08`, and `11`–`12`. The `03`/`04` workbench captures
-document retired standalone pages and are kept in the manifest as historical
-references only. The Skills Hub capture above shows the
+The 0.8.0 gallery covers the Canvas library and workspace, prompts, assets,
+templates, and companions. Replaced screenshots and captures of retired
+standalone workbenches have been removed. The Skills Hub capture above shows the
 Creative Studio skill packages as reusable capabilities. All captures
 should represent the running product, not a mockup or an invented capability. See
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture
@@ -355,7 +361,7 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and system WKWebView on macOS 14+ (Apple Silicon and Intel); Linux is deferred. The user and the Agent share one live page with tabs, navigation, forms, history, isolated sign-in state, WebSocket and HMR. On macOS, Agent interaction uses semantic page actions for ordinary buttons and forms; advanced gestures and automatic file transfer are explicitly unsupported. See the [platform capability matrix](docs/architecture/browser-platform.md).
 - **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
 - **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
 - **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
@@ -435,9 +441,10 @@ Run agent CLIs inside in-app PTY sessions. This is how **Claude Code, Codex, and
 > Product guide: [`docs/guides/webui-remote-access.md`](docs/guides/webui-remote-access.md) · [Portal mirror](https://www.nomifun.com/docs/guides/webui-remote/)
 > · App: [nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
-No social platform or NomiFun cloud relay is required on a LAN. One-tap **QR
-pairing** gives the phone a short-lived, one-time login credential and connects
-it directly to the authenticated listener inside Desktop. Mobile then uses the
+No social platform or NomiFun cloud relay is required on a LAN. Open **Connections
+& Devices → Connect a phone** and generate a short-lived, one-time pairing code.
+Every paired phone gets an independent, revocable credential and connects
+directly to the authenticated listener inside Desktop. Mobile then uses the
 same sessions, tasks, requirements, companions, models, and tools in real time;
 Desktop remains the data and execution authority. The phone is a connected,
 authenticated client, so it does not need a duplicate database or a second copy
@@ -445,7 +452,7 @@ of your model credentials.
 
 ### ⚙️ Config once, use anywhere
 
-Central hubs for **Knowledge**, **Agent workbench & Skills**, **MCP**, **Models**, and **Open Capabilities** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
+Central hubs for **Knowledge**, **Agent workbench & Skills**, **MCP**, **Models**, and **Connections & Devices** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
 
 ### 💬 11 IM channels
 
@@ -625,12 +632,12 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 - **`--signed`** — sign (and, on macOS, notarize). Requires local signing config; see each OS.
 - **`-- …`** — forwards supported arguments to `tauri build`
   (e.g. Windows `-- --bundles nsis`). macOS product packaging fixes the release
-  profile, arm64 target and complete App/DMG output; flags that bypass this contract
+  profile, selected native target and complete App/DMG output; flags that bypass this contract
   are rejected. For updater builds, layer on the committed overlay as a **file path**:
   `bun run build:<os> --config apps/desktop/tauri.updater.conf.json` — pass the file, not
   inline JSON, because Windows PowerShell 5.1 strips the quotes from `--config '{...}'`.
 
-**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64)
+**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64 or Intel x64)
 
 | Goal | Command |
 | --- | --- |
@@ -638,31 +645,39 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 | Developer ID signature + configured notarization | `bun run build:mac --signed` or `bun run build:signed` |
 | Complete signed updater archive | `bun run build:updater` |
 | Developer ID package and updater archive | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| Native Intel package and updater archive | `bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json` |
 | Complete development `.app` with embedded Browser | `bun run build:fast` |
 
-The pinned CEF runtime supports arm64; Intel and Universal builds are rejected.
-Arch aliases are `arm`/`aarch64`/`silicon`. All macOS product commands use the same
-CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
-are generated from the final App after its CEF components have been installed and
-signed; updater signing also requires the configured Tauri updater private key.
+Both architectures use system WKWebView without bundling or downloading a browser runtime. Arch aliases are
+`arm`/`aarch64`/`silicon` and `intel`/`x64`/`x86_64`; Universal builds are rejected.
+Intel packages include the verified ONNX Runtime 1.23.2 and its licenses.
+Use the native package for your architecture. Cross-compilation is not target-machine acceptance.
+All macOS product commands share the App assembly and signing pipeline. DMG and updater `.app.tar.gz`
+are generated from the final App; updater signing also requires the configured Tauri updater private key.
+
+DMGs use **ULMO/LZMA** compression by default. To produce a compatibility image
+with **UDZO/zlib level 9**, run
+`NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac` (the setting also applies to
+signed builds). ULMO can be mounted on macOS 10.15+; the existing embedded-browser
+target remains macOS 14+ for both native architectures. Compression changes neither the App's
+minimum-system declarations nor its browser runtime. For signed release builds
+with notarization configured, the final App is signed, notarized and stapled
+before either distribution container is generated; DMG signing and notarization
+follow container creation.
 
 `bun run dev` launches a complete development `.app` and waits for native browser
 cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
-and prints its path. A bare Cargo binary lacks the embedded browser bundle.
+and prints its path. Use the App bundle for product testing, including its identity and system permissions.
 
 For a stable installed development signing identity, explicitly set
 `NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` for
-`bun run dev` or `bun run build:fast`. The same identity signs the main App, CEF
-framework and all Helpers, including incremental rebuilds; bundle caches are
+`bun run dev` or `bun run build:fast`. The same identity signs the App,
+including incremental rebuilds; bundle caches are
 separate for each configured identity. The scripts do not select or create a
-certificate. With no setting, builds use ad-hoc signing and print one startup
-notice that rebuilding may require macOS Keychain authorization again.
-
-The pinned CEF currently uses the default **Chromium Safe Storage** Keychain
-item. macOS controls explicit access to it, separately from Agent Browser grants.
-A stable signing identity and bundle identifier let Keychain recognize updates;
-they do not replace the user's initial authorization. See the
-[macOS signing notes](apps/desktop/signing/README.md) for this SDK limitation.
+certificate. With no setting, builds use ad-hoc signing. WK website data is independent
+of Safari and the retired browser's profiles; users may need to sign into sites once
+after migration. Existing AgentSession data and application configuration are preserved.
+See the [macOS signing notes](apps/desktop/signing/README.md).
 
 Developer ID signing reads `apps/desktop/signing/.env.signing` (gitignored) and
 requires an installed `APPLE_SIGNING_IDENTITY`. Configured notarization applies
@@ -695,8 +710,9 @@ Arch aliases: `x64`/`x86_64`, `arm64`/`aarch64`/`arm`. Linux has no signing/nota
 ⚠️ Cross-arch (e.g. building arm64 on an x64 host) needs the target's sysroot/toolchain and often
 fails on the webkit2gtk link — build on the target architecture's machine/container instead.
 
-> `bun run build` builds for the current OS. On macOS it uses the complete arm64
-> CEF packaging pipeline; Windows and Linux retain their existing Tauri build path.
+> `bun run build` builds for the current OS. On macOS it uses the complete native
+> packaging pipeline with arm64 as the default; `build:mac intel` selects Intel.
+> Windows and Linux retain their existing Tauri build path.
 
 <details>
 <summary><b>Full script catalog</b></summary>
@@ -711,12 +727,12 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
+| `bun run build:fast` | 快速构建 debug；macOS 输出原生 WKWebView .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
+| `bun run build:mac` | 构建 macOS App 和 DMG（默认 arm64，可选 Intel），并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
-| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
+| `bun run build:signed` | 构建完整 macOS App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终签名 App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
@@ -733,6 +749,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
+| `bun run test:upgrade` | 运行启动、数据集兼容与升级定向 Rust 测试 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
@@ -742,8 +759,8 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
 | `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
-| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
-| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
+| `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创作页面、路由、API、翻译与 Gateway 标记回流 |
+| `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创作标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |

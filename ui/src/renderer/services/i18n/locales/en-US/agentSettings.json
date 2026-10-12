@@ -56,6 +56,16 @@
     "startConversation": "Start conversation",
     "saveRevision": "Save configuration"
   },
+  "recommendation": {
+    "preview": "Complete recommended capabilities",
+    "title": "Recommended additions",
+    "current": "Recommended capabilities are already complete",
+    "reviewHint": "Review these missing modules, actions and Skills. Completing the list re-enables recommended capabilities you previously turned off; your other settings are kept.",
+    "sessionHint": "Saved capabilities apply to new conversations. Apply the saved update separately in an existing Companion conversation.",
+    "saveFirst": "Save or discard your changes before reviewing recommended additions.",
+    "apply": "Complete and save",
+    "skill": "Skill · v{{version}}"
+  },
   "defaults": {
     "untitledName": "Untitled Agent",
     "forkName": "{{name}} Copy"
@@ -77,6 +87,7 @@
     "chooseModelLater": "Choose an Agent first, then configure a compatible chat model.",
     "loadFailed": "Could not load Agent options. Please retry.",
     "saveFailed": "Could not update the Agent. Please try again later.",
+    "partialSave": "The current conversation was updated, but the default setup could not be saved. Retry with Apply latest setup.",
     "modelChanged": "The current model is incompatible with this Agent. Options have been refreshed; please select again.",
     "busy": "Wait for the current reply to finish before switching Agents.",
     "unavailableAgent": "Unavailable Agent",
@@ -86,11 +97,17 @@
       "vision": "The current model does not support image understanding",
       "model": "The current chat model is unavailable",
       "capability": "Required capabilities are unavailable in this environment",
+      "companion": "Enable the Companion capability to preserve the companion's persona and memory",
       "removed": "This Agent was removed or has no saved revision"
     },
     "label": "Agent setup",
     "saved": "Agent updated",
-    "companionHint": "Changes apply to this companion's desktop, robot and IM conversations. The official Companion is used by default."
+    "companionHint": "Used for this companion's desktop, robot and IM conversations. Switch after the current task finishes.",
+    "officialTag": "Official",
+    "customTag": "Custom",
+    "applyLatest": "Apply latest setup",
+    "applyLatestHint": "After editing and saving the current Agent, apply its latest setup to this companion's existing conversation.",
+    "editAgent": "Edit Agent"
   },
   "library": {
     "ariaLabel": "Agent library",
@@ -123,13 +140,31 @@
     "assistant": {
       "general": {
         "name": "General",
-        "description": "A ready-to-customize set of research, knowledge, workspace, collaboration, and extension modules."
+        "description": "Research, files, Office, media, browser and computer tasks, knowledge, schedules, collaboration, and session management."
       }
     },
     "coding": {
       "codex": {
         "name": "Coding",
-        "description": "Combines workspace I/O, version control, processes, deliverables, project memory, research, and collaboration. Computer control can be added when needed."
+        "description": "Files, commands, Git, deliverables, project memory, knowledge, research, collaboration, session management, and SSH. Browser and computer tools can be added for desktop work."
+      }
+    },
+    "companion": {
+      "default": {
+        "name": "Companion",
+        "description": "A personal companion with memory and everyday tools for research, files, Office, media, browsers, apps, knowledge, schedules, messaging, and collaboration."
+      }
+    },
+    "customerService": {
+      "default": {
+        "name": "Customer Service",
+        "description": "Knowledge search, customer notes, replies and follow-ups, attachments, deliverables, and schedules for service work."
+      }
+    },
+    "creativeStudio": {
+      "default": {
+        "name": "Creation",
+        "description": "Media, canvas, assets, Office, files, project memory, research and browser references, collaboration, and schedules for creative work."
       }
     },
     "app": {
@@ -137,69 +172,216 @@
         "name": "Built-in Apps",
         "description": "Create, import and edit ordinary applications in Apps, configure their commands and optionally connect them to NomiFun."
       }
-    },
-    "companion": {
-      "default": {
-        "name": "Companion",
-        "description": "Combines companion identity, long-term memory, knowledge, and schedules. Channels, robots, and computer control can be connected when needed."
-      }
-    },
-    "customerService": {
-      "default": {
-        "name": "Customer Service",
-        "description": "Combine knowledge, communication and customer records for service work."
-      }
-    },
-    "creativeStudio": {
-      "default": {
-        "name": "Creation",
-        "description": "For professional multimodal work across media, canvas, Office, workspace, project memory, and web research."
-      }
     }
   },
   "modules": {
-    "appHosting": {"name": "NomiFun app development", "description": "Create, import and edit apps in conversation, configure commands and preview or use them. Read platform connection guidance when needed."},
-    "modelManagement": { "name": "Model management", "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults." },
-    "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
-    "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },
-    "browser": { "name": "Browser", "description": "Observe and interact with a bound managed browser or authorized Chrome. The provider never adds permissions." },
-    "channelMessaging": { "name": "Channel messaging", "description": "Reply or send through a channel selected by the usage target." },
-    "companion": { "name": "Companion", "description": "Learn and evolve the selected companion within its product boundary." },
-    "companionMemory": { "name": "Companion memory", "description": "Recall or write memory for the selected companion." },
-    "computer": { "name": "Computer", "description": "High-privilege extension. Missing OS grants disable only Computer actions, not the Agent's other capabilities." },
-    "creationMedia": { "name": "Media creation", "description": "Create text, images, video, audio and music through configured generation services." },
-    "creativeWorkshop": { "name": "$t(agentSettings.template.creativeStudio.default.name)", "description": "Work with canvases, assets and reusable creative templates." },
-    "customerService": { "name": "Customer service", "description": "Read and update service notes or hand work to a person." },
-    "knowledge": { "name": "Knowledge", "description": "Search, read and update a knowledge base selected when the Agent is used." },
-    "office": { "name": "Office", "description": "Preview and edit documents, spreadsheets and presentations." },
-    "projectMemory": { "name": "Project memory", "description": "Read or write durable memory for the selected project." },
-    "requirements": { "name": "Requirements", "description": "Read, write, update and claim work from the requirements platform." },
-    "robot": { "name": "Robot", "description": "Observe and control an explicitly bound robot device." },
-    "ssh": { "name": "SSH", "description": "Read files or run authorized commands on a selected SSH host." },
-    "webResearch": { "name": "Web research", "description": "Search public sources and fetch pages without using browser sign-in state." },
-    "workspaceArtifacts": { "name": "Deliverables", "description": "Publish workspace files as verified deliverables or read published content by artifact ID." },
-    "workspaceFiles": { "name": "Workspace I/O", "description": "Read, search, create, and modify files by path inside the workspace." },
-    "workspaceProcess": { "name": "Local processes", "description": "Start, observe, and control local command processes in the workspace." },
-    "workspaceVcs": { "name": "Version control", "description": "Inspect and explicitly change version-control state in the selected workspace." }
+    "modelManagement": {
+      "name": "Model management",
+      "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults."
+    },
+    "knowledgeManagement": {
+      "name": "Knowledge library management",
+      "description": "Create and manage knowledge libraries, initial materials, and webpage sources. Available to this installation's owner; select a new library in the conversation when needed."
+    },
+    "sessionManagement": {
+      "name": "Conversations and terminals",
+      "description": "Query and manage conversations, terminals, and collaborative tasks. Send an explicit request to a selected idle conversation. Available to this installation's owner."
+    },
+    "agentCollaboration": {
+      "name": "Agent collaboration",
+      "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision."
+    },
+    "automationSchedule": {
+      "name": "Schedules",
+      "description": "Create and manage durable schedules without exposing scheduler internals."
+    },
+    "browser": {
+      "name": "Browser",
+      "description": "Observe and interact with a bound browser. Available actions depend on the browser: macOS supports ordinary page and form actions; advanced gestures and automatic file transfer are unavailable. The provider never adds permissions."
+    },
+    "channelMessaging": {
+      "name": "Channel messaging",
+      "description": "Reply or send through a channel selected by the usage target."
+    },
+    "companion": {
+      "name": "Companion",
+      "description": "Learn and evolve the selected companion within its product boundary."
+    },
+    "companionMemory": {
+      "name": "Companion memory",
+      "description": "Recall or write memory for the selected companion."
+    },
+    "computer": {
+      "name": "Computer",
+      "description": "High-privilege extension. Missing OS grants disable only Computer actions, not the Agent's other capabilities."
+    },
+    "creationMedia": {
+      "name": "Media creation",
+      "description": "Create text, images, video, audio and music through configured generation services."
+    },
+    "creativeWorkshop": {
+      "name": "$t(agentSettings.template.creativeStudio.default.name)",
+      "description": "Work with canvases, assets and reusable creative templates."
+    },
+    "customerService": {
+      "name": "Customer service",
+      "description": "Read and update service notes or hand work to a person."
+    },
+    "knowledge": {
+      "name": "Knowledge",
+      "description": "Search, read and update a knowledge base selected when the Agent is used."
+    },
+    "office": {
+      "name": "Office",
+      "description": "Preview and edit documents, spreadsheets and presentations."
+    },
+    "projectMemory": {
+      "name": "Project memory",
+      "description": "Read or write durable memory for the selected project."
+    },
+    "requirements": {
+      "name": "Requirements",
+      "description": "Read, write, update and claim work from the requirements platform."
+    },
+    "robot": {
+      "name": "Robot",
+      "description": "Observe and control an explicitly bound robot device."
+    },
+    "ssh": {
+      "name": "SSH",
+      "description": "Read files or run authorized commands on a selected SSH host."
+    },
+    "webResearch": {
+      "name": "Web research",
+      "description": "Search public sources and fetch pages without using browser sign-in state."
+    },
+    "workspaceArtifacts": {
+      "name": "Deliverables",
+      "description": "Publish workspace files as verified deliverables or read published content by artifact ID."
+    },
+    "workspaceFiles": {
+      "name": "Workspace I/O",
+      "description": "Read, search, create, and modify files by path inside the workspace."
+    },
+    "workspaceProcess": {
+      "name": "Local processes",
+      "description": "Start, observe, and control local command processes in the workspace."
+    },
+    "workspaceVcs": {
+      "name": "Version control",
+      "description": "Inspect and explicitly change version-control state in the selected workspace."
+    },
+    "appHosting": {
+      "name": "NomiFun app development",
+      "description": "Create, import and edit apps in conversation, configure commands and preview or use them. Read platform connection guidance when needed."
+    }
   },
   "actionLabels": {
-    "inspect": "Inspect configuration and protocols", "create_provider": "Add provider", "add_model": "Add model", "guide": "Read app guide",
-    "search": "Search", "fetch": "Read pages", "read": "Read", "write": "Write", "autogen": "Generate knowledge",
-    "recall": "Recall", "delegate": "Delegate", "fork": "Fork", "request_user_decision": "Ask the user", "list": "List", "create": "Create", "update": "Update", "delete": "Delete", "edit": "Edit", "launch": "Launch",
-    "observe": "Observe", "navigate": "Navigate", "act": "Interact", "render_content": "Read page content", "download": "Download", "upload": "Upload", "evaluate": "Evaluate scripts",
-    "reply": "Reply", "send": "Send", "learn": "Learn", "evolve": "Evolve", "notes_read": "Read notes", "notes_write": "Write notes", "handoff": "Hand off",
-    "text": "Create text", "image": "Create images", "image_edit": "Edit images", "video": "Create video", "audio": "Create audio", "music": "Create music",
-    "canvas_read": "Read canvas", "canvas_edit": "Edit canvas", "asset_read": "Read assets", "asset_write": "Write assets", "template_run": "Run template",
-    "preview": "Preview", "document_edit": "Edit documents", "sheet_edit": "Edit spreadsheets", "slides_edit": "Edit presentations",
-    "publish": "Publish", "serve": "Serve", "status": "View status", "diff": "Review changes", "stage": "Stage changes", "commit": "Commit", "push": "Push",
-    "exec": "Run commands", "start": "Start process", "poll": "Read process output", "input": "Send input", "close_stdin": "Close input", "resize": "Resize terminal", "cancel": "Stop process",
-    "fs_read": "Read remote files", "fs_write": "Write remote files", "sudo": "Run privileged commands", "claim": "Claim work", "a11y_observe": "Inspect accessibility tree",
-    "vision": "Use robot vision", "display": "Use robot display", "motion": "Control motion", "device": "Use device tools", "tool_discovery_rank": "Discover tools"
+    "knowledge_management_list": "List knowledge libraries",
+    "knowledge_management_inspect": "View library details and documents",
+    "knowledge_management_create": "Create a knowledge library",
+    "knowledge_management_update": "Update library details and webpage sources",
+    "knowledge_management_delete": "Delete a knowledge library",
+    "session_management_list": "List conversations",
+    "session_management_status": "Check conversation status",
+    "session_management_create": "Create a conversation",
+    "session_management_send_input": "Send a request to another conversation",
+    "session_management_cancel_turn": "Cancel a conversation's current task",
+    "session_management_terminal_list": "List terminals",
+    "session_management_terminal_create": "Create a terminal",
+    "session_management_terminal_read": "Read terminal output",
+    "session_management_terminal_input": "Send terminal input",
+    "session_management_terminal_relaunch": "Relaunch a terminal",
+    "session_management_terminal_stop": "Stop a terminal",
+    "session_management_execution_list": "List collaborative tasks",
+    "session_management_execution_status": "Check collaborative task status",
+    "session_management_execution_retry_step": "Retry a collaborative task step",
+    "session_management_execution_adjust": "Adjust a collaborative task",
+    "session_management_execution_cancel": "Cancel a collaborative task",
+    "inspect": "Inspect configuration and protocols",
+    "create_provider": "Add provider",
+    "add_model": "Add model",
+    "search": "Search",
+    "fetch": "Read pages",
+    "read": "Read",
+    "write": "Write",
+    "autogen": "Generate knowledge",
+    "recall": "Recall",
+    "delegate": "Delegate",
+    "fork": "Fork",
+    "request_user_decision": "Ask the user",
+    "list": "List",
+    "create": "Create",
+    "update": "Update",
+    "delete": "Delete",
+    "edit": "Edit",
+    "launch": "Launch",
+    "observe": "Observe",
+    "navigate": "Navigate",
+    "act": "Interact",
+    "render_content": "Read page content",
+    "download": "Download",
+    "upload": "Upload",
+    "evaluate": "Evaluate scripts",
+    "reply": "Reply",
+    "send": "Send",
+    "learn": "Learn",
+    "evolve": "Evolve",
+    "notes_read": "Read notes",
+    "notes_write": "Write notes",
+    "handoff": "Hand off",
+    "text": "Create text",
+    "image": "Create images",
+    "image_edit": "Edit images",
+    "video": "Create video",
+    "audio": "Create audio",
+    "music": "Create music",
+    "canvas_read": "Read canvas",
+    "canvas_edit": "Edit canvas",
+    "asset_read": "Read assets",
+    "asset_write": "Write assets",
+    "template_run": "Run template",
+    "preview": "Preview",
+    "document_edit": "Edit documents",
+    "sheet_edit": "Edit spreadsheets",
+    "slides_edit": "Edit presentations",
+    "publish": "Publish",
+    "serve": "Serve",
+    "status": "View status",
+    "diff": "Review changes",
+    "stage": "Stage changes",
+    "commit": "Commit",
+    "push": "Push",
+    "exec": "Run commands",
+    "start": "Start process",
+    "poll": "Read process output",
+    "input": "Send input",
+    "close_stdin": "Close input",
+    "resize": "Resize terminal",
+    "cancel": "Stop process",
+    "fs_read": "Read remote files",
+    "fs_write": "Write remote files",
+    "sudo": "Run privileged commands",
+    "claim": "Claim work",
+    "a11y_observe": "Inspect accessibility tree",
+    "vision": "Use robot vision",
+    "display": "Use robot display",
+    "motion": "Control motion",
+    "device": "Use device tools",
+    "tool_discovery_rank": "Discover tools",
+    "guide": "Read app guide"
   },
   "effects": {
-    "pure": "No external effect", "read_local": "Reads local data", "read_sensitive": "Reads sensitive data",
-    "write_reversible": "Reversible change", "write_durable": "Durable change", "execute_local": "Runs on this device",
-    "external_transmit": "Sends data externally", "destructive": "Destructive action", "irreversible": "Irreversible action", "physical": "Physical action"
+    "pure": "No external effect",
+    "read_local": "Reads local data",
+    "read_sensitive": "Reads sensitive data",
+    "write_reversible": "Reversible change",
+    "write_durable": "Durable change",
+    "execute_local": "Runs on this device",
+    "external_transmit": "Sends data externally",
+    "destructive": "Destructive action",
+    "irreversible": "Irreversible action",
+    "physical": "Physical action"
   },
   "availability": {
     "offline": "The selected device is offline. Reconnect it and refresh the catalog.",
@@ -370,22 +552,19 @@
     "mine": "My Agents",
     "official": "Official presets",
     "noAgents": "No matching Agents",
-    "officialHint": "Start with a preset and make it yours",
+    "officialHint": "Edit official Agents directly and save for their product entry points",
     "myHint": "Prepare the right Agent for your work",
     "capabilityTab": "Modules & actions",
     "settingsTab": "Profile & behavior",
     "runtimeTab": "Runtime policy",
     "extensionsTab": "Execution extensions",
-    "saveAsMine": "Save as my Agent",
     "customizeTitle": "Make this preset yours",
     "customizeHint": "Adjust capabilities and save your own Agent. The official preset stays available.",
-    "readyToSave": "Ready for server validation",
     "pendingChanges": "Unsaved changes",
     "savedHint": "All changes saved",
     "saveHint": "This saved revision is ready for new conversations.",
     "previewCompileHint": "Save runs the authoritative server compile for the exact actions, providers and resource requirements.",
     "resetChanges": "Discard changes",
-    "resetTemplate": "Restore preset capabilities",
     "leaveTitle": "You have unsaved changes",
     "leaveBody": "Switching will discard these changes.",
     "keepEditing": "Keep editing",
@@ -404,6 +583,12 @@
     "disabledSave": "Resolve unavailable modules or actions before saving",
     "presetBadge": "Customizable preset",
     "personalBadge": "Personal Agent",
+    "officialBadge": "Official Agent · Personal configuration",
+    "officialSaveHint": "Saved changes apply to new sessions. Apply updates to an existing companion in its settings.",
+    "createCopy": "Create a copy",
+    "openCompanions": "Open Companions",
+    "openCustomerService": "Open Customer Service",
+    "companionCoreNeeded": "Keep Companion and Companion memory enabled. You can add other capabilities or create an independent copy.",
     "editIdentity": "Edit Agent details",
     "editName": "Rename Agent",
     "createHint": "Start from a blank Agent",
@@ -423,7 +608,11 @@
     "dependencyActionPermissions": "Actions available to dependency calls",
     "moduleUnavailableSummary": "{{count}} enabled modules, actions, or runtime conditions need attention.",
     "searchModules": "Search modules, actions or resources",
-    "moduleStatus": { "all": "All", "enabled": "Effective", "attention": "Needs attention" },
+    "moduleStatus": {
+      "all": "All",
+      "enabled": "Effective",
+      "attention": "Needs attention"
+    },
     "moduleCategories": "Module categories",
     "moduleCategoryCount": "{{enabled}} enabled, {{total}} total",
     "moduleCatalog": "Capability modules and dependencies",
@@ -456,7 +645,10 @@
     "emptyWorkbenchTitle": "Create your first Agent",
     "emptyWorkbenchHint": "No official presets or personal Agents are available. Start with a blank custom Agent and add modules from the installed catalog.",
     "showList": "Show Agent list",
-    "hideList": "Hide Agent list"
+    "hideList": "Hide Agent list",
+    "saveAsMine": "Save as my Agent",
+    "readyToSave": "Ready for server validation",
+    "resetTemplate": "Restore preset capabilities"
   },
   "runtimePolicy": {
     "title": "Runtime & supervision",

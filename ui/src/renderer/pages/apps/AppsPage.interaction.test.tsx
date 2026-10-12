@@ -27,7 +27,7 @@ const app = (id: string, name: string): HostedApp => ({ id, name, description: '
 const wrapper = ({ children }: { children: React.ReactNode }) => <I18nextProvider i18n={i18n}>
   <MemoryRouter><SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig></MemoryRouter></I18nextProvider>;
 beforeEach(() => {
-  spyOn(agentPlatform.library, 'invoke').mockResolvedValue({ user_presets: [], official_templates: [], active_bindings: [],
+  spyOn(agentPlatform.library, 'invoke').mockResolvedValue({ user_presets: [], official_presets: {}, official_templates: [], active_bindings: [],
     fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 0 } });
 });
 afterEach(() => { cleanup(); mock.restore(); });

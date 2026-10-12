@@ -108,7 +108,7 @@ export function getBaseUrl(): string {
 1. Tauri 外壳通过 `tauri://` / `file://` 协议加载 SPA；`BrowserRouter` 在该协议下经历的页面重新加载（如深链接或应用内导航）后无法保留状态。
 2. Web 宿主通过 `tower_http::services::ServeDir` 提供 SPA，并启用 `append_index_html_on_directories(true)`。Hash 路由意味着浏览器访问的任何路径都返回 `index.html`，由 SPA 完成其余工作 —— 静态服务器无需自定义 catch-all。
 
-路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、Agent 设置与 Agent Preset（`/agent`、单个 Agent 会话 `/agent-sessions/:agentSessionId`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements`、`/requirements/extensions`、`/requirements/sources`，`/autowork` 等旧路径仅作重定向）、定时任务（`/scheduled`、`/scheduled/:cron_job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、客服（`/customer-service`、`/customer-service/:cs_agent_id`）、知识库（`/knowledge`、`/knowledge/:id`）、应用托管（`/apps` 列表、当前运行设置和系统浏览器入口）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
+路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、Agent 设置与 Agent Preset（`/agent`、单个 Agent 会话 `/agent-sessions/:agentSessionId`）、技能（`/skills`）、MCP（`/mcp`）、连接与设备（`/connections`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements`、`/requirements/extensions`、`/requirements/sources`，`/autowork` 等旧路径仅作重定向）、定时任务（`/scheduled`、`/scheduled/:cron_job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、客服（`/customer-service`、`/customer-service/:cs_agent_id`）、知识库（`/knowledge`、`/knowledge/:id`）、应用托管（`/apps` 列表、独立应用项目、多会话开发、普通命令和预览）以及认证（`/login`）。旧 settings 路径与 `/open-capabilities` 只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
 创作位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
 进入产品后，左侧主侧栏会像“设置”一样切换为创作内部导航，并把“返回工作台”

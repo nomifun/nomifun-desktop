@@ -79,7 +79,6 @@ impl RobotModuleError {
     fn owner_mismatch(message: impl Into<String>) -> Self {
         Self::new(ROBOT_RESOURCE_OWNER_MISMATCH, message, false)
     }
-
 }
 
 impl std::fmt::Display for RobotModuleError {

@@ -33,6 +33,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod browser_surface;
+mod desktop_startup;
 mod native_api_plugins;
 #[cfg(windows)]
 mod headless_browser_runtime;
@@ -344,12 +345,12 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 /// The desktop and web hosts share the canonical startup-root resolver. It
 /// rejects ambiguous legacy layouts instead of silently selecting another
 /// architecture-specific sibling.
-fn default_data_dir() -> PathBuf {
+fn default_data_dir() -> anyhow::Result<PathBuf> {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(nomifun_app::cli::default_data_dir);
-    nomifun_app::bootstrap::resolve_startup_data_root(requested)
+    nomifun_app::bootstrap::prepare_startup_storage_root(requested, None)
 }
 
 fn desktop_browser_profile_store(
@@ -368,32 +369,39 @@ fn desktop_browser_profile_store(
 }
 
 #[cfg(target_os = "macos")]
-struct ExplicitDesktopDataRoot(bool);
-
-#[cfg(target_os = "macos")]
 struct MacosWebviewDataStore(Option<[u8; 16]>);
 
 /// WKWebView ignores data_directory and otherwise shares defaultDataStore.
-/// Only custom explicit backend roots receive a separate persistent store.
-/// Preserve the channel default even when a restart inherits its exported root.
+/// The original storage identity owns the persistent profile across relocation.
 #[cfg(target_os = "macos")]
 fn macos_webview_data_store(
-    explicit_root: bool,
     data_root: &Path,
+    channel_default: &Path,
+    custom_store_available: bool,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    let canonical_root = std::fs::canonicalize(data_root)
+        .context("cannot resolve WebView data root")?;
+    let origin = match nomifun_common::storage_relocation::resolve_control_dir(&canonical_root)? {
+        Some(control) => nomifun_common::storage_relocation::resolve_storage_location(&control)?
+            .map(|location| location.origin_data_dir)
+            .unwrap_or(canonical_root),
+        None => canonical_root,
+    };
+    let default_root = std::fs::canonicalize(channel_default)
+        .unwrap_or_else(|_| channel_default.to_path_buf());
+    macos_webview_store_for_origin(&origin, &default_root, custom_store_available)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_webview_store_for_origin(
+    origin: &Path,
     channel_default: &Path,
     custom_store_available: bool,
 ) -> anyhow::Result<Option<[u8; 16]>> {
     use std::os::unix::ffi::OsStrExt;
     use sha2::{Digest, Sha256};
 
-    if !explicit_root {
-        return Ok(None);
-    }
-    let canonical_root = std::fs::canonicalize(data_root)
-        .context("cannot resolve explicit WebView data root")?;
-    let default_root = std::fs::canonicalize(channel_default)
-        .unwrap_or_else(|_| channel_default.to_path_buf());
-    if canonical_root == default_root {
+    if origin == channel_default {
         return Ok(None);
     }
     anyhow::ensure!(
@@ -402,7 +410,7 @@ fn macos_webview_data_store(
     );
     let mut digest = Sha256::new();
     digest.update(b"NomiFun WKWebView explicit data root v1\0");
-    digest.update(canonical_root.as_os_str().as_bytes());
+    digest.update(origin.as_os_str().as_bytes());
     let mut identifier = [0u8; 16];
     identifier.copy_from_slice(&digest.finalize()[..16]);
     Ok(Some(identifier))
@@ -1152,10 +1160,11 @@ async fn relay_pairing_restart(
 #[tauri::command(rename_all = "camelCase")]
 async fn relay_pairing_stop(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
-        .stop()
+        .stop(server.inner().clone())
         .await
         .map_err(|error| format!("{error:#}"))
 }
@@ -1164,12 +1173,34 @@ async fn relay_pairing_stop(
 #[tauri::command(rename_all = "camelCase")]
 async fn relay_pairing_disconnect(
     manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
 ) -> Result<relay_pairing::RelayPairingStatus, String> {
     manager
         .inner()
-        .disconnect()
+        .disconnect(server.inner().clone())
         .await
         .map_err(|error| format!("{error:#}"))
+}
+
+/// Forget local pairing state without contacting the Relay.
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_forget_local(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager
+        .inner()
+        .forget_local(server.inner().clone())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn relay_pairing_refresh_qr(
+    manager: tauri::State<'_, Arc<relay_pairing::RelayPairingManager>>,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+) -> Result<relay_pairing::RelayPairingStatus, String> {
+    manager.inner().refresh_qr(server.inner().clone()).await.map_err(|error| format!("{error:#}"))
 }
 
 struct AwakeState(Mutex<Option<keepawake::KeepAwake>>);
@@ -1347,10 +1378,10 @@ enum StartupCleanup {
     /// the only state in which the shell can prove that no backend-owned
     /// resource exists.
     NotStarted,
-    /// `DesktopServer::start` has been entered, but it has not returned the
-    /// authoritative server handle yet.  A failure in this window must not be
-    /// treated as an already-verified cleanup: the start routine may have
-    /// acquired services, listeners, or browser ownership before failing.
+    /// Managed startup work has begun without published cleanup proof. This
+    /// includes an unproven component probe handed to the existing process
+    /// reaper, or DesktopServer startup before its authoritative handle returns.
+    /// Neither case can be treated as already-verified cleanup.
     StartingUnverified,
     /// `DesktopServer::start` returned a normal error after completing its
     /// internal startup-failure cleanup. Unlike a panic, this is a positive
@@ -1369,7 +1400,7 @@ impl StartupCleanup {
         match self {
             Self::NotStarted | Self::FailedVerified => Ok(()),
             Self::StartingUnverified => Err(anyhow::anyhow!(
-                "embedded backend startup entered before a cleanup authority was published"
+                "startup resource cleanup is unverified without a published authority"
             )),
             Self::RetainedKeepAlive(keep_alive) => {
                 keep_alive.shutdown_after_startup_failure_blocking(runtime)
@@ -2339,6 +2370,21 @@ where
     }
 }
 
+#[cfg(target_os = "macos")]
+fn prepare_macos_webview_store(app: &tauri::AppHandle, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if app.try_state::<MacosWebviewDataStore>().is_some() {
+        return Ok(());
+    }
+    let channel_default = nomifun_app::cli::default_data_dir();
+    let store = macos_webview_data_store(
+        data_dir,
+        &channel_default,
+        objc2::available!(macos = 14.0),
+    )?;
+    app.manage(MacosWebviewDataStore(store));
+    Ok(())
+}
+
 fn complete_main_thread_setup(
     app: tauri::AppHandle,
     server: Arc<DesktopServer>,
@@ -2351,18 +2397,7 @@ fn complete_main_thread_setup(
 
     let loopback_port = server.loopback_port();
     #[cfg(target_os = "macos")]
-    {
-        let channel_default = nomifun_app::bootstrap::resolve_startup_data_root(
-            nomifun_app::cli::default_data_dir(),
-        );
-        let store = macos_webview_data_store(
-            app.state::<ExplicitDesktopDataRoot>().0,
-            &pairing_data_dir,
-            &channel_default,
-            objc2::available!(macos = 14.0),
-        )?;
-        app.manage(MacosWebviewDataStore(store));
-    }
+    prepare_macos_webview_store(&app, &pairing_data_dir)?;
 
     // Build the main window programmatically so we can inject the backend
     // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
@@ -2386,6 +2421,11 @@ fn complete_main_thread_setup(
         relay_pairing::RelayPairingManager::new(pairing_data_dir)
             .context("failed to initialize Relay pairing state")?,
     );
+    let relay_shutdown_owner = pairing_manager.clone();
+    server.register_relay_shutdown(move || {
+        let owner = relay_shutdown_owner.clone();
+        async move { owner.shutdown().await }
+    })?;
     if !app.manage(pairing_manager.clone()) {
         return Err(anyhow::anyhow!(
             "Relay pairing state was already registered"
@@ -2430,6 +2470,12 @@ fn complete_main_thread_setup(
             .title("NomiFun")
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
+            .visible(app.get_webview_window("startup").is_none())
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    desktop_startup::main_loaded(window.app_handle());
+                }
+            })
             .initialization_script(&init_script);
     #[cfg(target_os = "macos")]
     let win_builder = match app.state::<MacosWebviewDataStore>().0 {
@@ -2663,6 +2709,11 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 return;
             };
 
+            if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
+                if startup.preparing() {
+                    desktop_startup::begin_quit(app);
+                }
+            }
             if code == Some(tauri::RESTART_EXIT_CODE) {
                 // Tauri documents that prevent_exit() is ignored for the
                 // restart sentinel. Mark the window as explicitly quitting
@@ -2908,37 +2959,15 @@ fn main() -> std::process::ExitCode {
     // Env mutation + runtime init BEFORE Tauri builds its runtime/threads,
     // mirroring the nomicore bin's ordering. `default_data_dir` resolves the
     // effective root (literal NOMIFUN_DATA_DIR or the channel default) and
-    // runs the one-shot legacy layout migration (`NomiFun/Nomi` → `NomiFun`,
-    // see nomifun_app::bootstrap::resolve_startup_data_root). v3 remains a
-    // hard dataset cut for the historical pre-v3 temp-rooted dataset: the
-    // backend quarantines any incompatible dataset found at the current root.
-    // Capture caller intent before the backend exports its effective root.
-    #[cfg(target_os = "macos")]
-    let explicit_desktop_data_root = std::env::var_os("NOMIFUN_DATA_DIR")
-        .is_some_and(|value| !value.is_empty());
-    let data_dir = default_data_dir();
-    #[cfg(target_os = "macos")]
-    let prepared_cef_engine = browser_surface::macos::lifecycle::prepare(&data_dir)
-        .and_then(|engine| {
-            // SAFETY: private command-only helpers already returned, and no
-            // Tauri/Tokio/host workers have started. CEF's allocator constructor
-            // must run here, while actual engine initialization stays deferred.
-            unsafe { engine.preload_framework()?; }
-            Ok(engine)
-        });
-    #[cfg(target_os = "macos")]
-    if let Err(error) = &prepared_cef_engine {
-        eprintln!("managed macOS Browser Provider unavailable: {error}");
-        nomifun_app::bootstrap::record_boot_note(
-            nomifun_app::bootstrap::BootNoteLevel::Warn,
-            format!("macOS built-in browser is unavailable: {error}"),
-        );
-    } else {
-        nomifun_app::bootstrap::record_boot_note(
-            nomifun_app::bootstrap::BootNoteLevel::Info,
-            "macOS built-in browser framework preloaded before workers; native initialization remains deferred until first use",
-        );
-    }
+    // completes an armed storage relocation before native profiles are opened.
+    // Incompatible database startup remains a separate dataset policy.
+    let data_dir = match default_data_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Cannot prepare NomiFun storage: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
@@ -2954,9 +2983,8 @@ fn main() -> std::process::ExitCode {
     //   NOMI_LOG_LEVEL=debug            (everything)
     //   NOMI_LOG_LEVEL=info             (default)
     // At `debug`, the `nomi_providers` target logs the outgoing request body and
-    // each SSE chunk, and `nomi_mcp` logs MCP connect results — exactly what is
-    // needed to diagnose a provider/gateway stall. Console output appears in the
-    // terminal that launched `tauri dev`; it is also written to the log files
+    // each SSE chunk, and `nomifun_mcp` logs MCP connection tests. Console output
+    // appears in the terminal that launched `tauri dev`; it is also written to the log files
     // under {data-dir}/logs/.
     if let Ok(level) = std::env::var("NOMI_LOG_LEVEL") {
         let level = level.trim();
@@ -2966,16 +2994,6 @@ fn main() -> std::process::ExitCode {
     }
 
     let tauri_context = generated_tauri_context();
-
-    #[cfg(target_os = "macos")]
-    let cef_engine = Arc::new(std::sync::OnceLock::<
-        Result<Arc<browser_surface::macos::lifecycle::DeferredEngine>, String>,
-    >::new());
-    #[cfg(target_os = "macos")]
-    let setup_cef_engine = cef_engine.clone();
-    #[cfg(target_os = "macos")]
-    cef_engine.set(prepared_cef_engine)
-        .unwrap_or_else(|_| panic!("macOS CEF availability resolved more than once"));
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -3018,23 +3036,12 @@ fn main() -> std::process::ExitCode {
                 ),
             ));
             #[cfg(target_os = "macos")]
-            let browser_resources = match setup_cef_engine
-                .get()
-                .expect("macOS CEF bundle availability is resolved before app setup")
-            {
-                Ok(engine) => Some(Arc::new(
-                    nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
-                        browser_surface::macos::host::DesktopBrowserHost::new_deferred(
-                            app_handle.clone(),
-                            engine.clone(),
-                        ),
-                    ))
-                    .with_profile_store(
-                        desktop_browser_profile_store(&data_dir)?,
-                    ),
-                )),
-                Err(_) => None,
-            };
+            let browser_resources = Some(Arc::new(
+                nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
+                    browser_surface::macos::host::DesktopBrowserHost::new(app_handle.clone()),
+                ))
+                .with_profile_store(desktop_browser_profile_store(&data_dir)?),
+            ));
             #[cfg(not(any(windows, target_os = "macos")))]
             let browser_resources = None;
             #[cfg(any(windows, target_os = "macos"))]
@@ -3042,11 +3049,13 @@ fn main() -> std::process::ExitCode {
             #[cfg(not(any(windows, target_os = "macos")))]
             let attached_chrome = None;
             app.manage(browser_resources.clone());
-            #[cfg(target_os = "macos")]
-            app.manage(ExplicitDesktopDataRoot(explicit_desktop_data_root));
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
             #[cfg(target_os = "macos")]
             install_macos_exit_observers(&app_handle)?;
+
+            #[cfg(target_os = "macos")]
+            prepare_macos_webview_store(&app_handle, &data_dir)?;
+            desktop_startup::install_window(&app_handle)?;
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
@@ -3146,10 +3155,40 @@ fn main() -> std::process::ExitCode {
                             return;
                         }
                     };
-                    mark_startup_cleanup_entered(&startup_cleanup);
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
+                                let startup = setup_app_handle
+                                    .state::<Arc<desktop_startup::StartupState>>()
+                                    .inner()
+                                    .clone();
+                                // Fail closed if the host preparation controller itself
+                                // panics before the supplier returns its cleanup proof.
+                                mark_startup_cleanup_entered(&startup_cleanup_for_run);
+                                match desktop_startup::prepare_node(setup_app_handle.clone(), startup)
+                                    .await
+                                {
+                                    desktop_startup::PreparationOutcome::Prepared => {}
+                                    desktop_startup::PreparationOutcome::Cancelled => {
+                                        mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
+                                        supervisor_coordinator.mark_backend_not_started();
+                                        setup_app_handle.exit(supervisor_coordinator.final_exit_code());
+                                        return Ok(());
+                                    }
+                                    desktop_startup::PreparationOutcome::CleanupUnproven => {
+                                        // The supplier's exact child authority is retained by
+                                        // the existing cleanup relay/platform reaper. Reuse the
+                                        // unverified startup + bounded deferred-exit path; never
+                                        // call backend-not-started as component cleanup proof.
+                                        return Err(anyhow::anyhow!("managed startup component cleanup remains unverified"));
+                                    }
+                                }
+                                if supervisor_coordinator.has_pending_shutdown() {
+                                    mark_startup_cleanup_failed_verified(&startup_cleanup_for_run);
+                                    supervisor_coordinator.mark_backend_not_started();
+                                    setup_app_handle.exit(supervisor_coordinator.final_exit_code());
+                                    return Ok(());
+                                }
                                 let host_services=nomifun_app::DesktopHostServices {
                                     browser_resources,
                                     attached_chrome,
@@ -3238,6 +3277,8 @@ fn main() -> std::process::ExitCode {
                                                 "NomiFun could not initialize its desktop window: {error:#}"
                                             ),
                                         );
+                                    } else {
+                                        desktop_startup::backend_ready(&setup_app);
                                     }
                                 }) {
                                     shutdown_then_show_fatal(
@@ -3373,7 +3414,11 @@ fn main() -> std::process::ExitCode {
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
+        .manage(Arc::new(desktop_startup::StartupState::new()))
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
+            desktop_startup::desktop_startup_status,
+            desktop_startup::desktop_startup_retry,
+            desktop_startup::desktop_startup_quit,
             browser_surface::commands::browser_surface_attach,
             browser_surface::commands::browser_surface_update,
             browser_surface::commands::browser_surface_detach,
@@ -3391,6 +3436,8 @@ fn main() -> std::process::ExitCode {
             relay_pairing_restart,
             relay_pairing_stop,
             relay_pairing_disconnect,
+            relay_pairing_forget_local,
+            relay_pairing_refresh_qr,
             set_keep_awake,
             set_tray_labels
         ]))
@@ -3403,6 +3450,19 @@ fn main() -> std::process::ExitCode {
         // `ExitRequested`, so window destruction cannot overwrite a restart
         // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
+            if window.label() == "startup" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let state = window
+                        .app_handle()
+                        .state::<Arc<desktop_startup::StartupState>>();
+                    if state.snapshot().stage != desktop_startup::StartupStage::Ready {
+                        api.prevent_close();
+                        desktop_startup::begin_quit(window.app_handle());
+                        window.app_handle().exit(0);
+                    }
+                }
+                return;
+            }
             if window.label() != "main" {
                 return;
             }
@@ -3491,22 +3551,46 @@ mod tests {
         for path in [&first, &second, &default] {
             fs::create_dir_all(path).unwrap();
         }
-        let resolve = |explicit, path: &Path, available| {
-            macos_webview_data_store(explicit, path, &default, available)
+        let resolve = |path: &Path, available| {
+            macos_webview_data_store(path, &default, available)
         };
-        assert_eq!(resolve(false, &first, false).unwrap(), None);
-        assert_eq!(resolve(true, &default, false).unwrap(), None);
-        let first_id = resolve(true, &first, true).unwrap().unwrap();
-        assert_eq!(resolve(true, &first, true).unwrap(), Some(first_id));
-        assert_ne!(resolve(true, &second, true).unwrap(), Some(first_id));
-        assert!(resolve(true, &first, false).is_err());
+        assert_eq!(resolve(&default, false).unwrap(), None);
+        let first_id = resolve(&first, true).unwrap().unwrap();
+        assert_eq!(resolve(&first, true).unwrap(), Some(first_id));
+        assert_ne!(resolve(&second, true).unwrap(), Some(first_id));
+        assert!(resolve(&first, false).is_err());
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&first, &alias).unwrap();
-        assert_eq!(resolve(true, &alias, true).unwrap(), Some(first_id));
+        assert_eq!(resolve(&alias, true).unwrap(), Some(first_id));
         let default_alias = root.path().join("default-alias");
         std::os::unix::fs::symlink(&default, &default_alias).unwrap();
-        assert_eq!(resolve(true, &default_alias, false).unwrap(), None);
+        assert_eq!(resolve(&default_alias, false).unwrap(), None);
         assert_eq!(fs::read_dir(&default).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_relocation_preserves_original_profile_identity() {
+        use nomifun_common::{factory_reset, storage_relocation as storage};
+        // Move both a default root out and a custom root into the default path.
+        for custom_origin in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let default = root.path().join("default");
+            let origin = if custom_origin { root.path().join("custom") } else { default.clone() };
+            let target = if custom_origin { default.clone() } else { root.path().join("moved") };
+            let control = root.path().join("control");
+            let generation = "0190f5fe-7c00-7a00-8000-0000000000f0";
+            fs::create_dir_all(&origin).unwrap();
+            fs::write(origin.join("storage-generation"), generation).unwrap();
+            factory_reset::write_v3_dataset_receipt_for_work_dir(&origin, &origin, generation).unwrap();
+            let before = macos_webview_data_store(&origin, &default, true).unwrap();
+            assert_eq!(before.is_some(), custom_origin);
+            let plan = storage::request_storage_relocation(&control, &origin, &origin, &target).unwrap();
+            storage::start_storage_relocation(&control, &plan.operation_id).unwrap();
+            let prepared = storage::prepare_pending_storage_relocation(&control).unwrap().unwrap();
+            storage::commit_storage_relocation(&control, &prepared).unwrap();
+            assert_eq!(macos_webview_data_store(&target, &default, true).unwrap(), before);
+        }
     }
 
     #[test]
@@ -4150,7 +4234,7 @@ mod tests {
         let error = cleanup
             .cleanup(&runtime)
             .expect_err("startup without published cleanup authority must fail closed");
-        assert!(format!("{error:#}").contains("cleanup authority"));
+        assert!(format!("{error:#}").contains("without a published authority"));
         assert!(!cleanup.is_verified());
         assert!(cleanup.server().is_none());
     }

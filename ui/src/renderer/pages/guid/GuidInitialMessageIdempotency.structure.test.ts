@@ -10,22 +10,16 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL): string => readFileSync(url, 'utf8');
 
 describe('Guid initial-message idempotency', () => {
-  test('persists a UUIDv7 key after an Agent Session resolves its conversation', () => {
+  test('uses the guarded initial-delivery writer after an Agent Session resolves its conversation', () => {
     const source = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
-    const initialMessagePayload =
-      source.match(/JSON\.stringify\(\{([\s\S]*?)\}\)\s*\)/)?.[1] ?? '';
-    expect(source.includes("import { uuidv7 } from '@/common/utils';")).toBe(true);
     expect(source.includes('ipcBridge.conversation.create.invoke')).toBe(false);
     expect(source.includes('agentPlatform.sessions.create.invoke')).toBe(true);
-    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(1);
-    expect(initialMessagePayload).not.toBe('');
-    expect(initialMessagePayload.includes('conversation_id: conversationId,')).toBe(true);
-    expect(initialMessagePayload.includes('initial_admission_epoch: 0,')).toBe(true);
-    expect(initialMessagePayload.includes('idempotency_key: uuidv7(),')).toBe(true);
+    expect(source.includes('persistInitialMessageDelivery(')).toBe(true);
+    expect(source.includes('initialMessage = { ...delivery, submittedAt: Date.now() }')).toBe(true);
     expect(source.includes("'initial-message-nomi'")).toBe(true);
 
     const writesBeforeNavigation =
-      source.lastIndexOf('sessionStorage.setItem') < source.lastIndexOf('await navigate(');
+      source.lastIndexOf('persistInitialMessageDelivery(') < source.lastIndexOf('await navigate(');
     expect(writesBeforeNavigation).toBe(true);
   });
 

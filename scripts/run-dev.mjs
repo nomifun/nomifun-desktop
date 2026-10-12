@@ -421,7 +421,7 @@ export function generatedDevelopmentDataDirectory(
 }
 
 export function developmentEnvironment(environment, platform = process.platform) {
-  const result = { ...environment, NOMI_CHANNEL: 'dev' };
+  const result = { ...environment, NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: environment.NOMIFUN_EMBED_OFFICECLI ?? '1' };
   const explicitKey = explicitDataRootKey(environment, platform);
   if (explicitKey) {
     if (typeof environment[explicitKey] !== 'string' || !environment[explicitKey].trim()) {

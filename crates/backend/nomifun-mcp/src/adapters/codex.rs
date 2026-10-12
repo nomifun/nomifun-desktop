@@ -65,7 +65,7 @@ impl McpAgentAdapter for CodexAdapter {
 /// ```
 fn parse_codex_list_json(json_str: &str) -> Result<Vec<DetectedServer>, McpError> {
     let trimmed = json_str.trim();
-    if trimmed.is_empty() || trimmed == "[]" {
+    if trimmed == "[]" {
         return Ok(Vec::new());
     }
 
@@ -74,9 +74,10 @@ fn parse_codex_list_json(json_str: &str) -> Result<Vec<DetectedServer>, McpError
     let mut servers = Vec::new();
 
     for entry in &entries {
-        if let Some(server) = parse_codex_entry(entry) {
-            servers.push(server);
-        }
+        let server = parse_codex_entry(entry).ok_or_else(|| McpError::AgentOperationFailed(
+            "external Codex CLI returned an unsupported MCP entry; verify its version".into(),
+        ))?;
+        servers.push(server);
     }
 
     Ok(servers)
@@ -191,8 +192,7 @@ mod tests {
 
     #[test]
     fn parse_empty_string() {
-        let servers = parse_codex_list_json("").unwrap();
-        assert!(servers.is_empty());
+        assert!(parse_codex_list_json("").is_err());
     }
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_transport_skipped() {
+    fn unsupported_transport_is_reported() {
         let json = r#"[
             {
                 "name": "unknown",
@@ -355,20 +355,18 @@ mod tests {
                 "transport": { "type": "websocket", "url": "ws://localhost" }
             }
         ]"#;
-        let servers = parse_codex_list_json(json).unwrap();
-        assert!(servers.is_empty());
+        assert!(parse_codex_list_json(json).is_err());
     }
 
     #[test]
-    fn parse_missing_name_skipped() {
+    fn malformed_catalog_entry_is_reported() {
         let json = r#"[
             {
                 "enabled": true,
                 "transport": { "type": "stdio", "command": "node" }
             }
         ]"#;
-        let servers = parse_codex_list_json(json).unwrap();
-        assert!(servers.is_empty());
+        assert!(parse_codex_list_json(json).is_err());
     }
 
     #[test]

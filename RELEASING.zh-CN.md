@@ -130,7 +130,7 @@ make dist VERSION="$VERSION" COMMIT="$COMMIT"
 必须在 Mac 上执行。一键脚本会自动判定两种场景：
 
 - **追加(APPEND)**：该版本的 GitHub Release 已存在（可能 Windows 侧先发过）——只补 macOS
-  产物、把 `darwin-aarch64` 条目并进 `latest.json`（macOS 仅发 arm64）。
+  产物、把 `darwin-aarch64` 条目并进 `latest.json`（一键脚本默认构建 Apple Silicon）。
 - **首发(CREATE)**：该版本还没有 Release（macOS 先发）——建 tag、建 Release（带 release
   note）、上传 macOS 产物；可用 `-Version` 顺带打版本号。
 
@@ -203,7 +203,27 @@ bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
-`bun run make:latest` 会把 macOS 的 `darwin-aarch64` 条目写入 `apps/desktop/updater/latest.json`（macOS 仅发 arm64）。
+`bun run make:latest` 会把当前目标的 macOS 条目写入 `apps/desktop/updater/latest.json`。
+双架构发布时，先提交版本和源码改动，让 release lock 对应干净的源码提交；
+分别构建，并将清单收集到不被 Git 跟踪的产物目录：
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$PWD/apps/desktop/signing/nomifun-updater.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+bun run build:mac --signed arm --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
+bun run build:mac --signed intel --config apps/desktop/tauri.updater.conf.json
+bun run make:latest --out dist/desktop/latest.json --collect --notes-file notes.md
+```
+
+两种架构均使用 macOS 14+ 系统 WKWebView，不下载或打包浏览器 framework/helper。
+打包验证主程序架构，并拒绝附带浏览器运行时或系统 WebKit.framework。
+Intel 更新包命名为 `NomiFun_<version>_x64.app.tar.gz`，Apple Silicon 保留
+`NomiFun.app.tar.gz`。将 `dist/desktop/` 收集的同一批产物上传到两处分发服务。
+Rosetta 运行不等同于 Intel 实机验收。
+两套构建结束后，再将合并清单写回 `apps/desktop/updater/latest.json`，提交、打 tag
+并发布。Intel 打包会自动下载 SHA-256 固定的官方 ONNX Runtime 1.23.2，使用匹配的
+API 23，并在 App 内签名其 x86_64 运行库；其他目标保持 API 27。
 
 ## Windows 发版
 

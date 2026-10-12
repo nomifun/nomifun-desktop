@@ -20,25 +20,6 @@ fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi tool surface: {value}"))
 }
 
-pub(super) fn capacity_diagnostic<'a>(
-    capability_ids: impl IntoIterator<Item = &'a CapabilityId>,
-    mcp_locks: &[nomifun_agent_contracts::ResolvedMcpToolLock],
-    unit: &str,
-    limit: usize,
-) -> String {
-    let sources = mcp_locks.iter().map(|lock| (&lock.capability_id,&lock.server_id))
-        .collect::<std::collections::BTreeMap<_,_>>();
-    let mut counts = std::collections::BTreeMap::<String,usize>::new();
-    let mut total = 0usize;
-    for id in capability_ids {
-        let source = sources.get(id).map(|id| format!("MCP source {}",id.as_ref())).unwrap_or_else(||id.as_ref().to_owned());
-        *counts.entry(source).or_default() += 1;
-        total += 1;
-    }
-    let counts = counts.into_iter().map(|(source,count)| format!("{source}={count}")).collect::<Vec<_>>().join(", ");
-    format!("selected {total} {unit} exceeds limit {limit}; source counts: {counts}; select fewer tools or sources")
-}
-
 pub(super) async fn compile(
     snapshot: &CompiledSnapshot,
     active: &ActiveCapabilitySetSnapshot,
@@ -51,11 +32,6 @@ pub(super) async fn compile(
         || snapshot.registry_digest != registry.registry_digest
     {
         return Err(error("registry changed after Snapshot compilation"));
-    }
-    if snapshot.content().enabled_capabilities.len() > 128
-    {
-        return Err(error(capacity_diagnostic(snapshot.content().enabled_capabilities.iter().map(|capability|&capability.capability.id),
-            &snapshot.content().mcp_tool_locks,"capabilities",128)));
     }
     let allowed_platform_actions = snapshot
         .content()
@@ -75,6 +51,7 @@ pub(super) async fn compile(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut exposures = standard_agent_tool_exposures();
     retain_exact_platform_actions(&mut exposures, &active.active, &allowed_platform_actions);
+    let mut exposures = resource_ready_exposures(snapshot, exposures)?;
     for exposure in &mut exposures {
         let capability = registry
             .capability(&exposure.capability_id)
@@ -143,6 +120,9 @@ pub(super) async fn compile(
                     && allowed.contains(&action.action_id)
             })
         {
+            if !action_resources_bound(snapshot, &selected.capability.id, &action.action_id)? {
+                continue;
+            }
             if !exact_actions.insert((
                 selected.capability.id.clone(),
                 action.action_id.clone(),
@@ -194,6 +174,13 @@ pub(super) async fn compile(
         if active.active.contains(&selected.capability.id)
             && selected.contribution_lock.source_kind == ContributionSourceKind::McpBinding
         {
+            let mut resource_ready = false;
+            for action in &selected.action_allowlist {
+                resource_ready |= action_resources_bound(snapshot, &selected.capability.id, action)?;
+            }
+            if !resource_ready {
+                continue;
+            }
             let tool = super::nomi_core_mcp_catalog::frozen_tool(registry, selected)?;
             if !snapshot.content().mcp_tool_locks.contains(&tool.lock) {
                 return Err(error(
@@ -241,8 +228,14 @@ pub(super) async fn compile(
         {
             return Err(error("Plugin tool description exceeds context bounds"));
         }
-        let start = exposures.len();
-        for action in admitted_module_actions(&capability.manifest, &policy.allowed_actions) {
+        let actions = admitted_module_actions(&capability.manifest, &policy.allowed_actions).collect::<Vec<_>>();
+        if actions.is_empty() {
+            return Err(error("selected Plugin has no allowed function-tool actions"));
+        }
+        for action in actions {
+            if !action_resources_bound(snapshot, &selected.capability.id, &action.action_id)? {
+                continue;
+            }
             let schema = plugin_schemas
                 .resolve(selected, &action.input_schema)
                 .await
@@ -267,12 +260,15 @@ pub(super) async fn compile(
                 capability_id: selected.capability.id.clone(), action_id: action.action_id.clone(),
             });
         }
-        if exposures.len() == start {
-            return Err(error(
-                "selected Plugin has no allowed function-tool actions",
-            ));
-        }
     }
+    let exposures = resource_ready_exposures(snapshot, exposures)?;
+    compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
+}
+
+fn resource_ready_exposures(
+    snapshot: &CompiledSnapshot,
+    exposures: Vec<AgentToolExposure>,
+) -> Result<Vec<AgentToolExposure>, AppError> {
     let mut resource_ready = Vec::with_capacity(exposures.len());
     for exposure in exposures {
         if action_resources_bound(
@@ -284,12 +280,7 @@ pub(super) async fn compile(
             resource_ready.push(exposure);
         }
     }
-    let exposures = resource_ready;
-    if exposures.len() > 128 {
-        return Err(error(capacity_diagnostic(exposures.iter().map(|exposure|&exposure.capability_id),
-            &snapshot.content().mcp_tool_locks,"actions",128)));
-    }
-    compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
+    Ok(resource_ready)
 }
 
 fn standard_presentation_schema(
@@ -326,38 +317,14 @@ fn standard_presentation_schema(
     canonical
 }
 
-/// Require the operation needed by a Wave 1 Action, not merely any resource
-/// of that Module. This keeps the model-visible tool table aligned with the
-/// live Knowledge switch/write-back disposition: search/read remain available
-/// for a read-only mount while write/autogen disappear when write-back is off.
+/// Model-visible Actions and execution admission share the exact resource
+/// operations frozen in their Snapshot descriptors.
 fn action_resources_bound(
     snapshot: &CompiledSnapshot,
     capability_id: &CapabilityId,
     action_id: &ActionId,
 ) -> Result<bool, AppError> {
-    if !nomifun_agent_domain_wave1::CAPABILITY_IDS.contains(&capability_id.as_ref()) {
-        return snapshot
-            .capability_resources_bound(capability_id)
-            .map_err(error);
-    }
-    let requirements = nomifun_agent_domain_wave1::required_action_resource_operations(
-        capability_id.as_ref(),
-        action_id.as_ref(),
-    )
-    .ok_or_else(|| error("Wave 1 Action has no resource-operation contract"))?;
-    if requirements.is_empty() {
-        return Ok(true);
-    }
-    let policy = snapshot
-        .policy(capability_id)
-        .ok_or_else(|| error("Wave 1 Module has no compiled resource policy"))?;
-    Ok(requirements.into_iter().all(|(kind, operation)| {
-        policy.resource_binding_ids.iter().any(|binding_id| {
-            snapshot.binding(binding_id).is_some_and(|binding| {
-                binding.resource_kind == kind && binding.operations.contains(&operation)
-            })
-        })
-    }))
+    snapshot.action_resources_bound(capability_id, action_id).map_err(error)
 }
 
 fn admitted_module_actions<'a>(
@@ -428,23 +395,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn action_capacity_names_the_app_mcp_source_and_preserves_all_counts() {
-        let capability: CapabilityId = "nomi.mcp.v1.fixture".into();
-        let source = "0190f5fe-7c00-7a00-8000-000000000001";
-        let lock = nomifun_agent_contracts::ResolvedMcpToolLock {
-            server_id:source.into(),canonical_tool_key:capability.as_ref().to_owned().into(),capability_id:capability.clone(),
-            schema_digest:"a".repeat(64).into(),materialization_revision:nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
-        };
-        let workspace: CapabilityId = "workspace.files".into();
-        let ids = vec![capability;125].into_iter().chain(vec![workspace;5]).collect::<Vec<_>>();
-        let diagnostic = capacity_diagnostic(ids.iter(),&[lock],"actions",128);
-        assert!(diagnostic.contains("selected 130 actions"));
-        assert!(diagnostic.contains(&format!("MCP source {source}=125")));
-        assert!(diagnostic.contains("workspace.files=5"));
-        assert!(diagnostic.contains("limit 128"));
-    }
-
     fn canonical_process_schema(action_id: &str) -> StrictJsonValue {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
         let capability = registration.metadata.manifest.payload.contributions.capabilities.into_iter()
@@ -452,6 +402,109 @@ mod tests {
         let reference = &capability.contributions.actions.iter()
             .find(|action| action.action_id.as_ref() == action_id).unwrap().input_schema;
         nomifun_agent_domain_wave2::resolve_action_schema("workspace.process", reference).unwrap()
+    }
+
+    fn creative_snapshot(selected: &[(&str, &[&str])]) -> (CompiledSnapshot, std::sync::Arc<MaterializedRegistry>) {
+        use nomifun_agent_contracts::*;
+        use nomifun_agent_kernel::*;
+        let registry = KernelRegistry::new(MaterializationPolicy::stable("1.0.0"),
+            std::sync::Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
+        let materialized = registry.replace_all(nomifun_agent_domain_wave3::registrations().unwrap()).unwrap();
+        let owner = PrincipalRef { principal_kind: "user".into(), principal_id: "creative-owner".into() };
+        let mut revision = AgentPresetRevision {
+            reference: PresetRevisionRef { preset_id: "creative-resource-fixture".into(), revision: 1, revision_digest: "".into() },
+            payload: AgentPresetRevisionPayload {
+                context_order: vec![], middleware_order: vec![], schema_version: "1.0.0".into(),
+                model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+                enabled_capabilities: selected.iter().map(|(id, actions)| CapabilitySelection {
+                    capability: CapabilityRef { id: (*id).into() },
+                    action_allowlist: actions.iter().map(|id| ActionId::from(*id)).collect(),
+                }).collect(), skill_bindings: vec![], system_role_provider_overrides: BTreeMap::new(),
+                persona: String::new(), instructions: String::new(), starter_prompts: vec![], runtime_policy: Default::default(),
+            },
+            contribution_locks: selected.iter().map(|(id, _)| materialized.capability(&CapabilityId::from(*id))
+                .unwrap().contribution_lock.clone()).collect(),
+            created_by: "creative-owner".into(), created_at_ms: 1, reason: None,
+        };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let snapshot = AgentPresetCompiler::compile(&materialized, &CompilerEnvironment {
+            resolver_version: "1.0.0".into(), required_runtime_protocol_version: "1.0.0".into(),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: "a".repeat(64).into(), available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(), canonical_schema_manifest_digest: "a".repeat(64).into(),
+            target_contribution_manifest_digest: materialized.registry_digest.clone(), host_target: "windows-desktop-x64".into(),
+            host_surface: "desktop".into(), availability_evidence_revision: "creative-resource-test".into(),
+        }, CompileRequest { revision, principal: owner.clone(), scene: "creative".into(), surface: "desktop".into(),
+            audience: "user".into(), created_at_ms: 1, resolver_run_id: "creative-resource-resolve".into(),
+        }).unwrap().with_target_resource_bindings(&owner, vec![TypedResourceBinding {
+            binding_id: "creative-library-binding".into(), resource_kind: "asset_library".into(),
+            resource_id: nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID.into(), owner_id: owner.principal_id.clone(),
+            operations: BTreeSet::from(["read".into(), "write".into()]), connection_config_ref: None, typed_parameters: BTreeMap::new(),
+        }]).unwrap();
+        (snapshot, materialized)
+    }
+
+    #[tokio::test]
+    async fn asset_and_office_tools_are_materialized_without_canvas_and_keep_exact_grants() {
+        struct NoPluginSchemas;
+        #[async_trait::async_trait]
+        impl NomiPluginToolSchemaResolver for NoPluginSchemas {
+            async fn resolve(&self, _: &nomifun_agent_contracts::ResolvedCapability,
+                _: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                Err("no Plugin selected".into())
+            }
+        }
+        struct LibrarySchemas;
+        #[async_trait::async_trait]
+        impl NomiPlatformBuiltinToolSchemaResolver for LibrarySchemas {
+            async fn resolve(&self, capability: &nomifun_agent_contracts::ResolvedCapability,
+                reference: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                if reference.as_ref().contains("/canvas.") {
+                    return Err("Canvas schema owner is unavailable".into());
+                }
+                super::super::agent_wave3_host::resolve_schema(capability, reference)
+            }
+        }
+        for canvas_selected in [false, true] {
+            let mut selected: Vec<(&str, &[&str])> = vec![
+                ("creative.workshop", &["creative.workshop/asset.read", "creative.workshop/asset.write"]),
+                ("office", &["office/preview", "office/document.edit"]),
+            ];
+            if canvas_selected {
+                selected[0].1 = &["creative.workshop/asset.read", "creative.workshop/asset.write", "creative.workshop/canvas.read"];
+            }
+            let (snapshot, materialized) = creative_snapshot(&selected);
+            let active = nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
+            let plan = compile(&snapshot, &active, &materialized, &NoPluginSchemas,
+                &LibrarySchemas, &BTreeSet::new()).await.unwrap();
+            let actions = plan.model_definitions().iter().map(|definition| plan.binding(&definition.name).unwrap()
+                .action_id.as_ref().to_owned()).collect::<BTreeSet<_>>();
+            assert_eq!(actions, BTreeSet::from(["creative.workshop/asset.read".into(), "creative.workshop/asset.write".into(),
+                "office/preview".into(), "office/document.edit".into()]));
+            super::super::nomi_core_resource_bindings::validate_frozen_action_resource_contracts(snapshot.content()).unwrap();
+            let mut incomplete = snapshot.content().clone();
+            incomplete.enabled_capabilities[0].actions.iter_mut()
+                .for_each(|action| action.required_resource_operations = None);
+            assert_eq!(super::super::nomi_core_resource_bindings::validate_frozen_action_resource_contracts(&incomplete)
+                .unwrap_err().code(), "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH");
+            assert_eq!(snapshot.content().required_resource_kinds,
+                if canvas_selected { BTreeSet::from(["asset_library".into(), "canvas".into()]) }
+                else { BTreeSet::from(["asset_library".into()]) });
+            assert!(!snapshot.action_resources_bound(&"office".into(), &"office/sheet.edit".into()).unwrap());
+        }
+        let (snapshot, materialized) = creative_snapshot(&[("creative.workshop", &["creative.workshop/canvas.read"])]);
+        let active = nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
+        assert!(compile(&snapshot, &active, &materialized, &NoPluginSchemas, &LibrarySchemas, &BTreeSet::new())
+            .await.unwrap().model_definitions().is_empty(), "an unbound Module can have an empty tool table");
+        let principal = snapshot.envelope.actor.clone();
+        let available = snapshot.with_target_resource_bindings(&principal, vec![nomifun_agent_contracts::TypedResourceBinding {
+            binding_id: "available-canvas".into(), resource_kind: "canvas".into(), resource_id: "owned-canvas".into(),
+            owner_id: principal.principal_id.clone(), operations: BTreeSet::from(["read".into()]),
+            connection_config_ref: None, typed_parameters: BTreeMap::new(),
+        }]).unwrap();
+        let active = nomifun_agent_kernel::SessionCapabilityState::new(&available).snapshot().unwrap();
+        assert!(compile(&available, &active, &materialized, &NoPluginSchemas, &LibrarySchemas, &BTreeSet::new()).await.is_err(),
+            "an available resource cannot bypass a missing schema owner");
     }
 
     #[test]
@@ -793,6 +846,7 @@ mod tests {
                     output_schema: "schema://mixed/run/output@1".into(),
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::FunctionTool,
+                    required_resource_operations: Default::default(),
                 }],
                 context_schema_refs: vec!["schema://mixed/context@1".into()],
                 event_schema_refs: vec!["schema://mixed/event@1".into()],

@@ -3,6 +3,7 @@ import {
   asAgentPresetId,
   asCapabilityId,
   asDigestHex,
+  agentPresetDocumentsEqual,
   capabilityPlacement,
   createEmptyAgentPresetDocument,
   cloneDraft,
@@ -30,6 +31,71 @@ describe('AgentPreset draft model', () => {
     expect('runtime_build' in draft.document).toBe(false);
     draft.document.persona = '';
     expect(isDraftDirty(saved, draft)).toBe(false);
+  });
+
+  test('restores default-valued fields omitted by the compact wire document', () => {
+    const wireDocument: Partial<AgentPresetDraft['document']> = createEmptyAgentPresetDocument();
+    delete wireDocument.chat_route_records;
+    delete wireDocument.system_role_provider_overrides;
+    delete wireDocument.starter_prompts;
+    delete wireDocument.runtime_policy;
+    const wireDraft: AgentPresetDraft = {
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      display_name: 'Wire Agent',
+      document: wireDocument as AgentPresetDraft['document'],
+    };
+
+    const draft = cloneDraft(wireDraft);
+
+    expect(draft.document.chat_route_records).toEqual({});
+    expect(draft.document.system_role_provider_overrides).toEqual({});
+    expect(draft.document.starter_prompts).toEqual([]);
+    expect(draft.document.runtime_policy.idmm.mode).toBe('off');
+    expect('system_role_provider_overrides' in wireDocument).toBe(false);
+  });
+
+  test('normalizes a null wire default without replacing configured overrides', () => {
+    const nullDocument = createEmptyAgentPresetDocument();
+    (nullDocument as unknown as { system_role_provider_overrides: null })
+      .system_role_provider_overrides = null;
+    const nullDraft = cloneDraft({
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      display_name: 'Null Wire Agent',
+      document: nullDocument,
+    });
+    expect(nullDraft.document.system_role_provider_overrides).toEqual({});
+
+    const configuredDocument = createEmptyAgentPresetDocument();
+    configuredDocument.system_role_provider_overrides.search = {
+      role: {
+        key: { role_id: 'search', contract_version: '1.0.0' },
+        contract_digest: asDigestHex('a'.repeat(64)),
+      },
+      provider_mount_id: 'local-search',
+    };
+    const configuredDraft = cloneDraft({
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000002'),
+      display_name: 'Configured Agent',
+      document: configuredDocument,
+    });
+    expect(configuredDraft.document.system_role_provider_overrides)
+      .toEqual(configuredDocument.system_role_provider_overrides);
+  });
+
+  test('compares normalized documents by value rather than object key order', () => {
+    const complete = createEmptyAgentPresetDocument();
+    const sparse = {
+      instructions: '',
+      persona: '',
+      skill_bindings: [],
+      enabled_capabilities: [],
+      model_route_refs: {},
+      schema_version: '1.0.0',
+    } as unknown as AgentPresetDraft['document'];
+
+    expect(agentPresetDocumentsEqual(complete, sparse)).toBe(true);
+    sparse.persona = 'Different';
+    expect(agentPresetDocumentsEqual(complete, sparse)).toBe(false);
   });
   test('preserves a restricted action allowlist when enabling an existing capability', () => {
     const empty = createEmptyAgentPresetDocument();

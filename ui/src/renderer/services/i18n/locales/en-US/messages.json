@@ -52,7 +52,6 @@
     "editingFiles": "Editing {{count}} files",
     "fileEditOperations": "File edits completed: {{count}}",
     "editingFileOperations": "File edits in progress: {{count}}",
-    "fileEditTargets": "Edited {{count}} files: {{target}}",
     "editingFileTargets": "Editing {{count}} files: {{target}}",
     "runCommands": "Ran {{count}} commands",
     "runningCommands": "Running {{count}} commands",
@@ -142,10 +141,9 @@
   "fileChanges": "File Changes",
   "fileChangesCount": "{{count}} File Changes",
   "turnDeliverables": {
-    "title": "Generated {{count}} files",
-    "partialTitle": "Showing {{count}} changed files from this turn (scroll up to load the rest)",
+    "title": "This turn involves {{count}} files",
+    "partialTitle": "This turn involves {{count}} files (list incomplete)",
     "imagesTitle": "Generated {{count}} images",
-    "mixedTitle": "Generated {{count}} items",
     "showMore": "Show {{count}} more files",
     "showLess": "Show less",
     "showMoreImages": "Show {{count}} more images",
@@ -157,7 +155,9 @@
     "saveImage": "Save image",
     "copyImagePath": "Copy image path",
     "reveal": "Reveal in folder",
-    "viewDiff": "View changes"
+    "create": "Added",
+    "modify": "Modified",
+    "delete": "Deleted"
   },
   "conversationInProgress": "A conversation is currently in progress...",
   "canceledExecution": "Execution canceled",

@@ -5,6 +5,68 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.4 - 2026-10-11
+
+- Make bulk session deletion reliable.
+- Keep first-message progress stable through conversation creation: the user
+  bubble and progress header stay mounted as message receipts and canonical
+  turn identity arrive.
+- Separate model changes from bundled contract evolution: model-only bindings
+  are derived from immutable Session artifacts and contract changes land at
+  the canonical idle boundary, preserving frozen authority, resources, and
+  history.
+- Add MCP enabled controls and refresh the session catalog.
+- Move the navigation scrollbar closer to the rail edge.
+- Retire unused agent tooling and dead code.
+
+## v0.8.3 - 2026-10-09
+
+- Replace the bundled macOS browser engine (CEF) with the system WKWebView,
+  shrinking installers and raising the minimum system version to macOS 14.0.
+- Restore macOS site compatibility and navigation recovery, and ignore macOS
+  window restoration during startup.
+- Keep the destructive dataset rebuild resumable when a retired database is
+  corrupted or not a SQLite file at all, instead of blocking startup.
+- Simplify remote host rows and actions, unify compact settings and
+  navigation, and refine the classic light and dark themes.
+- Clear the companion card background lingering after hover.
+
+## v0.8.2 - 2026-10-09
+
+- **Older installations can start after the destructive upgrade.** Historical
+  databases outside the current canonical migration chain, including the
+  87-migration lineage that blocked 0.8.1 startup, are automatically retired
+  together with managed side stores and replaced with a fresh dataset. Old
+  conversations, model settings, credentials and other database configuration
+  are not imported. Normal restarts preserve the replacement dataset, and an
+  interrupted rebuild resumes the same generation. Current browser profiles
+  participate in the reset; earlier reset plans remain resumable. Release
+  workflows now require the desktop startup and upgrade regression checks.
+- Reduce macOS installer size with LZMA disk images, a single embedded frontend,
+  and selected CEF language resources. Preserve ARM and Intel browser runtimes,
+  gzip updater compatibility, and nested signing and notarization order.
+
+## v0.8.1 - 2026-10-09
+
+- **Upgrade warning: back up the NomiFun data directory before upgrading.**
+  Upgrades from older installations retain v0.8.0's one-time cleanup of a
+  fully recognized retired Agent generation. Prior Agent sessions, messages,
+  execution history, presets, and bindings are removed while non-Agent
+  configuration is preserved. Unknown, partial, or hand-edited lineage refuses
+  conversion and deletion. Installations already cleaned by v0.8.0 are not
+  cleaned again.
+- Fix macOS updater archive compatibility and report update installation
+  failures clearly.
+- Restore macOS Intel packaging with its own pinned CEF runtime and matching
+  host, framework, and helper architecture checks.
+- Compact companion reply bubbles, unify Session updates and reply
+  presentation, retain completed replies, and dismiss action popovers on click.
+- Decouple skill-market installation from Agent sessions, refresh installed
+  skill metadata, and unify catalog presentation across renderer surfaces.
+- Restore Agnes video v2.0 and repair saved model-capability settings.
+- Remove retired runtime and plugin code, fix plugin delivery evidence, and
+  refresh desktop home screenshots and documentation.
+
 ## v0.8.0 - 2026-10-08
 
 - **Upgrade warning: back up the NomiFun data directory before upgrading.**

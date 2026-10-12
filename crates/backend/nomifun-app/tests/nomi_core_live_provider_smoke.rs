@@ -251,7 +251,7 @@ async fn build_fixture(root: &TempDir, local_proof: Option<&str>) -> Result<Live
         "ENVIRONMENT_BOOTSTRAP_DEADLINE_EXCEEDED",
         BOOT_DEADLINE,
         async {
-            nomifun_app::bootstrap::init_nomi_core_environment(&cli, "").map_err(|_| {
+            nomifun_app::bootstrap::init_nomi_core_environment(&cli, "").await.map_err(|_| {
                 SmokeFailure::new(
                     "bootstrap",
                     "ENVIRONMENT_BOOTSTRAP_FAILED",

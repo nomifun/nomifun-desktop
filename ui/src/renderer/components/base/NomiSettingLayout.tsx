@@ -61,6 +61,7 @@ export const NomiSettingList: React.FC<NomiSettingListProps> = ({ className, chi
 interface NomiSettingRowProps {
   title: React.ReactNode;
   description?: React.ReactNode;
+  align?: 'center' | 'start';
   controls?: React.ReactNode;
   footer?: React.ReactNode;
   leading?: React.ReactNode;
@@ -74,6 +75,7 @@ interface NomiSettingRowProps {
 export const NomiSettingRow: React.FC<NomiSettingRowProps> = ({
   title,
   description,
+  align = 'center',
   controls,
   footer,
   leading,
@@ -84,9 +86,16 @@ export const NomiSettingRow: React.FC<NomiSettingRowProps> = ({
   style,
 }) => (
   <div className={classNames('bg-[var(--color-bg-2)] px-10px py-6px', className)} style={style}>
-    <div className='flex min-h-28px min-w-0 items-center gap-12px max-[760px]:flex-col max-[760px]:items-stretch'>
+    <div className={classNames(
+      'flex min-h-28px min-w-0 gap-12px max-[760px]:flex-col max-[760px]:items-stretch',
+      align === 'start' ? 'items-start' : 'items-center'
+    )}>
       <div className='min-w-0 flex-1'>
-        <div className={classNames('flex min-w-0 items-center gap-6px text-14px font-500 text-t-primary', titleClassName)}>
+        <div className={classNames(
+          'flex min-w-0 items-center gap-6px text-14px font-500 text-t-primary',
+          align === 'start' && 'min-h-24px',
+          titleClassName
+        )}>
           {leading}
           <div className='min-w-0'>{title}</div>
         </div>

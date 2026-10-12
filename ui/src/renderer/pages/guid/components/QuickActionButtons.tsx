@@ -36,6 +36,7 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
   const [webuiQuickStatus, setWebuiQuickStatus] = useState<WebuiQuickStatus>('checking');
 
   useEffect(() => {
+    if (!webui.lifecycleSupported) return;
     let alive = true;
     const loadStatus = async () => {
       const now = Date.now();
@@ -77,7 +78,7 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
   }, []);
 
   const handleOpenWebUI = useCallback(() => {
-    void navigate('/open-capabilities');
+    void navigate('/connections?task=browser');
   }, [navigate]);
 
   const handleCheckUpdate = useCallback(() => {
@@ -85,7 +86,9 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
   }, []);
 
   const webuiStatusLabel =
-    webuiQuickStatus === 'running'
+    !webui.lifecycleSupported
+      ? t('settings.deviceConnections.currentSite')
+      : webuiQuickStatus === 'running'
       ? t('guid.utilities.running')
       : webuiQuickStatus === 'checking'
         ? t('guid.utilities.checking')

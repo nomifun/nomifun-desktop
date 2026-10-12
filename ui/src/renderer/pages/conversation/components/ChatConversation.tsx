@@ -5,15 +5,8 @@
  */
 
 import { ipcBridge } from '@/common';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IProvider, TChatConversation } from '@/common/config/storage';
 import { parseError } from '@/common/utils';
-import { uuidv7 } from '@/common/utils';
-import type {
-  AgentHandoffMode,
-  AgentSwitchSelection,
-  PreviewAgentSessionSwitchResponse,
-} from '@/common/types/agentPlatform';
 import { CronJobManager } from '@/renderer/pages/cron';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { Message } from '@arco-design/web-react';
@@ -46,7 +39,7 @@ import {
   filterConversationAgentPresets,
   isConversationAgentTemplate,
 } from '@/renderer/components/agent/conversationAgentCatalog';
-import AgentSwitchDialog from './AgentSwitchDialog';
+import { useConversationAgentSwitch } from './useConversationAgentSwitch';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { officialConversationTemplateKey } from './conversationAgentIdentity';
 import {
@@ -203,8 +196,9 @@ const NomiConversationPanel: React.FC<{
     setReasoningEffort(conversation.reasoning_effort);
   }, [conversation.reasoning_effort]);
   const modelSwitchingRef = useRef(false);
+  const agentSwitchingRef = useRef(false);
   const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
-    if (modelSwitchingRef.current) return false;
+    if (modelSwitchingRef.current || agentSwitchingRef.current || reasoningEffortUpdatingRef.current) return false;
     modelSwitchingRef.current = true;
     setModelSwitching(true);
     try {
@@ -245,7 +239,7 @@ const NomiConversationPanel: React.FC<{
   const onReasoningEffortChange = useCallback(async (
     next: SessionReasoningEffort | undefined
   ) => {
-    if (reasoningEffortUpdatingRef.current) return;
+    if (reasoningEffortUpdatingRef.current || agentSwitchingRef.current || modelSwitchingRef.current) return;
     if (isConversationProcessing(conversation)) {
       Message.warning(t('conversation.chat.modelSwitchAfterTurn'));
       return;
@@ -272,107 +266,15 @@ const NomiConversationPanel: React.FC<{
   }, [conversation, reasoningEffort, t]);
 
   const { info: presetPresetInfo } = useAgentInfo(conversation);
-  const [agentSwitch, setAgentSwitch] = useState<{
-    selection: GuidAgentSelection;
-    preview?: PreviewAgentSessionSwitchResponse;
-    mode: AgentHandoffMode;
-    loading: boolean;
-    applying: boolean;
-    error?: string;
-    errorCode?: string;
-  } | null>(null);
-  const switchCurrentConversationAgent = useCallback((selection: GuidAgentSelection) => {
-    if (fixedAgentLabel) return;
-    if (isConversationProcessing(conversation)) {
-      Message.warning(t('conversation.chat.agentSwitch.waitForTurn'));
-      return;
-    }
-    if (
-      (selection.kind === 'preset'
-        && frozenAgentSelection.kind === 'preset'
-        && selection.presetId === frozenAgentSelection.presetId)
-      || (selection.kind === 'template'
-        && frozenAgentSelection.kind === 'template'
-        && selection.templateKey === frozenAgentSelection.templateKey)
-    ) {
-      return;
-    }
-    const wireSelection: AgentSwitchSelection = selection.kind === 'preset'
-      ? { kind: 'preset', preset_id: selection.presetId }
-      : { kind: 'template', template_key: selection.templateKey };
-    // Keeping this flow mounted is intentional: creation.draft and the normal
-    // composer draft remain owned by the current Conversation surface.
-    setAgentSwitch({ selection, mode: 'context_only', loading: true, applying: false });
-    void ipcBridge.agentPlatform.sessions.previewAgentSwitch.invoke({
-      agent_session_id: conversation.id,
-      request: { selection: wireSelection },
-    }).then((preview) => {
-      setAgentSwitch((current) => current && ({
-        ...current,
-        preview,
-        mode: preview.handoff.available ? 'continue_task' : 'context_only',
-        loading: false,
-        error: undefined,
-        errorCode: undefined,
-      }));
-    }).catch((error) => {
-      const errorCode = isBackendHttpError(error) ? error.code : undefined;
-      const message = errorCode
-        ? t(`conversation.chat.agentSwitch.blockers.${errorCode}`, {
-            defaultValue: parseError(error),
-          })
-        : parseError(error);
-      setAgentSwitch((current) => current && ({
-        ...current,
-        loading: false,
-        error: t('conversation.chat.agentSwitch.failed', { error: message }),
-        errorCode,
-      }));
-    });
-  }, [conversation, creation.draft, frozenAgentSelection, t]);
-
-  const confirmCurrentConversationAgentSwitch = useCallback(() => {
-    if (!agentSwitch?.preview || !agentSwitch.preview.can_apply || agentSwitch.applying) return;
-    const wireSelection: AgentSwitchSelection = agentSwitch.selection.kind === 'preset'
-      ? { kind: 'preset', preset_id: agentSwitch.selection.presetId }
-      : { kind: 'template', template_key: agentSwitch.selection.templateKey };
-    setAgentSwitch((current) => current && ({
-      ...current,
-      applying: true,
-      error: undefined,
-      errorCode: undefined,
-    }));
-    void ipcBridge.agentPlatform.sessions.applyAgentSwitch.invoke({
-      agent_session_id: conversation.id,
-      idempotency_key: uuidv7(),
-      request: {
-        selection: wireSelection,
-        handoff_mode: agentSwitch.mode,
-        expected_binding_version: agentSwitch.preview.expected_binding_version,
-      },
-    }).then(async (result) => {
-      await refreshConversationCache(conversation.id);
-      setAgentSwitch(null);
-      Message.success(t('conversation.chat.agentSwitch.success', {
-        agent: agentSwitch.selection.kind === 'template'
-          ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[agentSwitch.selection.templateKey]}.name`)
-          : result.current_agent_label,
-      }));
-    }).catch((error) => {
-      const errorCode = isBackendHttpError(error) ? error.code : undefined;
-      const message = errorCode
-        ? t(`conversation.chat.agentSwitch.blockers.${errorCode}`, {
-            defaultValue: parseError(error),
-          })
-        : parseError(error);
-      setAgentSwitch((current) => current && ({
-        ...current,
-        applying: false,
-        error: t('conversation.chat.agentSwitch.failed', { error: message }),
-        errorCode,
-      }));
-    });
-  }, [agentSwitch, conversation.id, t]);
+  const { switching: agentSwitching, switchAgent: switchCurrentConversationAgent } = useConversationAgentSwitch({
+    sessionId: conversation.id,
+    currentSelection: frozenAgentSelection,
+    processing: isConversationProcessing(conversation),
+    switchingRef: agentSwitchingRef,
+    configurationChangingRef: modelSwitchingRef,
+    reasoningUpdatingRef: reasoningEffortUpdatingRef,
+  });
+  // The composer and creation.draft remain mounted throughout an Agent switch.
 
   const frozenPresetId = conversation.preset_id;
   const resolvePreset = useCallback(async () => {
@@ -407,10 +309,12 @@ const NomiConversationPanel: React.FC<{
       isLoading={agentsLoading}
       loadError={agentsError}
       onRetry={refreshAgents}
-      disabled={isConversationProcessing(conversation) || agentSwitch?.applying === true}
+      disabled={isConversationProcessing(conversation) || modelSwitching || reasoningEffortUpdating}
       disabledReason={t('conversation.chat.agentSwitch.waitForTurn')}
-      onSelectPreset={(presetId) => switchCurrentConversationAgent({ kind: 'preset', presetId })}
-      onSelectTemplate={(templateKey) => switchCurrentConversationAgent({ kind: 'template', templateKey })}
+      switching={agentSwitching}
+      switchingLabel={t('conversation.chat.agentSwitch.loading')}
+      onSelectPreset={(presetId) => void switchCurrentConversationAgent({ kind: 'preset', presetId })}
+      onSelectTemplate={(templateKey) => void switchCurrentConversationAgent({ kind: 'template', templateKey })}
     />
   );
   const presetResourceKinds = new Set(
@@ -464,44 +368,19 @@ const NomiConversationPanel: React.FC<{
 
   return (
     <CreationComposerContext.Provider value={embedded ? null : { ...creation, presetId: frozenPresetId, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
-      <>
-        <AgentSwitchDialog
-          visible={agentSwitch !== null}
-          preview={agentSwitch?.preview}
-          currentAgentLabel={agentSwitch?.preview?.current.preset_id === conversation.preset_id
-            ? currentAgentLabel : undefined}
-          targetAgentLabel={agentSwitch?.selection.kind === 'template'
-            ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[agentSwitch.selection.templateKey]}.name`)
-            : undefined}
-          loading={agentSwitch?.loading ?? false}
-          applying={agentSwitch?.applying ?? false}
-          mode={agentSwitch?.mode ?? 'context_only'}
-          error={agentSwitch?.error}
-          errorCode={agentSwitch?.errorCode}
-          onModeChange={(mode) => setAgentSwitch((current) => current && ({ ...current, mode }))}
-          onConfirm={confirmCurrentConversationAgentSwitch}
-          onCancel={() => setAgentSwitch(null)}
-          onRecovery={(code) => {
-            setAgentSwitch(null);
-            void navigate(code === 'AGENT_SESSION_MODEL_INCOMPATIBLE'
-              ? '/models?section=chat'
-              : '/agent');
-          }}
-        />
-        <NomiConversationLayout
-          conversation={conversation}
-          chatLayoutProps={chatLayoutProps}
-          modelSelection={modelSelection}
-          agentSelectorNode={agentSelectorNode}
-          currentAgentLabel={currentAgentLabel}
-          submissionDisabled={submissionDisabled}
-          onBeforeSubmit={onBeforeSubmit}
-          modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}
-          reasoningEffort={reasoningEffort}
-          reasoningEffortUpdating={reasoningEffortUpdating}
-          onReasoningEffortChange={onReasoningEffortChange}
-        />
-      </>
+      <NomiConversationLayout
+        conversation={conversation}
+        chatLayoutProps={chatLayoutProps}
+        modelSelection={modelSelection}
+        agentSelectorNode={agentSelectorNode}
+        currentAgentLabel={currentAgentLabel}
+        submissionDisabled={submissionDisabled}
+        onBeforeSubmit={onBeforeSubmit}
+        modelSelectionDisabled={modelSwitching || agentSwitching}
+        reasoningEffort={reasoningEffort}
+        reasoningEffortUpdating={reasoningEffortUpdating}
+        onReasoningEffortChange={onReasoningEffortChange}
+      />
     </CreationComposerContext.Provider>
   );
 };

@@ -6,7 +6,6 @@
  */
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
-import { resolveLocaleKey } from '@/common/utils';
 import { openExternalUrl } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import SkillMarketCard from './skill/SkillMarketCard';
@@ -25,7 +24,7 @@ import {
   normalizeSkillMarketItems,
   resolveMarketSyncItems,
   selectMarketSourceWithItems,
-} from './skill/skillMarket';
+} from '@/renderer/services/skills/skillMarket';
 import { Button, Input } from '@arco-design/web-react';
 import { CloseSmall, LinkOne, Refresh, Search } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -58,6 +57,8 @@ type MarketSettingsPanelProps = {
   searchPlaceholder: string;
   emptyText: string;
   onAdd: (item: ISkillMarketItem) => void | Promise<void>;
+  /** Consumers may invalidate their display metadata after a ranking-cache write. */
+  onCacheUpdated?: () => void;
   /** Whether cards expose the market-provided command for manual copying. */
   showInstallCommand?: boolean;
   /** True when this market entry already has a live installed resource. */
@@ -85,6 +86,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   searchPlaceholder,
   emptyText,
   onAdd,
+  onCacheUpdated,
   showInstallCommand = true,
   isAdded,
   canRunAddedAction,
@@ -93,8 +95,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   testIdPrefix,
   text,
 }) => {
-  const { t, i18n } = useTranslation();
-  const localeKey = resolveLocaleKey(i18n.language);
+  const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
   const autoSyncStartedRef = useRef(false);
   const itemsRef = useRef<ISkillMarketItem[]>([]);
@@ -127,8 +128,9 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       setErrors(normalizeSkillMarketErrors(cache.errors));
     } catch {
       localStorage.removeItem(cacheKey);
+      onCacheUpdated?.();
     }
-  }, [cacheKey, sources]);
+  }, [cacheKey, onCacheUpdated, sources]);
 
   const syncMarket = useCallback(
     async (options?: { showToast?: boolean }) => {
@@ -152,6 +154,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
             errors: normalizedErrors,
           })
         );
+        onCacheUpdated?.();
         if (showToast) {
           if (normalized.length > 0) {
             message.success(text?.syncSuccess ?? t('settings.market.syncSuccess', { defaultValue: '市场已更新' }));
@@ -173,7 +176,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         setLoading(false);
       }
     },
-    [cacheKey, message, sources, t, text]
+    [cacheKey, message, onCacheUpdated, sources, t, text]
   );
 
   useEffect(() => {
@@ -372,7 +375,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
               <SkillMarketCard
                 key={item.id}
                 item={item}
-                localeKey={localeKey}
                 adding={pendingAddIds.has(item.id)}
                 added={added}
                 addedActionEnabled={addedActionEnabled}

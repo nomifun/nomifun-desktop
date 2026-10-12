@@ -8,14 +8,14 @@ import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
 import { shell, webui } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import NomiModal from '@/renderer/components/base/NomiModal';
+import { fetchCurrentUser } from '@/renderer/hooks/context/AuthContext';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
 import { copyText } from '@/renderer/utils/ui/clipboard';
-import { Button, Form, Input, Message, Select, Switch, Tooltip } from '@arco-design/web-react';
+import { Alert, Button, Form, Input, Message, Select, Switch, Tooltip } from '@arco-design/web-react';
 import { Copy, Earth, EditTwo, Info, Refresh } from '@icon-park/react';
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { buildWebuiQrLoginUrl, getWebuiQrBaseUrls } from './webuiQrLinks';
-import RelayPairingPanel from './RelayPairingPanel';
 
 const QRCodeSVGLazy = React.lazy(async () => {
   const mod = await import('qrcode.react');
@@ -28,8 +28,8 @@ const QRCodeSVGLazy = React.lazy(async () => {
  *
  * Consumes the shared `useWebuiServer` state (single status subscription / single
  * start-stop path) and adds the credential modals + QR login, ported verbatim
- * from the former `WebuiModalContent` desktop panel. This panel only ever renders
- * inside the desktop shell, so it drops the browser-mode "channels moved" hint.
+ * from the former `WebuiModalContent` desktop panel. Browser sessions read their
+ * authenticated account separately from the desktop listener's status.
  */
 interface WebuiControlPanelProps {
   mode?: 'popover' | 'page';
@@ -51,6 +51,20 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
   // 用户名即时覆盖（改密后调 clearInitialPassword 收起明文）。
   // Optimistic username override for immediate display after a change.
   const [usernameOverride, setUsernameOverride] = useState<string | null>(null);
+  const [browserUsername, setBrowserUsername] = useState<string | null>(null);
+  const [browserUsernameLoading, setBrowserUsernameLoading] = useState(!lifecycleSupported);
+
+  useEffect(() => {
+    if (lifecycleSupported) return;
+    const controller = new AbortController();
+    setBrowserUsernameLoading(true);
+    void fetchCurrentUser(controller.signal).then((result) => {
+      if (controller.signal.aborted) return;
+      setBrowserUsername(result.kind === 'user' ? result.user.username : null);
+      setBrowserUsernameLoading(false);
+    });
+    return () => controller.abort();
+  }, [lifecycleSupported]);
 
   // 设置新密码 / 用户名弹窗 / Password & username modals
   const [setPasswordModalVisible, setSetPasswordModalVisible] = useState(false);
@@ -74,9 +88,9 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       .catch((error) => console.error('[WebuiControlPanel] Copy failed:', error));
   };
 
-  // Use `||` (not `??`) so an empty-string username from a not-yet-populated
-  // status falls back to the persisted value / 'admin' instead of rendering blank.
-  const displayUsername = usernameOverride || status?.adminUsername || 'admin';
+  // Browser lifecycle status is unavailable; it cannot establish an account.
+  const displayUsername = usernameOverride || (lifecycleSupported ? status?.adminUsername : browserUsername) || null;
+  const usernamePending = lifecycleSupported ? !status : browserUsernameLoading;
   const qrBaseUrls = useMemo(() => getWebuiQrBaseUrls(status, accessUrls, port), [status, accessUrls, port]);
   const qrUrl = useMemo(() => {
     if (!qrToken || !selectedQrBaseUrl) return null;
@@ -91,6 +105,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
   };
 
   const handleResetUsername = () => {
+    if (!displayUsername) return;
     usernameForm.setFieldsValue({ newUsername: displayUsername });
     setSetUsernameModalVisible(true);
   };
@@ -303,9 +318,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         {t('settings.webui.featureRemoteDesc')}
       </div>
 
-      {lifecycleSupported ? <RelayPairingPanel /> : null}
-
-      {/* 桌面端生命周期未实现提示 / Desktop lifecycle-unavailable notice */}
+      {/* A browser is already served by its host and cannot control its listener. */}
       {!lifecycleSupported && (
         <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-warning leading-relaxed'>
           {t('settings.webui.desktopLifecycleUnavailable')}
@@ -313,7 +326,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       )}
 
       {/* 启用 WebUI / Enable WebUI */}
-      <div className='flex items-center justify-between gap-12px'>
+      {lifecycleSupported && <div className='flex items-center justify-between gap-12px'>
         <div className='min-w-0 flex items-center gap-8px'>
           <span className='text-14px text-t-primary'>{t('settings.webui.enable')}</span>
           {starting ? (
@@ -328,7 +341,12 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
           disabled={!lifecycleSupported}
           onChange={(checked) => (checked ? void start() : void stop())}
         />
-      </div>
+      </div>}
+
+      {!lifecycleSupported && <div className='flex items-center gap-8px text-13px text-t-secondary'>
+        <code className='min-w-0 truncate'>{window.location.origin}</code>
+        <button type='button' className='bg-transparent border-none cursor-pointer text-primary-6' onClick={() => handleCopy(window.location.origin)}>{t('common.copy')}</button>
+      </div>}
 
       {/* 访问地址：本机 + 每个网卡真实 IP 的快捷 URL / Access URLs */}
       {lifecycleSupported && running && accessUrls.length > 0 && (
@@ -398,14 +416,16 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         <div className='flex items-center justify-between gap-12px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.username')}:</span>
           <div className={CREDENTIAL_PILL_CLASS}>
-            <span className='text-13px text-t-primary truncate'>{displayUsername}</span>
+            <span className='text-13px text-t-primary truncate'>{displayUsername || t(usernamePending ? 'common.loading' : 'common.unknownUser')}</span>
             <div className={CREDENTIAL_ACTIONS_CLASS}>
               <Tooltip content={t('common.copy')}>
                 <Button
                   type='text'
                   size='mini'
                   className={CREDENTIAL_ICON_BUTTON_CLASS}
-                  onClick={() => handleCopy(displayUsername)}
+                  aria-label={t('common.copy')}
+                  disabled={!displayUsername}
+                  onClick={() => { if (displayUsername) handleCopy(displayUsername); }}
                 >
                   <Copy size={13} />
                 </Button>
@@ -415,6 +435,8 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
                   type='text'
                   size='mini'
                   className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  aria-label={t('settings.webui.editUsernameTooltip')}
+                  disabled={!displayUsername}
                   onClick={handleResetUsername}
                 >
                   <EditTwo size={13} />
@@ -617,6 +639,9 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         size='small'
       >
         <Form form={form} layout='vertical' className='pt-12px'>
+          {!lifecycleSupported && (
+            <Alert className='mb-16px' type='warning' showIcon content={t('settings.deviceConnections.passwordChangeSignsOutDevices')} />
+          )}
           {!lifecycleSupported && (
             <Form.Item
               label={t('settings.webui.currentPassword')}

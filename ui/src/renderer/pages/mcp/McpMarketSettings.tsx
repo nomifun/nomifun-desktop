@@ -15,7 +15,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import MarketSettingsPanel from '@/renderer/pages/settings/MarketSettingsPanel';
-import { MCP_MARKET_SOURCES } from '@/renderer/pages/settings/skill/skillMarket';
+import { MCP_MARKET_SOURCES } from '@/renderer/services/skills/skillMarket';
 import { useMcpServerCRUD } from '@/renderer/hooks/mcp';
 import { getMcpConfigurationFields } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import {

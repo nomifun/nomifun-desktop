@@ -281,6 +281,47 @@ fn map_office_storage_error(error: nomifun_common::AppError) -> Wave3HostPortErr
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn office_document_edit_and_preview_use_only_asset_library_authority() {
+        use nomifun_agent_contracts::*;
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let owner_id = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+        let repository: Arc<dyn nomifun_db::IWorkshopRepository> =
+            Arc::new(nomifun_db::SqliteWorkshopRepository::new(database.pool().clone()));
+        let root = tempfile::tempdir().unwrap();
+        let workshop = WorkshopService::start(root.path(), repository);
+        let host = NomiWave3OfficeHost::new(Arc::clone(&workshop));
+        let request = |operation: Wave3CapabilityOperation, operations: &[&str]| Wave3HostRequest {
+            context: nomifun_agent_domain_wave3::Wave3HostContext {
+                principal: PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.clone() },
+                agent_session_id: "office-library-session".into(), operation_id: "office-library-operation".into(),
+                idempotency_key: "office-library-key".into(), correlation_id: "office-library-correlation".into(),
+                resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "office-library-snapshot".into(), snapshot_digest: "a".repeat(64).into() },
+                registry_generation: 1, capability_id: "office".into(), action_id: operation.action_id(),
+                state_scope_key: "session:office-library-session".into(),
+                resource_bindings: vec![TypedResourceBinding {
+                    binding_id: "office-library-binding".into(), resource_kind: "asset_library".into(),
+                    resource_id: nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID.into(), owner_id: owner_id.clone(),
+                    operations: operations.iter().map(|operation| (*operation).to_owned()).collect(),
+                    connection_config_ref: None, typed_parameters: Default::default(),
+                }],
+            }, operation,
+        };
+        let edit = Wave3CapabilityOperation::OfficeDocumentEdit { input: StrictJsonValue(serde_json::json!({
+            "title": "Library document", "content": "Saved without a Canvas or workspace binding.",
+        })) };
+        let denied = host.invoke(request(edit.clone(), &["read"])).await.unwrap_err();
+        assert_eq!(denied.code, "WAVE3_RESOURCE_BINDING_INVALID");
+        let document = host.invoke(request(edit, &["write"])).await.unwrap();
+        let asset_id = document.0["asset_id"].as_str().unwrap();
+        assert_eq!(workshop.get_asset(asset_id).await.unwrap().title, "Library document");
+        let preview = host.invoke(request(Wave3CapabilityOperation::OfficePreview {
+            input: StrictJsonValue(serde_json::json!({"asset_id": asset_id})),
+        }, &["read"])).await.unwrap();
+        assert_eq!(preview.0["content"], "Saved without a Canvas or workspace binding.");
+        assert_eq!(preview.0["format"], "document");
+    }
+
     #[test]
     fn approved_set_is_exact_and_exposes_only_product_modules() {
         let approved = approved_capability_ids();

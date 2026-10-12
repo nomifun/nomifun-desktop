@@ -11,7 +11,7 @@ callers and security models.
 | WebSocket `/ws` | backend <-> UI | Agent stream events, terminal output, broadcast events, heartbeats | `nomifun-realtime` |
 | Tauri IPC | SPA -> desktop shell | Desktop-only OS features | `apps/desktop/src/main.rs` + Tauri plugins |
 | PTY stdio | backend <-> child process | Terminal session bytes, including third-party agent CLIs | `nomifun-terminal` |
-| MCP stdio/HTTP | agent/backend/client <-> MCP server | Tools/resources/prompts | `nomi-mcp`, `nomifun-mcp`, `nomifun-public`, bridge subcommands |
+| MCP stdio/HTTP | agent/backend/client <-> MCP server | Tools/resources/prompts | `nomifun-mcp`, `nomifun-public`, bridge subcommands |
 | Canonical Remote ingress | external agents/scripts -> backend | Explicit AgentSession `open/turn/observe/cancel` | `/mcp`, `/api/remote/*` |
 
 ## Auth Modes
@@ -59,9 +59,9 @@ over HTTP; no parallel execution-event family exists.
 
 The in-process Runtime records typed `AgentEngineEvent` through `engine_journal`
 into the canonical Session. `nomifun-ai-agent::protocol::events::AgentStreamEvent`
-projects realtime presentation into `WebSocketMessage`; shared tool categories
-come from `nomi-types::tool::ToolCategory`. Authority, pauses, and recovery remain
-with the canonical owner and native Runtime described in [Agent Session](agent-session.md).
+projects realtime presentation into `WebSocketMessage`. Authority, pauses, and
+recovery remain with the canonical owner and native Runtime described in
+[Agent Session](agent-session.md).
 
 ## Tauri IPC
 
@@ -92,6 +92,10 @@ The current `nomicore` CLI subcommands include:
 - `remote turn`
 - `remote observe`
 - `remote cancel`
+
+The application host binds admitted MCP tool plans to `nomifun-mcp::McpOwner`
+through its MCP adapter. The Runtime calls tools through
+`nomifun-engine-core::EngineToolInvoker` and `nomifun-agent-kernel`.
 
 MCP injection differs by session and by caller:
 

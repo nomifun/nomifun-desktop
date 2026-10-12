@@ -31,7 +31,6 @@ import {
   Message,
   Modal,
   Notification,
-  Result,
   Spin,
   Switch,
   Tabs,
@@ -79,13 +78,15 @@ import {
   formatSize,
   getBaseSource,
   isAutogenNoProviderError,
-  knowledgeErrorText,
   notifySourceFetchResult,
   useKnowledgeBase,
 } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
+import KnowledgeExportControl from '../KnowledgeExportControl';
+import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
+import type { KnowledgeErrorPresentation } from '../knowledgeError';
 import TagPicker from '../CreateStudio/TagPicker';
 import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
 import KnowledgeAddContentControl, {
@@ -204,6 +205,8 @@ const KnowledgeIconButton: React.FC<KnowledgeIconButtonProps> = ({
 interface SettingsTabProps {
   base: IKnowledgeBase;
   allTags: IKnowledgeTag[];
+  tagsError: KnowledgeErrorPresentation | null;
+  onRetryTags: () => void;
   createTag: (label: string) => Promise<IKnowledgeTag>;
   onRefresh: () => void;
   onSourceRefreshed: () => Promise<void>;
@@ -212,6 +215,8 @@ interface SettingsTabProps {
 const SettingsTab: React.FC<SettingsTabProps> = ({
   base,
   allTags,
+  tagsError,
+  onRetryTags,
   createTag,
   onRefresh,
   onSourceRefreshed,
@@ -257,7 +262,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
       Message.success(t('knowledge.detail.settings.saveOk', { defaultValue: '保存成功' }));
       onRefresh();
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setSaving(false);
     }
@@ -274,31 +279,9 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
       notifySourceFetchResult(t, summary, t('knowledge.source.refreshOk', { defaultValue: '刷新完成，获取 {{fetched}} 条', fetched: summary.fetched }));
       await onSourceRefreshed();
     } catch (e) {
-      Message.error(knowledgeErrorText(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setSourceLoading(false);
-    }
-  };
-
-  // ─── Danger zone: export ──────────────────────────────────────────────────
-  const [exporting, setExporting] = useState(false);
-
-  const handleExport = async () => {
-    if (exporting) return;
-    const dirs = await ipcBridge.dialog.showOpen.invoke({ properties: ['openDirectory'] });
-    if (!dirs || dirs.length === 0) return;
-    const destDir = dirs[0];
-    setExporting(true);
-    try {
-      const { dest_path } = await ipcBridge.knowledge.exportBase.invoke({
-        knowledge_base_id: base.knowledge_base_id,
-        dest_path: destDir,
-      });
-      Message.success(t('knowledge.detail.settings.exportOk', { defaultValue: '已导出至 {{path}}', path: dest_path }));
-    } catch (e) {
-      Message.error(String(e));
-    } finally {
-      setExporting(false);
     }
   };
 
@@ -314,7 +297,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
       Message.success(t('knowledge.detail.settings.deleteOk', { defaultValue: '已删除' }));
       navigate('/knowledge');
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setDeleting(false);
       setDeleteModalVisible(false);
@@ -375,6 +358,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
       </NomiSettingSection>
 
       <section className='knowledge-settings-tags-section flex flex-col gap-8px'>
+        {tagsError && <KnowledgeErrorNotice error={tagsError} onRetry={onRetryTags} />}
         <label className={knowledgeDetailSettingsLabelClass}>
           {t('knowledge.detail.settings.labelTags', { defaultValue: '标签' })}
         </label>
@@ -421,7 +405,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
                   onClick={() => {
                     void ipcBridge.shell.openFolderWith
                       .invoke({ folder_path: base.root_path, tool: 'explorer' })
-                      .catch((e: unknown) => Message.error(String(e)));
+                      .catch((e: unknown) => showKnowledgeErrorMessage(e, 'operation', t));
                   }}
                 >
                   {t('knowledge.detail.settings.openFolder', { defaultValue: '打开' })}
@@ -440,20 +424,19 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
         />
       </NomiSettingList>
 
+      <NomiSettingList>
+        <NomiSettingRow
+          title={t('knowledge.detail.settings.exportDesc', { defaultValue: '导出为 .zip 资料包' })}
+          controls={<KnowledgeExportControl base={base} />}
+        />
+      </NomiSettingList>
+
       {/* ─── Danger zone ─── */}
       <NomiSettingSection
         className='knowledge-settings-danger-section'
         title={t('knowledge.detail.settings.dangerTitle', { defaultValue: '危险操作' })}
       >
         <NomiSettingList>
-          <NomiSettingRow
-            title={t('knowledge.detail.settings.exportDesc', { defaultValue: '导出为 .zip 备份包' })}
-            controls={
-              <Button size='mini' loading={exporting} onClick={() => void handleExport()}>
-                {t('knowledge.detail.settings.exportBtn', { defaultValue: '导出' })}
-              </Button>
-            }
-          />
           <NomiSettingRow
             title={t('knowledge.detail.settings.deleteDesc', { defaultValue: '删除此知识库' })}
             description={
@@ -561,7 +544,7 @@ const KnowledgeDetailPage: React.FC = () => {
     loadFiles,
   } = useKnowledgeBase(id, openingBase);
   const { choice: modelChoice, setChoice: setModelChoice } = useKnowledgeAutogenModel();
-  const { tags: allTags, createTag } = useKnowledgeTags();
+  const { tags: allTags, createTag, error: tagsError, refresh: refreshTags } = useKnowledgeTags();
 
   // ─── Tab routing via ?tab= ──────────────────────────────────────────────────
   const rawTabParam = searchParams.get('tab');
@@ -634,9 +617,9 @@ const KnowledgeDetailPage: React.FC = () => {
   const isTreeSearch = fileSearch.trim().length > 0;
 
   useEffect(() => {
-    if (!isTreeSearch || filesLoaded || filesLoading) return;
+    if (!isTreeSearch || filesLoaded || filesLoading || error) return;
     void loadFiles().catch(() => undefined);
-  }, [filesLoaded, filesLoading, isTreeSearch, loadFiles]);
+  }, [error, filesLoaded, filesLoading, isTreeSearch, loadFiles]);
 
   const source = getBaseSource(base);
   const canMutateTree = base?.tree_access === 'editable';
@@ -729,7 +712,7 @@ const KnowledgeDetailPage: React.FC = () => {
         }
       })
       .catch((e) => {
-        if (!cancelled) Message.error(String(e));
+        if (!cancelled) showKnowledgeErrorMessage(e, 'operation', t);
       })
       .finally(() => {
         if (!cancelled) setFileLoading(false);
@@ -831,7 +814,7 @@ const KnowledgeDetailPage: React.FC = () => {
         ]),
       ]);
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       saveInFlightRef.current = false;
       setSaving(false);
@@ -904,7 +887,7 @@ const KnowledgeDetailPage: React.FC = () => {
       dispatchTree({ type: 'select-tree-key', path: selectedPath });
       scrollCurrentTreeNodeIntoView();
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setTreeAction(null);
     }
@@ -938,7 +921,7 @@ const KnowledgeDetailPage: React.FC = () => {
       dispatchTree({ type: 'set-root', tree: fullTree });
       dispatchTree({ type: 'replace-expanded', paths: collectKnowledgeDirectoryPaths(fullTree) });
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setTreeAction(null);
     }
@@ -1152,7 +1135,7 @@ const KnowledgeDetailPage: React.FC = () => {
                         );
                       }
                     })
-                    .catch((error: unknown) => Message.error(String(error)))
+                    .catch((error: unknown) => showKnowledgeErrorMessage(error, 'operation', t))
                     .finally(() => {
                       relocationInFlightRef.current = false;
                       setMovingPath(null);
@@ -1169,7 +1152,7 @@ const KnowledgeDetailPage: React.FC = () => {
         }
         return result;
       } catch (e) {
-        Message.error(String(e));
+        showKnowledgeErrorMessage(e, 'operation', t);
         return null;
       } finally {
         relocationInFlightRef.current = false;
@@ -1201,7 +1184,7 @@ const KnowledgeDetailPage: React.FC = () => {
       dispatchTree({ type: 'select-folder', path });
       Message.success(t('knowledge.actions.createFolderOk', { defaultValue: '文件夹已创建' }));
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -1246,7 +1229,7 @@ const KnowledgeDetailPage: React.FC = () => {
       await refresh();
       await reloadTreePath(parent);
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -1274,7 +1257,7 @@ const KnowledgeDetailPage: React.FC = () => {
       await refresh();
       await reloadTreePath(parent);
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -1326,7 +1309,7 @@ const KnowledgeDetailPage: React.FC = () => {
           setMoveDirectoryTree(knowledgeDirectoryOnlyTree(rootTree, item));
         }
       } catch (error) {
-        Message.error(String(error));
+        showKnowledgeErrorMessage(error, 'operation', t);
       } finally {
         if (moveDirectoryRequestRef.current === requestNumber) {
           setMoveDirectoryLoading(false);
@@ -1368,7 +1351,7 @@ const KnowledgeDetailPage: React.FC = () => {
           parentDirOfKnowledgePath(event.old_prefix),
           parentDirOfKnowledgePath(event.new_prefix),
         ]),
-      ]).catch((error: unknown) => Message.error(String(error)));
+      ]).catch((error: unknown) => showKnowledgeErrorMessage(error, 'operation', t));
     });
   }, [id, preserveLoadedDocumentRelocation, refresh, reloadTreeBranches]);
 
@@ -1470,7 +1453,7 @@ const KnowledgeDetailPage: React.FC = () => {
         );
       }
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     } finally {
       setSourceActionEntryId(null);
     }
@@ -1526,7 +1509,7 @@ const KnowledgeDetailPage: React.FC = () => {
     }
     if (key === 'open-source' && item.source?.source_url) {
       void openExternalUrl(item.source.source_url).catch((error: unknown) =>
-        Message.error(knowledgeErrorText(error))
+        showKnowledgeErrorMessage(error, 'operation', t)
       );
       return;
     }
@@ -1653,7 +1636,7 @@ const KnowledgeDetailPage: React.FC = () => {
     try {
       await ipcBridge.shell.openFolderWith.invoke({ folder_path: base.root_path, tool: 'explorer' });
     } catch (e) {
-      Message.error(String(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     }
   };
 
@@ -1677,7 +1660,7 @@ const KnowledgeDetailPage: React.FC = () => {
         })
       );
     } catch (error) {
-      Message.error(knowledgeErrorText(error));
+      showKnowledgeErrorMessage(error, 'operation', t);
     } finally {
       setEnablingLocalFolderEdits(false);
     }
@@ -1693,7 +1676,8 @@ const KnowledgeDetailPage: React.FC = () => {
       );
       void refresh();
     } catch (e) {
-      Message.error(isAutogenNoProviderError(e) ? t('knowledge.actions.autogenNoProvider') : knowledgeErrorText(e));
+      if (isAutogenNoProviderError(e)) Message.error(t('knowledge.actions.autogenNoProvider'));
+      else showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setAutogenLoading(false);
     }
@@ -1717,7 +1701,7 @@ const KnowledgeDetailPage: React.FC = () => {
       notifySourceFetchResult(t, summary, t('knowledge.source.refreshOk', { fetched: summary.fetched }));
       await refreshAfterSourceMutation();
     } catch (e) {
-      Message.error(knowledgeErrorText(e));
+      showKnowledgeErrorMessage(e, 'operation', t);
     } finally {
       setRefreshingSource(false);
     }
@@ -1783,15 +1767,13 @@ const KnowledgeDetailPage: React.FC = () => {
   }, [base?.updated_at, t]);
 
   // ─── Error state ────────────────────────────────────────────────────────────
-  if (error) {
+  if (error && !base) {
     return (
       <div className='size-full flex items-center justify-center'>
-        <Result
-          status='error'
-          title={t('knowledge.loadError')}
-          subTitle={error}
-          extra={<Button onClick={() => navigate('/knowledge')}>{t('knowledge.backToList')}</Button>}
-        />
+        <div className='flex w-full max-w-600px flex-col gap-12px p-24px'>
+          <KnowledgeErrorNotice error={error} onRetry={() => void refresh()} />
+          <Button onClick={() => navigate('/knowledge')}>{t('knowledge.backToList')}</Button>
+        </div>
       </div>
     );
   }
@@ -1805,6 +1787,7 @@ const KnowledgeDetailPage: React.FC = () => {
       )}
     >
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
+        {error && <KnowledgeErrorNotice error={error} onRetry={() => void refresh()} />}
         {loading ? (
           <div
             className='flex min-h-38px items-center justify-center gap-10px rounded-10px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px text-13px text-[var(--color-text-2)]'
@@ -1840,7 +1823,7 @@ const KnowledgeDetailPage: React.FC = () => {
           <div className='flex gap-14px items-center'>
             {base && kindConfig && <DetailKindIcon kind={base.kind} config={kindConfig} />}
             <div className='flex flex-col gap-6px'>
-              <h1 className='m-0 text-21px font-700 text-[var(--color-text-1)] flex items-center gap-9px'>
+              <h1 className='m-0 text-[length:var(--page-title-size)] font-600 leading-[var(--page-title-line-height)] text-[var(--color-text-1)] flex items-center gap-9px'>
                 {base?.name ?? '...'}
                 {/* Pen icon — edit entry point (actual editing in D5/Settings tab) */}
                 <span
@@ -2060,7 +2043,7 @@ const KnowledgeDetailPage: React.FC = () => {
                     }
                     onInvalidDrop={(issue) => Message.warning(describeRelocationIssue(issue))}
                     onLoadDirectory={handleLoadTreeChildren}
-                    onLoadError={(error) => Message.error(String(error))}
+                    onLoadError={(error) => showKnowledgeErrorMessage(error, 'operation', t)}
                     onRelocate={(entry, destinationParentPath) => {
                       void relocateTreeEntry(entry, destinationParentPath, {
                         successKind: 'move',
@@ -2125,7 +2108,7 @@ const KnowledgeDetailPage: React.FC = () => {
                           const dataRef = (treeNode.props as { dataRef?: IKnowledgeTreeEntry }).dataRef;
                           if (!dataRef || dataRef.is_file || isTreeSearch) return Promise.resolve();
                           return handleLoadTreeChildren(dataRef).catch((e: unknown) => {
-                            Message.error(String(e));
+                            showKnowledgeErrorMessage(e, 'operation', t);
                           });
                         }}
                         renderTitle={(node) => {
@@ -2503,6 +2486,8 @@ const KnowledgeDetailPage: React.FC = () => {
                 <SettingsTab
                   base={base}
                   allTags={allTags}
+                  tagsError={tagsError}
+                  onRetryTags={() => void refreshTags()}
                   createTag={createTag}
                   onRefresh={refresh}
                   onSourceRefreshed={refreshAfterSourceMutation}
@@ -2611,7 +2596,7 @@ const KnowledgeDetailPage: React.FC = () => {
                       )
                     );
                   } catch (error) {
-                    Message.error(String(error));
+                    showKnowledgeErrorMessage(error, 'operation', t);
                   }
                 }}
                 onSelect={(keys) => {

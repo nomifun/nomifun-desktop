@@ -89,7 +89,7 @@ describe('GuidPage advanced controls', () => {
     );
     expect(
       page.includes(
-        "agentSelection.selection.kind === 'preset' && presetCapabilities.error"
+        'presetCapabilities.error && ('
       )
     ).toBe(true);
     expect(page.includes("<Alert\n                type='error'")).toBe(true);

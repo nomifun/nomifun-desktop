@@ -119,26 +119,48 @@ impl WorkRootLock {
 
 /// Layer 1: canonical data-root resolution + logging + config resolution.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
-    init_environment_inner(cli, merged_path)
+    init_environment_inner(cli, merged_path, super::resolve_startup_data_root(cli.data_dir.clone())?)
 }
 
 /// Initialize the current in-process Nomi-core host against the same canonical
 /// root used by every other database-owning command.
-pub fn init_nomi_core_environment(
+pub async fn init_nomi_core_environment(
     cli: &Cli,
     merged_path: &str,
 ) -> Result<ServerEnvironment> {
-    init_environment_inner(cli, merged_path)
+    let root = super::prepare_startup_storage_root_async(cli.data_dir.clone(), cli.work_dir.as_deref()).await?;
+    init_environment_inner(cli, merged_path, root)
 }
 
 fn init_environment_inner(
     cli: &Cli,
     merged_path: &str,
+    startup_data_dir: PathBuf,
 ) -> Result<ServerEnvironment> {
-    let startup_data_dir =
-        super::data_root::normalize_requested_startup_data_root(
-            cli.data_dir.clone(),
-        );
+    nomifun_common::storage_relocation::require_storage_root_not_sealed(&startup_data_dir)?;
+    // Take data-dir authority before resolving any pending reset or legacy
+    // work-root recovery hint from its control files.
+    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
+    let data_dir = server_lock.protected_data_dir().to_path_buf();
+    nomifun_common::storage_relocation::require_storage_root_not_sealed(&data_dir)?;
+    anyhow::ensure!(nomifun_common::paths::paths_equivalent(&super::resolve_startup_data_root(cli.data_dir.clone())?, &data_dir),
+        "active storage location changed while acquiring the server lock; restart against the committed root");
+    let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
+    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
+        &data_dir,
+    )?;
+    let requested_work_dir =
+        resolve_work_dir(cli.work_dir.clone(), &data_dir)?;
+    let external_work_root_lock =
+        acquire_distinct_work_root_lock(
+            &data_root_work_lock,
+            &requested_work_dir,
+        )?;
+    let work_dir = external_work_root_lock
+        .as_ref()
+        .map(|lock| lock.protected_root().to_path_buf())
+        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
+
     let log_dir = cli
         .log_dir
         .clone()
@@ -170,26 +192,6 @@ fn init_environment_inner(
         path_len = merged_path.len(),
         "startup: PATH ready"
     );
-
-    // Take data-dir authority before resolving any pending reset or legacy
-    // work-root recovery hint from its control files.
-    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
-    let data_dir = server_lock.protected_data_dir().to_path_buf();
-    let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
-    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
-        &data_dir,
-    )?;
-    let requested_work_dir =
-        resolve_work_dir(cli.work_dir.clone(), &data_dir)?;
-    let external_work_root_lock =
-        acquire_distinct_work_root_lock(
-            &data_root_work_lock,
-            &requested_work_dir,
-        )?;
-    let work_dir = external_work_root_lock
-        .as_ref()
-        .map(|lock| lock.protected_root().to_path_buf())
-        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
 
     // SAFETY: called before any service initialization; no concurrent reads.
     unsafe {
@@ -236,12 +238,14 @@ fn init_environment_inner(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ExistingV3DatabaseProbe {
+pub(super) enum ExistingV3DatabaseProbe {
     Missing,
     Current,
     /// A pre-v3 dataset without canonical v3 identity tables/columns.
     Legacy(String),
-    /// Claimed v3 lineage, schema/data damage, or an incompatible binary.
+    /// Readable historical lineage outside this binary's canonical chain.
+    RequiresRebuild(String),
+    /// Schema/data damage or failed inspection of a supported database.
     /// This is never authority to retire or reset existing user data.
     RequiresRepair(String),
 }
@@ -304,6 +308,22 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
     )
     .fetch_all(pool)
     .await?;
+    // Historical databases may retain only some v3-looking identity tables.
+    // Classify a readable lineage before treating missing identity as damage
+    // to a supported database; identity-table presence is not a data epoch.
+    let lineage_current = if required_tables.iter().any(|table| table == "_sqlx_migrations") {
+        match nomifun_db::inspect_migration_lineage(pool).await? {
+            nomifun_db::MigrationLineage::Current => Some(true),
+            nomifun_db::MigrationLineage::KnownPrefix => Some(false),
+            nomifun_db::MigrationLineage::Incompatible(reason) => {
+                return Ok(ExistingV3DatabaseProbe::RequiresRebuild(format!(
+                    "database migration lineage is not a recognized canonical prefix: {reason}"
+                )));
+            }
+        }
+    } else {
+        None
+    };
     if required_tables
         != [
             "_sqlx_migrations",
@@ -321,37 +341,14 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
                 && table_has_column_contract(pool, "users", "user_id", "TEXT", true, false).await?)
             || (table_has_column_contract(pool, "agent_metadata", "id", "INTEGER", false, true).await?
                 && table_has_column_contract(pool, "agent_metadata", "agent_id", "TEXT", true, false).await?);
-        return Ok(if has_v3_identity {
+        return Ok(if has_v3_identity || lineage_current.is_some() {
             ExistingV3DatabaseProbe::RequiresRepair(reason)
         } else {
             ExistingV3DatabaseProbe::Legacy(reason)
         });
     }
 
-    let agent_clean_cut = match nomifun_db::requires_agent_store_clean_cut(pool).await {
-        Ok(required) => required,
-        Err(error) => {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database Agent Store cutover identity could not be verified: {error}"
-            )));
-        }
-    };
-    // The DB owner performs the recognized Agent-only cutover in one
-    // transaction. Keep the non-Agent installation identity checks below;
-    // the current Agent schema contract applies after that commit.
-    let lineage_current = if agent_clean_cut {
-        false
-    } else {
-        match nomifun_db::validate_known_migration_lineage_prefix(pool).await {
-            Ok(current) => current,
-            Err(error) => {
-                return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                    "database migration lineage is not a recognized canonical prefix: {error}"
-                )));
-            }
-        }
-    };
-    if lineage_current {
+    if lineage_current == Some(true) {
         if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
             return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database does not satisfy the complete v3 ID schema contract: {error}"
@@ -424,7 +421,7 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
     Ok(ExistingV3DatabaseProbe::Current)
 }
 
-async fn probe_existing_v3_database(path: &Path) -> Result<ExistingV3DatabaseProbe> {
+pub(super) async fn probe_existing_v3_database(path: &Path) -> Result<ExistingV3DatabaseProbe> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -516,9 +513,9 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
     // it is deliberately non-destructive when a database file exists.  The
     // app probe below is the only authority allowed to classify/retire that
     // database. Receipt-valid databases still have to prove a supported
-    // exact embedded baseline plus the complete schema/data and installation
-    // identity contracts. Historical prefixes are preserved for an explicit
-    // reset; startup never mutates them in place.
+    // canonical lineage plus the schema/data and installation identity
+    // contracts. A readable incompatible lineage is retired as one dataset
+    // for this destructive release; no historical rows are converted.
     match nomifun_common::factory_reset::prepare_v3_dataset(
         &config.data_dir,
         &config.work_dir,
@@ -608,14 +605,27 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
                 "database compatibility validation failed; existing data preserved without automatic retirement: {reason}"
             )).into());
         }
+        ExistingV3DatabaseProbe::RequiresRebuild(reason) => {
+            warn!(
+                target: "boot",
+                database = %config.database_path().display(),
+                reason,
+                "rebuilding the incompatible dataset for the destructive release; historical data will not be migrated"
+            );
+            nomifun_common::factory_reset::rebuild_incompatible_dataset_after_probe(
+                &config.data_dir,
+                &config.work_dir,
+            )?;
+            V3DataLayerState::BootstrapRequired
+        }
         ExistingV3DatabaseProbe::Legacy(reason) => {
             warn!(
                 target: "boot",
                 database = %config.database_path().display(),
                 reason,
-                "database is a legacy dataset without v3 identity; checking retirement authority"
+                "rebuilding the historical dataset without v3 identity; historical data will not be migrated"
             );
-            nomifun_common::factory_reset::retire_non_v3_dataset_after_probe(
+            nomifun_common::factory_reset::rebuild_incompatible_dataset_after_probe(
                 &config.data_dir,
                 &config.work_dir,
             )?;
@@ -706,9 +716,25 @@ impl ServerEnvironment {
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
+    init_data_layer_with_browser(config, #[cfg(feature = "browser-use")] None).await
+}
+
+/// Desktop startup supplies its native Browser owner so a dataset reset also
+/// removes OS-managed website stores before the reset can be finalized.
+pub async fn init_data_layer_with_browser(
+    config: &AppConfig,
+    #[cfg(feature = "browser-use")]
+    browser: Option<&nomifun_browser_platform::workspace::BrowserResourceService>,
+) -> Result<Database> {
     let boot = Instant::now();
 
     let preparation = prepare_v3_data_layer(config).await?;
+    #[cfg(target_os = "macos")]
+    super::browser_profiles::cleanup_retired_browser_profiles(
+        config, #[cfg(feature = "browser-use")] browser,
+    ).await?;
+    #[cfg(all(not(target_os = "macos"), feature = "browser-use"))]
+    let _ = browser;
     if preparation == V3DataLayerState::BootstrapRequired
         && !config.work_dir_is_cli_override
         && nomifun_common::dir_config::replace_malformed_work_dir_after_lifecycle_proof(
@@ -735,11 +761,6 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
     let database = nomifun_db::init_database(&db_path).await?;
     info!(elapsed_ms = boot.elapsed().as_millis(), "startup: database initialized");
 
-    // One-shot absolute-path rewrite after a data-root relocation (layout
-    // migration). Idempotent and never fails the boot; see
-    // `bootstrap::relocation`.
-    super::relocation::rewrite_relocated_paths(&database, &config.data_dir).await;
-
     Ok(database)
 }
 
@@ -762,6 +783,9 @@ pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
         &config.data_dir,
         &config.work_dir,
     )?;
+    if let Some(control) = nomifun_common::storage_relocation::resolve_control_dir(&config.data_dir)? {
+        nomifun_common::storage_relocation::refresh_current_storage_location(&control, &config.data_dir)?;
+    }
     Ok(())
 }
 
@@ -784,7 +808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_rejects_an_unrecognized_agent_store_lineage() {
+    async fn probe_rebuilds_an_unrecognized_agent_store_lineage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
@@ -802,15 +826,15 @@ mod tests {
         database.close().await;
 
         match probe_existing_v3_database(&path).await.unwrap() {
-            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+            ExistingV3DatabaseProbe::RequiresRebuild(reason) => {
                 assert!(reason.contains("migration lineage"), "{reason}");
             }
-            other => panic!("unknown Agent lineage must fail closed: {other:?}"),
+            other => panic!("incompatible lineage requires a fresh dataset: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn probe_rejects_an_edited_canonical_baseline_checksum() {
+    async fn probe_rebuilds_an_incompatible_canonical_baseline_checksum() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
@@ -821,10 +845,10 @@ mod tests {
         database.close().await;
 
         match probe_existing_v3_database(&path).await.unwrap() {
-            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+            ExistingV3DatabaseProbe::RequiresRebuild(reason) => {
                 assert!(reason.contains("migration lineage"), "{reason}");
             }
-            other => panic!("edited lineage must fail closed: {other:?}"),
+            other => panic!("incompatible lineage requires a fresh dataset: {other:?}"),
         }
     }
 
@@ -845,5 +869,47 @@ mod tests {
             }
             other => panic!("damaged schema must fail closed: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn probe_rebuilds_retired_additive_migrations_even_with_a_matching_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) SELECT MAX(version) + 1, 'future', 1, X'00', 0 FROM _sqlx_migrations")
+            .execute(database.pool()).await.unwrap();
+        database.close().await;
+        match probe_existing_v3_database(&path).await.unwrap() {
+            ExistingV3DatabaseProbe::RequiresRebuild(reason) => {
+                assert!(reason.contains("migration lineage"), "{reason}");
+            }
+            other => panic!("retired additive migrations require a fresh dataset: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_rebuild_when_lineage_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        sqlx::query("ALTER TABLE _sqlx_migrations RENAME COLUMN checksum TO damaged_checksum")
+            .execute(database.pool()).await.unwrap();
+        database.close().await;
+        let before = std::fs::read(&path).unwrap();
+        assert!(probe_existing_v3_database(&path).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn missing_identity_is_rebuilt_only_when_lineage_is_incompatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        sqlx::query("DROP TABLE agent_metadata").execute(database.pool()).await.unwrap();
+        assert!(matches!(probe_v3_database_pool(database.pool()).await.unwrap(), ExistingV3DatabaseProbe::RequiresRepair(_)));
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
+            .execute(database.pool()).await.unwrap();
+        assert!(matches!(probe_v3_database_pool(database.pool()).await.unwrap(), ExistingV3DatabaseProbe::RequiresRebuild(_)));
+        database.close().await;
     }
 }

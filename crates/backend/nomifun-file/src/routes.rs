@@ -19,6 +19,7 @@ use nomifun_common::constants::UPLOAD_MAX_SIZE;
 use nomifun_auth::CurrentUser;
 
 use crate::browse;
+use crate::path_safety::PathAuthority;
 use crate::traits::{FileServiceRef, FileWatchServiceRef, SnapshotServiceRef};
 use crate::types::{
     CompareResult, CopyResult, FileChangeInfo, FileMetadata, SnapshotInfo, SnapshotMode, WorkspaceFlatFile,
@@ -36,9 +37,9 @@ pub struct FileRouterState {
     pub watch_service: FileWatchServiceRef,
     pub snapshot_service: SnapshotServiceRef,
     pub allowed_roots: Vec<std::path::PathBuf>,
-    /// Roots permitted by the shallow `/api/fs/browse` endpoint. This is
+    /// Roots permitted by the host picker and ZIP export destinations. This is
     /// typically wider than `allowed_roots` (it includes `cwd`, Windows
-    /// drive letters, and `/` on Unix) because the WebUI host-file picker
+    /// drive letters, and `/` on Unix) because the host-file picker
     /// legitimately needs to reach outside any single workspace.
     pub browse_roots: Vec<std::path::PathBuf>,
 }
@@ -142,7 +143,11 @@ async fn list_workspace_files(
     body: Result<Json<ListWorkspaceFilesRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<WorkspaceFlatFileResponse>>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let items = state.file_service.list_workspace_files(&req.root).await?;
+    let mut roots = state.allowed_roots;
+    if let Some(workspace) = req.workspace {
+        roots.push(workspace.into());
+    }
+    let items = state.file_service.list_workspace_files_scoped(&req.root, &PathAuthority::Confined(roots)).await?;
     let response: Vec<WorkspaceFlatFileResponse> = items.into_iter().map(to_flat_file_response).collect();
     Ok(Json(ApiResponse::ok(response)))
 }
@@ -353,10 +358,16 @@ async fn create_zip(
     body: Result<Json<ZipRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let entries: Vec<ZipEntry> = req.files.into_iter().map(to_zip_entry).collect();
+    let entries = req.files.into_iter().map(to_zip_entry).collect::<Result<Vec<_>, _>>()?;
+    // Match the host-folder picker's destination policy. Keep disk reads
+    // confined to application roots and explicitly supplied workspaces.
+    let output_authority = PathAuthority::Confined(state.browse_roots);
+    let mut source_roots = state.allowed_roots;
+    source_roots.extend(req.workspaces.into_iter().map(std::path::PathBuf::from));
+    let source_authority = PathAuthority::Confined(source_roots);
     let ok = state
         .file_service
-        .create_zip(&req.path, entries, req.request_id)
+        .create_zip_scoped(&req.path, entries, req.request_id, &output_authority, &source_authority)
         .await?;
     Ok(Json(ApiResponse::ok(ok)))
 }
@@ -569,20 +580,11 @@ fn to_copy_response(r: CopyResult) -> CopyFilesResponse {
     }
 }
 
-fn to_zip_entry(e: nomifun_api_types::ZipFileEntry) -> ZipEntry {
-    if let Some(content) = e.content {
-        ZipEntry::Text { name: e.name, content }
-    } else if let Some(file_path) = e.file_path {
-        ZipEntry::Disk {
-            name: e.name,
-            file_path,
-        }
-    } else {
-        // Fallback: treat as empty text entry
-        ZipEntry::Text {
-            name: e.name,
-            content: String::new(),
-        }
+fn to_zip_entry(e: nomifun_api_types::ZipFileEntry) -> Result<ZipEntry, AppError> {
+    match (e.content, e.file_path) {
+        (Some(content), None) => Ok(ZipEntry::Text { name: e.name, content }),
+        (None, Some(file_path)) => Ok(ZipEntry::Disk { name: e.name, file_path }),
+        _ => Err(AppError::BadRequest("ZIP entry requires exactly one of content or file_path".into())),
     }
 }
 
@@ -668,7 +670,7 @@ mod tests {
             content: Some("hello".into()),
             file_path: None,
         };
-        let z = to_zip_entry(e);
+        let z = to_zip_entry(e).unwrap();
         match z {
             ZipEntry::Text { name, content } => {
                 assert_eq!(name, "a.txt");
@@ -685,7 +687,7 @@ mod tests {
             content: None,
             file_path: Some("/src/b.bin".into()),
         };
-        let z = to_zip_entry(e);
+        let z = to_zip_entry(e).unwrap();
         match z {
             ZipEntry::Disk { name, file_path } => {
                 assert_eq!(name, "b.bin");
@@ -696,20 +698,23 @@ mod tests {
     }
 
     #[test]
-    fn zip_entry_conversion_empty_fallback() {
+    fn zip_entry_conversion_rejects_missing_source() {
         let e = nomifun_api_types::ZipFileEntry {
             name: "empty.txt".into(),
             content: None,
             file_path: None,
         };
-        let z = to_zip_entry(e);
-        match z {
-            ZipEntry::Text { name, content } => {
-                assert_eq!(name, "empty.txt");
-                assert!(content.is_empty());
-            }
-            _ => panic!("expected Text variant"),
-        }
+        assert!(to_zip_entry(e).is_err());
+    }
+
+    #[test]
+    fn zip_entry_conversion_rejects_ambiguous_source() {
+        let e = nomifun_api_types::ZipFileEntry {
+            name: "ambiguous.txt".into(),
+            content: Some("hello".into()),
+            file_path: Some("/src/a.txt".into()),
+        };
+        assert!(to_zip_entry(e).is_err());
     }
 
     #[test]

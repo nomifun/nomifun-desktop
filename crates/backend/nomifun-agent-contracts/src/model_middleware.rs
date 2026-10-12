@@ -52,6 +52,7 @@ pub fn action() -> CapabilityActionDescriptor {
         output_schema: reference("output", &output_schema()),
         effect_class: EffectClass::Pure,
         presentation: ToolPresentationKind::Hidden,
+        required_resource_operations: Some(Default::default()),
     }
 }
 

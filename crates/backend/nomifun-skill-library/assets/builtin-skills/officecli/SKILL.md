@@ -7,21 +7,16 @@ description: Create, analyze, proofread, and modify Office documents (.docx, .xl
 
 AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Office installation needed.
 
-## Install
+## Managed component setup
 
-If `officecli` is not installed:
+Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** component and the exact
+verified executable. Follow [the shared runtime instructions](references/runtime.md) before
+running any example. Read the Host-owned Office component context resource at
+the exact `read_context_resource` ID appended to the compiled Skill body.
+Every `officecli` example means that bound executable, never an ambient PATH tool.
 
-```bash
-# macOS / Linux
-curl -fsSL https://d.officecli.ai/install.sh | bash
-
-# Windows (PowerShell)
-irm https://d.officecli.ai/install.ps1 | iex
-```
-
-Verify with `officecli --version`. If still not found after install, open a new terminal.
-
----
+Standalone use outside NomiFun uses the exact official scoped package
+`@officecli/officecli@1.0.156`; the shared instructions cover verification.
 
 ## Strategy
 
@@ -49,7 +44,12 @@ Format aliases: `word`→`docx`, `excel`→`xlsx`, `ppt`/`powerpoint`→`pptx`. 
 
 ---
 
-## Performance: Resident Mode
+## Performance: Resident Mode (standalone only)
+
+Inside NomiFun, follow the Host resource's one-shot mode and
+`OFFICECLI_NO_AUTO_RESIDENT=1` on every supervised command. Do not use resident
+`open` / `watch` sessions or depend on a later `close` to flush a product task.
+The following resident workflow applies only to explicit standalone CLI use.
 
 **Every command auto-starts a resident on first access** (60s idle timeout) — file-lock conflicts are automatically avoided. Explicit `open`/`close` is still recommended for longer sessions (12min idle):
 ```bash
@@ -145,6 +145,9 @@ officecli query slides.pptx 'shape[fill=FF0000]'
 ---
 
 ## Watch & Interactive Selection
+
+This is an explicit standalone CLI workflow. NomiFun attachment previews use
+managed static HTML artifacts and do not start this server.
 
 Live HTML preview that auto-refreshes on every file change. Browsers can click / shift-click / box-drag to select shapes; the CLI can read the current browser selection and act on it.
 

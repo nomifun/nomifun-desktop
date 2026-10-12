@@ -25,9 +25,16 @@ const AUTO_SKILL: &str = "fixture-auto";
 const UNKNOWN_SERVER: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890fe";
 
 async fn response(router: &Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
-    let response = tokio::time::timeout(Duration::from_secs(35),router.clone().oneshot(Request::builder().method(method).uri(uri)
-        .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-        .body(Body::from(body.to_string())).unwrap())).await.unwrap_or_else(|_| panic!("{method} {uri} did not settle within its fixture request budget")).unwrap();
+    response_with_idempotency(router, method, uri, body, None).await
+}
+
+async fn response_with_idempotency(router: &Router, method: &str, uri: &str, body: Value, key: Option<&str>) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(uri)
+        .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
+    if let Some(key) = key { request = request.header("idempotency-key", key); }
+    let response = tokio::time::timeout(Duration::from_secs(35),
+        router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()))
+        .await.unwrap_or_else(|_| panic!("{method} {uri} did not settle within its fixture request budget")).unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await.unwrap();
     let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
@@ -524,6 +531,192 @@ async fn apply_preserves_workspace_and_noop_preserves_binding_and_transition_cou
     assert_eq!(status, StatusCode::CONFLICT, "{stale}");
     assert_eq!(stale["code"], "AGENT_SESSION_BINDING_CHANGED");
     assert_eq!(fixture.binding(id).await, after);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn explicit_extension_removal_does_not_require_recompiling_disabled_sources() {
+    let fixture = Fixture::new().await;
+    let preset = fixture.preset(true).await;
+    let mut sessions = Vec::new();
+    for keep_skill in [true, false] {
+        let session = fixture.create(&preset, Some(selection(&[SKILL_A], &[&fixture.server_a])), true).await;
+        let id = session["agent_session_id"].as_str().unwrap().to_owned();
+        let before = fixture.binding(&id).await;
+        let snapshot_id = before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap();
+        let snapshot: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(snapshot_id).fetch_one(fixture.services.database.pool()).await.unwrap();
+        sessions.push((keep_skill, id, before, snapshot));
+    }
+    call(&fixture.router, "POST", &format!("/api/mcp/servers/{}/toggle", fixture.server_a), Value::Null).await;
+    for (keep_skill, id, before, old_snapshot) in sessions {
+        if !keep_skill {
+            // This source belongs only to the fixture. The saved immutable
+            // bytes remain valid history after the user removes the source.
+            fs::remove_file(fixture.services.skill_paths.user_skills_dir.join(SKILL_A).join("SKILL.md")).unwrap();
+        }
+        let skills = if keep_skill { &[SKILL_A][..] } else { &[][..] };
+        let selected = selection(skills, &[]);
+        let applied = call(&fixture.router, "PUT", &selection_path(&id), json!({
+            "selection": selected, "expected_binding_version": before["binding_version"]
+        })).await;
+        assert_eq!(applied["selection"], selected);
+        assert_eq!(applied["binding_version"].as_u64().unwrap(), before["binding_version"].as_u64().unwrap() + 1);
+        let after = fixture.binding(&id).await;
+        let retained = non_mcp_resources(&before);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0]["resource_kind"], "workspace");
+        assert_eq!(after["typed_resource_bindings"], json!(retained), "remove only the explicitly deselected MCP authority");
+        assert_ne!(after["resolved_snapshot_ref"], before["resolved_snapshot_ref"]);
+        let transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed'")
+            .bind(&id).fetch_one(fixture.services.database.pool()).await.unwrap();
+        assert_eq!(transitions, 1, "the final requested selection commits one canonical transition");
+        let saved: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+            .fetch_one(fixture.services.database.pool()).await.unwrap();
+        assert_eq!(saved, old_snapshot, "removing unavailable extensions never rewrites the old frozen Snapshot");
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn agent_switch_retains_available_extensions_drops_removed_sources_and_runs_next_turn() {
+    const REPLY: &str = "SWITCH_AFTER_EXTENSION_REMOVAL_COMPLETE";
+    let fixture = Fixture::new().await;
+    let preset = fixture.preset(false).await;
+    let session = fixture.create(&preset, Some(selection(&[SKILL_A, SKILL_B], &[&fixture.server_a, &fixture.server_b])), false).await;
+    let id = session["agent_session_id"].as_str().unwrap();
+    let before = fixture.binding(id).await;
+    let old_snapshot: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+        .bind(before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+        .fetch_one(fixture.services.database.pool()).await.unwrap();
+    call(&fixture.router, "POST", &format!("/api/mcp/servers/{}/toggle", fixture.server_a), Value::Null).await;
+    fs::remove_file(fixture.services.skill_paths.user_skills_dir.join(SKILL_A).join("SKILL.md")).unwrap();
+    let target = call(&fixture.router, "POST", "/api/agent-presets", json!({
+        "display_name": "Target Agent after extensions were removed", "document": {
+            "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
+            "enabled_capabilities": [], "skill_bindings": [], "system_role_provider_overrides": {},
+            "persona": "Target fixture assistant", "instructions": "Use the remaining selected extensions", "starter_prompts": []
+        }
+    })).await;
+    let target_selection = json!({ "kind": "preset", "preset_id": target["preset"]["preset_id"] });
+    let preview = call(&fixture.router, "POST", &format!("/api/agent-sessions/{id}/agent-switch/preview"), json!({
+        "selection": target_selection
+    })).await;
+    assert_eq!(preview["can_apply"], true, "unavailable extensions must not block an idle Agent change: {preview}");
+    assert_eq!(preview["blockers"], json!([]));
+    let target_snapshot = preview["target"]["resolved_snapshot_ref"].clone();
+    let mut stale_snapshot = target_snapshot.clone();
+    stale_snapshot["snapshot_digest"] = json!("b".repeat(64));
+    let (status, stale) = response_with_idempotency(&fixture.router, "PUT", &format!("/api/agent-sessions/{id}/agent"), json!({
+        "selection": target_selection, "handoff_mode": "context_only", "expected_binding_version": before["binding_version"],
+        "expected_resolved_snapshot_ref": stale_snapshot
+    }), Some(&uuid::Uuid::now_v7().to_string())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["code"], "AGENT_SESSION_BINDING_CHANGED");
+    assert_eq!(stale["details"]["stage"], "target_preview");
+    assert_eq!(fixture.binding(id).await, before, "a stale target reference never submits a transition");
+    let switch_key = uuid::Uuid::now_v7().to_string();
+    let (status, switched) = response_with_idempotency(&fixture.router, "PUT", &format!("/api/agent-sessions/{id}/agent"), json!({
+        "selection": target_selection, "handoff_mode": "context_only", "expected_binding_version": before["binding_version"],
+        "expected_resolved_snapshot_ref": target_snapshot
+    }), Some(&switch_key)).await;
+    assert_eq!(status, StatusCode::OK, "{switched}");
+    assert_eq!(switched["data"]["conversation"]["conversation_id"], id);
+    let retained = selection(&[SKILL_B], &[&fixture.server_b]);
+    assert_eq!(fixture.state(id).await["selection"], retained);
+    let after = fixture.binding(id).await;
+    assert_eq!(after["resolved_snapshot_ref"], target_snapshot, "the preview target with retained global extensions stays stable through apply");
+    assert_eq!(after["binding_version"].as_u64().unwrap(), before["binding_version"].as_u64().unwrap() + 1);
+    assert!(after["typed_resource_bindings"].as_array().unwrap().iter().all(|binding|
+        binding["resource_kind"] != "mcp_server" || binding["resource_id"] != fixture.server_a),
+        "the disabled MCP source must not carry authority into the target Agent");
+    let transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed'")
+        .bind(id).fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_eq!(transitions, 1, "Agent and extension reconciliation must commit one canonical transition");
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(|request: &wiremock::Request| {
+            let request: Value = request.body_json().unwrap();
+            let messages = request["messages"].to_string();
+            assert!(messages.contains(&format!("Selected Skill {SKILL_B} for this accepted request")),
+                "the target Turn must use the remaining selected Skill: {request}");
+            assert!(!messages.contains(&format!("Selected Skill {SKILL_A} for this accepted request")),
+                "a removed Skill must not be reselected from its old frozen Snapshot");
+            chat_response(None, REPLY)
+        }).mount(&fixture.chat).await;
+    let accepted = call(&fixture.router, "POST", &format!("/api/agent-sessions/{id}/turns"), json!({
+        "idempotency_key": uuid::Uuid::now_v7().to_string(), "input": { "content": "Reply with a brief greeting." }
+    })).await;
+    let store = AgentSessionStore::from_pool(fixture.services.database.pool().clone()).await.unwrap();
+    let session_id = AgentSessionId::from(id);
+    let operation = OperationId::from(accepted["operation_id"].as_str().unwrap());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let receipt = store.read_turn_receipt(&session_id, &operation).await.unwrap();
+            if receipt.status == TurnReceiptStatus::Completed { break; }
+            assert_eq!(receipt.status, TurnReceiptStatus::Running, "the switched Agent's next native Turn failed: {receipt:?}");
+            let head = store.head(&session_id).await.unwrap();
+            assert!(!matches!(head.status.as_str(), "paused" | "reconciliation"), "the switched Agent must remain executable: {head:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the switched Agent's next native Turn must complete");
+    let facts = store.turn_output_facts(&session_id, &operation).await.unwrap();
+    assert!(facts.event_payloads.values().any(|payload| payload.to_string().contains(REPLY)));
+    let saved: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+        .bind(before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+        .fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_eq!(saved, old_snapshot, "an Agent switch never rewrites the source's immutable extension Snapshot");
+    assert!(fixture._mcp.received_requests().await.unwrap().iter().all(|request|
+        request.body_json::<Value>().unwrap()["method"] != "tools/call"), "switching alone must not execute any MCP tools");
+    fixture.finish_with_chat_count(1).await;
+}
+
+#[tokio::test]
+async fn explicit_reselection_refreshes_changed_mcp_descriptor_on_the_same_server() {
+    let fixture = Fixture::new().await;
+    let preset = fixture.preset(true).await;
+    let selected = selection(&[], &[&fixture.server_a]);
+    let session = fixture.create(&preset, Some(selected.clone()), true).await;
+    let id = session["agent_session_id"].as_str().unwrap();
+    let before = fixture.binding(id).await;
+    let old_snapshot: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+        .bind(before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+        .fetch_one(fixture.services.database.pool()).await.unwrap();
+    Mock::given(method("POST")).and(path("/mcp"))
+        .and(wiremock::matchers::body_partial_json(json!({ "method": "tools/list" })))
+        .respond_with(|request: &wiremock::Request| {
+            let request: Value = request.body_json().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": request["id"], "result": { "tools": [{
+                    "name": "lookup", "description": "Updated fixture lookup",
+                    "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "additionalProperties": false }
+                }] }
+            }))
+        }).with_priority(1).mount(&fixture._mcp).await;
+    let ready = call(&fixture.router, "POST", "/api/mcp/test-connection", json!({
+        "mcp_server_id": fixture.server_a, "name": "selection-server-a",
+        "transport": { "type": "http", "url": format!("{}/mcp", fixture._mcp.uri()) }
+    })).await;
+    assert_eq!(ready["success"], true, "{ready}");
+    let applied = call(&fixture.router, "PUT", &selection_path(id), json!({
+        "selection": selected, "expected_binding_version": before["binding_version"]
+    })).await;
+    assert_eq!(applied["selection"], selected);
+    assert_eq!(applied["binding_version"].as_u64().unwrap(), before["binding_version"].as_u64().unwrap() + 1);
+    let after = fixture.binding(id).await;
+    assert_eq!(non_mcp_resources(&after), non_mcp_resources(&before));
+    let snapshot: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+        .bind(after["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+        .fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_ne!(serde_json::from_str::<Value>(&snapshot).unwrap()["content"]["mcp_tool_locks"][0]["schema_digest"],
+        serde_json::from_str::<Value>(&old_snapshot).unwrap()["content"]["mcp_tool_locks"][0]["schema_digest"]);
+    let transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed'")
+        .bind(id).fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_eq!(transitions, 1);
+    let saved: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+        .bind(before["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+        .fetch_one(fixture.services.database.pool()).await.unwrap();
+    assert_eq!(saved, old_snapshot);
     fixture.finish().await;
 }
 

@@ -134,6 +134,8 @@ export type IMessageText = IMessage<
     content: string;
     /** Actual message time; created_at remains the durable pagination cursor. */
     display_at_ms?: number;
+    /** Read-only paths derived by the authenticated canonical Session projection. */
+    managed_file_paths?: Record<string, string>;
     idmm_decision?: IdmmDecisionExplanation;
     /** Canonical typed output-limit continuation, never inferred from text. */
     continuation_of_message_id?: MessageId;
@@ -249,6 +251,8 @@ export type IMessageToolCall = IMessage<
   {
     call_id: string;
     name: string;
+    /** Read-only paths derived by the authenticated canonical Session projection. */
+    managed_file_paths?: Record<string, string>;
     /**
      * Provider arguments when they were decoded as a JSON object. Local
      * Pre-execution validation failures preserve the rejected object so users
@@ -600,7 +604,8 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     const decision = primary.content.idmm_decision ?? secondary.content.idmm_decision;
     const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
       ? preferred.content.observations : fallback.content.observations;
-    if (!knowledgeWriteback && !interaction && !observations && !decision) return preferred;
+    const managedFilePaths = primary.content.managed_file_paths ?? secondary.content.managed_file_paths;
+    if (!knowledgeWriteback && !interaction && !observations && !decision && !managedFilePaths) return preferred;
     return {
       ...preferred,
       content: {
@@ -609,6 +614,7 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
         ...(interaction ? { interaction } : {}),
         ...(decision ? { idmm_decision: decision } : {}),
         ...(observations ? { observations } : {}),
+        ...(managedFilePaths ? { managed_file_paths: managedFilePaths } : {}),
       },
     };
   };
@@ -1147,6 +1153,8 @@ export const transformUserCreatedEvent = (
     created_at: event.created_at,
     content: {
       content: event.content,
+      ...(typeof event.display_at_ms === 'number' && Number.isFinite(event.display_at_ms) && event.display_at_ms > 0
+        ? { display_at_ms: event.display_at_ms } : {}),
       ...(event.interaction ? { interaction: event.interaction } : {}),
       ...(decision ? { idmm_decision: decision } : {}),
     },

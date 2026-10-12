@@ -80,6 +80,7 @@ fn resolve_storage_generation() -> String {
 pub fn get_system_info() -> SystemInfoResponse {
     SystemInfoResponse {
         cache_dir: resolve_cache_dir(),
+        data_dir: std::env::var("NOMIFUN_DATA_DIR").unwrap_or_default(),
         work_dir: resolve_work_dir(),
         log_dir: resolve_log_dir(),
         storage_generation: resolve_storage_generation(),

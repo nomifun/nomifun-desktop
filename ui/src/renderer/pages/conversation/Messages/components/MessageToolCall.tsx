@@ -21,6 +21,8 @@ import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { BadgeProps } from '@arco-design/web-react';
 import './MessageToolDetails.css';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+import { resolveMessageFilePath } from './messageFilePath';
 
 const statusToBadge = (status: NormalizedToolStatus): BadgeProps['status'] => {
   switch (status) {
@@ -36,6 +38,7 @@ const statusToBadge = (status: NormalizedToolStatus): BadgeProps['status'] => {
 };
 
 const ReplacePreview: React.FC<{ message: IMessageToolCall }> = ({ message }) => {
+  const conversationContext = useConversationContextSafe();
   const file_path = toDisplayText(message.content.args?.file_path ?? message.content.input?.file_path);
   const old_string = toDisplayText(message.content.args?.old_string ?? message.content.input?.old_string);
   const new_string = toDisplayText(message.content.args?.new_string ?? message.content.input?.new_string);
@@ -46,7 +49,11 @@ const ReplacePreview: React.FC<{ message: IMessageToolCall }> = ({ message }) =>
 
   const fileInfo = useMemo(() => parseDiff(diffText, file_path), [diffText, file_path]);
   const display_name = file_path.split(/[/\\]/).pop() || file_path;
-  const { handleFileClick, handleDiffClick } = useDiffPreviewHandlers({ diffText, display_name, file_path });
+  const { handleFileClick, handleDiffClick } = useDiffPreviewHandlers({
+    diffText,
+    display_name,
+    file_path: resolveMessageFilePath(file_path, conversationContext?.workspace, message.content.managed_file_paths),
+  });
 
   return (
     <FileChangesPanel
@@ -61,6 +68,7 @@ const ReplacePreview: React.FC<{ message: IMessageToolCall }> = ({ message }) =>
 
 const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) => {
   const { t, i18n } = useTranslation();
+  const conversationContext = useConversationContextSafe();
   const { name, artifacts = [] } = message.content;
   const [expanded, setExpanded] = useState(false);
 
@@ -111,7 +119,7 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
             <div className='tool-artifact' key={artifact.id} data-artifact-kind={artifact.kind}>
               {artifact.kind === 'image' ? (
                 <LocalImageView
-                  src={artifact.path}
+                  src={resolveMessageFilePath(artifact.path, conversationContext?.workspace, message.content.managed_file_paths)}
                   alt={artifact.relative_path || 'Generated image'}
                   className='tool-artifact-image'
                 />

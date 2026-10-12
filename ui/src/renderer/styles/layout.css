@@ -25,10 +25,9 @@
 /* Section title text — light mode uses text-t-tertiary (#86909c).
    In dark mode, the tertiary token (#5a5a5a) is too dim on #0e0e0e,
    while --text-secondary (#ced3da) is too bright; pick a mid-gray
-   shared by sidebar section titles and settings group headers.
+   used by sidebar section titles.
    Themable via --sider-section-title-color (see presets/README.md). */
-[data-theme='dark'] .sider-section-title,
-[data-theme='dark'] .settings-sider__group-header {
+[data-theme='dark'] .sider-section-title {
   color: var(--sider-section-title-color, #9098a1);
 }
 
@@ -157,9 +156,8 @@
   white-space: nowrap;
 }
 
-/* Sidebar item transitions (shared by chat-history and settings-sider) */
-.chat-history__item,
-.settings-sider__item {
+/* Chat history item transitions */
+.chat-history__item {
   transition:
     padding 0.2s ease,
     margin 0.2s ease,
@@ -167,8 +165,7 @@
 }
 
 .chat-history__item-name,
-.chat-history__item-editor,
-.settings-sider__item-label {
+.chat-history__item-editor {
   transition:
     opacity 0.25s ease,
     transform 0.25s ease;
@@ -180,10 +177,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
-}
-
-.settings-sider__item-label {
-  display: block;
 }
 
 .chat-history__placeholder,
@@ -219,11 +212,6 @@
   transform: translateX(-8px);
 }
 
-.settings-sider--collapsed .settings-sider__item-label {
-  opacity: 0;
-  transform: translateX(-8px);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .sidebar-update-button,
   .sidebar-update-button::before {
@@ -234,9 +222,6 @@
   .chat-history__item,
   .chat-history__item-name,
   .chat-history__item-editor,
-  .settings-sider,
-  .settings-sider__item,
-  .settings-sider__item-label,
   .chat-history__placeholder,
   .chat-history__section {
     transition: none;

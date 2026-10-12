@@ -8,7 +8,7 @@ exclude = ["vendor/wry"]
 wry = { path = "vendor/wry" }
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.4"
 edition = "2024"
 license = "Apache-2.0"
 repository = "local/nomifun-tauri"
@@ -52,7 +52,6 @@ nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
 nomifun-voice-contracts = { path = "crates/backend/nomifun-voice-contracts" }
 nomifun-voice-core = { path = "crates/backend/nomifun-voice-core" }
 nomifun-voice = { path = "crates/backend/nomifun-voice" }
-nomifun-audio = { path = "crates/shared/nomifun-audio" }
 nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
 nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
 nomifun-app-hosting = { path = "crates/backend/nomifun-app-hosting" }
@@ -79,8 +78,6 @@ nomi-types = { path = "crates/agent/nomi-types" }
 nomi-compact = { path = "crates/agent/nomi-compact" }
 nomi-config = { path = "crates/agent/nomi-config" }
 nomi-providers = { path = "crates/agent/nomi-providers" }
-nomi-tools = { path = "crates/agent/nomi-tools" }
-nomi-mcp = { path = "crates/agent/nomi-mcp" }
 nomi-computer = { path = "crates/agent/nomi-computer" }
 nomi-a11y = { path = "crates/agent/nomi-a11y" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }
@@ -163,7 +160,6 @@ rust-embed = "8"
 fs2 = "0.4"
 zstd = "0.13"
 glob = "0.3"
-globset = "0.4"
 # Windows path de-UNC-ing: `dunce::simplified` strips the `\\?\` verbatim
 # prefix whenever the path is losslessly representable without it. Used at
 # every canonicalization boundary that feeds persisted markers, env exports,
@@ -235,13 +231,10 @@ nostr = { version = "0.37", default-features = false, features = ["std", "nip04"
 # HTML → Markdown (URL knowledge-source snapshots)
 htmd = "0.5"
 libc = "0.2"
-lru = "0.18"
 url = "2"
 unicode-width = "0.2.2"
 unicode-normalization = "0.1"
 unicase = "2.9"
-crossterm = "0.29"
-is-terminal = "0.4"
 
 # --- Computer / browser use ---
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -278,13 +271,13 @@ symphonia = { version = "0.6.0", features = ["mp3", "wav", "isomp4", "aac", "vor
 # loaded at all, `nomifun-robot` degrades to its energy VAD. Defaults are
 # narrowed: `tls-rustls` keeps the build off system OpenSSL, and `ndarray` is
 # dropped because the VAD reads tensors as plain slices.
+# nomifun-robot selects API 23 for the pinned Intel runtime and API 27 elsewhere.
 ort = { version = "2.0.0-rc.13", default-features = false, features = [
     "std",
     "tracing",
     "download-binaries",
     "tls-rustls",
     "copy-dylibs",
-    "api-27",
 ] }
 
 # --- Testing ---

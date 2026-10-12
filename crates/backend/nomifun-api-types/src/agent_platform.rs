@@ -375,6 +375,7 @@ pub struct FreshStartPresentationDto {
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetLibraryResponse {
     pub official_templates: Vec<OfficialPresetTemplateDto>,
+    pub official_presets: BTreeMap<OfficialPresetKeyDto, AgentPresetSummaryDto>,
     pub user_presets: Vec<AgentPresetSummaryDto>,
     pub active_bindings: Vec<AgentBindingSummaryDto>,
     pub fresh_start: FreshStartPresentationDto,
@@ -486,8 +487,9 @@ pub struct CreateAgentPresetRequest {
 pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
-    /// Prepare/reuse an internal session-only configuration for direct official
-    /// Agent launch. False explicitly creates a personal Agent in the library.
+    /// Prepare/reuse the owner's editable official Agent for direct launch.
+    /// Model selections derive hidden immutable variants. False creates a
+    /// personal Agent from the bundled baseline in the library.
     /// This field is deliberately required: silently defaulting a missing field
     /// to false turns an ordinary launch into a persistent personal Agent.
     pub reuse_existing: bool,
@@ -507,6 +509,18 @@ pub struct AgentPresetEditorResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<AgentPresetRevisionDto>,
     pub draft: AgentPresetDraftDto,
+}
+
+/// An additive, reviewable proposal for an owned official Agent. Reading this
+/// response never saves a Revision or changes a Session binding. The caller
+/// commits `draft` through the normal expected-current-Revision save boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetRecommendedCapabilitiesResponse {
+    pub draft: AgentPresetDraftDto,
+    /// Only missing Actions; a new module includes its complete default grant.
+    pub added_capabilities: Vec<CapabilitySelectionDto>,
+    pub added_skills: Vec<ExactCatalogRefDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1091,6 +1105,10 @@ pub struct ApplyAgentSessionSwitchRequestDto {
     pub selection: AgentSwitchSelectionDto,
     pub handoff_mode: AgentHandoffModeDto,
     pub expected_binding_version: u64,
+    /// Exact server-owned target observed in preview. Companion configuration
+    /// refreshes require it; it never supplies a replacement binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_resolved_snapshot_ref: Option<ResolvedSnapshotRefDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
 }
@@ -1160,6 +1178,10 @@ pub struct AgentSessionTurnMutationResponseDto {
 #[serde(deny_unknown_fields)]
 pub struct CancelAgentSessionTurnRequestDto {
     pub idempotency_key: String,
+    /// Optional accepted input UUIDv7 from `turn.started`. When present,
+    /// cancellation stays attached to that Turn even after it has closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1409,6 +1431,18 @@ mod snapshot_tests {
         }))
         .expect("bounded apply command");
         assert_eq!(apply.handoff_mode, AgentHandoffModeDto::ContextOnly);
+        assert!(apply.expected_resolved_snapshot_ref.is_none());
+        let fenced_apply = serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "template", "template_key": "companion.default" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": 4,
+            "expected_resolved_snapshot_ref": {
+                "snapshot_id": "previewed-snapshot",
+                "snapshot_digest": "previewed-digest"
+            }
+        })).expect("the target preview fence is accepted without supplying authority");
+        assert_eq!(fenced_apply.expected_resolved_snapshot_ref.unwrap().snapshot_id,
+            "previewed-snapshot");
 
         for forbidden in ["agent_binding", "resolved_snapshot_ref", "typed_resource_bindings"] {
             let mut request = json!({
@@ -1643,5 +1677,14 @@ mod snapshot_tests {
             "idempotency_key": "cancel-1",
             "conversation_id": "legacy"
         })).is_err());
+        let ordinary: CancelAgentSessionTurnRequestDto = serde_json::from_value(json!({
+            "idempotency_key": "cancel-1"
+        })).unwrap();
+        assert_eq!(ordinary.expected_turn_id, None);
+        let exact: CancelAgentSessionTurnRequestDto = serde_json::from_value(json!({
+            "idempotency_key": "cancel-1",
+            "expected_turn_id": "0190f5fe-7c00-7a00-8abc-012345678901"
+        })).unwrap();
+        assert_eq!(exact.expected_turn_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678901"));
     }
 }

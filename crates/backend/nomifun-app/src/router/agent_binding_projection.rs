@@ -557,6 +557,7 @@ mod tests {
             output_schema: "schema://future/output@1".into(),
             effect_class: EffectClass::Pure,
             presentation: ToolPresentationKind::FunctionTool,
+            required_resource_operations: Default::default(),
         };
         let mut manifest = CapabilityManifest {
             id: "never-seen-before".into(),

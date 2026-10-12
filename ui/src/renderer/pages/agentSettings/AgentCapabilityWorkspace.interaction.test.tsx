@@ -328,6 +328,26 @@ describe('Agent capability Module workbench', () => {
     ]);
   });
 
+  test('management Modules show their specific knowledge and terminal action labels', () => {
+    const libraries = moduleItem('knowledge.management', [
+      ['knowledge.management/inspect', 'read_sensitive'], ['knowledge.management/create', 'write_durable'],
+    ]);
+    const conversations = moduleItem('session.management', [
+      ['session.management/terminal_list', 'read_sensitive'], ['session.management/terminal_read', 'read_sensitive'],
+      ['session.management/terminal_input', 'execute_local'],
+    ]);
+    const screen = mount(documentWith([[libraries.module, ['knowledge.management/inspect']],
+      [conversations.module, ['session.management/terminal_read']]]), catalog([libraries, conversations]));
+    fireEvent.click(screen.getByRole('button', { name: /2 actions and contributions/ }));
+    fireEvent.click(screen.getByRole('button', { name: /3 actions and contributions/ }));
+    expect(screen.getByRole('checkbox', { name: `Allow ${en.actionLabels.knowledge_management_inspect} in ${en.modules.knowledgeManagement.name}` })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: `Allow ${en.actionLabels.session_management_terminal_read} in ${en.modules.sessionManagement.name}` })).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: /Inspect configuration and protocols/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Knowledge & memory/ }));
+    expect(screen.getByRole('switch', { name: `Disable ${en.modules.knowledgeManagement.name}` })).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: `Disable ${en.modules.sessionManagement.name}` })).toBeNull();
+  });
+
   test('filters by category and searches exact actions and resources', () => {
     const screen = mount(documentWith([]));
     fireEvent.click(screen.getByRole('button', { name: /Knowledge & memory/ }));

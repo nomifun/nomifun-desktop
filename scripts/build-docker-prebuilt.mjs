@@ -31,11 +31,12 @@ const PKG = join(ROOT, 'package.json');
 const UI_DIST = join(ROOT, 'ui', 'dist');
 const UI_MANIFEST = join(UI_DIST, 'nomifun-build.json');
 const CONTEXT = join(ROOT, 'dist', 'docker-prebuilt-context');
+const COMPONENT_NOTICES = join(ROOT, 'crates/backend/nomifun-runtime/notices');
 const DOCKERFILE = join(ROOT, 'Dockerfile.prebuilt');
 const TAG = '[docker:prebuilt]';
 const DEFAULT_REPOSITORY = 'nomifun/nomifun-web';
-const DEFAULT_BUN_IMAGE = 'oven/bun:1';
-const DEFAULT_NODE_IMAGE = 'node:22-bookworm-slim';
+const components = JSON.parse(readFileSync(join(ROOT, 'crates/backend/nomifun-runtime/components.json'), 'utf8'));
+const DEFAULT_NODE_IMAGE = components.build_images.node;
 const DEFAULT_RUNTIME_IMAGE = 'ubuntu:26.04';
 
 const args = parseArgs(process.argv.slice(2).filter((arg) => arg !== '--'));
@@ -86,8 +87,6 @@ const dockerArgs = [
   '-f',
   DOCKERFILE,
   '--build-arg',
-  `BUN_IMAGE=${args.bunImage}`,
-  '--build-arg',
   `NODE_IMAGE=${args.nodeImage}`,
   '--build-arg',
   `RUNTIME_IMAGE=${args.runtimeImage}`,
@@ -114,7 +113,6 @@ function parseArgs(argv) {
     aptMirror: process.env.APT_MIRROR || '',
     binary: '',
     buildMissing: false,
-    bunImage: process.env.BUN_IMAGE || DEFAULT_BUN_IMAGE,
     dockerBin: process.env.DOCKER || 'docker',
     dryRun: false,
     help: false,
@@ -149,9 +147,6 @@ function parseArgs(argv) {
         break;
       case '--runtime-image':
         parsed.runtimeImage = value();
-        break;
-      case '--bun-image':
-        parsed.bunImage = value();
         break;
       case '--node-image':
         parsed.nodeImage = value();
@@ -194,7 +189,6 @@ Options:
       --binary <path>      Linux release nomifun-web binary to copy.
       --build-missing      Build missing/outdated local artifacts first; no-op when they already match.
       --dry-run            Stage artifacts and print the docker command only.
-      --bun-image <image>  Bun image for copying /usr/local/bin/bun.
       --node-image <image> Node image for copying Node.js plus npm/npx.
       --runtime-image <i>  Runtime image for the prebuilt Linux binary.
       --apt-mirror <url>   Optional apt mirror for Debian/Ubuntu runtime images.
@@ -378,6 +372,7 @@ function stageContext(binaryPath) {
     force: true,
     recursive: true,
   });
+  cpSync(COMPONENT_NOTICES, join(CONTEXT, 'component-notices'), { recursive: true });
 }
 
 function run(command, commandArgs) {
@@ -404,7 +399,6 @@ function buildMissingSuggestion() {
   } else if (args.repository !== DEFAULT_REPOSITORY) {
     commandArgs.push('--repository', args.repository);
   }
-  if (args.bunImage !== DEFAULT_BUN_IMAGE) commandArgs.push('--bun-image', args.bunImage);
   if (args.nodeImage !== DEFAULT_NODE_IMAGE) commandArgs.push('--node-image', args.nodeImage);
   if (args.runtimeImage !== DEFAULT_RUNTIME_IMAGE) commandArgs.push('--runtime-image', args.runtimeImage);
   if (args.aptMirror) commandArgs.push('--apt-mirror', args.aptMirror);

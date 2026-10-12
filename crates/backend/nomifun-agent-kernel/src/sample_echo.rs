@@ -24,7 +24,7 @@ use nomifun_agent_contracts::{
     PresetRevisionRef, PrincipalRef, ResolvedRoleProviderLock, ResourceBindingId, ResourceId,
     ResourceKind, RoleContractKey, RoleContractManifest, RoleMemberContract,
     RoleMemberRequirement, RoleProviderContribution, RoleProviderMemberContribution,
-    ExecutionRoleId, RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey,
+    ExecutionRoleId, RuntimeAuthorityDecision, RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey,
     ServiceHandleDescriptor, ServiceKeyRef,
     ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
     ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
@@ -38,6 +38,9 @@ mod invocation_preflight_tests;
 #[path = "dependency_call_tests.rs"]
 mod dependency_call_tests;
 
+#[path = "binding_evolution_tests.rs"]
+mod binding_evolution_tests;
+
 use crate::{
     AgentPresetCompiler, CapabilityContextContributionFactory,
     CapabilityContextContributionRequest, CapabilityHandler, CapabilityInvocationContext,
@@ -47,7 +50,7 @@ use crate::{
     MaterializationPolicy, Materializer, PluginRegistration, PluginStatePersistence, ServiceKey,
     ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
     ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
-    RoleToolInvocationContext, RoleToolOperationRequest, SessionCapabilityState,
+    RoleToolInvocationContext, RoleToolOperationRequest, SessionCapabilityState, ThinAuthority,
 };
 
 const SAMPLE_PACKAGE: &str = "sample.echo";
@@ -164,6 +167,7 @@ fn registration_for(
                 )),
                 effect_class: EffectClass::WriteReversible,
                 presentation: ToolPresentationKind::FunctionTool,
+                required_resource_operations: Default::default(),
             }],
             context_schema_refs: Vec::new(),
             context_phase: Default::default(),
@@ -458,7 +462,7 @@ fn role_schema_ref(
     ))
 }
 
-fn role_capability(
+pub(super) fn role_capability(
     package: &PackageRef,
     capability_id: &str,
     kind: CapabilityKind,
@@ -498,6 +502,7 @@ fn role_capability(
             ),
             effect_class: EffectClass::ExternalTransmit,
             presentation: ToolPresentationKind::FunctionTool,
+            required_resource_operations: Default::default(),
         })
         .into_iter()
         .collect();
@@ -1845,6 +1850,102 @@ async fn authority_rejects_wrong_principal_and_resource_without_invoking() {
             .await,
         Err(KernelError::ResourceBindingMissing { .. })
     ));
+}
+
+#[test]
+fn selected_actions_freeze_only_their_resources_and_cannot_escalate_operations() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    ).unwrap();
+    let mut registration = sample_registration("");
+    let capability = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
+    capability.contributions.resource_kinds = BTreeSet::from([
+        ResourceKind::from("asset_library"), ResourceKind::from("canvas"),
+    ]);
+    capability.contributions.actions[0].required_resource_operations = Some(BTreeMap::from([
+        (ResourceKind::from("asset_library"), BTreeSet::from(["read".to_owned()])),
+    ]));
+    let mut write = capability.contributions.actions[0].clone();
+    write.action_id = "sample.echo/write".into();
+    write.required_resource_operations = Some(BTreeMap::from([
+        (ResourceKind::from("asset_library"), BTreeSet::from(["write".to_owned()])),
+    ]));
+    let mut canvas = write.clone();
+    canvas.action_id = "sample.echo/canvas".into();
+    canvas.required_resource_operations = Some(BTreeMap::from([
+        (ResourceKind::from("canvas"), BTreeSet::from(["write".to_owned()])),
+    ]));
+    let mut missing = canvas.clone();
+    missing.action_id = "sample.echo/missing-resource-contract".into();
+    let mut missing_json = serde_json::to_value(&missing).unwrap();
+    missing_json.as_object_mut().unwrap().remove("required_resource_operations");
+    missing = serde_json::from_value(missing_json).unwrap();
+    assert!(missing.required_resource_operations.is_none());
+    let mut resource_free = canvas.clone();
+    resource_free.action_id = "sample.echo/explicit-resource-free".into();
+    resource_free.required_resource_operations = Some(BTreeMap::new());
+    capability.contributions.actions.extend([write.clone(), canvas.clone(), missing.clone(), resource_free.clone()]);
+    refresh_manifest(&mut registration);
+    let materialized = registry.replace_all(vec![registration]).unwrap();
+    let owner = principal("owner");
+    let mut revision = sample_revision("owner");
+    revision.payload.enabled_capabilities[0].action_allowlist = BTreeSet::from([
+        ActionId::from(SAMPLE_ACTION), write.action_id.clone(),
+    ]);
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    let compiled = AgentPresetCompiler::compile(&materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone())).unwrap();
+    assert_eq!(compiled.content().required_resource_kinds,
+        BTreeSet::from([ResourceKind::from("asset_library")]));
+    let mut binding = resource_binding("owner");
+    binding.resource_kind = "asset_library".into();
+    binding.operations = BTreeSet::from(["read".to_owned()]);
+    let compiled = compiled.with_target_resource_bindings(&owner, vec![binding.clone()]).unwrap();
+    let id = CapabilityId::from(SAMPLE_CAPABILITY);
+    assert!(compiled.action_resources_bound(&id, &ActionId::from(SAMPLE_ACTION)).unwrap());
+    assert!(!compiled.action_resources_bound(&id, &write.action_id).unwrap());
+    assert!(!compiled.action_resources_bound(&id, &canvas.action_id).unwrap());
+    let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();
+    let mut request = invocation(&compiled, owner.clone(), active.generation, "read");
+    assert_eq!(ThinAuthority::authorize(&compiled, &active, &request), RuntimeAuthorityDecision::Allow);
+    request.action_id = write.action_id.clone();
+    assert!(matches!(ThinAuthority::authorize(&compiled, &active, &request), RuntimeAuthorityDecision::Deny { .. }));
+    binding.operations.insert("write".to_owned());
+    let upgraded = compiled.with_target_resource_bindings(&owner, vec![binding]).unwrap();
+    assert!(upgraded.action_resources_bound(&id, &write.action_id).unwrap());
+    assert!(!upgraded.action_resources_bound(&id, &canvas.action_id).unwrap());
+
+    // Selecting the Canvas Action freezes its slot, but absence of that slot
+    // does not suppress the independently authorized asset Actions.
+    revision.payload.enabled_capabilities[0].action_allowlist.insert(canvas.action_id.clone());
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    let all = AgentPresetCompiler::compile(&materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone())).unwrap()
+        .with_target_resource_bindings(&owner, upgraded.resource_bindings().to_vec()).unwrap();
+    assert_eq!(all.content().required_resource_kinds,
+        BTreeSet::from([ResourceKind::from("asset_library"), ResourceKind::from("canvas")]));
+    assert!(all.action_resources_bound(&id, &write.action_id).unwrap());
+    assert!(!all.action_resources_bound(&id, &canvas.action_id).unwrap());
+    for (action, expected_kinds, expected_ready) in [
+        (missing, BTreeSet::from([ResourceKind::from("asset_library"), ResourceKind::from("canvas")]), false),
+        (resource_free, BTreeSet::new(), true),
+    ] {
+        revision.payload.enabled_capabilities[0].action_allowlist = BTreeSet::from([action.action_id.clone()]);
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let isolated = AgentPresetCompiler::compile(&materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision.clone(), owner.clone())).unwrap();
+        assert_eq!(isolated.content().required_resource_kinds, expected_kinds);
+        assert_eq!(isolated.action_resources_bound(&id, &action.action_id).unwrap(), expected_ready);
+        let active = SessionCapabilityState::new(&isolated).snapshot().unwrap();
+        let mut request = invocation(&isolated, owner.clone(), active.generation, "input");
+        request.action_id = action.action_id;
+        request.resource_binding_ids.clear();
+        assert_eq!(matches!(ThinAuthority::authorize(&isolated, &active, &request), RuntimeAuthorityDecision::Allow), expected_ready);
+    }
 }
 
 #[test]

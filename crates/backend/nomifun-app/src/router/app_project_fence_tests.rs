@@ -14,15 +14,10 @@ async fn cold_default_coding_session_creates_and_warms_its_owned_directory_witho
             description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await.unwrap();
     let binding = fixture.state.control_plane.resolve_agent_session_binding_with_model(&owner.0, editor.preset.preset_id.as_ref(), None).await.unwrap();
     let (_, _, snapshot) = fixture.state.control_plane.saved_binding_artifacts(&owner.0, &binding).await.unwrap();
-    let selections = snapshot.content.required_resource_kinds.iter().map(|kind| {
-        let resource_id = match kind.as_ref() {
-            "workspace" => super::super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID,
-            "process_session" => super::super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID,
-            "project_memory" => super::super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID,
-            other => panic!("unexpected cold Coding resource {other}"),
-        };
-        AgentResourceSelectionDto { resource_kind: kind.as_ref().into(), resource_id: resource_id.into() }
-    }).collect();
+    let required_kinds = snapshot.content.required_resource_kinds.iter()
+        .map(|kind| kind.as_ref().to_owned()).collect();
+    let mut selections = Vec::new();
+    complete_automatic_agent_resource_selections(&mut selections, &required_kinds);
     let Json(opened) = create_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()), HeaderMap::new(),
         Json(CreateAgentSessionRequestDto { preset_id: editor.preset.preset_id, title: Some("Default coding Session".into()),
             model: None, reasoning_effort: None, resource_selections: selections, knowledge_policy: None,
@@ -156,6 +151,127 @@ async fn idle_formal_app_project_sessions_release_caches_without_changing_any_ca
     assert_eq!(serde_json::to_value(store.observe(&fixture.session, None, 1000).await.unwrap()).unwrap(), serde_json::to_value(original).unwrap());
     assert_eq!(serde_json::to_value(store.observe(&second, None, 1000).await.unwrap()).unwrap(), serde_json::to_value(newer).unwrap());
     assert!(fixture.app.directory.exists());
+    drop(held);
+    fixture.finish().await;
+}
+
+/// Read exact persisted facts rather than checking only a projection or head.
+/// All setup and lifecycle mutations still use the production owners above.
+async fn canonical_fact_bytes(fixture: &Fixture, session: &AgentSessionId) -> BTreeMap<String, Vec<String>> {
+    use sqlx::Row;
+    let pool = fixture.services.database.pool();
+    let mut facts = BTreeMap::new();
+    for table in ["agent_sessions", "agent_turns", "agent_events", "agent_payloads", "agent_effects", "agent_session_resources"] {
+        let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(pool).await.unwrap();
+        let fields = columns.iter().map(|row| {
+            let name: String = row.get("name");
+            let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+            format!("typeof({quoted}) || ':' || hex({quoted})")
+        }).collect::<Vec<_>>().join(" || '|' || ");
+        let identity = if table == "agent_sessions" { "agent_session_id" } else { "session_id" };
+        let bytes = sqlx::query_scalar(&format!("SELECT {fields} FROM {table} WHERE {identity} = ? ORDER BY rowid"))
+            .bind(session.as_ref()).fetch_all(pool).await.unwrap();
+        facts.insert(table.to_owned(), bytes);
+    }
+    facts
+}
+
+#[tokio::test]
+async fn personal_app_developer_project_opening_releases_idle_cache_without_becoming_an_official_editor() {
+    let fixture = Fixture::new().await;
+    let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+    // A current-generation personal copy is a real User Preset. Matching the
+    // official display name or seed configuration cannot confer its identity.
+    let personal = fixture.state.control_plane.create_from_template(&owner.0, "app.developer",
+        CreateAgentPresetFromTemplateRequest { model: None, reuse_existing: false, display_name: "app.developer".into(),
+            description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await.unwrap();
+    assert_eq!(personal.preset.source, nomifun_api_types::AgentPresetSourceDto::User);
+    let preset_id = personal.preset.preset_id.clone();
+    let mut headers = HeaderMap::new();
+    let creation_key = format!("app-development:{}:new:{}", fixture.app.id, Uuid::now_v7());
+    headers.insert("Idempotency-Key", creation_key.parse().unwrap());
+    let Json(opened) = create_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()), headers,
+        Json(CreateAgentSessionRequestDto { preset_id: preset_id.clone(), title: Some("Personal application developer".into()),
+            model: None, reasoning_effort: None, resource_selections: Vec::new(), knowledge_policy: None,
+            workspace: Some(fixture.app.directory.to_str().unwrap().to_owned()), session_capabilities: Some(Default::default()),
+            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) })).await.unwrap();
+    let opened = opened.data.unwrap();
+    let session = parse_agent_session_id(&opened.agent_session_id).unwrap();
+    let (_, template) = fixture.state.control_plane.saved_binding_presentation(&owner.0, &opened.agent_binding).await.unwrap();
+    assert!(template.is_none(), "personal seed copies must never gain Official AppDeveloper presentation");
+    let conversation = fixture.state.session_owner.canonical_conversation_projection(&fixture.principal.principal_id, &session)
+        .await.unwrap().unwrap();
+    let root = canonical_existing_workspace_directory(&fixture.app.directory, WorkspaceDirectoryCheck::Create).unwrap();
+    assert!(!app_project_session_editable(&fixture.state, &owner, root.to_str().unwrap(), &conversation).await.unwrap());
+    let rejected = resolve_app_development_session_selection(&fixture.state, &fixture.principal.principal_id,
+        &fixture.app, Some(session.as_ref()), None, None, None).await.unwrap_err();
+    assert_eq!(rejected.code, "APP_DEVELOPMENT_SESSION_MISMATCH");
+    let history = app_project_session_history(&fixture.state, &fixture.principal.principal_id, &fixture.app, None, 100).await.unwrap();
+    let item = history.items.iter().find(|item| item.conversation.conversation_id == session.as_ref()).unwrap();
+    assert!(!item.editable_in_app);
+    assert_ne!(fixture.app.development_session_id.as_deref(), Some(session.as_ref()),
+        "cleanup must use the formal opening, independently of the latest navigation pointer");
+    let _ = warm_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()), Path(session.as_ref().to_owned())).await.unwrap();
+    assert!(fixture.services.agent_runtime_sessions.has_owned_runtime(session.as_ref()));
+    std::fs::write(fixture.app.directory.join("user-work.txt"), "PRESERVE_PERSONAL_PROJECT_SOURCE").unwrap();
+    let original = canonical_fact_bytes(&fixture, &fixture.session).await;
+    let personal_facts = canonical_fact_bytes(&fixture, &session).await;
+    let editor_before = serde_json::to_value(fixture.state.control_plane.editor(&owner.0, &preset_id, None).await.unwrap()).unwrap();
+    let held = guard_app_development_workspace_change(&fixture.state, &fixture.principal.principal_id, &fixture.app).await.unwrap();
+    release_app_development_workspace_runtime(&fixture.state, &fixture.app).await.unwrap();
+    assert!(!fixture.services.agent_runtime_sessions.has_owned_runtime(session.as_ref()));
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, original);
+    assert_eq!(canonical_fact_bytes(&fixture, &session).await, personal_facts);
+    assert_eq!(serde_json::to_value(fixture.state.control_plane.editor(&owner.0, &preset_id, None).await.unwrap()).unwrap(), editor_before);
+    assert_eq!(std::fs::read_to_string(fixture.app.directory.join("user-work.txt")).unwrap(), "PRESERVE_PERSONAL_PROJECT_SOURCE");
+    drop(held);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn same_root_fork_navigation_is_not_swept_and_its_holder_refuses_physical_cleanup() {
+    let fixture = Fixture::new().await;
+    let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+    let store = fixture.state.session_owner.canonical().store();
+    let binding = store.get_live_session(&fixture.session).await.unwrap().agent_binding;
+    let Json(fork) = fork_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()),
+        Path(fixture.session.as_ref().to_owned()), HeaderMap::new(), Json(ForkAgentSessionRequestDto {
+            target_agent_binding: agent_binding_dto(&binding).unwrap(), parent_through_seq: 0,
+            title: Some("Independent same-root fork".into()),
+        })).await.unwrap();
+    let fork = parse_agent_session_id(&fork.data.unwrap().child_agent_session_id).unwrap();
+    let exact = store.get_live_session(&fork).await.unwrap();
+    assert_eq!(exact.parent_session_id.as_ref(), Some(&fixture.session));
+    assert!(exact.fork_base_payload_id.is_some());
+    let reference = fork.as_ref().to_owned();
+    let app = fixture.services.app_hosting.development_session_with(&fixture.app.id, |_| async move { Ok(reference) }).await.unwrap();
+    assert_eq!(app.development_session_id.as_deref(), Some(fork.as_ref()));
+    for id in [&fixture.session, &fork] {
+        let _ = warm_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()), Path(id.as_ref().to_owned())).await.unwrap();
+        assert!(fixture.services.agent_runtime_sessions.has_owned_runtime(id.as_ref()));
+    }
+    std::fs::write(app.directory.join("user-work.txt"), "PRESERVE_FORK_PROJECT_SOURCE").unwrap();
+    let original = canonical_fact_bytes(&fixture, &fixture.session).await;
+    let fork_facts = canonical_fact_bytes(&fixture, &fork).await;
+    let held = guard_app_development_workspace_change(&fixture.state, &fixture.principal.principal_id, &app).await.unwrap();
+    let rejected = release_app_development_workspace_runtime(&fixture.state, &app).await.unwrap_err();
+    assert_eq!(rejected.code, "APP_DEVELOPMENT_RESOURCE_CLEANUP_FAILED");
+    assert!(!fixture.services.agent_runtime_sessions.has_owned_runtime(fixture.session.as_ref()));
+    assert!(fixture.services.agent_runtime_sessions.has_owned_runtime(fork.as_ref()),
+        "an application navigation pointer cannot make an unrelated fork eligible for teardown");
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, original);
+    assert_eq!(canonical_fact_bytes(&fixture, &fork).await, fork_facts);
+    assert_eq!(std::fs::read_to_string(app.directory.join("user-work.txt")).unwrap(), "PRESERVE_FORK_PROJECT_SOURCE");
+    drop(held);
+    // The application command cannot perform this unrelated owner's close.
+    // Its explicit normal teardown is the proof needed for a subsequent retry.
+    fixture.services.agent_runtime_sessions.terminate_and_wait_result(fork.as_ref(), None).await.unwrap();
+    let held = guard_app_development_workspace_change(&fixture.state, &fixture.principal.principal_id, &app).await.unwrap();
+    release_app_development_workspace_runtime(&fixture.state, &app).await.unwrap();
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, original);
+    assert_eq!(canonical_fact_bytes(&fixture, &fork).await, fork_facts);
+    assert!(app.directory.exists());
     drop(held);
     fixture.finish().await;
 }

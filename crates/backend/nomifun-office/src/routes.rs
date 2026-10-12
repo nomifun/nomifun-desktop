@@ -1,152 +1,123 @@
-use axum::Router;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Extension, Json, Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use std::path::{Path as FsPath, PathBuf};
-
+use crate::state::OfficeRouterState;
+use axum::{
+    Router,
+    extract::{Extension, Json, Path, Query, State, rejection::JsonRejection},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use nomifun_api_types::{
-    ApiResponse, GetSnapshotContentRequest, ListSnapshotsRequest,
-    PreviewSnapshotInfoDto, PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse,
-    StartPreviewRequest, StopPreviewRequest,
+    ApiResponse, GetSnapshotContentRequest, ListSnapshotsRequest, OfficePreviewResponse,
+    PreviewSnapshotInfoDto, SaveSnapshotRequest, SnapshotContentResponse,
+    StartOfficePreviewRequest, StopOfficePreviewRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 use nomifun_file::path_safety::validate_path_with_extra_root;
+use std::{
+    path::{Path as FsPath, PathBuf},
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
-use crate::error::OfficeError;
-use crate::state::OfficeRouterState;
-use crate::types::DocType;
+const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(5);
+static AUTHORIZATION_SLOTS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
 pub fn office_routes(state: OfficeRouterState) -> Router {
     Router::new()
-        .route("/api/word-preview/start", post(start_word_preview))
-        .route("/api/word-preview/stop", post(stop_word_preview))
-        .route("/api/excel-preview/start", post(start_excel_preview))
-        .route("/api/excel-preview/stop", post(stop_excel_preview))
-        .route("/api/ppt-preview/start", post(start_ppt_preview))
-        .route("/api/ppt-preview/stop", post(stop_ppt_preview))
+        .route("/api/office-preview/start", post(start_preview))
+        .route(
+            "/api/office-preview/status/{request_id}",
+            get(preview_status),
+        )
+        .route("/api/office-preview/stop", post(stop_preview))
         .route("/api/preview-history/list", post(list_snapshots))
         .route("/api/preview-history/save", post(save_snapshot))
-        .route("/api/preview-history/get-content", post(get_snapshot_content))
-        .with_state(state)
-}
-
-pub fn office_proxy_routes(state: OfficeRouterState) -> Router {
-    Router::new()
-        .route("/api/ppt-proxy/{capability}", get(ppt_proxy))
-        .route("/api/ppt-proxy/{capability}/", get(ppt_proxy))
-        .route("/api/ppt-proxy/{capability}/{*path}", get(ppt_proxy))
-        .route("/api/office-watch-proxy/{capability}", get(office_watch_proxy))
-        .route("/api/office-watch-proxy/{capability}/", get(office_watch_proxy))
         .route(
-            "/api/office-watch-proxy/{capability}/{*path}",
-            get(office_watch_proxy),
+            "/api/preview-history/get-content",
+            post(get_snapshot_content),
         )
         .with_state(state)
 }
 
-#[derive(serde::Deserialize)]
-struct ProxyCapabilityPath {
-    capability: String,
-}
-
-// -- Preview start/stop handlers ------------------------------------------
-
-async fn start_word_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StartPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, &user.id, body, DocType::Word).await
-}
-
-async fn stop_word_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StopPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, &user.id, body, DocType::Word).await
-}
-
-async fn start_excel_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StartPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, &user.id, body, DocType::Excel).await
-}
-
-async fn stop_excel_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StopPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, &user.id, body, DocType::Excel).await
-}
-
-async fn start_ppt_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StartPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, &user.id, body, DocType::Ppt).await
-}
-
-async fn stop_ppt_preview(
-    State(state): State<OfficeRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<StopPreviewRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, &user.id, body, DocType::Ppt).await
+/// Authenticated starts grant a revocable, random bearer capability to one
+/// immutable preview. No caller-controlled upstream, port or filesystem tail.
+pub fn office_artifact_routes(state: OfficeRouterState) -> Router {
+    Router::new()
+        .route("/api/office-preview-artifacts/{capability}", get(artifact))
+        .route("/api/office-preview-artifacts/{capability}/", get(artifact))
+        .with_state(state)
 }
 
 async fn start_preview(
-    state: OfficeRouterState,
-    owner_id: &str,
-    body: Result<Json<StartPreviewRequest>, JsonRejection>,
-    doc_type: DocType,
-) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let validated_path = validate_office_path(&state, &req.file_path, req.workspace.as_deref())?;
-    let validated_path = validated_path.to_string_lossy().into_owned();
-
-    let result = state.watch_manager.start(owner_id, &validated_path, doc_type).await;
-
-    let resp = match result {
-        Ok(access) => {
-            // The trailing slash is part of the security boundary: ordinary
-            // relative iframe links stay underneath the capability segment.
-            let url = format!("/api/{}/{}/", doc_type.proxy_prefix(), access.capability);
-            PreviewUrlResponse {
-                url,
-                capability: Some(access.capability),
-                error: None,
-            }
-        }
-        Err(e) => PreviewUrlResponse {
-            url: String::new(),
-            capability: None,
-            error: Some(preview_error_code(&e).to_owned()),
-        },
-    };
-
-    Ok(Json(ApiResponse::ok(resp)))
+    State(state): State<OfficeRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<StartOfficePreviewRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<OfficePreviewResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    nomifun_common::validate_uuidv7(&request.request_id)
+        .map_err(|_| AppError::BadRequest("request_id must be a canonical UUIDv7.".into()))?;
+    let source =
+        validate_office_path(&state, &request.file_path, request.workspace.as_deref()).await?;
+    Ok(Json(ApiResponse::ok(state.preview_service.start(
+        &user.id,
+        &request.request_id,
+        source,
+        request.doc_type,
+    )?)))
 }
-
+async fn preview_status(
+    State(state): State<OfficeRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(request_id): Path<String>,
+) -> Result<Json<ApiResponse<OfficePreviewResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.preview_service.status(&user.id, &request_id)?,
+    )))
+}
 async fn stop_preview(
-    state: OfficeRouterState,
-    owner_id: &str,
-    body: Result<Json<StopPreviewRequest>, JsonRejection>,
-    doc_type: DocType,
+    State(state): State<OfficeRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<StopOfficePreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .watch_manager
-        .stop(owner_id, doc_type, &req.capability)
-        .await;
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    state.preview_service.stop(&user.id, &request.request_id)?;
     Ok(Json(ApiResponse::success()))
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactQuery {
+    request_id: String,
+    nonce: String,
+}
+async fn artifact(
+    State(state): State<OfficeRouterState>,
+    Path(capability): Path<String>,
+    Query(query): Query<ArtifactQuery>,
+) -> Result<Response, AppError> {
+    let reader = state
+        .preview_service
+        .artifact_reader(&capability, &query.request_id, &query.nonce)
+        .await?;
+    let mut response = (
+        StatusCode::OK,
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(reader)),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    // The frame is opaque-origin and read-only. Office's inline renderer may
+    // paint its own document; it cannot connect, navigate, submit, or import
+    // scripts/fonts/images from uncontrolled origins or application endpoints.
+    headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; sandbox allow-scripts".parse().unwrap());
+    Ok(response)
 }
 
 // -- Snapshot handlers ----------------------------------------------------
@@ -167,7 +138,10 @@ async fn save_snapshot(
     body: Result<Json<SaveSnapshotRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PreviewSnapshotInfoDto>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let info = state.snapshot_service.save(&req.target, &req.content).await?;
+    let info = state
+        .snapshot_service
+        .save(&req.target, &req.content)
+        .await?;
     Ok(Json(ApiResponse::ok(info)))
 }
 
@@ -184,180 +158,98 @@ async fn get_snapshot_content(
     Ok(Json(ApiResponse::ok(result)))
 }
 
-// -- Document conversion --------------------------------------------------
-
-fn validate_office_path(
+async fn validate_office_path(
     state: &OfficeRouterState,
     file_path: &str,
     workspace: Option<&str>,
 ) -> Result<PathBuf, AppError> {
-    let allowed_roots: Vec<&FsPath> = state.allowed_roots.iter().map(PathBuf::as_path).collect();
-    validate_path_with_extra_root(file_path, &allowed_roots, workspace.map(FsPath::new))
+    let roots = state.allowed_roots.clone();
+    let file_path = file_path.to_owned();
+    let workspace = workspace.map(str::to_owned);
+    run_path_validation(
+        move || {
+            let allowed_roots: Vec<&FsPath> = roots.iter().map(PathBuf::as_path).collect();
+            validate_path_with_extra_root(
+                &file_path,
+                &allowed_roots,
+                workspace.as_deref().map(FsPath::new),
+            )
+        },
+        AUTHORIZATION_TIMEOUT,
+    )
+    .await
 }
 
-fn preview_error_code(error: &OfficeError) -> &'static str {
-    match error {
-        OfficeError::OfficecliNotFound => "OFFICECLI_NOT_FOUND",
-        OfficeError::InstallFailed(_) => "OFFICECLI_INSTALL_FAILED",
-        OfficeError::PortTimeout(_) => "OFFICECLI_PORT_TIMEOUT",
-        OfficeError::StartFailed(_)
-        | OfficeError::Io(_)
-        | OfficeError::Snapshot(_)
-        | OfficeError::Json(_)
-        | OfficeError::Conversion(_)
-        | OfficeError::ToolNotFound(_) => "OFFICECLI_START_FAILED",
-    }
-}
-
-// -- Reverse proxy handlers -----------------------------------------------
-
-/// Collect request headers into the `(name, value)` pairs `ProxyService`
-/// expects, dropping any values that are not valid UTF-8.
-fn headers_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
-        .collect()
-}
-
-/// Convert a `ProxyService` response into an axum HTTP response.
-fn proxy_response_into_axum(proxy_resp: crate::proxy::ProxyResponse) -> Response {
-    let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut response = axum::response::Response::builder().status(status);
-
-    for (key, value) in &proxy_resp.headers {
-        response = response.header(key.as_str(), value.as_str());
-    }
-
-    response
-        .body(axum::body::Body::from(proxy_resp.body))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-async fn ppt_proxy(
-    State(state): State<OfficeRouterState>,
-    Path(params): Path<ProxyCapabilityPath>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let path = proxy_path_and_query(&uri);
-    proxy_forward(state, &params.capability, &path, DocType::Ppt, &headers).await
-}
-
-async fn office_watch_proxy(
-    State(state): State<OfficeRouterState>,
-    Path(params): Path<ProxyCapabilityPath>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let path = proxy_path_and_query(&uri);
-    let request_headers = headers_to_pairs(&headers);
-
-    let proxy_resp = state
-        .proxy_service
-        .forward_watch(&params.capability, &path, &request_headers)
-        .await?;
-
-    Ok(proxy_response_into_axum(proxy_resp))
-}
-
-fn proxy_path_and_query(uri: &Uri) -> String {
-    // These routes are /api/{proxy-kind}/{capability}[/{path}]. Path extraction
-    // decodes escapes, so only use it for the capability, not the upstream URL.
-    let tail = uri.path().splitn(5, '/').nth(4).unwrap_or("");
-    let mut path = format!("/{tail}");
-    if let Some(query) = uri.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    path
-}
-
-async fn proxy_forward(
-    state: OfficeRouterState,
-    capability: &str,
-    path: &str,
-    doc_type: DocType,
-    headers: &HeaderMap,
-) -> Result<Response, AppError> {
-    let request_headers = headers_to_pairs(headers);
-
-    let proxy_resp = state
-        .proxy_service
-        .forward(capability, path, doc_type, &request_headers)
-        .await?;
-
-    Ok(proxy_response_into_axum(proxy_resp))
+/// Path metadata can block on a network filesystem. It never owns a preview
+/// lease or creates a job: a timeout/cancel drops its receiver, so late metadata
+/// completion cannot start rendering. Admission stays on the blocking worker
+/// until the actual I/O ends, bounding hung filesystem workers independently
+/// of the Tokio request/runtime threads.
+async fn run_path_validation(
+    validation: impl FnOnce() -> Result<PathBuf, AppError> + Send + 'static,
+    deadline: Duration,
+) -> Result<PathBuf, AppError> {
+    let operation = async {
+        let admission = AUTHORIZATION_SLOTS
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::Internal("Preview path authorization is unavailable.".into()))?;
+        tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            validation()
+        })
+        .await
+        .map_err(|_| {
+            AppError::Internal("Preview path authorization stopped unexpectedly.".into())
+        })?
+    };
+    tokio::time::timeout(deadline, operation).await.map_err(|_| AppError::Timeout("Document path validation took too long. Check that the file location is accessible and retry.".into()))?
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::error::OfficeError;
-    use crate::proxy::ProxyService;
-    use crate::snapshot::SnapshotService;
-    use crate::state::OfficeRouterState;
-    use crate::types::DocType;
-    use crate::watch_manager::{OfficecliWatchManager, ProcessHandle, ProcessSpawner};
-
-    use super::{office_proxy_routes, office_routes};
-
-    #[test]
-    fn office_routes_builds_without_panic() {
-        let state = build_test_state();
-        let _router = office_routes(state);
+    #[tokio::test]
+    async fn slow_path_metadata_does_not_block_runtime_or_deliver_late_authorization() {
+        let started = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_started = started.clone();
+        let worker_completed = completed.clone();
+        let result = run_path_validation(
+            move || {
+                worker_started.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(100));
+                worker_completed.store(true, Ordering::Release);
+                Ok(PathBuf::from("/late/authorized/source.pptx"))
+            },
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Timeout(_))));
+        // Even if a busy host schedules the worker after its caller deadline,
+        // its eventual metadata result has no live receiver or job authority.
+        // The current-thread Tokio test was able to deliver its deadline while
+        // the metadata worker remained blocked, and its result is already lost.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !completed.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(started.load(Ordering::Acquire));
     }
 
-    #[test]
-    fn office_proxy_routes_builds_without_panic() {
-        let state = build_test_state();
-        let _router = office_proxy_routes(state);
-    }
-
-    fn build_test_state() -> OfficeRouterState {
-        struct NoopSpawner;
-
-        #[async_trait::async_trait]
-        impl ProcessSpawner for NoopSpawner {
-            async fn spawn_officecli(
-                &self,
-                _file_path: &str,
-                _port: u16,
-                _doc_type: DocType,
-            ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
-                Err(OfficeError::OfficecliNotFound)
-            }
-            async fn install_officecli(&self) -> Result<(), OfficeError> {
-                Err(OfficeError::InstallFailed("noop".into()))
-            }
-            async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
-                Ok(())
-            }
-        }
-
-        struct NoopBroadcaster;
-        impl nomifun_realtime::UserEventSink for NoopBroadcaster {
-            fn send_to_user(
-                &self,
-                _user_id: &str,
-                _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
-            ) {
-            }
-        }
-
-        let spawner = Arc::new(NoopSpawner);
-        let bc: Arc<dyn nomifun_realtime::UserEventSink> = Arc::new(NoopBroadcaster);
-        let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
-
-        let snapshot = Arc::new(SnapshotService::new(std::path::Path::new("/tmp/test")));
-        let proxy = Arc::new(ProxyService::new(wm.clone()));
-
-        OfficeRouterState {
-            watch_manager: wm,
-            snapshot_service: snapshot,
-            proxy_service: proxy,
-            allowed_roots: vec![std::env::temp_dir()],
-        }
+    #[tokio::test]
+    async fn metadata_authorization_preserves_path_error_semantics() {
+        let result = run_path_validation(
+            || Err(AppError::Forbidden("outside the allowed sandbox".into())),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
     }
 }

@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';
+import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from './knowledgeError';
 
 /**
  * CRUD hook for knowledge-base tags (categorization / filtering).
@@ -15,7 +16,7 @@ import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';
 export function useKnowledgeTags() {
   const [tags, setTags] = useState<IKnowledgeTag[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<KnowledgeErrorPresentation | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -25,7 +26,8 @@ export function useKnowledgeTags() {
       setError(null);
     } catch (e) {
       console.error('Failed to load knowledge tags', e);
-      setError(String(e));
+      const error = normalizeKnowledgeError(e, 'load');
+      setError(error.handled ? null : error);
     } finally {
       setLoading(false);
     }

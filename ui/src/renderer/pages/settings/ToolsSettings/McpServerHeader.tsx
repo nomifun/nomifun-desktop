@@ -1,6 +1,6 @@
 import type { McpServerId } from '@/common/types/ids';
 import type { IMcpServer } from '@/common/config/storage';
-import { Button, Dropdown, Menu, Popover, Tooltip } from '@arco-design/web-react';
+import { Button, Dropdown, Menu, Popover, Switch, Tooltip } from '@arco-design/web-react';
 import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, SettingOne, Login } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -14,10 +14,12 @@ interface McpServerHeaderProps {
   isTestingConnection: boolean;
   oauthStatus?: McpOAuthStatus;
   isLoggingIn?: boolean;
+  isTogglingEnabled?: boolean;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
   onDeleteServer: (serverId: McpServerId) => void;
   onOAuthLogin?: (server: IMcpServer) => void;
+  onToggleEnabled: (server: IMcpServer) => void;
 }
 
 const getStatusIcon = (
@@ -133,10 +135,12 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   isTestingConnection,
   oauthStatus,
   isLoggingIn,
+  isTogglingEnabled,
   onTestConnection,
   onEditServer,
   onDeleteServer,
   onOAuthLogin,
+  onToggleEnabled,
 }) => {
   const { t } = useTranslation();
 
@@ -213,6 +217,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             className='!h-24px [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
             title={t('settings.mcpLogin') || 'Login'}
             loading={isLoggingIn}
+            disabled={isTogglingEnabled}
             onClick={() => onOAuthLogin(server)}
           >
             {t('settings.mcpLogin') || 'Login'}
@@ -224,15 +229,30 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             icon={<Refresh size={'14'} />}
             className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
             title={t('settings.mcpTestConnection')}
+            aria-label={t('settings.mcpTestConnection')}
             loading={isTestingConnection}
+            disabled={isTogglingEnabled}
             onClick={() => onTestConnection(server)}
           />
         )}
       </div>
       <div
-        className='invisible flex flex-none items-center gap-8px group-hover:visible'
+        className='flex flex-none items-center gap-8px'
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
       >
+        <span className='text-12px text-t-secondary'>
+          {t(server.enabled ? 'settings.mcpEnabled' : 'settings.mcpDisabled')}
+        </span>
+        <Switch
+          size='small'
+          checked={server.enabled}
+          loading={isTogglingEnabled}
+          disabled={isTogglingEnabled || isTestingConnection || server.last_test_status === 'testing' || isLoggingIn}
+          aria-busy={Boolean(isTogglingEnabled)}
+          aria-label={t(server.enabled ? 'settings.mcpDisableServer' : 'settings.mcpEnableServer', { name: server.name })}
+          onChange={() => onToggleEnabled(server)}
+        />
         {!server.builtin && (
           <Dropdown
             trigger='hover'
@@ -257,6 +277,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
               size='mini'
               icon={<SettingOne size={'14'} />}
               className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
+              aria-label={t('settings.mcpEditServer')}
             />
           </Dropdown>
         )}

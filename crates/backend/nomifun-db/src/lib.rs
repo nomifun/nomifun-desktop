@@ -4,6 +4,8 @@ pub mod backup_bundle;
 mod agent_store_reset;
 mod agent_store_clean_cut;
 mod database;
+mod storage_relocation;
+pub use storage_relocation::{relocate_storage_domain_paths, relocate_storage_domain_paths_with_app_workspaces, validate_storage_relocation_paths};
 mod error;
 mod id_schema_contract;
 pub mod models;
@@ -13,7 +15,8 @@ mod installation_role_bindings;
 pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
 
 pub use database::{
-    Database, init_database, init_database_memory, init_database_memory_with_owner,
+    Database, MigrationLineage, inspect_migration_lineage,
+    init_database, init_database_memory, init_database_memory_with_owner,
     open_database_for_backup,
     validate_current_migration_lineage, validate_known_migration_lineage_prefix,
 };

@@ -1,529 +1,561 @@
-//! CEF lifetime and main-thread scheduling. This module never owns the Tauri UI.
-use cef::*;
-use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
+//! Thread-safe handles to native objects retained solely on AppKit's main thread.
+//! No browser subprocess owner, protocol server, IPC bridge or second event loop.
+use crate::{callbacks::Delegate, interactions::NativeInteractions, navigation};
+use block2::RcBlock;
+use nomifun_browser_platform::runtime::{
+    BrowserDialogKind, BrowserDownloadSnapshot, BrowserPermissionRequest, BrowserSurfaceBounds,
+    BrowserTabLifecycle, BrowserContentState, BrowserLoadSummary, BrowserNavigationPhase,
+    BrowserNavigationSource, BrowserNavigationTrace, BrowserNavigationTraceSnapshot,
+};
+use objc2::{
+    AnyThread, MainThreadMarker, Message, msg_send,
+    rc::{Retained, autoreleasepool},
+    runtime::{AnyObject, ProtocolObject},
+};
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSEventType, NSImage, NSView,
+};
+use objc2_foundation::{
+    NSArray, NSDate, NSDictionary, NSError, NSNumber, NSPoint, NSProcessInfo, NSRect, NSSize,
+    NSString, NSURL, NSURLRequest, NSUUID,
+};
+use objc2_web_kit::{
+    WKContentWorld, WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    rc::Rc,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot, watch};
-use crate::protocol::Protocol;
-#[path = "callbacks.rs"]
-mod callbacks;
-#[path = "site_data.rs"]
-mod site_data;
-#[path = "shutdown_state.rs"]
-mod shutdown_state;
-pub use callbacks::{NativeDialog, PageSnapshot};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 pub type UiWork = Box<dyn FnOnce() + Send>;
-pub type ParentView = dyn Fn() -> Result<objc2::rc::Retained<objc2_app_kit::NSView>, String> + Send + Sync;
+pub type ParentView = dyn Fn() -> Result<Retained<NSView>, String> + Send + Sync;
+pub type DispatchGuard = dyn Fn() -> bool + Send + Sync;
+pub enum NavigationCommand {
+    Navigate(String),
+    Back,
+    Forward,
+    Reload,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct NativeNavigationReceipt {
+    pub document_generation: u64,
+    pub navigation_sequence: u64,
+}
+impl NativeNavigationReceipt {
+    fn matches(self, snapshot: &PageSnapshot) -> bool {
+        self.document_generation == snapshot.document_generation
+            && self.navigation_sequence == snapshot.load.navigation_sequence
+    }
+}
+const INTERRUPTED: &str = "BROWSER_ACTION_INTERRUPTED";
+const UNCONFIRMED: &str = "BROWSER_EXECUTION_UNCONFIRMED";
+const STALE: &str = "BROWSER_STALE_OBSERVATION";
 
-pub struct Paths {
-    pub framework: PathBuf,
-    pub helper: PathBuf,
-    pub main_bundle: PathBuf,
-    pub data_root: PathBuf,
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeDialog {
+    pub request_id: String,
+    pub document_generation: u64,
+    pub kind: BrowserDialogKind,
+    pub message: String,
+    pub default_text: String,
+    pub origin: String,
+    pub text_truncated: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageSnapshot {
+    pub document_generation: u64,
+    pub url: String,
+    pub title: String,
+    pub lifecycle: BrowserTabLifecycle,
+    pub load: BrowserLoadSummary,
+    pub bootstrap_ready: bool,
+    pub(crate) bootstrap_loading: bool,
+    pub(crate) navigation_source: BrowserNavigationSource,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub dialog: Option<NativeDialog>,
+    pub blocked_permissions: Vec<String>,
+    pub permission_requests: Vec<BrowserPermissionRequest>,
+}
+impl Default for PageSnapshot {
+    fn default() -> Self {
+        Self {
+            document_generation: 0,
+            url: "about:blank".into(),
+            title: String::new(),
+            lifecycle: BrowserTabLifecycle::Loading,
+            load: BrowserLoadSummary::default(),
+            bootstrap_ready: false,
+            bootstrap_loading: false,
+            navigation_source: BrowserNavigationSource::Unknown,
+            can_go_back: false,
+            can_go_forward: false,
+            dialog: None,
+            blocked_permissions: vec![],
+            permission_requests: vec![],
+        }
+    }
 }
 
-static INITIALIZED: OnceLock<()> = OnceLock::new();
-static PRELOADED_FRAMEWORK: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-const BOOTSTRAP_URL: &str = "data:text/html,";
-const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) struct NativePage {
+    pub view: Retained<WKWebView>,
+    // WebKit's named-world registry is weak. Retain the world for this native
+    // page's entire lifetime so observe/action calls share the same opaque DOM
+    // reference store; recreating only its name creates a new world identifier.
+    content_world: Retained<WKContentWorld>,
+    pub parent: Retained<NSView>,
+    pub delegate: Retained<Delegate>,
+    pub interactions: Rc<NativeInteractions>,
+    pub owner: Weak<Page>,
+    surface_requested: Cell<bool>,
+    context: Arc<Context>,
+}
+struct NativeContext {
+    store: Retained<WKWebsiteDataStore>,
+    identifier: Option<Uuid>,
+}
+#[derive(Default)]
+struct Registry {
+    pages: BTreeMap<Uuid, Rc<NativePage>>,
+    contexts: BTreeMap<Uuid, NativeContext>,
+    monitors: BTreeMap<Uuid, Retained<AnyObject>>,
+    removing: BTreeSet<Uuid>,
+}
+thread_local! { static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default()); }
+pub(crate) fn native_page(id: Uuid) -> Option<Rc<NativePage>> {
+    REGISTRY.with(|r| r.borrow().pages.get(&id).cloned())
+}
 
-/// Only the desktop host can construct this process-wide owner. All CEF object
-/// mutations happen on the application's existing main thread.
 pub struct Engine {
-    ready: watch::Sender<bool>,
-    stopped: shutdown_state::ShutdownState,
+    id: Uuid,
     closing: AtomicBool,
-    pump_generation: AtomicU64,
-    pump_due: Mutex<Option<Instant>>,
-    pump_active: AtomicBool,
-    pump_reentered: AtomicBool,
-    pages: Mutex<BTreeMap<uuid::Uuid, Weak<Page>>>,
-    contexts: Mutex<BTreeMap<uuid::Uuid, Weak<Context>>>,
+    pages: Mutex<BTreeMap<Uuid, Weak<Page>>>,
     pointer_owners: Mutex<BTreeMap<isize, Weak<Page>>>,
-    root: PathBuf,
-    guardian: Arc<crate::guardian_client::GuardOwner>,
 }
-
 impl Engine {
-    /// The native compatibility fixture proves its preload never starts CEF.
-    pub fn initialized_in_process() -> bool { INITIALIZED.get().is_some() }
-
-    /// Load and pin CEF before the host starts Tauri, Tokio or other workers.
-    /// This does not initialize CEF, create profiles, start helpers or access
-    /// Keychain. The loaded library remains resident until process exit.
-    ///
-    /// # Safety
-    /// Call during single-threaded process startup. CEF's macOS library
-    /// constructor replaces the default malloc zone by temporarily unregistering
-    /// the system zone. Concurrent allocation/free can corrupt the host heap or
-    /// hit Chromium's "no zone found" check, even before cef_initialize.
-    pub unsafe fn preload_framework(framework: &std::path::Path) -> Result<(), String> {
-        if objc2::MainThreadMarker::new().is_none() {
-            return Err("CEF framework preload requires the startup main thread".into());
+    pub fn initialize() -> Result<Arc<Self>, String> {
+        let _mtm = MainThreadMarker::new().ok_or("WK initialization requires the main thread")?;
+        if NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion
+            < 14
+        {
+            return Err("WK persistent session stores require macOS 14 or newer".into());
         }
-        let framework = framework.canonicalize().map_err(|_| "CEF framework is missing")?;
-        let loaded = PRELOADED_FRAMEWORK.get_or_init(|| {
-            let library = std::ffi::CString::new(framework.join("Chromium Embedded Framework").as_os_str().as_encoded_bytes())
-                .map_err(|_| "CEF framework path is invalid".to_owned())?;
-            if unsafe { load_library(Some(&*library.as_ptr().cast())) } != 1 {
-                return Err("CEF framework could not be loaded during startup".into());
+        let owner = Arc::new(Self {
+            id: Uuid::now_v7(),
+            closing: AtomicBool::new(false),
+            pages: Mutex::new(BTreeMap::new()),
+            pointer_owners: Mutex::new(BTreeMap::new()),
+        });
+        let weak = Arc::downgrade(&owner);
+        // App-local public event monitor; never observes other apps or uses a
+        // global event tap, accessibility permission, swizzling or WebKit SPI.
+        let monitor = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+            let event_ref = unsafe { event.as_ref() };
+            if weak
+                .upgrade()
+                .is_some_and(|engine| engine.blocks_user_event(event_ref))
+            {
+                std::ptr::null_mut()
+            } else {
+                event.as_ptr()
             }
-            Ok(framework.clone())
         });
-        match loaded {
-            Ok(path) if path == &framework => Ok(()),
-            Ok(_) => Err("CEF framework differs from the preloaded application library".into()),
-            Err(error) => Err(error.clone()),
+        let token = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::Any, &monitor)
         }
+        .ok_or("WK input gate installation failed")?;
+        REGISTRY.with(|r| r.borrow_mut().monitors.insert(owner.id, token));
+        Ok(owner)
     }
-
-    /// Requires startup `preload_framework`. Call on the main thread after the
-    /// application implements CefAppProtocol, before its first native context.
-    pub fn initialize(paths: Paths) -> Result<Arc<Self>, String> {
-        if objc2::MainThreadMarker::new().is_none() { return Err("CEF initialization requires the main thread".into()); }
-        if INITIALIZED.set(()).is_err() { return Err("CEF cannot be initialized twice in one process".into()); }
-        let framework = paths.framework.canonicalize().map_err(|_| "CEF framework is missing")?;
-        match PRELOADED_FRAMEWORK.get() {
-            Some(Ok(loaded)) if loaded == &framework => {}
-            Some(Err(error)) => return Err(error.clone()),
-            _ => return Err("CEF framework must be preloaded before starting host workers".into()),
-        }
-        let helper = paths.helper.canonicalize().map_err(|_| "CEF helper is missing")?;
-        let main_bundle = paths.main_bundle.canonicalize().map_err(|_| "CEF main bundle is missing")?;
-        std::fs::create_dir_all(&paths.data_root).map_err(|_| "CEF data root cannot be created")?;
-        let root = paths.data_root.canonicalize().map_err(|_| "CEF data root cannot be resolved")?;
-        let main=nomi_process_runtime::probe_process_identity(std::process::id()).map_err(|error|format!("CEF main identity unavailable: {error}"))?
-            .ok_or("CEF main identity is absent")?;
-        let guardian=crate::guardian_client::GuardOwner::start(&helper,main,packaged_helper_paths(&helper)?)?;
-        let mut initialization_guard=GuardianInitializationGuard {owner:guardian.clone(),armed:true};
-        let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
-        let (ready, _) = watch::channel(false);
-        let engine = Arc::new(Self { ready, stopped: Default::default(), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root,guardian });
-        crate::application::install(Arc::downgrade(&engine))?;
-        let args = args::Args::new();
-        let helper_text = crate::text::Text::new(helper.to_str().ok_or("CEF helper path must be UTF-8")?);
-        let framework_text = crate::text::Text::new(framework.to_str().ok_or("CEF framework path must be UTF-8")?);
-        let bundle_text = crate::text::Text::new(main_bundle.to_str().ok_or("CEF bundle path must be UTF-8")?);
-        let root_text = crate::text::Text::new(engine.root.to_str().ok_or("CEF data root must be UTF-8")?);
-        let settings = Settings {
-            // CEF copies these fields during initialize; buffers stay alive
-            // until that call returns. See text.rs for the binding boundary.
-            browser_subprocess_path: unsafe { helper_text.field() },
-            framework_dir_path: unsafe { framework_text.field() },
-            main_bundle_path: unsafe { bundle_text.field() },
-            root_cache_path: unsafe { root_text.field() },
-            no_sandbox: 0,
-            external_message_pump: 1,
-            command_line_args_disabled: 1,
-            windowless_rendering_enabled: 0,
-            remote_debugging_port: 0,
-            ..Default::default()
-        };
-        let mut app = Application::new(engine.clone());
-        if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
-            let _=engine.stopped.begin(); // Closed admission, never cleanup success.
-            return Err("CEF initialization failed".into());
-        }
-        initialization_guard.armed=false;
-        Ok(engine)
-    }
-
     pub fn post(self: &Arc<Self>, work: UiWork) -> Result<(), String> {
-        if self.stopped.blocks_work() { return Err("CEF is stopped or shutting down".into()); }
-        // CEF work belongs to its UI task runner, even though that runner and
-        // Tauri share the same macOS main thread. Serialize the CEF API call
-        // with shutdown on that thread: an async caller must never race a
-        // check-then-post against cef_shutdown from another thread.
-        let engine = self.clone();
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            if engine.stopped.blocks_work() { return; }
-            let mut task = NativeTask::new(Arc::new(Mutex::new(Some(work))));
-            let _ = post_task(ThreadId::UI, Some(&mut task));
-            // A rejected task drops its owned oneshot sender. The waiter gets
-            // failure rather than a synthetic completion acknowledgement.
-        });
+        if self.closing.load(Ordering::Acquire) {
+            return Err("WK engine is closing".into());
+        }
+        dispatch2::DispatchQueue::main().exec_async(work);
         Ok(())
     }
-
-    pub(crate) fn blocks_user_event(&self, event: &objc2_app_kit::NSEvent) -> bool {
-        use objc2_app_kit::{NSEventType, NSEventModifierFlags, NSView};
-        use objc2::msg_send;
+    pub async fn wait_ready(&self) -> Result<(), String> {
+        if self.closing.load(Ordering::Acquire) {
+            Err("WK engine is closing".into())
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn create_context(
+        self: &Arc<Self>,
+        identifier: Option<Uuid>,
+    ) -> Result<Arc<Context>, String> {
+        self.wait_ready().await?;
+        if identifier.is_some_and(|id| id.is_nil()) {
+            return Err("WK store identifier cannot be nil".into());
+        }
+        let context = Arc::new(Context {
+            id: Uuid::now_v7(),
+            identifier,
+            closed: AtomicBool::new(false),
+        });
+        let result = context.clone();
+        let engine = self.clone();
+        on_main(move || {
+            if engine.closing.load(Ordering::Acquire) {
+                return Err("WK engine is closing".into());
+            }
+            if identifier.is_some_and(|id| REGISTRY.with(|r| r.borrow().removing.contains(&id))) {
+                return Err("WK store removal is in progress".into());
+            }
+            let mtm = MainThreadMarker::new().unwrap();
+            let store = unsafe {
+                match identifier {
+                    Some(id) => WKWebsiteDataStore::dataStoreForIdentifier(&native_uuid(id), mtm),
+                    None => WKWebsiteDataStore::nonPersistentDataStore(mtm),
+                }
+            };
+            REGISTRY.with(|r| {
+                r.borrow_mut()
+                    .contexts
+                    .insert(result.id, NativeContext { store, identifier })
+            });
+            Ok(())
+        })
+        .await?;
+        Ok(context)
+    }
+    pub async fn create_page(
+        self: &Arc<Self>,
+        parent: Arc<ParentView>,
+        context: Arc<Context>,
+    ) -> Result<Arc<Page>, String> {
+        self.wait_ready().await?;
+        let page = self.allocate_page(context);
+        let pending = page.clone();
+        on_main(move || {
+            let parent = parent()?;
+            let native = create_native_page(&pending, parent, None)?;
+            native.delegate.prepare_bootstrap();
+            unsafe {
+                let navigation = native.view.loadHTMLString_baseURL(
+                    &NSString::from_str("<!doctype html><meta charset=utf-8><title></title>"),
+                    None,
+                );
+                native.delegate.track_navigation(navigation, &native.view);
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(page)
+    }
+    pub(crate) fn allocate_page(self: &Arc<Self>, context: Arc<Context>) -> Arc<Page> {
+        let (metadata, _) = watch::channel(PageSnapshot::default());
+        let (closed, _) = watch::channel(false);
+        let page = Arc::new(Page {
+            id: Uuid::now_v7(),
+            engine: self.clone(),
+            context,
+            metadata,
+            closed,
+            close_requested: AtomicBool::new(false),
+            visible: AtomicBool::new(false),
+            panel_presented: AtomicBool::new(false),
+            input_locked: AtomicBool::new(true),
+            blocked_inputs: AtomicUsize::new(0),
+            dialog_draining: AtomicBool::new(false),
+            change_listener: Mutex::new(None),
+            popup_sender: Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+            downloads: Mutex::new(vec![]),
+            navigation_trace: Mutex::new(BrowserNavigationTrace::default()),
+        });
+        self.pages
+            .lock()
+            .unwrap()
+            .insert(page.id, Arc::downgrade(&page));
+        page
+    }
+    fn blocks_user_event(&self, event: &NSEvent) -> bool {
         let kind = event.r#type();
-        let keyboard = matches!(kind, NSEventType::KeyDown | NSEventType::KeyUp | NSEventType::FlagsChanged);
-        if matches!(kind, NSEventType::KeyDown | NSEventType::KeyUp) && event.modifierFlags().contains(NSEventModifierFlags::Command)
-            && event.charactersIgnoringModifiers().is_some_and(|value| value.to_string().eq_ignore_ascii_case("q")) {
-            // Application Quit belongs to Tauri's existing exit coordinator.
+        let keyboard = matches!(
+            kind,
+            NSEventType::KeyDown | NSEventType::KeyUp | NSEventType::FlagsChanged
+        );
+        let pointer = matches!(
+            kind,
+            NSEventType::LeftMouseDown
+                | NSEventType::LeftMouseUp
+                | NSEventType::RightMouseDown
+                | NSEventType::RightMouseUp
+                | NSEventType::OtherMouseDown
+                | NSEventType::OtherMouseUp
+                | NSEventType::MouseMoved
+                | NSEventType::LeftMouseDragged
+                | NSEventType::RightMouseDragged
+                | NSEventType::OtherMouseDragged
+                | NSEventType::ScrollWheel
+                | NSEventType::Magnify
+                | NSEventType::Rotate
+                | NSEventType::Swipe
+                | NSEventType::BeginGesture
+                | NSEventType::EndGesture
+                | NSEventType::Pressure
+        );
+        if !keyboard && !pointer {
             return false;
         }
-        let pointer = matches!(kind, NSEventType::LeftMouseDown | NSEventType::LeftMouseUp | NSEventType::RightMouseDown | NSEventType::RightMouseUp | NSEventType::OtherMouseDown | NSEventType::OtherMouseUp | NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged | NSEventType::OtherMouseDragged | NSEventType::ScrollWheel | NSEventType::Magnify | NSEventType::Rotate | NSEventType::Swipe | NSEventType::BeginGesture | NSEventType::EndGesture | NSEventType::Pressure);
-        if !keyboard && !pointer { return false; }
-        let Some(mtm) = objc2::MainThreadMarker::new() else { return true; };
-        let window = event.window(mtm).or_else(|| if keyboard { objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() } else { None });
-        let down = matches!(kind, NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown);
-        let up = matches!(kind, NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp);
-        let dragged = matches!(kind, NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged | NSEventType::OtherMouseDragged);
-        if up || dragged {
-            let owner = if up { self.pointer_owners.lock().unwrap().remove(&event.buttonNumber()) }
-                else { self.pointer_owners.lock().unwrap().get(&event.buttonNumber()).cloned() };
-            if let Some(page) = owner.and_then(|owner| owner.upgrade()).filter(|page| page.input_locked()) {
+        let down = matches!(
+            kind,
+            NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown
+        );
+        let up = matches!(
+            kind,
+            NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+        );
+        let drag = matches!(
+            kind,
+            NSEventType::LeftMouseDragged
+                | NSEventType::RightMouseDragged
+                | NSEventType::OtherMouseDragged
+        );
+        if up || drag {
+            let owner = if up {
+                self.pointer_owners
+                    .lock()
+                    .unwrap()
+                    .remove(&event.buttonNumber())
+            } else {
+                self.pointer_owners
+                    .lock()
+                    .unwrap()
+                    .get(&event.buttonNumber())
+                    .cloned()
+            };
+            if let Some(page) = owner.and_then(|p| p.upgrade()).filter(|p| p.input_locked()) {
                 page.blocked_inputs.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
         }
-        let pages: Vec<_> = self.pages.lock().unwrap().values().filter_map(Weak::upgrade).collect();
-        let hit = pages.iter().find(|page| {
-            let view = page.view.load(Ordering::Acquire);
-            let Some(view) = (unsafe { (view as *const NSView).as_ref() }) else { return false; };
-            let Some(page_window) = view.window() else { return false; };
-            if view.isHidden() || window.as_ref().is_some_and(|window| **window != *page_window) { return false; }
-            if keyboard {
-                let Some(responder) = page_window.firstResponder() else { return false; };
-                let is_view: objc2::runtime::Bool = unsafe { msg_send![&responder, isKindOfClass: objc2::class!(NSView)] };
-                is_view.as_bool() && unsafe { msg_send![&responder, isDescendantOf: view] }
+        // Modifier transitions are not key-character events. Asking AppKit
+        // for characters on FlagsChanged raises an Objective-C exception,
+        // which aborts when it crosses Tao's non-unwinding event callback.
+        if has_key_characters(kind)
+            && event
+                .modifierFlags()
+                .contains(NSEventModifierFlags::Command)
+            && event
+                .charactersIgnoringModifiers()
+                .is_some_and(|s| s.to_string().eq_ignore_ascii_case("q"))
+        {
+            return false;
+        }
+        let pages: Vec<_> = self
+            .pages
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        // Semantic element.focus() can restore an editable native responder.
+        // Re-establish the gate before every local input event, including a
+        // menu click with no WK window; menu actions resolve the responder later.
+        for page in pages.iter().filter(|page| page.input_locked()) {
+            if let Some(native) = native_page(page.id) {
+                if release_browser_responder(&native).is_err() {
+                    return true;
+                }
+            }
+        }
+        let Some(window) = event.window(MainThreadMarker::new().unwrap()) else {
+            return false;
+        };
+        for page in pages {
+            if !page.is_visible() {
+                continue;
+            }
+            let Some(native) = native_page(page.id) else {
+                continue;
+            };
+            if native.view.window().as_ref().is_none_or(|w| **w != *window) {
+                continue;
+            }
+            let hit = if keyboard {
+                window.firstResponder().is_some_and(|r| {
+                    let is_view: bool =
+                        unsafe { msg_send![&r, isKindOfClass: objc2::class!(NSView)] };
+                    is_view && unsafe { msg_send![&r, isDescendantOf: &*native.view] }
+                })
             } else {
-                let location = if window.is_some() { event.locationInWindow() } else { page_window.convertPointFromScreen(event.locationInWindow()) };
-                let point = view.convertPoint_fromView(location, None);
-                let bounds = view.bounds();
-                point.x >= 0.0 && point.y >= 0.0 && point.x < bounds.size.width && point.y < bounds.size.height
-            }
-        });
-        if down {
-            let mut owners = self.pointer_owners.lock().unwrap();
-            if let Some(page) = hit.filter(|_| (0..32).contains(&event.buttonNumber())) { owners.insert(event.buttonNumber(), Arc::downgrade(page)); }
-            else { owners.remove(&event.buttonNumber()); }
-        }
-        if let Some(page) = hit.filter(|page| page.input_locked()) {
-            page.blocked_inputs.fetch_add(1, Ordering::Relaxed);
-            true
-        } else { false }
-    }
-
-    fn schedule(self: &Arc<Self>, delay: i64) {
-        // CEF's reference external pump requires a maximum 30 Hz fallback,
-        // even when no further OnScheduleMessagePumpWork callback arrives.
-        // See tests/shared/browser/main_message_loop_external_pump.cc upstream.
-        let delay = Duration::from_millis(delay.clamp(0, 33) as u64);
-        let due = Instant::now() + delay;
-        let mut pending = self.pump_due.lock().unwrap();
-        if pending.is_some_and(|pending| pending <= due) { return; }
-        *pending = Some(due);
-        let generation = self.pump_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        drop(pending);
-        let weak = Arc::downgrade(self);
-        let work = Box::new(move || {
-            if let Some(engine) = weak.upgrade() {
-                if engine.stopped.blocks_work() { return; }
-                // Claim under the same lock used by schedule(). A stale task
-                // must never erase a newer immediate wakeup's deadline.
-                let mut pending = engine.pump_due.lock().unwrap();
-                if engine.pump_generation.load(Ordering::Acquire) != generation { return; }
-                pending.take();
-                drop(pending);
-                if engine.pump_active.swap(true, Ordering::AcqRel) {
-                    engine.pump_reentered.store(true, Ordering::Release);
-                    return;
+                let p = native
+                    .view
+                    .convertPoint_fromView(event.locationInWindow(), None);
+                let b = native.view.bounds();
+                p.x >= 0.0 && p.y >= 0.0 && p.x < b.size.width && p.y < b.size.height
+            };
+            if hit {
+                if down {
+                    self.pointer_owners
+                        .lock()
+                        .unwrap()
+                        .insert(event.buttonNumber(), Arc::downgrade(&page));
                 }
-                engine.pump_reentered.store(false, Ordering::Release);
-                do_message_loop_work();
-                engine.pump_active.store(false, Ordering::Release);
-                if !engine.stopped.blocks_work() {
-                    engine.schedule(if engine.pump_reentered.swap(false, Ordering::AcqRel) { 0 } else { 33 });
+                if page.input_locked() {
+                    page.blocked_inputs.fetch_add(1, Ordering::Relaxed);
+                    return true;
                 }
+                return false;
             }
-        });
-        if delay.is_zero() { dispatch2::DispatchQueue::main().exec_async(work); }
-        else {
-            let when = dispatch2::DispatchTime::try_from(delay).expect("bounded CEF delay");
-            let _ = dispatch2::DispatchQueue::main().after(when, work);
         }
+        false
     }
-
-    pub async fn wait_ready(&self) -> Result<(), String> {
-        if self.closing.load(Ordering::Acquire) { return Err("CEF is closing".into()); }
-        let mut ready = self.ready.subscribe();
-        tokio::time::timeout(NATIVE_INITIALIZATION_TIMEOUT, async {
-            while !*ready.borrow_and_update() {
-                if self.stopped.blocks_work() || self.closing.load(Ordering::Acquire) { return Err("CEF initialization stopped".into()); }
-                ready.changed().await.map_err(|_| "CEF readiness channel closed")?;
+    pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
+        self.closing.store(true, Ordering::Release);
+        let pages: Vec<_> = self
+            .pages
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for page in pages {
+            page.force_close().await?;
+        }
+        let id = self.id;
+        on_main(move || {
+            if let Some(token) = REGISTRY.with(|r| r.borrow_mut().monitors.remove(&id)) {
+                unsafe {
+                    NSEvent::removeMonitor(&token);
+                }
             }
             Ok(())
-        }).await.map_err(|_| "CEF initialization timed out")?
-    }
-
-    /// Construct this once per Conversation, including ephemeral conversations.
-    /// Every tab in that Conversation receives the same Context owner.
-    pub async fn create_context(self: &Arc<Self>, profile: Option<PathBuf>) -> Result<Arc<Context>, String> {
-        self.wait_ready().await?;
-        let profile = profile.map(|path| crate::profile::resolve(&self.root, &path)).transpose()?;
-        let (tx, rx) = oneshot::channel();
-        let owner = self.clone();
-        self.post(Box::new(move || {
-            if owner.closing.load(Ordering::Acquire) { let _ = tx.send(Err("CEF is closing".into())); return; }
-            let path = match profile.as_ref().map(|path| path.to_str().ok_or("CEF profile path must be UTF-8")).transpose() {
-                Ok(path) => path.unwrap_or(""),
-                Err(error) => { let _ = tx.send(Err(error.into())); return; }
-            };
-            let path_text = crate::text::Text::new(path);
-            let settings = RequestContextSettings { cache_path: unsafe { path_text.field() }, persist_session_cookies: i32::from(profile.is_some()), ..Default::default() };
-            let result = request_context_create_context(Some(&settings), None).filter(|raw| CefString::from(&raw.cache_path()).to_string() == path).map(|raw| {
-                let context = Arc::new(Context { raw: Mutex::new(Some(raw)), profile });
-                owner.contexts.lock().unwrap().insert(uuid::Uuid::now_v7(), Arc::downgrade(&context));
-                context
-            })
-                .ok_or_else(|| "CEF request context creation failed".to_owned());
-            let _ = tx.send(result);
-        }))?;
-        rx.await.map_err(|_| "CEF request context creation was interrupted")?
-    }
-
-    /// Resolve and retain the parent on the UI thread. No raw native handle is
-    /// accepted from a serialized request, and queued work cannot use a freed view.
-    pub async fn create_page(self: &Arc<Self>, parent: Arc<ParentView>, context: Arc<Context>) -> Result<Arc<Page>, String> {
-        self.wait_ready().await?;
-        let (created, wait) = oneshot::channel();
-        let page = self.allocate_page(context.clone(), created);
-        self.pages.lock().unwrap().insert(page.id, Arc::downgrade(&page));
-        let pending = page.clone();
-        self.post(Box::new(move || {
-            if pending.engine.closing.load(Ordering::Acquire) { pending.creation_failed(); return; }
-            let Ok(parent) = parent() else { pending.creation_failed(); return; };
-            if parent.window().is_none() { pending.creation_failed(); return; }
-            let parent = objc2::rc::Retained::into_raw(parent);
-            pending.parent.store(parent as usize, Ordering::Release);
-            let Some(mut context) = context.raw.lock().unwrap().clone() else { pending.creation_failed(); return; };
-            let window = WindowInfo { parent_view: parent.cast(), bounds: Rect { x: 0, y: 0, width: 880, height: 600 }, hidden: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
-            let mut client = PageClient::new(pending.clone());
-            // A fresh off-the-record context may defer renderer creation for
-            // about:blank. Bootstrap the same view with inert, host-owned HTML
-            // so the protocol can attach before navigating to an untrusted site.
-            let bootstrap = CefString::from(BOOTSTRAP_URL);
-            if browser_host_create_browser(Some(&window), Some(&mut client), Some(&bootstrap), Some(&BrowserSettings::default()), None, Some(&mut context)) != 1 { pending.creation_failed(); }
-        }))?;
-        // No timeout that would orphan a late native creation. The owner remains
-        // retained by CEF until its create/abort callback; app shutdown owns it.
-        wait.await.map_err(|_| "CEF page creation was interrupted")??;
-        Ok(page)
-    }
-
-    fn allocate_page(
-        self: &Arc<Self>,
-        context: Arc<Context>,
-        created: oneshot::Sender<Result<(), String>>,
-    ) -> Arc<Page> {
-        let (closed, _) = watch::channel(false);
-        Arc::new_cyclic(|weak: &Weak<Page>| {
-            let weak = weak.clone();
-            let engine = self.clone();
-            let protocol = Protocol::new(Box::new(move |message| {
-                let weak = weak.clone();
-                engine.post(Box::new(move || {
-                    if let Some(page) = weak.upgrade() {
-                        if message.guard.as_ref().is_some_and(|guard| !guard()) { page.protocol.reject(message.id); return; }
-                        let browser = page.browser.lock().unwrap().clone();
-                        if let Some(browser) = browser {
-                            if let Some(host) = browser.host() {
-                                #[cfg(debug_assertions)]
-                                page.protocol.trace(message.id, "native_dispatch");
-                                if host.send_dev_tools_message(Some(&message.bytes)) == 1 { return; }
-                            }
-                        }
-                        page.protocol.close();
-                    }
-                }))
-            }));
-            Page { metadata: watch::channel(PageSnapshot::default()).0, change_listener: Mutex::new(None), dialog: Mutex::new(None), permissions: Mutex::new(BTreeMap::new()), popup_sender: Mutex::new(None), download: Mutex::new(None), user_downloads: Mutex::new(Default::default()), dialog_draining: AtomicBool::new(true), id: uuid::Uuid::now_v7(), engine: self.clone(), protocol, browser: Mutex::new(None), registration: Mutex::new(None), created: Mutex::new(Some(created)), closed, view: AtomicUsize::new(0), parent: AtomicUsize::new(0), input_locked: AtomicBool::new(true), blocked_inputs: AtomicUsize::new(0), visible: AtomicBool::new(false), close_requested: AtomicBool::new(false), _context: context.clone() }
         })
+        .await
     }
-
-    pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
-        self.shutdown_owned(false).await
-    }
-
-    pub async fn shutdown_after_storage_close(self: &Arc<Self>)->Result<(),String> {
-        self.shutdown_owned(true).await
-    }
-
-    async fn shutdown_owned(self: &Arc<Self>, host_storage_closed: bool) -> Result<(), String> {
-        if self.stopped.completed() { return Ok(()); }
-        if self.stopped.blocks_work() { return Err(if self.stopped.native_is_running() {
-            "CEF shutdown is still in progress; completion has not been acknowledged"
-        } else if self.stopped.native_has_returned() {"CEF shutdown returned; completion has not been acknowledged"}
-        else {"CEF shutdown entry failed; cleanup is still unconfirmed"}.into()); }
-        #[cfg(debug_assertions)]
-        let shutdown_started = Instant::now();
-        self.closing.store(true, Ordering::Release);
-        self.ready.send_replace(false);
-        let pages: Vec<_> = self.pages.lock().unwrap().values().filter_map(Weak::upgrade).collect();
-        #[cfg(debug_assertions)]
-        eprintln!("CEF_SHUTDOWN phase=page_close_begin pages={}", pages.len());
-        for page in pages { page.force_close().await?; }
+    pub async fn remove_data_store(identifier: Uuid) -> Result<(), String> {
+        if identifier.is_nil() {
+            return Err("WK store identifier cannot be nil".into());
+        }
         let (tx, rx) = oneshot::channel();
-        let engine = self.clone();
-        let runtime=tokio::runtime::Handle::try_current().map_err(|_|"CEF shutdown has no retained host runtime")?;
         dispatch2::DispatchQueue::main().exec_async(move || {
-            if engine.stopped.completed() { let _ = tx.send(Ok(())); return; }
-            if engine.stopped.blocks_work() { let _ = tx.send(Err("CEF shutdown is still in progress; completion has not been acknowledged".into())); return; }
-            if engine.pages.lock().unwrap().values().any(|page| page.strong_count() != 0) {
-                let _ = tx.send(Err("CEF pages remain during shutdown".to_owned()));
+            if NSProcessInfo::processInfo()
+                .operatingSystemVersion()
+                .majorVersion
+                < 14
+            {
+                let _ = tx.send(Err(
+                    "WK persistent session stores require macOS 14 or newer".into(),
+                ));
                 return;
             }
-            let contexts: Vec<_> = std::mem::take(&mut *engine.contexts.lock().unwrap()).into_values().filter_map(|context| context.upgrade()).collect();
-            #[cfg(debug_assertions)]
-            eprintln!("CEF_SHUTDOWN phase=context_release_begin contexts={} elapsed_ms={}", contexts.len(), shutdown_started.elapsed().as_millis());
-            for context in contexts { let raw = context.raw.lock().unwrap().take(); drop(raw); }
-            if !engine.stopped.begin() { let _ = tx.send(Err("CEF shutdown entry was already claimed".into())); return; }
-            let monitor_gate=Arc::new(AtomicUsize::new(0));
-            if host_storage_closed {
-                let monitored=engine.clone();let gate=monitor_gate.clone();
-                if let Err(error)=std::thread::Builder::new().name("nomifun-cef-failure-exit".into()).spawn(move || {
-                    while gate.load(Ordering::Acquire)==0 {std::thread::sleep(Duration::from_millis(5));}
-                    if gate.load(Ordering::Acquire)==1 {monitor_native_failure(monitored,runtime);}
-                }) {let _=tx.send(Err(format!("CEF independent failure monitor could not start: {error}")));return;}
-            }
-            if let Err(error)=engine.guardian.enter_native() {
-                monitor_gate.store(2,Ordering::Release);
-                let _=tx.send(Err(format!("CEF guardian did not acknowledge native entry: {error}")));return;
-            }
-            engine.stopped.mark_native_entered();
-            monitor_gate.store(1,Ordering::Release);
-            #[cfg(debug_assertions)]
-            eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
-            #[cfg(debug_assertions)]
-            if host_storage_closed && shutdown_state::hold_native_entry(&engine.root) {
-                // Exercise the actual post-storage-close guardian/monitor with
-                // an occupied main thread after real CEF use. This explicit
-                // boundary fixture has NOT called cef_shutdown; its log must
-                // never be accepted as a CEF-internal or Keychain reproduction.
-                eprintln!("CEF_SHUTDOWN phase=native_entry_held_fixture actual_cef_shutdown_called=false host_storage_closed=true");
-                // No altered timeout or synthetic completion: only the
-                // production independent monitor can terminate this process
-                // after exact Helper cleanup and guardian Stop/join proof.
-                loop { std::thread::park(); }
-            }
-            shutdown();
-            engine.stopped.mark_native_returned();
-            let returned=engine.guardian.native_returned();
-            #[cfg(debug_assertions)]
-            eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
-            // Exercise the real native/desktop failure path after physical
-            // cleanup, not instead of it. A lost acknowledgement stays
-            // unverified and retries must never re-enter cef_shutdown.
-            #[cfg(debug_assertions)]
-            if shutdown_state::lose_completion_ack(&engine.root) {
-                eprintln!("CEF_SHUTDOWN phase=completion_ack_lost_fixture");
-                let _ = tx.send(Err("CEF native cleanup returned but its completion acknowledgement was lost (isolated acceptance fixture)".into()));
+            // This entry point also runs before any browser/renderer exists
+            // (for example startup dataset cleanup). On supported macOS,
+            // enumerating first can dispatch through WebKit's uninitialized
+            // main RunLoop. The public configuration initializer establishes
+            // WebKit's process state without opening a view, starting our own
+            // event loop, or creating a persistent/default website data store.
+            let _configuration =
+                unsafe { WKWebViewConfiguration::new(MainThreadMarker::new().unwrap()) };
+            if REGISTRY.with(|r| {
+                let r = r.borrow();
+                r.contexts
+                    .values()
+                    .any(|c| c.identifier == Some(identifier))
+                    || r.removing.contains(&identifier)
+            }) {
+                let _ = tx.send(Err("WK store is still in use".into()));
                 return;
             }
-            let _ = tx.send(returned.map(|_|()));
-        });
-        let result=rx.await.map_err(|_|"CEF shutdown acknowledgement was lost".to_owned())?;
-        if self.stopped.native_has_returned() {
-            self.guardian.stop_and_join().await?;
-            if result.is_ok() {self.stopped.finish();}
-        }
-        result
-    }
-}
-
-wrap_task! { struct NativeTask { work: Arc<Mutex<Option<UiWork>>>, } impl Task {
-    fn execute(&self) {
-        let work = self.work.lock().unwrap().take();
-        if let Some(work) = work { work(); }
-    }
-} }
-
-fn packaged_helper_paths(generic: &std::path::Path)->Result<Vec<PathBuf>,String> {
-    let name=generic.file_name().and_then(|name|name.to_str()).ok_or("CEF helper name is invalid")?;
-    let frameworks=generic.parent().and_then(std::path::Path::parent).and_then(std::path::Path::parent)
-        .and_then(std::path::Path::parent).ok_or("CEF helper bundle layout is invalid")?;
-    [""," (GPU)"," (Renderer)"," (Plugin)"," (Alerts)"].into_iter().map(|suffix| {
-        let name=format!("{name}{suffix}");
-        frameworks.join(format!("{name}.app/Contents/MacOS/{name}")).canonicalize()
-            .map_err(|_|"CEF typed helper bundle is missing".to_owned())
-    }).collect()
-}
-
-/// This worker exists only for the host's post-storage-close entry. It never
-/// asks the occupied main queue to exit and never calls native shutdown again.
-fn monitor_native_failure(engine: Arc<Engine>, runtime: tokio::runtime::Handle) {
-    while engine.stopped.native_is_running() {
-        match engine.guardian.status() {
-            Ok(reply) if helper_cleanup_proven(&reply)
-                && reply.native_running => {
-                if !engine.stopped.native_is_running() {return;}
-                let result=runtime.block_on(async {tokio::time::timeout(Duration::from_secs(5),engine.guardian.stop_and_join()).await});
-                match result {
-                    Ok(Ok(stopped)) if helper_cleanup_proven(&stopped)
-                        && engine.stopped.native_is_running() => {
-                        eprintln!("CEF_SHUTDOWN phase=physical_timeout helpers_generation_absent=true native_completion=false exit_code=1");
-                        // All app consumers and storage were acknowledged by
-                        // the typed host entry. Exact Helpers and guardian are
-                        // now absent/joined; this remains a failed native close.
-                        unsafe {libc::_exit(1)};
-                    }
-                    Ok(Err(error))=>eprintln!("CEF guardian stop/join unproven; no emergency exit: {error}"),
-                    Err(_)=>{
-                        eprintln!("CEF guardian stop/join still pending; retained authority will be joined once more");
-                        let retry=runtime.block_on(async {tokio::time::timeout(Duration::from_secs(5),engine.guardian.stop_and_join()).await});
-                        if matches!(retry,Ok(Ok(ref stopped)) if helper_cleanup_proven(stopped)) && engine.stopped.native_is_running() {
-                            eprintln!("CEF_SHUTDOWN phase=physical_timeout late_guardian_join=true native_completion=false exit_code=1");
-                            unsafe {libc::_exit(1)};
-                        }
-                    }
-                    _=>return,
+            REGISTRY.with(|r| r.borrow_mut().removing.insert(identifier));
+            let tx = Arc::new(Mutex::new(Some(tx)));
+            let fetched = RcBlock::new(move |identifiers: std::ptr::NonNull<NSArray<NSUUID>>| {
+                let target = native_uuid(identifier);
+                let exists = unsafe { identifiers.as_ref() }
+                    .iter()
+                    .any(|id| *id == *target);
+                if !exists {
+                    finish_store_removal(identifier, &tx, Ok(()));
+                    return;
                 }
-                return;
+                remove_store_attempt(identifier, tx.clone(), 1);
+            });
+            unsafe {
+                WKWebsiteDataStore::fetchAllDataStoreIdentifiers(
+                    &fetched,
+                    MainThreadMarker::new().unwrap(),
+                );
             }
-            Err(error)=>{
-                eprintln!("CEF guardian receipt unavailable; native failure remains unconfirmed: {error}");
-                return;
-            }
-            _=>std::thread::sleep(Duration::from_millis(100)),
-        }
-    }
-}
-
-fn helper_cleanup_proven(reply:&crate::guardian::Reply)->bool {
-    reply.status=="ok" && reply.error.is_none() && reply.receipt.as_ref().is_some_and(|receipt| {
-        receipt.complete && receipt.generation_absence_only && receipt.registered==receipt.absent
-            && receipt.unresolved_declarations==0 && receipt.errors.is_empty()
-    })
-}
-
-struct GuardianInitializationGuard {
-    owner: Arc<crate::guardian_client::GuardOwner>,
-    armed: bool,
-}
-impl Drop for GuardianInitializationGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            if let Err(error)=self.owner.settle_failed_initialization() {
-                eprintln!("CEF initialization failed; guardian cleanup remains owned and unconfirmed: {error}");
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod guardian_exit_tests {
-    use super::*;
-    #[test]
-    fn emergency_requires_complete_generation_proof_not_just_a_complete_flag() {
-        let mut reply=crate::guardian::Reply {status:"ok".into(),phase:"cleanup_complete".into(),native_running:true,
-            deadline_unix_ms:None,error:None,receipt:Some(crate::guardian::CleanupReceipt {complete:true,generation_absence_only:true,
-                registered:1,absent:1,unresolved_declarations:0,errors:vec![]})};
-        assert!(helper_cleanup_proven(&reply));
-        reply.receipt.as_mut().unwrap().absent=0;assert!(!helper_cleanup_proven(&reply));
-        reply.receipt.as_mut().unwrap().absent=1;
-        reply.receipt.as_mut().unwrap().unresolved_declarations=1;assert!(!helper_cleanup_proven(&reply));
-        reply.receipt.as_mut().unwrap().unresolved_declarations=0;
-        reply.receipt.as_mut().unwrap().errors.push("probe unavailable".into());assert!(!helper_cleanup_proven(&reply));
-        reply.receipt.as_mut().unwrap().errors.clear();reply.status="error".into();assert!(!helper_cleanup_proven(&reply));
+        });
+        rx.await
+            .map_err(|_| "WK persistent store removal acknowledgement lost".to_owned())?
     }
 }
 
 pub struct Context {
-    raw: Mutex<Option<RequestContext>>,
-    pub profile: Option<PathBuf>,
+    id: Uuid,
+    pub identifier: Option<Uuid>,
+    closed: AtomicBool,
+}
+impl Context {
+    pub async fn clear_site_data(self: &Arc<Self>) -> Result<(), String> {
+        let id = self.id;
+        let (tx, rx) = oneshot::channel();
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let store = REGISTRY.with(|r| r.borrow().contexts.get(&id).map(|c| c.store.clone()));
+            let Some(store) = store else {
+                let _ = tx.send(Err("WK context is closed".into()));
+                return;
+            };
+            if REGISTRY.with(|r| r.borrow().pages.values().any(|p| p.context.id == id)) {
+                let _ = tx.send(Err("WK pages must close before site data removal".into()));
+                return;
+            }
+            let tx = RefCell::new(Some(tx));
+            let done = RcBlock::new(move || {
+                if let Some(tx) = tx.borrow_mut().take() {
+                    let _ = tx.send(Ok(()));
+                }
+            });
+            unsafe {
+                store.removeDataOfTypes_modifiedSince_completionHandler(
+                    &WKWebsiteDataStore::allWebsiteDataTypes(MainThreadMarker::new().unwrap()),
+                    &NSDate::distantPast(),
+                    &done,
+                );
+            }
+        });
+        rx.await
+            .map_err(|_| "WK data removal acknowledgement lost".to_owned())?
+    }
+    pub async fn close(&self) -> Result<(), String> {
+        let id = self.id;
+        on_main(move || {
+            if REGISTRY.with(|r| r.borrow().pages.values().any(|p| p.context.id == id)) {
+                return Err("WK context still owns pages".into());
+            }
+            REGISTRY.with(|r| r.borrow_mut().contexts.remove(&id));
+            Ok(())
+        })
+        .await?;
+        self.closed.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+impl Drop for Context {
+    fn drop(&mut self) {
+        let id = self.id;
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            REGISTRY.with(|r| r.borrow_mut().contexts.remove(&id));
+        });
+    }
 }
 
 pub struct PopupCandidate {
@@ -531,461 +563,1008 @@ pub struct PopupCandidate {
     pub target_url: String,
     pub ready: oneshot::Receiver<Result<(), String>>,
 }
-
 pub struct Page {
+    pub(crate) id: Uuid,
+    pub(crate) engine: Arc<Engine>,
+    pub(crate) context: Arc<Context>,
     metadata: watch::Sender<PageSnapshot>,
-    change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    dialog: Mutex<Option<callbacks::DeferredDialog>>,
-    permissions: Mutex<BTreeMap<String, callbacks::DeferredPermission>>,
-    popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
-    pub(crate) download: Mutex<Option<Weak<crate::downloads::AgentDownloadRequest>>>,
-    pub(crate) user_downloads: Mutex<crate::downloads::UserDownloads>,
-    dialog_draining: AtomicBool,
-    id: uuid::Uuid,
-    engine: Arc<Engine>,
-    pub protocol: Arc<Protocol>,
-    browser: Mutex<Option<Browser>>,
-    registration: Mutex<Option<Registration>>,
-    created: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     closed: watch::Sender<bool>,
-    view: AtomicUsize,
-    parent: AtomicUsize,
+    pub(crate) close_requested: AtomicBool,
+    visible: AtomicBool,
+    panel_presented: AtomicBool,
     input_locked: AtomicBool,
     blocked_inputs: AtomicUsize,
-    visible: AtomicBool,
-    pub(crate) close_requested: AtomicBool,
-    _context: Arc<Context>,
+    dialog_draining: AtomicBool,
+    change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
+    pending: Mutex<BTreeMap<Uuid, Box<dyn FnOnce(&'static str) + Send>>>,
+    downloads: Mutex<Vec<BrowserDownloadSnapshot>>,
+    navigation_trace: Mutex<BrowserNavigationTrace>,
 }
-
 impl Page {
-    pub fn id(&self) -> uuid::Uuid { self.id }
-    pub fn closed(&self) -> watch::Receiver<bool> { self.closed.subscribe() }
-    /// Browser creation does not prove its initial RenderFrameHost/document is
-    /// ready. The runtime registers this Page before awaiting this native-only
-    /// barrier, then initializes protocol policies and navigates the same view.
-    pub async fn wait_bootstrap_ready(&self, cancel: &tokio_util::sync::CancellationToken, closing: &tokio_util::sync::CancellationToken) -> Result<(), String> {
-        let started = Instant::now();
-        let result = wait_bootstrap_ready(self.metadata.subscribe(), self.closed.subscribe(), cancel, closing).await;
-        #[cfg(debug_assertions)]
-        if crate::protocol::protocol_trace_enabled() {
-            eprintln!("CEF_BOOTSTRAP readiness={} elapsed_ms={}", if result.is_ok() { "ready" } else { "failed" }, started.elapsed().as_millis());
+    #[cfg(test)]
+    pub(crate) fn test_user_surface(presented: bool, visible: bool, locked: bool, draining: bool) -> Arc<Self> {
+        let engine = Arc::new(Engine { id: Uuid::now_v7(), closing: AtomicBool::new(false),
+            pages: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()) });
+        let context = Arc::new(Context { id: Uuid::now_v7(), identifier: None, closed: AtomicBool::new(true) });
+        let page = engine.allocate_page(context);
+        page.panel_presented.store(presented, Ordering::Release);
+        page.visible.store(visible, Ordering::Release);
+        page.input_locked.store(locked, Ordering::Release);
+        page.dialog_draining.store(draining, Ordering::Release);
+        page
+    }
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn snapshot(&self) -> PageSnapshot {
+        self.metadata.borrow().clone()
+    }
+    /// A known empty terminal page needs no renderer-layout wait to explain
+    /// its state. Valid retained/partial documents remain readable.
+    pub fn document_unavailable_error(&self) -> Option<&'static str> {
+        page_unavailable(&self.snapshot())
+    }
+    pub fn navigation_trace(&self) -> BrowserNavigationTraceSnapshot {
+        self.navigation_trace.lock().unwrap().snapshot()
+    }
+    pub(crate) fn transition(&self, update: navigation::Update) {
+        let mut trace = self.navigation_trace.lock().unwrap();
+        let changed = self.metadata.send_if_modified(|snapshot| {
+            let before = snapshot.clone();
+            for event in navigation::reduce(snapshot, update) { trace.push(event); }
+            *snapshot != before
+        });
+        drop(trace);
+        if changed {
+            if let Some(native) = native_page(self.id) { apply_native_mask(&native); }
+            let listener = self.change_listener.lock().unwrap().clone();
+            if let Some(listener) = listener { listener(); }
         }
-        let _ = started;
-        result
+    }
+    pub fn subscribe(&self) -> watch::Receiver<PageSnapshot> {
+        self.metadata.subscribe()
+    }
+    pub fn closed(&self) -> watch::Receiver<bool> {
+        self.closed.subscribe()
+    }
+    pub fn input_locked(&self) -> bool {
+        self.input_locked.load(Ordering::Acquire)
+    }
+    pub(crate) fn dialog_draining(&self) -> bool {
+        self.dialog_draining.load(Ordering::Acquire)
+    }
+    pub(crate) fn inherit_input_lock(&self, other: &Page) {
+        self.input_locked
+            .store(other.input_locked(), Ordering::Release);
+        self.dialog_draining
+            .store(other.dialog_draining(), Ordering::Release);
+    }
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible.load(Ordering::Acquire)
+    }
+    /// The active, acknowledged user surface can remain presented while a
+    /// first navigation becomes a download without committing any document.
+    /// Document interactions must continue to use is_visible instead.
+    pub(crate) fn is_presented(&self) -> bool {
+        self.panel_presented.load(Ordering::Acquire)
+    }
+    pub(crate) fn allows_user_download(&self) -> bool {
+        !self.close_requested.load(Ordering::Acquire) && !self.input_locked()
+            && !self.dialog_draining() && self.is_presented()
+            && self.snapshot().load.phase != BrowserNavigationPhase::Crashed
+    }
+    pub fn blocked_input_count(&self) -> usize {
+        self.blocked_inputs.load(Ordering::Acquire)
+    }
+    pub fn set_change_listener(&self, listener: Arc<dyn Fn() + Send + Sync>) {
+        *self.change_listener.lock().unwrap() = Some(listener);
+    }
+    pub(crate) fn changed(&self, update: impl FnOnce(&mut PageSnapshot)) {
+        self.metadata.send_modify(update);
+        let listener = self.change_listener.lock().unwrap().clone();
+        if let Some(listener) = listener {
+            listener();
+        }
+    }
+    pub(crate) fn update_downloads(&self, value: Vec<BrowserDownloadSnapshot>) {
+        *self.downloads.lock().unwrap() = value;
+        self.changed(|_| {});
+    }
+    pub async fn wait_bootstrap_ready(
+        &self,
+        cancel: &CancellationToken,
+        closing: &CancellationToken,
+    ) -> Result<(), String> {
+        let mut state = self.subscribe();
+        let mut closed = self.closed();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if *closed.borrow_and_update() || cancel.is_cancelled() || closing.is_cancelled() { return Err(INTERRUPTED.into()); }
+                if snapshot.bootstrap_ready || snapshot.load.content_state != BrowserContentState::None { return Ok(()); }
+                if let Some(error) = page_unavailable(&snapshot) { return Err(error.into()); }
+                tokio::select! { _ = cancel.cancelled() => return Err(INTERRUPTED.into()), _ = closing.cancelled() => return Err(INTERRUPTED.into()), r = state.changed() => { r.map_err(|_| INTERRUPTED)?; }, r = closed.changed() => {r.map_err(|_| INTERRUPTED)?;} }
+            }
+        }).await.map_err(|_| "WK bootstrap timed out".to_owned())?
+    }
+    pub async fn wait_document_available(
+        &self, cancel: &CancellationToken, closing: &CancellationToken,
+    ) -> Result<(), String> {
+        let mut state = self.subscribe();
+        let mut closed = self.closed();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if *closed.borrow_and_update() || cancel.is_cancelled() || closing.is_cancelled() { return Err(INTERRUPTED.into()); }
+                if snapshot.load.content_state != BrowserContentState::None { return Ok(()); }
+                if let Some(error) = page_unavailable(&snapshot) { return Err(error.into()); }
+                tokio::select! { _ = cancel.cancelled() => return Err(INTERRUPTED.into()), _ = closing.cancelled() => return Err(INTERRUPTED.into()), r = state.changed() => { r.map_err(|_| INTERRUPTED)?; }, r = closed.changed() => {r.map_err(|_| INTERRUPTED)?;} }
+            }
+        }).await.map_err(|_| "WK document timed out".to_owned())?
     }
     pub fn listen_popups(&self) -> Result<mpsc::Receiver<PopupCandidate>, String> {
-        let mut sender = self.popup_sender.lock().unwrap();
-        if sender.is_some() {
-            return Err("CEF popup listener is already installed".into());
+        let mut slot = self.popup_sender.lock().unwrap();
+        if slot.is_some() {
+            return Err("WK popup listener already registered".into());
         }
-        let (output, receiver) = mpsc::channel(8);
-        *sender = Some(output);
-        Ok(receiver)
+        let (tx, rx) = mpsc::channel(8);
+        *slot = Some(tx);
+        Ok(rx)
     }
-
-    fn prepare_popup(
+    async fn mutate(
         self: &Arc<Self>,
-        target_url: Option<&CefString>,
-        target_disposition: WindowOpenDisposition,
-        user_gesture: i32,
-        window_info: Option<&mut WindowInfo>,
-        client: Option<&mut Option<Client>>,
-        no_javascript_access: Option<&mut i32>,
-    ) -> bool {
-        let target_url = target_url.map(ToString::to_string).unwrap_or_default();
-        if user_gesture == 0
-            || !navigation_allowed(&target_url)
-            || !matches!(
-                target_disposition,
-                WindowOpenDisposition::NEW_FOREGROUND_TAB
-                    | WindowOpenDisposition::NEW_BACKGROUND_TAB
-                    | WindowOpenDisposition::NEW_POPUP
-                    | WindowOpenDisposition::NEW_WINDOW
-            )
-            || self.close_requested.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(output) = self.popup_sender.lock().unwrap().as_ref().cloned() else {
-            return false;
-        };
-        let (Some(window_info), Some(client)) = (window_info, client) else {
-            return false;
-        };
-        let parent = self.parent.load(Ordering::Acquire) as *mut objc2_app_kit::NSView;
-        let Some(parent) = (unsafe { objc2::rc::Retained::retain(parent) }) else {
-            return false;
-        };
-        let (created, ready) = oneshot::channel();
-        let page = self.engine.allocate_page(self._context.clone(), created);
-        page.dialog_draining.store(
-            self.dialog_draining.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        let parent = objc2::rc::Retained::into_raw(parent);
-        page.parent.store(parent as usize, Ordering::Release);
-        self.engine.pages.lock().unwrap().insert(page.id, Arc::downgrade(&page));
-        *window_info = WindowInfo {
-            parent_view: parent.cast(),
-            bounds: Rect { x: 0, y: 0, width: 880, height: 600 },
-            hidden: 1,
-            runtime_style: RuntimeStyle::ALLOY,
-            ..Default::default()
-        };
-        *client = Some(PageClient::new(page.clone()));
-        if let Some(no_javascript_access) = no_javascript_access {
-            *no_javascript_access = 0;
-        }
-        if output.try_send(PopupCandidate { page: page.clone(), target_url, ready }).is_err() {
-            page.creation_failed();
-            return false;
-        }
-        true
-    }
-    /// Native browser zoom, independent of backing scale and CSS transforms.
-    pub async fn set_zoom_factor(self: &Arc<Self>, factor: f64) -> Result<(), String> {
-        if !factor.is_finite() || !(0.25..=5.0).contains(&factor) { return Err("CEF zoom factor is outside its range".into()); }
+        work: impl FnOnce(&NativePage) -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
         let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            let browser = page.browser.lock().unwrap().clone();
-            let result = if let Some(host) = browser.and_then(|browser| browser.host()) {
-                let level = factor.ln() / 1.2_f64.ln();
-                host.set_zoom_level(level);
-                if (host.zoom_level() - level).abs() < 1e-9 { Ok(()) } else { Err("CEF zoom readback differs".into()) }
-            } else { Err("CEF page is closed".into()) };
-            let _ = tx.send(result);
-        }))?;
-        rx.await.map_err(|_| "CEF zoom acknowledgement was lost")?
+        on_main(move || {
+            if page.close_requested.load(Ordering::Acquire) {
+                return Err(INTERRUPTED.into());
+            }
+            let native = native_page(page.id).ok_or(INTERRUPTED)?;
+            work(&native)
+        })
+        .await
+    }
+    pub async fn navigate(self: &Arc<Self>, url: String) -> Result<(), String> {
+        self.navigate_guarded(NavigationCommand::Navigate(url), Arc::new(|| true))
+            .await
+    }
+    pub async fn go_back(self: &Arc<Self>) -> Result<(), String> {
+        self.navigate_guarded(NavigationCommand::Back, Arc::new(|| true))
+            .await
+    }
+    pub async fn go_forward(self: &Arc<Self>) -> Result<(), String> {
+        self.navigate_guarded(NavigationCommand::Forward, Arc::new(|| true))
+            .await
+    }
+    pub async fn reload(self: &Arc<Self>) -> Result<(), String> {
+        self.navigate_guarded(NavigationCommand::Reload, Arc::new(|| true))
+            .await
+    }
+    pub async fn navigate_guarded(
+        self: &Arc<Self>,
+        command: NavigationCommand,
+        guard: Arc<DispatchGuard>,
+    ) -> Result<(), String> {
+        self.navigate_guarded_receipt(command, guard, BrowserNavigationSource::Unknown).await.map(|_| ())
+    }
+    pub async fn navigate_guarded_receipt(
+        self: &Arc<Self>, command: NavigationCommand, guard: Arc<DispatchGuard>,
+        source: BrowserNavigationSource,
+    ) -> Result<NativeNavigationReceipt, String> {
+        if matches!(&command,NavigationCommand::Navigate(url) if !navigation_allowed(url)) {
+            return Err("WK navigation requires an HTTP(S) URL without credentials".into());
+        }
+        let page = self.clone();
+        on_main(move || {
+            if page.close_requested.load(Ordering::Acquire) { return Err(INTERRUPTED.into()); }
+            let native = native_page(page.id).ok_or(INTERRUPTED)?;
+            if !guard() {
+                return Err("BROWSER_CANCELLED".into());
+            }
+            unsafe {
+                if matches!(command, NavigationCommand::Back) && !native.view.canGoBack() {
+                    let snapshot = page.snapshot();
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
+                }
+                if matches!(command, NavigationCommand::Forward) && !native.view.canGoForward() {
+                    let snapshot = page.snapshot();
+                    return Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence });
+                }
+                let requested = match &command { NavigationCommand::Navigate(url) => Some(url.clone()), _ => Some(page.snapshot().url) };
+                native.delegate.prepare_navigation(requested, source);
+                let navigation = match command {
+                    NavigationCommand::Navigate(url) => {
+                        let url = NSURL::URLWithString(&NSString::from_str(&url))
+                            .ok_or("WK invalid URL")?;
+                        native.view.loadRequest(&NSURLRequest::requestWithURL(&url))
+                    }
+                    NavigationCommand::Back => native.view.goBack(),
+                    NavigationCommand::Forward => native.view.goForward(),
+                    NavigationCommand::Reload => native.view.reload(),
+                };
+                native.delegate.track_navigation(navigation, &native.view);
+            }
+            let snapshot = page.snapshot();
+            Ok(NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence })
+        })
+        .await
+    }
+    pub async fn stop_loading(self: &Arc<Self>) -> Result<(), String> {
+        let expected = self.snapshot();
+        self.stop_loading_guarded(expected.document_generation, expected.load.navigation_sequence, Arc::new(|| true)).await
+    }
+    pub async fn stop_loading_guarded(
+        self: &Arc<Self>, generation: u64, navigation_sequence: u64, guard: Arc<DispatchGuard>,
+    ) -> Result<(), String> {
+        self.mutate(move |n| {
+            if !guard() { return Err("BROWSER_CANCELLED".into()); }
+            let page = n.owner.upgrade().ok_or(INTERRUPTED)?;
+            let snapshot = page.snapshot();
+            if !(NativeNavigationReceipt { document_generation: generation, navigation_sequence }).matches(&snapshot) { return Err(STALE.into()); }
+            n.delegate.stop_loading(&n.view);
+            Ok(())
+        })
+        .await
+    }
+    pub async fn set_zoom_factor(self: &Arc<Self>, factor: f64) -> Result<(), String> {
+        if !factor.is_finite() || !(0.25..=5.0).contains(&factor) {
+            return Err("WK zoom outside range".into());
+        }
+        self.mutate(move |n| {
+            unsafe {
+                n.view.setPageZoom(factor);
+            }
+            Ok(())
+        })
+        .await
     }
     pub async fn hide(self: &Arc<Self>) -> Result<(), String> {
         let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            page.clear_permissions(true);
-            page.cancel_surface_downloads();
-            if let Some(view) = unsafe { (page.view.load(Ordering::Acquire) as *const objc2_app_kit::NSView).as_ref() } {
-                view.setHidden(true);
-            }
+        self.mutate(move |n| {
+            n.surface_requested.set(false);
+            page.panel_presented.store(false, Ordering::Release);
             page.visible.store(false, Ordering::Release);
-            let _ = tx.send(());
-        }))?;
-        rx.await.map_err(|_| "CEF hide acknowledgement was lost".into())
+            release_browser_responder(n)?;
+            // WebsiteDialog's renderer overlay hides the native child while
+            // its retained JavaScript completion awaits an explicit answer.
+            n.interactions.cancel_user_panels();
+            n.view.setHidden(true);
+            Ok(())
+        })
+        .await
     }
-    fn creation_failed(&self) {
-        self.release_parent();
-        self.protocol.close();
-        if let Some(tx) = self.created.lock().unwrap().take() { let _ = tx.send(Err("CEF page creation failed".into())); }
+    pub async fn set_surface(
+        self: &Arc<Self>,
+        bounds: BrowserSurfaceBounds,
+        visible: bool,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        if !bounds.is_valid() {
+            return Err("WK invalid surface bounds".into());
+        }
+        self.mutate(move |n| {
+            if cancel.is_cancelled() {
+                return Err("BROWSER_CANCELLED".into());
+            }
+            let y = if n.parent.isFlipped() {
+                bounds.y
+            } else {
+                n.parent.bounds().size.height - bounds.y - bounds.height
+            };
+            n.view.setFrame(NSRect::new(
+                NSPoint::new(bounds.x, y),
+                NSSize::new(bounds.width, bounds.height),
+            ));
+            n.surface_requested.set(visible);
+            apply_native_mask(n);
+            Ok(())
+        })
+        .await
+    }
+    pub async fn set_input_locked(self: &Arc<Self>, locked: bool) -> Result<(), String> {
+        let page = self.clone();
+        self.mutate(move |n| {
+            page.input_locked.store(locked, Ordering::Release);
+            if locked {
+                // Edit-menu selectors bypass NSEvent filtering. Move the
+                // responder out of WebKit before acknowledging Agent ownership.
+                release_browser_responder(n)?;
+                n.interactions.drain_dialogs();
+                n.interactions.cancel_user_panels();
+            }
+            Ok(())
+        })
+        .await
+    }
+    pub async fn set_dialog_draining(self: &Arc<Self>, draining: bool) -> Result<(), String> {
+        let page = self.clone();
+        self.mutate(move |n| {
+            page.dialog_draining.store(draining, Ordering::Release);
+            if draining {
+                n.interactions.drain_dialogs();
+            }
+            Ok(())
+        })
+        .await
+    }
+    pub async fn reply_dialog(
+        self: &Arc<Self>,
+        id: String,
+        generation: u64,
+        accept: bool,
+        text: String,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.mutate(move |n| {
+            if cancel.is_cancelled() {
+                return Err("BROWSER_CANCELLED".into());
+            }
+            n.interactions.reply_dialog(&id, generation, accept, &text)
+        })
+        .await
+    }
+    pub async fn reply_permission(
+        self: &Arc<Self>,
+        _id: String,
+        _generation: u64,
+        _allow: bool,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        Err("BROWSER_UNSUPPORTED_ACTION".into())
+    }
+    pub fn user_download_snapshot(&self) -> Vec<BrowserDownloadSnapshot> {
+        self.downloads.lock().unwrap().clone()
+    }
+    pub async fn configure_user_downloads(self: &Arc<Self>, path: PathBuf) -> Result<(), String> {
+        self.mutate(move |n| n.interactions.configure_user_downloads(path))
+            .await
+    }
+    pub async fn cancel_user_download(self: &Arc<Self>, id: String) -> Result<(), String> {
+        self.mutate(move |n| n.interactions.cancel_user_download(&id))
+            .await
+    }
+    pub async fn cancel_user_downloads(self: &Arc<Self>) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.mutate(move |n| {
+            n.interactions
+                .cancel_user_downloads_with_completion(Box::new(move || {
+                    let _ = tx.send(());
+                }));
+            Ok(())
+        })
+        .await?;
+        rx.await
+            .map_err(|_| "WK download cancellation acknowledgement lost".into())
+    }
+    pub async fn evaluate(
+        self: &Arc<Self>,
+        script: String,
+        generation: u64,
+        guard: Arc<DispatchGuard>,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, String> {
+        let navigation_sequence = self.snapshot().load.navigation_sequence;
+        let (tx, mut rx) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(tx)));
+        let page = self.clone();
+        let operation = Uuid::now_v7();
+        let callback_cancel = cancel.clone();
+        let pending_sender = sender.clone();
+        self.pending.lock().unwrap().insert(
+            operation,
+            Box::new(move |error| {
+                if let Some(tx) = pending_sender.lock().unwrap().take() {
+                    let _ = tx.send(Err(error.into()));
+                }
+            }),
+        );
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(native) = native_page(page.id) {
+                native.delegate.refresh(&native.view);
+            }
+            let rejection = if callback_cancel.is_cancelled() || !guard() {
+                Some("BROWSER_CANCELLED")
+            } else if page.snapshot().document_generation != generation {
+                Some(STALE)
+            } else if page.close_requested.load(Ordering::Acquire) {
+                Some(INTERRUPTED)
+            } else if !page.is_visible() {
+                Some("BROWSER_ELEMENT_NOT_ACTIONABLE")
+            } else {
+                None
+            };
+            if let Some(error) = rejection {
+                page.pending.lock().unwrap().remove(&operation);
+                if let Some(tx) = sender.lock().unwrap().take() {
+                    let _ = tx.send(Err(error.into()));
+                }
+                return;
+            }
+            let Some(native) = native_page(page.id) else {
+                page.interrupt_pending();
+                return;
+            };
+            let callback_page = page.clone();
+            let done = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                callback_page.pending.lock().unwrap().remove(&operation);
+                let Some(tx) = sender.lock().unwrap().take() else {
+                    return;
+                };
+                let result = if callback_cancel.is_cancelled()
+                    || !guard()
+                    || callback_page.close_requested.load(Ordering::Acquire)
+                    || callback_page.snapshot().document_generation != generation
+                {
+                    Err(INTERRUPTED.into())
+                } else if !error.is_null() {
+                    // A transport/process error cannot prove a script had no
+                    // effects; the host must never replay it automatically.
+                    Err(INTERRUPTED.into())
+                } else {
+                    unsafe { value.as_ref() }
+                        .and_then(|v| v.downcast_ref::<NSString>())
+                        .ok_or_else(|| "WK evaluation expected a JSON string".to_owned())
+                        .and_then(|v| {
+                            serde_json::from_str(&v.to_string())
+                                .map_err(|_| "WK evaluation returned invalid JSON".into())
+                        })
+                };
+                if callback_page.input_locked() {
+                    if let Some(native) = native_page(callback_page.id) {
+                        let _ = release_browser_responder(&native);
+                    }
+                }
+                let _ = tx.send(result);
+            });
+            unsafe {
+                native
+                    .view
+                    .evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                        &NSString::from_str(&script),
+                        None,
+                        &native.content_world,
+                        Some(&done),
+                    );
+            }
+        });
+        // A sent script is never retried and cancellation does not declare it
+        // settled. Drain modal callbacks, then await WebKit's completion. A
+        // nonsettling script closes its page, but retirement does not prove
+        // execution settled. The host keeps its uncertainty latch/input lock.
+        tokio::select! { result = &mut rx => result.map_err(|_| INTERRUPTED.to_owned())?, _ = cancel.cancelled() => {
+            let _ = self.stop_loading_guarded(generation, navigation_sequence, Arc::new(|| true)).await;
+            match tokio::time::timeout(Duration::from_secs(5), &mut rx).await { Ok(result) => result.map_err(|_| UNCONFIRMED.to_owned())?, Err(_) => {let _=self.force_close().await; Err(UNCONFIRMED.into())} }
+        }}
+    }
+    pub async fn screenshot(
+        self: &Arc<Self>,
+        generation: u64,
+        cancel: CancellationToken,
+    ) -> Result<Vec<u8>, String> {
+        let (tx, rx) = oneshot::channel();
+        let page = self.clone();
+        let sender = Arc::new(Mutex::new(Some(tx)));
+        let pending_sender = sender.clone();
+        let operation = Uuid::now_v7();
+        let completion_cancel = cancel.clone();
+        self.pending.lock().unwrap().insert(
+            operation,
+            Box::new(move |_| {
+                if let Some(tx) = pending_sender.lock().unwrap().take() {
+                    let _ = tx.send(Err(INTERRUPTED.into()));
+                }
+            }),
+        );
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(native) = native_page(page.id) {
+                native.delegate.refresh(&native.view);
+            }
+            if cancel.is_cancelled()
+                || page.snapshot().document_generation != generation
+                || !page.is_visible()
+            {
+                page.pending.lock().unwrap().remove(&operation);
+                if let Some(tx) = sender.lock().unwrap().take() {
+                    let _ = tx.send(Err(STALE.into()));
+                }
+                return;
+            }
+            let Some(native) = native_page(page.id) else {
+                page.interrupt_pending();
+                return;
+            };
+            let done = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                page.pending.lock().unwrap().remove(&operation);
+                let Some(tx) = sender.lock().unwrap().take() else {
+                    return;
+                };
+                let result = if cancel.is_cancelled()
+                    || page.snapshot().document_generation != generation
+                    || page.close_requested.load(Ordering::Acquire)
+                    || !page.is_visible()
+                {
+                    Err(INTERRUPTED.into())
+                } else if !error.is_null() {
+                    Err("WK snapshot failed".into())
+                } else {
+                    image_png(image)
+                };
+                let _ = tx.send(result);
+            });
+            // Snapshot width is in points; account for the backing scale so
+            // the actual PNG's longest pixel edge stays within tool limits.
+            let bounds = native.view.bounds();
+            let scale = native
+                .view
+                .window()
+                .map_or(1.0, |w| w.backingScaleFactor())
+                .max(1.0);
+            let reduction = (1600.0 / (bounds.size.width.max(bounds.size.height) * scale)).min(1.0);
+            let configuration =
+                unsafe { WKSnapshotConfiguration::new(MainThreadMarker::new().unwrap()) };
+            unsafe {
+                configuration
+                    .setSnapshotWidth(Some(&NSNumber::new_f64(bounds.size.width * reduction)));
+                native
+                    .view
+                    .takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &done);
+            }
+        });
+        // Snapshot is read-only: abandoning its result is safe. Removing the
+        // sender makes a delayed WebKit callback inert, without claiming that
+        // stopLoading cancels WebKit's snapshot work.
+        tokio::select! {result=rx=>result.map_err(|_|INTERRUPTED.to_owned())?,_=completion_cancel.cancelled()=>{if let Some(reject)=self.pending.lock().unwrap().remove(&operation){reject(INTERRUPTED);}Err(INTERRUPTED.into())},_=tokio::time::sleep(Duration::from_secs(30))=>{if let Some(reject)=self.pending.lock().unwrap().remove(&operation){reject(INTERRUPTED);}Err("WK snapshot timed out".into())}}
+    }
+    pub(crate) fn interrupt_pending(&self) {
+        self.settle_pending(INTERRUPTED);
+    }
+    fn settle_pending(&self, error: &'static str) {
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+        for reject in pending.into_values() {
+            reject(error);
+        }
+    }
+    pub(crate) fn close_native(self: &Arc<Self>) {
+        self.close_requested.store(true, Ordering::Release);
+        self.visible.store(false, Ordering::Release);
+        self.panel_presented.store(false, Ordering::Release);
+        self.dialog_draining.store(true, Ordering::Release);
+        if *self.closed.borrow() {
+            return;
+        }
+        if let Some(native) = native_page(self.id) {
+            let _ = release_browser_responder(&native);
+            native.interactions.drain_dialogs();
+            unsafe {
+                native.view.stopLoading();
+            }
+            let page = self.clone();
+            native
+                .interactions
+                .cancel_user_downloads_with_completion(Box::new(move || {
+                    page.finish_close_native()
+                }));
+        } else {
+            self.finish_close_native();
+        }
+    }
+    fn finish_close_native(&self) {
+        if *self.closed.borrow() {
+            return;
+        }
+        let native = REGISTRY.with(|r| r.borrow_mut().pages.remove(&self.id));
+        if let Some(native) = native {
+            let _ = release_browser_responder(&native);
+            native.interactions.drain_dialogs();
+            unsafe {
+                native.view.stopLoading();
+                native.view.setNavigationDelegate(None);
+                native.view.setUIDelegate(None);
+            }
+            native.view.removeFromSuperview();
+        }
+        self.settle_pending(UNCONFIRMED);
+        self.transition(navigation::Update::Closed);
         self.closed.send_replace(true);
         self.engine.pages.lock().unwrap().remove(&self.id);
     }
-    fn release_parent(&self) {
-        // Called only by CEF/UI creation and destruction callbacks.
-        debug_assert!(objc2::MainThreadMarker::new().is_some());
-        let parent = self.parent.swap(0, Ordering::AcqRel);
-        if parent != 0 { drop(unsafe { objc2::rc::Retained::from_raw(parent as *mut objc2_app_kit::NSView) }); }
-    }
-    /// Used after explicit discard/clear confirmation or application shutdown.
     pub async fn force_close(self: &Arc<Self>) -> Result<(), String> {
         self.close_requested.store(true, Ordering::Release);
-        self.cancel_surface_downloads();
-        let mut closed = self.closed.subscribe();
-        if *closed.borrow() { return Ok(()); }
+        let mut closed = self.closed();
         let page = self.clone();
-        self.engine.post(Box::new(move || {
-            page.dialog_draining.store(true, Ordering::Release);
-            page.clear_dialog(true);
-            page.clear_permissions(true);
-            let browser = page.browser.lock().unwrap().clone();
-            if let Some(host) = browser.and_then(|browser| browser.host()) { host.close_browser(1); }
-        }))?;
-        while !*closed.borrow_and_update() { closed.changed().await.map_err(|_| "CEF close confirmation channel ended")?; }
+        on_main(move || {
+            page.close_native();
+            Ok(())
+        })
+        .await?;
+        while !*closed.borrow_and_update() {
+            closed
+                .changed()
+                .await
+                .map_err(|_| "WK close acknowledgement lost".to_owned())?;
+        }
         Ok(())
     }
-
-    pub async fn set_surface(self: &Arc<Self>, bounds: nomifun_browser_platform::runtime::BrowserSurfaceBounds, visible: bool, cancel: tokio_util::sync::CancellationToken) -> Result<(), String> {
-        if !bounds.is_valid() { return Err("CEF surface bounds are invalid".into()); }
-        let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            if cancel.is_cancelled() { let _ = tx.send(Ok(())); return; }
-            let result = (|| {
-                let view = page.view.load(Ordering::Acquire);
-                let view = unsafe { (view as *const objc2_app_kit::NSView).as_ref() }.ok_or("CEF page is closed")?;
-                let parent = unsafe { view.superview() }.ok_or("CEF page is detached")?;
-                let y = if parent.isFlipped() { bounds.y } else { parent.bounds().size.height - bounds.y - bounds.height };
-                if !visible {
-                    page.clear_permissions(true);
-                    page.cancel_surface_downloads();
-                }
-                view.setFrame(objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(bounds.x, y), objc2_foundation::NSSize::new(bounds.width, bounds.height)));
-                view.setHidden(!visible);
-                page.visible.store(visible, Ordering::Release);
-                Ok(())
-            })().map_err(str::to_owned);
-            let _ = tx.send(result);
-        }))?;
-        rx.await.map_err(|_| "CEF surface update was interrupted")?
-    }
-
-    pub fn input_locked(&self) -> bool { self.input_locked.load(Ordering::Acquire) }
-    pub(crate) fn is_visible(&self) -> bool { self.visible.load(Ordering::Acquire) }
-    pub fn blocked_input_count(&self) -> usize { self.blocked_inputs.load(Ordering::Acquire) }
-
-    pub async fn set_input_locked(self: &Arc<Self>, locked: bool) -> Result<(), String> {
-        let page = self.clone();
-        let (tx, rx) = oneshot::channel();
-        self.engine.post(Box::new(move || {
-            let result = if page.view.load(Ordering::Acquire) == 0 || page.protocol.is_closed() { Err("CEF input gate has no live page".into()) }
-                else {
-                    let browser = page.browser.lock().unwrap().clone();
-                    if let Some(host) = browser.and_then(|browser| browser.host()) {
-                        if locked { page.clear_permissions(true); }
-                        page.input_locked.store(locked, Ordering::Release);
-                        host.set_accessibility_state(if locked { State::DISABLED } else { State::ENABLED });
-                        Ok(())
-                    } else { Err("CEF input gate has no browser host".into()) }
-                };
-            let _ = tx.send(result);
-        }))?;
-        rx.await.map_err(|_| "CEF input gate acknowledgement was lost")?
+}
+impl Drop for Page {
+    fn drop(&mut self) {
+        let id = self.id;
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let native = native_page(id);
+            if let Some(native) = native {
+                let _ = release_browser_responder(&native);
+                native.interactions.drain_dialogs();
+                native
+                    .interactions
+                    .cancel_user_downloads_with_completion(Box::new(move || {
+                        if let Some(native) = REGISTRY.with(|r| r.borrow_mut().pages.remove(&id)) {
+                            unsafe {
+                                native.view.stopLoading();
+                                native.view.setNavigationDelegate(None);
+                                native.view.setUIDelegate(None);
+                            }
+                            native.view.removeFromSuperview();
+                        }
+                    }));
+            }
+        });
     }
 }
 
-async fn wait_bootstrap_ready(
-    snapshots: watch::Receiver<PageSnapshot>,
-    closed: watch::Receiver<bool>,
-    cancel: &tokio_util::sync::CancellationToken,
-    closing: &tokio_util::sync::CancellationToken,
-) -> Result<(), String> {
-    wait_bootstrap_ready_until(snapshots, closed, cancel, closing, NATIVE_INITIALIZATION_TIMEOUT).await
+pub(crate) fn create_native_page(
+    page: &Arc<Page>,
+    parent: Retained<NSView>,
+    configuration: Option<&WKWebViewConfiguration>,
+) -> Result<Rc<NativePage>, String> {
+    if page.context.closed.load(Ordering::Acquire) || page.engine.closing.load(Ordering::Acquire) {
+        return Err("WK owner is closing".into());
+    }
+    if parent.window().is_none() {
+        return Err("WK parent view is not attached to a window".into());
+    }
+    let mtm = MainThreadMarker::new().ok_or("WK view creation requires main thread")?;
+    let configuration = match configuration {
+        Some(c) => c.retain(),
+        None => unsafe { WKWebViewConfiguration::new(mtm) },
+    };
+    let store = REGISTRY
+        .with(|r| {
+            r.borrow()
+                .contexts
+                .get(&page.context.id)
+                .map(|c| c.store.clone())
+        })
+        .ok_or("WK context is closed")?;
+    unsafe {
+        configuration.setWebsiteDataStore(&store);
+        configuration
+            .preferences()
+            .setJavaScriptCanOpenWindowsAutomatically(false);
+    }
+    let view = crate::view::BrowserView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(880.0, 600.0)),
+        &configuration,
+        Arc::downgrade(page),
+    );
+    crate::identity::apply(&view)?;
+    let interactions = NativeInteractions::new(Arc::downgrade(page));
+    let delegate = Delegate::new(mtm, Arc::downgrade(page), interactions.clone());
+    unsafe {
+        view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        parent.addSubview(&view);
+    }
+    view.setHidden(true);
+    let native = Rc::new(NativePage {
+        view,
+        content_world: unsafe {
+            WKContentWorld::worldWithName(&NSString::from_str("NomiFunAgent"), mtm)
+        },
+        parent,
+        delegate,
+        interactions,
+        owner: Arc::downgrade(page),
+        surface_requested: Cell::new(false),
+        context: page.context.clone(),
+    });
+    REGISTRY.with(|r| r.borrow_mut().pages.insert(page.id, native.clone()));
+    schedule_metadata(Arc::downgrade(page));
+    Ok(native)
 }
-
-async fn wait_bootstrap_ready_until(
-    mut snapshots: watch::Receiver<PageSnapshot>,
-    mut closed: watch::Receiver<bool>,
-    cancel: &tokio_util::sync::CancellationToken,
-    closing: &tokio_util::sync::CancellationToken,
-    timeout: Duration,
-) -> Result<(), String> {
-    use nomifun_browser_platform::runtime::BrowserTabLifecycle;
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    loop {
-        if cancel.is_cancelled() || closing.is_cancelled() { return Err("CEF bootstrap readiness was cancelled".into()); }
-        if *closed.borrow_and_update() { return Err("CEF page closed before bootstrap readiness".into()); }
-        let snapshot = snapshots.borrow_and_update().clone();
-        if matches!(snapshot.lifecycle, BrowserTabLifecycle::Failed | BrowserTabLifecycle::Crashed) {
-            return Err("CEF bootstrap document failed before readiness".into());
+fn schedule_metadata(page: Weak<Page>) {
+    let when = dispatch2::DispatchTime::try_from(Duration::from_millis(250))
+        .expect("bounded metadata interval");
+    let _ = dispatch2::DispatchQueue::main().after(when, move || {
+        let Some(owner) = page.upgrade() else {
+            return;
+        };
+        if owner.close_requested.load(Ordering::Acquire) {
+            return;
         }
-        if snapshot.url == BOOTSTRAP_URL && snapshot.document_generation > 0 && snapshot.lifecycle == BrowserTabLifecycle::Ready {
-            return Ok(());
+        if let Some(native) = native_page(owner.id) {
+            native.delegate.refresh(&native.view);
+            schedule_metadata(page);
         }
-        tokio::select! { biased;
-            _ = cancel.cancelled() => return Err("CEF bootstrap readiness was cancelled".into()),
-            _ = closing.cancelled() => return Err("CEF bootstrap readiness was cancelled".into()),
-            _ = &mut deadline => return Err("CEF bootstrap initialization timed out".into()),
-            result = closed.changed() => { result.map_err(|_| "CEF bootstrap close witness was lost")?; },
-            result = snapshots.changed() => { result.map_err(|_| "CEF bootstrap document witness was lost")?; },
+    });
+}
+fn page_unavailable(snapshot: &PageSnapshot) -> Option<&'static str> {
+    if snapshot.load.content_state != BrowserContentState::None {
+        return None;
+    }
+    match snapshot.load.phase {
+        BrowserNavigationPhase::Failed => Some("BROWSER_PAGE_FAILED"),
+        BrowserNavigationPhase::Cancelled => Some("BROWSER_PAGE_STOPPED"),
+        BrowserNavigationPhase::Crashed => Some("BROWSER_PAGE_CRASHED"),
+        _ => None,
+    }
+}
+fn apply_native_mask(native: &NativePage) {
+    let Some(page) = native.owner.upgrade() else { return; };
+    let snapshot = page.snapshot();
+    let presented = native.surface_requested.get() && !page.close_requested.load(Ordering::Acquire);
+    page.panel_presented.store(presented, Ordering::Release);
+    let visible = native_displayable(presented, false, &snapshot);
+    native.view.setHidden(!visible);
+    page.visible.store(visible, Ordering::Release);
+    if !visible {
+        let _ = release_browser_responder(native);
+    }
+    if revoke_user_choices(presented, &snapshot) { native.interactions.cancel_user_panels(); }
+}
+fn revoke_user_choices(presented: bool, snapshot: &PageSnapshot) -> bool {
+    !presented || snapshot.load.phase == BrowserNavigationPhase::Crashed
+}
+fn native_displayable(requested: bool, closed: bool, snapshot: &PageSnapshot) -> bool {
+    requested && !closed && snapshot.load.content_state != BrowserContentState::None
+}
+fn release_browser_responder(native: &NativePage) -> Result<(), String> {
+    if let Some(window) = native.view.window() {
+        if window.firstResponder().is_some_and(|responder| {
+            let is_view: bool =
+                unsafe { msg_send![&responder,isKindOfClass:objc2::class!(NSView)] };
+            is_view && unsafe { msg_send![&responder,isDescendantOf:&*native.view] }
+        }) && !window.makeFirstResponder(None)
+        {
+            return Err("WK input responder could not be released".into());
         }
     }
+    Ok(())
+}
+fn has_key_characters(kind: NSEventType) -> bool {
+    matches!(kind, NSEventType::KeyDown | NSEventType::KeyUp)
 }
 
 #[cfg(test)]
-mod bootstrap_readiness_tests {
+mod event_contract_tests {
     use super::*;
-    use nomifun_browser_platform::runtime::BrowserTabLifecycle;
-    use tokio_util::sync::CancellationToken;
-
-    fn ready() -> PageSnapshot {
-        PageSnapshot { url: BOOTSTRAP_URL.into(), document_generation: 1, lifecycle: BrowserTabLifecycle::Ready, ..Default::default() }
-    }
-
-    #[tokio::test]
-    async fn creation_and_protocol_attachment_do_not_replace_a_committed_ready_document() {
-        let (snapshots, receiver) = watch::channel(PageSnapshot::default());
-        let (_closed, close_receiver) = watch::channel(false);
-        let waiting = tokio::spawn(async move { wait_bootstrap_ready(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new()).await });
-        let mut not_committed = ready(); not_committed.document_generation = 0;
-        snapshots.send_replace(not_committed);
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
-        let mut loading = ready(); loading.lifecycle = BrowserTabLifecycle::Loading;
-        snapshots.send_replace(loading);
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
-        let mut wrong_document = ready(); wrong_document.url = "https://untrusted.example/".into();
-        snapshots.send_replace(wrong_document);
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished(), "another document cannot satisfy the owned bootstrap barrier");
-        snapshots.send_replace(ready());
-        waiting.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn close_crash_and_cancellation_retire_an_unready_owned_page() {
-        for reason in ["close", "crash", "cancel", "shutdown"] {
-            let (snapshots, receiver) = watch::channel(PageSnapshot::default());
-            let (closed, close_receiver) = watch::channel(false);
-            let cancel = CancellationToken::new(); let shutdown = CancellationToken::new();
-            let waiter_cancel = cancel.clone(); let waiter_shutdown = shutdown.clone();
-            let waiting = tokio::spawn(async move { wait_bootstrap_ready(receiver, close_receiver, &waiter_cancel, &waiter_shutdown).await });
-            match reason {
-                "close" => { closed.send_replace(true); },
-                "crash" => { let mut failed = ready(); failed.lifecycle = BrowserTabLifecycle::Crashed; snapshots.send_replace(failed); },
-                "cancel" => cancel.cancel(),
-                _ => shutdown.cancel(),
+    #[test]
+    fn early_page_error_preserves_readable_retained_and_partial_documents() {
+        let mut snapshot = PageSnapshot::default();
+        for (phase, error) in [
+            (BrowserNavigationPhase::Failed, "BROWSER_PAGE_FAILED"),
+            (BrowserNavigationPhase::Cancelled, "BROWSER_PAGE_STOPPED"),
+        ] {
+            snapshot.load.phase = phase;
+            snapshot.load.content_state = BrowserContentState::None;
+            assert_eq!(page_unavailable(&snapshot), Some(error));
+            for content in [BrowserContentState::RetainedDocument, BrowserContentState::CurrentDocument] {
+                snapshot.load.content_state = content;
+                assert_eq!(page_unavailable(&snapshot), None);
             }
-            assert!(waiting.await.unwrap().is_err(), "{reason} cannot become readiness");
+        }
+        snapshot.load.phase = BrowserNavigationPhase::Crashed;
+        snapshot.load.content_state = BrowserContentState::None;
+        assert_eq!(page_unavailable(&snapshot), Some("BROWSER_PAGE_CRASHED"));
+    }
+    #[test]
+    fn modifier_transitions_never_read_key_characters() {
+        assert!(has_key_characters(NSEventType::KeyDown));
+        assert!(has_key_characters(NSEventType::KeyUp));
+        for kind in [
+            NSEventType::FlagsChanged,
+            NSEventType::LeftMouseDown,
+            NSEventType::ScrollWheel,
+            NSEventType::ApplicationDefined,
+        ] {
+            assert!(!has_key_characters(kind));
         }
     }
-
-    #[tokio::test]
-    async fn cancelled_or_closed_pages_cannot_win_with_a_cached_ready_snapshot() {
-        let (_snapshots, receiver) = watch::channel(ready());
-        let (_closed, close_receiver) = watch::channel(false);
-        let cancel = CancellationToken::new(); cancel.cancel();
-        assert!(wait_bootstrap_ready(receiver, close_receiver, &cancel, &CancellationToken::new()).await.is_err());
-        let (_snapshots, receiver) = watch::channel(ready());
-        let (_closed, close_receiver) = watch::channel(true);
-        assert!(wait_bootstrap_ready(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new()).await.is_err());
+    #[test]
+    fn stale_stop_receipt_does_not_match_a_successor_or_crashed_document() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/first".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        let receipt = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        assert!(receipt.matches(&snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/second".into()), source: BrowserNavigationSource::PageNavigation, bootstrap: false });
+        assert!(!receipt.matches(&snapshot));
+        let second = NativeNavigationReceipt { document_generation: snapshot.document_generation, navigation_sequence: snapshot.load.navigation_sequence };
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(!second.matches(&snapshot));
     }
-
-    #[tokio::test]
-    async fn an_unready_document_has_a_bounded_initialization_deadline() {
-        let (_snapshots, receiver) = watch::channel(PageSnapshot::default());
-        let (_closed, close_receiver) = watch::channel(false);
-        let error = wait_bootstrap_ready_until(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new(), Duration::from_millis(1)).await.unwrap_err();
-        assert_eq!(error, "CEF bootstrap initialization timed out");
+    #[test]
+    fn late_show_cannot_cover_an_empty_failure_but_retained_content_stays_visible() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        navigation::reduce(&mut snapshot, navigation::Update::Failed { domain: "NSURLErrorDomain".into(), code: -1009 });
+        assert!(!native_displayable(true, false, &snapshot));
+        snapshot.load.content_state = BrowserContentState::RetainedDocument;
+        assert!(native_displayable(true, false, &snapshot));
+        assert!(!native_displayable(false, false, &snapshot));
+        assert!(!native_displayable(true, true, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(!native_displayable(true, false, &snapshot));
+    }
+    #[test]
+    fn first_attachment_mask_keeps_user_destination_choice_until_surface_revoke_or_crash() {
+        let mut snapshot = PageSnapshot::default();
+        navigation::reduce(&mut snapshot, navigation::Update::Begin { url: Some("https://fixture.invalid/attachment".into()), source: BrowserNavigationSource::UserCommand, bootstrap: false });
+        assert!(!native_displayable(true, false, &snapshot));
+        assert!(!revoke_user_choices(true, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Cancelled(nomifun_browser_platform::runtime::BrowserCancellationReason::Unknown));
+        assert!(!revoke_user_choices(true, &snapshot));
+        assert!(revoke_user_choices(false, &snapshot));
+        navigation::reduce(&mut snapshot, navigation::Update::Crashed);
+        assert!(revoke_user_choices(true, &snapshot));
+    }
+    #[test]
+    fn crashed_presented_surface_cannot_admit_a_late_download() {
+        let page = Page::test_user_surface(true, false, false, false);
+        assert!(page.allows_user_download());
+        page.transition(navigation::Update::Crashed);
+        assert!(page.is_presented());
+        assert!(!page.allows_user_download());
     }
 }
-
-wrap_app! { struct Application { engine: Arc<Engine>, } impl App {
-    fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
-        if let Some(command_line) = command_line {
-            // CEF 152.0.6: native tracing proves the experimental declarative
-            // observer store misses the ClearAllData deadline (data_type 16).
-            // Disable that nonessential reporting API before contexts exist;
-            // retain the complete storageTypes=all cleanup and its callback.
-            let key = CefString::from("disable-features");
-            let existing = CefString::from(&command_line.switch_value(Some(&key))).to_string();
-            let value = if existing.is_empty() { "DeclarativePerformanceObserver".to_owned() }
-                else { format!("{existing},DeclarativePerformanceObserver") };
-            command_line.append_switch_with_value(Some(&key), Some(&CefString::from(value.as_str())));
-        }
-    }
-    fn browser_process_handler(&self) -> Option<BrowserProcessHandler> { Some(ProcessHandler::new(self.engine.clone())) }
-} }
-wrap_browser_process_handler! { struct ProcessHandler { engine: Arc<Engine>, } impl BrowserProcessHandler {
-    fn on_before_child_process_launch(&self,command_line:Option<&mut CommandLine>) {
-        let Some(command)=command_line else {return;};
-        let role=CefString::from(&command.switch_value(Some(&CefString::from("type")))).to_string();
-        match self.engine.guardian.declare(&role) {
-            Ok(nonce)=>{
-                command.append_switch_with_value(Some(&CefString::from("nomifun-cef-guardian-socket")),
-                    Some(&CefString::from(self.engine.guardian.socket_path().to_string_lossy().as_ref())));
-                command.append_switch_with_value(Some(&CefString::from("nomifun-cef-launch-nonce")),Some(&CefString::from(nonce.as_str())));
-            }
-            Err(error)=>{
-                eprintln!("CEF helper launch registration not admitted: {error}");
-                command.append_switch(Some(&CefString::from("nomifun-cef-registration-rejected")));
-            }
-        }
-    }
-    fn on_context_initialized(&self) { self.engine.ready.send_replace(true); }
-    fn on_schedule_message_pump_work(&self, delay_ms: i64) { self.engine.schedule(delay_ms); }
-} }
-wrap_client! { struct PageClient { page: Arc<Page>, } impl Client {
-    fn dialog_handler(&self) -> Option<DialogHandler> { Some(callbacks::FileDialogs::new()) }
-    fn download_handler(&self) -> Option<DownloadHandler> { Some(callbacks::Downloads::new(self.page.clone())) }
-    fn context_menu_handler(&self) -> Option<ContextMenuHandler> { Some(callbacks::Menus::new(self.page.clone())) }
-    fn jsdialog_handler(&self) -> Option<JsdialogHandler> { Some(callbacks::Dialogs::new(self.page.clone())) }
-    fn load_handler(&self) -> Option<LoadHandler> { Some(callbacks::Loading::new(self.page.clone())) }
-    fn display_handler(&self) -> Option<DisplayHandler> { Some(callbacks::Display::new(self.page.clone())) }
-    fn permission_handler(&self) -> Option<PermissionHandler> { Some(callbacks::Permissions::new(self.page.clone())) }
-    fn life_span_handler(&self) -> Option<LifeSpanHandler> { Some(Lifetime::new(self.page.clone())) }
-    fn drag_handler(&self) -> Option<DragHandler> { Some(ExternalDrag::new(self.page.clone())) }
-    fn request_handler(&self) -> Option<RequestHandler> { Some(RequestPolicy::new(self.page.clone())) }
-} }
-wrap_life_span_handler! { struct Lifetime { page: Arc<Page>, } impl LifeSpanHandler {
-    fn on_before_popup(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _popup_id: i32, target_url: Option<&CefString>, _target_frame_name: Option<&CefString>, target_disposition: WindowOpenDisposition, user_gesture: i32, _popup_features: Option<&PopupFeatures>, window_info: Option<&mut WindowInfo>, client: Option<&mut Option<Client>>, _settings: Option<&mut BrowserSettings>, _extra_info: Option<&mut Option<DictionaryValue>>, no_javascript_access: Option<&mut i32>) -> i32 {
-        // Return 0 only after an owned child PageClient, hidden child NSView,
-        // inherited request context and bounded runtime queue are installed.
-        i32::from(!self.page.prepare_popup(target_url, target_disposition, user_gesture, window_info, client, no_javascript_access))
-    }
-    fn on_after_created(&self, browser: Option<&mut Browser>) {
-        let Some(browser) = browser else { self.page.creation_failed(); return; };
-        let Some(host) = browser.host() else { self.page.creation_failed(); return; };
-        self.page.view.store(host.window_handle() as usize, Ordering::Release);
-        host.set_accessibility_state(State::DISABLED);
-        if let Some(view) = unsafe { host.window_handle().cast::<objc2_app_kit::NSView>().as_ref() } { view.setHidden(true); }
-        let mut observer = Observer::new(self.page.protocol.clone());
-        let registration = host.add_dev_tools_message_observer(Some(&mut observer));
-        let registered = registration.is_some();
-        *self.page.registration.lock().unwrap() = registration;
-        *self.page.browser.lock().unwrap() = Some(browser.clone());
-        let created = self.page.created.lock().unwrap().take();
-        if let Some(tx) = created {
-            let closing = self.page.close_requested.load(Ordering::Acquire) || self.page.engine.closing.load(Ordering::Acquire);
-            let result = if !registered { Err("CEF observer registration failed".into()) } else if closing { Err("CEF page creation was cancelled".into()) } else { Ok(()) };
-            if tx.send(result).is_err() || !registered || closing { host.close_browser(1); }
-        }
-    }
-    fn do_close(&self, _browser: Option<&mut Browser>) -> i32 {
-        let page = self.page.clone();
-        // Detach only this child after CEF has acknowledged close. Never send
-        // performClose to the application's main window.
-        let _ = self.page.engine.post(Box::new(move || {
-            let view = page.view.swap(0, Ordering::AcqRel);
-            if let Some(view) = unsafe { (view as *const objc2_app_kit::NSView).as_ref() } { view.removeFromSuperview(); }
-        }));
-        1
-    }
-    fn on_before_close(&self, _browser: Option<&mut Browser>) {
-        self.page.clear_dialog(false);
-        self.page.clear_permissions(false);
-        self.page.popup_sender.lock().unwrap().take();
-        self.page.protocol.close();
-        let registration = self.page.registration.lock().unwrap().take();
-        let browser = self.page.browser.lock().unwrap().take();
-        drop(registration);
-        drop(browser);
-        self.page.view.store(0, Ordering::Release);
-        if let Some(tx) = self.page.created.lock().unwrap().take() { let _ = tx.send(Err("CEF page closed during creation".into())); }
-        self.page.release_parent();
-        self.page.engine.pages.lock().unwrap().remove(&self.page.id);
-        self.page.closed.send_replace(true);
-    }
-} }
-wrap_drag_handler! { struct ExternalDrag { page: Arc<Page>, } impl DragHandler {
-    fn on_drag_enter(&self, _browser: Option<&mut Browser>, _drag_data: Option<&mut DragData>, _mask: DragOperationsMask) -> i32 {
-        i32::from(self.page.input_locked())
-    }
-} }
-wrap_request_handler! { struct RequestPolicy { page: Arc<Page>, } impl RequestHandler {
-    fn on_before_browse(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32) -> i32 {
-        let Some(frame) = frame else { return 1; };
-        if frame.is_main() == 0 { return 0; }
-        let Some(request) = request else { return 1; };
-        let url = CefString::from(&request.url()).to_string();
-        i32::from(!navigation_allowed(&url))
-    }
-    fn on_render_process_terminated(&self, _browser: Option<&mut Browser>, _status: TerminationStatus, _error_code: i32, _error_string: Option<&CefString>) {
-        self.page.input_locked.store(true, Ordering::Release);
-        self.page.clear_dialog(false);
-        self.page.changed(|state| state.lifecycle = nomifun_browser_platform::runtime::BrowserTabLifecycle::Crashed);
-        self.page.protocol.close();
-    }
-} }
-
-fn navigation_allowed(value: &str) -> bool {
-    if value == BOOTSTRAP_URL || value == "about:blank" { return true; }
-    url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.username().is_empty() && url.password().is_none() && url.host_str().is_some())
+pub(crate) fn navigation_allowed(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https") && u.username().is_empty() && u.password().is_none()
+    })
 }
-wrap_dev_tools_message_observer! { struct Observer { protocol: Arc<Protocol>, } impl DevToolsMessageObserver {
-    fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
-        if let Some(message) = message { self.protocol.receive(message); } else { self.protocol.close(); }
-        1
+fn native_uuid(id: Uuid) -> Retained<NSUUID> {
+    NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(&id.to_string()))
+        .expect("validated UUID")
+}
+type StoreRemovalCompletion = Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
+fn finish_store_removal(identifier: Uuid, tx: &StoreRemovalCompletion, result: Result<(), String>) {
+    REGISTRY.with(|r| r.borrow_mut().removing.remove(&identifier));
+    if let Some(tx) = tx.lock().unwrap().take() {
+        let _ = tx.send(result);
     }
-    fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) { self.protocol.close(); }
-} }
+}
+fn remove_store_attempt(identifier: Uuid, tx: StoreRemovalCompletion, attempt: u8) {
+    autoreleasepool(|_| {
+        let admitted = REGISTRY.with(|r| {
+            let r = r.borrow();
+            r.removing.contains(&identifier)
+                && !r
+                    .contexts
+                    .values()
+                    .any(|c| c.identifier == Some(identifier))
+                && !r
+                    .pages
+                    .values()
+                    .any(|p| p.context.identifier == Some(identifier))
+        });
+        if !admitted {
+            finish_store_removal(
+                identifier,
+                &tx,
+                Err("WK profile removal ownership changed".into()),
+            );
+            return;
+        }
+        let done = RcBlock::new(move |error: *mut NSError| {
+            autoreleasepool(|_| {
+                if let Some(error) = unsafe { error.as_ref() } {
+                    let domain = error.domain().to_string();
+                    let safe_domain = match domain.as_str() {
+                        "WKWebSiteDataStore" => "WKWebSiteDataStore",
+                        "WKErrorDomain" => "WKErrorDomain",
+                        "NSCocoaErrorDomain" => "NSCocoaErrorDomain",
+                        "NSPOSIXErrorDomain" => "NSPOSIXErrorDomain",
+                        _ => "other",
+                    };
+                    // Classify only WebKit's fixed framework reasons. Never
+                    // print arbitrary localized descriptions or userInfo.
+                    let description = error.localizedDescription().to_string();
+                    let busy = domain == "WKWebSiteDataStore"
+                        && matches!(
+                            description.as_str(),
+                            "Data store is in use" | "Data store is in use (by network process)"
+                        );
+                    let category = if busy {
+                        "native_in_use"
+                    } else {
+                        "native_remove_failed"
+                    };
+                    let code = error.code();
+                    eprintln!(
+                        "WK_PROFILE_REMOVE domain={safe_domain} code={code} category={category} attempt={attempt}"
+                    );
+                    if busy && attempt < 20 {
+                        // Store deletion is idempotent. Hold the same removal
+                        // lease while WebKit asynchronously releases its native
+                        // network owner; neither a timeout nor in-use is success.
+                        let when = dispatch2::DispatchTime::try_from(Duration::from_millis(100))
+                            .expect("bounded store release interval");
+                        let next = tx.clone();
+                        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+                            remove_store_attempt(identifier, next, attempt + 1)
+                        });
+                        return;
+                    }
+                    finish_store_removal(
+                        identifier,
+                        &tx,
+                        Err(format!(
+                            "WK persistent store removal failed: domain={safe_domain} code={code} category={category}"
+                        )),
+                    );
+                    return;
+                }
+                let tx = tx.clone();
+                let verified =
+                    RcBlock::new(move |identifiers: std::ptr::NonNull<NSArray<NSUUID>>| {
+                        autoreleasepool(|_| {
+                            let target = native_uuid(identifier);
+                            let remains = unsafe { identifiers.as_ref() }
+                                .iter()
+                                .any(|id| *id == *target);
+                            finish_store_removal(
+                                identifier,
+                                &tx,
+                                if remains {
+                                    Err("WK removed store remains registered".into())
+                                } else {
+                                    Ok(())
+                                },
+                            );
+                        });
+                    });
+                unsafe {
+                    WKWebsiteDataStore::fetchAllDataStoreIdentifiers(
+                        &verified,
+                        MainThreadMarker::new().unwrap(),
+                    );
+                }
+            });
+        });
+        unsafe {
+            WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
+                &native_uuid(identifier),
+                &done,
+                MainThreadMarker::new().unwrap(),
+            );
+        }
+    });
+}
+async fn on_main<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = oneshot::channel();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // AppKit's event-loop pool may span many GCD blocks. Native ownership
+        // receipts must follow release of this operation's autoreleased views,
+        // configurations and stores, not wait for an unrelated user event.
+        let result = autoreleasepool(|_| work());
+        let _ = tx.send(result);
+    });
+    rx.await
+        .map_err(|_| "WK main-thread acknowledgement lost".to_owned())?
+}
+fn image_png(image: *mut NSImage) -> Result<Vec<u8>, String> {
+    let image = unsafe { image.as_ref() }.ok_or("WK snapshot image absent")?;
+    let tiff = image
+        .TIFFRepresentation()
+        .ok_or("WK snapshot conversion failed")?;
+    let bitmap = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)
+        .ok_or("WK bitmap conversion failed")?;
+    let data = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }
+    .ok_or("WK PNG conversion failed")?;
+    Ok(data.to_vec())
+}

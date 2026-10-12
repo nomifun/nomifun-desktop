@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Message, Modal, Spin } from '@arco-design/web-react';
 import { NomiSettingList, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import ContentAside from '@/renderer/components/layout/ContentAside';
-import { resolveSkillDisplay } from '@/renderer/pages/settings/skill/skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { toggleCompanionSkill } from './companionSkillConfig';
 import { useAsidePortal } from '../../AsideHost';
 import type { WorkspaceTabProps } from '../../types';
@@ -26,7 +26,6 @@ import {
   countDrafts,
   filterSkillEntries,
   EMPTY_SKILL_CONFIG,
-  type CatalogSkillInfo,
   type SkillEntry,
   type SkillSourceFilter,
 } from './unify';
@@ -63,10 +62,7 @@ const SkillsTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
   // actually made, and every grant control would silently no-op.
   const profileReady = profile != null;
   const localeKey = i18n.language;
-  const display = useCallback(
-    (skill: CatalogSkillInfo) => resolveSkillDisplay(skill, localeKey),
-    [localeKey]
-  );
+  const display = useSkillDisplay(localeKey);
 
   const entries = useMemo(
     () =>
@@ -189,9 +185,9 @@ const SkillsTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
         ) : (
           <CatalogSkillDetail
             entry={selected}
-            busy={busyName === selected.name}
+            busy={busyName === selected.skillName}
             disabled={busyName !== null || !profileReady}
-            onRevoke={() => void revokeGrant(selected.name)}
+            onRevoke={() => void revokeGrant(selected.skillName)}
           />
         )}
       </ContentAside>
@@ -239,12 +235,14 @@ const SkillsTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
                     key={entry.key}
                     entry={entry}
                     selected={entry.key === selectedKey}
-                    busy={busyName === entry.name}
+                    busy={entry.kind === 'catalog' && busyName === entry.skillName}
                     grantDisabled={busyName !== null || !profileReady}
                     onSelect={() => openEntry(entry, false)}
                     onEdit={() => openEntry(entry, true)}
                     onDecide={(accept) => decide(entry, accept)}
-                    onRevoke={() => void revokeGrant(entry.name)}
+                    onRevoke={() => {
+                      if (entry.kind === 'catalog') void revokeGrant(entry.skillName);
+                    }}
                   />
                 ))}
               </NomiSettingList>

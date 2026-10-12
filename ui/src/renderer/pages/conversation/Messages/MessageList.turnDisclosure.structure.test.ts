@@ -31,8 +31,10 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('highlighted={highlighted}')).toBe(true);
   });
 
-  test('uses the stable view-model id as the React reconciliation key', () => {
-    expect(source.includes('<React.Fragment key={item.id}>')).toBe(true);
+  test('defaults to the stable view-model id while the first submit keeps its presentation key', () => {
+    expect(source.includes('renderKey = item.id')).toBe(true);
+    expect(source.includes(': item.id;')).toBe(true);
+    expect(source.includes('<React.Fragment key={key}>')).toBe(true);
     expect(source.includes('<React.Fragment key={getProcessedItemAnchorId(item) || index}>')).toBe(false);
   });
 
@@ -120,11 +122,8 @@ describe('MessageList turn completion disclosure structure', () => {
 
   test('marks only genuinely detailed receipts as expandable', () => {
     const toolSummaryCase =
-      buildSummarySource.match(/if \('type' in item && item\.type === 'tool_summary'\) \{[\s\S]*?if \('type' in item && item\.type === 'file_summary'\)/)?.[0] ?? '';
-    const fileSummaryCase =
-      buildSummarySource.match(/if \('type' in item && item\.type === 'file_summary'\) \{[\s\S]*?switch \(item\.type\)/)?.[0] ?? '';
+      buildSummarySource.match(/if \('type' in item && item\.type === 'tool_summary'\) \{[\s\S]*?switch \(item\.type\)/)?.[0] ?? '';
     expect(toolSummaryCase.includes('hasDetail: true')).toBe(true);
-    expect(fileSummaryCase.includes('hasDetail: item.diffs.length > 1')).toBe(true);
   });
 
   test('routes context compaction tips through process receipts instead of assistant text', () => {

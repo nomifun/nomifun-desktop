@@ -227,6 +227,15 @@ impl CanonicalAgentSessionOwner {
             .map_err(store_error)
     }
 
+    /// Owner-scoped metadata without loading unrelated event or message pages.
+    pub async fn session_record(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+    ) -> Result<AgentSessionLiveRecord, AppError> {
+        self.require_owner(owner, session_id).await
+    }
+
     pub async fn messages(
         &self,
         owner: &PrincipalRef,

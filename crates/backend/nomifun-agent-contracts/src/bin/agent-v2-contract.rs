@@ -4,10 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
+    AgentBindingChangedPayloadV1, AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice,
+    TurnWorkspaceFilesObservedV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
@@ -406,6 +407,7 @@ fn validate_api_inventory(
         ("apps.delete", CanonicalHttpMethod::Delete, "/api/apps/{id}"),
         ("apps.operate", CanonicalHttpMethod::Post, "/api/apps/{id}/operate"),
         ("apps.development_session", CanonicalHttpMethod::Post, "/api/apps/{id}/development-session"),
+        ("apps.development_sessions", CanonicalHttpMethod::Get, "/api/apps/{id}/development-sessions"),
         ("apps.import_into", CanonicalHttpMethod::Post, "/api/apps/{id}/import"),
         ("apps.import_into_zip", CanonicalHttpMethod::Post, "/api/apps/{id}/import-zip"),
         ("apps.overwrite", CanonicalHttpMethod::Post, "/api/apps/{id}/overwrite"),
@@ -567,12 +569,14 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<CapabilityCatalogEntry>(&mut schemas, "capability_catalog_entry")?;
     add_schema::<ResolvedSnapshotEnvelope>(&mut schemas, "agent_snapshot")?;
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
+    add_schema::<AgentBindingChangedPayloadV1>(&mut schemas, "agent_binding_changed_payload")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
     add_schema::<IdmmDecisionNotice>(&mut schemas, "idmm_decision_notice")?;
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
+    add_schema::<TurnWorkspaceFilesObservedV1>(&mut schemas, "turn_workspace_files_observed")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;
     add_schema::<PlatformFeatureInventoryPayload>(
         &mut schemas,
@@ -595,6 +599,7 @@ fn validate_generated_schemas(
         "agent_preset_revision",
         "capability_catalog_entry",
         "agent_snapshot",
+        "agent_binding_changed_payload",
     ];
     for name in required {
         if !schemas.contains_key(name) {

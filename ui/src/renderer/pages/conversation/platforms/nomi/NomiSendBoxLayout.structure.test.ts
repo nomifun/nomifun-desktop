@@ -140,28 +140,26 @@ describe('Nomi sendbox control layout', () => {
       selectorSource.indexOf('{reasoningControl}')
     );
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
-    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice)')).toBe(true);
+    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice || initialSubmissionPending)')).toBe(true);
   });
 
   test('switches the current AgentSession in place instead of navigating back to Guid', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
-    const agentSwitchBlock = chatSource.slice(
-      chatSource.indexOf('const switchCurrentConversationAgent'),
-      chatSource.indexOf('const frozenPresetId'),
-    );
+    const agentSwitchSource = readSource(new URL('../../components/useConversationAgentSwitch.ts', import.meta.url));
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
-    expect(agentSwitchBlock.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);
-    expect(agentSwitchBlock.includes('agentPlatform.sessions.applyAgentSwitch.invoke')).toBe(true);
-    expect(agentSwitchBlock.includes("navigate('/guid', { state })")).toBe(false);
-    expect(agentSwitchBlock.includes('expected_binding_version')).toBe(true);
-    expect(agentSwitchBlock.includes('handoff_mode')).toBe(true);
-    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(false);
+    expect(chatSource.includes('useConversationAgentSwitch({')).toBe(true);
+    expect(chatSource.includes('AgentSwitchDialog')).toBe(false);
+    expect(agentSwitchSource.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchSource.includes('agentPlatform.sessions.applyAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchSource.includes('expected_binding_version')).toBe(true);
+    expect(agentSwitchSource.includes('expected_resolved_snapshot_ref: preview.target.resolved_snapshot_ref')).toBe(true);
+    expect(agentSwitchSource.includes('handoff_mode')).toBe(true);
     expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
-    expect(agentSwitchBlock.includes('creation.draft')).toBe(true);
+    expect(chatSource.includes('creation.draft remain mounted')).toBe(true);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
     expect(sendBoxSource.includes('sideTools={compactProductComposer')).toBe(true);

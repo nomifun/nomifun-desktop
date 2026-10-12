@@ -8,6 +8,32 @@ use nomifun_agent_kernel::{AgentPresetCompiler, CapabilityInvocationRequest, Com
     CompiledSnapshot, CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
     MaterializationPolicy, SessionCapabilityState};
 
+#[tokio::test]
+async fn new_session_after_verified_application_relocation_reuses_current_logical_memory() {
+    let fixture = super::app_completion_fence_tests::Fixture::new().await;
+    let target = tempfile::tempdir().unwrap();
+    let target_root = nomifun_common::paths::canonicalize_simplified(target.path()).unwrap();
+    let project = target_root.join("app-hosting").join("apps").join(&fixture.app.id);
+    std::fs::create_dir_all(&project).unwrap();
+    let store = fixture.state.session_owner.canonical().store();
+    let old = store.get_live_session(&fixture.session).await.unwrap();
+    let old_memory = old.agent_binding.typed_resource_bindings.iter()
+        .find(|resource| resource.resource_kind.as_ref() == "project_memory").unwrap().resource_id.clone();
+    store.relocate_managed_workspaces_with_app_workspaces(&fixture.services.data_dir, &fixture.services.work_dir,
+        &target_root, &OperationId::from(uuid::Uuid::now_v7().to_string()), &BTreeSet::from([fixture.app.id.clone()])).await.unwrap();
+    let moved = store.get_live_session(&fixture.session).await.unwrap();
+    let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+    let Json(created) = create_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner), HeaderMap::new(),
+        Json(CreateAgentSessionRequestDto { preset_id: old.agent_binding.preset_revision_ref.preset_id.as_ref().to_owned(),
+            title: Some("Next project iteration".into()), model: None, reasoning_effort: None,
+            resource_selections: Vec::new(), knowledge_policy: None, workspace: Some(project.to_string_lossy().into_owned()),
+            session_capabilities: Some(Default::default()), required_modules: BTreeSet::new() })).await.unwrap();
+    let next = store.get_live_session(&parse_agent_session_id(&created.data.unwrap().agent_session_id).unwrap()).await.unwrap();
+    assert_eq!(next.agent_binding.typed_resource_bindings.iter().find(|resource| resource.resource_kind.as_ref() == "project_memory").unwrap().resource_id, old_memory);
+    assert_eq!(store.get_live_session(&fixture.session).await.unwrap(), moved, "new-session admission cannot rewrite the relocated Session");
+    fixture.finish().await;
+}
+
 fn revision(owner: &PrincipalRef) -> AgentPresetRevision {
     let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef { preset_id:"project-memory-fixture".into(), revision:1, revision_digest:"".into() },

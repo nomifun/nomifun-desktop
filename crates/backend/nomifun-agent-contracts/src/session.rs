@@ -277,6 +277,26 @@ pub struct AgentBindingChangedPayloadV1 {
     pub handoff_payload_digest: Option<DigestHex>,
     pub completion_gate_inherited: bool,
     pub effective_after_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_relocation: Option<crate::ManagedStorageRelocationV1>,
+}
+
+impl AgentBindingChangedPayloadV1 {
+    pub fn validate_storage_relocation(&self) -> Result<(), String> {
+        let proof = self.workspace_relocation.as_ref().ok_or("storage transition proof is missing")?;
+        proof.validate()?;
+        if crate::digest_payload(proof).map_err(|error| error.to_string())? != self.request_digest {
+            return Err("storage transition request digest differs from its exact proof".into());
+        }
+        if self.previous_binding_ref.preset_revision_ref != self.next_binding_ref.preset_revision_ref
+            || self.previous_binding_ref.resolved_snapshot_ref != self.next_binding_ref.resolved_snapshot_ref
+            || self.previous_binding_ref.binding_version.checked_add(1) != Some(self.next_binding_ref.binding_version)
+            || self.previous_agent_label != self.next_agent_label
+            || self.handoff_mode != AgentHandoffMode::ContextOnly || self.completion_gate_inherited
+            || self.handoff_payload_id.is_some() || self.handoff_payload_digest.is_some()
+        { return Err("storage transition changed the frozen Agent or inherited execution state".into()); }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

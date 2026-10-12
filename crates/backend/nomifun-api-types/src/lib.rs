@@ -40,11 +40,13 @@ mod system;
 mod terminal;
 mod task_plan;
 pub use task_plan::*;
+mod turn_files;
+pub use turn_files::*;
 mod webhook;
 mod websocket;
 
 pub use session_ops::{
-    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModelRequest, SideQuestionRequest,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SideQuestionRequest,
     SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
@@ -77,8 +79,10 @@ pub use agent_execution_template::{
     CreateExecutionFromTemplateRequest, UpdateAgentExecutionTemplateRequest,
 };
 pub use agent_platform::*;
-pub use agnes_model::{AgnesModelContract, agnes_model_contract, is_retired_provider_model};
+pub use agnes_model::{AgnesModelContract, agnes_model_contract};
 pub use auth::{
+    ConnectedDevice, ConnectionInfo, DeviceLoginRequest, DevicePairRequest, DevicePairResponse,
+    DevicePairingStatus, DevicePairingTicket,
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,
     UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
@@ -95,9 +99,8 @@ pub use channel::{
 };
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
-    ActiveCountResponse, CloneConversationRequest,
-    ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
-    ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
+    ConversationListResponse, ConversationResponse, ConversationRuntimeStateKind,
+    ConversationRuntimeSummary,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse,
     MessageResponse, MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
     SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
@@ -138,8 +141,9 @@ pub use knowledge::{
     UpdateKnowledgeTagRequest,
 };
 pub use lifecycle::{
-    GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult,
-    UpdateReleaseInfo, UpdateWorkDirRequest,
+    GitHubReleaseAsset, PrepareStorageRelocationRequest, StorageRelocationBlocker,
+    StorageRelocationOperationRequest, StorageRelocationResponse, SystemInfoResponse,
+    UpdateCheckRequest, UpdateCheckResult, UpdateReleaseInfo,
 };
 pub use model_failover::ModelFailoverConfig;
 pub use mcp::{
@@ -173,9 +177,9 @@ pub use model_task::{
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,
-    PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent, PreviewUrlResponse,
-    SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
-    StopPreviewRequest, is_preview_capability,
+    PreviewSnapshotInfoDto, OfficePreviewState, OfficePreviewResponse, OfficePreviewError,
+    OfficePreviewDocType, StartOfficePreviewRequest, StopOfficePreviewRequest,
+    SaveSnapshotRequest, SnapshotContentResponse, is_preview_capability,
 };
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,

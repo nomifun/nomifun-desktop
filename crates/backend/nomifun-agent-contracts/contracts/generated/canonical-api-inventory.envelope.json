@@ -254,6 +254,14 @@
         "canonical_errors": []
       },
       {
+        "operation_id": "agent_presets.recommended_capabilities",
+        "method": "GET",
+        "path": "/api/agent-presets/{preset_id}/recommended-capabilities",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
         "operation_id": "agent_preset_revisions.create",
         "method": "POST",
         "path": "/api/agent-presets/{preset_id}/revisions",
@@ -400,6 +408,16 @@
         "operation_id": "agent_sessions.messages",
         "method": "GET",
         "path": "/api/agent-sessions/{agent_session_id}/messages?after_seq={seq}&limit={limit}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.turn_files",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/turn-files?turn_ids={turn_ids}",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": [
@@ -630,5 +648,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "181a78c5ed973aef0b2469600af070f703decfa8f868a6286f5b1f25183023d7"
+  "payload_digest": "71c737375ca6426a6004eb09ef27365a610d69c59bdad897828e849734caa39c"
 }

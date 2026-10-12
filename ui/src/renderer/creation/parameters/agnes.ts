@@ -52,7 +52,22 @@ export function isCurrentAgnesVideo(model: Model): boolean {
   return model?.protocol === 'agnes.video_jobs' && ['agnes-video-2.5', 'agnes-video-2.5-flash'].includes(model.model);
 }
 
+export function isAgnesVideoV20(model: Model): boolean {
+  return model?.protocol === 'agnes.video_jobs' && model.model === 'agnes-video-v2.0';
+}
+
+export function isAgnesVideo(model: Model): boolean {
+  return isAgnesVideoV20(model) || isCurrentAgnesVideo(model);
+}
+
 export function agnesVideoSizeOptions(model: Model): ImageGenerationAspectRatioOption[] {
+  if (isAgnesVideoV20(model)) {
+    // Restore the established pixel choices; v2.0 sends width/height, not tiers.
+    return [automatic,
+      option('16:9', '720P', 1280, 720), option('9:16', '720P', 720, 1280), option('1:1', '720P', 720, 720),
+      option('16:9', '1080P', 1920, 1080), option('9:16', '1080P', 1080, 1920), option('1:1', '1080P', 1080, 1080),
+    ];
+  }
   if (!isCurrentAgnesVideo(model)) return [];
   const ratios = model?.model === 'agnes-video-2.5-flash' ? flashVideoRatios : videoRatios;
   const options = ratios.map(([ratio, width, height]) => option(ratio, '720P', width, height));
@@ -65,7 +80,7 @@ export function agnesVideoSizeOptions(model: Model): ImageGenerationAspectRatioO
 }
 
 export function agnesVideoPolicy(model: Model): { seconds: number[]; sizes: string[] } {
-  return { seconds: isCurrentAgnesVideo(model) ? [4, 5, 6, 7, 8, 9, 10, 11, 12] : [],
+  return { seconds: isAgnesVideoV20(model) ? [5, 10, 15] : isCurrentAgnesVideo(model) ? [4, 5, 6, 7, 8, 9, 10, 11, 12] : [],
     sizes: agnesVideoSizeOptions(model).flatMap(value => value.requestSize ? [value.requestSize] : []) };
 }
 

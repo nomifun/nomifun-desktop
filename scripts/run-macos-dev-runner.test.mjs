@@ -6,15 +6,16 @@ import { EventEmitter, once } from 'node:events';
 import { connect } from 'node:net';
 import { createMacosDevLifetime } from './run-dev.mjs';
 import { createMacosDevSupervisor, acquireMacosDevGeneration, validateDevelopmentLaunch } from './lib/macos-dev-supervisor.mjs';
-import { parseMacosCargoRunnerArguments, developmentInfoPlist, ensureMacosDevelopmentBundle, runCargoArtifact, macosBrowserCompilerEnvironment, nativeBrowserLaunchEnvironment } from './run-macos-dev-runner.mjs';
+import { parseMacosCargoRunnerArguments, macosDevelopmentApplicationArguments, developmentInfoPlist, ensureMacosDevelopmentBundle, runCargoArtifact } from './run-macos-dev-runner.mjs';
 import { fastBuildInvocation, findBuiltMacosApp, completeFastMacosApp } from './run-fast-build.mjs';
-import { MACOS_BROWSER_RUNTIME } from './lib/macos-browser-bundle.mjs';
+import { prepareMacosBuildEnvironment } from './lib/macos-build-environment.mjs';
+import { INTEL_ONNX_RUNTIME } from './lib/macos-onnx-runtime.mjs';
 import { macosDevelopmentSigningIdentity, macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
 
 describe('macOS cargo runner', () => {
   test('only an explicit installed identity replaces ad-hoc signing', () => {
     expect(macosDevelopmentSigningIdentity({})).toBe('-');
-    expect(macosDevelopmentSigningNotice({})).toContain('重建后可能需 macOS 钥匙串授权');
+    expect(macosDevelopmentSigningNotice({})).toContain('使用 ad-hoc 签名');
     const environment = { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: ' Apple Development: Fixture (TEAMFIXTURE) ' };
     expect(macosDevelopmentSigningIdentity(environment)).toBe('Apple Development: Fixture (TEAMFIXTURE)');
     expect(macosDevelopmentSigningNotice(environment)).toBeNull();
@@ -26,12 +27,24 @@ describe('macOS cargo runner', () => {
   test('retains features, target, profile and application arguments across bundle launch', () => {
     const plan = parseMacosCargoRunnerArguments(['run', '--no-default-features', '--features', 'fixture', '--target', 'aarch64-apple-darwin', '--profile', 'release', '--color', 'always', '--', '--fixture', '中文'], 'arm64');
     expect(plan.build).toEqual(['build', '--no-default-features', '--features', 'fixture', '--target', 'aarch64-apple-darwin', '--profile', 'release', '--color', 'always', '--bin', 'nomifun-desktop', '--message-format=json-render-diagnostics']);
-    expect(plan.helper).toContain('aarch64-apple-darwin');
-    expect(plan.helper).toContain('release');
+    expect(plan.profile).toBe('release');
     expect(plan.application).toEqual(['--fixture', '中文']);
-    expect(() => parseMacosCargoRunnerArguments(['run'], 'x64')).toThrow('arm64');
-    expect(() => parseMacosCargoRunnerArguments(['run', '--target', 'x86_64-apple-darwin'], 'arm64')).toThrow('aarch64');
+    expect(parseMacosCargoRunnerArguments(['run'], 'x64').target).toBeNull();
+    expect(parseMacosCargoRunnerArguments(['run', '--target', 'x86_64-apple-darwin'], 'arm64').target).toBe('x86_64-apple-darwin');
+    expect(() => parseMacosCargoRunnerArguments(['run', '--target', 'x86_64-unknown-linux-gnu'], 'arm64')).toThrow('macOS builds');
     expect(() => parseMacosCargoRunnerArguments(['run', '--bin', 'unrelated'], 'arm64')).toThrow('desktop');
+  });
+
+  test('isolates AppKit restoration for the dev process while preserving application arguments', () => {
+    const args = Object.freeze(['--fixture', '中文', 'nomifun-dev://fixture']);
+    expect(macosDevelopmentApplicationArguments(args)).toEqual([
+      '--fixture', '中文', 'nomifun-dev://fixture', '-ApplePersistenceIgnoreState', 'YES',
+    ]);
+    expect(args).toEqual(['--fixture', '中文', 'nomifun-dev://fixture']);
+    expect(macosDevelopmentApplicationArguments([])).toEqual(['-ApplePersistenceIgnoreState', 'YES']);
+    const plan = parseMacosCargoRunnerArguments(['run', '--profile', 'release', '--', '--fixture'], 'arm64');
+    expect(plan.build).not.toContain('-ApplePersistenceIgnoreState');
+    expect(macosDevelopmentApplicationArguments(plan.application)).toEqual(['--fixture', '-ApplePersistenceIgnoreState', 'YES']);
   });
 
   test('fast Mac builds produce an app while Windows and Linux keep no-bundle', () => {
@@ -39,7 +52,9 @@ describe('macOS cargo runner', () => {
     expect(fastBuildInvocation([], 'darwin', 'arm64').args).not.toContain('--no-bundle');
     for (const platform of ['win32', 'linux']) expect(fastBuildInvocation([], platform, 'x64').args).toContain('--no-bundle');
     expect(() => fastBuildInvocation(['--no-bundle'], 'darwin', 'arm64')).toThrow('complete');
-    expect(() => fastBuildInvocation(['--target=x86_64-apple-darwin'], 'darwin', 'arm64')).toThrow('arm64');
+    expect(fastBuildInvocation([], 'darwin', 'x64').args).toContain('app');
+    expect(fastBuildInvocation(['--target=x86_64-apple-darwin'], 'darwin', 'arm64').target).toBe('x86_64-apple-darwin');
+    expect(() => fastBuildInvocation(['--target=x86_64-pc-windows-msvc'], 'darwin', 'arm64')).toThrow('macOS builds');
     expect(() => fastBuildInvocation(['--', '--profile=release'], 'darwin', 'arm64')).toThrow('debug profile');
   });
 
@@ -69,23 +84,38 @@ describe('macOS cargo runner', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   }, 1500);
 
-  test('reuses only a validated pinned compile cache and never passes CEF_PATH to the app', async () => {
-    const environment = { CEF_PATH: '/ambient-unverified', FLATPAK: '1', NOMIFUN_DATA_DIR: '/isolated', TAURI_CONFIG: '{"identifier":"fixture"}' };
-    const root = await mkdtemp(join(tmpdir(), 'nomifun-pinned-cef-cache-'));
-    try {
-      const runtime = join(root, 'build.noindex/debug/build/cef-dll-sys-fixture/out/cef_macos_aarch64');
-      await mkdir(join(runtime, 'Chromium Embedded Framework.framework'), { recursive: true });
-      await writeFile(join(runtime, 'Chromium Embedded Framework.framework/Chromium Embedded Framework'), 'fixture');
-      await writeFile(join(runtime, 'archive.json'), JSON.stringify({ name: MACOS_BROWSER_RUNTIME.archive, sha1: MACOS_BROWSER_RUNTIME.archive_sha1 }));
-      const compiler = await macosBrowserCompilerEnvironment({ root, target: 'aarch64-apple-darwin', profile: 'release', environment });
-      expect(compiler.environment.CEF_PATH).toBe(runtime);
-      expect(compiler.environment.FLATPAK).toBeUndefined();
-      expect(nativeBrowserLaunchEnvironment(compiler.environment)).toEqual({ NOMIFUN_DATA_DIR: '/isolated', TAURI_CONFIG: '{"identifier":"fixture"}' });
-      await rm(join(root, 'build.noindex'), { recursive: true, force: true });
-      const fresh = await macosBrowserCompilerEnvironment({ root, environment });
-      expect(fresh.runtimePath).toBeNull();
-      expect(fresh.environment.CEF_PATH).toBeUndefined();
-    } finally { await rm(root, { recursive: true, force: true }); }
+  test('Apple Silicon builds use system frameworks without preparing a native runtime', async () => {
+    const environment = { NOMIFUN_DATA_DIR: '/isolated', ORT_LIB_PATH: '/previous-intel-build', ORT_PREFER_DYNAMIC_LINK: '1' };
+    const compiler = await prepareMacosBuildEnvironment({ architecture: 'arm64', environment }, {
+      prepareOnnx: async () => { throw new Error('must not download'); },
+    });
+    expect(compiler.target).toBe('aarch64-apple-darwin');
+    expect(compiler.environment).toEqual({ NOMIFUN_DATA_DIR: '/isolated' });
+    expect(compiler.bundleConfig).toBeNull();
+    expect(compiler.bundleFiles).toEqual({});
+    expect(environment.ORT_LIB_PATH).toBe('/previous-intel-build');
+  });
+
+  test('Intel builds retain their ONNX library, licenses and runtime rpath', async () => {
+    const compiler = await prepareMacosBuildEnvironment({ architecture: 'x64', environment: { RUSTFLAGS: '-C debuginfo=1' } }, {
+      prepareOnnx: async () => '/owned/onnx/lib',
+    });
+    expect(compiler.target).toBe('x86_64-apple-darwin');
+    expect(compiler.environment.ORT_LIB_PATH).toBe('/owned/onnx/lib');
+    expect(compiler.environment.ORT_PREFER_DYNAMIC_LINK).toBe('1');
+    expect(compiler.environment.RUSTFLAGS).toBe('-C debuginfo=1 -C link-arg=-Wl,-rpath,@executable_path/../Frameworks');
+    expect(compiler.bundleConfig).toBe('/owned/onnx/tauri.conf.json');
+    expect(compiler.bundleFiles).toEqual({
+      [`Frameworks/${INTEL_ONNX_RUNTIME.library}`]: `/owned/onnx/lib/${INTEL_ONNX_RUNTIME.library}`,
+      'Resources/onnxruntime-LICENSE': '/owned/onnx/LICENSE',
+      'Resources/onnxruntime-ThirdPartyNotices.txt': '/owned/onnx/ThirdPartyNotices.txt',
+    });
+    const encoded = await prepareMacosBuildEnvironment({ architecture: 'arm64', environment: {
+      CARGO_BUILD_TARGET: 'x86_64-apple-darwin', CARGO_ENCODED_RUSTFLAGS: '-C\x1fdebuginfo=1',
+    } }, { prepareOnnx: async () => '/owned/onnx/lib' });
+    expect(encoded.environment.CARGO_ENCODED_RUSTFLAGS).toBe('-C\x1fdebuginfo=1\x1f-C\x1flink-arg=-Wl,-rpath,@executable_path/../Frameworks');
+    const again = await prepareMacosBuildEnvironment({ environment: encoded.environment }, { prepareOnnx: async () => '/owned/onnx/lib' });
+    expect(again.environment.CARGO_ENCODED_RUSTFLAGS).toBe(encoded.environment.CARGO_ENCODED_RUSTFLAGS);
   });
 });
 
@@ -95,11 +125,11 @@ async function fixtureRoot() {
   await mkdir(join(root, 'scripts/lib'), { recursive: true });
   await writeFile(join(root, 'apps/desktop/tauri.conf.json'), JSON.stringify({ productName: 'NomiFun', identifier: 'com.nomifun.desktop' }));
   await writeFile(join(root, 'apps/desktop/tauri.dev.conf.json'), JSON.stringify({ productName: 'NomiFun Dev', identifier: 'com.nomifun.desktop.dev' }));
-  await writeFile(join(root, 'apps/desktop/Info.plist'), '<plist><dict><key>NSCameraUsageDescription</key><string>existing camera reason</string></dict></plist>');
-  await writeFile(join(root, 'scripts/lib/macos-browser-bundle.mjs'), '// fixture staging version');
+  await writeFile(join(root, 'apps/desktop/Info.plist'), '<plist><dict><key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict><key>NSCameraUsageDescription</key><string>existing camera reason</string></dict></plist>');
+  await writeFile(join(root, 'scripts/lib/macos-app-bundle.mjs'), '// fixture signing version');
   await writeFile(join(root, 'package.json'), JSON.stringify({ version: '0.7.6' }));
   await writeFile(join(root, 'host'), 'host-one');
-  await writeFile(join(root, 'helper'), 'helper-one');
+  await writeFile(join(root, 'native-library'), 'library-one');
   return root;
 }
 
@@ -108,9 +138,9 @@ describe('complete development app cache', () => {
     const root = await fixtureRoot();
     const attempted = [];
     try {
-      const request = { root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment: { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: 'Unavailable identity' } };
+      const request = { root, hostPath: join(root, 'host'), environment: { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: 'Unavailable identity' } };
       await expect(ensureMacosDevelopmentBundle(request, {
-        stage: async options => { attempted.push(options); throw new Error('installed identity missing'); },
+        sign: async options => { attempted.push(options); throw new Error('installed identity missing'); },
         inspect: async () => ({ status: 'pass' }), run: async () => {},
       })).rejects.toThrow('installed identity missing');
       expect(attempted.map(options => options.identity)).toEqual(['Unavailable identity']);
@@ -118,17 +148,17 @@ describe('complete development app cache', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test('stable signing identity reaches the full stage and incremental seal and isolates caches', async () => {
+  test('stable signing identity reaches full signing and incremental sealing and isolates caches', async () => {
     const root = await fixtureRoot();
     const staged = [];
     const commands = [];
     const hooks = {
-      stage: async request => { staged.push(request); },
+      sign: async request => { staged.push(request); },
       inspect: async () => ({ status: 'pass' }),
       run: async (program, args) => { commands.push([program, ...args]); },
     };
     const identity = 'Apple Development: Fixture (TEAMFIXTURE)';
-    const request = { root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment: {} };
+    const request = { root, hostPath: join(root, 'host'), environment: {} };
     try {
       const adhoc = await ensureMacosDevelopmentBundle(request, hooks);
       const signedRequest = { ...request, environment: { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: identity } };
@@ -156,30 +186,31 @@ describe('complete development app cache', () => {
       const plist = await developmentInfoPlist(root, environment);
       expect(plist).toContain('com.nomifun.fixture');
       expect(plist).toContain('Fixture &amp; Test');
+      expect(plist).toContain('<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>');
       expect(plist).toContain('existing camera reason');
-      const hooks = { stage: async () => {}, inspect: async () => ({ status: 'pass' }), run: async () => {} };
-      const first = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment }, hooks);
-      const second = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment: { ...environment, NOMIFUN_DATA_DIR: '/second-data' } }, hooks);
+      const hooks = { sign: async () => {}, inspect: async () => ({ status: 'pass' }), run: async () => {} };
+      const first = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), environment }, hooks);
+      const second = await ensureMacosDevelopmentBundle({ root, hostPath: join(root, 'host'), environment: { ...environment, NOMIFUN_DATA_DIR: '/second-data' } }, hooks);
       expect(first).not.toBe(second);
       expect(first).toEndWith(join('.app', 'Contents', 'MacOS', 'nomifun-desktop'));
       expect(await readFile(join(dirname(dirname(first)), 'Info.plist'), 'utf8')).toContain('com.nomifun.fixture');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test('incremental host rebuild reuses CEF; changed helper or broken seal restages it', async () => {
+  test('incremental host rebuild preserves immutable resources; changed library or broken seal rebuilds the bundle', async () => {
     const root = await fixtureRoot();
     let stages = 0;
     let broken = false;
     const commands = [];
     const hooks = {
-      stage: async () => { stages++; broken = false; },
+      sign: async () => { stages++; broken = false; },
       inspect: async () => ({ status: 'pass' }),
       run: async (program, args) => {
         commands.push([program, ...args]);
         if (broken && program === 'codesign' && args[0] === '--verify') throw new Error('broken app seal');
       },
     };
-    const request = { root, hostPath: join(root, 'host'), helperPath: join(root, 'helper'), runtimePath: '/pinned', environment: {} };
+    const request = { root, hostPath: join(root, 'host'), bundleFiles: { 'Frameworks/native.dylib': join(root, 'native-library') }, environment: {} };
     try {
       const program = await ensureMacosDevelopmentBundle(request, hooks);
       await ensureMacosDevelopmentBundle(request, hooks);
@@ -190,10 +221,13 @@ describe('complete development app cache', () => {
       expect(rebuilt).not.toBe(program);
       expect(await readFile(program, 'utf8')).toBe('host-one');
       expect(await readFile(rebuilt, 'utf8')).toBe('host-two');
+      expect(await readFile(join(dirname(dirname(program)), 'Frameworks/native.dylib'), 'utf8')).toBe('library-one');
       expect(commands.some(command => command.includes('--force'))).toBe(true);
-      await writeFile(request.helperPath, 'helper-two');
-      await ensureMacosDevelopmentBundle(request, hooks);
+      await writeFile(request.bundleFiles['Frameworks/native.dylib'], 'library-two');
+      const changed = await ensureMacosDevelopmentBundle(request, hooks);
       expect(stages).toBe(2);
+      expect(await readFile(join(dirname(dirname(changed)), 'Frameworks/native.dylib'), 'utf8')).toBe('library-two');
+      expect(await readFile(join(dirname(dirname(program)), 'Frameworks/native.dylib'), 'utf8')).toBe('library-one');
       broken = true;
       await ensureMacosDevelopmentBundle(request, hooks);
       expect(stages).toBe(3);
@@ -214,7 +248,7 @@ describe('complete development app cache', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test('fast build keeps its verified app when a watcher replaces raw outputs during the helper build', async () => {
+  test('fast build keeps its verified app when a watcher replaces raw outputs during signing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'nomifun-fast-build-race-'));
     const original = join(root, 'bundle/macos/NomiFun Dev.app');
     try {
@@ -225,15 +259,14 @@ describe('complete development app cache', () => {
       const appPath = await completeFastMacosApp({
         outDir: root,
         environment: { NOMIFUN_MACOS_DEV_SIGN_IDENTITY: 'Apple Development: Fast Fixture (TEAMFIXTURE)' },
-        buildHelper: async () => {
-          // Simulate Cargo watch winning the lock and a later bundler touching
-          // the same output while the helper waits. Neither may alter our app.
+        target: 'x86_64-apple-darwin',
+        sign: async ({ appPath, identity, target }) => {
+          // Simulate Cargo watch and a later bundler replacing raw outputs
+          // while signing this immutable generation.
           await writeFile(join(root, 'nomifun-desktop'), 'watcher-build');
           await writeFile(join(original, 'Contents/MacOS/nomifun-desktop'), 'later-bundler-build');
           await writeFile(join(original, 'Contents/Info.plist'), 'later-bundler-identity');
-          return { helperPath: '/owned/helper', runtimePath: '/pinned/runtime' };
-        },
-        stage: async ({ appPath, identity }) => {
+          expect(target).toBe('x86_64-apple-darwin');
           expect(identity).toBe('Apple Development: Fast Fixture (TEAMFIXTURE)');
           expect(appPath).not.toBe(original);
           expect(await readFile(join(appPath, 'Contents/MacOS/nomifun-desktop'), 'utf8')).toBe('this-fast-build');
@@ -261,6 +294,40 @@ describe('complete development app cache', () => {
 });
 
 describe('macOS watch generation ownership', () => {
+  test('every watch generation forwards process-scoped restoration arguments without changing identity or data root', async () => {
+    const root = join(tmpdir(), 'nomifun-owned-workspace');
+    const program = join(root, 'target', 'macos-dev-app', 'same-identity', 'generation-fixture', 'NomiFun Dev.app', 'Contents', 'MacOS', 'nomifun-desktop');
+    const cwd = join(root, 'apps', 'desktop');
+    const children = [];
+    const launches = [];
+    const supervisor = await createMacosDevSupervisor({
+      root,
+      createLifetime: async () => ({ socketPath: '/fake-native-lifetime', stop: async () => {} }),
+      spawnProgram(program, args, options) {
+        launches.push({ program, args, options });
+        const child = new EventEmitter();
+        children.push(child);
+        return child;
+      },
+    });
+    try {
+      for (const label of ['first', 'watch-restart']) {
+        const generation = await acquireMacosDevGeneration(supervisor.socketPath);
+        const plan = parseMacosCargoRunnerArguments(['run', '--', '--fixture', label], 'arm64');
+        const exited = generation.launch({ program, args: macosDevelopmentApplicationArguments(plan.application), environment: { NOMIFUN_DATA_DIR: '/isolated-owned-data' }, cwd });
+        const index = label === 'first' ? 0 : 1;
+        while (!children[index]) await new Promise(accept => setImmediate(accept));
+        expect(launches[index].program).toBe(program);
+        expect(launches[index].args).toEqual(['--fixture', label, '-ApplePersistenceIgnoreState', 'YES']);
+        expect(launches[index].options.env.NOMIFUN_DATA_DIR).toBe('/isolated-owned-data');
+        expect(launches[index].options.cwd).toBe(cwd);
+        children[index].emit('exit', 0, null);
+        expect((await exited).code).toBe(0);
+        generation.close();
+      }
+    } finally { await supervisor.stop(); }
+  });
+
   test('runner death requests native cleanup and blocks the next launch until child exit', async () => {
     const children = [];
     const desktops = [];
@@ -307,12 +374,12 @@ describe('macOS watch generation ownership', () => {
 
   test('rejects arbitrary launch paths and keeps each control socket private', async () => {
     const root = join(tmpdir(), 'nomifun-owned-workspace');
-    const cache = join(root, 'target', 'macos-dev-browser');
+    const cache = join(root, 'target', 'macos-dev-app');
     const request = { program: join(cache, 'key', 'NomiFun Dev.app', 'Contents', 'MacOS', 'nomifun-desktop'), args: ['中文'], environment: { NOMIFUN_DATA_DIR: '/isolated' }, cwd: join(root, 'apps', 'desktop') };
     expect(validateDevelopmentLaunch(request, root).environment.NOMIFUN_DATA_DIR).toBe('/isolated');
     expect(() => validateDevelopmentLaunch({ ...request, program: join(tmpdir(), 'Applications', 'Other.app', 'Contents', 'MacOS', 'nomifun-desktop') }, root)).toThrow('owned');
     expect(() => validateDevelopmentLaunch({ ...request, program: join(cache, 'key', 'NomiFun Dev.app', 'Contents', 'MacOS', 'other-binary') }, root)).toThrow('owned');
-    expect(() => validateDevelopmentLaunch({ ...request, program: join(root, 'target', 'macos-dev-browser-other', 'Other.app', 'Contents', 'MacOS', 'nomifun-desktop') }, root)).toThrow('owned');
+    expect(() => validateDevelopmentLaunch({ ...request, program: join(root, 'target', 'macos-dev-app-other', 'Other.app', 'Contents', 'MacOS', 'nomifun-desktop') }, root)).toThrow('owned');
     expect(() => validateDevelopmentLaunch({ ...request, cwd: join(tmpdir(), 'outside') }, root)).toThrow('workspace');
   });
 
@@ -343,7 +410,7 @@ describe('macOS watch generation ownership', () => {
     }
   });
 
-  test('an abnormal app exit cannot start another CEF generation', async () => {
+  test('an abnormal app exit cannot start another development generation before native cleanup', async () => {
     let child;
     const supervisor = await createMacosDevSupervisor({
       root: '/workspace', validateLaunch: request => request,

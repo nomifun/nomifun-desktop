@@ -8,7 +8,7 @@ use axum::http::Method;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use axum::{Router, middleware};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use nomifun_ai_agent::agent_routes;
 use nomifun_agent_contracts::{
@@ -31,7 +31,7 @@ use nomifun_cron::cron_routes;
 use nomifun_file::file_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
-use nomifun_office::{office_proxy_routes, office_routes};
+use nomifun_office::{office_artifact_routes, office_routes};
 use nomifun_skill_library::skill_routes;
 use nomifun_agent_execution::{agent_execution_routes, agent_execution_template_routes};
 use nomifun_realtime::{UserEventEnvelope, WebSocketManager, WsHandlerState, ws_upgrade_handler};
@@ -42,6 +42,27 @@ use nomifun_terminal::terminal_routes;
 use nomifun_webhook::webhook_routes;
 
 use crate::services::AppServices;
+
+/// Scheduling maintenance closes HTTP mutation admission. Existing writers
+/// finish on the old root; the offline coordinator validates them again after
+/// process shutdown before copying or committing any data.
+async fn storage_maintenance_admission(
+    axum::extract::State(root): axum::extract::State<std::path::PathBuf>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, nomifun_common::AppError> {
+    use nomifun_common::storage_relocation::{self as storage, RelocationPhase};
+    let path = request.uri().path();
+    if !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !matches!(path, "/api/system/storage-relocation/start" | "/api/system/storage-relocation/cancel")
+        && let Some(control) = storage::resolve_control_dir(&root)?
+        && let Some(plan) = storage::pending_storage_relocation(&control)?
+        && (matches!(plan.phase, RelocationPhase::AwaitingRestart | RelocationPhase::Copying | RelocationPhase::Verifying)
+            || (plan.phase == RelocationPhase::Failed && !plan.cancellable)) {
+        return Err(nomifun_common::AppError::Conflict("storage relocation is awaiting restart; restart or cancel it before changing dataset data".into()));
+    }
+    Ok(next.run(request).await)
+}
 
 use super::computer_permissions::{
     computer_permission_status, open_permission_settings, request_computer_permission,
@@ -245,6 +266,29 @@ fn admit_headless_installation_owner(
         state.clone(),
         installation_token_trust_resolve_middleware,
     ))
+}
+
+/// The shell's packaged origin and its loopback dev server are cross-origin
+/// with the API. Ordinary remote browsers use the API's own origin. Accept
+/// only serialized origins so credentials, paths and lookalike hosts cannot
+/// turn a URL that merely contains `localhost` into a trusted CORS origin.
+fn is_desktop_webview_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else { return false; };
+    if matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost") {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(origin) else { return false; };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty() || url.password().is_some()
+        || url.path() != "/" || url.query().is_some() || url.fragment().is_some()
+        || url.origin().ascii_serialization() != origin
+    { return false; }
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// Fallible Nomi-core router assembly with the current product routes
@@ -692,8 +736,13 @@ fn create_nomi_core_router_with_all_state(
     services
         .ws_manager
         .ensure_heartbeat(ws_state.token_authenticator.clone());
+    services.ws_manager.ensure_auth_watch(
+        ws_state.token_authenticator.clone(),
+        services.jwt_service.subscribe_invalidations(),
+    );
 
     let auth_state = AuthRouterState {
+        auth_policy: services.auth_policy,
         jwt_service: services.jwt_service.clone(),
         user_repo: services.user_repo.clone(),
         cookie_config: services.cookie_config.clone(),
@@ -946,6 +995,14 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
+    // Fixed host components are instance-owned; GET observes only, while POST
+    // starts the supplier's single shared preparation without waiting for I/O.
+    let runtime_tools_authenticated = protect_instance_owner(
+        super::runtime_tools::runtime_tool_routes(),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Shell + STT routes protected by auth middleware
     let shell_authenticated = protect_instance_owner(
         shell_routes(states.shell),
@@ -1027,10 +1084,9 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Office iframe GETs cannot carry the app auth header. Authenticated start
-    // mints a high-entropy, in-memory session capability in the URL path; these
-    // routes accept only that revocable capability and never a caller-owned port.
-    let office_proxy = office_proxy_routes(states.office);
+    // Immutable Office artifacts use an owner-minted revocable capability:
+    // iframe requests cannot carry the application's authentication header.
+    let office_artifacts = office_artifact_routes(states.office);
     let public_assets = asset_routes();
     // Figure-image serving — exempt from auth: `<img>`/`new Image()` can't carry
     // the local-trust header, so the desktop webview would 403 every figure
@@ -1102,6 +1158,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(agent_execution_template_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
+        .merge(runtime_tools_authenticated)
         .merge(shell_authenticated);
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.
@@ -1131,7 +1188,7 @@ fn create_nomi_core_router_with_all_state(
     };
     let router = router
     .merge(ws_routes)
-    .merge(office_proxy)
+        .merge(office_artifacts)
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public);
@@ -1146,7 +1203,11 @@ fn create_nomi_core_router_with_all_state(
         None => router,
     };
 
+    let router = router.layer(middleware::from_fn_with_state(services.data_dir.clone(), storage_maintenance_admission));
     let router = router.layer(middleware::from_fn(security_headers_middleware));
+    // Retain the management host's weak Session owner for the router lifetime.
+    // Handlers retain only Weak references, so this lease creates no runtime cycle.
+    let router = router.layer(axum::Extension(states._session_management_state));
 
     // Raise the default request body limit from axum's 2MB default to
     // `BODY_LIMIT` (10MB). Routes that need a larger cap (e.g. `/api/fs/upload`)
@@ -1174,15 +1235,12 @@ fn create_nomi_core_router_with_all_state(
         "startup: route tree build with states completed"
     );
 
-    // Permissive CORS for the desktop's own cross-origin webview (its document
-    // origin is `tauri://` / `http://tauri.localhost`, not the loopback port).
-    // Safe even on the LAN-bound listener: the trust secret rides a header (not
-    // a cookie), so an attacker page can neither read it nor read authenticated
-    // cross-origin responses.
-    // Remote browsers are served same-origin and do not rely on CORS.
+    // Packaged webviews and serialized loopback development origins may use
+    // CORS. Privileged endpoints retain their local trust or authentication
+    // authority; ordinary remote WebUI remains same-origin.
     if services.auth_policy.allows_local_webview() {
         let cors = CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::predicate(|origin, _request| is_desktop_webview_origin(origin)))
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -1195,5 +1253,43 @@ fn create_nomi_core_router_with_all_state(
         router.layer(cors)
     } else {
         router
+    }
+}
+
+#[cfg(test)]
+mod storage_relocation_tests {
+    use super::*;
+    use axum::{body::Body, http::{Request, StatusCode}};
+    use nomifun_common::{factory_reset, storage_relocation as storage};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn storage_relocation_admission_blocks_writes_until_restart_or_cancel() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = nomifun_common::paths::canonicalize_simplified(fixture.path()).unwrap();
+        let source = root.join("source");
+        let control = root.join("control");
+        let target = root.join("target");
+        let generation = "0190f5fe-7c00-7a00-8000-0000000000f0";
+        std::fs::create_dir(&source).unwrap();
+        let database = nomifun_db::init_database(&source.join("nomifun-backend.db")).await.unwrap();
+        database.close().await;
+        std::fs::write(source.join("storage-generation"), generation).unwrap();
+        factory_reset::write_v3_dataset_receipt_for_work_dir(&source, &source, generation).unwrap();
+        let plan = storage::request_storage_relocation(&control, &source, &source, &target).unwrap();
+        let router = Router::new()
+            .route("/dataset", get(|| async { StatusCode::OK }).post(|| async { StatusCode::OK }))
+            .route("/api/system/storage-relocation/cancel", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(source, storage_maintenance_admission));
+
+        let request = |method, uri| Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        storage::start_storage_relocation(&control, &plan.operation_id).unwrap();
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(router.clone().oneshot(request(Method::GET, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(router.clone().oneshot(request(Method::POST, "/api/system/storage-relocation/cancel")).await.unwrap().status(), StatusCode::OK);
+        storage::cancel_storage_relocation(&control, &plan.operation_id).unwrap();
+        assert_eq!(router.oneshot(request(Method::POST, "/dataset")).await.unwrap().status(), StatusCode::OK);
+        assert!(!target.exists());
     }
 }

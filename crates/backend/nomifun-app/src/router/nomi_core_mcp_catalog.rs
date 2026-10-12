@@ -294,6 +294,9 @@ fn registration(
                         .into(),
                         effect_class: EffectClass::ExternalTransmit,
                         presentation: ToolPresentationKind::FunctionTool,
+                        required_resource_operations: Some(BTreeMap::from([(
+                            "mcp_server".into(), BTreeSet::from(["connect".into(), "invoke".into()]),
+                        )])),
                     }],
                     context_schema_refs: Vec::new(),
                     event_schema_refs: Vec::new(),

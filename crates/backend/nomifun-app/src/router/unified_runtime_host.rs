@@ -356,11 +356,6 @@ pub(crate) fn factory(
                 }
             }))?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
-            if full_plan.len() > 128 {
-                return Err(error(super::agent_tool_surface::capacity_diagnostic(
-                    full_plan.model_definitions().iter().filter_map(|definition|full_plan.binding(&definition.name).map(|binding|&binding.capability_id)),
-                    &compiled.content().mcp_tool_locks,"actions",128)));
-            }
             let full_plan = super::agent_tool_presentation::project(
                 full_plan, resources.tool_discovery_port()?.is_some(),
             )?;

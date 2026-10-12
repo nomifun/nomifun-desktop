@@ -120,7 +120,7 @@ The shell ships `tauri-plugin-autostart` so the renderer can opt the app into "l
 
 ## Where data is stored
 
-The installed desktop app persists the SQLite database, agent state, logs, and the Bun runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun`** on Windows, **`~/Library/Application Support/NomiFun`** on macOS, **`$XDG_DATA_HOME/NomiFun`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `NomiFun-dev` sibling instead and do not import historical Agent state from the stable dataset.
+The installed desktop app persists the SQLite database, agent state, logs, and the managed runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun`** on Windows, **`~/Library/Application Support/NomiFun`** on macOS, **`$XDG_DATA_HOME/NomiFun`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `NomiFun-dev` sibling instead and do not import historical Agent state from the stable dataset.
 
 Set `NOMIFUN_DATA_DIR=<absolute path>` before launching the app and that path **is** the data dir — the value is taken literally on every host, with no `/Nomi` suffix. The backend takes an exclusive `server.lock` on the data dir at startup; if it fails to start — for example because another instance already holds the directory — the desktop shell shows a native error dialog and exits.
 
@@ -134,7 +134,7 @@ To start fresh, **quit the app** and delete that directory. To migrate, copy the
 ├── logs/                     # nomicore.log
 ├── companion/                # companions + their memory database (one file, per-companion rows)
 ├── knowledge/                # managed knowledge bases
-├── runtime/                  # regenerable runtimes (Bun and on-demand nfagent)
+├── runtime/                  # managed Bun/Node/OfficeCLI + optional nfagent cache
 └── server.lock               # exclusive lock held while a backend is running
 ```
 
@@ -183,8 +183,8 @@ Make sure the WebView runtime is installed (WebView2 on Windows 10 needs the Eve
 **"Failed to bind backend port".**
 Another process is holding `127.0.0.1` ephemeral ports. The backend tries `pick_free_port()` and falls back to `8799` if that fails — quit any other NomiFun instance and try again.
 
-**Agent commands fail with `bun: command not found`.**
-The agent engine spawns Bun as a child process for tool execution. Install Bun (`curl -fsSL https://bun.sh/install | bash`) and make sure it is on the system `PATH`, or build the desktop bundle with `NOMIFUN_EMBED_BUN=1` to embed it.
+**Managed execution components are unavailable.**
+Released desktop bundles contain OfficeCLI. Before the backend starts, the startup window prepares genuine Node through a fixed-version, hash-verified download and reports stages, bytes, and retryable failures. Bun is prepared on feature use. Once prepared, unchanged components are reused offline. Check cache access/execute permissions and component diagnostics. Debug builds can embed OfficeCLI or use validated explicit development paths. See [External tools](../architecture/external-tools.md).
 
 ## See also
 

@@ -36,6 +36,7 @@ import {
   completeInitialMessageDelivery,
   handleInitialMessageDeliveryFailure,
   readAuthorizedInitialMessageDelivery,
+  readInitialMessageDelivery,
   releaseInitialMessageDelivery,
 } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
 import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
@@ -76,6 +77,7 @@ import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
 import { mutate as mutateSWR } from 'swr';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { useConversationTaskPlan } from './useConversationTaskPlan';
+import { useInitialMessage } from '../../components/ConversationShell/InitialMessageContext';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -233,7 +235,19 @@ const NomiSendBox: React.FC<{
     getTurnStartGeneration,
     getTurnCompletionGeneration,
   } = turnActivity;
-  const modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice);
+  const { pending: initialMessage, end: endInitialMessage } = useInitialMessage();
+  const messageList = useMessageList();
+  const initialMessageRef = useLatestRef(initialMessage);
+  // The presentation may outlive admission while execution state arrives.
+  // Release composer interaction at the same accepted-user boundary as before.
+  const initialSubmissionPending = initialMessage?.conversation_id === conversation_id
+    && !messageList.some(message => message.conversation_id === conversation_id
+      && !message.hidden && message.type === 'text' && message.position === 'right');
+  const dismissInitialMessage = useCallback((idempotencyKey?: string) => {
+    const pending = initialMessageRef.current;
+    if (pending?.conversation_id === conversation_id) endInitialMessage(conversation_id, idempotencyKey ?? pending.idempotency_key);
+  }, [conversation_id, endInitialMessage, initialMessageRef]);
+  const modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice || initialSubmissionPending);
   const modelPickerHint = pauseNotice ? t('messages.planPaused') : running
     ? t('conversation.chat.modelSwitchAfterTurn')
     : modelSelectionHint;
@@ -293,6 +307,8 @@ const NomiSendBox: React.FC<{
   useEffect(() => {
     if (!conversation_id || isCreating) return;
     let cancelled = false;
+    const initialPresentationKey = initialMessageRef.current?.conversation_id === conversation_id
+      ? initialMessageRef.current.idempotency_key : undefined;
     setInitialDeliveryReady(false);
     void warmupConversationForPassiveMount(conversation_id)
       .then(() => {
@@ -304,14 +320,20 @@ const NomiSendBox: React.FC<{
         }
       })
       .catch((error) => {
-        if (!cancelled) reportRequestFailure(error, 'CONVERSATION_PREPARATION_FAILED');
+        if (!cancelled) {
+          reportRequestFailure(error, 'CONVERSATION_PREPARATION_FAILED');
+          dismissInitialMessage(initialPresentationKey);
+        }
       });
     return () => { cancelled = true; };
-  }, [conversation_id, isCreating, reportRequestFailure]);
+  }, [conversation_id, isCreating, reportRequestFailure, dismissInitialMessage, initialMessageRef]);
+
+  useEffect(() => {
+    if (sessionCapabilities.error) dismissInitialMessage();
+  }, [sessionCapabilities.error, dismissInitialMessage]);
 
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const removeMessageByMsgId = useRemoveMessageByMsgId();
-  const messageList = useMessageList();
   const messageListRef = useLatestRef(messageList);
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
@@ -545,7 +567,9 @@ const NomiSendBox: React.FC<{
 
       let attemptedIdempotencyKey: string | null = null;
       let admissionStarted = false;
+      let waitsForAcceptedMessage = false;
       try {
+        attemptedIdempotencyKey = readInitialMessageDelivery(sessionStorage, storageKey)?.idempotency_key ?? null;
         sessionStorage.removeItem(processedKey);
         const initialMessage = await readAuthorizedInitialMessageDelivery(
           sessionStorage,
@@ -564,12 +588,13 @@ const NomiSendBox: React.FC<{
         }
         const { input, files, idempotency_key } = initialMessage;
         attemptedIdempotencyKey = idempotency_key;
-        await executeCommand(
+        const disposition = await executeCommand(
           { id: idempotency_key, input, files, initialOnly: true },
           undefined,
           true,
           { isCurrent: () => !cancelled, onAdmissionStarted: () => { admissionStarted = true; } }
         );
+        waitsForAcceptedMessage = disposition === 'fresh';
         completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key);
       } catch (error) {
         handleInitialMessageDeliveryFailure(
@@ -582,19 +607,18 @@ const NomiSendBox: React.FC<{
         sessionStorage.removeItem(processedKey);
       } finally {
         releaseInitialMessageDelivery(storageKey);
-        // If the newer effect already tried to claim while this old authority
-        // read was pending, resume through a fresh authority check with the same
-        // persisted key. Nothing here manufactures or copies Session history.
+        // A canceled authority read keeps the persisted same-key handoff.
         if (cancelled && !admissionStarted && mountedRef.current && requestConversationIdRef.current === conversation_id
           && !submissionDisabledRef.current && sessionStorage.getItem(storageKey)) {
           setInitialDeliveryRetry(attempt => attempt + 1);
         }
+        if (!cancelled && attemptedIdempotencyKey && !waitsForAcceptedMessage) endInitialMessage(conversation_id, attemptedIdempotencyKey);
       }
     };
 
     void processInitialMessage();
     return () => { cancelled = true; };
-  }, [submissionDisabled, submissionDisabledRef, conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, initialDeliveryRetry, sessionCapabilities.loading, sessionCapabilities.state, setContent, requestConversationIdRef]);
+  }, [submissionDisabled, submissionDisabledRef, conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, initialDeliveryRetry, sessionCapabilities.loading, sessionCapabilities.state, setContent, requestConversationIdRef, endInitialMessage]);
 
   const onSendHandler = async (message: string) => {
     if (submissionDisabledRef.current || preparingSubmissionRef.current) throw new Error(t('common.processing'));
@@ -944,7 +968,7 @@ const NomiSendBox: React.FC<{
           loadFailed={Boolean(capabilityCatalog.error || sessionCapabilities.error)}
           errorMessage={(sessionCapabilities.error || capabilityCatalog.error)?.message}
           onRetry={() => { capabilityCatalog.retry(); sessionCapabilities.retry(); }}
-          disabled={isBusy || Boolean(pauseNotice) || modelSelectionDisabled || sessionCapabilities.saving || sessionCapabilities.state?.editable !== true}
+          disabled={initialSubmissionPending || isBusy || Boolean(pauseNotice) || modelSelectionDisabled || sessionCapabilities.saving || sessionCapabilities.state?.editable !== true}
           applyMode='next-send'
         />}
         prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
@@ -958,7 +982,8 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
-        disabled={submissionDisabled || preparingSubmission || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || sessionCapabilities.loading || !sessionCapabilities.state || sessionCapabilities.saving)}
+        disabled={submissionDisabled || preparingSubmission || initialSubmissionPending || Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving)}
+        submitDisabled={!isCreating && sessionCapabilities.loading}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={

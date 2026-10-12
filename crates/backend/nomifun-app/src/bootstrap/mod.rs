@@ -6,12 +6,14 @@
 
 mod bind;
 mod boot_log;
+#[cfg(target_os = "macos")]
+mod browser_profiles;
 mod builtin_skills;
 mod composition_cleanup;
 mod data_root;
 mod environment;
 mod nomi_core;
-mod relocation;
+mod storage_relocation;
 mod server_lock;
 mod tracing_init;
 mod webui_dist;
@@ -19,13 +21,10 @@ mod work_dir;
 
 pub use bind::{PORT_FILE, PortAnnouncement, SCAN_SPAN, announce_bound_port, bind_with_fallback, write_port_file};
 pub use boot_log::{BootNoteLevel, record_boot_note};
-pub use data_root::{
-    LAYOUT_MIGRATION_PENDING_MARKER, RELOCATED_DONE_MARKER,
-    RELOCATED_FROM_MARKER, RelocationMarker, is_known_default_location,
-    resolve_startup_data_root,
-};
+pub use data_root::{is_known_default_location, resolve_startup_data_root};
+pub use storage_relocation::{prepare_startup_storage_root, prepare_startup_storage_root_async};
 pub use environment::{
-    ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
+    ServerEnvironment, finalize_data_layer, init_data_layer, init_data_layer_with_browser, init_environment,
     init_nomi_core_environment,
 };
 pub use nomi_core::NomiCoreApplication;

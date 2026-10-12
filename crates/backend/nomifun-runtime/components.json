@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "bun",
+      "version": "1.3.13",
+      "source": "https://github.com/oven-sh/bun",
+      "package": "bun",
+      "development_version_requirement": ">=1.3.13, <2.0.0",
+      "hash_source": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/SHASUMS256.txt",
+      "assets": [
+        {
+          "target": "x86_64-apple-darwin",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-x64.zip",
+          "sha256": "e5a6c8b64f419925232d111ecb13e25f0abf55e54f792341f987623fd0778009",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "x86_64-apple-darwin",
+          "variant": "baseline",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-x64-baseline.zip",
+          "sha256": "a98ba6a480f22fda9b343626b906a4e26aa53618bf85d2bc5928ecf2ba45f0ed",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "aarch64-apple-darwin",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-aarch64.zip",
+          "sha256": "5467e3f65dba526b9fea98f0cce04efafc0c63e169733ec27b876a3ad32da190",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "x86_64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64.zip",
+          "sha256": "79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "x86_64-unknown-linux-gnu",
+          "variant": "baseline",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64-baseline.zip",
+          "sha256": "9d8a24292a7068090205daac0a5a223f5f69736f5287e37bf88d3b4031edc750",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "aarch64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-aarch64.zip",
+          "sha256": "70bae41b3908b0a120e1e58c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "x86_64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-x64.zip",
+          "sha256": "85b14f3e0584218e9b63407b3aa6b90c4835ec5c32435c1f12cb6fc13667c7c9",
+          "format": "zip",
+          "executable": "bun.exe"
+        },
+        {
+          "target": "x86_64-pc-windows-msvc",
+          "variant": "baseline",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-x64-baseline.zip",
+          "sha256": "c68c7903c1190101590cc1b2129835f47211b3b37ae87759f2b97d6534aa3ad1",
+          "format": "zip",
+          "executable": "bun.exe"
+        },
+        {
+          "target": "aarch64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-aarch64.zip",
+          "sha256": "feaf3f2951c50104dc9a33cf1a2e1ae3422f0c7e5d8890601c87b97b5d90b376",
+          "format": "zip",
+          "executable": "bun.exe"
+        },
+        {
+          "target": "x86_64-unknown-linux-musl",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64-musl.zip",
+          "sha256": "5b91a48f0b00df9fd2da8bff1a795d2659d842da966432969203f25da19d1c74",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "x86_64-unknown-linux-musl",
+          "variant": "baseline",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64-musl-baseline.zip",
+          "sha256": "88ca7c7ad235b498f549eea2f770f434e9f0f5e9ba95168a2d3a1f235184c394",
+          "format": "zip",
+          "executable": "bun"
+        },
+        {
+          "target": "aarch64-unknown-linux-musl",
+          "variant": "default",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-aarch64-musl.zip",
+          "sha256": "5385e978107ce4934298d8d6afe9bfbb898683f6cc23e6753a0da60bc60c5b81",
+          "format": "zip",
+          "executable": "bun"
+        }
+      ],
+      "delivery": "download"
+    },
+    {
+      "id": "node",
+      "version": "22.22.0",
+      "source": "https://nodejs.org",
+      "package": "node",
+      "development_version_requirement": ">=22.0.0, <25.0.0",
+      "hash_source": "https://nodejs.org/dist/v22.22.0/SHASUMS256.txt",
+      "assets": [
+        {
+          "target": "x86_64-apple-darwin",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-x64.tar.gz",
+          "sha256": "5ea50c9d6dea3dfa3abb66b2656f7a4e1c8cef23432b558d45fb538c7b5dedce",
+          "format": "tar.gz",
+          "executable": "node"
+        },
+        {
+          "target": "aarch64-apple-darwin",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz",
+          "sha256": "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640",
+          "format": "tar.gz",
+          "executable": "node"
+        },
+        {
+          "target": "x86_64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz",
+          "sha256": "c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744",
+          "format": "tar.gz",
+          "executable": "node"
+        },
+        {
+          "target": "aarch64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-arm64.tar.gz",
+          "sha256": "25ba95dfb96871fa2ef977f11f95ea90818c8fa15c0f2110771db08d4ba423be",
+          "format": "tar.gz",
+          "executable": "node"
+        },
+        {
+          "target": "x86_64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/win-x64/node.exe",
+          "sha256": "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb",
+          "format": "raw",
+          "executable": "node.exe"
+        },
+        {
+          "target": "aarch64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://nodejs.org/dist/v22.22.0/win-arm64/node.exe",
+          "sha256": "fd44256121597d6a3707f4c7730b4e3733eacb5a95cc78a099f601d7e7f8290d",
+          "format": "raw",
+          "executable": "node.exe"
+        }
+      ],
+      "delivery": "download"
+    },
+    {
+      "id": "officecli",
+      "version": "1.0.156",
+      "source": "https://github.com/iOfficeAI/OfficeCLI",
+      "package": "@officecli/officecli",
+      "development_version_requirement": ">=1.0.156, <1.1.0",
+      "hash_source": "https://github.com/iOfficeAI/OfficeCLI/releases/expanded_assets/v1.0.156",
+      "assets": [
+        {
+          "target": "x86_64-apple-darwin",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-mac-x64",
+          "sha256": "9487262651e76bf6f586a5edaa41c01b7318991aa10c382d0d46065259fac3bd",
+          "format": "raw",
+          "executable": "officecli"
+        },
+        {
+          "target": "aarch64-apple-darwin",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-mac-arm64",
+          "sha256": "8a6c1aa383ee8b9069d012914418a4814d183727ca100b6c3d1ef2839a460290",
+          "format": "raw",
+          "executable": "officecli"
+        },
+        {
+          "target": "x86_64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-linux-x64",
+          "sha256": "a5ed6e4157fe9b24a099cd24ff30e89a4349b7a7d782d2b7de8d56294c7e1423",
+          "format": "raw",
+          "executable": "officecli"
+        },
+        {
+          "target": "aarch64-unknown-linux-gnu",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-linux-arm64",
+          "sha256": "972198c8db1f992ffd3fec4ecf6694533ecbdbae8da7a021ab513e73ecb2f15c",
+          "format": "raw",
+          "executable": "officecli"
+        },
+        {
+          "target": "x86_64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-win-x64.exe",
+          "sha256": "70b4e26695cf3197694fb10033a1035395480cad409581eff8ca029f198ed37f",
+          "format": "raw",
+          "executable": "officecli.exe"
+        },
+        {
+          "target": "aarch64-pc-windows-msvc",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-win-arm64.exe",
+          "sha256": "87645a5c6774c9d51153b04ae0c7715189a720cc29a0d9603b5bb8b33cdf44f2",
+          "format": "raw",
+          "executable": "officecli.exe"
+        },
+        {
+          "target": "x86_64-unknown-linux-musl",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-linux-alpine-x64",
+          "sha256": "5577657314a9374d2bbf78f89b869449e69da90bae73971d17e23f075d6a86f6",
+          "format": "raw",
+          "executable": "officecli"
+        },
+        {
+          "target": "aarch64-unknown-linux-musl",
+          "variant": "default",
+          "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.156/officecli-linux-alpine-arm64",
+          "sha256": "0d7d4211ac20a74bc58d6bcb5b0f5f64f8d2840487eca7b11dbc646c821b94ea",
+          "format": "raw",
+          "executable": "officecli"
+        }
+      ],
+      "delivery": "embedded"
+    }
+  ],
+  "domain_components": [
+    {
+      "id": "nfagent",
+      "owner": "desktop-relay-pairing",
+      "manifest": "apps/desktop/nfagent-runtime.json",
+      "delivery": "on-demand verified download"
+    },
+    {
+      "id": "onnxruntime-macos-intel",
+      "owner": "desktop-native-library-packaging",
+      "manifest": "apps/desktop/onnx-runtime-intel.json",
+      "delivery": "bundled native library"
+    },
+    {
+      "id": "onnxruntime",
+      "owner": "ort-sys-build-and-desktop-packaging",
+      "manifest": "Cargo.lock",
+      "delivery": "pinned ort-sys distribution manifest"
+    },
+    {
+      "id": "browser",
+      "owner": "nomi-browser-engine",
+      "manifest": "crates/agent/nomi-browser-engine/src",
+      "delivery": "platform discovery and CDP capability handshake"
+    }
+  ],
+  "build_images": {
+    "bun": "oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e",
+    "node": "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
+  }
+}

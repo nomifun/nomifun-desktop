@@ -170,6 +170,9 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::Conflict(_) => {
             "Creative Studio Canvas request conflicts with current state".to_owned()
         }
+        AppError::ComponentPreparationRequired(_) => {
+            "A required host component must be prepared before the Creative Studio Canvas operation".to_owned()
+        }
         AppError::RevisionConflict(_) => "Creative Studio Canvas revision conflict".to_owned(),
         AppError::ProviderInUse(_) => {
             "Creative Studio Canvas still references the selected provider".to_owned()
@@ -178,7 +181,10 @@ fn canvas_operation_error(error: AppError) -> String {
             format!("No usable model provider is configured: {message}")
         }
         AppError::RateLimited => "Creative Studio Canvas operation was rate limited".to_owned(),
-        AppError::Internal(_) => "Creative Studio Canvas operation failed".to_owned(),
+        AppError::Internal(_)
+        | AppError::KnowledgeExportDestinationInvalid(_)
+        | AppError::KnowledgeExportDestinationExists(_)
+        | AppError::KnowledgeExportIo { .. } => "Creative Studio Canvas operation failed".to_owned(),
         AppError::BadGateway(_) => "Creative Studio Canvas upstream operation failed".to_owned(),
         AppError::Timeout(_) => "Creative Studio Canvas operation timed out".to_owned(),
         AppError::UnprocessableEntity(_) => {

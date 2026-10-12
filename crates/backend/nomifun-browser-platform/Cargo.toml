@@ -20,6 +20,7 @@ cap-fs-ext.workspace = true
 tempfile.workspace = true
 dunce.workspace = true
 libc.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -122,8 +122,7 @@ async fn commit_context_binding(
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &replacement).await?;
     state.product_agent_resolver.official_runtime.validate_agent(&snapshot)?;
     let label = state.control_plane.editor(&owner.0, &current.preset_revision_ref.preset_id, Some(current.preset_revision_ref.revision)).await?.preset.display_name;
-    state.session_owner.runtime_sessions.terminate_and_wait_result(id.as_ref(), Some(AgentKillReason::ConfigurationChanged)).await?;
-    super::super::hosted_effect_receipts::HostedEffectReceipts::new(state.session_owner.pool.clone()).ensure_settled(owner.as_ref(), id.as_ref()).await?;
+    state.session_owner.settle_session_binding_runtime(owner.as_ref(), &id).await?;
     let transition = OperationId::from(Uuid::now_v7().to_string());
     let changed = state.session_owner.canonical().store().replace_session_agent_binding(&principal, &id,
         nomifun_agent_session::ReplaceSessionAgentBinding {

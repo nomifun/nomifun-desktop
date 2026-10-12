@@ -13,7 +13,7 @@ Tauri 桌面壳。如果只是安装或部署，请先看
 | 工具 | 最低要求 | 用途 |
 | --- | --- | --- |
 | Rust | stable，edition 2024 | Workspace 使用 resolver `3` 和 edition `2024`。 |
-| Bun | >= 1.3.13 | 前端包管理、Vite runner，也被 agent 运行时使用。 |
+| Bun | >= 1.3.13 | 前端包管理与 Vite runner；应用为明确需要 Bun 的功能供应独立的批准组件。 |
 | Tauri CLI v2 | 来自 `devDependencies` | 通过 `bun run dev` / `bun run build` 调用，无需全局安装。 |
 | Git | 较新版本 | 开发流程和部分内置工具需要。 |
 | CMake | >= 3.16 | `opusic-sys` 在干净构建时现场编译内置的 libopus（约 25 秒）。 |
@@ -71,10 +71,15 @@ bun run serve:web
 或隔离网络。
 
 带 Rust 后端的开发入口（`dev`、`dev:web`、`build:fast`）统一使用 `dev`
-构建 channel，因此默认数据目录是 `NomiFun-dev`（stable 根的同级目录，
-永远不嵌套在其内部）。生产形态的 `serve:web` 和
+构建 channel。桌面 `bun run dev` 未指定数据根时，启动器根据当前 canonical baseline
+派生 `NomiFun-dev-schema-<fingerprint>`，复用同一 schema 的开发数据，并保留原有目录。
+开发根位于 stable 根之外，永远不嵌套在其内部。生产形态的 `serve:web` 和
 release 构建仍使用 stable 的 `NomiFun` 目录。需要隔离复现时显式设置
 `NOMIFUN_DATA_DIR` 或 `--data-dir`；开发启动不会导入 stable 的历史 Agent 状态。
+
+macOS 开发启动器给每一代 App 进程传入 `-ApplePersistenceIgnoreState YES`，
+避免上一次崩溃的系统窗口恢复提示阻塞 Tauri 启动及后端监听。该设置只作用于当前进程，
+不写入用户偏好，不删除系统保存状态，也不改变正式发布 App 的窗口恢复行为。
 
 桌面循环已经不是旧 Electron 模型。Tauri shell 直接链接 `nomifun-app`，在进程内
 启动后端，选择一个空闲 localhost 端口，注入 `window.__backendPort` 与
@@ -141,7 +146,7 @@ cargo run -p nomifun-app --bin nomicore -- doctor
 - macOS：`~/Library/Application Support/NomiFun`
 - Linux：`$XDG_DATA_HOME/NomiFun` 或 `~/.local/share/NomiFun`
 
-数据目录包含 SQLite、日志、Bun runtime cache、extension 数据和 agent 状态。
+数据目录包含 SQLite、日志、managed runtime cache、extension 数据和 agent 状态。
 后端启动时会先拿 `{data_dir}/server.lock` 独占锁，避免两个活跃后端同时写同一
 目录。
 

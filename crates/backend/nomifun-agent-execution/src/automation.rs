@@ -24,6 +24,7 @@ pub fn resolve_frozen_execution_workspace(
         ));
     }
     let mut roots = BTreeSet::new();
+    let mut logical_managed = false;
     for resource in binding.typed_resource_bindings.iter().filter(|resource| {
         matches!(
             resource.resource_kind.as_str(),
@@ -34,6 +35,14 @@ pub fn resolve_frozen_execution_workspace(
             return Err(AppError::Forbidden(
                 "Agent execution workspace resource belongs to another owner".to_owned(),
             ));
+        }
+        if resource.typed_parameters == nomifun_agent_contracts::managed_workspace_parameters() {
+            if !((resource.resource_kind == "workspace" && resource.resource_id == DEFAULT_WORKSPACE_RESOURCE_ID)
+                || (resource.resource_kind == "process_session" && resource.resource_id == MANAGED_PROCESS_SESSION_RESOURCE_ID)) {
+                return Err(AppError::Conflict("external Workspace cannot use a managed Session location".into()));
+            }
+            logical_managed = true;
+            continue;
         }
         let root = resource
             .typed_parameters
@@ -46,7 +55,7 @@ pub fn resolve_frozen_execution_workspace(
         validate_workspace_root(root)?;
         roots.insert(root.clone());
     }
-    if roots.len() > 1 {
+    if roots.len() > 1 || (logical_managed && !roots.is_empty()) {
         return Err(AppError::Conflict(
             "Agent execution binding contains conflicting workspace roots".to_owned(),
         ));
@@ -60,7 +69,11 @@ pub fn resolve_frozen_automation_workspace(
     owner_id: &str,
     binding: &AgentBindingValueDto,
 ) -> Result<Option<String>, AppError> {
-    resolve_frozen_execution_workspace(owner_id, binding)
+    let resolved = resolve_frozen_execution_workspace(owner_id, binding)?;
+    if resolved.is_none() && uses_managed_session_workspace(binding) {
+        return Err(AppError::Conflict("managed Workspace requires an exact Session and host root".into()));
+    }
+    Ok(resolved)
 }
 
 fn uses_managed_session_workspace(binding: &AgentBindingValueDto) -> bool {
@@ -90,7 +103,7 @@ pub fn resolve_frozen_session_workspace(
     managed_workspace_root: &Path,
 ) -> Result<Option<String>, AppError> {
     let frozen = resolve_frozen_execution_workspace(owner_id, binding)?;
-    if frozen.is_none() || !uses_managed_session_workspace(binding) {
+    if !uses_managed_session_workspace(binding) {
         return Ok(frozen);
     }
     nomifun_common::validate_uuidv7(session_id).map_err(|error| {
@@ -154,7 +167,7 @@ pub fn admit_frozen_automation_workspace(
     requested: Option<&str>,
 ) -> Result<Option<String>, AppError> {
     let bound = binding
-        .map(|binding| resolve_frozen_execution_workspace(owner_id, binding))
+        .map(|binding| resolve_frozen_automation_workspace(owner_id, binding))
         .transpose()?
         .flatten();
     if let Some(requested) = requested {
@@ -426,5 +439,26 @@ mod tests {
             .is_err(),
             "the shared installation root must never be admitted as a Session workspace",
         );
+    }
+
+    #[test]
+    fn logical_managed_workspaces_resolve_at_the_host_and_reject_mixed_authority() {
+        const SESSION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000031";
+        let work_root = std::env::temp_dir().join("nomifun-logical-work-root");
+        let managed_root = work_root.join("conversations");
+        let mut workspace = resource("workspace", "owner", None);
+        workspace.resource_id = "default-workspace".into();
+        workspace.typed_parameters = nomifun_agent_contracts::managed_workspace_parameters();
+        let mut process = resource("process_session", "owner", None);
+        process.resource_id = "managed-process-session".into();
+        process.typed_parameters = nomifun_agent_contracts::managed_workspace_parameters();
+        let exact = binding(vec![workspace.clone(), process.clone()]);
+        assert_eq!(resolve_frozen_session_workspace("owner", &exact, SESSION_ID, &managed_root).unwrap(),
+            Some(managed_root.join(SESSION_ID).to_string_lossy().into_owned()));
+        assert!(resolve_frozen_automation_workspace("owner", &exact).is_err(), "logical references require a concrete Session");
+        process.typed_parameters = BTreeMap::from([("workspace_root".into(), work_root.to_string_lossy().into_owned())]);
+        assert!(resolve_frozen_session_workspace("owner", &binding(vec![workspace.clone(), process]), SESSION_ID, &managed_root).is_err());
+        workspace.resource_id = "selected-workspace:external".into();
+        assert!(resolve_frozen_session_workspace("owner", &binding(vec![workspace]), SESSION_ID, &managed_root).is_err());
     }
 }

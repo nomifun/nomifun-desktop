@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "startup",
+  "description": "Only the local pre-backend preparation page can listen for its real progress.",
+  "webviews": ["startup"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

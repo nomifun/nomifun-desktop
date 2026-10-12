@@ -8,15 +8,17 @@ import {
   Button,
   Checkbox,
   Input,
-  InputNumber,
   Modal,
-  Select,
   Switch,
 } from '@arco-design/web-react';
 import { Delete, Plus } from '@icon-park/react';
 import React, { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+
+import NomiInput from '@renderer/components/base/NomiInput';
+import NomiInputNumber from '@renderer/components/base/NomiInputNumber';
+import NomiSelect from '@renderer/components/base/NomiSelect';
 
 import { parseProviderId } from '@/common/types/ids';
 import { OutputLimitInput } from '@/renderer/pages/settings/components/OutputLimitInput';
@@ -36,7 +38,7 @@ import {
   type CreativeTemplatePromptPlanningSettings,
   type CreativeTemplateVariable,
 } from '../domain';
-import styles from './CreativeTemplateWorkspacePage.module.css';
+import styles from './TemplateWorkspaceDialogs.module.css';
 import {
   convertTemplateVariable,
   createTemplateVariable,
@@ -212,13 +214,13 @@ const VariableValueEditor: React.FC<{
     return variable.type === 'multiline-text' ? (
       <Input.TextArea {...controlProps} autoSize={{ minRows: 2, maxRows: 4 }} />
     ) : (
-      <Input {...controlProps} />
+      <NomiInput {...controlProps} />
     );
   }
   if (variable.type === 'number') {
     return (
       <div className={styles.variableValueGrid}>
-        <InputNumber
+        <NomiInputNumber
           value={variable.defaultValue ?? undefined}
           placeholder={t('creativeStudio.templates.editor.default.number', {
             defaultValue: 'Default number',
@@ -231,7 +233,7 @@ const VariableValueEditor: React.FC<{
             )
           }
         />
-        <InputNumber
+        <NomiInputNumber
           value={variable.minimum ?? undefined}
           placeholder={t('creativeStudio.templates.editor.minimum', {
             defaultValue: 'Minimum',
@@ -244,7 +246,7 @@ const VariableValueEditor: React.FC<{
             )
           }
         />
-        <InputNumber
+        <NomiInputNumber
           value={variable.maximum ?? undefined}
           placeholder={t('creativeStudio.templates.editor.maximum', {
             defaultValue: 'Maximum',
@@ -281,7 +283,7 @@ const VariableValueEditor: React.FC<{
   if (variable.type === 'choice') {
     return (
       <div className={styles.variableValueGrid}>
-        <Input
+        <NomiInput
           value={variable.options.join(' / ')}
           placeholder={t('creativeStudio.templates.editor.optionsPlaceholder', {
             defaultValue: 'Option one / Option two',
@@ -303,7 +305,7 @@ const VariableValueEditor: React.FC<{
             );
           }}
         />
-        <Select
+        <NomiSelect
           value={variable.defaultValue ?? undefined}
           placeholder={t('creativeStudio.templates.editor.default.option', {
             defaultValue: 'Default option',
@@ -460,7 +462,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                 defaultValue: 'Basic information',
               })}
             </h3>
-            <Input
+            <NomiInput
               value={template.metadata.name}
               placeholder={t('creativeStudio.templates.editor.namePlaceholder', {
                 defaultValue: 'Template name',
@@ -469,7 +471,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
               onChange={(name) => patchMetadata({ name })}
             />
             <div className={styles.twoColumns}>
-              <Input
+              <NomiInput
                 value={template.metadata.category}
                 placeholder={t('creativeStudio.templates.editor.categoryPlaceholder', {
                   defaultValue: 'Category, e.g. e-commerce poster',
@@ -477,7 +479,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                 maxLength={80}
                 onChange={(category) => patchMetadata({ category })}
               />
-              <Select
+              <NomiSelect
                 value={mode}
                 options={[
                   {
@@ -544,7 +546,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
               {template.variables.map((variable) => (
                 <article key={variable.id} className={styles.variableCard}>
                   <div className={styles.variableRow}>
-                    <Input
+                    <NomiInput
                       value={variable.key}
                       placeholder={t(
                         'creativeStudio.templates.editor.variableKeyPlaceholder',
@@ -554,7 +556,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                         onChange(patchVariable(template, variable, { key }))
                       }
                     />
-                    <Input
+                    <NomiInput
                       value={variable.label}
                       placeholder={t('creativeStudio.templates.editor.variableLabelPlaceholder', {
                         defaultValue: 'Display name',
@@ -563,7 +565,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                         onChange(patchVariable(template, variable, { label }))
                       }
                     />
-                    <Select
+                    <NomiSelect
                       value={variable.type}
                       options={variableTypeOptions}
                       onChange={(type) =>
@@ -685,7 +687,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                 defaultValue: 'Quality',
               })}
             </span>
-            <Select
+            <NomiSelect
               value={generate.generation.quality}
               options={qualityOptions}
               onChange={(quality) => onChange(patchGeneration(template, { quality }))}
@@ -705,7 +707,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                 defaultValue: 'Images per prompt',
               })}
             </span>
-            <InputNumber
+            <NomiInputNumber
               min={1}
               max={imageSizeContext?.policy.maxCount ?? 6}
               value={generate.generation.imagesPerPrompt}
@@ -791,7 +793,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                       defaultValue: 'Number of images',
                     })}
                   </span>
-                  <InputNumber
+                  <NomiInputNumber
                     min={2}
                     max={20}
                     value={output.targetCount}
@@ -810,7 +812,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                       defaultValue: 'Concurrency',
                     })}
                   </span>
-                  <InputNumber
+                  <NomiInputNumber
                     min={1}
                     max={20}
                     value={output.concurrency}

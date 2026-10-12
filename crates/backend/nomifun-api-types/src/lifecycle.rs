@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 /// Response for `GET /api/system/info`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 pub struct SystemInfoResponse {
     pub cache_dir: String,
+    /// Effective persistent dataset root; distinct from project workspaces.
+    pub data_dir: String,
     pub work_dir: String,
     pub log_dir: String,
     /// Opaque identity of the current on-disk dataset. Browser caches must
@@ -28,14 +30,43 @@ pub struct UpdateCheckRequest {
     pub repo: Option<String>,
 }
 
-/// Request body for `POST /api/system/work-dir`: request a user-chosen
-/// conversation workspace root for the next boot. Changing a finalized
-/// dataset's root creates one fresh v3 generation; historical data is not
-/// migrated.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Prepare a relocation plan without changing the current live dataset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
-pub struct UpdateWorkDirRequest {
-    pub work_dir: String,
+pub struct PrepareStorageRelocationRequest {
+    pub target_dir: String,
+}
+
+/// Start or cancel the exact persisted plan the user inspected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct StorageRelocationOperationRequest {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+pub struct StorageRelocationBlocker {
+    pub code: String,
+    pub message: String,
+}
+
+/// Durable relocation state. Preparing or scheduling a move does not change
+/// `current_dir`, the dataset identity, or the canonical Agent generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+pub struct StorageRelocationResponse {
+    pub operation_id: Option<String>,
+    pub phase: String,
+    pub current_dir: String,
+    pub target_dir: Option<String>,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub file_count: u64,
+    pub blockers: Vec<StorageRelocationBlocker>,
+    pub warnings: Vec<String>,
+    pub restart_required: bool,
+    pub cancellable: bool,
+    pub error: Option<String>,
 }
 
 /// Response for `POST /api/system/check-update`.
@@ -87,6 +118,7 @@ mod tests {
     fn test_system_info_response_serialization() {
         let resp = SystemInfoResponse {
             cache_dir: "/home/user/.cache/nomifun".into(),
+            data_dir: "/home/user/.local/share/nomifun".into(),
             work_dir: "/home/user/.local/share/nomifun".into(),
             log_dir: "/home/user/.local/state/nomifun/logs".into(),
             storage_generation: "01900000-0000-7000-8000-000000000000".into(),
@@ -96,6 +128,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["cache_dir"], "/home/user/.cache/nomifun");
+        assert_eq!(json["data_dir"], "/home/user/.local/share/nomifun");
         assert_eq!(json["work_dir"], "/home/user/.local/share/nomifun");
         assert_eq!(json["log_dir"], "/home/user/.local/state/nomifun/logs");
         assert_eq!(
@@ -114,6 +147,7 @@ mod tests {
     fn test_system_info_response_roundtrip() {
         let original = SystemInfoResponse {
             cache_dir: "/tmp/cache".into(),
+            data_dir: "/tmp/data".into(),
             work_dir: "/tmp/work".into(),
             log_dir: "/tmp/logs".into(),
             storage_generation: "01900000-0000-7000-8000-000000000001".into(),
@@ -147,13 +181,36 @@ mod tests {
         assert_eq!(req.repo.as_deref(), Some("nomifun/nomifun-app"));
     }
 
-    // -- UpdateWorkDirRequest --
+    #[test]
+    fn relocation_requests_reject_retired_or_unreviewed_fields() {
+        let request: PrepareStorageRelocationRequest = serde_json::from_value(json!({
+            "target_dir": "/Users/me/NomiFun"
+        })).unwrap();
+        assert_eq!(request.target_dir, "/Users/me/NomiFun");
+        assert!(serde_json::from_value::<PrepareStorageRelocationRequest>(json!({
+            "work_dir": "/Users/me/NomiFun"
+        })).is_err());
+        assert!(serde_json::from_value::<StorageRelocationOperationRequest>(json!({
+            "operation_id": "reviewed-plan", "target_dir": "/other"
+        })).is_err());
+    }
 
     #[test]
-    fn test_update_work_dir_request_deserializes_snake_case() {
-        let raw = json!({ "work_dir": "/Users/me/Workspaces/nomi" });
-        let req: UpdateWorkDirRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.work_dir, "/Users/me/Workspaces/nomi");
+    fn relocation_response_retains_nullable_state_and_blocker_codes() {
+        let response = StorageRelocationResponse {
+            operation_id: None, phase: "idle".into(), current_dir: "/data".into(),
+            target_dir: None, total_bytes: 0, file_count: 0,
+            blockers: vec![StorageRelocationBlocker {
+                code: "TARGET_OWNED_BY_OTHER_INSTALLATION".into(), message: "Select another folder".into(),
+            }],
+            warnings: vec![], restart_required: false, cancellable: false, error: None,
+        };
+        let wire = serde_json::to_value(&response).unwrap();
+        assert!(wire["operation_id"].is_null());
+        assert!(wire["target_dir"].is_null());
+        assert!(wire["error"].is_null());
+        assert_eq!(wire["blockers"][0]["code"], "TARGET_OWNED_BY_OTHER_INSTALLATION");
+        assert_eq!(serde_json::from_value::<StorageRelocationResponse>(wire).unwrap(), response);
     }
 
     // -- UpdateCheckResult --

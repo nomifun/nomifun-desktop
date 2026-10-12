@@ -595,7 +595,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     try {
       let caught: unknown;
       try {
-        await httpRequest('POST', '/api/ppt-preview/stop', { capability });
+        await httpRequest('POST', '/api/office-preview/stop', { request_id: capability });
       } catch (error) {
         caught = error;
       }

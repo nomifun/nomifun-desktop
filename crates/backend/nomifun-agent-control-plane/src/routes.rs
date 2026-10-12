@@ -77,6 +77,10 @@ fn control_plane_router_with_legacy_skill_route(
             get(get_editor),
         )
         .route(
+            "/api/agent-presets/{preset_id}/recommended-capabilities",
+            get(get_recommended_capabilities),
+        )
+        .route(
             "/api/agent-presets/{preset_id}/revisions",
             post(save_revision),
         )
@@ -214,6 +218,16 @@ async fn get_editor(
         control_plane
             .editor(&owner, &preset_id, query.revision)
             .await?,
+    )))
+}
+
+async fn get_recommended_capabilities(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(preset_id): Path<String>,
+) -> Result<Json<ApiResponse<nomifun_api_types::AgentPresetRecommendedCapabilitiesResponse>>, ControlPlaneError> {
+    Ok(Json(ApiResponse::ok(
+        control_plane.recommended_capabilities(&owner, &preset_id).await?,
     )))
 }
 
@@ -367,6 +381,33 @@ mod tests {
             handler.contains("Extension(owner): Extension<AuthenticatedOwner>"),
             "impact inspection must remain authenticated and owner-scoped"
         );
+    }
+
+    #[tokio::test]
+    async fn recommended_capabilities_route_requires_owner_and_remains_read_only() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let library = control_plane.library(&owner).await.unwrap();
+        let id = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal].preset_id;
+        let before = control_plane.editor(&owner, id, None).await.unwrap();
+        let router = control_plane_router(control_plane.clone());
+        let request = || Request::builder()
+            .uri(format!("/api/agent-presets/{id}/recommended-capabilities"))
+            .body(Body::empty()).unwrap();
+        assert!(!router.clone().oneshot(request()).await.unwrap().status().is_success());
+        let response = router.clone().layer(Extension(AuthenticatedOwner(owner.clone())))
+            .oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["draft"]["preset_id"], *id);
+        assert_eq!(value["data"]["added_capabilities"], serde_json::json!([]));
+        assert_eq!(value["data"]["added_skills"], serde_json::json!([]));
+        assert_eq!(control_plane.editor(&owner, id, None).await.unwrap(), before);
+        let response = router.layer(Extension(AuthenticatedOwner(UserId::from("0190f5fe-7c00-7a00-8000-000000000002"))))
+            .oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

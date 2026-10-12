@@ -56,6 +56,16 @@
     "startConversation": "开始对话",
     "saveRevision": "保存配置"
   },
+  "recommendation": {
+    "preview": "补齐推荐能力",
+    "title": "推荐新增能力",
+    "current": "推荐能力已完整",
+    "reviewHint": "核对缺少的模块、操作和 Skill。补齐会重新启用你此前关闭的推荐能力，其他设置保持。",
+    "sessionHint": "保存后用于新会话。已有伙伴会话可单独应用已保存的更新。",
+    "saveFirst": "请先保存或放弃当前修改，再查看推荐新增能力。",
+    "apply": "补齐并保存",
+    "skill": "Skill · v{{version}}"
+  },
   "defaults": {
     "untitledName": "未命名 Agent",
     "forkName": "{{name}} 副本"
@@ -77,6 +87,7 @@
     "chooseModelLater": "可先选择 Agent，再配置兼容的对话模型。",
     "loadFailed": "暂时无法读取 Agent 选项，请重试。",
     "saveFailed": "Agent 未能更新，请稍后重试。",
+    "partialSave": "当前会话已更新，但默认设定未能保存。请点击“应用最新设定”重试。",
     "modelChanged": "当前模型与此 Agent 不兼容，选项已刷新，请重新选择。",
     "busy": "请等待当前回复结束后再切换 Agent。",
     "unavailableAgent": "不可用的 Agent",
@@ -86,11 +97,17 @@
       "vision": "当前模型不支持图片理解",
       "model": "当前对话模型不可用",
       "capability": "所需能力在当前环境不可用",
+      "companion": "此 Agent 需要启用伙伴能力，才能保留伙伴的人格与记忆",
       "removed": "该 Agent 已删除或尚未保存"
     },
     "label": "Agent 设定",
     "saved": "Agent 已更新",
-    "companionHint": "修改后统一应用于这位伙伴的桌面、机器人与 IM 对话；未选择时使用官方“伙伴”。"
+    "companionHint": "统一用于这位伙伴的桌面、机器人与 IM 对话；请在任务结束后切换。",
+    "officialTag": "官方",
+    "customTag": "自定义",
+    "applyLatest": "应用最新设定",
+    "applyLatestHint": "编辑并保存当前 Agent 后，将最新设定应用到这位伙伴的现有会话。",
+    "editAgent": "编辑 Agent"
   },
   "library": {
     "ariaLabel": "Agent 列表",
@@ -123,13 +140,31 @@
     "assistant": {
       "general": {
         "name": "通用",
-        "description": "预选调研、知识、工作区、协作与扩展能力，并可继续定制。"
+        "description": "集合调研、文件、办公、媒体、浏览器与电脑操作、知识、日程、协作和会话管理能力。"
       }
     },
     "coding": {
       "codex": {
         "name": "编程",
-        "description": "组合工作区读写、版本控制、进程、交付产物、项目记忆、调研与协作；电脑控制可按需添加。"
+        "description": "组合文件、命令、Git、交付物、项目记忆、知识、调研、协作、会话管理及 SSH；桌面任务可按需添加浏览器与电脑工具。"
+      }
+    },
+    "companion": {
+      "default": {
+        "name": "伙伴",
+        "description": "保留伙伴身份与记忆，配备调研、文件、办公、媒体、浏览器、应用操作、知识、日程、消息和协作等日常办事能力。"
+      }
+    },
+    "customerService": {
+      "default": {
+        "name": "客户服务",
+        "description": "整合知识查询、客户备注、回复与跟进、附件处理、交付产物和日程，适配服务工作。"
+      }
+    },
+    "creativeStudio": {
+      "default": {
+        "name": "创作",
+        "description": "组合媒体、画布、素材、办公、文件、项目记忆、调研与浏览器参考资料、协作和日程，适配创作任务。"
       }
     },
     "app": {
@@ -137,69 +172,216 @@
         "name": "内置应用",
         "description": "在应用区创建、导入和修改普通应用，配置运行命令，并按需连接 NomiFun。"
       }
-    },
-    "companion": {
-      "default": {
-        "name": "伙伴",
-        "description": "结合伙伴身份、长期记忆、知识库与定时任务；渠道、机器人和电脑控制可按需接入。"
-      }
-    },
-    "customerService": {
-      "default": {
-        "name": "客户服务",
-        "description": "整合知识查询、沟通和客户记录，适配服务工作。"
-      }
-    },
-    "creativeStudio": {
-      "default": {
-        "name": "创作",
-        "description": "面向专业多模态任务，组合媒体、画布、办公、工作区、项目记忆与 Web 调研能力。"
-      }
     }
   },
   "modules": {
-    "appHosting": {"name": "NomiFun 应用开发", "description": "在会话中创建、导入和修改应用，配置命令并预览使用；可按需读取平台连接指南。"},
-    "modelManagement": { "name": "模型管理", "description": "根据会话中提供的配置添加提供商和模型，查询协议要求与已有配置。不会覆盖已有模型或切换默认模型。" },
-    "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。" },
-    "automationSchedule": { "name": "定时任务", "description": "创建和管理持久计划，不暴露调度器内部机制。" },
-    "browser": { "name": "浏览器", "description": "观察和操作已绑定的内置浏览器或已授权 Chrome；Provider 不会扩大权限。" },
-    "channelMessaging": { "name": "渠道消息", "description": "通过使用目标选择的渠道回复或发送消息。" },
-    "companion": { "name": "伙伴", "description": "在产品边界内学习和演进所选伙伴。" },
-    "companionMemory": { "name": "伙伴记忆", "description": "读取或写入所选伙伴的记忆。" },
-    "computer": { "name": "电脑控制", "description": "高权限扩展；缺少系统授权时仅电脑操作暂不可用，不影响 Agent 的其他能力。" },
-    "creationMedia": { "name": "媒体创作", "description": "通过已配置的生成服务创作文本、图片、视频、音频和音乐。" },
-    "creativeWorkshop": { "name": "$t(agentSettings.template.creativeStudio.default.name)", "description": "处理画布、素材和可复用的创作模板。" },
-    "customerService": { "name": "客户服务", "description": "读取和更新服务备注，或将工作转交给人工。" },
-    "knowledge": { "name": "知识库", "description": "搜索、读取和更新 Agent 使用时选择的知识库。" },
-    "office": { "name": "办公文档", "description": "预览和编辑文档、表格与演示文稿。" },
-    "projectMemory": { "name": "项目记忆", "description": "读取或写入所选项目的持久记忆。" },
-    "requirements": { "name": "需求", "description": "读取、编写、更新和认领需求平台中的工作。" },
-    "robot": { "name": "机器人", "description": "观察和控制明确绑定的机器人设备。" },
-    "ssh": { "name": "SSH", "description": "在所选 SSH 主机读取文件或运行已授权命令。" },
-    "webResearch": { "name": "Web 调研", "description": "搜索公开来源并读取网页，不使用浏览器登录状态。" },
-    "workspaceArtifacts": { "name": "交付产物", "description": "将工作区文件固化为可校验的交付物，或按产物 ID 读取已发布内容。" },
-    "workspaceFiles": { "name": "工作区读写", "description": "按路径读取、搜索、创建和修改工作区中的文件。" },
-    "workspaceProcess": { "name": "本地进程", "description": "在工作区中启动、观察和控制本地命令进程。" },
-    "workspaceVcs": { "name": "版本控制", "description": "检查并明确修改所选工作区的版本控制状态。" }
+    "modelManagement": {
+      "name": "模型管理",
+      "description": "根据会话中提供的配置添加提供商和模型，查询协议要求与已有配置。不会覆盖已有模型或切换默认模型。"
+    },
+    "knowledgeManagement": {
+      "name": "知识库管理",
+      "description": "新建和管理知识库、初始资料及网页来源。仅本机安装的所有者可用，新建的库可按需在会话中选择。"
+    },
+    "sessionManagement": {
+      "name": "会话与终端管理",
+      "description": "查询和管理会话、终端及协作任务，向指定空闲会话发送明确请求。仅本机安装的所有者可用。"
+    },
+    "agentCollaboration": {
+      "name": "Agent 协作",
+      "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。"
+    },
+    "automationSchedule": {
+      "name": "定时任务",
+      "description": "创建和管理持久计划，不暴露调度器内部机制。"
+    },
+    "browser": {
+      "name": "浏览器",
+      "description": "观察和操作已绑定的浏览器。可用动作取决于浏览器：macOS 支持普通网页和表单操作，暂不支持高阶手势及自动文件传输；Provider 不会扩大权限。"
+    },
+    "channelMessaging": {
+      "name": "渠道消息",
+      "description": "通过使用目标选择的渠道回复或发送消息。"
+    },
+    "companion": {
+      "name": "伙伴",
+      "description": "在产品边界内学习和演进所选伙伴。"
+    },
+    "companionMemory": {
+      "name": "伙伴记忆",
+      "description": "读取或写入所选伙伴的记忆。"
+    },
+    "computer": {
+      "name": "电脑控制",
+      "description": "高权限扩展；缺少系统授权时仅电脑操作暂不可用，不影响 Agent 的其他能力。"
+    },
+    "creationMedia": {
+      "name": "媒体创作",
+      "description": "通过已配置的生成服务创作文本、图片、视频、音频和音乐。"
+    },
+    "creativeWorkshop": {
+      "name": "$t(agentSettings.template.creativeStudio.default.name)",
+      "description": "处理画布、素材和可复用的创作模板。"
+    },
+    "customerService": {
+      "name": "客户服务",
+      "description": "读取和更新服务备注，或将工作转交给人工。"
+    },
+    "knowledge": {
+      "name": "知识库",
+      "description": "搜索、读取和更新 Agent 使用时选择的知识库。"
+    },
+    "office": {
+      "name": "办公文档",
+      "description": "预览和编辑文档、表格与演示文稿。"
+    },
+    "projectMemory": {
+      "name": "项目记忆",
+      "description": "读取或写入所选项目的持久记忆。"
+    },
+    "requirements": {
+      "name": "需求",
+      "description": "读取、编写、更新和认领需求平台中的工作。"
+    },
+    "robot": {
+      "name": "机器人",
+      "description": "观察和控制明确绑定的机器人设备。"
+    },
+    "ssh": {
+      "name": "SSH",
+      "description": "在所选 SSH 主机读取文件或运行已授权命令。"
+    },
+    "webResearch": {
+      "name": "Web 调研",
+      "description": "搜索公开来源并读取网页，不使用浏览器登录状态。"
+    },
+    "workspaceArtifacts": {
+      "name": "交付产物",
+      "description": "将工作区文件固化为可校验的交付物，或按产物 ID 读取已发布内容。"
+    },
+    "workspaceFiles": {
+      "name": "工作区读写",
+      "description": "按路径读取、搜索、创建和修改工作区中的文件。"
+    },
+    "workspaceProcess": {
+      "name": "本地进程",
+      "description": "在工作区中启动、观察和控制本地命令进程。"
+    },
+    "workspaceVcs": {
+      "name": "版本控制",
+      "description": "检查并明确修改所选工作区的版本控制状态。"
+    },
+    "appHosting": {
+      "name": "NomiFun 应用开发",
+      "description": "在会话中创建、导入和修改应用，配置命令并预览使用；可按需读取平台连接指南。"
+    }
   },
   "actionLabels": {
-    "inspect": "查询配置与协议", "create_provider": "添加提供商", "add_model": "添加模型", "guide": "读取应用开发指南",
-    "search": "搜索", "fetch": "读取网页", "read": "读取", "write": "写入", "autogen": "生成知识",
-    "recall": "回忆", "delegate": "委派", "fork": "派生", "request_user_decision": "询问用户", "list": "查看列表", "create": "创建", "update": "更新", "delete": "删除", "edit": "编辑", "launch": "启动应用",
-    "observe": "观察", "navigate": "导航", "act": "交互", "render_content": "读取页面内容", "download": "下载", "upload": "上传", "evaluate": "执行脚本",
-    "reply": "回复", "send": "发送", "learn": "学习", "evolve": "演进", "notes_read": "读取备注", "notes_write": "写入备注", "handoff": "转交人工",
-    "text": "创作文本", "image": "生成图片", "image_edit": "编辑图片", "video": "生成视频", "audio": "生成音频", "music": "创作音乐",
-    "canvas_read": "读取画布", "canvas_edit": "编辑画布", "asset_read": "读取素材", "asset_write": "写入素材", "template_run": "运行模板",
-    "preview": "预览", "document_edit": "编辑文档", "sheet_edit": "编辑表格", "slides_edit": "编辑演示文稿",
-    "publish": "发布", "serve": "运行服务", "status": "查看状态", "diff": "查看改动", "stage": "暂存改动", "commit": "创建提交", "push": "推送",
-    "exec": "执行命令", "start": "启动进程", "poll": "读取进程输出", "input": "发送输入", "close_stdin": "关闭输入", "resize": "调整终端", "cancel": "停止进程",
-    "fs_read": "读取远程文件", "fs_write": "写入远程文件", "sudo": "执行特权命令", "claim": "认领工作", "a11y_observe": "检查无障碍树",
-    "vision": "使用机器人视觉", "display": "使用机器人显示", "motion": "控制运动", "device": "使用设备工具", "tool_discovery_rank": "发现工具"
+    "knowledge_management_list": "列出知识库",
+    "knowledge_management_inspect": "查看库信息与文档目录",
+    "knowledge_management_create": "新建知识库",
+    "knowledge_management_update": "更新库信息与网页来源",
+    "knowledge_management_delete": "删除知识库",
+    "session_management_list": "列出会话",
+    "session_management_status": "查看会话状态",
+    "session_management_create": "创建会话",
+    "session_management_send_input": "向其他会话发送请求",
+    "session_management_cancel_turn": "取消会话当前任务",
+    "session_management_terminal_list": "列出终端",
+    "session_management_terminal_create": "创建终端",
+    "session_management_terminal_read": "读取终端输出",
+    "session_management_terminal_input": "发送终端输入",
+    "session_management_terminal_relaunch": "重新启动终端",
+    "session_management_terminal_stop": "停止终端",
+    "session_management_execution_list": "列出协作任务",
+    "session_management_execution_status": "查看协作任务状态",
+    "session_management_execution_retry_step": "重试协作任务步骤",
+    "session_management_execution_adjust": "调整协作任务",
+    "session_management_execution_cancel": "取消协作任务",
+    "inspect": "查询配置与协议",
+    "create_provider": "添加提供商",
+    "add_model": "添加模型",
+    "search": "搜索",
+    "fetch": "读取网页",
+    "read": "读取",
+    "write": "写入",
+    "autogen": "生成知识",
+    "recall": "回忆",
+    "delegate": "委派",
+    "fork": "派生",
+    "request_user_decision": "询问用户",
+    "list": "查看列表",
+    "create": "创建",
+    "update": "更新",
+    "delete": "删除",
+    "edit": "编辑",
+    "launch": "启动应用",
+    "observe": "观察",
+    "navigate": "导航",
+    "act": "交互",
+    "render_content": "读取页面内容",
+    "download": "下载",
+    "upload": "上传",
+    "evaluate": "执行脚本",
+    "reply": "回复",
+    "send": "发送",
+    "learn": "学习",
+    "evolve": "演进",
+    "notes_read": "读取备注",
+    "notes_write": "写入备注",
+    "handoff": "转交人工",
+    "text": "创作文本",
+    "image": "生成图片",
+    "image_edit": "编辑图片",
+    "video": "生成视频",
+    "audio": "生成音频",
+    "music": "创作音乐",
+    "canvas_read": "读取画布",
+    "canvas_edit": "编辑画布",
+    "asset_read": "读取素材",
+    "asset_write": "写入素材",
+    "template_run": "运行模板",
+    "preview": "预览",
+    "document_edit": "编辑文档",
+    "sheet_edit": "编辑表格",
+    "slides_edit": "编辑演示文稿",
+    "publish": "发布",
+    "serve": "运行服务",
+    "status": "查看状态",
+    "diff": "查看改动",
+    "stage": "暂存改动",
+    "commit": "创建提交",
+    "push": "推送",
+    "exec": "执行命令",
+    "start": "启动进程",
+    "poll": "读取进程输出",
+    "input": "发送输入",
+    "close_stdin": "关闭输入",
+    "resize": "调整终端",
+    "cancel": "停止进程",
+    "fs_read": "读取远程文件",
+    "fs_write": "写入远程文件",
+    "sudo": "执行特权命令",
+    "claim": "认领工作",
+    "a11y_observe": "检查无障碍树",
+    "vision": "使用机器人视觉",
+    "display": "使用机器人显示",
+    "motion": "控制运动",
+    "device": "使用设备工具",
+    "tool_discovery_rank": "发现工具",
+    "guide": "读取应用开发指南"
   },
   "effects": {
-    "pure": "无外部效果", "read_local": "读取本地数据", "read_sensitive": "读取敏感数据",
-    "write_reversible": "可撤销改动", "write_durable": "持久改动", "execute_local": "在本机执行",
-    "external_transmit": "向外部发送数据", "destructive": "破坏性操作", "irreversible": "不可逆操作", "physical": "物理动作"
+    "pure": "无外部效果",
+    "read_local": "读取本地数据",
+    "read_sensitive": "读取敏感数据",
+    "write_reversible": "可撤销改动",
+    "write_durable": "持久改动",
+    "execute_local": "在本机执行",
+    "external_transmit": "向外部发送数据",
+    "destructive": "破坏性操作",
+    "irreversible": "不可逆操作",
+    "physical": "物理动作"
   },
   "availability": {
     "offline": "所选设备当前离线，请重新连接后刷新目录。",
@@ -370,22 +552,19 @@
     "mine": "我的 Agent",
     "official": "官方预设",
     "noAgents": "暂无匹配的 Agent",
-    "officialHint": "从预设开始，也可以自由调整",
+    "officialHint": "直接编辑官方 Agent，保存后用于对应产品入口",
     "myHint": "为你的工作准备好合适的 Agent",
     "capabilityTab": "模块与操作",
     "settingsTab": "名称与行为",
     "runtimeTab": "运行策略",
     "extensionsTab": "执行扩展",
-    "saveAsMine": "保存为我的 Agent",
     "customizeTitle": "自定义这份预设",
     "customizeHint": "自由调整能力，保存为你的 Agent。官方预设仍可随时使用。",
-    "readyToSave": "等待服务端校验",
     "pendingChanges": "有未保存的修改",
     "savedHint": "所有修改已保存",
     "saveHint": "该已保存 Revision 可用于新会话。",
     "previewCompileHint": "保存时由服务端权威编译精确操作、Provider 和资源要求。",
     "resetChanges": "还原修改",
-    "resetTemplate": "恢复预设能力",
     "leaveTitle": "还有未保存的修改",
     "leaveBody": "切换后，这些修改会被放弃。",
     "keepEditing": "继续编辑",
@@ -404,6 +583,12 @@
     "disabledSave": "请先处理不可用模块或操作",
     "presetBadge": "可自定义预设",
     "personalBadge": "个人 Agent",
+    "officialBadge": "官方 Agent · 个人配置",
+    "officialSaveHint": "保存后用于新会话；已有伙伴会话可在伙伴设置中应用更新。",
+    "createCopy": "创建副本",
+    "openCompanions": "打开伙伴",
+    "openCustomerService": "打开客服",
+    "companionCoreNeeded": "伙伴需要保留伙伴与伙伴记忆能力。可继续增加其他能力，或创建独立副本。",
     "editIdentity": "编辑 Agent 信息",
     "editName": "修改 Agent 名称",
     "createHint": "从空白开始",
@@ -423,7 +608,11 @@
     "dependencyActionPermissions": "依赖内部可用的操作",
     "moduleUnavailableSummary": "有 {{count}} 个已启用模块、操作或运行条件需要处理。",
     "searchModules": "搜索模块、操作或资源",
-    "moduleStatus": { "all": "全部", "enabled": "生效中", "attention": "需要处理" },
+    "moduleStatus": {
+      "all": "全部",
+      "enabled": "生效中",
+      "attention": "需要处理"
+    },
     "moduleCategories": "模块分类",
     "moduleCategoryCount": "已启用 {{enabled}} 个，总计 {{total}} 个",
     "moduleCatalog": "能力模块与依赖",
@@ -456,7 +645,10 @@
     "emptyWorkbenchTitle": "创建第一个 Agent",
     "emptyWorkbenchHint": "当前没有官方预设或个人 Agent。可先创建空白自定义 Agent，再从已安装目录添加模块。",
     "showList": "展开 Agent 列表",
-    "hideList": "收起 Agent 列表"
+    "hideList": "收起 Agent 列表",
+    "saveAsMine": "保存为我的 Agent",
+    "readyToSave": "等待服务端校验",
+    "resetTemplate": "恢复预设能力"
   },
   "runtimePolicy": {
     "title": "运行与值守",

@@ -34,7 +34,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, parse, resolve, sep } from 'node:path';
+import { dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -42,14 +42,11 @@ import {
   resolveReleaseArtifactPath,
   sha256File,
 } from '../release/release-lock.mjs';
+import { inspectMacosAppBundle } from '../lib/macos-app-bundle.mjs';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
-export const EXPECTED_CEF = Object.freeze(JSON.parse(readFileSync(
-  new URL('../../apps/desktop/browser-runtime.json', import.meta.url), 'utf8',
-)));
-export const CEF_HELPER_NAMES = Object.freeze([...EXPECTED_CEF.helpers]);
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json';
 
@@ -359,136 +356,40 @@ function checkOptionalArtifactOverride(report, id, override, lockedPath) {
   });
 }
 
-function exactArm64MachO(path, runCommand) {
-  const result = runCommand('lipo', ['-archs', path]);
-  const architectures = result.stdout.trim().split(/\s+/).filter(Boolean).sort();
-  return {
-    status: result.status === 0 && architectures.length === 1 && architectures[0] === 'arm64'
-      ? 'pass'
-      : 'fail',
-    path,
-    architectures,
-    exit_code: result.status,
-    stderr_tail: result.stderr.slice(-2_000),
-  };
+export async function inspectNativeAppBundle(appPath) {
+  try {
+    return await inspectMacosAppBundle(appPath);
+  } catch (error) {
+    return { status: 'fail', appPath, reason: error.message };
+  }
 }
 
-export function inspectCefBundle(
-  appPath,
-  runCommand = command,
-  inspectPath = validatePathShape,
-) {
-  const frameworkApp = join(
-    appPath,
-    'Contents/Frameworks/Chromium Embedded Framework.framework',
-  );
-  const frameworkBinary = join(frameworkApp, 'Chromium Embedded Framework');
-  const runtimeMetadata = join(appPath, 'Contents/Resources/browser-cef/runtime.json');
-  const credits = join(appPath, 'Contents/Resources/browser-cef/CREDITS.html');
-  const metadataShape = inspectPath(runtimeMetadata);
-  const creditsShape = inspectPath(credits);
-  let metadata = null;
-  let metadataError = null;
-  if (metadataShape.status === 'pass') {
-    try {
-      metadata = readJson(runtimeMetadata);
-    } catch (error) {
-      metadataError = error.message;
+// Compare every shipped regular file and symlink, including the signed host,
+// resources and native libraries. System WebKit is never part of this inventory.
+function bundleFingerprints(appPath) {
+  const entries = {};
+  function visit(directory) {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const metadata = lstatSync(path);
+      const key = relative(appPath, path).split(sep).join('/');
+      if (metadata.isSymbolicLink()) {
+        entries[key] = { kind: 'symlink', target: readlinkSync(path) };
+      } else if (metadata.isDirectory()) {
+        entries[key] = { kind: 'directory' };
+        visit(path);
+      } else if (metadata.isFile()) {
+        entries[key] = { kind: 'file', sha256: sha256File(path), mode: metadata.mode & 0o777 };
+      } else {
+        throw new Error(`unsupported app bundle entry: ${key}`);
+      }
     }
   }
-  const metadataValid = metadataShape.status === 'pass'
-    && ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1']
-      .every(field => metadata?.[field] === EXPECTED_CEF[field]);
-
-  const frameworkShape = inspectPath(frameworkBinary, { requireExecutable: true });
-  const frameworkArchitecture = frameworkShape.status === 'pass'
-    ? exactArm64MachO(frameworkBinary, runCommand)
-    : { status: 'fail', path: frameworkBinary, reason: frameworkShape.reason || 'missing' };
-  const helpers = CEF_HELPER_NAMES.map((name) => {
-    const app = join(appPath, 'Contents/Frameworks', `${name}.app`);
-    const binary = join(app, 'Contents/MacOS', name);
-    const appShape = inspectPath(app, { kind: 'directory' });
-    const binaryShape = inspectPath(binary, { requireExecutable: true });
-    const architecture = binaryShape.status === 'pass'
-      ? exactArm64MachO(binary, runCommand)
-      : { status: 'fail', path: binary, reason: binaryShape.reason || 'missing' };
-    const signature = runCommand(
-      'codesign',
-      ['--verify', '--strict', '--verbose=2', app],
-      120_000,
-    );
-    return {
-      name,
-      app,
-      binary,
-      app_shape: appShape.status,
-      binary_shape: binaryShape.status,
-      architecture: architecture.architectures || [],
-      architecture_status: architecture.status,
-      signature_status: signature.status === 0 ? 'pass' : 'fail',
-      signature_stderr_tail: signature.stderr.slice(-2_000),
-    };
-  });
-  const frameworkSignature = runCommand(
-    'codesign',
-    ['--verify', '--strict', '--verbose=2', frameworkApp],
-    120_000,
-  );
-  const status = metadataValid
-    && creditsShape.status === 'pass'
-    && frameworkShape.status === 'pass'
-    && frameworkArchitecture.status === 'pass'
-    && frameworkSignature.status === 0
-    && helpers.every((helper) => helper.app_shape === 'pass'
-      && helper.binary_shape === 'pass'
-      && helper.architecture_status === 'pass'
-      && helper.signature_status === 'pass')
-    ? 'pass'
-    : 'fail';
-  return {
-    status,
-    metadata: {
-      status: metadataValid ? 'pass' : 'fail',
-      path: runtimeMetadata,
-      value: metadata,
-      error: metadataError,
-    },
-    credits: { status: creditsShape.status, path: credits },
-    framework: {
-      path: frameworkBinary,
-      shape: frameworkShape.status,
-      architecture: frameworkArchitecture.architectures || [],
-      architecture_status: frameworkArchitecture.status,
-      signature_status: frameworkSignature.status === 0 ? 'pass' : 'fail',
-      signature_stderr_tail: frameworkSignature.stderr.slice(-2_000),
-    },
-    helpers,
-  };
+  visit(appPath);
+  return entries;
 }
 
-function bundleFingerprints(appPath) {
-  const paths = {
-    host: join(appPath, 'Contents/MacOS/nomifun-desktop'),
-    runtime: join(appPath, 'Contents/Resources/browser-cef/runtime.json'),
-    framework: join(
-      appPath,
-      'Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework',
-    ),
-  };
-  for (const name of CEF_HELPER_NAMES) {
-    paths[`helper:${name}`] = join(
-      appPath,
-      'Contents/Frameworks',
-      `${name}.app/Contents/MacOS`,
-      name,
-    );
-  }
-  return Object.fromEntries(
-    Object.entries(paths).map(([name, path]) => [name, { path, sha256: sha256File(path) }]),
-  );
-}
-
-function inspectMountedDmg(dmgPath, sourceAppPath, runCommand, inspectPath) {
+export async function inspectMountedDmg(dmgPath, sourceAppPath, runCommand = command, inspectPath = validatePathShape) {
   const temporary = mkdtempSync(join(tmpdir(), 'nomifun-dmg-inspect-'));
   const mountpoint = join(temporary, 'mounted');
   mkdirSync(mountpoint);
@@ -523,25 +424,25 @@ function inspectMountedDmg(dmgPath, sourceAppPath, runCommand, inspectPath) {
     if (appShape.status !== 'pass') {
       return { status: 'fail', reason: 'mounted_app_missing', mounted_app: mountedApp };
     }
-    const cef = inspectCefBundle(mountedApp, runCommand, inspectPath);
+    const bundle = await inspectNativeAppBundle(mountedApp);
     let identical = false;
     let fingerprintError = null;
     try {
       const source = bundleFingerprints(sourceAppPath);
       const mounted = bundleFingerprints(mountedApp);
-      identical = Object.keys(source).every((key) => source[key].sha256 === mounted[key]?.sha256);
+      identical = JSON.stringify(source) === JSON.stringify(mounted);
     } catch (error) {
       fingerprintError = error.message;
     }
     return {
-      status: cef.status === 'pass' && identical && applicationLinkStatus === 'pass'
+      status: bundle.status === 'pass' && identical && applicationLinkStatus === 'pass'
         ? 'pass'
         : 'fail',
       mounted_app: mountedApp,
       applications_link: applicationLinkStatus,
       app_matches_staged_source: identical,
       fingerprint_error: fingerprintError,
-      cef,
+      bundle,
     };
   } finally {
     if (attached) runCommand('hdiutil', ['detach', mountpoint], 120_000);
@@ -1021,9 +922,8 @@ export async function runValidation(
         stdout_tail: signature.stdout.slice(-2_000),
         stderr_tail: signature.stderr.slice(-2_000),
       });
-      const cef = inspectCefBundle(appPath, runCommand, inspectPath);
-      check(report, 'macos-app:cef-runtime-framework-helpers', cef.status, cef);
-      report.artifacts.cef_runtime = cef.metadata.path;
+      const bundle = await inspectNativeAppBundle(appPath);
+      check(report, 'macos-app:system-webkit-policy', bundle.status, bundle);
     }
   } else {
     check(report, 'macos-app:artifact', 'blocked', {
@@ -1048,7 +948,7 @@ export async function runValidation(
     if (verify.status === 0 && appPath) {
       const inspectDmg = execution.inspectDmg || inspectMountedDmg;
       const mounted = await inspectDmg(dmgPath, appPath, runCommand, inspectPath);
-      check(report, 'macos-package:mounted-app-cef-identity', mounted.status, mounted);
+      check(report, 'macos-package:mounted-app-identity', mounted.status, mounted);
     }
     if (options.requireNotarization) {
       const packageSignature = runCommand(

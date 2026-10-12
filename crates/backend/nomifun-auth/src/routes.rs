@@ -21,7 +21,7 @@ use nomifun_db::{IUserRepository, models::User};
 
 use crate::extract::extract_token_from_headers;
 use crate::middleware::{AuthState, CurrentUser, auth_middleware};
-use crate::trust::require_local_trust_middleware;
+use crate::trust::{AuthPolicy, require_local_trust_middleware, require_owner_setup_permission_middleware};
 use crate::password::{dummy_password_hash, generate_password, hash_password, verify_password_timed};
 use crate::qr_token::QrTokenStore;
 use crate::rate_limit::{
@@ -33,6 +33,8 @@ use crate::{CookieConfig, JwtService};
 /// Shared state for all auth route handlers.
 #[derive(Clone)]
 pub struct AuthRouterState {
+    /// The instance's actual policy, shared with upstream trust resolution.
+    pub auth_policy: AuthPolicy,
     pub jwt_service: Arc<JwtService>,
     pub user_repo: Arc<dyn IUserRepository>,
     pub cookie_config: Arc<CookieConfig>,
@@ -84,9 +86,11 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
     // Auth rate limited routes (login, setup, qr-login)
     let auth_rate_limited = Router::new()
         .route("/login", post(login_handler))
-        .route("/api/auth/setup", post(setup_handler))
+        .route("/api/auth/setup", post(setup_handler).route_layer(from_fn_with_state(
+            state.auth_policy, require_owner_setup_permission_middleware,
+        )))
         .route("/api/auth/qr-login", post(qr_login_handler))
-        .route_layer(from_fn_with_state(auth_limiter, auth_rate_limit_middleware))
+        .route_layer(from_fn_with_state(auth_limiter.clone(), auth_rate_limit_middleware))
         .with_state(state.clone());
 
     // Truly public, no-auth route: first-run/login status probe.
@@ -133,12 +137,13 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
             authenticated_action_rate_limit_middleware,
         ))
         .route_layer(from_fn_with_state(api_limiter, api_rate_limit_middleware))
-        .with_state(state);
+        .with_state(state.clone());
 
     // Static page (no middleware)
     let static_routes = Router::new().route("/qr-login", get(qr_login_page));
 
     Router::new()
+        .merge(crate::connections::connection_routes(state, auth_limiter))
         .merge(auth_rate_limited)
         .merge(api_public)
         .merge(api_local_only)
@@ -162,6 +167,27 @@ async fn login_handler(
     state.cookie_config.reject_plaintext_login_when_secure(&headers)?;
 
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let user = authenticate_password(&state, &req).await?;
+
+    let token = state
+        .jwt_service
+        .sign(user.user_id.as_str(), &user.username)
+        .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
+
+    // Update last login (best-effort)
+    if let Err(e) = state.user_repo.update_last_login(user.user_id.as_str()).await {
+        tracing::warn!("Failed to update last login for {}: {e}", user.user_id);
+    }
+
+    let cookie = state.cookie_config.build_session_cookie(&token);
+    let resp = LoginResponse::new(into_public_user(user)?, token);
+
+    Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
+}
+
+/// The same password verification owner serves browser and Mobile credentials.
+pub(crate) async fn authenticate_password(state: &AuthRouterState, req: &LoginRequest) -> Result<User, AppError> {
 
     // Input length validation (per API spec)
     if req.username.len() > 32 {
@@ -201,22 +227,7 @@ async fn login_handler(
         return Err(AppError::Unauthorized("Invalid username or password".into()));
     }
 
-    let user = found_user.ok_or_else(|| AppError::Unauthorized("Invalid username or password".into()))?;
-
-    let token = state
-        .jwt_service
-        .sign(user.user_id.as_str(), &user.username)
-        .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
-
-    // Update last login (best-effort)
-    if let Err(e) = state.user_repo.update_last_login(user.user_id.as_str()).await {
-        tracing::warn!("Failed to update last login for {}: {e}", user.user_id);
-    }
-
-    let cookie = state.cookie_config.build_session_cookie(&token);
-    let resp = LoginResponse::new(into_public_user(user)?, token);
-
-    Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
+    found_user.ok_or_else(|| AppError::Unauthorized("Invalid username or password".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +236,14 @@ async fn login_handler(
 
 async fn logout_handler(State(state): State<AuthRouterState>, headers: HeaderMap) -> Result<Response, AppError> {
     if let Some(token) = extract_token_from_headers(&headers) {
-        state.jwt_service.blacklist_token(&token);
+        if let Ok(payload) = state.jwt_service.verify(&token)
+            && let Some(device_id) = payload.device_id.as_deref()
+        {
+            state.jwt_service.devices.revoke(device_id, payload.user_id.as_str()).await?;
+            state.jwt_service.notify_invalidated();
+        } else {
+            state.jwt_service.blacklist_token(&token);
+        }
     }
 
     let cookie = state.cookie_config.clear_session_cookie();
@@ -298,6 +316,27 @@ async fn setup_handler(
     // before it creates an admin whose session cookie can never stick.
     state.cookie_config.reject_plaintext_login_when_secure(&headers)?;
 
+    let user = initialize_owner(&state, body.map(|Json(req)| req).map_err(|e| AppError::BadRequest(e.to_string()))).await?;
+
+    let token = state
+        .jwt_service
+        .sign(user.user_id.as_str(), &user.username)
+        .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
+
+    if let Err(e) = state.user_repo.update_last_login(user.user_id.as_str()).await {
+        tracing::warn!("Failed to update last login for {}: {e}", user.user_id);
+    }
+
+    let cookie = state.cookie_config.build_session_cookie(&token);
+    let resp = LoginResponse::new(into_public_user(user)?, token);
+
+    tracing::info!("first-run setup: initial admin account created");
+    Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
+}
+
+/// First-run atomic account claim, independent from the resulting credential.
+pub(crate) async fn initialize_owner(state: &AuthRouterState, req: Result<LoginRequest, AppError>) -> Result<User, AppError> {
+
     // One-time only: refuse once any real (non-empty-password) user exists.
     let has_users = state
         .user_repo
@@ -308,8 +347,7 @@ async fn setup_handler(
         return Err(AppError::Conflict("Admin account already initialized".into()));
     }
 
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-
+    let req = req?;
     let username = req.username.trim().to_owned();
     validate_username(&username).map_err(|e| AppError::BadRequest(e.to_string()))?;
     validate_password(&req.password).map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -340,20 +378,7 @@ async fn setup_handler(
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| AppError::Internal("Admin user missing after setup".into()))?;
 
-    let token = state
-        .jwt_service
-        .sign(user.user_id.as_str(), &user.username)
-        .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
-
-    if let Err(e) = state.user_repo.update_last_login(user.user_id.as_str()).await {
-        tracing::warn!("Failed to update last login for {}: {e}", user.user_id);
-    }
-
-    let cookie = state.cookie_config.build_session_cookie(&token);
-    let resp = LoginResponse::new(into_public_user(user)?, token);
-
-    tracing::info!("first-run setup: initial admin account created");
-    Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
+    Ok(user)
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +428,10 @@ async fn change_password_handler(
     let new_hash = tokio::task::spawn_blocking(move || hash_password(&password))
         .await
         .map_err(|e| AppError::Internal(format!("Task join error: {e}")))??;
+
+    // Devices are revoked first so a later failure can only leave them revoked (fail closed).
+    state.jwt_service.devices.revoke_all(current_user.id.as_str()).await?;
+    state.jwt_service.notify_invalidated();
 
     // Persist new password hash
     state
@@ -483,23 +512,37 @@ async fn change_username_handler(
 async fn refresh_handler(
     State(state): State<AuthRouterState>,
     body: Result<Json<RefreshTokenRequest>, JsonRejection>,
-) -> Result<Json<RefreshResponse>, AppError> {
+) -> Result<Response, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let payload = state
-        .jwt_service
-        .verify(&req.token)
-        .map_err(|_| AppError::Unauthorized("Invalid or expired token".into()))?;
+    let payload = match state.jwt_service.verify(&req.token) {
+        Ok(payload) => payload,
+        Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::UNAUTHORIZED)),
+        Err(_) => return Err(AppError::Unauthorized("Invalid or expired token".into())),
+    };
 
-    let new_token = state
-        .jwt_service
-        .sign(payload.user_id.as_str(), &payload.username)
-        .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
+    let user = state.user_repo.find_by_id(payload.user_id.as_str()).await?
+        .ok_or_else(|| AppError::Unauthorized("User no longer exists".into()))?;
+
+    let new_token = match state.jwt_service.renew(&payload, &user.username) {
+        Ok(token) => token,
+        Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::UNAUTHORIZED)),
+        Err(error) => return Err(AppError::Internal(format!("Token signing error: {error}"))),
+    };
+
+    // The original authority must survive the async user lookup and signing.
+    // A secret rotation or device revocation cannot turn a stale token into a
+    // fresh credential signed with the replacement secret.
+    match state.jwt_service.verify(&req.token) {
+        Ok(_) => {}
+        Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::UNAUTHORIZED)),
+        Err(_) => return Err(AppError::Unauthorized("Invalid or expired token".into())),
+    }
 
     Ok(Json(RefreshResponse {
         success: true,
         token: new_token,
-    }))
+    }).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +933,7 @@ mod tests {
         user_repo: Arc<dyn IUserRepository>,
     ) -> AuthRouterState {
         AuthRouterState {
+            auth_policy: AuthPolicy::Required,
             jwt_service,
             user_repo,
             cookie_config: Arc::new(CookieConfig {

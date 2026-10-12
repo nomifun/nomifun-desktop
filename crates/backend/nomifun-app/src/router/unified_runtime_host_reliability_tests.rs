@@ -35,6 +35,7 @@ struct Fixture {
     services: crate::services::AppServices,
     host: Arc<ConversationRuntimeHost>,
     owner: Arc<super::super::nomi_core_session::NomiCoreSessionOwner>,
+    api_state: super::super::nomi_core_session::NomiCoreAgentApiState,
     voice_control:Arc<nomifun_agent_control_plane::AgentControlPlane>,
     voice_execution:Arc<nomifun_agent_execution::AgentExecutionEngine>,
     message: SendMessageData,
@@ -60,7 +61,7 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
             .map(|root| PathBuf::from(root).join(scenario))
-            .unwrap_or_else(|| directory.path().to_path_buf());
+            .unwrap_or_else(|| std::fs::canonicalize(directory.path()).unwrap());
         let config = crate::AppConfig {
             data_dir: root.join("data"), work_dir: root.join("work"),
             auth_policy: nomifun_auth::AuthPolicy::TrustLocalToken,
@@ -68,6 +69,7 @@ impl Fixture {
             ..Default::default()
         };
         std::fs::create_dir_all(&config.data_dir).unwrap();
+        crate::config::load_or_create_storage_generation(&config.data_dir).unwrap();
         let database_path = config.database_path();
         let database = nomifun_db::init_database(&database_path).await.unwrap();
         let services = crate::services::AppServices::from_config(database, &config).await.unwrap();
@@ -80,6 +82,7 @@ impl Fixture {
         }
         let (states, _components) = super::super::state::try_build_module_states(&services).await.unwrap();
         let owner = states.nomi_core_agent_api.session_owner.clone();
+        let api_state = states.nomi_core_agent_api.clone();
         let voice_control=states.nomi_core_agent_api.control_plane.clone();let voice_execution=states.agent_execution.clone();
         let router = super::super::create_router_with_states(&services, states);
         #[cfg(feature = "browser-use")]
@@ -151,7 +154,7 @@ impl Fixture {
         let message = SendMessageData { content:"cancel before model dispatch".into(), msg_id:"cleanup-wire".into(),
             source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
-        Self { _directory:directory, _router:router, runtime, services, host, owner,voice_control,voice_execution, message, database_path }
+        Self { _directory:directory, _router:router, runtime, services, host, owner,api_state,voice_control,voice_execution, message, database_path }
     }
 
     fn pool(&self) -> &nomifun_db::SqlitePool { self.services.database.pool() }
@@ -1087,4 +1090,117 @@ mod browser_terminal_recovery {
         model_task.await.unwrap();
         fixture.services.shutdown_nomi_core_host().await.unwrap();
     }
+}
+
+async fn file_api_get(router: &axum::Router, path: &str, trusted: bool) -> (axum::http::StatusCode, Value) {
+    let mut request = Request::builder().method("GET").uri(path);
+    if trusted { request = request.header("x-nomi-local-trust", "cleanup-fixture-local-trust"); }
+    let response = router.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_file_api_discovers_command_binary_outputs_and_preserves_exact_turn_history() {
+    let fixture = Fixture::new("turn-file-command-observation").await;
+    fixture.host.prepare_turn(&fixture.message, CancellationToken::new()).await.unwrap();
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let root = fixture.message.source_message_id.as_ref().unwrap();
+    let path = format!("/api/agent-sessions/{}/turn-files?turn_ids={root}", session.as_ref());
+    let (status, running) = file_api_get(&fixture._router, &path, true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(running["data"], json!([]));
+    // Use the real installed host's resource boundaries and a real process,
+    // without dispatching a model or manufacturing a workspace file receipt.
+    // The binary fixture exercises detection, not Office document validation.
+    let workspace = fixture.host.options.workspace.clone();
+    let command = tokio::process::Command::new("/bin/sh")
+        .current_dir(&workspace).arg("-c")
+        .arg("printf '%s\\n' '# fixture generator' > \"$1\"; printf 'PK\\003\\004\\000\\377binary fixture' > \"$2\"")
+        .arg("turn-file-fixture").arg("build_docx.py").arg("骆驼祥子读后感.docx")
+        .status().await.unwrap();
+    assert!(command.success());
+    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled { model_steps:0 }).await.unwrap();
+    fixture.assert_settled().await;
+    let (status, first) = file_api_get(&fixture._router, &path, true).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{first}");
+    let summary: Vec<nomifun_api_types::TurnFileSummary> = serde_json::from_value(first["data"].clone()).unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].turn_id, *root);
+    assert!(summary[0].complete);
+    assert_eq!(summary[0].files.iter().map(|file| file.file_name.as_str()).collect::<Vec<_>>(),
+        vec!["build_docx.py", "骆驼祥子读后感.docx"]);
+    assert!(summary[0].files.iter().all(|file| file.operation == nomifun_common::FileChangeOperation::Create
+        && file.size_bytes.is_some() && file.sha256.is_some()));
+    let facts = fixture.owner.canonical().store().turn_output_facts(&session, &"cleanup-retry-turn".into()).await.unwrap();
+    assert!(facts.events.iter().any(|event| event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED));
+    // A newly opened store reads the persisted summary even while a later
+    // input is active and the original files have since changed or disappeared.
+    let store = fixture.owner.canonical().store();
+    let (input, _) = store.start_turn(&session, "session_api".into(), "file-successor".into(),
+        "file-successor".into(), StrictJsonValue(json!({"content":"later turn","admission":{
+            "route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref,
+        }}))).await.unwrap();
+    std::fs::remove_file(std::path::Path::new(&workspace).join("骆驼祥子读后感.docx")).unwrap();
+    std::fs::write(std::path::Path::new(&workspace).join("build_docx.py"), "changed after the original Turn").unwrap();
+    let second = file_api_get(&fixture._router, &path, true).await;
+    assert_eq!(second.0, axum::http::StatusCode::OK);
+    assert_eq!(first["data"], second.1["data"]);
+    let reopened_pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(&fixture.database_path)).await.unwrap();
+    let reopened = nomifun_agent_session::AgentSessionStore::from_pool(reopened_pool.clone()).await.unwrap();
+    let reloaded = super::super::turn_files::query(&reopened, &session, &[root.clone()], None,
+        std::path::Path::new(&workspace).parent().unwrap()).await.unwrap();
+    assert_eq!(summary, reloaded);
+    reopened_pool.close().await;
+    let next = SendMessageData { source_message_id:Some(input.record.unwrap().event_id.as_ref().into()),
+        msg_id:"file-successor-wire".into(), content:"later turn".into(), files:vec![], inject_skills:vec![], origin:None };
+    fixture.host.cleanup_turn(&next).await.unwrap();
+    fixture.host.record_event(&next, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn turn_file_api_requires_owner_and_returns_no_final_list_for_paused_turns() {
+    let fixture = Fixture::new("turn-file-api-authority-and-pause").await;
+    fixture.host.prepare_turn(&fixture.message, CancellationToken::new()).await.unwrap();
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let root = fixture.message.source_message_id.as_ref().unwrap();
+    let path = format!("/api/agent-sessions/{}/turn-files?turn_ids={root}", session.as_ref());
+    let denied = file_api_get(&fixture._router, &path, false).await;
+    assert!(matches!(denied.0, axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN));
+    let foreign = nomifun_auth::CurrentUser {
+        id:nomifun_common::UserId::parse(nomifun_common::generate_id()).unwrap(), username:"foreign fixture".into(),
+    };
+    let foreign_router = super::super::nomi_core_session::build_nomi_core_agent_router(fixture.api_state.clone())
+        .layer(axum::Extension(foreign));
+    let denied = file_api_get(&foreign_router, &path, false).await;
+    assert_eq!(denied.0, axum::http::StatusCode::FORBIDDEN);
+    assert!(denied.1.get("data").is_none(), "a foreign principal received file metadata");
+    let binding = fixture.owner.canonical().store().get_live_session(&session).await.unwrap().agent_binding;
+    let other = api(&fixture._router, "/api/agent-sessions", json!({
+        "preset_id":binding.preset_revision_ref.preset_id,"model":fixture.host.options.model,
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],
+    })).await;
+    let cross_session = format!("/api/agent-sessions/{}/turn-files?turn_ids={root}", other["agent_session_id"].as_str().unwrap());
+    assert_eq!(file_api_get(&fixture._router, &cross_session, true).await.0, axum::http::StatusCode::NOT_FOUND);
+    let checkpoint = AgentExecutionCheckpoint {
+        version:1, binding:fixture.host.engine_binding.clone(), turn_operation_id:"cleanup-retry-turn".into(),
+        active_set_generation:fixture.host.capability_state.snapshot().unwrap().generation,
+        model_steps:0, tool_call_count:0, accepted_input_count:1, applied_steering_receipts:vec![],
+        plan:Default::default(), work:Default::default(), patch_recovery:Default::default(), segments:None,
+        control_rejections:Default::default(), completion_review:Default::default(),
+    };
+    fixture.host.save_execution_checkpoint(&fixture.message, &checkpoint).await.unwrap().unwrap();
+    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnPaused {
+        model_steps:0, reason:"EXECUTION_USER_REQUESTED".into(),
+    }).await.unwrap();
+    let (status, paused) = file_api_get(&fixture._router, &path, true).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{paused}");
+    assert_eq!(paused["data"], json!([]));
+    fixture.finish().await;
 }

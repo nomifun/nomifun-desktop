@@ -14,50 +14,60 @@ pub fn is_preview_capability(value: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// A. Preview requests
+// A. Office artifact requests and responses
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum OfficePreviewDocType {
+    Word,
+    Excel,
+    Ppt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StartPreviewRequest {
+pub struct StartOfficePreviewRequest {
+    /// Client-owned UUIDv7 lease, created before dispatch so cancellation can win.
+    pub request_id: String,
     pub file_path: String,
     #[serde(default)]
     pub workspace: Option<String>,
+    pub doc_type: OfficePreviewDocType,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StopPreviewRequest {
-    pub capability: String,
+pub struct StopOfficePreviewRequest {
+    pub request_id: String,
 }
 
-// ---------------------------------------------------------------------------
-// B. Preview responses & events
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PreviewUrlResponse {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum PreviewState {
-    Starting,
-    Installing,
+pub enum OfficePreviewState {
+    Queued,
+    Rendering,
     Ready,
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PreviewStatusEvent {
-    pub state: PreviewState,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfficePreviewError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfficePreviewResponse {
+    pub request_id: String,
+    pub state: OfficePreviewState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<OfficePreviewError>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,166 +144,63 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -- A. StartPreviewRequest / StopPreviewRequest --------------------------
-
     #[test]
     fn preview_capability_requires_canonical_256_bit_hex() {
-        assert!(is_preview_capability(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ));
-        assert!(!is_preview_capability("43210"));
-        assert!(!is_preview_capability(
-            &"A".repeat(PREVIEW_CAPABILITY_HEX_LEN)
-        ));
-        assert!(!is_preview_capability(
-            &"0".repeat(PREVIEW_CAPABILITY_HEX_LEN - 1)
-        ));
+        assert!(is_preview_capability(&"a".repeat(64)));
+        assert!(!is_preview_capability(&"A".repeat(64)));
+        assert!(!is_preview_capability(&"a".repeat(63)));
+        assert!(!is_preview_capability("12345"));
     }
 
     #[test]
-    fn start_preview_request_deserialize() {
-        let raw = json!({"file_path": "/path/to/doc.docx", "workspace": "/tmp/ws"});
-        let req: StartPreviewRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.file_path, "/path/to/doc.docx");
-        assert_eq!(req.workspace.as_deref(), Some("/tmp/ws"));
-    }
-
-    #[test]
-    fn start_preview_request_missing_file_path() {
-        let raw = json!({});
-        assert!(serde_json::from_value::<StartPreviewRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn stop_preview_request_deserialize() {
-        let raw = json!({
-            "capability": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        });
-        let req: StopPreviewRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.capability.len(), 64);
-    }
-
-    #[test]
-    fn stop_preview_request_requires_capability() {
-        let raw = json!({});
-        assert!(serde_json::from_value::<StopPreviewRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn start_preview_request_workspace_optional() {
-        let raw = json!({"file_path": "/path/to/doc.docx"});
-        let req: StartPreviewRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.workspace.is_none());
-    }
-
-    // -- B. PreviewUrlResponse ------------------------------------------------
-
-    #[test]
-    fn preview_url_response_success() {
-        let resp = PreviewUrlResponse {
-            url: "/api/office-watch-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/".into(),
-            capability: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
-            error: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert!(json["url"].as_str().unwrap().ends_with('/'));
-        assert_eq!(json["capability"].as_str().unwrap().len(), 64);
-        assert!(json.get("error").is_none());
-    }
-
-    #[test]
-    fn preview_url_response_error() {
-        let resp = PreviewUrlResponse {
-            url: String::new(),
-            capability: None,
-            error: Some("officecli not found".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["url"], "");
-        assert_eq!(json["error"], "officecli not found");
-    }
-
-    #[test]
-    fn preview_url_response_roundtrip() {
-        let resp = PreviewUrlResponse {
-            url: "/api/ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/"
-                .into(),
-            capability: Some(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
-            ),
-            error: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: PreviewUrlResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, resp);
-    }
-
-    // -- B2. PreviewState / PreviewStatusEvent --------------------------------
-
-    #[test]
-    fn preview_state_serialize_all_variants() {
-        let cases = [
-            (PreviewState::Starting, "starting"),
-            (PreviewState::Installing, "installing"),
-            (PreviewState::Ready, "ready"),
-            (PreviewState::Error, "error"),
-        ];
-        for (state, expected) in cases {
-            let json = serde_json::to_value(state).unwrap();
-            assert_eq!(json, expected);
+    fn artifact_request_requires_identity_type_and_path() {
+        let value = json!({"request_id":"0190f5fe-7c00-7a00-8000-000000000001", "file_path":"/a.pptx", "doc_type":"ppt"});
+        let request: StartOfficePreviewRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(request.doc_type, OfficePreviewDocType::Ppt);
+        assert!(request.workspace.is_none());
+        for field in ["request_id", "file_path", "doc_type"] {
+            let mut incomplete = value.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<StartOfficePreviewRequest>(incomplete).is_err());
         }
+        assert!(
+            serde_json::from_value::<StopOfficePreviewRequest>(json!({"capability":"old"}))
+                .is_err()
+        );
     }
 
     #[test]
-    fn preview_state_deserialize_all_variants() {
-        let cases = [
-            ("starting", PreviewState::Starting),
-            ("installing", PreviewState::Installing),
-            ("ready", PreviewState::Ready),
-            ("error", PreviewState::Error),
-        ];
-        for (input, expected) in cases {
-            let parsed: PreviewState = serde_json::from_value(json!(input)).unwrap();
-            assert_eq!(parsed, expected);
+    fn artifact_error_and_ready_contract_roundtrip() {
+        for state in [
+            OfficePreviewState::Queued,
+            OfficePreviewState::Rendering,
+            OfficePreviewState::Ready,
+            OfficePreviewState::Error,
+        ] {
+            let response = OfficePreviewResponse {
+                request_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
+                state,
+                url: None,
+                capability: None,
+                error: None,
+            };
+            let encoded = serde_json::to_value(&response).unwrap();
+            assert!(encoded.get("url").is_none());
+            assert_eq!(
+                serde_json::from_value::<OfficePreviewResponse>(encoded).unwrap(),
+                response
+            );
         }
-    }
-
-    #[test]
-    fn preview_state_invalid() {
-        assert!(serde_json::from_value::<PreviewState>(json!("unknown")).is_err());
-    }
-
-    #[test]
-    fn preview_status_event_serialize() {
-        let event = PreviewStatusEvent {
-            state: PreviewState::Ready,
-            message: None,
+        let error = OfficePreviewError {
+            code: "ENGINE_UNAVAILABLE".into(),
+            message: "Preview component unavailable".into(),
+            retryable: false,
         };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["state"], "ready");
-        assert!(json.get("message").is_none());
-    }
-
-    #[test]
-    fn preview_status_event_with_message() {
-        let event = PreviewStatusEvent {
-            state: PreviewState::Error,
-            message: Some("port timeout".into()),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["state"], "error");
-        assert_eq!(json["message"], "port timeout");
-    }
-
-    #[test]
-    fn preview_status_event_roundtrip() {
-        let event = PreviewStatusEvent {
-            state: PreviewState::Installing,
-            message: Some("installing officecli...".into()),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: PreviewStatusEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, event);
+        assert_eq!(
+            serde_json::from_value::<OfficePreviewError>(serde_json::to_value(&error).unwrap())
+                .unwrap(),
+            error
+        );
     }
 
     // -- C. PreviewHistoryTargetDto -------------------------------------------
@@ -399,7 +306,11 @@ mod tests {
             let t: PreviewHistoryTargetDto = serde_json::from_value(raw).unwrap();
             assert_eq!(t.content_type, expected);
         }
-        assert!(serde_json::from_value::<PreviewHistoryTargetDto>(json!({"content_type":"url"})).is_err(),"web pages belong to Browser Workspace, not document preview");
+        assert!(
+            serde_json::from_value::<PreviewHistoryTargetDto>(json!({"content_type":"url"}))
+                .is_err(),
+            "web pages belong to Browser Workspace, not document preview"
+        );
     }
 
     // -- C2. PreviewSnapshotInfoDto -------------------------------------------

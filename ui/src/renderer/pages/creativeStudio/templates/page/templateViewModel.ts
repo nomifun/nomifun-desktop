@@ -499,13 +499,6 @@ export function duplicateTemplate(
   return next;
 }
 
-export function templatePromptPreview(
-  template: CreativeTemplateDefinitionV1,
-  copy: CreativeTemplateTranslationCopy = createTemplateTranslationCopy()
-): string {
-  return creativePromptTemplateText(template).trim() || copy.emptyPrompt;
-}
-
 export function templateOutputLabel(
   output: CreativeTemplateOutputPlan,
   copy: CreativeTemplateTranslationCopy = createTemplateTranslationCopy()

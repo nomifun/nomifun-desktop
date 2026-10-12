@@ -50,7 +50,7 @@ All flags below are read by `apps/web/src/main.rs`. Each has an environment-vari
 |---|---|---|---|
 | `--host` | `NOMIFUN_WEB_HOST` | `127.0.0.1` | IP to bind on. `0.0.0.0` accepts LAN/VPN/public traffic; pre-seed the admin or complete first-run setup before broad exposure. |
 | `--port` | `NOMIFUN_WEB_PORT` | `8787` | TCP port. Serves the API, the WebSocket at `/ws`, and the SPA. |
-| `--data-dir` | `NOMIFUN_DATA_DIR` | per-user dir | Backend data dir (SQLite database, agent state, logs, Bun cache). Defaults to the per-user location shared with the desktop app (`%LOCALAPPDATA%\NomiFun`, `~/Library/Application Support/NomiFun`, `$XDG_DATA_HOME/NomiFun`). **Still set an explicit absolute path in production.** |
+| `--data-dir` | `NOMIFUN_DATA_DIR` | per-user dir | Backend data dir (SQLite database, agent state, logs, managed runtime cache). Defaults to the per-user location shared with the desktop app (`%LOCALAPPDATA%\NomiFun`, `~/Library/Application Support/NomiFun`, `$XDG_DATA_HOME/NomiFun`). **Still set an explicit absolute path in production.** |
 | `--dist` | `NOMIFUN_WEB_DIST` | `../../ui/dist` | Directory containing the built SPA. **Set this explicitly when deploying.** |
 | `--admin-user` | `NOMIFUN_ADMIN_USERNAME` | `admin` | Username used when pre-seeding the first admin. Ignored once an admin exists. |
 | `--admin-password` | `NOMIFUN_ADMIN_PASSWORD` | — | Pre-seed the first admin password at boot, skipping interactive setup. Ignored once an admin exists. |
@@ -108,8 +108,9 @@ For reproducible deployments, pin an explicit version or image digest. The image
 
 1. Builds the SPA with Bun.
 2. Compiles `nomifun-web` from the workspace.
-3. Assembles a slim `debian:trixie-slim` runtime that includes Bun, Node.js
-   22 with npm/npx, Python 3 with PyYAML, Git, and ripgrep.
+3. Assembles a slim `debian:trixie-slim` runtime with managed execution components,
+   a manifest-pinned Node/npm image for user commands, Python 3 with PyYAML, Git,
+   and ripgrep. Bun build and Node image versions/digests come from the component manifest.
 
 It exposes port `8787` and uses `/data` as the data volume.
 
@@ -154,7 +155,7 @@ docker compose logs -f nomifun
 # look for: "nomifun-web: embedded backend + SPA on one port"
 ```
 
-The compose file mounts a named volume `nomifun-data:/data` which holds the SQLite DB, logs, the Bun runtime cache, and per-agent state. Back this up with the same care as any other database.
+The compose file mounts a named volume `nomifun-data:/data` which holds the SQLite DB, logs, the managed runtime cache, and per-agent state. Back this up with the same care as any other database.
 
 ### Pre-seeding the admin in Compose
 
@@ -345,14 +346,32 @@ sudo cp target/release/nomifun-web /opt/nomifun/
 sudo cp -r ui/dist/. /opt/nomifun/web/
 ```
 
-### Bun must be on the system `PATH`
+### Managed execution components
 
-The agent engine requires **`bun ≥ 1.3.13`** as a runtime dependency. Because the service runs under a `nologin` system account, an install in someone's `~/.bun/bin/` is invisible to it. Pick one:
+Release builds embed OfficeCLI. Node is prepared by fixed-version, hash-verified
+managed download before backend startup; Bun is prepared on feature use. Prepared
+artifacts are reused offline under `<data_dir>/runtime`, using verified absolute paths. Grant the service account read/execute access
+to that cache and write access to its data directory. No separate system-wide
+installation of these product components is required.
 
-- **System install**: `curl -fsSL https://bun.sh/install | bash`, then `sudo install ~/.bun/bin/bun /usr/local/bin/bun`.
-- **Embed in the binary**: build with `NOMIFUN_EMBED_BUN=1 cargo build --release -p nomifun-web`. Bun is bundled into the binary and self-extracts into the data dir on first run.
+The diagnostic subcommand belongs to `nomicore`, not the WebUI host CLI.
+If deploying the optional diagnostic companion, build/copy it first:
 
-Verify: `sudo -u nomifun -s -- which bun` must return a path. Otherwise the first agent spawn will fail with an opaque error.
+```bash
+cargo build --release -p nomifun-app --bin nomicore
+sudo cp target/release/nomicore /opt/nomifun/
+```
+
+```bash
+sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
+```
+
+Run this after the service data directory exists. `--verify` may download Node/Bun,
+extract tools, and run private capability probes; `tool-doctor` alone is a read-only inventory.
+Source debug builds may use `NOMIFUN_EMBED_OFFICECLI=1` or validated explicit
+development paths. The first Node preparation requires network access from the
+service account; prepare it before first offline deployment.
+See [External tools](../architecture/external-tools.md).
 
 ### Install the unit
 
@@ -402,8 +421,8 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 | Dependency | Required? | Notes |
 |---|---|---|
 | `glibc` + `ca-certificates` | Yes | sqlite is statically linked, TLS uses rustls — **no openssl, no libsqlite needed**. |
-| `bun` ≥ 1.3.13 | **Yes** | Agent execution runtime. 1.1.38 has an stdin bug; do not use. Already inside the Docker image. |
-| Node.js 22 + `npm` / `npx` | Recommended | Used by many MCP stdio servers and the automatic OfficeCLI install path. Already inside the Docker image. |
+| Bun, genuine Node, OfficeCLI | Bundled in release | Approved versions/assets extract to managed cache and never use ambient same-named tools. |
+| User tools such as `npm` / `npx` | As configured | Needed by user-defined MCP stdio commands; Docker Node/npm image provenance is fixed in the component manifest. Office preview does not install global npm packages. |
 | Python 3 + PyYAML | Recommended | Enables the Agent's Python script mode and bundled Python-based skills. Already inside the Docker image. |
 | `git` | Recommended | Skill discovery and a few built-in tools. |
 | `ripgrep` (`rg`) | Recommended | Code-search backend. Falls back to `grep` if missing. |
@@ -425,7 +444,7 @@ nomifun-web[12345]: listening on 127.0.0.1:8787 (auth: enabled)
 
 **Replies/task status only update after a page refresh (WebUI looks stuck on "executing").** The `/ws` WebSocket handshake is being rejected — check the server log for `rejected websocket upgrade` (WARN, includes the offending `origin`/`host`/`forwarded_host`) or `GET /ws` → `403` lines. Almost always a reverse proxy that rewrites `Host`: see [Other reverse proxies: preserve the original Host](#other-reverse-proxies-preserve-the-original-host).
 
-**Agent commands fail with `bun: command not found` under systemd.** Install bun system-wide (see the bun-on-PATH section above) or rebuild with `NOMIFUN_EMBED_BUN=1`.
+**Managed execution components are unavailable.** Run `tool-doctor --verify` as the service user; check the complete release binary and data-directory read/write/execute permissions. See [Managed execution components](#managed-execution-components).
 
 **A robot never connects (the firmware's OTA check succeeds but no session appears).** The server published no reachable address, so the OTA response carried an empty websocket URL. Check `/api/robots/endpoints`; under Docker set `NOMIFUN_ROBOT_ADVERTISE` to the *host* LAN IP — see [LAN robots (ESP32)](#lan-robots-esp32).
 

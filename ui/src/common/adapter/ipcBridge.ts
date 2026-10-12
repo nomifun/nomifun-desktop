@@ -13,6 +13,11 @@
  */
 
 import { bridge } from '@/platform';
+import type { TurnFileSummary } from '@/common/types/platform/turnFiles';
+import type { PrepareStorageRelocationRequest } from '@/common/protocolBindings/PrepareStorageRelocationRequest';
+import type { StorageRelocationOperationRequest } from '@/common/protocolBindings/StorageRelocationOperationRequest';
+import type { StorageRelocationResponse } from '@/common/protocolBindings/StorageRelocationResponse';
+import type { SystemInfoResponse } from '@/common/protocolBindings/SystemInfoResponse';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import type { McpConnectionTestRequest } from './mcpRequest';
 import {
@@ -39,8 +44,10 @@ import {
   tauriWebuiStop,
   tauriRelayPairingBootstrap,
   tauriRelayPairingDisconnect,
+  tauriRelayPairingForgetLocal,
   tauriRelayPairingGetStatus,
   tauriRelayPairingRestart,
+  tauriRelayPairingRefreshQr,
   tauriRelayPairingStop,
   type TauriRelayPairingBootstrapRequest,
   type TauriRelayPairingStatus,
@@ -66,7 +73,7 @@ import type {
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
-import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
+import type { OfficePreviewRequest, OfficePreviewStatus, PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
 import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
 import {
   parsePreviewSnapshotId,
@@ -148,6 +155,7 @@ import type {
   AgentBindingValue,
   AgentPresetId,
   AgentPresetEditorResponse,
+  AgentPresetRecommendedCapabilitiesResponse,
   AgentPresetLibraryResponse,
   AgentPresetRevision,
   AgentResolvedSnapshot,
@@ -647,6 +655,10 @@ export const agentPlatform = {
     (params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions`,
     (params) => params.request
   ),
+  recommendedCapabilities: httpGet<
+    AgentPresetRecommendedCapabilitiesResponse,
+    { preset_id: string }
+  >((params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/recommended-capabilities`),
   getRevision: httpGet<
     AgentPresetRevision,
     { preset_id: string; revision: number }
@@ -921,8 +933,6 @@ const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => 
   msg_id: parseMessageId(message.msg_id),
   turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),
   conversation_id: parseConversationId(message.conversation_id),
-  companion_id:
-    message.companion_id == null ? message.companion_id : parseCompanionId(message.companion_id),
 });
 
 const fromApiUserMessageCreatedEvent = (
@@ -932,8 +942,6 @@ const fromApiUserMessageCreatedEvent = (
   idmm_decision: normalizeIdmmDecisionExplanation(event.idmm_decision),
   conversation_id: parseConversationId(event.conversation_id),
   msg_id: parseMessageId(event.msg_id),
-  companion_id:
-    event.companion_id == null ? event.companion_id : parseCompanionId(event.companion_id),
 });
 
 export const fromApiTurnPausedEvent = (raw: unknown): { conversation_id: ConversationId; turn_id: MessageId } => {
@@ -995,6 +1003,17 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
 };
 
 export const conversation = {
+  /** Complete Turn-scoped file projection, independent of message pagination. */
+  turnFiles: withResponseMap(
+    httpGet<TurnFileSummary[], { conversation_id: ConversationId; turn_ids: MessageId[] }>((p) => {
+      const query = new URLSearchParams({ turn_ids: p.turn_ids.join(',') });
+      return `/api/agent-sessions/${encodeURIComponent(p.conversation_id)}/turn-files?${query}`;
+    }),
+    (summaries) => summaries.map((summary) => ({
+      ...summary,
+      turn_id: parseMessageId(summary.turn_id),
+    }))
+  ),
   get: withResponseMap(
     httpGet<unknown, { conversation_id: ConversationId }>(
       (p) => `/api/agent-sessions/${p.conversation_id}/projection`,
@@ -1051,11 +1070,11 @@ export const conversation = {
   ),
   stop: {
     provider: () => {},
-    invoke: async (p: { conversation_id: ConversationId }): Promise<void> => {
+    invoke: async (p: { conversation_id: ConversationId; expected_turn_id?: MessageId }): Promise<void> => {
       await httpRequest(
         'POST',
         `/api/agent-sessions/${p.conversation_id}/turns/cancel`,
-        { idempotency_key: uuidv7() }
+        { idempotency_key: uuidv7(), ...(p.expected_turn_id ? { expected_turn_id: p.expected_turn_id } : {}) }
       );
     },
   },
@@ -1177,10 +1196,6 @@ export const conversation = {
           : { active_turn_id: parseMessageId(rawRuntime.active_turn_id) }),
         ...(Number.isFinite(processing_started_at) ? { processing_started_at } : {}),
       },
-      companion: r.companion as boolean | undefined,
-      companion_id: r.companion_id == null ? null : parseCompanionId(r.companion_id),
-      origin: (r.origin ?? null) as string | null | undefined,
-      channel_platform: r.channel_platform as string | null | undefined,
     };
   }),
   turnCompleted: wsMappedEmitter<IConversationTurnCompletedEvent, unknown>('turn.completed', fromApiTurnCompletedEvent),
@@ -1223,20 +1238,10 @@ export const application = {
   // (application.restart) right after this resolves.
   factoryReset: httpPost<void, void>('/api/system/factory-reset'),
   systemInfo: withResponseMap(
-    httpGet<
-      {
-        cache_dir: string;
-        work_dir: string;
-        log_dir: string;
-        storage_generation: string;
-        agent_data_generation: number;
-        platform: string;
-        arch: string;
-      },
-      void
-    >('/api/system/info'),
+    httpGet<SystemInfoResponse, void>('/api/system/info'),
     (raw) => ({
       cacheDir: raw.cache_dir,
+      dataDir: raw.data_dir,
       workDir: raw.work_dir,
       logDir: raw.log_dir,
       storageGeneration: raw.storage_generation,
@@ -1246,15 +1251,6 @@ export const application = {
     })
   ),
   getPath: shellProvider<string, { name: 'desktop' | 'home' | 'downloads' }>(({ name }) => tauriGetPath(name), ''),
-  // Persist the user-chosen work dir to a pre-boot config file that the next
-  // boot reads before resolving work_dir (Rust `nomifun_common::dir_config`).
-  // The caller restarts right after this resolves; the new dir applies then.
-  // `cacheDir` is accepted for back-compat but ignored — it is no longer
-  // user-editable (removed from the settings UI), only `workDir` is sent.
-  updateSystemInfo: httpPost<void, { cacheDir: string; workDir: string }>(
-    '/api/system/work-dir',
-    ({ workDir }) => ({ work_dir: workDir })
-  ),
   getZoomFactor: shellProvider<number, void>(async () => tauriGetZoom(), 1),
   setZoomFactor: shellProvider<number, { factor: number }>(({ factor }) => tauriSetZoom(factor), 1),
   applyKeepAwake: shellProvider<void, { enabled: boolean }>(({ enabled }) => tauriSetKeepAwake(enabled), undefined),
@@ -1286,6 +1282,14 @@ export const application = {
     },
     { success: false }
   ),
+};
+
+/** Installation-owned storage relocation; never a Session import or reset. */
+export const storageRelocation = {
+  prepare: httpPost<StorageRelocationResponse, PrepareStorageRelocationRequest>('/api/system/storage-relocation/prepare'),
+  start: httpPost<StorageRelocationResponse, StorageRelocationOperationRequest>('/api/system/storage-relocation/start'),
+  status: httpGet<StorageRelocationResponse, void>('/api/system/storage-relocation/status'),
+  cancel: httpPost<StorageRelocationResponse, StorageRelocationOperationRequest>('/api/system/storage-relocation/cancel'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1437,9 +1441,15 @@ export const fromApiFileMetadata = (metadata: RawFileMetadata): IFileMetadata =>
   isDirectory: metadata.isDirectory ?? metadata.is_directory,
 });
 
+/** A ZIP entry carries exactly one source, using the backend wire field names. */
+export type IZipFile = { name: string } & (
+  | { content: string; file_path?: never }
+  | { file_path: string; content?: never }
+);
+
 export const fs = {
   listWorkspaceFiles: withResponseMap(
-    httpPost<Array<RawWorkspaceFlatFile>, { root: string }>('/api/fs/list'),
+    httpPost<Array<RawWorkspaceFlatFile>, { root: string; workspace?: string }>('/api/fs/list'),
     fromBackendWorkspaceFlatFiles
   ),
   getImageBase64: httpPost<string | null, { path: string; workspace?: string }>('/api/fs/image-base64'),
@@ -1451,11 +1461,8 @@ export const fs = {
     {
       path: string;
       request_id?: string;
-      files: Array<{
-        name: string;
-        content?: string | Uint8Array;
-        source_path?: string;
-      }>;
+      workspaces?: string[];
+      files: IZipFile[];
     }
   >('/api/fs/zip'),
   cancelZip: httpPost<boolean, { request_id: string }>('/api/fs/zip/cancel'),
@@ -1882,6 +1889,7 @@ export const mcpService = {
     Array<{
       source: string;
       servers: DetectedMcpServer[];
+      detection_error?: string;
     }>,
     Array<{
       agent_type: string;
@@ -2272,6 +2280,8 @@ export type PaginatedResult<T> = {
   items: T[];
   total: number;
   has_more: boolean;
+  /** History cursor includes processed rows omitted from the display projection. */
+  next_cursor?: string;
 };
 
 export const database = {
@@ -2284,10 +2294,9 @@ export const database = {
         page_size?: number;
         order?: string;
         content_mode?: 'compact' | 'full';
-        // Keyset cursor for incremental history loading: '' = newest window,
-        // '<created_at>:<message_id>' = the page strictly older than that
-        // persisted message. When
-        // set (incl. ''), the backend ignores page/offset pagination.
+        // Backward canonical history cursor: '' = newest window. Use the
+        // response's next_cursor for the next raw projection window, including
+        // windows whose rows were filtered from the visible items.
         cursor?: string;
         // One LOCAL calendar day (`YYYYMMDD`), oldest-first and complete: the
         // backend decides the day boundary (the same one that partitions
@@ -2408,34 +2417,16 @@ export const preview = {
 };
 
 // ---------------------------------------------------------------------------
-// Office Previews — routed to /api/*-preview/*
+// Office artifact previews — a request owns a cancellable lease, not a server.
 // ---------------------------------------------------------------------------
 
-export const pptPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/ppt-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/ppt-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('ppt-preview.status'),
-};
-
-export const wordPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/word-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/word-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('word-preview.status'),
-};
-
-export const excelPreview = {
-  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/excel-preview/start'),
-  stop: httpPost<void, { capability: string }>('/api/excel-preview/stop'),
-  status: wsEmitter<{
-    state: 'starting' | 'installing' | 'ready' | 'error';
-    message?: string;
-  }>('excel-preview.status'),
+export const officePreview = {
+  start: httpPost<OfficePreviewStatus, OfficePreviewRequest>('/api/office-preview/start', undefined, { timeoutMs: 8_000 }),
+  status: httpGet<OfficePreviewStatus, { request_id: string }>(
+    (p) => `/api/office-preview/status/${encodeURIComponent(p.request_id)}`,
+    { timeoutMs: 5_000 }
+  ),
+  stop: httpPost<void, { request_id: string }>('/api/office-preview/stop', undefined, { timeoutMs: 5_000 }),
 };
 
 // ---------------------------------------------------------------------------
@@ -2686,6 +2677,10 @@ export type IRelayPairingStatus = TauriRelayPairingStatus;
 export type IRelayPairingBootstrapRequest = TauriRelayPairingBootstrapRequest;
 
 export const relayPairing = {
+  refreshQr: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingRefreshQr(),
+    { state: 'disconnected' }
+  ),
   bootstrap: shellProvider<IRelayPairingStatus, IRelayPairingBootstrapRequest>(
     (request) => tauriRelayPairingBootstrap(request),
     { state: 'disconnected' }
@@ -2704,6 +2699,10 @@ export const relayPairing = {
   ),
   disconnect: shellProvider<IRelayPairingStatus, void>(
     () => tauriRelayPairingDisconnect(),
+    { state: 'disconnected' }
+  ),
+  forgetLocal: shellProvider<IRelayPairingStatus, void>(
+    () => tauriRelayPairingForgetLocal(),
     { state: 'disconnected' }
   ),
 };
@@ -3245,22 +3244,9 @@ export interface IResponseMessage {
    *  an active model turn. Consumers must render it without raising turn or
    *  conversation activity state. */
   stream_complete?: boolean;
-  /** Companion wire markers (backend StreamRelay stamps them on every
-   *  fragment): true + owning companion id when the conversation is a companion
-   *  owned session. */
-  companion?: boolean;
-  companion_id?: CompanionId | null;
-  /** IM platform ("telegram" | "lark" | ...) when the conversation is a
-   *  channel-originated turn; null/absent for local conversations. */
-  channel_platform?: string | null;
-  /** Originating subsystem of the turn's user message (companion/cron/autowork);
-   * null/absent = typed by a real person. */
-  origin?: string | null;
 }
 
-/** `message.userCreated` broadcast: a user message was persisted (covers IM
- *  channel inbound messages — the companion window renders those as incoming
- *  bubble headers). Same companion wire markers as IResponseMessage. */
+/** A newly accepted canonical input, shared by all windows and sending surfaces. */
 export interface IUserMessageCreatedEvent {
   idmm_decision?: IdmmDecisionExplanation;
   interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
@@ -3271,9 +3257,9 @@ export interface IUserMessageCreatedEvent {
   status: string;
   hidden?: boolean;
   origin?: string | null;
-  companion?: boolean;
-  companion_id?: CompanionId | null;
   channel_platform?: string | null;
+  /** Canonical message wall-clock time; created_at remains the ordering cursor. */
+  display_at_ms?: number;
   created_at: number;
 }
 
@@ -3301,10 +3287,6 @@ export interface IConversationTurnStartedEvent {
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };
-  companion?: boolean;
-  companion_id?: CompanionId | null;
-  origin?: string | null;
-  channel_platform?: string | null;
 }
 
 export interface IConversationTurnCompletedEvent {
@@ -6413,9 +6395,9 @@ export const knowledge = {
     }
   ), fromApiKnowledgeBinding),
   // ── Import / export (spec 2026-06-11 §4.8: zip with manifest.kind="knowledge-base") ──
-  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string }>(
+  exportBase: httpPost<{ dest_path: string }, { knowledge_base_id: KnowledgeBaseId; dest_path: string; overwrite?: boolean }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/export`,
-    (p) => ({ dest_path: p.dest_path })
+    (p) => ({ dest_path: p.dest_path, overwrite: p.overwrite ?? false })
   ),
   /** Import a knowledge-base bundle — a new managed base is provisioned (name conflicts get a "(2)" suffix). */
   importBase: withResponseMap(httpPost<IKnowledgeBase, { src_path: string }>('/api/knowledge/bases/import'), fromApiKnowledgeBase),

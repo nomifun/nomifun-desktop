@@ -51,6 +51,7 @@ pub fn build_system_state(
     let connection_repo = Arc::new(SqliteProviderConnectionRepository::new(db.pool().clone()));
 
     SystemRouterState {
+        database_pool: db.pool().clone(),
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(
             db.pool().clone(),
         ))),

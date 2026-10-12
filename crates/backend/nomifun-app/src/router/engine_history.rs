@@ -70,12 +70,23 @@ fn native_replay_floor(
         .map(|event| event.seq)
         .max()
         .unwrap_or(0);
+    Ok(context_floor.max(canonical_agent_transition_floor(events, event_payloads, current)?))
+}
+
+/// The canonical Agent transition bounds execution-owned state independently
+/// of conversational context clearing. Other native consumers share this
+/// exact transition validation rather than interpreting a second boundary.
+pub(super) fn canonical_agent_transition_floor(
+    events: &[SessionEventRecord],
+    event_payloads: &BTreeMap<String, Value>,
+    current: &AgentBindingValue,
+) -> Result<u64, AppError> {
     let transition = events
         .iter()
         .filter(|event| event.kind.0 == "session/agent-binding-changed")
         .max_by_key(|event| event.seq);
     let Some(transition) = transition else {
-        return Ok(context_floor);
+        return Ok(0);
     };
     let payload = event_payloads
         .get(transition.event_id.as_ref())
@@ -83,10 +94,17 @@ fn native_replay_floor(
     let payload: AgentBindingChangedPayloadV1 = serde_json::from_value(payload.clone())
         .map_err(|error| failure(format!("Agent transition event is invalid: {error}")))?;
     let previous_version = payload.previous_binding_ref.binding_version;
+    if payload.workspace_relocation.is_some() {
+        payload.validate_storage_relocation().map_err(failure)?;
+    }
     let current_ref = AgentHandoffBindingRefV1::from(current);
     let target_reached_current = payload.next_binding_ref.binding_version
         < current_ref.binding_version
         || payload.next_binding_ref == current_ref;
+    if payload.next_binding_ref == current_ref
+        && payload.workspace_relocation.as_ref().is_some_and(|proof| proof.next_resources != current.typed_resource_bindings) {
+        return Err(failure("storage transition resources differ from the exact current binding"));
+    }
     if !target_reached_current
         || payload.completion_gate_inherited
         || payload.transition_id.as_ref() != transition.correlation_id.as_ref()
@@ -95,13 +113,14 @@ fn native_replay_floor(
         || (payload.previous_binding_ref.preset_revision_ref
             == payload.next_binding_ref.preset_revision_ref
             && payload.previous_binding_ref.resolved_snapshot_ref
-                == payload.next_binding_ref.resolved_snapshot_ref)
+                == payload.next_binding_ref.resolved_snapshot_ref
+            && payload.validate_storage_relocation().is_err())
     {
         return Err(failure(
             "Agent transition event does not prove the exact current binding boundary",
         ));
     }
-    Ok(context_floor.max(transition.seq))
+    Ok(transition.seq)
 }
 
 async fn facts(
@@ -429,6 +448,7 @@ mod tests {
             request_digest: DigestHex::from("c".repeat(64)),
             previous_binding_ref: AgentHandoffBindingRefV1::from(&binding(1, "source")),
             next_binding_ref: AgentHandoffBindingRefV1::from(current),
+            workspace_relocation: None,
             previous_agent_label: "Source".to_owned(),
             next_agent_label: "Target".to_owned(),
             handoff_mode: AgentHandoffMode::ContextOnly,
@@ -486,6 +506,41 @@ mod tests {
             native_replay_floor(&events, &payloads, &current_model_variant).unwrap(),
             9
         );
+    }
+
+    #[test]
+    fn storage_relocation_segments_native_replay_without_rewriting_the_snapshot() {
+        use nomifun_agent_contracts::{TypedResourceBinding, ManagedStorageRelocationV1,
+            resource_definition_id, managed_workspace_parameters, digest_payload};
+        let old = tempfile::tempdir().unwrap(); let new = tempfile::tempdir().unwrap();
+        let mut resource = TypedResourceBinding {
+            binding_id: "unassigned".into(), resource_kind: "workspace".into(),
+            resource_id: "default-workspace".into(), owner_id: "owner".into(),
+            operations: Default::default(), connection_config_ref: None,
+            typed_parameters: BTreeMap::from([("workspace_root".into(), old.path().to_string_lossy().into_owned())]),
+        };
+        resource.binding_id = resource_definition_id(&resource).unwrap();
+        let mut previous = binding(1, "same-agent"); previous.typed_resource_bindings = vec![resource.clone()];
+        resource.typed_parameters = managed_workspace_parameters();
+        resource.binding_id = resource_definition_id(&resource).unwrap();
+        let mut current = previous.clone(); current.binding_version = 2; current.typed_resource_bindings = vec![resource];
+        let proof = ManagedStorageRelocationV1 {
+            managed_app_workspace: None,
+            managed_session_namespace: None,
+            source_data_root: old.path().to_string_lossy().into_owned(), source_work_root: old.path().to_string_lossy().into_owned(),
+            target_data_root: new.path().to_string_lossy().into_owned(), managed_knowledge_ids: Default::default(),
+            previous_resources: previous.typed_resource_bindings.clone(), next_resources: current.typed_resource_bindings.clone(),
+        };
+        let mut payload: AgentBindingChangedPayloadV1 = serde_json::from_value(transition_payload(&current)).unwrap();
+        payload.previous_binding_ref = AgentHandoffBindingRefV1::from(&previous);
+        payload.previous_agent_label = "Agent".into(); payload.next_agent_label = "Agent".into();
+        payload.request_digest = digest_payload(&proof).unwrap(); payload.workspace_relocation = Some(proof);
+        let events = vec![event(9, "session/agent-binding-changed")];
+        let payloads = BTreeMap::from([("event-9".into(), serde_json::to_value(&payload).unwrap())]);
+        assert_eq!(native_replay_floor(&events, &payloads, &current).unwrap(), 9);
+        payload.workspace_relocation.as_mut().unwrap().next_resources[0].operations.insert("execute".into());
+        let invalid = BTreeMap::from([("event-9".into(), serde_json::to_value(payload).unwrap())]);
+        assert!(native_replay_floor(&events, &invalid, &current).is_err());
     }
 
     fn context_event(seq: u64, kind: &str, correlation: &str, value: Value) -> (SessionEventRecord, Value) {

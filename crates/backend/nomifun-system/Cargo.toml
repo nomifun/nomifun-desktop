@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 nomifun-agent-contracts.workspace = true
+nomifun-agent-session.workspace = true
 nomifun-auth.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true
@@ -30,3 +31,4 @@ tower = { workspace = true }
 http-body-util.workspace = true
 reqwest.workspace = true
 wiremock = "0.6"
+tempfile.workspace = true

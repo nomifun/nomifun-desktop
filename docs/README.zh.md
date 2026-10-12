@@ -22,6 +22,7 @@ Git 历史。
 | 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
 | 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
 | 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
+| 理解受管工具与附件预览 | [architecture/external-tools.zh.md](architecture/external-tools.zh.md) |
 | 构建或打包项目 | [contributing/building-and-packaging.zh.md](contributing/building-and-packaging.zh.md) |
 | 查询参数、环境变量或 API 分组 | [reference/](reference/) |
 | 参与贡献 | [../CONTRIBUTING.zh-CN.md](../CONTRIBUTING.zh-CN.md)、[../CONTRIBUTING.md](../CONTRIBUTING.md) |
@@ -45,7 +46,7 @@ docs/
 ```
 
 当前顶层用户界面包括会话、终端、可扩展模型管理、创作（Canvas + 素材库）、
-Agent 工作台、技能、MCP、开放能力、需求/AutoWork、定时任务、伙伴、知识库、
+Agent 工作台、技能、MCP、连接与设备、需求/AutoWork、定时任务、伙伴、知识库、
 SSH 主机和应用托管。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。
 

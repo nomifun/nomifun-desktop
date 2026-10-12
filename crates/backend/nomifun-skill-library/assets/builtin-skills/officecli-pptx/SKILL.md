@@ -5,14 +5,16 @@ description: "Use this skill any time a .pptx file is involved -- as input, outp
 
 # OfficeCLI PPTX Skill
 
-## Setup
+## Managed component setup
 
-If `officecli` is missing:
+Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** component and the exact
+verified executable. Follow [the shared runtime instructions](references/runtime.md) before
+running any example. Read the Host-owned Office component context resource at
+the exact `read_context_resource` ID appended to the compiled Skill body.
+Every `officecli` example means that bound executable, never an ambient PATH tool.
 
-- **macOS / Linux**: `curl -fsSL https://d.officecli.ai/install.sh | bash`
-- **Windows (PowerShell)**: `irm https://d.officecli.ai/install.ps1 | iex`
-
-Verify with `officecli --version` (open a new terminal if PATH hasn't picked up). If install fails, download a binary from https://github.com/iOfficeAI/OfficeCLI/releases.
+Standalone use outside NomiFun uses the exact official scoped package
+`@officecli/officecli@1.0.156`; the shared instructions cover verification.
 
 ## ⚠️ Help-First Rule
 

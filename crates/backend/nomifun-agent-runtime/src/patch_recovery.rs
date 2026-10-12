@@ -5,62 +5,7 @@ use crate::{AgentEffectClass, AgentToolBinding, AgentToolResult};
 use nomifun_chat_model_broker::ChatToolCall;
 use std::collections::BTreeSet;
 
-/// Engine-derived recovery obligation, not a checkpoint, permission grant or
-/// filesystem proof. Hosts restore this independently of conversational history.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentPatchRecoveryState {
-    pub version: u8,
-    /// Targets that must be freshly observed before another effect.
-    pub targets: Vec<String>,
-    /// Failed patch targets whose requested mutation still lacks a successful
-    /// owner receipt. Fresh reads alone do not settle this task obligation.
-    #[serde(default)]
-    pub unresolved_targets: Vec<String>,
-    /// Accepted input count when the unresolved mutation was admitted. A later
-    /// scope change can settle it only by citing inputs after this boundary.
-    #[serde(default)]
-    pub unresolved_before_input: Option<usize>,
-    pub target_budget_exceeded: bool,
-}
-
-impl Default for AgentPatchRecoveryState {
-    fn default() -> Self {
-        Self {
-            version: 2,
-            targets: Vec::new(),
-            unresolved_targets: Vec::new(),
-            unresolved_before_input: None,
-            target_budget_exceeded: false,
-        }
-    }
-}
-
-impl AgentPatchRecoveryState {
-    pub fn has_pending(&self) -> bool {
-        self.target_budget_exceeded || !self.targets.is_empty() || !self.unresolved_targets.is_empty()
-    }
-
-    pub fn validate(&self) -> Result<(), crate::AgentEngineError> {
-        let pending = self.targets.iter().collect::<BTreeSet<_>>();
-        let unresolved = self.unresolved_targets.iter().collect::<BTreeSet<_>>();
-        if !matches!(self.version, 1 | 2)
-            || (self.version == 1 && !self.unresolved_targets.is_empty())
-            || self.targets.len() > 64
-            || self.unresolved_targets.len() > 64
-            || self.targets.iter().chain(&self.unresolved_targets).map(String::len).sum::<usize>() > 32 * 1024
-            || self.unresolved_before_input.is_some_and(|count| count == 0 || count > 32)
-            || (self.unresolved_targets.is_empty() && self.unresolved_before_input.is_some())
-            || pending.len() != self.targets.len() || unresolved.len() != self.unresolved_targets.len()
-            || self.targets.iter().chain(&self.unresolved_targets).any(|path| normalize(path).as_ref() != Some(path))
-        {
-            return Err(crate::AgentEngineError::InvalidContract(
-                "Invalid bounded patch recovery state".into(),
-            ));
-        }
-        Ok(())
-    }
-}
+pub use nomifun_agent_contracts::AgentPatchRecoveryState;
 
 #[derive(Default)]
 pub(crate) struct PatchRecovery {
@@ -81,7 +26,7 @@ impl PatchRecovery {
     pub(crate) fn restore(
         state: &AgentPatchRecoveryState,
     ) -> Result<Self, crate::AgentEngineError> {
-        state.validate()?;
+        state.validate().map_err(crate::AgentEngineError::InvalidContract)?;
         let mut pending = state.targets.iter().cloned().collect::<BTreeSet<_>>();
         let mut unresolved = state.unresolved_targets.iter().cloned().collect::<BTreeSet<_>>();
         // Historical v1 checkpoints only carried pending targets. Treat them

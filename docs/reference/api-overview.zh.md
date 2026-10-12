@@ -101,8 +101,9 @@ NomiFun 启动时进入三种鉴权策略之一：
 | Agent session Browser Workspace | `/api/agent-sessions/{agent_session_id}/browser*` | 安装 owner + 本地产品信任；校验 agent session 所有权，并拒绝委派执行 step | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
 | Attached Chrome Provider | `GET|POST|DELETE /api/browser-providers/attached-chrome` | 安装 owner + 本地产品信任 | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |
 | 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
-| Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/preview-history/*` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
-| Office iframe 代理 | `/api/ppt-proxy/*`、`/api/office-watch-proxy/*` | 公共（提供 iframe 内容；不鉴权） | 同上 |
+| Office 预览与历史 | `/api/office-preview/start`、`/api/office-preview/status/{request_id}`、`/api/office-preview/stop`、`/api/preview-history/*` | 已鉴权；请求归属用户 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
+| 受管运行环境准备 | `GET /api/runtime-tools/{tool}`、`POST /api/runtime-tools/{tool}/prepare` | 安装 owner；固定组件 ID；非阻塞共享准备 | [`nomifun-app/src/router/runtime_tools.rs`](../../crates/backend/nomifun-app/src/router/runtime_tools.rs) |
+| Office HTML 产物 | `/api/office-preview-artifacts/{capability}/?request_id=...&nonce=...` | 活跃、匹配请求的 capability；UUIDv7 nonce；只读沙箱 HTML | 同上；[契约](../architecture/external-tools.zh.md) |
 | 设置 + 提供商 + 系统信息 | `/api/settings`、`/api/providers/*`、`/api/system/*` | 已鉴权 | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
 | 宿主系统权限 | `GET /api/system/permissions` 读取麦克风、辅助功能与屏幕录制实时状态；`POST /api/system/permissions/{request,open-settings}` 请求授权或打开对应设置 | 读取仅限安装 owner；会弹出本机 UI 的写操作还要求本地产品信任 | [`router/computer_permissions.rs`](../../crates/backend/nomifun-app/src/router/computer_permissions.rs) |
 | 全局模型故障转移队列 | `/api/agent/model-failover` | 已鉴权 | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |

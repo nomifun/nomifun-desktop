@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react
 import { SWRConfig } from 'swr';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { Message } from '@arco-design/web-react';
 import ProductAgentBindingSelect from './ProductAgentBindingSelect';
@@ -13,6 +14,7 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 const i18n = createInstance();
 await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation: {
   'agentSettings.productBinding.label': 'Agent setup',
+  'agentSettings.productBinding.editAgent': 'Edit Agent',
   'agentSettings.template.companion.default.name': 'Companion',
   'agentSettings.template.chat.minimal.name': 'Minimal',
   'agentSettings.template.assistant.general.name': 'Assistant',
@@ -21,6 +23,15 @@ await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation
   'agentSettings.productBinding.loadFailed': 'Could not load Agent options',
   'agentSettings.actions.retry': 'Retry',
   'agentSettings.productBinding.modelChanged': 'Model compatibility changed. Please choose again.',
+  'agentSettings.productBinding.applyLatest': 'Apply latest setup',
+  'agentSettings.productBinding.applyLatestHint': 'Apply saved Agent edits to this conversation',
+  'agentSettings.productBinding.reasons.companion': 'This Agent needs the Companion capability',
+  'agentSettings.productBinding.busy': 'Wait for the current reply to finish',
+  'agentSettings.productBinding.partialSave': 'Current conversation updated; retry saving the default setup',
+  'agentSettings.productBinding.officialTag': 'Official',
+  'agentSettings.productBinding.customTag': 'Custom',
+  'agentSettings.productBinding.reasons.removed': 'This Agent was removed',
+  'agentSettings.productBinding.currentUnavailable': 'Current Agent is unavailable: {{reason}}',
 } } } });
 const restores: Array<() => void> = [];
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => restore()); });
@@ -44,11 +55,11 @@ test('compact product Agent selector updates a product binding with its existing
   for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
   const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
   const providerId = parseProviderId('019b0000-0000-7000-8000-000000000003');
-  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
     <ProductAgentBindingSelect compact targetKind='customer'
       targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default'
       conversationId={conversationId} model={{ id: providerId, use_model: 'model-a' }} />
-  </I18nextProvider></SWRConfig>);
+  </I18nextProvider></MemoryRouter></SWRConfig>);
   fireEvent.click(await view.findByRole('button', { name: 'Agent setup: Companion' }));
   fireEvent.click(await view.findByText('Minimal'));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -59,6 +70,204 @@ test('compact product Agent selector updates a product binding with its existing
   });
   await waitFor(() => expect(view.getByRole('button', { name: 'Agent setup: Minimal' })).toBeTruthy());
 });
+
+test.each([false, true])('companion selector saves a personal Agent and explicitly reapplies its latest setup (compact=%s)', async (compact) => {
+  const companionId = '019b0000-0000-7000-8000-000000000001';
+  const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
+  const providerId = parseProviderId('019b0000-0000-7000-8000-000000000003');
+  const personal = { kind: 'preset' as const, preset_id: '019b0000-0000-7000-8000-000000000004' };
+  let state: ProductAgentOptions = {
+    ...structuredClone(initial), needs_model: false,
+    options: [initial.options[0],
+      { selection: personal, display_name: 'My Companion', available: true, reason: null },
+      { ...initial.options[1], available: false, reason: 'companion' }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    return { selection: request.selection, needs_model: false };
+  });
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
+  let refreshed = 0;
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId={companionId}
+      defaultTemplateKey='companion.default' model={{ id: providerId, use_model: 'model-a' }}
+      conversationId={compact ? conversationId : undefined} onChanged={() => { refreshed++; }} />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  const trigger = compact
+    ? await view.findByRole('button', { name: 'Agent setup: Companion' })
+    : await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(trigger);
+  fireEvent.click(await view.findByText('My Companion'));
+  await waitFor(() => expect(refreshed).toBe(1));
+  expect(save.mock.calls[0][0]).toEqual({
+    target_kind: 'companion', target_id: companionId,
+    request: { selection: personal, model: { provider_id: providerId, model: 'model-a' },
+      ...(compact ? { conversation_id: conversationId } : {}) },
+  });
+  if (compact) {
+    fireEvent.click(await view.findByRole('button', { name: 'Agent setup: My Companion' }));
+    fireEvent.click(await view.findByText('Apply latest setup'));
+  } else {
+    fireEvent.click(await view.findByRole('button', { name: 'Apply latest setup' }));
+  }
+  await waitFor(() => expect(refreshed).toBe(2));
+  expect(save.mock.calls[1][0]).toEqual(save.mock.calls[0][0]);
+});
+
+test.each([false, true])('companion editing follows the selected official or personal Agent (compact=%s)', async (compact) => {
+  const personal = { kind: 'preset' as const, preset_id: 'personal-companion' };
+  let state: ProductAgentOptions = { ...structuredClone(initial), needs_model: false,
+    options: [initial.options[0], { selection: personal, display_name: 'My Companion', available: true, reason: null }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    return { selection: request.selection, needs_model: false };
+  });
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId='companion-editor'
+      defaultTemplateKey='companion.default' />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  if (compact) fireEvent.click(await view.findByRole('button', { name: 'Agent setup: Companion' }));
+  expect((await view.findByRole('link', { name: 'Edit Agent' })).getAttribute('href')).toBe('/agent?template=companion.default');
+  if (!compact) fireEvent.click(view.container.querySelector('.arco-select')!);
+  fireEvent.click(await view.findByText('My Companion'));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  if (compact) fireEvent.click(await view.findByRole('button', { name: 'Agent setup: My Companion' }));
+  await waitFor(() => expect(view.getByRole('link', { name: 'Edit Agent' }).getAttribute('href')).toBe('/agent?preset=personal-companion'));
+});
+
+test.each([false, true])('companion menu only lists Companion presets and distinguishes authored origin (compact=%s)', async (compact) => {
+  const state: ProductAgentOptions = {
+    ...structuredClone(initial), needs_model: false,
+    options: [initial.options[0],
+      { ...initial.options[1], available: false, reason: 'companion' },
+      { selection: { kind: 'preset', preset_id: 'personal-companion' }, display_name: 'companion.default', available: true, reason: null },
+      { selection: { kind: 'preset', preset_id: 'companion-web' }, display_name: 'Companion Web', available: false, reason: 'web_search' },
+      { selection: { kind: 'preset', preset_id: 'removed-companion' }, display_name: 'Removed Companion', available: false, reason: 'removed' }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockResolvedValue(state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke');
+  for (const spy of [options, save]) restores.push(() => spy.mockRestore());
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId='companion-filter'
+      defaultTemplateKey='companion.default' />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  const trigger = compact
+    ? await view.findByRole('button', { name: 'Agent setup: Companion' })
+    : await waitFor(() => { const node = view.container.querySelector('.arco-select-size-mini.nomi-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(trigger);
+  const menu = await waitFor(() => {
+    const node = view.baseElement.querySelector(compact ? '.arco-dropdown-menu' : '.arco-select-popup');
+    expect(node).toBeTruthy(); return node!;
+  });
+  expect(menu.textContent).not.toContain('Minimal');
+  expect(menu.textContent).not.toContain('Removed Companion');
+  expect(menu.textContent).toContain('companion.default');
+  expect(menu.textContent).toContain('Companion Web');
+  expect(menu.textContent).toContain('Model lacks web search');
+  expect(menu.querySelectorAll('[data-agent-origin="official"]')).toHaveLength(1);
+  expect(menu.querySelectorAll('[data-agent-origin="custom"]')).toHaveLength(2);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('a removed current Companion stays visible while its menu only offers valid replacements (compact=%s)', async (compact) => {
+  const state: ProductAgentOptions = { ...structuredClone(initial), needs_model: false,
+    selection: { kind: 'preset', preset_id: 'removed-companion' },
+    options: [initial.options[0], { selection: { kind: 'preset', preset_id: 'removed-companion' },
+      display_name: 'My Removed Companion', available: false, reason: 'removed' }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockResolvedValue(state);
+  restores.push(() => options.mockRestore());
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact={compact} targetKind='companion' targetId='companion-removed' defaultTemplateKey='companion.default' />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  const trigger = compact
+    ? await view.findByRole('button', { name: 'Agent setup: My Removed Companion' })
+    : await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  if (compact) {
+    fireEvent.mouseEnter(trigger.parentElement!);
+    expect((await view.findByRole('tooltip')).textContent).toContain('This Agent was removed');
+  } else {
+    const value = view.container.querySelector('.arco-select-view-value')!;
+    expect(value.textContent).toContain('My Removed Companion');
+    expect(value.textContent).toContain('Custom');
+    expect(value.textContent).not.toContain('This Agent was removed');
+    expect(view.getByRole('status').textContent).toContain('This Agent was removed');
+    expect((view.getByRole('button', { name: 'Apply latest setup' }) as HTMLButtonElement).disabled).toBe(true);
+  }
+  fireEvent.click(trigger);
+  const menu = await waitFor(() => {
+    const node = view.baseElement.querySelector(compact ? '.arco-dropdown-menu' : '.arco-select-popup');
+    expect(node).toBeTruthy(); return node!;
+  });
+  expect(menu.textContent).toContain('Companion');
+  expect(menu.textContent).not.toContain('My Removed Companion');
+  if (compact) expect(view.getByRole('menuitem', { name: 'Apply latest setup' }).getAttribute('aria-disabled')).toBe('true');
+});
+
+test('companion selector preserves its Agent when the existing conversation is busy', async () => {
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockResolvedValue(initial);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockRejectedValue(new BackendHttpError({
+    method: 'PUT', path: '/api/product-agent-bindings/companion/private', status: 409,
+    body: { code: 'AGENT_SESSION_TURN_ACTIVE', error: 'private operation identity' },
+  }));
+  const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
+  for (const spy of [options, save, toast]) restores.push(() => spy.mockRestore());
+  let refreshed = false;
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect targetKind='companion' targetId='019b0000-0000-7000-8000-000000000001'
+      defaultTemplateKey='companion.default' onChanged={() => { refreshed = true; }} />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  const selector = await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(selector);
+  fireEvent.click(await view.findByText('Minimal'));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith('Wait for the current reply to finish'));
+  expect(refreshed).toBe(false);
+  expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Companion');
+  expect(view.baseElement.textContent).not.toContain('private operation identity');
+});
+
+test('companion selector shows the active Agent and can retry a failed default save after reopening', async () => {
+  let state: ProductAgentOptions = { ...structuredClone(initial),
+    selection: { kind: 'preset', preset_id: 'personal-companion' },
+    options: [initial.options[0], { selection: { kind: 'preset', preset_id: 'personal-companion' },
+      display_name: 'My Companion', available: true, reason: null }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    if (save.mock.calls.length === 1) throw new BackendHttpError({
+      method: 'PUT', path: '/api/product-agent-bindings/companion/private', status: 500,
+      body: { code: 'COMPANION_AGENT_DEFAULT_SAVE_FAILED', error: 'private storage detail' },
+    });
+    return { selection: request.selection, needs_model: true };
+  });
+  const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, toast, success]) restores.push(() => spy.mockRestore());
+  const renderSelector = () => render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect targetKind='companion' targetId='019b0000-0000-7000-8000-000000000001'
+      defaultTemplateKey='companion.default' />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  let view = renderSelector();
+  const selector = await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(selector);
+  fireEvent.click(await view.findByText('Companion'));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith('Current conversation updated; retry saving the default setup'));
+  await waitFor(() => expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Companion'));
+  expect(success).not.toHaveBeenCalled();
+  expect(view.baseElement.textContent).not.toContain('private storage detail');
+  view.unmount();
+  view = renderSelector();
+  fireEvent.click(await view.findByRole('button', { name: 'Apply latest setup' }));
+  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[1][0].request.selection).toEqual({ kind: 'template', template_key: 'companion.default' });
+});
 test('allows Agent selection before model setup and prevents selecting incompatible options', async () => {
   let state = structuredClone(initial);
   const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
@@ -68,9 +277,9 @@ test('allows Agent selection before model setup and prevents selecting incompati
   });
   const success = spyOn(Message, 'success').mockImplementation(() => () => {});
   for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
-  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
     <ProductAgentBindingSelect targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
-  </I18nextProvider></SWRConfig>);
+  </I18nextProvider></MemoryRouter></SWRConfig>);
   await waitFor(() => expect(view.getByText('Choose a model later')).toBeTruthy());
   expect(view.queryByText('Using Agent')).toBeNull();
   const selector = view.container.querySelector('.arco-select')!;
@@ -96,9 +305,9 @@ test('rechecks options when the model changes and displays fetch failures instea
   for (const spy of [options, save]) restores.push(() => spy.mockRestore());
   const providerId = parseProviderId('019b0000-0000-7000-8000-000000000001');
   const cache = new Map();
-  const panel = (model: string) => <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
+  const panel = (model: string) => <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
     <ProductAgentBindingSelect targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' model={{ id: providerId, use_model: model }} />
-  </I18nextProvider></SWRConfig>;
+  </I18nextProvider></MemoryRouter></SWRConfig>;
   const view = render(panel('compatible'));
   await waitFor(() => expect(view.container.querySelector('.arco-select')).toBeTruthy());
   view.rerender(panel('incompatible'));
@@ -122,9 +331,9 @@ test.each([false, true])('a stale selection failure preserves the selected Agent
   }));
   const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
   for (const spy of [options, save, toast]) restores.push(() => spy.mockRestore());
-  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
     <ProductAgentBindingSelect compact={compact} targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
-  </I18nextProvider></SWRConfig>);
+  </I18nextProvider></MemoryRouter></SWRConfig>);
   const trigger = compact
     ? await view.findByRole('button', { name: 'Agent setup: Companion' })
     : await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });

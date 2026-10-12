@@ -269,6 +269,7 @@ impl EngineProcessScope {
             // Obvious input errors are rejected before the uncertain spawn
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
+            prepare_managed_program(&mut request, &self.cancellation).await?;
             state.unregistered_start = true;
             let session = match self
                 .owner
@@ -474,6 +475,31 @@ fn rejected_terminal_control(id: &str, poll: &EngineProcessPoll, operation: Oper
     Ok(output)
 }
 
+/// Supply a literal product Bun executable before entering the uncertain user
+/// process-start window. Shell text and explicit user executable paths retain
+/// their existing semantics; one turn cancelling never cancels shared supply.
+async fn prepare_managed_program(
+    request: &mut EngineProcessRequest,
+    cancellation: &CancellationToken,
+) -> Result<(), Wave2HostPortError> {
+    if request.shell_script.is_some() || nomifun_runtime::managed_command_tool(&request.command).is_none() {
+        return Ok(());
+    }
+    let prepared = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started")),
+        result = nomifun_runtime::prepare_managed_command(&request.command, &request.args) => result.map_err(|cause|
+            Wave2HostPortError::new("COMPONENT_PREPARATION_FAILED", cause.to_string()))?,
+    };
+    if cancellation.is_cancelled() {
+        return Err(Wave2HostPortError::new("CANCELLED", "Process preparation cancelled before user code started"));
+    }
+    let prepared = prepared.ok_or_else(|| error("Managed Bun preparation did not supply the requested executable"))?;
+    request.command = prepared.executable_path.to_str().ok_or_else(|| error("Managed Bun path cannot be represented by the process protocol"))?.to_owned();
+    request.args = prepared.args;
+    request.validate().map_err(error)
+}
+
 async fn reconcile_unregistered_start(
     state: &mut ProcessState,
     proof: impl std::future::Future<Output = bool>,
@@ -516,6 +542,27 @@ fn process_output(
 mod tests {
     use super::*;
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
+
+    #[tokio::test]
+    async fn managed_program_preserves_shell_text_and_explicit_user_executables() {
+        for mut request in [EngineProcessRequest::shell("bun test"), EngineProcessRequest::pipe("/user/tools/bun"), EngineProcessRequest::pipe("bun test")] {
+            let original = request.clone();
+            prepare_managed_program(&mut request, &CancellationToken::new()).await.unwrap();
+            assert_eq!(request, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_program_cancelled_before_supply_cannot_enter_user_start() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut request = EngineProcessRequest::pipe("bunx");
+        request.args = vec!["tool-package".into()];
+        let original = request.clone();
+        let failure = prepare_managed_program(&mut request, &cancellation).await.unwrap_err();
+        assert_eq!(failure.code, "CANCELLED");
+        assert_eq!(request, original);
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]

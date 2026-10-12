@@ -26,6 +26,10 @@ pub struct CurrentUser {
     pub username: String,
 }
 
+/// Authenticated device identity, never synthesized from an ordinary user JWT.
+#[derive(Debug, Clone)]
+pub struct CurrentDevice(pub String);
+
 /// Shared state for the authentication middleware.
 #[derive(Clone)]
 pub struct AuthState {
@@ -91,10 +95,14 @@ pub async fn auth_middleware(
     let token = extract_token_from_headers(request.headers())
         .ok_or_else(|| AppError::Forbidden("Authentication required".into()))?;
 
-    let payload = state.jwt_service.verify(&token).map_err(|e| {
-        tracing::debug!("Token verification failed: {e}");
-        AppError::Forbidden("Invalid or expired token".into())
-    })?;
+    let payload = match state.jwt_service.verify(&token) {
+        Ok(payload) => payload,
+        Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::FORBIDDEN)),
+        Err(error) => {
+            tracing::debug!(%error, "Token verification failed");
+            return Err(AppError::Forbidden("Invalid or expired token".into()));
+        }
+    };
 
     let user = state
         .user_repo
@@ -110,7 +118,7 @@ pub async fn auth_middleware(
         && extract_bearer_token(request.headers()).is_none()
         && extract_cookie_value(request.headers(), COOKIE_NAME).as_deref() == Some(token.as_str());
     let renewed = if renew_cookie {
-        match state.jwt_service.sign(user.user_id.as_str(), &user.username) {
+        match state.jwt_service.renew(&payload, &user.username) {
             Ok(fresh) => Some(state.cookie_config.build_session_cookie(&fresh)),
             Err(error) => {
                 // Renewal is opportunistic: the current token is still valid,
@@ -122,6 +130,19 @@ pub async fn auth_middleware(
     } else {
         None
     };
+
+    if let Some(device_id) = payload.device_id.as_deref() {
+        if let Err(error) = state.jwt_service.devices.touch(device_id, user.user_id.as_str()).await {
+            tracing::debug!(%error, "device activity persistence deferred");
+        }
+        // Recheck after await: a concurrently revoked device cannot be admitted.
+        match state.jwt_service.verify(&token) {
+            Ok(_) => {}
+            Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::FORBIDDEN)),
+            Err(_) => return Err(AppError::Forbidden("Invalid or expired token".into())),
+        }
+        request.extensions_mut().insert(CurrentDevice(device_id.to_owned()));
+    }
 
     request.extensions_mut().insert(CurrentUser {
         id: user.user_id,

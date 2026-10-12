@@ -1,15 +1,4 @@
-//! E2E tests for office HTTP endpoints.
-//!
-//! Covers test-plan items:
-//! - AU-1/AU-2: Unauthenticated access rejected
-//! - SH-1..SH-7: Snapshot CRUD (save, list, get-content, not-found, trim, isolation, target combos)
-//! - SO-1/SO-2: Star Office detection (no service available)
-//! - RP-2/RP-4: Proxy SSRF protection (inactive port rejected)
-//! - WP-4: Word preview start when officecli not available
-//!
-//! Items requiring real officecli or mock HTTP backends (WP-1..3, WP-5..6, EP-1..2,
-//! PP-1..3, RP-1/RP-3, RP-5..7, SO-5..6) are tested at the service
-//! integration level in `nomifun-office/tests/`.
+//! Office artifact authorization, lifecycle and snapshot HTTP contracts.
 
 use std::sync::Arc;
 
@@ -20,12 +9,8 @@ use tower::ServiceExt;
 use common::{body_json, get_request, json_with_token, setup_and_login};
 
 use nomifun_app::AppConfig;
-use nomifun_app::compatibility::{
-    AppServices, build_module_states, create_router_with_states,
-};
-use nomifun_office::{
-    OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService,
-};
+use nomifun_app::compatibility::{AppServices, build_module_states, create_router_with_states};
+use nomifun_office::{OfficePreviewService, OfficeRouterState, SnapshotService};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -58,54 +43,42 @@ async fn build_office_app_with_roots(
     (router, services, tmp)
 }
 
-fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::path::PathBuf>) -> OfficeRouterState {
-    use nomifun_office::error::OfficeError;
-    use nomifun_office::types::DocType;
-    use nomifun_office::{ProcessHandle, ProcessSpawner};
-
-    struct NoopSpawner;
-
+fn build_test_office_state(
+    data_dir: &std::path::Path,
+    allowed_roots: Vec<std::path::PathBuf>,
+) -> OfficeRouterState {
+    use nomifun_office::{OfficeEngine, OfficeEngineSupplier, PreviewLimits};
+    struct UnavailableEngine;
     #[async_trait::async_trait]
-    impl ProcessSpawner for NoopSpawner {
-        async fn spawn_officecli(
-            &self,
-            _file_path: &str,
-            _port: u16,
-            _doc_type: DocType,
-        ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
-            Err(OfficeError::OfficecliNotFound)
-        }
-        async fn install_officecli(&self) -> Result<(), OfficeError> {
-            Err(OfficeError::InstallFailed("not available in test".into()))
-        }
-        async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
-            Ok(())
+    impl OfficeEngineSupplier for UnavailableEngine {
+        async fn resolve(&self) -> Result<OfficeEngine, nomifun_api_types::OfficePreviewError> {
+            Err(nomifun_api_types::OfficePreviewError {
+                code: "ENGINE_UNAVAILABLE".into(),
+                message: "Preview component unavailable".into(),
+                retryable: false,
+            })
         }
     }
-
-    struct NoopBroadcaster;
-    impl nomifun_realtime::UserEventSink for NoopBroadcaster {
-        fn send_to_user(
-            &self,
-            _user_id: &str,
-            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
-        ) {
-        }
-    }
-
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(NoopSpawner);
-    let bc: Arc<dyn nomifun_realtime::UserEventSink> = Arc::new(NoopBroadcaster);
-    let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
-
-    let snapshot = Arc::new(SnapshotService::new(data_dir));
-    let proxy = Arc::new(ProxyService::new(wm.clone()));
-
     OfficeRouterState {
-        watch_manager: wm,
-        snapshot_service: snapshot,
-        proxy_service: proxy,
+        preview_service: Arc::new(OfficePreviewService::with_supplier(
+            data_dir,
+            Arc::new(UnavailableEngine),
+            PreviewLimits::default(),
+        )),
+        snapshot_service: Arc::new(SnapshotService::new(data_dir)),
         allowed_roots,
     }
+}
+
+fn write_office_fixture(path: &std::path::Path, part: &str) {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for name in ["[Content_Types].xml", part] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"<root/>").unwrap();
+    }
+    zip.finish().unwrap();
 }
 
 fn snapshot_target() -> serde_json::Value {
@@ -117,7 +90,7 @@ fn snapshot_target() -> serde_json::Value {
 #[tokio::test]
 async fn au1_unauthenticated_preview_start_returns_403() {
     let (app, _services, _tmp) = build_office_app().await;
-    let req = common::get_request("/api/word-preview/start");
+    let req = common::get_request("/api/office-preview/start");
     let resp = app.oneshot(req).await.unwrap();
     assert!(
         resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,
@@ -129,9 +102,9 @@ async fn au1_unauthenticated_preview_start_returns_403() {
 #[tokio::test]
 async fn au2_unauthenticated_all_office_endpoints() {
     let endpoints = [
-        "/api/word-preview/start",
-        "/api/excel-preview/start",
-        "/api/ppt-preview/start",
+        "/api/office-preview/start",
+        "/api/office-preview/start",
+        "/api/office-preview/start",
         "/api/preview-history/list",
         "/api/preview-history/save",
     ];
@@ -162,18 +135,37 @@ async fn wp4_word_preview_officecli_not_available() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let file_path = tmp.path().join("test.docx");
-    std::fs::write(&file_path, b"docx").unwrap();
+    write_office_fixture(&file_path, "word/document.xml");
 
-    let body = json!({"file_path": file_path.to_str().unwrap()});
-    let req = json_with_token("POST", "/api/word-preview/start", body, &token, &csrf);
+    let body = json!({"request_id":nomifun_common::generate_id(), "doc_type":"word", "file_path": file_path.to_str().unwrap()});
+    let req = json_with_token("POST", "/api/office-preview/start", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    let url = json["data"]["url"].as_str().unwrap();
-    assert!(url.is_empty(), "url should be empty when officecli unavailable");
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    assert_eq!(json["data"]["state"], "queued");
+    let request_id = json["data"]["request_id"].as_str().unwrap();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let request = json_with_token(
+                "GET",
+                &format!("/api/office-preview/status/{request_id}"),
+                json!({}),
+                &token,
+                &csrf,
+            );
+            let result = body_json(app.clone().oneshot(request).await.unwrap()).await;
+            if result["data"]["state"] == "error" {
+                break result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal["data"]["error"]["code"], "ENGINE_UNAVAILABLE");
+    assert_eq!(terminal["data"]["error"]["retryable"], false);
 }
 
 #[tokio::test]
@@ -181,22 +173,24 @@ async fn wp5_word_preview_with_workspace_accepts_non_sandbox_path() {
     let sandbox = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let file_path = outside.path().join("demo.docx");
-    std::fs::write(&file_path, b"docx").unwrap();
+    write_office_fixture(&file_path, "word/document.xml");
 
-    let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
+    let (mut app, services, _tmp) =
+        build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
+        "request_id":nomifun_common::generate_id(), "doc_type":"word",
         "file_path": file_path.to_str().unwrap(),
         "workspace": outside.path().to_str().unwrap()
     });
-    let req = json_with_token("POST", "/api/word-preview/start", body, &token, &csrf);
+    let req = json_with_token("POST", "/api/office-preview/start", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    assert_eq!(json["data"]["state"], "queued");
 }
 
 #[tokio::test]
@@ -204,15 +198,17 @@ async fn wp6_word_preview_without_workspace_rejects_non_sandbox_path() {
     let sandbox = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let file_path = outside.path().join("demo.docx");
-    std::fs::write(&file_path, b"docx").unwrap();
+    write_office_fixture(&file_path, "word/document.xml");
 
-    let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
+    let (mut app, services, _tmp) =
+        build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
+        "request_id":nomifun_common::generate_id(), "doc_type":"word",
         "file_path": file_path.to_str().unwrap()
     });
-    let req = json_with_token("POST", "/api/word-preview/start", body, &token, &csrf);
+    let req = json_with_token("POST", "/api/office-preview/start", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -225,22 +221,24 @@ async fn ep1_excel_preview_with_workspace_accepts_non_sandbox_path() {
     let sandbox = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let file_path = outside.path().join("demo.xlsx");
-    std::fs::write(&file_path, b"xlsx").unwrap();
+    write_office_fixture(&file_path, "xl/workbook.xml");
 
-    let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
+    let (mut app, services, _tmp) =
+        build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
+        "request_id":nomifun_common::generate_id(), "doc_type":"excel",
         "file_path": file_path.to_str().unwrap(),
         "workspace": outside.path().to_str().unwrap()
     });
-    let req = json_with_token("POST", "/api/excel-preview/start", body, &token, &csrf);
+    let req = json_with_token("POST", "/api/office-preview/start", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    assert_eq!(json["data"]["state"], "queued");
 }
 
 #[tokio::test]
@@ -248,22 +246,24 @@ async fn pp1_ppt_preview_with_workspace_accepts_non_sandbox_path() {
     let sandbox = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let file_path = outside.path().join("demo.pptx");
-    std::fs::write(&file_path, b"pptx").unwrap();
+    write_office_fixture(&file_path, "ppt/presentation.xml");
 
-    let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
+    let (mut app, services, _tmp) =
+        build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
+        "request_id":nomifun_common::generate_id(), "doc_type":"ppt",
         "file_path": file_path.to_str().unwrap(),
         "workspace": outside.path().to_str().unwrap()
     });
-    let req = json_with_token("POST", "/api/ppt-preview/start", body, &token, &csrf);
+    let req = json_with_token("POST", "/api/office-preview/start", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    assert_eq!(json["data"]["state"], "queued");
 }
 
 // ── SH-1: Save snapshot ─────────────────────────────────────────────
@@ -333,7 +333,13 @@ async fn sh3_get_snapshot_content() {
         "target": snapshot_target(),
         "content": "# Hello"
     });
-    let req = json_with_token("POST", "/api/preview-history/save", save_body, &token, &csrf);
+    let req = json_with_token(
+        "POST",
+        "/api/preview-history/save",
+        save_body,
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
     let save_json = body_json(resp).await;
     let snapshot_id = save_json["data"]["snapshot_id"].as_str().unwrap();
@@ -342,7 +348,13 @@ async fn sh3_get_snapshot_content() {
         "target": snapshot_target(),
         "snapshot_id": snapshot_id
     });
-    let req = json_with_token("POST", "/api/preview-history/get-content", get_body, &token, &csrf);
+    let req = json_with_token(
+        "POST",
+        "/api/preview-history/get-content",
+        get_body,
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -364,7 +376,13 @@ async fn sh4_get_nonexistent_snapshot() {
         "target": snapshot_target(),
         "snapshot_id": "0190f5fe-7c00-7a00-8000-000000000099"
     });
-    let req = json_with_token("POST", "/api/preview-history/get-content", body, &token, &csrf);
+    let req = json_with_token(
+        "POST",
+        "/api/preview-history/get-content",
+        body,
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -478,50 +496,48 @@ async fn sh7_target_field_combination_different_hash() {
     );
 }
 
-
-
-// ── RP-2: PPT proxy SSRF protection ─────────────────────────────────
-
+// Capability reads never accept port numbers or inactive opaque tokens.
 #[tokio::test]
-async fn rp2_ppt_proxy_ssrf_inactive_port() {
-    let (app, _services, _tmp) = build_office_app().await;
-
-    let req = get_request("/api/ppt-proxy/8080/index.html");
-    let resp = app.oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-// ── RP-4: Office watch proxy SSRF protection ────────────────────────
-
-#[tokio::test]
-async fn rp4_office_watch_proxy_ssrf_inactive_port() {
-    let (app, _services, _tmp) = build_office_app().await;
-
-    let req = get_request("/api/office-watch-proxy/9999/index.html");
-    let resp = app.oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-// ── RP-root: proxy root path (no trailing path segment) ─────────────
-
-#[tokio::test]
-async fn ppt_proxy_root_path_returns_non_404() {
-    let (app, _services, _tmp) = build_office_app().await;
-
-    let req = get_request("/api/ppt-proxy/19999");
-    let resp = app.oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+async fn artifact_capabilities_require_an_active_grant() {
+    for capability in ["8080".to_owned(), "a".repeat(64)] {
+        let (app, _services, _tmp) = build_office_app().await;
+        let request = get_request(&format!(
+            "/api/office-preview-artifacts/{capability}/?request_id={}&nonce={}",
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7()
+        ));
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[tokio::test]
-async fn office_watch_proxy_root_path_returns_non_404() {
-    let (app, _services, _tmp) = build_office_app().await;
-
-    let req = get_request("/api/office-watch-proxy/19999");
-    let resp = app.oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+async fn stop_before_start_prevents_resurrection() {
+    let (mut app, services, tmp) = build_office_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
+    let request_id = nomifun_common::generate_id();
+    let stop = json_with_token(
+        "POST",
+        "/api/office-preview/stop",
+        json!({"request_id":request_id}),
+        &token,
+        &csrf,
+    );
+    assert_eq!(
+        app.clone().oneshot(stop).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let file = tmp.path().join("test.docx");
+    write_office_fixture(&file, "word/document.xml");
+    let start = json_with_token(
+        "POST",
+        "/api/office-preview/start",
+        json!({"request_id":request_id,"doc_type":"word","file_path":file}),
+        &token,
+        &csrf,
+    );
+    let response = body_json(app.oneshot(start).await.unwrap()).await;
+    assert_eq!(response["data"]["error"]["code"], "CANCELLED");
 }

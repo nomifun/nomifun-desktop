@@ -1,30 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Tool effect category shared by native tools and host adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCategory {
-    Info,
-    Edit,
-    Exec,
-    Mcp,
-    /// Irreversible action such as submit, payment, delete, or send.
-    Irreversible,
-}
-
-impl std::fmt::Display for ToolCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Info => write!(f, "info"),
-            Self::Edit => write!(f, "edit"),
-            Self::Exec => write!(f, "exec"),
-            Self::Mcp => write!(f, "mcp"),
-            Self::Irreversible => write!(f, "irreversible"),
-        }
-    }
-}
-
 /// Schema for a tool parameter, in JSON Schema format
 pub type JsonSchema = Value;
 
@@ -71,13 +47,6 @@ pub struct ToolImage {
     pub data: String,
 }
 
-/// Generic name for the backwards-compatible inline artifact carrier.
-///
-/// Keeping this as an alias avoids invalidating persisted transcripts and the
-/// many existing image-producing tools while giving MCP/resource code an
-/// accurate type name.
-pub type ToolArtifact = ToolImage;
-
 /// Result from executing a tool
 #[derive(Debug, Clone, Default)]
 pub struct ToolResult {
@@ -113,29 +82,11 @@ impl ToolResult {
         self.images = images;
         self
     }
-
-    /// Attach generic inline artifacts using the legacy wire-compatible field.
-    pub fn with_artifacts(mut self, artifacts: Vec<ToolArtifact>) -> Self {
-        self.images = artifacts;
-        self
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tool_categories_use_the_same_wire_and_display_names() {
-        for (category, name) in [
-            (ToolCategory::Info, "info"), (ToolCategory::Edit, "edit"),
-            (ToolCategory::Exec, "exec"), (ToolCategory::Mcp, "mcp"),
-            (ToolCategory::Irreversible, "irreversible"),
-        ] {
-            assert_eq!(category.to_string(), name);
-            assert_eq!(serde_json::to_value(category).unwrap(), name);
-        }
-    }
 
     // --- ToolResult success scenario ---
 

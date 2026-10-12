@@ -12,15 +12,13 @@ import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import CodePreview from '../viewers/CodeViewer';
 import DiffPreview from '../viewers/DiffViewer';
-import ExcelPreview from '../viewers/ExcelViewer';
 import HTMLEditor from '../editors/HTMLEditor';
 import HTMLRenderer from '../renderers/HTMLRenderer';
 import ImagePreview from '../viewers/ImageViewer';
 import MarkdownEditor from '../editors/MarkdownEditor';
 import MarkdownPreview from '../viewers/MarkdownViewer';
 import PDFPreview from '../viewers/PDFViewer';
-import OfficeDocPreview from '../viewers/OfficeDocViewer';
-import PptViewer from '../viewers/PptViewer';
+import OfficeArtifactViewer from '../viewers/OfficeArtifactViewer';
 import TextEditor from '../editors/TextEditor';
 import {
   PreviewTabs,
@@ -593,12 +591,15 @@ const PreviewPanel: React.FC = () => {
       );
     } else if (content_type === 'pdf') {
       return <PDFPreview file_path={metadata?.file_path} content={content} />;
-    } else if (content_type === 'ppt') {
-      return <PptViewer file_path={metadata?.file_path} content={content} workspace={metadata?.workspace} />;
-    } else if (content_type === 'word') {
-      return <OfficeDocPreview file_path={metadata?.file_path} content={content} workspace={metadata?.workspace} />;
-    } else if (content_type === 'excel') {
-      return <ExcelPreview file_path={metadata?.file_path} content={content} workspace={metadata?.workspace} />;
+    } else if (content_type === 'ppt' || content_type === 'word' || content_type === 'excel') {
+      return (
+        <OfficeArtifactViewer
+          docType={content_type}
+          file_path={metadata?.file_path}
+          workspace={metadata?.workspace}
+          revision={activeTab.fileRevision}
+        />
+      );
     } else if (content_type === 'image') {
       return (
         <ImagePreview

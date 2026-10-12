@@ -43,6 +43,12 @@ Component-specific tokens such as `--message-user-bg` and
 `--workspace-btn-bg` are allowed when a generic semantic token is not precise
 enough.
 
+Neutral pill/segmented Tab containers use `nomi-pill-tabs` and read
+`var(--pill-tab-active-bg, <existing light surface>)` only for their selected
+background. The control contract supplies a stronger neutral fill in dark mode
+and resets it to the fallback in light mode. Keep this scoped contract out of
+line Tabs, navigation menus and other control states.
+
 ## Adding A Color Scheme
 
 1. Add a new `*-color-scheme.css` file beside `default-color-scheme.css`.

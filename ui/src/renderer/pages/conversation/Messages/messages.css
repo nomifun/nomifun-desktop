@@ -831,40 +831,6 @@ button.turn-process-trace__row:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.turn-process-trace-file-list__button {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  padding: 1px 4px;
-  text-align: left;
-}
-
-.turn-process-trace-file-list__button:hover {
-  background: var(--color-fill-1, #f7f8fa);
-  color: var(--color-text-1, #1d2129);
-}
-
-.turn-process-trace-file-list__button > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.turn-process-trace-file-list__stats {
-  flex: none;
-  color: var(--color-text-3, #86909c);
-  font-variant-numeric: tabular-nums;
-}
-
 /* Multimodal results stay in the transcript's reading flow. The selected
    artifact gets the visual weight; sibling images act as a compact picker. */
 .turn-deliverables {

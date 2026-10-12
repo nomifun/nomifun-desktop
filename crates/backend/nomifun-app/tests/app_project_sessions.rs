@@ -321,8 +321,13 @@ async fn scripted_runtime_import_uses_real_project_fences_and_hosted_effect_rece
         let rounds = Arc::new(AtomicUsize::new(0));
         let seen = rounds.clone();
         wiremock::Mock::given(wiremock::matchers::method("POST")).and(wiremock::matchers::path("/v1/chat/completions"))
-            .respond_with(move |_: &wiremock::Request| {
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
                 let first = seen.fetch_add(1, Ordering::SeqCst) == 0;
+                if first {
+                    assert!(body["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == "import_app"),
+                        "the selected application's import schema must be exposed before the first model step");
+                }
                 let delta = if first { json!({"tool_calls":[{"index":0,"id":"scripted-project-import","type":"function",
                     "function":{"name":"import_app","arguments":arguments}}]}) }
                     else { json!({"content":if protection.is_some() { "The import was rejected because the target has active or unknown work. No target files were changed." }

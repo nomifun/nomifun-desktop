@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -36,6 +36,9 @@ pub struct TokenPayload {
     pub iss: String,
     /// Audience (standard JWT claim).
     pub aud: String,
+    /// Present only for individually registered Mobile credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 /// JWT service for signing, verification, and token blacklisting.
@@ -46,6 +49,8 @@ pub struct JwtService {
     secret: RwLock<String>,
     /// Blacklisted token hashes -> expiry timestamps.
     blacklist: DashMap<String, u64>,
+    pub(crate) devices: Arc<crate::DeviceStore>,
+    invalidations: tokio::sync::watch::Sender<u64>,
 }
 
 impl JwtService {
@@ -53,9 +58,41 @@ impl JwtService {
     ///
     /// The secret's bytes are used as the HMAC-SHA256 key.
     pub fn new(secret: String) -> Self {
+        Self::with_devices(secret, Arc::new(crate::DeviceStore::default()))
+    }
+
+    pub fn with_devices(secret: String, devices: Arc<crate::DeviceStore>) -> Self {
+        let (invalidations, _) = tokio::sync::watch::channel(0);
         Self {
             secret: RwLock::new(secret),
             blacklist: DashMap::new(),
+            devices,
+            invalidations,
+        }
+    }
+
+    /// Existing sockets subscribe to credential revocation without polling.
+    pub fn subscribe_invalidations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.invalidations.subscribe()
+    }
+
+    pub fn notify_invalidated(&self) {
+        self.invalidations.send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    pub fn sign_for_device(&self, user_id: &str, username: &str, device_id: &str) -> Result<String, AuthError> {
+        if !self.devices.is_active(device_id, user_id) {
+            return Err(AuthError::DeviceRevoked);
+        }
+        let now = now_secs()?;
+        self.sign_claims(user_id, username, now, now + TOKEN_EXPIRY.as_secs(), Some(device_id.to_owned()))
+    }
+
+    /// Refresh keeps the original credential kind; it cannot drop device scope.
+    pub fn renew(&self, payload: &TokenPayload, username: &str) -> Result<String, AuthError> {
+        match payload.device_id.as_deref() {
+            Some(id) => self.sign_for_device(payload.user_id.as_str(), username, id),
+            None => self.sign(payload.user_id.as_str(), username),
         }
     }
 
@@ -71,6 +108,10 @@ impl JwtService {
     /// tests can mint tokens at a chosen point in their life (e.g. "already
     /// past half-life") without waiting out real time.
     pub fn sign_with_window(&self, user_id: &str, username: &str, iat: u64, exp: u64) -> Result<String, AuthError> {
+        self.sign_claims(user_id, username, iat, exp, None)
+    }
+
+    fn sign_claims(&self, user_id: &str, username: &str, iat: u64, exp: u64, device_id: Option<String>) -> Result<String, AuthError> {
         let user_id = UserId::parse(user_id)
             .map_err(|error| AuthError::TokenInvalid(format!("invalid user id: {error}")))?;
         let claims = TokenPayload {
@@ -80,6 +121,7 @@ impl JwtService {
             exp,
             iss: JWT_ISSUER.to_owned(),
             aud: JWT_AUDIENCE.to_owned(),
+            device_id,
         };
 
         let secret = self
@@ -119,7 +161,13 @@ impl JwtService {
                 _ => AuthError::TokenInvalid(format!("JWT verification failed: {e}")),
             })?;
 
-        Ok(token_data.claims)
+        let payload = token_data.claims;
+        if let Some(device_id) = payload.device_id.as_deref()
+            && !self.devices.is_active(device_id, payload.user_id.as_str())
+        {
+            return Err(AuthError::DeviceRevoked);
+        }
+        Ok(payload)
     }
 
     /// Add a token to the blacklist.
@@ -132,6 +180,7 @@ impl JwtService {
             .extract_expiry(token)
             .unwrap_or_else(|| now_secs().unwrap_or(0) + TOKEN_EXPIRY.as_secs());
         self.blacklist.insert(hash, exp);
+        self.notify_invalidated();
     }
 
     /// Generate a candidate JWT secret without changing the current service state.
@@ -155,6 +204,9 @@ impl JwtService {
         *secret = new_secret;
         // All old tokens are invalid with the new secret; clear the blacklist
         self.blacklist.clear();
+        // Release the signing lock before sockets revalidate their credentials.
+        drop(secret);
+        self.notify_invalidated();
         tracing::info!("JWT secret rotated; all existing tokens invalidated");
         Ok(())
     }
@@ -345,6 +397,7 @@ mod tests {
             exp: 1001,
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
+            device_id: None,
         };
         let token = encode(
             &Header::default(),
@@ -421,6 +474,7 @@ mod tests {
             exp: 1001,
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
+            device_id: None,
         };
         let token = encode(
             &Header::default(),

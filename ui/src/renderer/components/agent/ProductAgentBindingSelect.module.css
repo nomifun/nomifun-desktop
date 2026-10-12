@@ -1,0 +1,91 @@
+/* Block flex avoids an inline baseline shift in the selected value. */
+.selectedLabel,
+.optionLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.optionLabel {
+  justify-content: space-between;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceTag {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
+}
+
+.popup,
+.menu {
+  min-width: 180px;
+  max-width: 280px;
+}
+
+.popup :global(.arco-select-option),
+.menu :global(.arco-menu-item),
+.menu :global(.arco-dropdown-menu-item) {
+  height: auto;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.optionContent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.reason {
+  font-size: 11px;
+  line-height: 15px;
+  white-space: normal;
+}
+
+.applyButton {
+  flex-shrink: 0;
+  font-weight: 400;
+}
+
+.editLink {
+  flex-shrink: 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 24px;
+  text-decoration: none;
+}
+
+.editLink:hover {
+  color: rgb(var(--primary-6));
+}
+
+.applyButton:global(.arco-btn-text):not(:disabled) {
+  color: var(--color-text-3);
+}
+
+.applyButton:global(.arco-btn-text):not(:disabled):hover {
+  color: rgb(var(--primary-6));
+}
+
+.hint {
+  max-width: 280px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 16px;
+}

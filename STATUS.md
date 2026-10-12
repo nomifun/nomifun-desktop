@@ -1,6 +1,6 @@
 ﻿# Current Technical Status
 
-Updated: 2026-10-07.
+Updated: 2026-10-09.
 
 This file is a compact current-state snapshot. Historical migration notes are
 intentionally not kept here; use Git history for superseded transitions.
@@ -8,10 +8,10 @@ intentionally not kept here; use Git history for superseded transitions.
 ## Current Architecture
 
 - One Cargo workspace:
-  - `crates/agent/*`: 11 `nomi-*` crates.
+  - `crates/agent/*`: 7 `nomi-*` crates.
   - `crates/backend/*`: 54 `nomifun-*` crates.
-  - `crates/shared/*`: 5 cross-layer crates (`nomi-process-runtime`,
-    `nomi-redact`, `nomi-ssh`, `nomifun-audio`, `nomifun-net`).
+  - `crates/shared/*`: 4 cross-layer crates (`nomi-process-runtime`,
+    `nomi-redact`, `nomi-ssh`, `nomifun-net`).
   - `apps/web` and `apps/desktop`.
 - One frontend: `ui/`, a React 19 + Vite SPA.
 - Two host modes:
@@ -31,7 +31,7 @@ The current frontend route map lives in
 - `/terminal-new` and `/terminal/:id`
 - `/models`
 - `/mcp`
-- `/open-capabilities`
+- `/connections` (Connections & Devices; legacy `/open-capabilities` redirects here)
 - `/skills`
 - `/agent` and `/agent-sessions/:agentSessionId`
 - `/requirements`, `/requirements/extensions`, `/requirements/sources`

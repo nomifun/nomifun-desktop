@@ -123,6 +123,7 @@ fn tab() -> BrowserTabSnapshot {
         title: String::new(),
         url: "https://example.com".into(),
         lifecycle: BrowserTabLifecycle::Ready,
+        load: None,
         can_go_back: false,
         can_go_forward: false,
         zoom_percent: 100,

@@ -5,11 +5,14 @@
 //! runtime crates.
 
 pub mod closure;
+pub mod binding_evolution;
 pub mod catalog;
 pub mod chat_model;
 pub mod chat_provider_reasoning;
 pub mod digest;
 pub mod event;
+pub mod turn_files;
+pub use turn_files::*;
 pub mod engine_features;
 pub mod impact;
 pub mod idmm;
@@ -19,6 +22,7 @@ pub mod model_middleware;
 pub mod tool_middleware;
 pub mod tool_presentation;
 pub mod package;
+pub mod patch_recovery;
 pub mod preset;
 pub mod primitives;
 pub mod remote;
@@ -26,9 +30,11 @@ pub mod runtime;
 pub mod schema;
 pub mod session;
 pub mod supervision;
+pub mod storage_relocation;
 pub mod validation;
 
 pub use closure::*;
+pub use binding_evolution::*;
 pub use catalog::*;
 pub use chat_model::ReasoningEffort;
 pub use chat_model::{ModelFailureDiagnostic, ModelFailureReason};
@@ -42,6 +48,7 @@ pub use idmm::*;
 pub use manifest::*;
 pub use model_route::*;
 pub use package::*;
+pub use patch_recovery::*;
 pub use preset::*;
 pub use primitives::*;
 pub use remote::*;
@@ -56,4 +63,5 @@ pub use session::*;
 mod native_execution;
 pub use native_execution::*;
 pub use supervision::*;
+pub use storage_relocation::*;
 pub use validation::*;

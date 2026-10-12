@@ -1,14 +1,14 @@
 //! Desktop in-process serving: a PERMANENT loopback listener for the app's own
-//! webview plus an ON-DEMAND LAN listener for remote browsers, sharing ONE
+//! webview plus independent ON-DEMAND LAN and Relay listeners, sharing ONE
 //! router that is built exactly once.
 //!
-//! Why two listeners instead of rebinding one (see the design doc):
+//! Separate listener ownership keeps the private webview stable:
 //! - The loopback serve task is never touched by a LAN toggle, so the desktop
 //!   webview's long-lived `/ws` and in-flight requests never blip.
 //! - A LAN bind failure (port in use, firewall) is reported via [`WebUiStatus`]
 //!   without affecting the already-serving loopback listener.
 //! - `connect-info` (real peer IP for rate-limiting) and the SPA static
-//!   fallback are added ONLY to the LAN listener, leaving the loopback path and
+//!   fallback are added to the remote edges, leaving the private loopback path and
 //!   the standalone-web/test paths byte-identical.
 //!
 //! Trust model: the router is built under [`AuthPolicy::TrustLocalToken`] with a
@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::{future::Future, time::Duration};
@@ -28,7 +29,7 @@ use std::{future::Future, time::Duration};
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -48,6 +49,11 @@ use nomifun_db::{IClientPreferenceRepository, IUserRepository};
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
 pub const WEBUI_LAN_PORT: u16 = 25808;
+/// Authentication-only remote edge used by the v2 Desktop Relay contract.
+/// It never exposes the LAN and never accepts the private webview trust header.
+pub const DESKTOP_RELAY_PORT: u16 = 25811;
+
+type RelayShutdown = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 /// `client_preferences` row holding the desktop "WebUI remote access" switch.
 ///
@@ -512,6 +518,9 @@ pub struct DesktopServer {
     /// For the pre-LAN safety gate (refuse to expose before an admin exists).
     user_repo: Arc<dyn IUserRepository>,
     lan: Mutex<Option<LanListener>>,
+    relay: Mutex<Option<LanListener>>,
+    relay_shutdown: StdMutex<Option<RelayShutdown>>,
+    ingress_closing: AtomicBool,
     status_tx: watch::Sender<WebUiStatus>,
     status_rx: watch::Receiver<WebUiStatus>,
 }
@@ -744,7 +753,7 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = bootstrap::init_nomi_core_environment(cli, merged_path)
+        let env = bootstrap::init_nomi_core_environment(cli, merged_path).await
             .map_err(DesktopStartError::verified)?;
 
         // Override the CLI-derived policy: the desktop trusts its own webview via
@@ -760,7 +769,11 @@ impl DesktopServer {
         config.auth_policy = AuthPolicy::TrustLocalToken;
         config.local_trust_secret = Some(secret.clone());
 
-        let database = bootstrap::init_data_layer(&config)
+        let database = bootstrap::init_data_layer_with_browser(
+            &config,
+            #[cfg(feature = "browser-use")]
+            host_services.browser_resources.as_deref(),
+        )
             .await
             .map_err(DesktopStartError::verified)?;
         let services = match AppServices::try_from_config_with_host(database, &config, host_services).await {
@@ -904,6 +917,9 @@ impl DesktopServer {
             shutdown_complete_rx,
             user_repo,
             lan: Mutex::new(None),
+            relay: Mutex::new(None),
+            relay_shutdown: StdMutex::new(None),
+            ingress_closing: AtomicBool::new(false),
             status_tx,
             status_rx,
         });
@@ -1108,6 +1124,14 @@ impl DesktopServer {
             .listener_lifecycle
             .loopback_termination
             .subscribe();
+        let relay_completion = {
+            let relay = self.relay.lock().await;
+            relay.as_ref().map(|listener| {
+                listener.termination.request_stop();
+                listener.shutdown.send_replace(true);
+                listener.termination.subscribe()
+            })
+        };
         let wait = async {
             let loopback_wait = Self::wait_for_listener_completion(loopback_completion, "loopback");
             let lan_wait = async {
@@ -1119,10 +1143,17 @@ impl DesktopServer {
                     Ok(None)
                 }
             };
-            tokio::try_join!(loopback_wait, lan_wait)
+            let relay_wait = async {
+                if let Some(completion) = relay_completion {
+                    Self::wait_for_listener_completion(completion, "Relay").await.map(Some)
+                } else {
+                    Ok(None)
+                }
+            };
+            tokio::try_join!(loopback_wait, lan_wait, relay_wait)
         };
         match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
-            Ok(Ok((loopback_state, lan_state))) => {
+            Ok(Ok((loopback_state, lan_state, relay_state))) => {
                 // A listener pinned in UnexpectedExit is by definition already
                 // stopped: there is nothing left to stop, so shutdown proceeds
                 // loudly instead of failing forever (which would leave the
@@ -1139,6 +1170,9 @@ impl DesktopServer {
                         "LAN listener had already exited unexpectedly; continuing shutdown"
                     );
                 }
+                if let Some(ListenerCompletion::UnexpectedExit(error)) = &relay_state {
+                    tracing::error!(%error, "Relay listener had already exited; continuing shutdown");
+                }
                 // Remove the LAN inventory only after the listener completion
                 // future itself returned a confirmed terminal state; an outer
                 // timeout success carrying an inner error is not sufficient.
@@ -1148,6 +1182,10 @@ impl DesktopServer {
                     .is_some_and(|listener| listener.termination.snapshot().is_terminal())
                 {
                     lan.take();
+                }
+                let mut relay = self.relay.lock().await;
+                if relay.as_ref().is_some_and(|listener| listener.termination.snapshot().is_terminal()) {
+                    relay.take();
                 }
                 Ok(())
             }
@@ -1163,6 +1201,11 @@ impl DesktopServer {
         // database teardown. Each stage runs even when an earlier stage fails;
         // the final error retains every cleanup diagnostic.
         let mut errors = Vec::new();
+        self.ingress_closing.store(true, Ordering::Release);
+        let relay_shutdown = self.relay_shutdown.lock().map_err(|_| anyhow::anyhow!("Relay shutdown registration lock poisoned"))?.clone();
+        if let Some(shutdown) = relay_shutdown {
+            if let Err(error) = shutdown().await { errors.push(format!("Relay agent shutdown was not confirmed: {error:#}")); }
+        }
 
         self._keep_alive.request_background_shutdown();
         // Signal HTTP ingress first, but cancel hosted preparation before
@@ -1413,10 +1456,103 @@ impl DesktopServer {
         }
     }
 
+    /// Start the fixed v2 Relay service without opening a LAN listener.
+    pub async fn start_relay(self: &Arc<Self>) -> Result<u16> {
+        anyhow::ensure!(!self.ingress_closing.load(Ordering::Acquire), "Desktop 正在关闭，不能启动 Relay 接入");
+        let mut relay = self.relay.lock().await;
+        if let Some(listener) = relay.as_ref() {
+            if !listener.termination.snapshot().is_terminal() {
+                return Ok(listener.port);
+            }
+            relay.take();
+        }
+        // Provision the owner before making even an authenticated edge visible.
+        if !self.user_repo.has_users().await? {
+            let password = nomifun_auth::generate_password(20);
+            let hashed = tokio::task::spawn_blocking(move || nomifun_auth::hash_password(&password))
+                .await??;
+            self.user_repo.set_system_user_password_if_uninitialized(&hashed).await?;
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, DESKTOP_RELAY_PORT))
+            .await.with_context(|| format!("Relay 接入端口 {DESKTOP_RELAY_PORT} 被占用"))?;
+        let mut app = self.router.clone();
+        if let Some(dev_url) = &self.dev_frontend_url {
+            let dev_url = dev_url.clone();
+            app = app.fallback(move |request: Request| {
+                let dev_url = dev_url.clone();
+                async move { dev_spa_proxy(&dev_url, request).await }
+            });
+        } else if let Some(source) = &self.webui_asset_source {
+            let source = source.clone();
+            app = app.fallback(move |request: Request| {
+                let source = source.clone();
+                async move { embedded_spa_response(source, request).await }
+            });
+        } else if let Some(dir) = &self.spa_dir {
+            app = app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true)
+                .fallback(ServeFile::new(dir.join("index.html"))));
+        }
+        app = app.layer(axum::middleware::from_fn(relay_public_edge_marker))
+            .layer(axum::middleware::from_fn(host_guard_middleware))
+            .layer(axum::middleware::from_fn_with_state(self.local_trust_secret.clone(), relay_reject_local_trust));
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let termination = ListenerTermination::new();
+        *relay = Some(LanListener { shutdown, termination: termination.clone(), port: DESKTOP_RELAY_PORT });
+        let server = Arc::clone(self);
+        self.runtime.spawn(async move {
+            let stop = async move {
+                while shutdown_rx.changed().await.is_ok() {
+                    if *shutdown_rx.borrow() { break; }
+                }
+            };
+            let result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .with_graceful_shutdown(stop).await.map_err(|error| error.to_string());
+            if let ListenerCompletion::UnexpectedExit(error) = termination.complete(result) {
+                server.handle_listener_failure("relay", error).await;
+            }
+        });
+        Ok(DESKTOP_RELAY_PORT)
+    }
+
+    /// Release only the Relay edge; preserve the user's LAN sharing choice.
+    pub async fn stop_relay(&self) -> Result<()> {
+        let pending = {
+            let relay = self.relay.lock().await;
+            relay.as_ref().map(|listener| {
+                listener.termination.request_stop();
+                listener.shutdown.send_replace(true);
+                (listener.termination.clone(), listener.termination.subscribe())
+            })
+        };
+        if let Some((termination, completion)) = pending {
+            tokio::time::timeout(Duration::from_secs(5), Self::wait_for_listener_completion(completion, "Relay"))
+                .await.context("Relay listener shutdown timed out")??;
+            let mut relay = self.relay.lock().await;
+            if relay.as_ref().is_some_and(|listener| listener.termination.same_listener(&termination)) {
+                relay.take();
+            }
+        }
+        Ok(())
+    }
+
+    /// The native host attaches its existing managed Relay owner to the same
+    /// shutdown flight as listeners and the database. No second process owner.
+    pub fn register_relay_shutdown<F, Fut>(&self, shutdown: F) -> Result<()>
+    where F: Fn() -> Fut + Send + Sync + 'static,
+          Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let mut slot = self.relay_shutdown.lock().map_err(|_| anyhow::anyhow!("Relay shutdown registration lock poisoned"))?;
+        anyhow::ensure!(!self.ingress_closing.load(Ordering::Acquire), "Desktop 已在关闭，不能注册 Relay owner");
+        anyhow::ensure!(slot.is_none(), "Relay shutdown owner is already registered");
+        *slot = Some(Arc::new(move || Box::pin(shutdown())));
+        Ok(())
+    }
+
     /// Start LAN serving (bind `0.0.0.0:WEBUI_LAN_PORT`). Awaitable directly
     /// from an async Tauri command — the LAN serve task is spawned on the
     /// backend runtime regardless of which runtime drives this call.
     pub async fn start_lan(self: &Arc<Self>) -> WebUiStatus {
+        if self.ingress_closing.load(Ordering::Acquire) { return self.fail_start("Desktop 正在关闭，不能启动局域网接入".to_owned()); }
         let mut lan = self.lan.lock().await;
         if let Some(listener) = lan.as_ref() {
             if listener.termination.snapshot().is_terminal() {
@@ -2025,6 +2161,32 @@ async fn host_guard_middleware(request: Request, next: Next) -> Result<Response,
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
+}
+
+/// A Relay request can never gain possession-based desktop privileges, even
+/// when it is forwarded from a process on the same machine.
+async fn relay_reject_local_trust(State(secret): State<Arc<str>>, request: Request, next: Next) -> Result<Response, StatusCode> {
+    let private_ws_capability = request.headers().get_all(header::SEC_WEBSOCKET_PROTOCOL).iter()
+        .filter_map(|value| value.to_str().ok()).flat_map(|value| value.split(','))
+        .any(|candidate| {
+            let candidate = candidate.trim().as_bytes();
+            let mut difference = candidate.len() ^ secret.len();
+            for (index, byte) in secret.bytes().enumerate() {
+                difference |= usize::from(candidate.get(index).copied().unwrap_or(0) ^ byte);
+            }
+            difference == 0
+        });
+    if request.headers().contains_key("x-nomi-local-trust") || private_ws_capability {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
+/// Marks every request on the dedicated relay listener so anonymous edge
+/// responses can withhold local-machine detail.
+async fn relay_public_edge_marker(mut request: Request, next: Next) -> Response {
+    request.extensions_mut().insert(nomifun_auth::PublicRelayEdge);
+    next.run(request).await
 }
 
 /// True if `host` (possibly `host:port`) is an IP literal or `localhost`.

@@ -49,8 +49,8 @@ pub trait McpAgentAdapter: Send + Sync {
 
     /// Checks whether the Agent CLI is installed on this machine.
     ///
-    /// Typically implemented via `which <cli-name>` or checking a known
-    /// config directory.
+    /// This is discovery only. Command-backed adapters must additionally
+    /// require successful execution and validate the MCP catalog format.
     async fn is_installed(&self) -> Result<bool, McpError>;
 
     /// Reads the currently configured MCP servers from this Agent CLI.

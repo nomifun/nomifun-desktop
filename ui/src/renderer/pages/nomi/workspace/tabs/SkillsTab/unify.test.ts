@@ -83,6 +83,19 @@ describe('unified companion skill list', () => {
       display: (skill) => ({ name: skill.name_i18n?.['zh-CN'] ?? skill.name, description: skill.description }),
     });
     expect(entries[0].name).toBe('定时任务');
+    expect(entries[0]).toMatchObject({ skillName: 'cron', key: 'catalog:cron' });
+  });
+
+  test('preserves empty shared descriptions and does not overlay companion-generated skills', () => {
+    const entries = buildSkillEntries({
+      generated: [generated('s1', 'mermaid', 'active', 1)],
+      catalog, autoNames: new Set(),
+      config: { enabled: ['mermaid'], disabled_auto: [] },
+      missingDescription: 'missing',
+      display: () => ({ name: 'Market title', description: '' }),
+    });
+    expect(entries.find((entry) => entry.kind === 'catalog')).toMatchObject({ name: 'Market title', description: '', skillName: 'mermaid' });
+    expect(entries.find((entry) => entry.kind === 'generated')).toMatchObject({ name: 'mermaid', description: 'mermaid desc' });
   });
 
   test('the source filter splits the merged list', () => {

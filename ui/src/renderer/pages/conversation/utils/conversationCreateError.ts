@@ -99,11 +99,11 @@ const getWorkspacePathErrorPayload = (error: unknown): EmbeddedBackendErrorPaylo
 };
 
 const getConversationConfigurationErrorKey = (payload: EmbeddedBackendErrorPayload | undefined): string | undefined => {
-  const code = 'AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED';
+  const code = 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED';
   const matches = payload?.code === code || (
     payload?.code === 'CONFLICT'
     && typeof payload.error === 'string'
-    && /^(?:Conflict:\s*)?AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED(?:\s*:|$)/.test(payload.error)
+    && /^(?:Conflict:\s*)?AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED(?:\s*:|$)/.test(payload.error)
   );
   return matches ? `conversation.agentError.codes.${code}.body` : undefined;
 };

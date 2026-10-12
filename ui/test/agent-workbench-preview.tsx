@@ -20,8 +20,9 @@ import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json'
 import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
 import catalogDefinitions from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json';
+import { createEmptyAgentPresetDocument } from '../src/common/types/agentPlatform';
 
-const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v2';
+const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v3';
 const OWNER = '0190f5fe-7c00-7a00-8000-000000000001';
 const route = {
   schema: 'nomifun.chat-route-record.v1', task: 'agent_chat',
@@ -30,7 +31,7 @@ const route = {
     connection_config_ref: 'preview-connection', config_revision_digest: 'a'.repeat(64),
     credential_ref: 'preview-only-no-credential', features: ['text_input', 'text_output', 'tool_calls'] }, failovers: [],
 };
-const emptyDocument = () => ({ schema_version: '1.0.0', model_route_refs: { agent_chat: route.primary.model_route_id }, chat_route_records: { agent_chat: route }, enabled_capabilities: [], skill_bindings: [], system_role_provider_overrides: {}, persona: '', instructions: '', starter_prompts: [] });
+const emptyDocument = () => ({ ...createEmptyAgentPresetDocument(), model_route_refs: { agent_chat: route.primary.model_route_id }, chat_route_records: { agent_chat: route } });
 const definitions = catalogDefinitions as Array<{ id: string; name: string; description: string; resources: string[]; actions: Array<[string, string]> }>;
 const modules = definitions.map((definition) => ({
   module: { id: definition.id, version: '1.0.0' }, display_name: definition.name,
@@ -56,6 +57,13 @@ const makeEditor = (id: string, name: string, document: any, revisionNumber = 1,
   return { preset, revision: { reference, document, created_by: OWNER, created_at_ms: Date.now() }, draft: { preset_id: id, display_name: name, description, current_revision: reference, document } };
 };
 const initialEditors = () => [
+  ...Object.entries(seed.templates).map(([key, value], index) => {
+    const name = key.split('.').reduce((current: any, part) => current?.[part],
+      { ...agentSettings.template, 'customer-service': agentSettings.template.customerService, 'creative-studio': agentSettings.template.creativeStudio })?.name ?? key;
+    const editor = makeEditor(`0190f5fe-7c00-7a00-8000-00000000020${index}`, name,
+      { enabled_capabilities: value.enabled_capabilities, skill_bindings: value.skill_bindings });
+    return { ...editor, preset: { ...editor.preset, source: 'official' }, draft: { ...editor.draft, source_template_key: key } };
+  }),
   makeEditor('0190f5fe-7c00-7a00-8000-000000000101', '研究助理', { enabled_capabilities: [
     selection('knowledge', ['knowledge/search', 'knowledge/read']),
     selection('project.memory', ['project.memory/read']),
@@ -70,7 +78,7 @@ const initialEditors = () => [
 let editors: any[];
 try { editors = JSON.parse(localStorage.getItem(PREVIEW_KEY) || 'null') || initialEditors(); } catch { editors = initialEditors(); }
 const persist = () => localStorage.setItem(PREVIEW_KEY, JSON.stringify(editors));
-const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })), user_presets: editors.map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: Object.keys(seed.templates).length, user_preset_count: editors.length } });
+const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })), official_presets: Object.fromEntries(editors.filter(entry => entry.preset.source === 'official').map(entry => [entry.draft.source_template_key, entry.preset])), user_presets: editors.filter(entry => entry.preset.source === 'user').map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: Object.keys(seed.templates).length, user_preset_count: editors.filter(entry => entry.preset.source === 'user').length } });
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(status < 400 ? { success: true, data } : { success: false, error: data }), { status, headers: { 'Content-Type': 'application/json' } });
 const hasUnavailableCapability = (document: any) => document.enabled_capabilities.some(
   ({ capability }: any) => catalog.capabilities.find((row) => row.capability.id === capability.id)?.materialization_state !== 'materialized'
@@ -101,9 +109,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (match[2] === 'revisions') {
       if (hasUnavailableCapability(body.draft.document)) return response('请先移除待处理的能力', 422);
       const updated = makeEditor(match[1], body.draft.display_name, body.draft.document, entry.revision.reference.revision + 1, body.draft.description);
+      updated.preset.source = entry.preset.source;
+      updated.draft = { ...updated.draft, source_template_key: entry.draft.source_template_key };
       editors = editors.map((item) => item === entry ? updated : item); persist(); return response(updated);
     }
-    if (method === 'DELETE') { editors = editors.filter((item) => item !== entry); persist(); return new Response(null, { status: 204 }); }
+    if (method === 'DELETE') {
+      if (entry.preset.source === 'official') return response('Official Agents cannot be deleted.', 409);
+      editors = editors.filter((item) => item !== entry); persist(); return new Response(null, { status: 204 });
+    }
   }
   return response('This UI preview does not execute backend operations.', 404);
 }) as typeof fetch;

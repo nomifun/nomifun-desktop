@@ -136,7 +136,6 @@ impl InMemoryState {
     ) -> Result<(), ControlPlaneError> {
         if self.presets.get(preset_id).is_some_and(|stored| {
             stored.preset.owner_user_id.as_ref() == Some(owner)
-                && stored.preset.source == nomifun_agent_contracts::AgentPresetSource::User
                 && !self.retired_presets.contains_key(preset_id)
         }) {
             Ok(())

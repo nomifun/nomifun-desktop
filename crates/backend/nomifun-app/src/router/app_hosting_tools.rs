@@ -38,6 +38,7 @@ pub(super) fn registration(services: &crate::services::AppServices,
     capability.display.name = "NomiFun application development / NomiFun 应用开发".into();
     capability.contributions.host_ports = vec![port.clone()];
     capability.contributions.actions = ACTIONS.iter().map(|action| CapabilityActionDescriptor {
+        required_resource_operations: Some(Default::default()),
         action_id: (*action).into(), input_schema: schema_ref(action, "input", &input_schema(action)),
         output_schema: schema_ref(action, "output", &json!({"type":"object"})),
         effect_class: action_effect(action),

@@ -65,6 +65,7 @@ fn registration_with_owner(owner: Arc<Owner>) -> anyhow::Result<PluginRegistrati
                 EffectClass::WriteDurable
             },
             presentation: ToolPresentationKind::FunctionTool,
+            required_resource_operations: Some(Default::default()),
         })
         .collect();
     metadata.manifest = ArtifactEnvelope::new(metadata.manifest.payload)?;

@@ -142,12 +142,21 @@ Host 退出先取消准备并停止托管树，再等 HTTP 请求 drain，避免
 源码、命令、预览和设置属于应用，聊天内容属于各自的普通 Session；切换仅重新挂载会话区域。
 完成同步验证确切的项目 Session 和已结束 Turn，不要求它等于最近导航引用。
 
-新建显式目录的普通 Session 将项目记忆 resource 身份冻结为 owner 与 canonical root 的摘要，
-同项目共享原有 `project.memory` 状态，不同项目隔离。Agent 切换保留该身份，未改动旧会话的冻结
+新建显式目录的普通 Session 优先复用当前同 owner、同 canonical root 的既有 scoped 项目记忆
+resource 身份，首次建立时才使用 owner 与 canonical root 的摘要。同项目共享原有 `project.memory`
+状态，不同项目隔离。Agent 切换和正式存储位置迁移保留该逻辑身份，未改动旧会话的冻结
 默认记忆 binding。现役项目记忆使用 Host 内存 persistence，本轮不改变其重启合同；
 源码与 canonical Session 内容持久，记忆共享限定在当前 Host 生命周期。
 Runtime 只读取各自合法 canonical 内容和已授权记忆，不能拼接其他会话投影。
 普通会话列表继续按现役工作区分组，应用入口仅登记现有显示路径偏好。
+
+同一现役数据集的位置迁移离线校验应用登记 UUID、真实 installation owner 与精确自有根，
+只重写副本登记中的目录，并通过原 canonical 位置转换更新项目资源参数；源码、设置、逻辑资源
+身份、权限和原历史保持各自合同。未确认的应用进程阻止迁移，不在离线检查中尝试结束进程。
+详见 [数据集位置迁移](agent-session.zh.md#同一现役数据集的位置迁移)。
+
+当前 portable backup/restore 和 factory reset 尚未完整纳入 `app-hosting` 根目录，不能据此保证应用
+登记、项目文件与会话引用的完整恢复或清除。本次位置迁移的验证不覆盖这些独立流程。
 
 ## 删除与历史保护
 

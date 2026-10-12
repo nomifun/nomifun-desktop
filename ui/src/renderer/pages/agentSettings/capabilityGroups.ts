@@ -28,7 +28,7 @@ export type RequiredModuleReference = {
 
 export function moduleCategory(reference: ModuleReference): ModuleCategory {
   const id = String(reference.id);
-  if (id === 'knowledge' || id.endsWith('.memory')) return 'knowledge';
+  if (id === 'knowledge' || id === 'knowledge.management' || id.endsWith('.memory')) return 'knowledge';
   if (id.startsWith('workspace.') || id === 'ssh' || id === 'app.hosting') {
     return 'development';
   }
@@ -44,7 +44,7 @@ export function moduleCategory(reference: ModuleReference): ModuleCategory {
   if (id === 'creation.media' || id === 'creative.workshop' || id === 'office') {
     return 'creation';
   }
-  if (id === 'requirements' || id === 'automation.schedule') return 'automation';
+  if (id === 'requirements' || id === 'automation.schedule' || id === 'session.management') return 'automation';
   if (id === 'computer' || id === 'robot') return 'devices';
   return 'integrations';
 }

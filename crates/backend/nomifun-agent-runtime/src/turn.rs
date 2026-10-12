@@ -229,7 +229,7 @@ impl AgentTurnRequest {
         if let Some(prior) = &self.prior_task {
             prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
         }
-        self.patch_recovery.validate()?;
+        self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
         if let Some(recovery) = &self.recovery {
             recovery.validate_for(binding, &self.model_request.causality.turn_operation_id, self.active_set_generation)?;
             if let Some(segments) = &recovery.checkpoint.segments {
@@ -435,15 +435,13 @@ pub(crate) async fn run_turn(
                 &request.tool_plan,
             )
         })
+        .transpose()?
         .unwrap_or_default();
     // Host pre-activation is the same presentation state a successful
     // ToolSearch would set: only already-admitted deferred names count.
-    discovered_tools.extend(request.preactivated_tools.iter().filter(|name| {
-        request
-            .tool_plan
-            .binding(name.as_str())
-            .is_some_and(|binding| binding.definition.deferred)
-    }).cloned());
+    crate::tool_discovery::preactivate_deferred_tools(
+        &request.tool_plan, &mut discovered_tools, &request.preactivated_tools,
+    )?;
 
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
@@ -2665,13 +2663,13 @@ fn required_historical_report(archive:&crate::tool_archive::ToolArchive,inputs:&
 }
 
 /// ToolSearch activations are turn-local presentation state, not durable
-/// authority. On checkpoint recovery, rebuild the set from the recorded
-/// ToolSearch results so the resumed turn re-exposes the same already-admitted
-/// deferred schemas instead of reporting the tools as not exposed.
+/// authority. On checkpoint recovery, replay each recorded ToolSearch result
+/// through the same bounded presentation window in canonical event order.
+/// Older evicted schemas remain in the complete frozen authorized ToolPlan.
 fn restore_discovered_tools<'a>(
     events: impl Iterator<Item = &'a AgentEngineEvent>,
     plan: &AgentToolPlan,
-) -> std::collections::BTreeSet<String> {
+) -> Result<std::collections::BTreeSet<String>, AgentEngineError> {
     let mut discovery_calls = std::collections::BTreeSet::new();
     let mut restored = std::collections::BTreeSet::new();
     for event in events {
@@ -2689,20 +2687,21 @@ fn restore_discovered_tools<'a>(
                 else {
                     continue;
                 };
-                for entry in entries {
+                let names = entries.into_iter().filter_map(|entry| {
                     if let Some(name) = entry.get("name").and_then(serde_json::Value::as_str)
                         && plan
                             .binding(name)
                             .is_some_and(|binding| binding.definition.deferred)
                     {
-                        restored.insert(name.to_owned());
-                    }
-                }
+                        Some(name.to_owned())
+                    } else { None }
+                }).collect::<Vec<_>>();
+                crate::tool_discovery::activate_deferred_tools(plan, &mut restored, &names)?;
             }
             _ => {}
         }
     }
-    restored
+    Ok(restored)
 }
 
 fn upsert_instruction(
@@ -2737,7 +2736,13 @@ fn configure_tools(
         .iter().any(|name| plan.binding(name).is_some()) {
         return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
+    if tool_discovery { crate::tool_discovery::validate_window_base(plan)?; }
     request.input.tools = crate::tool_discovery::definitions(plan, discovered_tools);
+    if tool_discovery && request.input.tools.len() > crate::tool_discovery::MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS {
+        return Err(AgentEngineError::InvalidContract(
+            "the authorized tool presentation window exceeds its reserved Runtime control budget".into(),
+        ));
+    }
     crate::standard_tools::deduplicate_workspace_guidance(request);
     if tool_discovery {
         request.input.tools.push(crate::tool_discovery::definition());
@@ -2756,6 +2761,11 @@ fn configure_tools(
     if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
+    if request.input.tools.len() > crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS {
+        return Err(AgentEngineError::InvalidContract(
+            "model-visible tools exceed the reserved Runtime control window".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -7460,8 +7470,67 @@ mod tests {
             AgentEngineEvent::ToolCompleted {step:4,result:AgentToolResult::text("read-1".into(),
                 json!([{"name":"deferred_beta"}]).to_string(),false)},
         ];
-        let restored=restore_discovered_tools(events.iter(),&plan);
+        let restored=restore_discovered_tools(events.iter(),&plan).unwrap();
         assert_eq!(restored.into_iter().collect::<Vec<_>>(),["deferred_alpha"]);
+    }
+
+    fn presentation_window_plan(deferred_count: usize) -> AgentToolPlan {
+        let binding = |name: String, deferred: bool| {
+            let mut binding = tool_binding(&name, "fixture.tools", &format!("fixture.tools/{name}"),
+                AgentEffectClass::ReadOnly, true);
+            binding.definition.deferred = deferred;
+            binding
+        };
+        AgentToolPlan::new((0..crate::tool_discovery::INITIAL_VISIBLE_TOOL_DEFINITIONS)
+            .map(|index| binding(format!("visible_{index:03}"), false))
+            .chain((0..deferred_count).map(|index| binding(format!("deferred_{index:03}"), true)))).unwrap()
+    }
+
+    #[test]
+    fn canonical_discovery_recovery_replays_window_replacements_instead_of_unioning_history() {
+        let plan = presentation_window_plan(145);
+        let frozen = plan.clone();
+        let mut events = Vec::new();
+        for batch in 0..29 {
+            let id = format!("search-{batch}");
+            let call = ChatToolCall { call_id: id.clone().into(), name: crate::tool_discovery::TOOL_NAME.into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"query":format!("batch-{batch}")})),
+                provider_metadata: None };
+            events.push(AgentEngineEvent::ToolCallCompleted { step: batch + 1, call });
+            let entries = (batch * 5..batch * 5 + 5).map(|index| json!({
+                "name":format!("deferred_{index:03}"), "activated":true,
+            })).collect::<Vec<_>>();
+            events.push(AgentEngineEvent::ToolCompleted { step: batch + 1,
+                result: AgentToolResult::text(id.into(), serde_json::to_string(&entries).unwrap(), false) });
+        }
+        let restored = restore_discovered_tools(events.iter(), &plan).unwrap();
+        assert_eq!(restored, (140..145).map(|index| format!("deferred_{index:03}")).collect());
+        let visible = crate::tool_discovery::definitions(&plan, &restored);
+        assert_eq!(visible.len(), crate::tool_discovery::MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS);
+        assert!(visible.iter().any(|definition| definition.name == "deferred_144"));
+        assert!(!visible.iter().any(|definition| definition.name == "deferred_139"));
+        assert_eq!(plan, frozen);
+    }
+
+    #[test]
+    fn discovery_window_reserves_every_runtime_control_without_rejecting_no_discovery_plans() {
+        let plan = presentation_window_plan(5);
+        let mut activated = BTreeSet::new();
+        crate::tool_discovery::activate_deferred_tools(&plan, &mut activated,
+            &(0..5).map(|index| format!("deferred_{index:03}")).collect::<Vec<_>>()).unwrap();
+        let mut request = request();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, true, &activated).unwrap();
+        assert_eq!(request.input.tools.len(), crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS,
+            "the reserved control count must match the actual full Runtime surface");
+
+        let direct = AgentToolPlan::new((0..120).map(|index| tool_binding(&format!("direct_{index:03}"),
+            "fixture.tools", &format!("fixture.tools/direct_{index:03}"), AgentEffectClass::ReadOnly, true))).unwrap();
+        configure_tools(&mut request, &direct, false, false, false, true, true, true, false, &BTreeSet::new()).unwrap();
+        assert_eq!(request.input.tools.len(), 125,
+            "without ToolSearch, enforce the actual assembled wire limit instead of its reserved 112-tool base");
+        let over_limit = configure_tools(&mut request, &direct, true, true, true, true, true, true, false, &BTreeSet::new());
+        assert!(matches!(over_limit, Err(AgentEngineError::InvalidContract(message))
+            if message.contains("model-visible tools exceed")));
     }
 
     /// Host pre-activation is ToolSearch-identical presentation: the deferred
@@ -8543,6 +8612,48 @@ mod tests {
         }
         assert_eq!(serde_json::to_value(&requests[0].input).unwrap()["parallel_tool_calls"],json!(false),
             "a surface with exclusive discovery must request single-call delivery without relaxing batch preflight");
+    }
+
+    #[tokio::test]
+    async fn discovery_over_128_tools_keeps_the_last_search_schemas_on_the_next_model_step() {
+        #[derive(Debug)]
+        struct BatchDiscovery;
+        #[async_trait]
+        impl crate::AgentToolDiscoveryPort for BatchDiscovery {
+            async fn select(&self, _: &ChatCausality, _: u64, query: &str,
+                candidates: &[crate::AgentToolDiscoveryCandidate], limit: usize, _: CancellationToken,
+            ) -> Result<Vec<String>, AgentEngineError> {
+                assert_eq!(limit, 5);
+                let start = query.parse::<usize>().unwrap() * 5;
+                let names = (start..start + 5).map(|index| format!("deferred_{index:03}")).collect::<Vec<_>>();
+                assert!(names.iter().all(|name| candidates.iter().any(|candidate| &candidate.name == name)));
+                Ok(names)
+            }
+        }
+        let plan = presentation_window_plan(145);
+        let frozen = plan.clone();
+        let mut steps = (0..29).map(|batch| control_step(&format!("search-{batch}"), "ToolSearch",
+            json!({"query":batch.to_string()}))).collect::<Vec<_>>();
+        steps.push(text_step("Schemas ready"));
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(steps) });
+        let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), plan.clone(), principal(), 0)
+                .with_tool_discovery_port(Arc::new(BatchDiscovery)),
+        ).await.unwrap();
+        assert_eq!(result.model_steps, 30);
+        let requests = model.requests.lock().unwrap();
+        for (step, request) in requests.iter().enumerate().skip(1) {
+            assert!(request.input.tools.len() <= crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS);
+            for index in (step - 1) * 5..step * 5 {
+                let name = format!("deferred_{index:03}");
+                assert!(request.input.tools.iter().any(|definition| definition.name == name),
+                    "every last-search schema must reach step {step}: {name}");
+            }
+        }
+        let last = requests.last().unwrap();
+        assert!(last.input.tools.iter().any(|definition| definition.name == "deferred_144"));
+        assert!(!last.input.tools.iter().any(|definition| definition.name == "deferred_139"));
+        assert_eq!(plan, frozen, "only model presentation may change");
     }
 
     #[tokio::test]

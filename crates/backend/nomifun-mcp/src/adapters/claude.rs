@@ -6,7 +6,7 @@ use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
 use crate::types::McpServerTransport;
 
-use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, normalize_detection_status, run_cli, strip_ansi};
+use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, normalize_detection_status, run_cli_strict, strip_ansi, validate_list_output};
 
 const CLI_NAME: &str = "claude";
 
@@ -35,8 +35,8 @@ impl McpAgentAdapter for ClaudeAdapter {
             return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
         }
 
-        let (stdout, _stderr) = run_cli(CLI_NAME, &["mcp", "list"], DETECT_TIMEOUT).await?;
-        Ok(parse_claude_list_output(&stdout))
+        let stdout = run_cli_strict(CLI_NAME, &["mcp", "list"], DETECT_TIMEOUT).await?;
+        validate_list_output(&stdout, parse_claude_list_output(&stdout))
     }
 }
 

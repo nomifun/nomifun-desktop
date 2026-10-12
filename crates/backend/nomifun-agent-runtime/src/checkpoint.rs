@@ -39,7 +39,7 @@ pub struct AgentCheckpointReceipt {
 impl AgentExecutionCheckpoint {
     pub fn validate(&self) -> Result<(), AgentEngineError> {
         self.binding.validate()?;
-        self.patch_recovery.validate()?;
+        self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
         if let Some(segments) = &self.segments { segments.validate(self.model_steps)?; }
         self.control_rejections.validate()?;
         if !self.completion_review.valid_for(self.accepted_input_count) {

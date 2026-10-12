@@ -14,7 +14,6 @@ type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
 type ProcessStateItem =
   | TMessage
-  | { type: 'file_summary' }
   | { type: 'tool_summary'; messages: ToolProcessMessage[] }
   | { type: 'artifact' };
 
@@ -52,9 +51,6 @@ export const getToolMessagesProcessState = (messages: ToolProcessMessage[]): Tur
 export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProcessState => {
   if ('type' in item && item.type === 'tool_summary') {
     return getToolMessagesProcessState(item.messages);
-  }
-  if ('type' in item && item.type === 'file_summary') {
-    return 'completed';
   }
   if ('type' in item && item.type === 'artifact') {
     return 'completed';

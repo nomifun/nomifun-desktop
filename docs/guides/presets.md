@@ -5,23 +5,20 @@
 > internal name of the backend authoring aggregate. Application MCP tools reuse
 > current session selection; process ownership belongs to application hosting.
 
-## Entry and shortest path
+Open **Agent** (`/agent`) from the sidebar to edit an official Agent directly or create a personal Agent. The official list includes Chat, General, Coding, Companion, Customer Service, and Creation.
 
-Open **Agent** (`/agent`) from the sidebar, then:
+## Edit an official Agent
 
-1. Create a new Agent;
-2. Pick a creation seed: Lite, General, Full, or Custom;
-3. Edit identity, instructions, model routing, capabilities, skills, and typed
-   resources;
-4. Review provenance, availability, and impact hints;
-5. Save and try it out;
-6. Continue in the resulting session at `/agent-sessions/:agentSessionId`.
+1. Select an Agent from the official list, such as **Companion**.
+2. Enable or disable capabilities and individual actions. Choose compatible implementations on the components tab.
+3. Edit the name, description, persona, instructions, and runtime defaults.
+4. Configure an available Chat model, then select **Save**.
 
-Runtime, network, system, and provider management stay in global settings —
-especially `/settings/execution-engines`. They are not part of what the Agent
-Workbench edits.
+Saving updates the current user's official Agent configuration and keeps the same Agent identity. Creating a copy is optional. Other users have separate configurations. Future sessions launched from that official product entry use the saved configuration. Official template updates preserve capabilities, instructions, and component choices saved in the current dataset.
 
-## Domain boundaries
+The official Companion keeps its two core capabilities, Companion and Companion memory. Other capabilities and actions remain editable.
+
+Existing sessions keep their frozen configuration. For a desktop companion, select **Apply saved updates** in the companion overview or chat controls, review the capability changes, and confirm. This updates the same idle session. Active or paused turns and unsettled effects block the update. The companion's model and still-required resource selections and parameters are retained; resources removed with disabled capabilities appear in the preview. Configure missing resources required by newly enabled capabilities before applying. If the saved configuration changes after preview, preview and confirm again.
 
 | Object | Owner | What the Agent Workbench can do |
 | --- | --- | --- |
@@ -37,9 +34,13 @@ Current application files, commands, processes and MCP addresses belong to
 the hosting owner. Agents discover and call explicitly selected tools through
 the current MCP chain without a second writable source registry or process.
 
-## The four creation seeds
+Select **Create a copy** when you need an independent personal Agent. This creates a new identity and leaves the saved official configuration intact. Personal Agents can be deleted; official product entries are retained.
 
-The four modes are creation-time seeds, not four persisted types:
+## Create a personal Agent
+
+Select **Create** to start a blank Agent. Choose capabilities, implementations, identity, instructions, and runtime defaults, then save. Use **Use Agent** to start a conversation or choose it in product selectors that support personal Agents. Concrete resources such as knowledge bases, workspaces, and companions are selected by the session or product entry, not stored in a second binding inside the workbench.
+
+## Capabilities and extensions
 
 | Seed | Initial content | What it does not auto-do |
 | --- | --- | --- |
@@ -48,21 +49,15 @@ The four modes are creation-time seeds, not four persisted types:
 | Full | Official coding baseline | Does not install or include every application tool |
 | Custom | Blank or optional seed | Does not allow entering internal IDs, digests, or runtime parameters |
 
-Every creation flows into the same main chain:
+The workbench reads enabled, materialized capabilities that support the target consumer. Editing cannot grant access to unavailable or uninstalled capabilities. The server validates action grants, dependencies, conflicts, and implementation compatibility. Choose a source explicitly when multiple implementations exist.
 
-```text
-creation seed
-  → AgentPreset Draft
-  → canonical Compiler
-  → AgentPresetRevision + ContributionLock[]
-  → ResolvedSnapshot
-  → AgentSession / AgentBinding
-```
+MCP and Skills use the global extension catalog and session selections. Neither official nor personal Agent configurations contain an extension master switch. Installation, credentials, enablement, and service lifecycle remain with their respective settings and domain owners owners.
 
-Template updates only affect Drafts created later; existing Revisions never
-drift silently.
+## Saving and session boundaries
 
-## Capabilities, skills, and provenance
+Edits first live in a draft. The canonical compiler validates a save, atomically creates an immutable `AgentPresetRevision`, and advances its current revision pointer. Official and personal configurations use this same save path.
+
+Session creation freezes capabilities, implementations, models, tool contracts, and resources in a Snapshot. Saving an Agent never rewrites previous revisions, Snapshots, session events, or an executing turn. Existing sessions change configuration through an explicit canonical binding transition after admission checks, runtime cleanup, and effect settlement.
 
 The workbench queries the platform Capability Catalog. A catalog entry carries
 at least: a stable capability ID, contract digest, owner, source Package or
@@ -108,38 +103,29 @@ Runtime features, initial/on-demand grouping, and the Snapshot digest. Session
 Open reads the saved Snapshot; it does not re-pick the latest source on every
 Turn and never silently switches Providers or falls back.
 
-Relevant migrations:
-
-- `061_agent_snapshot_naming.sql` renamed the physical columns of
-  `conversations`, `agent_execution_participants`,
-  `agent_execution_template_participants`, and `cron_jobs` to `agent_snapshot`,
-  with no alias or dual write;
-- `062_agent_preset_contribution_locks.sql` added `contribution_locks_json` to
-  `nomi_agent_preset_revisions` and requires it to be a valid JSON array;
-- `preset_snapshot` in the old baseline is only a migration source, not a
-  current runtime field;
-- Where `preset_id`/`preset_revision` still appear, they only record AgentPreset
-  provenance — they do not revive the old resolver or compatibility model.
+Storage and transitions follow the [Agent Session architecture](../architecture/agent-session.md) and current canonical baseline; retired Conversation or preset fields are never a recovery source.
 
 ## Canonical API (machine resource names)
 
 The workbench uses these canonical APIs; the stable machine names do not mean
 the UI must display "Preset":
 
+Official templates remain release baselines for initialization and explicit copies. Template updates affect unsaved defaults; saved official configurations never drift silently.
+
+## APIs and implementation
+
 | Purpose | Endpoint |
 | --- | --- |
-| Official creation seeds | `GET /api/agent-preset-templates?source=official` |
-| Create an AgentPreset | `POST /api/agent-presets` |
-| Create a Draft from an official seed | `POST /api/agent-presets/from-template/{template_id}` |
-| Read the editor | `GET /api/agent-presets/{preset_id}/editor` |
-| Preview / Save / Revision | `/api/agent-presets/{preset_id}/...` |
-| Platform capability Catalog | `GET /api/capabilities` |
-| Agent Session | `/api/agent-sessions/*` |
-| Agent Binding | `/api/agent-bindings/*` |
+| Templates and the user's official and personal configurations | `GET /api/agent-preset-templates` |
+| Create a personal Agent | `POST /api/agent-presets` |
+| Explicit personal copy of an official baseline | `POST /api/agent-presets/from-template/{template_id}`, `reuse_existing=false` |
+| Prepare saved configuration for an official product entry | Same endpoint, `reuse_existing=true` |
+| Read the shared editor | `GET /api/agent-presets/{preset_id}/editor` |
+| Save an immutable revision | `POST /api/agent-presets/{preset_id}/revisions` |
+| Capability and implementation catalog | `GET /api/agent-catalog` |
+| Sessions and explicit Agent updates | `/api/agent-sessions/*` |
 
-Clients must not submit Snapshot digests, internal Revision IDs, complete
-Bindings, or raw canonical JSON. The server owns owner checks, Catalog resolve,
-ContributionLocks, Revision/Snapshot digests, and typed failures.
+`official_templates` contains initialization baselines. `official_presets` maps template keys to the current user's stable editable identities. `user_presets` contains personal Agents only. Templates, source labels, and internal IDs are never client authorization; the server validates ownership, capabilities, and Snapshots.
 
 ## Implementation boundaries
 
@@ -149,3 +135,5 @@ Module authorization, see
 
 For application imports, preview, settings and commands, see
 [application hosting architecture](../architecture/app-hosting.md).
+
+See [Agent Session architecture](../architecture/agent-session.md) for runtime boundaries and [Plugin Platform architecture](../architecture/plugin-platform.zh.md) for Plugin management (Chinese).

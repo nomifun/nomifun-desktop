@@ -16,10 +16,11 @@ serde_json.workspace = true
 [dependencies]
 # The unified backend, linked in-process (no spawned binary, no bundled-nomicore).
 # computer-use: the desktop host is the one place screen/input control is sane.
-# browser-use: likewise, the desktop host is where a managed/connected Chromium
-# is sane (the in-process self-hosted CDP engine).
+# browser-use: the desktop host supplies the native visible Browser surface
+# (WebView2 on Windows, system WKWebView on macOS).
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
 nomifun-runtime.workspace = true
+nomifun-common.workspace = true
 nomifun-browser-platform.workspace = true
 nomi-browser-engine.workspace = true
 async-trait.workspace = true
@@ -60,6 +61,7 @@ url.workspace = true
 dunce.workspace = true
 sha2.workspace = true
 hex.workspace = true
+getrandom.workspace = true
 open.workspace = true
 # Required at compile time by `tauri::generate_context!` — the codegen emits
 # `serde_json::...` tokens into this crate (verified: removing it breaks the
@@ -110,14 +112,10 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 tempfile.workspace = true
 tauri = { version = "2", features = ["test"] }
-nomi-tools.workspace = true
-nomi-types.workspace = true
-nomifun-agent-kernel.workspace = true
-nomifun-agent-contracts.workspace = true
-nomifun-ai-agent.workspace = true
 image.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 # Tests build a real NTFS junction inside the fake legacy tree to prove the
 # data relocation skips links instead of failing.

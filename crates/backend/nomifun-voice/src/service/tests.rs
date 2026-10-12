@@ -12,6 +12,7 @@ use crate::*;
 
 const OWNER: &str = "owner";
 const SESSION: &str = "agent-session";
+const SECOND_SESSION: &str = "second-agent-session";
 #[tokio::test]
 async fn canonical_source_watcher_retracts_cached_initial_text_and_observer_projection_without_stopping_work(){
     let h=Harness::new();let speech=VoiceSpeechProjection{message_id:"canonical-source".into(),revision:7,through_seq:7,text:"old source words".into()};
@@ -70,6 +71,68 @@ async fn revoked_authorization_cannot_consume_attachment_or_admit_ui_work() {
 }
 
 #[tokio::test]
+async fn credential_invalidation_closes_only_its_voice_activation_and_joins_worker() {
+    let h=Harness::new();
+    h.authority.allow_second_session.store(true,Ordering::SeqCst);
+    h.work.allow_second_session.store(true,Ordering::SeqCst);
+    let access_a=Arc::new(Access(AtomicBool::new(true)));
+    let access_b=Arc::new(Access(AtomicBool::new(true)));
+    let a=h.service.activate_with_access(OWNER,request("device-a",false),access_a.clone()).await.unwrap();
+    let mut second=request("device-b",false);second.agent_session_id=SECOND_SESSION.into();
+    let b=h.service.activate_with_access(OWNER,second,access_b).await.unwrap();
+    let _media_a=h.service.attach_media(OWNER,&a.voice_session_id,&a.attachment_token).await.unwrap();
+    let _media_b=h.service.attach_media(OWNER,&b.voice_session_id,&b.attachment_token).await.unwrap();
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),2);
+
+    access_a.0.store(false,Ordering::SeqCst);
+    assert_eq!(h.service.validate_access(OWNER,&a.voice_session_id,a.activation_epoch).await.unwrap_err().kind,VoiceErrorKind::Authentication);
+    h.service.revoke_invalid_access().await;
+    assert_eq!(h.state(&a).await.connection,VoiceConnectionState::Closed);
+    assert_eq!(h.state(&b).await.connection,VoiceConnectionState::Ready);
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),1);
+    assert!(h.adapter.terminations.lock().unwrap().iter().any(|termination|termination.reason==VoiceCloseReason::PermissionRevoked));
+    h.service.validate_access(OWNER,&b.voice_session_id,b.activation_epoch).await.unwrap();
+    h.service.audio(OWNER,&b.voice_session_id,frame(b.activation_epoch,1)).await.unwrap();
+    assert!(h.work.requests.lock().unwrap().is_empty());
+    h.service.shutdown().await;
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),0);
+}
+
+#[tokio::test]
+async fn credential_invalidation_closes_native_voice_without_relay_socket_or_orphan() {
+    let h=Harness::new_for_transport(VoiceTransportPreference::NativeWebrtc);
+    let access=Arc::new(Access(AtomicBool::new(true)));
+    let mut activation=request("native-device",false);activation.transport=VoiceTransportPreference::NativeWebrtc;activation.native_offer=Some("local lifecycle SDP fixture".into());
+    let a=h.service.activate_with_access(OWNER,activation,access.clone()).await.unwrap();
+    assert!(a.negotiation.native_attachment.is_some());
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),1);
+    access.0.store(false,Ordering::SeqCst);
+    h.service.revoke_invalid_access().await;
+    assert_eq!(h.state(&a).await.connection,VoiceConnectionState::Closed);
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),0);
+    assert!(h.adapter.terminations.lock().unwrap().iter().any(|termination|termination.reason==VoiceCloseReason::PermissionRevoked));
+    assert!(h.work.requests.lock().unwrap().is_empty());h.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn attached_voice_uses_original_credential_after_one_shot_ticket_expires() {
+    let h=Harness::new();let access=Arc::new(Access(AtomicBool::new(true)));
+    let a=h.service.activate_with_access(OWNER,request("long-mobile-session",false),access.clone()).await.unwrap();
+    let _media=h.service.attach_media(OWNER,&a.voice_session_id,&a.attachment_token).await.unwrap();
+    tokio::time::pause();
+    for sequence in 1..=61{
+        tokio::time::advance(Duration::from_secs(1)).await;
+        h.service.foreground(OWNER,&a.voice_session_id,a.activation_epoch,sequence).await.unwrap();
+    }
+    assert_eq!(h.service.capability_owner(&a.voice_session_id,&a.attachment_token).await.unwrap_err().kind,VoiceErrorKind::Authentication);
+    h.service.validate_access(OWNER,&a.voice_session_id,a.activation_epoch).await.unwrap();
+    access.0.store(false,Ordering::SeqCst);
+    assert_eq!(h.service.validate_access(OWNER,&a.voice_session_id,a.activation_epoch).await.unwrap_err().kind,VoiceErrorKind::Authentication);
+    tokio::time::resume();h.service.revoke_invalid_access().await;
+    assert_eq!(h.adapter.live_workers.load(Ordering::SeqCst),0);h.service.shutdown().await;
+}
+
+#[tokio::test]
 async fn provider_transcripts_before_attachment_or_after_mute_never_authorize_later_work(){
     let h=Harness::new();let a=h.activate("mobile-before-input").await;
     let transcript=VoiceModelEvent::Transcript{fragment:TranscriptFragment{speaker:VoiceSpeaker::User,fragment_id:"pre-attach".into(),revision:1,commit:TranscriptCommit::Committed,text:"Prepare a report".into(),media_range:None}};
@@ -119,7 +182,7 @@ fn capabilities() -> VoiceCapabilities {
 fn descriptor() -> VoiceAdapterDescriptor {
     VoiceAdapterDescriptor { adapter_id: "test.lifecycle".into(), contract_version: 1, api_version: "local-1".into(),
         config_schema_version: 1, label: "In-process lifecycle port".into(), capabilities: capabilities(),
-        transports: vec![VoiceTransportPreference::Relay], input_specs: vec![spec()], output_specs: vec![spec()],
+        transports: vec![VoiceTransportPreference::Relay,VoiceTransportPreference::NativeWebrtc], input_specs: vec![spec()], output_specs: vec![spec()],
         native_requirements: None }
 }
 fn target() -> WorkTarget {
@@ -165,8 +228,10 @@ impl VoiceModelPort for LocalAdapter {
     fn describe(&self) -> VoiceAdapterDescriptor { descriptor() }
     async fn open(&self, request: VoiceOpenRequest, cancel: CancellationToken, deadline: Instant) -> Result<VoiceModelSession, VoiceError> {
         if Instant::now() >= deadline { return Err(VoiceError::new(VoiceErrorKind::Deadline, "test port open deadline")); }
-        let negotiation = VoiceNegotiation { capabilities: capabilities(), input_spec: Some(spec()), output_spec: Some(spec()), native_attachment: None };
-        let (io, mut worker_io) = VoiceModelSession::channels_with_specs(Some(spec()), Some(spec()),
+        let negotiation = if request.transport==VoiceTransportPreference::NativeWebrtc{
+            VoiceNegotiation{capabilities:capabilities(),input_spec:None,output_spec:None,native_attachment:Some(VoiceNativeAttachment{attachment_id:"local-native-lifecycle".into(),answer_sdp:"local lifecycle answer".into(),safe_output_boundary:true})}
+        }else{VoiceNegotiation { capabilities: capabilities(), input_spec: Some(spec()), output_spec: Some(spec()), native_attachment: None }};
+        let (io, mut worker_io) = VoiceModelSession::channels_with_specs(negotiation.input_spec.clone(), negotiation.output_spec.clone(),
             VoiceSessionLimits { close_timeout: Duration::from_millis(100), ..Default::default() }, cancel)?;
         self.opens.lock().unwrap().push(request);
         self.senders.lock().unwrap().push(worker_io.event_tx.clone());
@@ -194,7 +259,7 @@ impl VoiceModelPort for LocalAdapter {
     }
 }
 
-struct Authority { plan: VoiceBindingPlan, binding_valid: AtomicBool, credential_valid: AtomicBool }
+struct Authority { plan: VoiceBindingPlan, binding_valid: AtomicBool, credential_valid: AtomicBool,allow_second_session:AtomicBool }
 #[async_trait]
 impl VoiceAuthorityPort for Authority {
     async fn resolve_plan(&self, owner: &str, session: &str, binding: u64,_profile:&str,_revision:u64) -> Result<VoiceBindingPlan, VoiceError> {
@@ -202,7 +267,8 @@ impl VoiceAuthorityPort for Authority {
     }
     async fn validate_binding(&self, owner: &str, session: &str, binding: u64) -> Result<(), VoiceError> {
         if owner != OWNER { return Err(VoiceError::new(VoiceErrorKind::Authentication, "not the canonical owner")); }
-        if session != SESSION || binding != 1 || !self.binding_valid.load(Ordering::SeqCst) {
+        let known_session=session==SESSION||(session==SECOND_SESSION&&self.allow_second_session.load(Ordering::SeqCst));
+        if !known_session || binding != 1 || !self.binding_valid.load(Ordering::SeqCst) {
             return Err(VoiceError::new(VoiceErrorKind::StaleBinding, "canonical binding changed"));
         }
         Ok(())
@@ -217,6 +283,7 @@ impl VoiceAuthorityPort for Authority {
 }
 #[derive(Default)]
 struct Work {
+    allow_second_session:AtomicBool,
     recoveries:Mutex<Vec<(String,String)>>,
     requests: Mutex<Vec<(String, VoiceWorkRequest)>>,
     receipts: Mutex<BTreeMap<String, VoiceWorkReceipt>>,
@@ -233,10 +300,11 @@ impl VoiceWorkPort for Work {
         Err(VoiceError::new(VoiceErrorKind::Unsupported, "no pending approval in this fixture"))
     }
     async fn context(&self, owner: &str, session: &str, binding: u64) -> Result<VoiceWorkContext, VoiceError> {
-        assert_eq!((owner, session, binding), (OWNER, SESSION, 1));
+        assert_eq!((owner,binding),(OWNER,1));assert!(session==SESSION||(session==SECOND_SESSION&&self.allow_second_session.load(Ordering::SeqCst)));
+        let mut observed_target=self.context_target.lock().unwrap().clone().unwrap_or_else(target);observed_target.agent_session_id=session.into();
         Ok(VoiceWorkContext { context_floor:0,context_reference:"canonical-context".into(),instructions: "Use the canonical report workspace".into(),
             initial_facts: vec![VerifiedVoiceFact{correlation_id:"prior".into(),upstream_trigger_id:None,canonical_receipt_id:"canonical-prior".into(),content:"The prior canonical conversation".into(),speak:false,output_generation:None,work_context:None,speech_source:self.speech_source.lock().unwrap().as_ref().map(|(speech,_)|VoiceSpeechSourceRef{message_id:speech.message_id.clone(),revision:speech.revision,through_seq:speech.through_seq})}],
-            observed_target: Some(self.context_target.lock().unwrap().clone().unwrap_or_else(target)), facts: vec![receipt("original")], approvals: vec![] })
+            observed_target: Some(observed_target), facts: vec![receipt("original")], approvals: vec![] })
     }
     async fn interact(&self, owner: &str, session: &str, binding: u64, key: &str, request: VoiceWorkRequest) -> Result<VoiceWorkReceipt, VoiceError> {
         assert_eq!((owner, session, binding), (OWNER, SESSION, 1));
@@ -249,13 +317,16 @@ impl VoiceWorkPort for Work {
         Ok(self.receipts.lock().unwrap().get(key).cloned())
     }
     async fn observe(&self, owner: &str, observed: &WorkTarget) -> Result<VoiceWorkReceipt, VoiceError> {
-        assert_eq!(owner, OWNER);assert_eq!(observed.agent_session_id.as_ref(),SESSION);assert_eq!(observed.binding_version,1);
+        assert_eq!(owner, OWNER);assert!(observed.agent_session_id.as_ref()==SESSION||(observed.agent_session_id.as_ref()==SECOND_SESSION&&self.allow_second_session.load(Ordering::SeqCst)));assert_eq!(observed.binding_version,1);
         let mut fact=receipt("original");fact.target=Some(observed.clone());Ok(fact)
     }
 }
 struct Harness { service: Arc<VoiceSessionService>, adapter: Arc<LocalAdapter>, authority: Arc<Authority>, work: Arc<Work>, dir: tempfile::TempDir }
 impl Harness {
     fn new() -> Self {
+        Self::new_for_transport(VoiceTransportPreference::Relay)
+    }
+    fn new_for_transport(transport:VoiceTransportPreference) -> Self {
         let dir = tempfile::tempdir().unwrap(); let adapter = Arc::new(LocalAdapter::default());
         let factory_adapter = adapter.clone();
         let registry = Arc::new(VoiceAdapterRegistry::new(vec![VoiceAdapterRegistration { adapter_id: "test.lifecycle".into(),
@@ -269,11 +340,11 @@ impl Harness {
             credential_ref: "credential-reference".into(), adapter_id: "test.lifecycle".into(), adapter_contract_version: 1,
             adapter_config_digest: nomifun_agent_contracts::digest_payload(&config).unwrap(), adapter_config: config,
             connection_config_digest: DigestHex("a".repeat(64)), required_features: native_duplex_requirements().into_iter().chain([VoiceFeature::TypedTools]).collect(),
-            transport: VoiceTransportPreference::Relay };
+            transport };
         let plan = ResolvedVoicePlan { identity: record.identity().unwrap(), interaction: AgentVoiceInteraction {
             enabled: true, mode: VoiceInteractionMode::FullDuplex, route_key: "voice.primary".into(), work_policy: VoiceWorkPolicy::ExplicitIntent } };
         let authority = Arc::new(Authority { plan: VoiceBindingPlan { record, plan,profile_id:"profile".into(),profile_revision:1,work_steering_policy:Default::default(), lease_revision: "credential-v1".into() },
-            binding_valid: AtomicBool::new(true), credential_valid: AtomicBool::new(true) });
+            binding_valid: AtomicBool::new(true), credential_valid: AtomicBool::new(true),allow_second_session:AtomicBool::new(false) });
         let work = Arc::new(Work::default());
         let service = Arc::new(VoiceSessionService::new(registry, work.clone(), authority.clone(), dir.path().into(), CancellationToken::new()));
         Self { service, adapter, authority, work, dir }

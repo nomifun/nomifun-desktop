@@ -98,29 +98,58 @@ app sees. If a CLI is missing, install it or add its bin directory to `PATH` and
 restart. Note that conversations do not depend on any of this — the built-in
 `nomi` engine is compiled into the binary.
 
-### Under systemd: `bun: command not found`
+### Managed tools under systemd
 
-NomiFun bundles **`bun ≥ 1.3.13`** to launch MCP stdio servers and other Node-style child processes. A `nologin` system account does not see `~/.bun/bin/`; install bun system-wide (`sudo install ~/.bun/bin/bun /usr/local/bin/bun`) or build with `NOMIFUN_EMBED_BUN=1` so bun is bundled into the binary and self-extracts into the data dir on first run. See [Web Server Deployment](../guides/web-server-deployment.md#bun-must-be-on-the-system-path) for the worked recipe.
+Release binaries embed OfficeCLI. Node is prepared through verified managed
+download before backend startup; Bun is prepared on feature use. Prepared artifacts
+are reused offline under the configured data directory with verified absolute paths; a service
+account does not need another user's Bun installation. Check data-directory
+access and the actual components as the service user:
 
-Verify with `sudo -u nomifun -s -- which bun` after installing.
+Use the optional `nomicore` diagnostic binary built from `nomifun-app`
+(`cargo build --release -p nomifun-app --bin nomicore`). The WebUI host CLI
+does not accept `tool-doctor`; see the [deployment recipe](../guides/web-server-deployment.md#managed-execution-components).
 
-### "bun runtime extraction" log line followed by no MCP activity
+```bash
+sudo -u nomifun /opt/nomifun/nomicore --data-dir /var/lib/nomifun tool-doctor --verify
+```
 
-The embedded-bun build extracts bun into the data directory on first run. If extraction fails (typically permissions), stdio MCP servers have no runtime to launch with. Check the data-dir for the bun binary, ensure the service user owns the data dir, and look in the log for the actual extraction error.
+`tool-doctor` without `--verify` only prints the supply catalogue. Verification
+may download Node/Bun, extract components, and run private probes, but never
+opens the database. Check network access for first preparation and runtime cache
+access/execute permissions. Debug builds without OfficeCLI embedded need its
+validated explicit development override.
+See [External tools](../architecture/external-tools.md).
 
 ## Office preview
 
-### Word/Excel/PPT preview fails to start
+### Word/Excel/PPT cannot be previewed
 
-The Office preview features (`/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`) spawn the `officecli` helper to render and watch a document. If it is not installed, the start call returns an "officecli not found" error.
+All three formats use `/api/office-preview/*` and the managed
+`iOfficeAI/OfficeCLI` component. Run `tool-doctor --verify` against the same data
+root to inspect the actual executable, version, digest, and capability error.
+Repair or update the application if component admission fails. Debug overrides
+must be absolute paths satisfying the manifest's development requirements.
 
-Install it with `npm install -g officecli` (the backend can also run that install for you), make sure `npm` and the resulting `officecli` binary are on the **process** `PATH`, and restart the backend.
+The UI separates preparation, rendering, and display. An early process exit is
+a render failure, not a port-ready timeout. Unsupported formats,
+invalid/encrypted documents, resource limits, and unstable writes have distinct
+errors. Retry appears only for recoverable failures. Failed refreshes retain
+the previous preview; system-open and download remain available.
 
-> The old `POST /api/star-office/detect` route and the Star Office integration behind it were retired and no longer exist.
+### Artifact frame is blocked or blank
 
-### Preview iframe stays blank
+The active request returns `/api/office-preview-artifacts/{capability}/`.
+The iframe adds its UUIDv7 request ID and nonce as query parameters. Preserve
+that full path and query through your reverse proxy. Artifact access uses a
+random revocable capability; start/status/stop remain authenticated. Do not
+exempt arbitrary `/api/*` endpoints or weaken the artifact CSP/sandbox.
 
-The Office preview routes spawn `officecli` subprocesses and proxy them via `/api/ppt-proxy/*` and `/api/office-watch-proxy/*`. These proxy routes are **public** (no auth) on purpose — the iframe content needs to load without sending the SPA's session cookie. If your reverse proxy strips the URL path components or applies auth at the edge to `/api/*`, exempt the proxy paths.
+HTTP ready and iframe load alone do not establish display success. The frame
+must report first-screen readiness with matching source, opaque origin, request
+ID, capability, and nonce. Check browser policy/transport diagnostics and the
+backend's bounded generation diagnostics. See
+[External tools and Office artifacts](../architecture/external-tools.md).
 
 ## Data directory permissions
 

@@ -78,7 +78,7 @@ beforeEach(() => {
   spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
   spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation, editable_in_app: true, archived: false }], total: 1, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
   spyOn(ipcBridge.database.getUserConversations, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
-  spyOn(ipcBridge.agentPlatform.library, 'invoke').mockResolvedValue({ user_presets: [], official_templates: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 0 } });
+  spyOn(ipcBridge.agentPlatform.library, 'invoke').mockResolvedValue({ user_presets: [], official_presets: {}, official_templates: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 0 } });
 });
 afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); });
 
@@ -170,7 +170,7 @@ test('disabled App Guid media handling never reads or rewrites the ordinary medi
   const agent: ReturnType<typeof useGuidAgentSelection> = { selection: { kind: 'template', templateKey: 'app.developer' }, selectedPreset: undefined, selectedTemplate: undefined,
     presets: [], draftPresets: [], officialTemplates: [], isLoading: false, isLoaded: true, loadError: undefined, setSelection: mock(() => {}), refreshPresets: async () => {} };
   const hookWrapper = ({ children }: { children: React.ReactNode }) => <MemoryRouter initialEntries={['/apps/owned-app?creation=video']}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false, shouldRetryOnError: false }}>{children}</SWRConfig></MemoryRouter>;
-  const hook = renderHook(() => ({ controller: useGuidCreation(agent, 'Build an application', [], app.directory, undefined, undefined, false), location: useLocation() }), { wrapper: hookWrapper });
+  const hook = renderHook(() => ({ controller: useGuidCreation(agent, 'Build an application', [], app.directory, undefined, undefined, undefined, false), location: useLocation() }), { wrapper: hookWrapper });
   expect(hook.result.current.controller.draft.mode).toBeNull();
   expect(hook.result.current.controller.draft.pendingPrompt).toBeUndefined();
   expect(hook.result.current.controller.draft.pendingFiles).toBeUndefined();

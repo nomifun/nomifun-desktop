@@ -23,7 +23,6 @@ use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::session_port::CompanionHostPorts;
-use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
     CompanionMemory, CompanionSkill, CompanionStore,
@@ -477,18 +476,6 @@ impl CompanionService {
     /// wins; later calls are ignored (`OnceLock` semantics).
     pub fn set_cleanup_hooks(&self, hooks: Vec<Arc<dyn CompanionCleanupHook>>) {
         let _ = self.cleanup_hooks.set(hooks);
-    }
-
-    /// Build the `CompanionSkillSink` the agent factory needs — gives companion_session
-    /// conversations the `companion_skill` tool + the per-turn when_to_use injection
-    /// over the owning companion's self-evolved skills (design §7).
-    pub fn skill_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionSkillSink> {
-        Arc::new(CompanionSkillStoreSink {
-            store: self.store.clone(),
-            config: self.config.clone(),
-            registry: self.registry.clone(),
-            skill_paths: self.skill_paths.clone(),
-        })
     }
 
     fn companion(&self) -> Result<&CompanionThreads, AppError> {
@@ -1975,6 +1962,50 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bound_persona_context_preserves_identity_without_advertising_tool_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let selected = svc.create_companion("Selected", "ink").await.unwrap();
+        let other = svc.create_companion("Other", "ink").await.unwrap();
+        svc.patch_companion(
+            &selected.companion_id,
+            serde_json::json!({"persona": {"preset": "calm", "custom": "叫主人老大"}}),
+        )
+        .await
+        .unwrap();
+        svc.config.write().await.smart_collaboration = true;
+        let owner = crate::agent_capability::CompanionAgentCapabilityOwner::new(
+            "owner-a",
+            Arc::clone(&svc),
+        );
+        // Persona read is available even when the frozen Agent grants none of
+        // the companion's memory/actions or any platform-management tools.
+        let resources = owner
+            .resolve_scene_bindings(
+                "owner-a",
+                &selected.companion_id,
+                &std::collections::BTreeSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].operations,
+            std::collections::BTreeSet::from(["read".to_owned()]),
+        );
+        let context = owner.persona_context("owner-a", &resources).await.unwrap();
+        assert_eq!(context.companion_id, selected.companion_id);
+        assert!(context.system_prompt.contains("你是 Selected"));
+        assert!(context.system_prompt.contains("沉稳温柔"));
+        assert!(context.system_prompt.contains("叫主人老大"));
+        assert!(!context.system_prompt.contains(&other.companion_id));
+        assert!(context.system_prompt.contains("当前运行时的已授权工具目录和工具说明为准"));
+        assert!(context.system_prompt.contains("当前提供委派工具时"));
+        assert!(!context.system_prompt.contains("nomi_"));
+        assert!(!context.system_prompt.contains("完整的工具能力"));
     }
 
     #[tokio::test]

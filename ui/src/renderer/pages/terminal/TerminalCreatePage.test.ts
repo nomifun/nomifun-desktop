@@ -14,6 +14,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
+import { runtimeTools, type RuntimeToolSnapshot } from '@/common/adapter/runtimeTools';
 import { parseTerminalId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 import TerminalCreatePage from './TerminalCreatePage';
@@ -108,6 +109,30 @@ function fixture() {
     path: () => view.getByTestId('route').textContent,
   };
 }
+
+test('managed Bun preparation completes before a terminal row can be created', async () => {
+  const prepared = deferred<RuntimeToolSnapshot>();
+  const prepare = spyOn(runtimeTools.prepare, 'invoke').mockImplementation(() => prepared.promise);
+  restore.push(() => prepare.mockRestore());
+  const f = fixture(); f.command('bun --version');
+  await f.launch();
+  expect(f.create).not.toHaveBeenCalled();
+  await act(async () => { prepared.resolve({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'ready', received_bytes: 0 }); await Promise.resolve(); });
+  expect(f.create).toHaveBeenCalledTimes(1);
+  await act(async () => { f.created.resolve(session); });
+  expect(f.path()).toBe(`/terminal/${session.terminal_id}`);
+});
+
+test('leaving during preparation prevents a late terminal creation', async () => {
+  const prepared = deferred<RuntimeToolSnapshot>();
+  const prepare = spyOn(runtimeTools.prepare, 'invoke').mockImplementation(() => prepared.promise);
+  restore.push(() => prepare.mockRestore());
+  const f = fixture(); f.command('bun --version');
+  await f.launch(); f.cancel();
+  await act(async () => { prepared.resolve({ tool: 'bun', version: '1.3.13', revision: 1, phase: 'ready', received_bytes: 0 }); await Promise.resolve(); });
+  expect(f.create).not.toHaveBeenCalled();
+  expect(f.path()).toBe('/origin');
+});
 
 test('same-render clicks issue one create; failure keeps the draft and unlocks retry', async () => {
   const f = fixture();

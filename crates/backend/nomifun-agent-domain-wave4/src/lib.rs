@@ -2048,6 +2048,11 @@ fn conversation_module_manifest(
                 output_schema: schema_ref(action.id, "output", &output)?,
                 effect_class: action.effect_class,
                 presentation: ToolPresentationKind::FunctionTool,
+                required_resource_operations: Some(action.requirements.iter().fold(BTreeMap::new(), |mut requirements, requirement| {
+                    requirements.entry(ResourceKind::from(requirement.resource_kind))
+                        .or_insert_with(BTreeSet::new).insert(requirement.operation.to_owned());
+                    requirements
+                })),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -2131,6 +2136,11 @@ fn capability_manifest(
             output_schema: schema_ref(spec.id, "output", &output_schema)?,
             effect_class,
             presentation: ToolPresentationKind::FunctionTool,
+            required_resource_operations: Some(spec.requirements.iter().fold(BTreeMap::new(), |mut requirements, requirement| {
+                    requirements.entry(ResourceKind::from(requirement.resource_kind))
+                        .or_insert_with(BTreeSet::new).insert(requirement.operation.to_owned());
+                    requirements
+                })),
         });
         contributions
             .host_ports

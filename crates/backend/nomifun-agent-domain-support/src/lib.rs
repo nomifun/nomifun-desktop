@@ -271,6 +271,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
                     output_schema: schema_ref(capability.id, "output", &output_digest),
                     effect_class,
                     presentation: capability.presentation,
+                    required_resource_operations: capability.resource_kinds.is_empty()
+                        .then(BTreeMap::new),
                 }]
             }
             (false, None) => Vec::new(),

@@ -175,16 +175,29 @@ ordinary Session. Switching only remounts the conversation area. Completion sync
 checks the exact project Session and completed Turn rather than the latest navigation
 reference.
 
-New ordinary Sessions with an explicit directory freeze project-memory resource
-identity to a digest of the owner and canonical root. The same project shares the
+New ordinary Sessions with an explicit directory first reuse the current scoped
+project-memory resource identity for the same owner and canonical root; only the
+first namespace derives its identity from their digest. The same project shares the
 existing `project.memory` state, while different projects are isolated. Agent switches
-preserve that identity. The current memory owner remains in-memory for the Host
+and formal storage relocation preserve that logical identity. The current memory owner remains in-memory for the Host
 lifetime; this change does not introduce cross-restart memory persistence. Source
 files and canonical Session history retain their existing durable storage.
 Existing frozen default memory bindings are unchanged. Runtime
 reads only each Session's valid canonical content and authorized memory; it does not
 concatenate other sessions' message projections. The ordinary session list retains
 workspace grouping; the App entry only registers an existing display-path preference.
+
+Relocating the same current dataset validates registered application UUIDs, the real
+installation owner and exact owned roots offline. It rebases only copied registry
+directories and updates project location parameters through the existing canonical
+transition, retaining source, settings, logical resource IDs, grants and original
+history under their contracts. Unconfirmed application processes block relocation;
+offline inspection never tries to terminate them. See [dataset relocation](agent-session.md#relocating-the-same-current-dataset).
+
+Portable backup/restore and factory reset do not yet fully include the `app-hosting`
+root. They therefore do not guarantee complete restoration or removal of application
+registrations, project files and Session references. Storage-relocation validation
+does not cover those separate workflows.
 
 Manual imports, overwrites and deletion hold the directory fence and existing
 admission fences for every current project Session, then recheck the development

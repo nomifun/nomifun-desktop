@@ -326,28 +326,6 @@ fn count(source: &str, needle: &str) -> usize {
     source.match_indices(needle).count()
 }
 
-fn dependency_sections(manifest: &str, dependency: &str) -> Vec<String> {
-    let mut section = String::new();
-    let mut matches = Vec::new();
-    for raw_line in manifest.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if let Some(header) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {
-            section = header.trim().to_owned();
-            continue;
-        }
-        let Some(rest) = line.strip_prefix(dependency) else {
-            continue;
-        };
-        if rest.starts_with(char::is_whitespace)
-            || rest.starts_with('=')
-            || rest.starts_with(".workspace")
-        {
-            matches.push(section.clone());
-        }
-    }
-    matches
-}
-
 fn visit_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
     for entry in
         fs::read_dir(root).unwrap_or_else(|error| panic!("read {}: {error}", root.display()))
@@ -471,7 +449,7 @@ fn platform_module_is_private_and_owns_os_process_primitives() {
 }
 
 #[test]
-fn runtime_path_support_and_tools_depend_on_the_process_runtime() {
+fn runtime_path_support_depends_on_the_process_runtime() {
     let runtime_manifest = without_whitespace(&read_workspace(
         "crates/backend/nomifun-runtime/Cargo.toml",
     ));
@@ -479,13 +457,6 @@ fn runtime_path_support_and_tools_depend_on_the_process_runtime() {
         runtime_manifest.contains("nomi-process-runtime.workspace=true"),
         "nomifun-runtime must depend on nomi-process-runtime"
     );
-    let tools_manifest =
-        without_whitespace(&read_workspace("crates/agent/nomi-tools/Cargo.toml"));
-    assert!(
-        tools_manifest.contains("nomi-process-runtime.workspace=true"),
-        "nomi-tools must depend on nomi-process-runtime"
-    );
-
     assert!(
         !workspace_root()
             .join("crates/backend/nomifun-runtime/src/spawn.rs")
@@ -499,37 +470,6 @@ fn runtime_path_support_and_tools_depend_on_the_process_runtime() {
         shell_env.contains("nomi_process_runtime::merge_process_path("),
         "nomifun-runtime PATH merging must delegate to nomi-process-runtime"
     );
-}
-
-#[test]
-fn command_adapters_delegate_to_the_process_supervisor() {
-    for path in [
-        "crates/agent/nomi-tools/src/bash.rs",
-        "crates/agent/nomi-tools/src/exec_command.rs",
-        "crates/agent/nomi-tools/src/write_stdin.rs",
-    ] {
-        let source = without_whitespace(&production_source(path));
-        assert!(
-            source.contains("ProcessSupervisor"),
-            "{path} must delegate process to ProcessSupervisor"
-        );
-        for forbidden in [
-            "crate::pty",
-            "PtyParams",
-            "Pty::spawn",
-            "MasterPty",
-            "ChildKiller",
-            "ExecSession",
-            "collect_until_deadline",
-            "tokio::process::Command",
-            ".output(",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{path} retained forbidden process path {forbidden:?}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -550,80 +490,6 @@ fn unified_process_owner_creates_one_supervisor() {
     ));
     assert!(host.contains("owner:ManagedEngineProcessOwner"));
     assert!(host.contains(".write_stdin("));
-}
-
-#[test]
-fn mcp_routing_uses_origin_stable_reserved_names_without_a_collision_snapshot() {
-    let proxy = without_whitespace(&production_source(
-        "crates/agent/nomi-mcp/src/tool_proxy.rs",
-    ));
-    assert!(
-        proxy.contains("canonical_mcp_display_name(&server_name,&tool_name)"),
-        "every MCP proxy must derive its provider name from immutable origin"
-    );
-    assert!(
-        proxy.contains("Some(MCP_PROVIDER_NAME_PREFIX)"),
-        "MCP proxies must claim their reserved provider namespace"
-    );
-}
-
-#[test]
-fn retired_pty_modules_and_dependency_are_absent() {
-    let lib_path = "crates/agent/nomi-tools/src/lib.rs";
-    let complete_lib = without_whitespace(&rust_code_mask(&read_workspace(lib_path)));
-    for module in ["pty", "persistent_shell"] {
-        let declaration = format!("pubmod{module};");
-        assert!(
-            !complete_lib.contains(&declaration),
-            "retired {module} must not be exported, including in test builds"
-        );
-        assert!(
-            !workspace_root()
-                .join(format!("crates/agent/nomi-tools/src/{module}.rs"))
-                .is_file(),
-            "retired source {module}.rs must not be retained"
-        );
-    }
-
-    let manifest = read_workspace("crates/agent/nomi-tools/Cargo.toml");
-    let sections = dependency_sections(&manifest, "portable-pty");
-    assert!(
-        sections.is_empty(),
-        "retired portable-pty dependency must not be retained, found {sections:?}"
-    );
-}
-
-#[test]
-fn numeric_process_store_contains_metadata_but_no_process_owner() {
-    let path = "crates/agent/nomi-tools/src/process_store.rs";
-    let store = without_whitespace(&production_source(path));
-    for required in [
-        "ProcessOwner",
-        "SessionId",
-        "OutputCursor",
-        "Transport",
-    ] {
-        assert!(
-            store.contains(required),
-            "ProcessStore must retain {required} metadata"
-        );
-    }
-    for forbidden in [
-        "crate::pty",
-        "PtyParams",
-        "Pty::spawn",
-        "Arc<Pty>",
-        "MasterPty",
-        "ChildKiller",
-        "ExecSession",
-        "std::process::Child",
-        "tokio::process::Child",
-    ] {
-        assert!(
-            !store.contains(forbidden),
-            "ProcessStore must not own process state: {forbidden:?}"
-        );
-    }
 }
 
 #[test]

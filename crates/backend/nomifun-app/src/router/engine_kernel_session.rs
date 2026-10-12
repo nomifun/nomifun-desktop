@@ -128,6 +128,7 @@ struct Turn {
     root: String,
     cleanup: Option<Completion>,
     resource_operations: std::collections::BTreeSet<String>,
+    file_capture: Option<super::engine_turn_files::TurnFileCapture>,
 }
 #[derive(Default)]
 struct State {
@@ -1115,6 +1116,7 @@ impl EngineKernelSession {
             root: receipt.root_message_id().into(),
             cleanup: None,
             resource_operations: Default::default(),
+            file_capture: None,
         });
         }
         *self
@@ -1136,8 +1138,15 @@ impl EngineKernelSession {
                 self.session_id.as_ref(),
                 receipt.operation_id(),
                 &self.workspace,
-                journal,
+                journal.clone(),
             )?;
+        }
+        let capture_generation = journal.generation();
+        let file_capture = super::engine_turn_files::TurnFileCapture::begin(&self.workspace, journal).await;
+        let mut state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+        if let Some(turn) = state.turn.as_mut().filter(|turn| turn.root == receipt.root_message_id()
+            && turn.operation == receipt.operation_id() && turn.generation == capture_generation && turn.cleanup.is_none()) {
+            turn.file_capture = Some(file_capture);
         }
         Ok(())
     }
@@ -1283,10 +1292,13 @@ impl EngineKernelSession {
                 let owner = self.clone();
                 let executor = tokio::runtime::Handle::try_current().map_err(failure)?;
                 let task = executor.spawn(async move {
-                    owner
-                        .settle_owned(&tools)
-                        .await
-                        .map_err(|error| error.to_string())
+                    owner.settle_owned(&tools).await.map_err(|error| error.to_string())?;
+                    let file_capture = {
+                        let mut state = owner.state.lock().map_err(|_| "resource state poisoned".to_owned())?;
+                        state.turn.as_mut().and_then(|turn| turn.file_capture.take())
+                    };
+                    if let Some(capture) = file_capture { capture.finish().await; }
+                    Ok(())
                 });
                 let done = async move { task.await.map_err(|error| error.to_string())? }
                     .boxed()

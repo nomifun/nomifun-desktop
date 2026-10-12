@@ -1,7 +1,8 @@
 //! W155 — canonical settlement-error delivery over the production Realtime
 //! transport.
 //!
-//! A turn that ends in a settlement error emits `turn.started`, `message.stream`
+//! A turn that ends in a settlement error emits `message.userCreated`,
+//! `turn.started`, `message.stream`
 //! tool lifecycle frames, and `turn.completed` over the real WebSocket bridge.
 //! The event bus is volatile: a consumer that disconnects mid-turn must recover
 //! the missed settlement through the durable canonical cursors
@@ -715,6 +716,72 @@ async fn canonical_session_list_mutations_notify_only_the_owner() {
 }
 
 #[tokio::test]
+async fn exact_public_cancel_remains_bound_to_its_accepted_input_after_a_successor_starts() {
+    use nomifun_agent_contracts::{AgentSessionId, OperationId, StrictJsonValue};
+
+    let app = start_realtime_app().await;
+    let session_id = create_settlement_session(&app).await;
+    let session = AgentSessionId::from(session_id.clone());
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        app.services.database.pool().clone(),
+    ).await.unwrap();
+    // Admit through the real Store without dispatching a model: the test is
+    // about the public source identity and its atomic canonical cancellation.
+    let first_operation = OperationId::from("exact-public-cancel-first");
+    let (first_input, _) = store.start_turn(&session, "session_api".into(), "exact-first".into(),
+        first_operation.clone(), StrictJsonValue(json!({"content":"first input"})),
+    ).await.unwrap();
+    let first_root = first_input.record.unwrap().event_id;
+    let path = format!("/api/agent-sessions/{session_id}/turns/cancel");
+    let cancel = json!({"idempotency_key":"exact-first-cancel","expected_turn_id":first_root});
+    let (status, result) = call(app.router.clone(), "POST", &path, cancel.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["target_operation_id"], first_operation.as_ref());
+    assert_eq!(result["data"]["duplicate"], false);
+    assert!(store.head(&session).await.unwrap().active_turn_id.is_none());
+
+    let successor = OperationId::from("exact-public-cancel-successor");
+    let (next_input, _) = store.start_turn(&session, "session_api".into(), "exact-next".into(),
+        successor.clone(), StrictJsonValue(json!({"content":"successor input"})),
+    ).await.unwrap();
+    let next_root = next_input.record.unwrap().event_id;
+    let before = store.current_cursor(&session).await.unwrap();
+    for request in [cancel, json!({"idempotency_key":"late-dismiss","expected_turn_id":first_root})] {
+        let (status, result) = call(app.router.clone(), "POST", &path, request).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["data"]["target_operation_id"], first_operation.as_ref());
+        assert_eq!(result["data"]["duplicate"], true);
+        assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some(successor.as_ref()));
+        assert_eq!(store.current_cursor(&session).await.unwrap(), before);
+    }
+    for invalid_root in ["invalid".to_owned(), uuid::Uuid::now_v7().to_string()] {
+        let (status, result) = call(app.router.clone(), "POST", &path,
+            json!({"idempotency_key":"unknown-dismiss","expected_turn_id":invalid_root}),
+        ).await;
+        assert!(matches!(status, StatusCode::BAD_REQUEST | StatusCode::CONFLICT), "{result}");
+        assert_eq!(store.current_cursor(&session).await.unwrap(), before);
+    }
+    let (status, result) = call(app.router.clone(), "POST", &path,
+        json!({"idempotency_key":"exact-next-cancel","expected_turn_id":next_root}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["target_operation_id"], successor.as_ref());
+    assert_eq!(result["data"]["duplicate"], false);
+    assert!(store.head(&session).await.unwrap().active_turn_id.is_none());
+
+    let ordinary = OperationId::from("ordinary-public-cancel");
+    store.start_turn(&session, "session_api".into(), "ordinary-next".into(),
+        ordinary.clone(), StrictJsonValue(json!({"content":"ordinary stop remains supported"})),
+    ).await.unwrap();
+    let (status, result) = call(app.router.clone(), "POST", &path,
+        json!({"idempotency_key":"ordinary-cancel"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["target_operation_id"], ordinary.as_ref());
+    assert!(store.head(&session).await.unwrap().active_turn_id.is_none());
+}
+
+#[tokio::test]
 async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_after_reconnect() {
     let app = start_realtime_app().await;
     let session_id = create_settlement_session(&app).await;
@@ -727,8 +794,9 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
     // Owner on the desktop-webview handshake; a different authenticated user on
     // the Bearer path must stay silent for the whole batch.
     let mut owner_rx = connect_owner(app.addr).await;
+    let mut companion_rx = connect_owner(app.addr).await;
     let mut intruder_rx = connect_intruder(app.addr, &intruder_token).await;
-    wait_for_clients(&app, 2).await;
+    wait_for_clients(&app, 3).await;
 
     // --- Turn 1: consumer disconnects mid-turn, before the settlement lands ---
     app.gate.arm();
@@ -744,11 +812,23 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
         .await
     });
 
+    // Both product windows receive the same committed input while the Runtime
+    // is held mid-turn; neither waits for completion or a history reload.
+    let accepted = read_text(&mut owner_rx).await;
+    assert_eq!(accepted["name"], "message.userCreated");
+    assert_eq!(accepted["data"]["conversation_id"], session_id);
+    assert_eq!(accepted["data"]["content"], "settle with an error");
+    assert_eq!(accepted["data"]["hidden"], false);
+    assert_eq!(accepted["data"]["position"], "right");
+    assert_eq!(read_text(&mut companion_rx).await, accepted);
+    assert!(!turn_one.is_finished(), "accepted input must precede terminal settlement");
+    drop(companion_rx);
     let started = read_text(&mut owner_rx).await;
     assert_eq!(started["name"], "turn.started");
     assert_eq!(started["data"]["conversation_id"], session_id);
     assert_eq!(started["data"]["status"], "running");
     let turn_one_root = started["data"]["turn_id"].as_str().unwrap().to_owned();
+    assert_eq!(accepted["data"]["msg_id"], turn_one_root);
 
     let (_, running) = read_stream_until(&mut owner_rx, &turn_one_root, |frame| {
         frame["name"] == "message.stream"
@@ -945,9 +1025,13 @@ async fn settlement_error_streams_over_realtime_and_recovers_via_durable_cursor_
         .await
     });
 
+    let accepted = read_text(&mut owner_rx).await;
+    assert_eq!(accepted["name"], "message.userCreated");
+    assert_eq!(accepted["data"]["content"], "settle with an error again");
     let started = read_text(&mut owner_rx).await;
     assert_eq!(started["name"], "turn.started");
     let turn_two_root = started["data"]["turn_id"].as_str().unwrap().to_owned();
+    assert_eq!(accepted["data"]["msg_id"], turn_two_root);
     assert_ne!(turn_two_root, turn_one_root);
 
     let mut seen_running = false;

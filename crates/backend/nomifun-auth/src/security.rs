@@ -12,7 +12,7 @@ const CONTENT_SECURITY_POLICY: HeaderName = HeaderName::from_static("content-sec
 
 /// Every origin the NomiFun SPA is itself served from, as a `frame-ancestors`
 /// source list. One definition answers "may our own app embed this response?"
-/// for the office preview proxy.
+/// for the office preview artifact.
 ///
 /// `'self'` covers WebUI, where the SPA and the API share an origin (including
 /// behind a reverse proxy); the `tauri:` scheme source and the two
@@ -78,7 +78,7 @@ fn is_office_preview_capability_path(path: &str) -> bool {
             segments.next(),
             segments.next(),
         ),
-        (Some(""), Some("api"), Some("ppt-proxy" | "office-watch-proxy"), Some(capability))
+        (Some(""), Some("api"), Some("office-preview-artifacts"), Some(capability))
             if is_preview_capability(capability)
     )
 }
@@ -311,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn office_capability_routes_allow_only_webui_and_tauri_ancestors() {
-        for prefix in ["ppt-proxy", "office-watch-proxy"] {
+        for prefix in ["office-preview-artifacts"] {
             let uri = format!("/api/{prefix}/{CAPABILITY}/assets/index.html");
             let app = Router::new()
                 .route(
@@ -350,14 +350,14 @@ mod tests {
     async fn office_capability_routes_replace_frame_ancestors_in_every_upstream_policy() {
         let app = Router::new()
             .route(
-                "/api/ppt-proxy/{capability}/{*path}",
+                "/api/office-preview-artifacts/{capability}/{*path}",
                 get(upstream_csp_response),
             )
             .layer(middleware::from_fn(security_headers_middleware));
         let response = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/api/ppt-proxy/{CAPABILITY}/index.html"))
+                    .uri(format!("/api/office-preview-artifacts/{CAPABILITY}/index.html"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -383,9 +383,9 @@ mod tests {
     #[tokio::test]
     async fn malformed_or_similar_office_paths_remain_frame_denied() {
         for uri in [
-            "/api/ppt-proxy/43210/",
-            "/api/office-watch-proxy/not-a-capability/",
-            "/api/ppt-proxy-extra/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
+            "/api/office-preview-artifacts/43210/",
+            "/api/office-preview-artifacts/not-a-capability/",
+            "/api/office-preview-artifacts-extra/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
         ] {
             let app = Router::new()
                 .fallback(get(|| async { "ok" }))

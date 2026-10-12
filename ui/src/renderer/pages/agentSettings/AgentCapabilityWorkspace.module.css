@@ -101,7 +101,7 @@
   font-size: 12px;
   cursor: pointer;
 }
-.statusFilters button[aria-pressed='true'] { background: var(--capability-card-surface); color: var(--color-text-1); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.statusFilters button[aria-pressed='true'] { background: var(--pill-tab-active-bg, var(--capability-card-surface)); color: var(--color-text-1); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 
 .catalogLayout {
   display: grid;

@@ -54,6 +54,7 @@ const templates = [
 
 const library = {
   official_templates: templates,
+  official_presets: {},
   user_presets: [stablePreset, draftPreset, productPreset],
   active_bindings: [{
     target_kind: 'customer',

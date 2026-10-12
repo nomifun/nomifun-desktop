@@ -35,6 +35,54 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test.each([false, true])('accepted input uses its wall clock before canonical start, with process=%p', (withProcess) => {
+    const acceptedAt = 4_000_000;
+    const entries = [
+      item('user', 'user', { createdAt: 1_000, displayAt: acceptedAt }),
+      ...(withProcess ? [item('phase', 'process_content', { createdAt: 1_001, processState: 'running' })] : []),
+    ];
+    const disclosure = buildTurnDisclosureItems(entries, { tailClosed: false })
+      .find(entry => entry.type === 'turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('active disclosure missing');
+    expect(disclosure.startAt).toBe(acceptedAt);
+    expect(disclosure.running).toBe(true);
+
+    const started = buildTurnDisclosureItems(entries, {
+      activeTurnId: TURN_1, activeTurnStartedAt: acceptedAt + 100,
+    }).find(entry => entry.type === 'turn_disclosure');
+    if (started?.type !== 'turn_disclosure') throw new Error('started disclosure missing');
+    expect(started.startAt).toBe(acceptedAt + 100);
+    expect(started.id).toBe(disclosure.id);
+  });
+
+  test('canonical history owns the interval regardless of input wall time or row order', () => {
+    const metadata = item('summary', 'metadata', {
+      createdAt: 1_001, turnStartedAt: 4_000_100, turnEndedAt: 4_003_100,
+    });
+    const user = item('user', 'user', { createdAt: 1_000, displayAt: 4_000_000 });
+    for (const entries of [[metadata, user], [user, metadata]]) {
+      const disclosure = buildTurnDisclosureItems(entries, { tailClosed: true })
+        .find(entry => entry.type === 'turn_disclosure');
+      if (disclosure?.type !== 'turn_disclosure') throw new Error('settled disclosure missing');
+      expect(disclosure.startAt).toBe(4_000_100);
+      expect(disclosure.endAt).toBe(4_003_100);
+      expect(disclosure.running).toBe(false);
+    }
+  });
+
+  test.each([false, true])('text-only fallback keeps start and end on the same clock, display time=%p', (withDisplayTime) => {
+    const startAt = withDisplayTime ? 4_000_000 : 1_000;
+    const endAt = withDisplayTime ? 4_003_000 : 4_000;
+    const disclosure = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1_000, ...(withDisplayTime ? { displayAt: startAt } : {}) }),
+      item('final', 'assistant', { createdAt: 4_000, ...(withDisplayTime ? { displayAt: endAt } : {}) }),
+    ], { tailClosed: true }).find(entry => entry.type === 'turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('text-only disclosure missing');
+    expect(disclosure.startAt).toBe(startAt);
+    expect(disclosure.endAt).toBe(endAt);
+    expect(disclosure.endAt - disclosure.startAt).toBe(3_000);
+  });
+
   test.each([null, Number.NaN, Number.POSITIVE_INFINITY, '3000'])('ignores invalid canonical finish %p on a running Turn', (finish) => {
     const result = buildTurnDisclosureItems([
       item('summary', 'metadata', {

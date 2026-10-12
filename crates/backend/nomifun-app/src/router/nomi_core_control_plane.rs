@@ -273,7 +273,7 @@ async fn load_revision(
     else {
         return Ok(None);
     };
-    let contribution_locks = sqlx::query_scalar::<_, String>(
+    let mut contribution_locks: Vec<nomifun_agent_contracts::ContributionLock> = sqlx::query_scalar::<_, String>(
         "SELECT lock_json FROM agent_preset_contribution_locks \
          WHERE revision_id = ? ORDER BY contribution_id",
     )
@@ -284,6 +284,9 @@ async fn load_revision(
     .into_iter()
     .map(|value| decode(&value, "AgentPreset contribution lock"))
     .collect::<Result<Vec<_>, _>>()?;
+    // SQL row order is not the canonical ContributionLock order used by
+    // immutable digests and derived-configuration cache comparisons.
+    contribution_locks.sort();
     let revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: preset_id.clone(),
@@ -393,13 +396,8 @@ async fn insert_preset_tx(
     created_at: i64,
 ) -> Result<(), ControlPlaneError> {
     let Some(owner) = preset.preset.owner_user_id.as_ref() else {
-        return Err(conflict("Nomi-core user Preset requires an owner"));
+        return Err(conflict("Nomi-core Preset requires an owner"));
     };
-    if preset.preset.source != AgentPresetSource::User {
-        return Err(conflict(
-            "Nomi-core control-plane store only persists user Presets",
-        ));
-    }
     sqlx::query(
         "INSERT INTO agent_presets \
          (preset_id, owner_ref_json, source_json, display_json, current_stable_revision, created_at) \
@@ -1096,6 +1094,36 @@ mod tests {
                 current_stable_revision: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn official_presets_persist_owned_editable_metadata_and_cannot_be_retired() {
+        let database = nomifun_db::init_database_memory_with_owner(
+            CommonUserId::parse(OWNER_ID.to_owned()).unwrap(),
+        ).await.unwrap();
+        let owner = UserId::from(OWNER_ID);
+        let id = AgentPresetId::from(PRESET_ID);
+        let store = NomiCoreControlPlaneStore::new(database.pool().clone());
+        let mut official = user_preset(PRESET_ID, &owner);
+        official.preset.source = AgentPresetSource::Official;
+        official.preset.display_name = "companion.default".into();
+        store.insert_preset(official).await.unwrap();
+        let mut stored = store.get_preset(&id).await.unwrap().unwrap();
+        assert_eq!(stored.preset.source, AgentPresetSource::Official);
+        stored.preset.display_name = "My companion".into();
+        stored.preset.description = Some("Extended capabilities".into());
+        store.update_preset_metadata(&stored).await.unwrap();
+        let reopened = NomiCoreControlPlaneStore::new(database.pool().clone());
+        let stored = reopened.get_preset(&id).await.unwrap().unwrap();
+        assert_eq!(stored.preset.display_name, "My companion");
+        assert_eq!(stored.preset.source, AgentPresetSource::Official);
+        assert!(stored.preset.current_stable_revision.is_none());
+        assert!(!stored.session_only);
+        assert_eq!(reopened.list_presets(&owner).await.unwrap().len(), 1);
+        assert!(reopened.list_presets(&UserId::from(OTHER_OWNER_ID)).await.unwrap().is_empty());
+        assert_eq!(reopened.retire_preset(&owner, &id).await.unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        assert!(reopened.get_preset(&id).await.unwrap().is_some());
+        database.close().await;
     }
 
     #[tokio::test]

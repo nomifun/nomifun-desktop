@@ -272,7 +272,7 @@ describe('CreativeCanvasVideoComposer', () => {
   });
 
   test.each([
-    ['agnes-video-2.5-flash', 5], ['agnes-video-2.5', 8],
+    ['agnes-video-2.5-flash', 5], ['agnes-video-2.5', 8], ['agnes-video-v2.0', 8],
   ] as const)('keeps all references visible while enforcing the %s image limit', (name, limit) => {
     const componentProps = props({
       mode: 'i2v', initialPrompt: 'waves',
@@ -289,6 +289,23 @@ describe('CreativeCanvasVideoComposer', () => {
     view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
       references={componentProps.references?.slice(0, limit)} />));
     expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('v2.0 remains selectable with ordered multi-image references and HD settings', () => {
+    const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
+      mode: 'i2v', initialPrompt: 'transition',
+      modelOptions: [{ ...model, model: 'agnes-video-v2.0', protocol: 'agnes.video_jobs' }],
+      settings: { ...props().settings, resolution: '1080p', model: { providerId: model.providerId, model: 'agnes-video-v2.0' } },
+      references: ['first', 'middle', 'last'].map((id, index) => ({
+        assetId: id, nodeId: id, connectionId: id, base: false, ordinal: index + 1,
+        label: id, originalUrl: `/${id}.png`,
+      })),
+    })} />);
+    expect(html.includes('agnes-video-v2.0')).toBe(true);
+    expect(html.includes('aria-label="生成视频" disabled')).toBe(false);
+    expect(html.includes('参考图 · 按连线顺序')).toBe(true);
+    expect(html.match(/<img\b/g)?.length).toBe(3);
+    expect(html.includes('所选视频模型仅支持 720p')).toBe(false);
   });
 
   test('keeps generation disabled when no exact video model exists', () => {

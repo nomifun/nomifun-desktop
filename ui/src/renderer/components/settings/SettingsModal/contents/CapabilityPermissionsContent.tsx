@@ -10,8 +10,8 @@ import type {
   SystemPermissionKind,
   SystemPermissionState,
 } from '@/common/adapter/ipcBridge';
-import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
+import { VisualListRow, VisualPanel, VisualRow, VisualStatus, VisualTabs, type VisualTabItem, type VisualTone } from '@/renderer/pages/settings/components/CodeVisualPrimitives';
+import PageHeader from '@/renderer/components/layout/PageHeader';
 import {
   SYSTEM_PERMISSION_AUDIT,
   computerPermissionsReady,
@@ -21,7 +21,7 @@ import {
 } from '@/renderer/hooks/system/systemPermissionModel';
 import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import { Alert, Button, Message, Spin, Tag } from '@arco-design/web-react';
+import { Alert, Button, Message, Spin } from '@arco-design/web-react';
 import {
   Computer,
   Earth,
@@ -45,11 +45,11 @@ const isCapabilityTab = (value: string | null): value is PermissionCapabilityTab
 const readyState = (state: SystemPermissionState): boolean =>
   state === 'granted' || state === 'not_required';
 
-const statusColor = (state: SystemPermissionState): 'green' | 'red' | 'orange' | 'gray' => {
-  if (readyState(state)) return 'green';
-  if (state === 'denied' || state === 'restricted') return 'red';
-  if (state === 'not_determined') return 'orange';
-  return 'gray';
+const statusTone = (state: SystemPermissionState): VisualTone => {
+  if (readyState(state)) return 'success';
+  if (state === 'denied' || state === 'restricted') return 'danger';
+  if (state === 'not_determined') return 'warning';
+  return 'neutral';
 };
 
 type PermissionRowProps = {
@@ -77,58 +77,23 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
 }) => {
   const { t } = useTranslation();
   const state = entry?.state ?? 'unknown';
-  return (
-    <div className='flex min-h-68px items-center justify-between gap-24px py-12px'>
-      <div className='min-w-0 flex-1'>
-        <div className='flex items-center gap-8px'>
-          <span className='text-14px text-t-primary'>{title}</span>
-          <Tag size='small' color={statusColor(state)}>
-            {t(`settings.capabilityPermissions.states.${state}`)}
-          </Tag>
-        </div>
-        <div className='mt-4px text-12px leading-19px text-t-tertiary'>{description}</div>
-        {entry?.requires_restart_after_grant && !readyState(state) && (
-          <div className='mt-4px text-12px leading-19px text-warning-6'>
-            {t('settings.capabilityPermissions.restartAfterGrant')}
-          </div>
-        )}
-      </div>
-      <div className='flex shrink-0 items-center gap-8px'>
-        {extraAction}
-        {actionsEnabled && entry?.can_request && state !== 'denied' && state !== 'restricted' && (
-          <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>
-            {t('settings.capabilityPermissions.requestAccess')}
-          </Button>
-        )}
-        {actionsEnabled && entry?.can_open_settings && !readyState(state) && (
-          <Button size='small' onClick={() => onOpenSettings?.(kind)}>
-            {t('settings.capabilityPermissions.openSystemSettings')}
-          </Button>
-        )}
-      </div>
-    </div>
-  );
+  return <VisualRow
+    label={<><span>{title}</span><VisualStatus tone={statusTone(state)}>{t(`settings.capabilityPermissions.states.${state}`)}</VisualStatus></>}
+    description={<>{description}
+      {entry?.requires_restart_after_grant && !readyState(state) && <span className='cv-row__note'>
+        {t('settings.capabilityPermissions.restartAfterGrant')}
+      </span>}
+    </>}
+  >
+    {extraAction}
+    {actionsEnabled && entry?.can_request && state !== 'denied' && state !== 'restricted' && (
+      <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>{t('settings.capabilityPermissions.requestAccess')}</Button>
+    )}
+    {actionsEnabled && entry?.can_open_settings && !readyState(state) && (
+      <Button size='small' onClick={() => onOpenSettings?.(kind)}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>
+    )}
+  </VisualRow>;
 };
-
-const SettingsCard: React.FC<{
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}> = ({ title, description, children, action }) => (
-  <section className='rounded-16px bg-2 px-24px py-18px'>
-    <div className='flex items-start justify-between gap-24px'>
-      <div>
-        <h2 className='m-0 text-15px font-600 text-t-primary'>{title}</h2>
-        {description && <p className='m-0 mt-5px text-12px leading-19px text-t-secondary'>{description}</p>}
-      </div>
-      {action}
-    </div>
-    <div className='mt-12px divide-y divide-x-0 divide-solid divide-[var(--color-border-2)]'>
-      {children}
-    </div>
-  </section>
-);
 
 const CapabilityPermissionsContent: React.FC = () => {
   const { t } = useTranslation();
@@ -225,7 +190,7 @@ const CapabilityPermissionsContent: React.FC = () => {
     }
   }, []);
 
-  const tabItems: SegmentedTabItem[] = useMemo(() => [
+  const tabItems: VisualTabItem[] = useMemo(() => [
     {
       key: 'overview',
       label: t('settings.capabilityPermissions.tabs.overview'),
@@ -264,94 +229,31 @@ const CapabilityPermissionsContent: React.FC = () => {
   };
 
   const overview = (
-    <div className='grid grid-cols-2 gap-12px'>
-      {[
-        {
-          key: 'voice-input' as const,
-          icon: <HeadsetOne theme='outline' size='20' />,
-          title: t('settings.capabilityPermissions.voice.title'),
-          description: t('settings.capabilityPermissions.voice.summary'),
-          state: voiceReady ? 'ready' : 'attention',
-        },
-        {
-          key: 'computer-use' as const,
-          icon: <Computer theme='outline' size='20' />,
-          title: t('settings.capabilityPermissions.computer.title'),
-          description: t('settings.capabilityPermissions.computer.summary'),
-          state: computerReady ? 'ready' : 'attention',
-        },
-        {
-          key: 'browser-use' as const,
-          icon: <Earth theme='outline' size='20' />,
-          title: t('settings.capabilityPermissions.browser.title'),
-          description: t('settings.capabilityPermissions.browser.summary'),
-          state: 'onDemand',
-        },
-        {
-          key: 'notifications' as const,
-          icon: <Remind theme='outline' size='20' />,
-          title: t('settings.capabilityPermissions.notifications.title'),
-          description: t('settings.capabilityPermissions.notifications.summary'),
-          state: notificationState === 'granted' ? 'ready' : 'attention',
-        },
-      ].map((item) => (
-        <button
-          key={item.key}
-          type='button'
-          className='flex min-h-116px cursor-pointer items-start gap-12px rounded-16px border border-solid border-[var(--color-border-2)] bg-2 p-16px text-left transition-colors hover:bg-fill-1'
-          onClick={() => setTab(item.key)}
-        >
-          <span className='flex size-38px shrink-0 items-center justify-center rounded-12px bg-primary-1 text-primary-6'>
-            {item.icon}
-          </span>
-          <span className='min-w-0 flex-1'>
-            <span className='flex items-center justify-between gap-8px'>
-              <strong className='text-14px text-t-primary'>{item.title}</strong>
-              <Tag size='small' color={item.state === 'ready' ? 'green' : item.state === 'onDemand' ? 'blue' : 'orange'}>
-                {t(`settings.capabilityPermissions.summaryStates.${item.state}`)}
-              </Tag>
-            </span>
-            <span className='mt-6px block text-12px leading-19px text-t-secondary'>{item.description}</span>
-          </span>
-        </button>
-      ))}
-      <div className='col-span-2 flex items-start gap-12px rounded-16px border border-solid border-[var(--color-border-2)] bg-2 p-16px'>
-        <span className='flex size-38px shrink-0 items-center justify-center rounded-12px bg-fill-2 text-t-secondary'>
-          <Earth theme='outline' size='20' />
-        </span>
-        <div>
-          <div className='text-14px font-600 text-t-primary'>{t('settings.capabilityPermissions.localNetwork.title')}</div>
-          <div className='mt-5px text-12px leading-19px text-t-secondary'>{t('settings.capabilityPermissions.localNetwork.description')}</div>
-        </div>
-        {desktopShell && status?.platform === 'macos' && (
-          <Button className='ml-auto shrink-0' size='small' onClick={() => void openSettings('local_network')}>
-            {t('settings.capabilityPermissions.openSystemSettings')}
-          </Button>
-        )}
-      </div>
-      <div className='col-span-2 flex items-start gap-12px rounded-16px border border-solid border-[var(--color-border-2)] bg-2 p-16px'>
-        <span className='flex size-38px shrink-0 items-center justify-center rounded-12px bg-fill-2 text-t-secondary'>
-          <FolderOpen theme='outline' size='20' />
-        </span>
-        <div>
-          <div className='text-14px font-600 text-t-primary'>{t('settings.capabilityPermissions.files.title')}</div>
-          <div className='mt-5px text-12px leading-19px text-t-secondary'>{t('settings.capabilityPermissions.files.description')}</div>
-        </div>
-        {desktopShell && status?.platform === 'macos' && (
-          <Button className='ml-auto shrink-0' size='small' onClick={() => void openSettings('full_disk_access')}>
-            {t('settings.capabilityPermissions.openSystemSettings')}
-          </Button>
-        )}
-      </div>
+    <div className='cv-stack'>
+      <VisualPanel label={t('settings.capabilityPermissions.tabs.overview')}>
+        {[
+          { key: 'voice-input' as const, icon: <HeadsetOne theme='outline' size={18} />, title: t('settings.capabilityPermissions.voice.title'), description: t('settings.capabilityPermissions.voice.summary'), state: !microphone ? 'unknown' : voiceReady ? 'ready' : 'attention' },
+          { key: 'computer-use' as const, icon: <Computer theme='outline' size={18} />, title: t('settings.capabilityPermissions.computer.title'), description: t('settings.capabilityPermissions.computer.summary'), state: !status ? 'unknown' : computerReady ? 'ready' : 'attention' },
+          { key: 'browser-use' as const, icon: <Earth theme='outline' size={18} />, title: t('settings.capabilityPermissions.browser.title'), description: t('settings.capabilityPermissions.browser.summary'), state: 'onDemand' },
+          { key: 'notifications' as const, icon: <Remind theme='outline' size={18} />, title: t('settings.capabilityPermissions.notifications.title'), description: t('settings.capabilityPermissions.notifications.summary'), state: notificationState === 'unknown' ? 'unknown' : notificationState === 'granted' ? 'ready' : 'attention' },
+        ].map((item) => <VisualListRow key={item.key} icon={item.icon} title={item.title} description={item.description} onClick={() => setTab(item.key)}
+          action={<VisualStatus tone={item.state === 'ready' ? 'success' : item.state === 'attention' ? 'warning' : 'neutral'}>
+            {item.state === 'unknown' ? t('settings.capabilityPermissions.states.unknown') : t(`settings.capabilityPermissions.summaryStates.${item.state}`)}
+          </VisualStatus>} />)}
+      </VisualPanel>
+      <VisualPanel title={t('settings.workspace.systemAccess')}>
+        <VisualListRow icon={<Earth theme='outline' size={18} />} title={t('settings.capabilityPermissions.localNetwork.title')} description={t('settings.capabilityPermissions.localNetwork.description')}
+          action={desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('local_network')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>} />
+        <VisualListRow icon={<FolderOpen theme='outline' size={18} />} title={t('settings.capabilityPermissions.files.title')} description={t('settings.capabilityPermissions.files.description')}
+          action={desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('full_disk_access')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>} />
+      </VisualPanel>
     </div>
   );
 
   const voice = (
     <div className='space-y-12px'>
-      <SettingsCard
-        title={t('settings.capabilityPermissions.voice.title')}
-        description={t('settings.capabilityPermissions.voice.description')}
-        action={<Button size='small' onClick={() => navigate('/models?section=asr')}>{t('settings.capabilityPermissions.voice.configureModel')}</Button>}
+      <VisualPanel
+        label={t('settings.capabilityPermissions.voice.title')}
       >
         <PermissionRow
           entry={microphone}
@@ -363,21 +265,21 @@ const CapabilityPermissionsContent: React.FC = () => {
           onRequest={requestPermission}
           onOpenSettings={openSettings}
           extraAction={
+            <><Button size='small' onClick={() => navigate('/models?section=asr')}>{t('settings.capabilityPermissions.voice.configureModel')}</Button>
             <Button size='small' loading={microphoneBusy} onClick={() => void testMicrophone()}>
               {t('settings.capabilityPermissions.voice.test')}
-            </Button>
+            </Button></>
           }
         />
-      </SettingsCard>
+      </VisualPanel>
       <Alert type='info' showIcon content={t('settings.capabilityPermissions.voice.privacy')} />
     </div>
   );
 
   const computer = (
     <div className='space-y-12px'>
-      <SettingsCard
-        title={t('settings.capabilityPermissions.computer.title')}
-        description={t('settings.capabilityPermissions.computer.description')}
+      <VisualPanel
+        label={t('settings.capabilityPermissions.computer.title')}
       >
         <PermissionRow
           entry={accessibility}
@@ -399,7 +301,7 @@ const CapabilityPermissionsContent: React.FC = () => {
           onRequest={requestPermission}
           onOpenSettings={openSettings}
         />
-      </SettingsCard>
+      </VisualPanel>
       <Alert
         type={computerReady ? 'success' : 'warning'}
         showIcon
@@ -413,16 +315,16 @@ const CapabilityPermissionsContent: React.FC = () => {
   const browser = (
     <div className='space-y-12px'>
       <Alert type='success' showIcon content={t('settings.capabilityPermissions.browser.baseReady')} />
-      <SettingsCard
+      <VisualPanel
         title={t('settings.capabilityPermissions.browser.websiteTitle')}
         description={t('settings.capabilityPermissions.browser.websiteDescription')}
       >
         {SYSTEM_PERMISSION_AUDIT.browser_use.requestedOnDemand.map((kind) => (
-          <div key={kind} className='flex min-h-62px items-center justify-between gap-24px py-12px'>
+          <div key={kind} className='cv-row'>
             <div>
               <div className='flex items-center gap-8px text-14px text-t-primary'>
                 {t(`settings.capabilityPermissions.permissions.${kind}`)}
-                <Tag size='small' color='blue'>{t('settings.capabilityPermissions.summaryStates.onDemand')}</Tag>
+                <VisualStatus tone='info'>{t('settings.capabilityPermissions.summaryStates.onDemand')}</VisualStatus>
               </div>
               <div className='mt-4px text-12px leading-19px text-t-tertiary'>
                 {t(`settings.capabilityPermissions.browser.siteKinds.${kind}`)}
@@ -435,34 +337,20 @@ const CapabilityPermissionsContent: React.FC = () => {
             )}
           </div>
         ))}
-      </SettingsCard>
-      <section className='rounded-16px bg-2 px-24px py-18px'>
-        <div className='flex items-center justify-between gap-24px'>
-          <div>
-            <div className='flex items-center gap-8px'>
-              <h2 className='m-0 text-15px font-600 text-t-primary'>{t('settings.capabilityPermissions.localNetwork.title')}</h2>
-              <Tag size='small' color='blue'>{t('settings.capabilityPermissions.summaryStates.onDemand')}</Tag>
-            </div>
-            <p className='m-0 mt-5px text-12px leading-19px text-t-secondary'>
-              {t('settings.capabilityPermissions.localNetwork.browserDescription')}
-            </p>
-          </div>
-          {desktopShell && status?.platform === 'macos' && (
-            <Button className='shrink-0' size='small' onClick={() => void openSettings('local_network')}>
-              {t('settings.capabilityPermissions.openSystemSettings')}
-            </Button>
-          )}
-        </div>
-      </section>
+      </VisualPanel>
+      <VisualPanel title={t('settings.capabilityPermissions.localNetwork.title')}>
+        <VisualRow label={t('settings.capabilityPermissions.summaryStates.onDemand')} description={t('settings.capabilityPermissions.localNetwork.browserDescription')}>
+          {desktopShell && status?.platform === 'macos' && <Button size='small' onClick={() => void openSettings('local_network')}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>}
+        </VisualRow>
+      </VisualPanel>
       <Alert type='info' showIcon content={t('settings.capabilityPermissions.browser.agentBoundary')} />
     </div>
   );
 
   const notifications = (
     <div className='space-y-12px'>
-      <SettingsCard
-        title={t('settings.capabilityPermissions.notifications.title')}
-        description={t('settings.capabilityPermissions.notifications.description')}
+      <VisualPanel
+        label={t('settings.capabilityPermissions.notifications.title')}
       >
         <PermissionRow
           entry={notificationEntry}
@@ -474,47 +362,23 @@ const CapabilityPermissionsContent: React.FC = () => {
           onRequest={() => void requestNotifications()}
           onOpenSettings={openSettings}
         />
-      </SettingsCard>
+      </VisualPanel>
       <Alert type='info' showIcon content={t('settings.capabilityPermissions.notifications.preferenceHint')} />
     </div>
   );
 
   return (
-    <div className='flex h-full w-full flex-col'>
-      <div className='mb-16px flex items-start justify-between gap-24px'>
-        <div>
-          <h1 className='m-0 text-20px font-650 text-t-primary'>{t('settings.capabilityPermissions.title')}</h1>
-          <p className='m-0 mt-6px max-w-720px text-13px leading-20px text-t-secondary'>
-            {t('settings.capabilityPermissions.subtitle')}
-          </p>
-        </div>
-        <Button size='small' icon={<Refresh theme='outline' size='14' />} loading={loading} onClick={() => void Promise.all([refresh(), refreshNotification()])}>
-          {t('settings.capabilityPermissions.refresh')}
-        </Button>
+    <div>
+      <PageHeader title={t('settings.capabilityPermissions.title')}
+        actions={<Button size='small' icon={<Refresh theme='outline' size={14} />} loading={loading} onClick={() => void Promise.all([refresh(), refreshNotification()]).catch(() => Message.error(t('settings.capabilityPermissions.loadFailed')))}>{t('settings.capabilityPermissions.refresh')}</Button>} />
+      {!desktopShell && <Alert className='mb-16px' type='info' showIcon content={t('settings.capabilityPermissions.desktopOnly')} />}
+      {error && <Alert className='mb-16px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
+      <VisualTabs id='permissions' label={t('settings.capabilityPermissions.title')} items={tabItems} activeKey={tab}
+        onChange={(key) => setTab(isCapabilityTab(key) ? key : 'overview')} />
+      <div id='permissions-panel' role='tabpanel' aria-labelledby={'permissions-tab-' + tab} aria-busy={loading}>
+        {loading && !status ? <div className='flex min-h-180px items-center justify-center'><Spin /></div>
+          : tab === 'voice-input' ? voice : tab === 'computer-use' ? computer : tab === 'browser-use' ? browser : tab === 'notifications' ? notifications : overview}
       </div>
-
-      {!desktopShell && (
-        <Alert className='mb-12px' type='info' showIcon content={t('settings.capabilityPermissions.desktopOnly')} />
-      )}
-      {error && <Alert className='mb-12px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
-
-      <SegmentedTabs
-        items={tabItems}
-        activeKey={tab}
-        onChange={(key) => setTab(isCapabilityTab(key) ? key : 'overview')}
-        size='sm'
-        className='mb-16px'
-      />
-
-      <NomiScrollArea className='min-h-0 flex-1 pb-16px' disableOverflow>
-        {loading && !status ? (
-          <div className='flex min-h-180px items-center justify-center'><Spin /></div>
-        ) : tab === 'voice-input' ? voice
-          : tab === 'computer-use' ? computer
-            : tab === 'browser-use' ? browser
-              : tab === 'notifications' ? notifications
-                : overview}
-      </NomiScrollArea>
     </div>
   );
 };

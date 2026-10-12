@@ -1387,7 +1387,33 @@ fn role_implementation_matches(facade: &CapabilityManifest, implementation: &Cap
                 && action.input_schema == candidate.input_schema
                 && action.output_schema == candidate.output_schema
                 && action.effect_class == candidate.effect_class
+                && action.required_resource_operations == candidate.required_resource_operations
         }))
+}
+
+#[cfg(test)]
+mod action_resource_contract_tests {
+    use super::*;
+
+    #[test]
+    fn mapped_role_cannot_change_action_operations_or_infer_missing_metadata() {
+        let package = PackageRef { id: "role-resource-test".into(), version: "1.0.0".into() };
+        let mut facade = crate::sample_echo::role_capability(&package, "role-resource-action", CapabilityKind::Tool);
+        let kind = facade.contributions.resource_kinds.iter().next().unwrap().clone();
+        facade.contributions.actions[0].required_resource_operations = Some(BTreeMap::from([
+            (kind.clone(), BTreeSet::from(["read".to_owned()])),
+        ]));
+        let mut implementation = facade.clone();
+        implementation.id = "role-private-implementation".into();
+        implementation.contributions.resource_kinds.insert("private-cache".into());
+        assert!(role_implementation_matches(&facade, &implementation), "private implementation slots remain supported");
+        implementation.contributions.actions[0].required_resource_operations = Some(BTreeMap::from([
+            (kind, BTreeSet::from(["write".to_owned()])),
+        ]));
+        assert!(!role_implementation_matches(&facade, &implementation));
+        implementation.contributions.actions[0].required_resource_operations = None;
+        assert!(!role_implementation_matches(&facade, &implementation));
+    }
 }
 
 fn build_service_dag(

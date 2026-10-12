@@ -40,7 +40,7 @@
 .librarySearch input::placeholder { color: var(--agent-muted); }
 .libraryTabs { display: flex; gap: 3px; margin: 0 10px 10px; padding: 3px; border-radius: 9px; background: var(--color-fill-1); }
 .libraryTabs button { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; min-height: 33px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-3); font-size: 12px; cursor: pointer; white-space: nowrap; }
-.libraryTabs button[aria-selected='true'] { background: var(--color-bg-2); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
+.libraryTabs button[aria-selected='true'] { background: var(--pill-tab-active-bg, var(--color-bg-2)); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
 .libraryTabs button span { font-size: 10px; color: var(--color-text-3); }
 .libraryBody { overflow-y: auto; min-height: 0; padding: 0 10px 14px; }
 .libraryHint { padding: 0 5px; margin: 0 0 12px; color: var(--agent-muted); font-size: 11px; line-height: 1.6; }
@@ -117,7 +117,6 @@
 .editorActionButton:global(.arco-btn-secondary):not(:disabled):active { background: rgba(var(--primary-6), .16); }
 .editorActionButton:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .actionButtons { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
-.templateSaveState { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--color-text-3); font-size: 11px; }
 .saveStatus { display: flex; align-items: center; min-width: 0; gap: 8px; color: var(--color-text-3); font-size: 12px; }
 .saveStatus > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .saveStatus strong { color: var(--color-text-2); font-size: 12px; font-weight: 500; }
@@ -141,20 +140,27 @@
   .editorBody { padding: 18px; }
   .actionBar { padding: 13px 16px; gap: 10px; }
   .saveStatus > div > span { display: none; }
-  .templateSaveState { display: none; }
+  .saveStatusWarning > div > span { display: block; }
   .editorHeaderActions { align-self: flex-start; }
 }
 
-.templateReset { flex-shrink: 0; font-size: 11px; }
-@media (max-width: 1100px) { .templateReset { max-width: 104px; overflow: hidden; } }
 
 .capabilityBody { overflow:hidden; display:flex; flex-direction:column; }
 .capabilityPanel { flex:1; min-height:0; }
+.recommendation { flex-shrink:0; min-width:0; max-height:260px; overflow-y:auto; margin:0 0 12px; padding:12px; border:1px solid var(--agent-border); border-radius:10px; background:var(--color-fill-1); font-size:12px; color:var(--color-text-2); }
+.recommendation > strong { color:var(--color-text-1); }
+.recommendation p { margin:6px 0; line-height:1.6; }
+.recommendationList { list-style:none; display:grid; gap:8px; margin:10px 0; padding:0; }
+.recommendationList li { display:flex; flex-direction:column; gap:3px; }
+.recommendationList span { color:var(--color-text-3); line-height:1.6; overflow-wrap:anywhere; }
+.recommendationActions { display:flex; justify-content:flex-end; gap:8px; }
 @container agent-editor (max-width:720px) {
+  .editorHeader { align-items:flex-start; flex-wrap:wrap; }
+  .editorHeaderCopy { flex-basis:100%; }
+  .editorHeaderActions { min-width:0; max-width:100%; flex-shrink:1; flex-wrap:wrap; justify-content:flex-start; }
   .capabilityBody { overflow-y:auto; }
   .capabilityPanel { height:auto; flex:none; }
   .actionBar { flex-wrap:wrap; padding:12px; gap:8px; }
-  .templateSaveState { display:none; }
   .runtimePolicyFlow { grid-template-columns:1fr; gap:8px; }
   .runtimePolicyFlowStep:not(:last-child)::after { content:'↓'; right:auto; left:21px; top:auto; bottom:-10px; transform:none; z-index:1; }
   .runtimePolicyBoundary { max-width:180px; white-space:normal; text-align:right; }

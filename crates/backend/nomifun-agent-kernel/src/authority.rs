@@ -42,6 +42,11 @@ impl ThinAuthority {
                 CAPABILITY_NOT_IN_PRESET,
             );
         }
+        if !snapshot.action_resources_bound(&request.capability_id, &request.action_id)
+            .unwrap_or(false)
+        {
+            return deny(RuntimeAuthorityCheckKind::TypedResourceBinding, PRESET_RESOURCE_NOT_BOUND);
+        }
         RuntimeAuthorityDecision::Allow
     }
 
@@ -50,7 +55,7 @@ impl ThinAuthority {
         active: &ActiveCapabilitySetSnapshot,
         request: &CapabilityAccessRequest,
     ) -> RuntimeAuthorityDecision {
-        authorize_capability_access(
+        let decision = authorize_capability_access(
             snapshot,
             active,
             &request.principal,
@@ -59,7 +64,14 @@ impl ThinAuthority {
             request.active_set_generation,
             &request.capability_id,
             &request.resource_binding_ids,
-        )
+        );
+        if !matches!(decision, RuntimeAuthorityDecision::Allow) {
+            return decision;
+        }
+        if !snapshot.capability_resources_bound(&request.capability_id).unwrap_or(false) {
+            return deny(RuntimeAuthorityCheckKind::TypedResourceBinding, PRESET_RESOURCE_NOT_BOUND);
+        }
+        decision
     }
 
     pub fn enforce_access(

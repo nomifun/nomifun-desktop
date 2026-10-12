@@ -4,15 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AutoWorkRunState } from '@/common/adapter/ipcBridge';
+import type { AutoWorkRunState, IZipFile } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 
-export type ExportZipFile = {
-  name: string;
-  content?: string;
-  sourcePath?: string;
-};
+export type ExportZipFile = IZipFile;
 
 export type ExportTask =
   | { mode: 'single'; conversation: TChatConversation }

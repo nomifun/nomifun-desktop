@@ -450,6 +450,9 @@ impl VoiceSessionService {
         let mut sessions=self.sessions.lock().await;
         if sessions.len()>=128{sessions.retain(|_,prior|!matches!(prior.state().connection,VoiceConnectionState::Closed|VoiceConnectionState::Failed));}
         sessions.insert(id.clone(),active.clone());drop(sessions);
+        // The invalidation watcher may have swept while model open was still
+        // pending. Recheck after publishing and join the new worker on failure.
+        if let Err(error)=active.check_access(){self.close_active(active,VoiceCloseReason::PermissionRevoked).await;return Err(error);}
         Ok(VoiceActivationResponse{voice_session_id:id,activation_epoch:epoch,attachment_token:active.attachment_token.clone(),state:active.state(),negotiation})
     }
     async fn get(&self,owner:&str,id:&str,epoch:u64)->Result<Arc<ActiveVoice>,VoiceError> {
@@ -458,6 +461,23 @@ impl VoiceSessionService {
         active.core.lock().unwrap_or_else(|p|p.into_inner()).check_epoch(epoch)?;Ok(active)
     }
     pub async fn state(&self,owner:&str,id:&str,epoch:u64)->Result<VoiceState,VoiceError>{Ok(self.get(owner,id,epoch).await?.state())}
+    /// Validate the original activation credential before sending relay media.
+    /// Attachment tickets authorize one attachment; their expiry is not the
+    /// lifetime of the already attached authentication lease.
+    pub async fn validate_access(&self,owner:&str,id:&str,epoch:u64)->Result<(),VoiceError>{
+        self.get(owner,id,epoch).await?.check_access()
+    }
+    /// Called on credential invalidation, including native media activations
+    /// that have no relay WebSocket. Close only activations whose own credential
+    /// is no longer valid; sharing an owner does not revoke another device.
+    pub async fn revoke_invalid_access(&self){
+        let invalid=self.sessions.lock().await.values().filter(|active|active.access.as_ref().is_some_and(|access|!access.is_valid())).cloned().collect::<Vec<_>>();
+        // Close every invalid media lane before awaiting any supplier cleanup.
+        // A slow worker on one activation must not leave another native track
+        // for the same revoked credential transmitting during its join.
+        for active in &invalid{let _=active.input.try_control(VoiceControl::Close{reason:VoiceCloseReason::PermissionRevoked});}
+        for active in invalid{self.close_active(active,VoiceCloseReason::PermissionRevoked).await;}
+    }
     pub async fn active_binding(&self,owner:&str,session:&str)->Option<serde_json::Value>{
         self.sessions.lock().await.values().find(|s|s.owner==owner&&s.state().agent_session_id==session&&!matches!(s.state().connection,VoiceConnectionState::Closed|VoiceConnectionState::Failed|VoiceConnectionState::Closing))
             .map(|s|{let state=s.state();serde_json::json!({"voice_session_id":state.voice_session_id,"activation_epoch":state.activation_epoch,"state":state})})

@@ -14,10 +14,10 @@ const LOCAL_CONNECT_ATTEMPT: Duration = Duration::from_millis(100);
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct StoredRecord {
+pub(crate) struct StoredRecord {
     #[serde(deserialize_with = "read_current_record")]
-    record: AppRecord,
-    identity: Option<ExactProcessIdentity>,
+    pub(crate) record: AppRecord,
+    pub(crate) identity: Option<ExactProcessIdentity>,
 }
 
 /// Current application registries previously wrote a redundant empty Session
@@ -1039,7 +1039,7 @@ fn validate_execution_change(has_process: bool, current: &AppSettings, requested
     Ok(())
 }
 
-fn validate_name(value: String) -> Result<String, AppError> {
+pub(crate) fn validate_name(value: String) -> Result<String, AppError> {
     let value = value.trim().to_owned();
     if value.is_empty() || value.contains('\0') {
         return Err(AppError::Invalid("application name is required and cannot contain a null byte".into()));
@@ -1047,7 +1047,7 @@ fn validate_name(value: String) -> Result<String, AppError> {
     Ok(value)
 }
 
-fn validate_metadata(mut value: AppMetadata) -> Result<AppMetadata, AppError> {
+pub(crate) fn validate_metadata(mut value: AppMetadata) -> Result<AppMetadata, AppError> {
     if value.description.chars().count() > 4000 || value.description.contains('\0') {
         return Err(AppError::Invalid("application description exceeds 4000 characters or contains a null byte".into()));
     }
@@ -1064,7 +1064,7 @@ fn validate_metadata(mut value: AppMetadata) -> Result<AppMetadata, AppError> {
     Ok(value)
 }
 
-fn validate_id(id: &str) -> Result<(), AppError> {
+pub(crate) fn validate_id(id: &str) -> Result<(), AppError> {
     let identity = uuid::Uuid::parse_str(id).map_err(|_| AppError::Invalid("invalid application identity".into()))?;
     if identity.get_version_num() != 7 || identity.to_string() != id {
         return Err(AppError::Invalid("application identity must be a bare canonical UUIDv7".into()));
@@ -1072,7 +1072,7 @@ fn validate_id(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_settings(root: &Path, settings: &AppSettings) -> Result<(), AppError> {
+pub(crate) fn validate_settings(root: &Path, settings: &AppSettings) -> Result<(), AppError> {
     contained_directory(root, &settings.project_directory)?;
     if let Some(output) = settings.output_directory.as_deref().filter(|s| !s.is_empty()) {
         let project = root.join(relative_path(&settings.project_directory)?);

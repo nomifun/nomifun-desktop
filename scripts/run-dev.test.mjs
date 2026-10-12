@@ -37,7 +37,7 @@ describe('development data generation', () => {
   test('honors explicit data roots including Windows case-insensitive env names', () => {
     for (const key of ['NOMIFUN_DATA_DIR', 'nomifun_data_dir']) {
       const input = { [key]: 'D:\\existing-dev-data' };
-      expect(developmentEnvironment(input, 'win32')).toEqual({ ...input, NOMI_CHANNEL: 'dev' });
+      expect(developmentEnvironment(input, 'win32')).toEqual({ ...input, NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: '1' });
     }
   });
 
@@ -54,12 +54,14 @@ describe('development data generation', () => {
         HOME: '/Users/dev',
         NOMIFUN_DATA_DIR: generatedDirectory('/Users/dev/Library/Application Support'),
         NOMI_CHANNEL: 'dev',
+        NOMIFUN_EMBED_OFFICECLI: '1',
       });
     expect(developmentEnvironment({ HOME: '/home/dev' }, 'linux'))
       .toEqual({
         HOME: '/home/dev',
         NOMIFUN_DATA_DIR: generatedDirectory('/home/dev/.local/share'),
         NOMI_CHANNEL: 'dev',
+        NOMIFUN_EMBED_OFFICECLI: '1',
       });
     expect(developmentEnvironment({
       HOME: '/home/dev',
@@ -77,9 +79,9 @@ describe('development data generation', () => {
 
   test('honors explicit POSIX roots and rejects empty ones', () => {
     expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'darwin'))
-      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: '1' });
     expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'linux'))
-      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: '1' });
     expect(() => developmentEnvironment({ NOMIFUN_DATA_DIR: '' }, 'darwin'))
       .toThrow('must not be empty');
   });

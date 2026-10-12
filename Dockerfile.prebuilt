@@ -4,11 +4,9 @@
 # Build it through:
 #   bun run docker:prebuilt -- --tag nomifun/nomifun-web:latest
 
-ARG BUN_IMAGE="oven/bun:1"
-ARG NODE_IMAGE="node:22-bookworm-slim"
+ARG NODE_IMAGE="node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
 ARG RUNTIME_IMAGE="ubuntu:26.04"
 
-FROM ${BUN_IMAGE} AS bun-base
 FROM ${NODE_IMAGE} AS node-base
 
 FROM ${RUNTIME_IMAGE}
@@ -26,7 +24,6 @@ RUN apt-get -o Acquire::Retries=5 update \
         ca-certificates git liblzma5 python3 python3-yaml ripgrep tini zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -38,6 +35,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && python3 -c "import yaml"
 COPY --chmod=755 nomifun-web /usr/local/bin/nomifun-web
 COPY web /opt/nomifun/web
+COPY component-notices/ /opt/nomifun/component-notices/
 
 LABEL org.opencontainers.image.title="nomifun-web" \
       org.opencontainers.image.version="${NOMIFUN_VERSION}"

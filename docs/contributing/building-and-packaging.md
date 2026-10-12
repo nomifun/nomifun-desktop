@@ -29,7 +29,10 @@ bun run build:ui
 Output: `ui/dist/`.
 
 Desktop builds bundle this directory through `frontendDist` in
-`apps/desktop/tauri.conf.json`. `nomifun-web` serves it from `--dist` /
+`apps/desktop/tauri.conf.json`. The desktop window and production LAN WebUI use
+the same embedded assets; desktop bundles do not carry a separate `webui-dist`
+copy. An explicit `NOMIFUN_WEBUI_DIST` directory retains its precedence and must
+match the desktop frontend build identity. `nomifun-web` serves it from `--dist` /
 `NOMIFUN_WEB_DIST`; when running from the repo, the default points at
 `../../ui/dist` from `apps/web`.
 
@@ -44,7 +47,7 @@ Runtime requirements:
 
 - built SPA directory;
 - writable data directory;
-- Bun on `PATH`, unless the binary was built with `NOMIFUN_EMBED_BUN=1`;
+- OfficeCLI embedded automatically in release; Node prepared by verified managed download before backend startup, Bun on feature use; writable/executable runtime cache ([component contract](../architecture/external-tools.md));
 - configured auth/admin flow, or explicit `--insecure-no-auth` for trusted
   loopback-only development.
 
@@ -117,6 +120,30 @@ the manifest is live. See the root [`RELEASING.md`](../../RELEASING.md) for the
 manual upload runbook.
 
 ## macOS Signing and Notarization
+
+Complete macOS bundles support Apple Silicon arm64 and Intel x64 using system
+WKWebView; Universal builds are rejected. Use
+`bun run build:mac` for the arm64 default or `bun run build:mac intel` for Intel,
+whose bundle also carries the verified ONNX Runtime and its licenses. The
+embedded-browser target remains macOS 14+ for both native architectures.
+DMGs use ULMO/LZMA compression by default, supported for mounting on macOS 10.15+.
+For the UDZO compatibility format with zlib level 9, use:
+
+```bash
+NOMIFUN_MACOS_DMG_FORMAT=UDZO bun run build:mac
+```
+
+The override also applies to `build:signed` and `build:updater`. Compression does
+not change the App's macOS 14+ minimum-system declaration.
+For signed release builds with notarization configured, the final App is signed,
+notarized and stapled before creating DMG/updater bytes; DMG signing and
+notarization remain after container creation.
+
+No browser runtime, helper, locale pack, or system WebKit.framework is downloaded
+or bundled. The package verifier rejects such browser components. Native Intel
+ONNX Runtime, rpath and licenses remain separate application requirements.
+Updater payloads remain `.app.tar.gz` and use gzip level 9; extraction verifies
+all application bytes, permissions and symlink targets against the final App.
 
 Unsigned/ad-hoc macOS artifacts are useful for local testing but are not suitable
 for distributing to other people. To produce a Developer ID signed and notarized

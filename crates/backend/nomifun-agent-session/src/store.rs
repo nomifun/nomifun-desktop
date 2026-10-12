@@ -57,6 +57,15 @@ pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_
 mod runtime_state;
 pub use runtime_state::RuntimeStateObservation;
 
+#[path = "storage_relocation.rs"]
+mod storage_relocation;
+
+#[path = "turn_files.rs"]
+mod turn_files;
+
+#[path = "history_transition_projection.rs"]
+mod history_transition_projection;
+
 #[path = "native_execution.rs"]
 mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
@@ -497,6 +506,9 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
+        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
         if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
             reject_unleased_native_turn_tx(&mut tx, &append.agent_session_id,
                 &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
@@ -1589,6 +1601,18 @@ impl AgentSessionStore {
                 "wait for the active Turn before switching models".to_owned(),
             ));
         }
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects \
+             WHERE session_id = ? AND state IN ('pending', 'unknown'))",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        if unsettled != 0 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession has unsettled effects".to_owned(),
+            ));
+        }
         let result = sqlx::query(
             "UPDATE agent_sessions SET agent_binding_json = ? \
              WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",
@@ -1985,6 +2009,7 @@ impl AgentSessionStore {
                 .map(|payload| payload.digest.clone()),
             completion_gate_inherited: false,
             effective_after_seq: head.last_seq,
+            workspace_relocation: None,
         };
 
         let replacement_json = serde_json::to_string(&request.replacement)?;
@@ -2070,6 +2095,40 @@ impl AgentSessionStore {
             active_set_ack,
             duplicate: false,
         })
+    }
+
+    /// Typed binding transitions resolved from their canonical events and
+    /// Payloads in one read transaction, newest first. Product presentation
+    /// can prove an original authoring choice without reading Message caches.
+    pub async fn agent_binding_transitions(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<AgentBindingChangedPayloadV1>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let rows = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed' ORDER BY seq DESC",
+        ).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
+        let mut transitions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event = event_from_row(row)?;
+            let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload_value_for_event_tx(&mut tx, &event).await?)?;
+            if event.kind_version != 1 || transition.transition_id.as_ref() != event.correlation_id.as_ref()
+                || transition.effective_after_seq.checked_add(1) != Some(event.seq)
+                || transition.previous_binding_ref.binding_version.checked_add(1) != Some(transition.next_binding_ref.binding_version)
+                || transition.next_binding_ref.binding_version > session.agent_binding.binding_version
+            {
+                return Err(SessionStoreError::InvalidEvent("Agent transition differs from its canonical binding boundary".into()));
+            }
+            if transition.workspace_relocation.is_some() {
+                transition.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+            }
+            transitions.push(transition);
+        }
+        tx.commit().await?;
+        Ok(transitions)
     }
 
     pub async fn active_capability_ids(
@@ -2475,7 +2534,8 @@ impl AgentSessionStore {
                 "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key, \
                  e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
                  JOIN agent_turns t ON t.session_id=e.session_id AND t.operation_id=? JOIN agent_events s ON s.event_id=t.started_event_id \
-                 WHERE e.session_id=? AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
+                 WHERE e.session_id=? AND e.kind <> 'turn/workspace-files-observed' \
+                 AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
                 .bind(turn_operation_id.as_ref()).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("native recovery fact budget exceeded".into())); }
             rows
@@ -2495,7 +2555,11 @@ impl AgentSessionStore {
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("Turn output fact budget exceeded".into())); }
             rows
             }
-            CausalityFactScope::SessionHistory => event_rows_for_session_tx(&mut tx, session_id.as_ref()).await?,
+            CausalityFactScope::SessionHistory => sqlx::query_as::<_, StoredEventRow>(
+                "SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version, \
+                 correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
+                 WHERE session_id=? AND kind <> 'turn/workspace-files-observed' ORDER BY seq",
+            ).bind(session_id.as_ref()).fetch_all(&mut *tx).await?,
         };
 
         let mut events = Vec::with_capacity(rows.len());
@@ -2780,11 +2844,12 @@ impl AgentSessionStore {
         .fetch_all(&mut *tx)
         .await?;
         let has_more = rows.len() > limit as usize;
-        let messages = rows
+        let mut messages = rows
             .into_iter()
             .take(limit as usize)
             .map(projection_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        history_transition_projection::hydrate(&mut tx, session_id, &mut messages).await?;
         let total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
                AND presentation_intent IN ('message', 'tool', 'agent_transition')",
@@ -2920,6 +2985,7 @@ impl AgentSessionStore {
         });
         let has_more = history.len() > limit as usize;
         history.truncate(limit as usize);
+        history_transition_projection::hydrate(&mut tx, session_id, &mut history).await?;
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
@@ -2967,7 +3033,14 @@ impl AgentSessionStore {
         .bind(as_i64(after_seq, "after_seq")?)
         .fetch_all(&mut **tx)
         .await?;
-        rows.into_iter().map(projection_from_row).collect()
+        let mut messages = rows.into_iter().map(projection_from_row).collect::<Result<Vec<_>, _>>()?;
+        if messages.iter().any(|projection| projection.last_seq > last_seq) {
+            return Err(SessionStoreError::InvalidEvent(
+                "message projection is ahead of the committed AgentSession sequence".into(),
+            ));
+        }
+        history_transition_projection::hydrate(tx, session_id, &mut messages).await?;
+        Ok(messages)
     }
 
     pub async fn rebuild_projections(
@@ -4240,7 +4313,10 @@ impl AgentSessionStore {
                 "delete requested_at must not be negative".to_owned(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
+        // Read the deletion state only after obtaining the writer lock. A
+        // deferred transaction can fail its read-to-write upgrade immediately
+        // when another Session deletion or domain owner has written in WAL.
+        let mut tx = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
@@ -4297,7 +4373,9 @@ impl AgentSessionStore {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
+        // Blockers, private-content purge and tombstone validation must share
+        // a writer-owned snapshot even when other Sessions delete in parallel.
+        let mut tx = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
@@ -5607,8 +5685,37 @@ async fn validate_semantic_event_tx(
     event: &SessionEventRecord,
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
+    if event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+        let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(payload.clone())?;
+        observation.validate().map_err(SessionStoreError::InvalidPayload)?;
+        let identity: Option<(String, i64, String)> = sqlx::query_as(
+            "SELECT started_event_id,execution_generation,state FROM agent_turns WHERE session_id=? AND operation_id=?",
+        ).bind(event.agent_session_id.as_ref()).bind(observation.operation_id.as_ref()).fetch_optional(&mut **tx).await?;
+        if event.correlation_id.as_ref() != observation.operation_id.as_ref()
+            || identity.is_none_or(|(started, generation, state)| {
+                event.causation_event_id.as_ref().map(EventId::as_ref) != Some(started.as_str())
+                    || generation < 0 || generation as u64 != observation.execution_generation
+                    || !matches!(state.as_str(), "running" | "paused")
+            }) {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+    }
     if event.kind.0 == "compaction/completed" {
         validate_compaction_payload_tx(tx, event, payload).await?;
+    }
+    if event.kind.0 == "session/agent-binding-changed"
+        && payload.get("workspace_relocation").is_some_and(|proof| !proof.is_null()) {
+        let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload.clone())?;
+        transition.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+        let session = live_session_by_id_tx(tx, event.agent_session_id.as_ref()).await?;
+        storage_relocation::validate_namespace_proof_tx(tx, &session, transition.workspace_relocation.as_ref().expect("validated proof")).await?;
+        if transition.transition_id.as_ref() != event.correlation_id.as_ref()
+            || transition.effective_after_seq.checked_add(1) != Some(event.seq)
+            || transition.next_binding_ref != AgentHandoffBindingRefV1::from(&session.agent_binding)
+            || transition.workspace_relocation.as_ref().expect("validated proof").next_resources
+                != session.agent_binding.typed_resource_bindings {
+            return Err(SessionStoreError::InvalidEvent("storage relocation event differs from its atomic binding boundary".into()));
+        }
     }
     Ok(())
 }
@@ -7092,7 +7199,19 @@ async fn payload_value_for_event_tx(
                         payload_id.as_ref()
                     ))
                 })?;
-            payload_body_to_value(&payload_from_row(row)?.body)
+            let payload = payload_from_row(row)?;
+            if payload.agent_session_id != event.agent_session_id {
+                return Err(SessionStoreError::InvalidPayload(
+                    "event payload belongs to another AgentSession".into(),
+                ));
+            }
+            let bytes = logical_payload_bytes(&payload.body)?;
+            if payload.byte_len != bytes.len() as u64 || payload.digest != digest_bytes(&bytes) {
+                return Err(SessionStoreError::InvalidPayload(
+                    "event payload differs from its recorded length or digest".into(),
+                ));
+            }
+            payload_body_to_value(&payload.body)
         }
     }
 }

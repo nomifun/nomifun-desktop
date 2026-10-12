@@ -114,6 +114,287 @@
     "title": "AgentBindingValue",
     "type": "object"
   },
+  "agent_binding_changed_payload": {
+    "$defs": {
+      "AgentHandoffBindingRefV1": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "preset_revision_ref": {
+            "$ref": "#/$defs/PresetRevisionRef"
+          },
+          "resolved_snapshot_ref": {
+            "$ref": "#/$defs/ResolvedSnapshotRef"
+          }
+        },
+        "required": [
+          "preset_revision_ref",
+          "resolved_snapshot_ref",
+          "binding_version"
+        ],
+        "type": "object"
+      },
+      "AgentHandoffMode": {
+        "description": "Explicit user choice for one Agent binding transition. The first release\nnever guesses task continuation from transcript contents.",
+        "enum": [
+          "continue_task",
+          "context_only"
+        ],
+        "type": "string"
+      },
+      "ManagedAppWorkspaceNamespaceV1": {
+        "additionalProperties": false,
+        "description": "An exact current application registry identity, supplied by the hosting\nowner to the offline coordinator. It proves only the location of that\napplication's existing project; Session authority remains canonical.",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "owner_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "owner_id"
+        ],
+        "type": "object"
+      },
+      "ManagedSessionWorkspaceNamespaceV1": {
+        "additionalProperties": false,
+        "description": "The canonical event itself carries the exact before/after definitions.\nThis is bounded provenance, never another active resource binding ledger.",
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "opening_workspace": {
+            "$ref": "#/$defs/TypedResourceBinding",
+            "description": "Exact immutable workspace definition from this Session's opening event."
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "opening_workspace"
+        ],
+        "type": "object"
+      },
+      "ManagedStorageRelocationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_app_workspace": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ManagedAppWorkspaceNamespaceV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "managed_knowledge_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "managed_session_namespace": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ManagedSessionWorkspaceNamespaceV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_resources": {
+            "items": {
+              "$ref": "#/$defs/TypedResourceBinding"
+            },
+            "type": "array"
+          },
+          "previous_resources": {
+            "items": {
+              "$ref": "#/$defs/TypedResourceBinding"
+            },
+            "type": "array"
+          },
+          "source_data_root": {
+            "type": "string"
+          },
+          "source_work_root": {
+            "type": "string"
+          },
+          "target_data_root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_data_root",
+          "source_work_root",
+          "target_data_root",
+          "managed_knowledge_ids",
+          "previous_resources",
+          "next_resources"
+        ],
+        "type": "object"
+      },
+      "PresetRevisionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "preset_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "preset_id",
+          "revision",
+          "revision_digest"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      },
+      "TypedResourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_kind": {
+            "type": "string"
+          },
+          "typed_parameters": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "binding_id",
+          "resource_kind",
+          "resource_id",
+          "owner_id",
+          "operations"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "completion_gate_inherited": {
+        "type": "boolean"
+      },
+      "effective_after_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "handoff_mode": {
+        "$ref": "#/$defs/AgentHandoffMode"
+      },
+      "handoff_payload_digest": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "handoff_payload_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "next_agent_label": {
+        "type": "string"
+      },
+      "next_binding_ref": {
+        "$ref": "#/$defs/AgentHandoffBindingRefV1"
+      },
+      "previous_agent_label": {
+        "type": "string"
+      },
+      "previous_binding_ref": {
+        "$ref": "#/$defs/AgentHandoffBindingRefV1"
+      },
+      "request_digest": {
+        "type": "string"
+      },
+      "transition_id": {
+        "type": "string"
+      },
+      "workspace_relocation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ManagedStorageRelocationV1"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "transition_id",
+      "request_digest",
+      "previous_binding_ref",
+      "next_binding_ref",
+      "previous_agent_label",
+      "next_agent_label",
+      "handoff_mode",
+      "completion_gate_inherited",
+      "effective_after_seq"
+    ],
+    "title": "AgentBindingChangedPayloadV1",
+    "type": "object"
+  },
   "agent_preset_revision": {
     "$defs": {
       "AgentIdmmBypassModelRef": {
@@ -2467,6 +2748,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4300,6 +4595,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5499,6 +5808,20 @@
           },
           "presentation": {
             "$ref": "#/$defs/ToolPresentationKind"
+          },
+          "required_resource_operations": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "description": "Exact resource operations consumed by this Action. The Module's\nresource kinds continue to describe its complete contribution surface;\na selected Action only requires the resource slots declared here.\nNone means the Action did not publish an exact resource contract;\nSome(empty) explicitly declares that it consumes no resource slots.",
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "required": [
@@ -7484,6 +7807,101 @@
       "packages"
     ],
     "title": "TargetPackageInventoryPayload",
+    "type": "object"
+  },
+  "turn_workspace_files_observed": {
+    "$defs": {
+      "ObservedFileOperation": {
+        "enum": [
+          "create",
+          "modify",
+          "delete"
+        ],
+        "type": "string"
+      },
+      "ObservedWorkspaceFile": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/$defs/ObservedFileOperation"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source_sha256": {
+            "description": "Captured start-side fingerprint; this is presentation data, not effect evidence.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "complete": {
+        "type": "boolean"
+      },
+      "execution_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "files": {
+        "items": {
+          "$ref": "#/$defs/ObservedWorkspaceFile"
+        },
+        "type": "array"
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "unchanged_paths": {
+        "description": "Owner-mutated paths whose included start/end fingerprints are equal.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "workspace_root": {
+        "description": "Exact root observed during this Turn; relocation is resolved on presentation reads.",
+        "type": "string"
+      },
+      "workspace_root_sha256": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation_id",
+      "execution_generation",
+      "workspace_root",
+      "workspace_root_sha256",
+      "complete",
+      "files",
+      "unchanged_paths"
+    ],
+    "title": "TurnWorkspaceFilesObservedV1",
     "type": "object"
   }
 }

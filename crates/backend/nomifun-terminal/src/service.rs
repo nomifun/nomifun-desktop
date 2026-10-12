@@ -30,7 +30,7 @@ use crate::error::TerminalError;
 use crate::events::TerminalEventEmitter;
 use crate::pty::{PtyExit, PtyHandle, SpawnParams};
 use crate::types::{
-    TerminalOwnerScope, persisted_terminal_env, process_env_from_persisted, resolve_command,
+    TerminalOwnerScope, persisted_terminal_env, process_env_from_persisted,
     row_to_response, strip_internal_terminal_env, terminal_owner_scope,
 };
 
@@ -224,6 +224,38 @@ pub struct TerminalOutputTail {
     pub truncated: bool,
     /// The session's status: "running" | "exited" | "error".
     pub status: String,
+}
+
+/// One owner-checked observation of the durable row and its live PTY generation.
+/// Management callers must return both versions when mutating this terminal.
+#[derive(Debug, Clone)]
+pub struct TerminalManagementSnapshot {
+    pub session: TerminalSessionResponse,
+    pub pty_epoch: Option<u64>,
+}
+
+#[derive(Clone)]
+struct TerminalManagementFence {
+    user_id: UserId,
+    updated_at: i64,
+    pty_epoch: Option<u64>,
+}
+
+impl TerminalManagementFence {
+    fn new(user_id: &str, updated_at: i64, pty_epoch: Option<u64>) -> Result<Self, TerminalError> {
+        if updated_at < 0 {
+            return Err(TerminalError::InvalidInput(
+                "expected_updated_at must be non-negative".to_owned(),
+            ));
+        }
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid user_id: {error}")))?;
+        Ok(Self {
+            user_id,
+            updated_at,
+            pty_epoch,
+        })
+    }
 }
 
 /// Manages terminal sessions: DB-persisted metadata + live in-memory PTYs.
@@ -684,6 +716,9 @@ impl TerminalService {
                 WorkspaceDirectoryCheck::Create,
             )?;
         }
+        // Verify prerequisite readiness before minting/persisting any terminal
+        // row or materializing its workspace knowledge/PTY side effects.
+        crate::types::resolve_command_for_spawn(&req.command, &req.args)?;
         let name = req
             .name
             .clone()
@@ -810,7 +845,7 @@ impl TerminalService {
         knowledge_scope: TerminalKnowledgeScope,
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
-        let (program, resolved_args) = resolve_command(command, args);
+        let (program, resolved_args) = crate::types::resolve_command_for_spawn(command, args)?;
         #[cfg(all(test, windows))]
         let program = resolve_windows_test_program(&program);
         // Mint the PTY generation before issuing child capabilities so their
@@ -1424,6 +1459,128 @@ impl TerminalService {
         Ok(())
     }
 
+    /// Read a management version under the same lock as process replacement.
+    /// A timestamp alone cannot distinguish two relaunches in one millisecond.
+    pub async fn management_snapshot(
+        &self,
+        user_id: &str,
+        id: &str,
+    ) -> Result<TerminalManagementSnapshot, TerminalError> {
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid user_id: {error}")))?;
+        let lifecycle_slot = self.lifecycle_slot_for_existing_row(id).await?;
+        let lifecycle = lifecycle_slot.lock().await;
+        if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
+            return Err(TerminalError::NotFound(id.to_owned()));
+        }
+        let row = self.management_owned_row(&user_id, id).await?;
+        Ok(TerminalManagementSnapshot {
+            session: row_to_response(&row, None, &self.work_dir),
+            pty_epoch: self.live.get(id).map(|handle| handle.epoch()),
+        })
+    }
+
+    /// Pair output with the version of the process that produced it. A relaunch
+    /// cannot swap the PTY between reading its generation and its scrollback.
+    pub async fn management_read_output_tail(
+        &self,
+        user_id: &str,
+        id: &str,
+        max_bytes: usize,
+    ) -> Result<(TerminalManagementSnapshot, TerminalOutputTail), TerminalError> {
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid user_id: {error}")))?;
+        let lifecycle_slot = self.lifecycle_slot_for_existing_row(id).await?;
+        let lifecycle = lifecycle_slot.lock().await;
+        if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
+            return Err(TerminalError::NotFound(id.to_owned()));
+        }
+        let row = self.management_owned_row(&user_id, id).await?;
+        let handle = self.live.get(id).map(|entry| Arc::clone(entry.value()));
+        let pty_epoch = handle.as_ref().map(|handle| handle.epoch());
+        let raw = match handle {
+            Some(handle) => handle.scrollback(),
+            None => self.repo.load_scrollback(id).await?.unwrap_or_default(),
+        };
+        let text = crate::ansi::strip_ansi(&raw);
+        let (tail, truncated) = tail_on_char_boundary(&text, max_bytes);
+        Ok((
+            TerminalManagementSnapshot {
+                session: row_to_response(&row, None, &self.work_dir),
+                pty_epoch,
+            },
+            TerminalOutputTail {
+                text: tail,
+                truncated,
+                status: row.last_status,
+            },
+        ))
+    }
+
+    /// Include both standalone and conversation-owned terminals for this user.
+    /// Each result is coherent independently; deleted rows disappear from the list.
+    pub async fn management_list(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<TerminalManagementSnapshot>, TerminalError> {
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid user_id: {error}")))?;
+        let mut snapshots = Vec::new();
+        for row in self.repo.list_by_user(user_id.as_str()).await? {
+            match self
+                .management_snapshot(user_id.as_str(), row.terminal_id.as_str())
+                .await
+            {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(TerminalError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(snapshots)
+    }
+
+    async fn management_owned_row(
+        &self,
+        user_id: &UserId,
+        id: &str,
+    ) -> Result<nomifun_db::TerminalSessionRow, TerminalError> {
+        self.repo
+            .get_by_id(id)
+            .await?
+            .filter(|row| row.user_id == *user_id)
+            .filter(|row| {
+                !matches!(
+                    terminal_owner_scope(row.env.as_deref()),
+                    TerminalOwnerScope::Invalid
+                )
+            })
+            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))
+    }
+
+    /// Called only while holding the terminal's lifecycle slot.
+    fn check_management_fence(
+        &self,
+        id: &str,
+        row: &nomifun_db::TerminalSessionRow,
+        fence: &TerminalManagementFence,
+    ) -> Result<(), TerminalError> {
+        if row.user_id != fence.user_id
+            || matches!(
+                terminal_owner_scope(row.env.as_deref()),
+                TerminalOwnerScope::Invalid
+            )
+        {
+            return Err(TerminalError::NotFound(id.to_owned()));
+        }
+        let pty_epoch = self.live.get(id).map(|handle| handle.epoch());
+        if row.updated_at != fence.updated_at || pty_epoch != fence.pty_epoch {
+            return Err(TerminalError::StaleGeneration(format!(
+                "terminal {id} changed since it was observed; read its current version before retrying"
+            )));
+        }
+        Ok(())
+    }
+
     /// Get one session, including a base64 scrollback snapshot. A live session
     /// returns its in-memory scrollback; a session with no live PTY (e.g. after
     /// an app restart) falls back to the persisted snapshot so the frontend can
@@ -1635,6 +1792,57 @@ impl TerminalService {
                 self.write_input_exact_epoch(id, epoch, &cr).await
             }
         }
+    }
+
+    /// Submit Agent management input only to the exact observed process.
+    /// Keep the lifecycle lock across both paste and Enter so a relaunch cannot
+    /// receive the trailing Enter belonging to its predecessor.
+    pub async fn management_submit_text(
+        &self,
+        user_id: &str,
+        id: &str,
+        expected_updated_at: i64,
+        expected_pty_epoch: Option<u64>,
+        text: &str,
+    ) -> Result<(), TerminalError> {
+        if text.len() > 16 * 1024 {
+            return Err(TerminalError::InvalidInput(
+                "text exceeds 16 KiB".to_owned(),
+            ));
+        }
+        let fence = TerminalManagementFence::new(user_id, expected_updated_at, expected_pty_epoch)?;
+        let service = self.clone();
+        let id = id.to_owned();
+        let text = text.to_owned();
+        self.coordinate("management-input", async move {
+            let _shutdown_guard = service.enter_operation().await?;
+            let lifecycle_slot = service.lifecycle_slot_for_existing_row(&id).await?;
+            let lifecycle = lifecycle_slot.lock().await;
+            if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
+                return Err(TerminalError::NotFound(id));
+            }
+            let row = service.management_owned_row(&fence.user_id, &id).await?;
+            service.check_management_fence(&id, &row, &fence)?;
+            let handle = service
+                .live
+                .get(&id)
+                .map(|entry| Arc::clone(entry.value()))
+                .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
+            let args = crate::types::parse_args(&row.args);
+            let (program, prog_args) = crate::types::resolve_command(&row.command, &args);
+            let is_agent =
+                crate::enhance::resolve_agent_family(&program, &prog_args, row.backend.as_deref())
+                    .is_some();
+            match crate::submit::encode_submit_chunks(&text, is_agent) {
+                crate::submit::SubmitChunks::Single(bytes) => handle.write(&bytes).await,
+                crate::submit::SubmitChunks::PasteThenCr { paste, cr } => {
+                    handle.write(&paste).await?;
+                    tokio::time::sleep(crate::submit::TERMINAL_SUBMIT_DELAY).await;
+                    handle.write(&cr).await
+                }
+            }
+        })
+        .await
     }
 
     /// Wait for a terminal turn to settle after a submit. Agent CLIs with
@@ -2068,11 +2276,31 @@ impl TerminalService {
     pub async fn kill(&self, id: &str) -> Result<(), TerminalError> {
         let service = self.clone();
         let id = id.to_owned();
-        self.coordinate("kill", async move { service.kill_coordinated(id).await })
+        self.coordinate("kill", async move { service.kill_coordinated(id, None).await })
             .await
     }
 
-    async fn kill_coordinated(&self, id: String) -> Result<(), TerminalError> {
+    pub async fn management_stop(
+        &self,
+        user_id: &str,
+        id: &str,
+        expected_updated_at: i64,
+        expected_pty_epoch: Option<u64>,
+    ) -> Result<(), TerminalError> {
+        let fence = TerminalManagementFence::new(user_id, expected_updated_at, expected_pty_epoch)?;
+        let service = self.clone();
+        let id = id.to_owned();
+        self.coordinate("management-stop", async move {
+            service.kill_coordinated(id, Some(fence)).await
+        })
+        .await
+    }
+
+    async fn kill_coordinated(
+        &self,
+        id: String,
+        fence: Option<TerminalManagementFence>,
+    ) -> Result<(), TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         let lifecycle_slot = self
             .existing_lifecycle_slot(&id)
@@ -2080,6 +2308,10 @@ impl TerminalService {
         let lifecycle = lifecycle_slot.lock().await;
         if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
             return Err(TerminalError::NotFound(id));
+        }
+        if let Some(fence) = fence.as_ref() {
+            let row = self.management_owned_row(&fence.user_id, &id).await?;
+            self.check_management_fence(&id, &row, fence)?;
         }
         let pty_epoch = self
             .live
@@ -2196,7 +2428,25 @@ impl TerminalService {
         let service = self.clone();
         let id = id.to_owned();
         self.coordinate("relaunch", async move {
-            service.relaunch_in_place(id, RelaunchTarget::Stored).await
+            service.relaunch_in_place(id, RelaunchTarget::Stored, None).await
+        })
+        .await
+    }
+
+    pub async fn management_relaunch(
+        &self,
+        user_id: &str,
+        id: &str,
+        expected_updated_at: i64,
+        expected_pty_epoch: Option<u64>,
+    ) -> Result<TerminalSessionResponse, TerminalError> {
+        let fence = TerminalManagementFence::new(user_id, expected_updated_at, expected_pty_epoch)?;
+        let service = self.clone();
+        let id = id.to_owned();
+        self.coordinate("management-relaunch", async move {
+            service
+                .relaunch_in_place(id, RelaunchTarget::Stored, Some(fence))
+                .await
         })
         .await
     }
@@ -2219,7 +2469,7 @@ impl TerminalService {
         let service = self.clone();
         let id = id.to_owned();
         self.coordinate("shell-relaunch", async move {
-            service.relaunch_in_place(id, RelaunchTarget::Shell).await
+            service.relaunch_in_place(id, RelaunchTarget::Shell, None).await
         })
         .await
     }
@@ -2232,6 +2482,7 @@ impl TerminalService {
         &self,
         id: String,
         target: RelaunchTarget,
+        fence: Option<TerminalManagementFence>,
     ) -> Result<TerminalSessionResponse, TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         let lifecycle_slot = self.lifecycle_slot_for_existing_row(&id).await?;
@@ -2247,8 +2498,14 @@ impl TerminalService {
                 return Err(TerminalError::NotFound(id));
             }
         };
+        if let Some(fence) = fence.as_ref() {
+            self.check_management_fence(&id, &row, fence)?;
+        }
         let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
         let args = crate::types::parse_args(&row.args);
+        if matches!(target, RelaunchTarget::Stored) {
+            crate::types::resolve_command_for_spawn(&row.command, &args)?;
+        }
 
         // Re-sync knowledge mounts + README on every relaunch. Binding
         // changes already reach a LIVE terminal through the binding-change
@@ -3847,6 +4104,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unprepared_bun_rejects_before_persisting_a_terminal_or_workspace_effects() {
+        assert!(
+            nomifun_runtime::resolve_cached_managed_command("bun", &[]).unwrap().is_none(),
+            "this process has not requested Bun preparation"
+        );
+        let (svc, events, repo) = service_with_repo();
+        let mut request = req("bun", &["-e", "process.stdout.write('unexpected')"]);
+        request.defer_spawn = true;
+        let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
+        let app: nomifun_common::AppError = error.into();
+        assert_eq!(app.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(app.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+        assert!(repo.rows.lock().unwrap().is_empty());
+        assert!(svc.live.is_empty());
+        assert!(events.events.lock().unwrap().is_empty());
+        assert_eq!(
+            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun).phase,
+            nomifun_runtime::ToolPreparationPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "opt-in native managed Bun preparation and PTY smoke"]
+    async fn prepared_bun_starts_a_terminal_after_required_component_gate() {
+        let root = tempfile::tempdir().unwrap();
+        nomifun_runtime::init(root.path());
+        let (svc, events, repo) = service_with_repo();
+        let script = "process.stdout.write('managed-bun-ready'); setInterval(()=>{},1000)";
+        let request = req("bun", &["-e", script]);
+        let error: nomifun_common::AppError = svc.create(TEST_USER_ID, request.clone()).await.unwrap_err().into();
+        assert_eq!(error.error_code(), "COMPONENT_PREPARATION_REQUIRED");
+        assert!(repo.rows.lock().unwrap().is_empty());
+        nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::Bun).await
+            .expect("explicitly prepare the approved native Bun");
+        let response = svc.create(TEST_USER_ID, request).await.unwrap();
+        assert!(svc.live.contains_key(response.terminal_id.as_str()));
+        assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        let observed = wait_for(|| collect_output(&events).contains("managed-bun-ready"), 4000).await;
+        svc.kill(response.terminal_id.as_str()).await.unwrap();
+        assert!(observed, "prepared Bun must execute the PTY script and deliver output");
+        assert!(svc.live.is_empty());
+    }
+
+    #[tokio::test]
     async fn deferred_create_rejects_a_missing_cwd_before_persisting_a_sidebar_row() {
         let (svc, _events, repo) = service_with_repo();
         let parent = tempfile::tempdir().unwrap();
@@ -4691,6 +4992,329 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn management_test_request(cwd: &Path) -> CreateTerminalRequest {
+        #[cfg(windows)]
+        let mut request = req("cmd.exe", &["/D", "/Q"]);
+        #[cfg(not(windows))]
+        let mut request = req("cat", &[]);
+        request.cwd = cwd.to_string_lossy().into_owned();
+        request
+    }
+
+    #[tokio::test]
+    async fn management_fence_list_preserves_owner_scope_and_hides_invalid_metadata() {
+        let (svc, _events, repo) = service_with_repo();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut request = management_test_request(cwd.path());
+        request.defer_spawn = true;
+        let standalone = svc.create(TEST_USER_ID, request.clone()).await.unwrap();
+        let conversation_id = ConversationId::new();
+        let owned = svc
+            .create_for_conversation(TEST_USER_ID, conversation_id.as_str(), request)
+            .await
+            .unwrap();
+        let listed = svc.management_list(TEST_USER_ID).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.session.terminal_id == standalone.terminal_id
+                    && entry.session.owner_conversation_id.is_none())
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.session.terminal_id == owned.terminal_id
+                    && entry.session.owner_conversation_id.as_ref() == Some(&conversation_id))
+        );
+        repo.rows
+            .lock()
+            .unwrap()
+            .get_mut(owned.terminal_id.as_str())
+            .unwrap()
+            .env = Some("invalid owner metadata".into());
+        assert_eq!(svc.management_list(TEST_USER_ID).await.unwrap().len(), 1);
+        assert!(matches!(
+            svc.management_snapshot(TEST_USER_ID, owned.terminal_id.as_str())
+                .await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert!(matches!(
+            svc.management_relaunch(
+                TEST_USER_ID,
+                owned.terminal_id.as_str(),
+                owned.updated_at,
+                None
+            )
+            .await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert!(svc.live.is_empty());
+        svc.delete(standalone.terminal_id.as_str()).await.unwrap();
+        svc.delete(owned.terminal_id.as_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn management_fence_rejects_cross_owner_without_touching_process() {
+        let (svc, _events, repo) = service_with_repo();
+        let cwd = tempfile::tempdir().unwrap();
+        let terminal = svc
+            .create(TEST_USER_ID, management_test_request(cwd.path()))
+            .await
+            .unwrap();
+        let id = terminal.terminal_id.as_str();
+        let snapshot = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        let other_user = UserId::new().to_string();
+        assert!(svc.management_list(&other_user).await.unwrap().is_empty());
+        assert!(matches!(
+            svc.management_snapshot(&other_user, id).await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert!(matches!(
+            svc.management_submit_text(
+                &other_user,
+                id,
+                snapshot.session.updated_at,
+                snapshot.pty_epoch,
+                "must-not-write"
+            )
+            .await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert!(matches!(
+            svc.management_stop(
+                &other_user,
+                id,
+                snapshot.session.updated_at,
+                snapshot.pty_epoch
+            )
+            .await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert!(matches!(
+            svc.management_relaunch(
+                &other_user,
+                id,
+                snapshot.session.updated_at,
+                snapshot.pty_epoch
+            )
+            .await,
+            Err(TerminalError::NotFound(_))
+        ));
+        assert_eq!(TerminalDriver::current_epoch(&svc, id), snapshot.pty_epoch);
+        assert!(repo.parked_turns.lock().unwrap().is_empty());
+        svc.delete(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn management_fence_rejects_stale_row_and_same_timestamp_successor() {
+        let (svc, events, repo) = service_with_repo();
+        let cwd = tempfile::tempdir().unwrap();
+        let terminal = svc
+            .create(TEST_USER_ID, management_test_request(cwd.path()))
+            .await
+            .unwrap();
+        let id = terminal.terminal_id.as_str();
+        let observed = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        repo.rows.lock().unwrap().get_mut(id).unwrap().updated_at += 1;
+        assert!(matches!(
+            svc.management_submit_text(
+                TEST_USER_ID,
+                id,
+                observed.session.updated_at,
+                observed.pty_epoch,
+                "must-not-write"
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert!(matches!(
+            svc.management_stop(
+                TEST_USER_ID,
+                id,
+                observed.session.updated_at,
+                observed.pty_epoch
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert!(matches!(
+            svc.management_relaunch(
+                TEST_USER_ID,
+                id,
+                observed.session.updated_at,
+                observed.pty_epoch
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert!(repo.parked_turns.lock().unwrap().is_empty());
+
+        let before_relaunch = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        svc.management_relaunch(
+            TEST_USER_ID,
+            id,
+            before_relaunch.session.updated_at,
+            before_relaunch.pty_epoch,
+        )
+        .await
+        .unwrap();
+        let successor = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        // The test repository intentionally leaves the row timestamp unchanged.
+        assert_eq!(
+            before_relaunch.session.updated_at,
+            successor.session.updated_at
+        );
+        assert_ne!(before_relaunch.pty_epoch, successor.pty_epoch);
+        let parked_before = repo.parked_turns.lock().unwrap().len();
+        assert!(matches!(
+            svc.management_submit_text(
+                TEST_USER_ID,
+                id,
+                before_relaunch.session.updated_at,
+                before_relaunch.pty_epoch,
+                "must-not-write"
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert!(matches!(
+            svc.management_stop(
+                TEST_USER_ID,
+                id,
+                before_relaunch.session.updated_at,
+                before_relaunch.pty_epoch
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert!(matches!(
+            svc.management_relaunch(
+                TEST_USER_ID,
+                id,
+                before_relaunch.session.updated_at,
+                before_relaunch.pty_epoch
+            )
+            .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        assert_eq!(repo.parked_turns.lock().unwrap().len(), parked_before);
+        assert_eq!(TerminalDriver::current_epoch(&svc, id), successor.pty_epoch);
+        svc.management_submit_text(
+            TEST_USER_ID,
+            id,
+            successor.session.updated_at,
+            successor.pty_epoch,
+            "echo current-management-input",
+        )
+        .await
+        .unwrap();
+        assert!(
+            wait_for(
+                || collect_output(&events).contains("current-management-input"),
+                4000
+            )
+            .await
+        );
+        let (read_snapshot, tail) = svc
+            .management_read_output_tail(TEST_USER_ID, id, 8192)
+            .await
+            .unwrap();
+        assert_eq!(read_snapshot.pty_epoch, successor.pty_epoch);
+        assert_eq!(read_snapshot.session.updated_at, successor.session.updated_at);
+        assert_eq!(tail.status, read_snapshot.session.last_status);
+        assert!(tail.text.contains("current-management-input"));
+        assert!(!collect_output(&events).contains("must-not-write"));
+        svc.management_stop(
+            TEST_USER_ID,
+            id,
+            successor.session.updated_at,
+            successor.pty_epoch,
+        )
+        .await
+        .unwrap();
+        svc.delete(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn management_fence_is_checked_after_waiting_for_concurrent_relaunch() {
+        let (svc, _events, repo) = service_with_repo();
+        let cwd = tempfile::tempdir().unwrap();
+        let terminal = svc
+            .create(TEST_USER_ID, management_test_request(cwd.path()))
+            .await
+            .unwrap();
+        let id = terminal.terminal_id.clone();
+        let observed = svc
+            .management_snapshot(TEST_USER_ID, id.as_str())
+            .await
+            .unwrap();
+        let gate = Arc::new(CommitGate::default());
+        *repo.running_status_commit_gate.lock().unwrap() = Some(gate.clone());
+        let relaunch_svc = svc.clone();
+        let relaunch_id = id.clone();
+        let relaunch =
+            tokio::spawn(async move { relaunch_svc.relaunch(relaunch_id.as_str()).await });
+        tokio::time::timeout(Duration::from_secs(2), gate.committed.notified())
+            .await
+            .unwrap();
+        let management_svc = svc.clone();
+        let management_id = id.clone();
+        let expected_updated_at = observed.session.updated_at;
+        let expected_pty_epoch = observed.pty_epoch;
+        let management = tokio::spawn(async move {
+            management_svc
+                .management_stop(
+                    TEST_USER_ID,
+                    management_id.as_str(),
+                    expected_updated_at,
+                    expected_pty_epoch,
+                )
+                .await
+        });
+        gate.release.notify_one();
+        relaunch.await.unwrap().unwrap();
+        assert!(matches!(
+            management.await.unwrap(),
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        let successor = svc
+            .management_snapshot(TEST_USER_ID, id.as_str())
+            .await
+            .unwrap();
+        assert_ne!(successor.pty_epoch, observed.pty_epoch);
+        assert_eq!(successor.session.last_status, "running");
+        svc.delete(id.as_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn management_fence_requires_no_epoch_to_match_deferred_terminal() {
+        let (svc, _events) = service();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut request = management_test_request(cwd.path());
+        request.defer_spawn = true;
+        let terminal = svc.create(TEST_USER_ID, request).await.unwrap();
+        let id = terminal.terminal_id.as_str();
+        let observed = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        assert_eq!(observed.pty_epoch, None);
+        assert!(matches!(
+            svc.management_relaunch(TEST_USER_ID, id, observed.session.updated_at, Some(1))
+                .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        svc.management_relaunch(TEST_USER_ID, id, observed.session.updated_at, None)
+            .await
+            .unwrap();
+        let successor = svc.management_snapshot(TEST_USER_ID, id).await.unwrap();
+        assert!(successor.pty_epoch.is_some());
+        assert!(matches!(
+            svc.management_stop(TEST_USER_ID, id, successor.session.updated_at, None)
+                .await,
+            Err(TerminalError::StaleGeneration(_))
+        ));
+        svc.delete(id).await.unwrap();
     }
 
     #[tokio::test]

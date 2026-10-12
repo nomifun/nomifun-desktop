@@ -148,9 +148,6 @@ fn command_not_found_message(command: &str) -> String {
         "node" => format!(
             "Command not found: {command}. Install Node.js (which includes npm/npx), then restart Nomi or configure this MCP server to use an absolute command path."
         ),
-        "bun" => format!(
-            "Command not found: {command}. Install Bun (which includes bun/bunx), then restart Nomi or configure this MCP server to use an absolute command path."
-        ),
         "uv" => format!(
             "Command not found: {command}. Install uv, then restart Nomi or configure this MCP server to use an absolute command path."
         ),
@@ -370,12 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn spawn_error_not_found_bun_command() {
+    fn spawn_error_for_user_owned_bun_path_uses_generic_command_guidance() {
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
-        let result = spawn_error_result("bunx", &err);
+        let result = spawn_error_result("/user/configured/bunx", &err);
         let error = result.error.as_deref().unwrap();
-        assert!(error.contains("Command not found: bunx"));
-        assert!(error.contains("Install Bun"));
+        assert!(error.contains("Command not found: /user/configured/bunx"));
+        assert!(error.contains("Install the command"));
+        assert!(error.contains("absolute command path"));
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "bun");
     }
 

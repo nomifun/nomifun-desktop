@@ -44,6 +44,7 @@ import {
 } from './capabilityGroups';
 import {
   actionFallbackName,
+  actionI18nKey,
   capabilityReferenceKey,
   humanizeResourceKind,
   moduleI18nKey,
@@ -96,9 +97,6 @@ type Props = {
   disabled?: boolean;
   onChange: (document: AgentPresetDocument) => void;
 };
-
-const actionTranslationKey = (actionId: string): string =>
-  actionId.slice(actionId.indexOf('/') + 1).replace(/[^a-zA-Z0-9]+/g, '_');
 
 const effectTone = (effectClass: string): 'critical' | 'caution' | 'normal' => {
   if (['destructive', 'irreversible', 'physical'].includes(effectClass)) return 'critical';
@@ -312,7 +310,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   const needsAttention = (entry: ModuleEntry): boolean =>
     moduleNeedsAttention(entry) || permissionNeedsAttention(entry);
   const localizedActionName = (actionId: string): string => t(
-    `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
+    `agentSettings.actionLabels.${actionI18nKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
   );
   const resourceName = (value: string): string => {
@@ -458,7 +456,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
             onInput={(event) => setQuery(event.currentTarget.value)}
           />
         </label>
-        <div className={styles.statusFilters} role='group' aria-label={t('agentSettings.workbench.filterStatus')}>
+        <div className={`nomi-pill-tabs ${styles.statusFilters}`} role='group' aria-label={t('agentSettings.workbench.filterStatus')}>
           {(['all', 'enabled', 'attention'] as const).map((value) => (
             <button
               type='button'

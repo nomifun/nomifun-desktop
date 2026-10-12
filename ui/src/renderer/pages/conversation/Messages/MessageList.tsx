@@ -31,7 +31,6 @@ import './messages.css';
 import contentStyles from '../components/ConversationContentColumn.module.css';
 import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
-import type { FileChangeInfo } from './MessageFileChanges';
 import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
@@ -55,7 +54,6 @@ import { isContextCompressionTip } from './processTipModel';
 import {
   selectJournalProcessItems,
 } from './processTraceDisplayModel';
-import { formatFileTargetPreview } from './processFileTargetLabel';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
 import SelectionReplyButton from './components/SelectionReplyButton';
@@ -69,14 +67,16 @@ import {
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
 import {
-  collectTurnDeliverables,
-  type TurnDeliverableCandidate,
+  buildTurnFileItems,
+  collectVerifiedTurnImages,
+  type TurnImageCandidate,
   type TurnDeliverableItem,
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
+import { useTurnFiles } from './useTurnFiles';
 import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
-import type { MessageId } from '@/common/types/ids';
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
 import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
@@ -87,15 +87,6 @@ type SourceMessageId = MessageId;
 
 type IMessageVO =
   | TMessage
-  | {
-      type: 'file_summary';
-      id: string;
-      msg_id?: MessageId;
-      turn_id?: MessageId;
-      diffs: FileChangeInfo[];
-      sourceMessageIds: SourceMessageId[];
-      created_at: number;
-    }
   | {
       type: 'tool_summary';
       id: string;
@@ -142,6 +133,7 @@ type ITurnDeliverablesVO = {
   id: string;
   turn_id: MessageId;
   items: TurnDeliverableItem[];
+  partial: boolean;
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
@@ -188,9 +180,6 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
   if ('type' in item && item.type === 'tool_summary') {
     return item.sourceMessageIds;
   }
-  if ('type' in item && item.type === 'file_summary') {
-    return item.sourceMessageIds;
-  }
   const message = item as TMessage;
   const businessId = message.message_id ?? message.msg_id;
   return businessId ? [businessId] : [];
@@ -214,7 +203,6 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
   if (
     'type' in item &&
     [
-      'file_summary',
       'tool_summary',
       'turn_process_disclosure',
       'process_receipt',
@@ -238,13 +226,20 @@ const getThinkingDurationMs = (item: IRenderableItem): number | undefined => {
   return duration;
 };
 
-const getProcessedItemProcessStartedAt = (item: IRenderableItem): number => getProcessedItemCreatedAt(item);
+const getProcessedItemProcessStartedAt = (item: IRenderableItem): number => {
+  // Canonical text created_at is a Session/keyset cursor, not elapsed time.
+  // Legacy messages without a separate wall clock already use created_at as one.
+  const displayAt = item.type === 'text' ? item.content.display_at_ms : undefined;
+  return typeof displayAt === 'number' && Number.isFinite(displayAt)
+    ? displayAt
+    : getProcessedItemCreatedAt(item);
+};
 
 const getProcessedItemProcessEndedAt = (item: IRenderableItem): number => {
-  const createdAt = getProcessedItemCreatedAt(item);
+  const startedAt = getProcessedItemProcessStartedAt(item);
   const duration = getThinkingDurationMs(item);
-  if (duration === undefined) return createdAt;
-  return createdAt + duration;
+  if (duration === undefined) return startedAt;
+  return startedAt + duration;
 };
 
 const getProcessedItemTurnStartedAt = (item: IRenderableItem): number | undefined => {
@@ -282,9 +277,6 @@ const isHiddenProcessItem = (item: IRenderableItem): boolean => {
 };
 
 const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => {
-  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
-    return item.msg_id;
-  }
   return item.msg_id;
 };
 
@@ -293,7 +285,7 @@ const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined =>
 };
 
 const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['role'] => {
-  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
+  if ('type' in item && item.type === 'tool_summary') {
     return 'process';
   }
   switch (item.type) {
@@ -524,28 +516,6 @@ const buildProcessReceiptSummary = (
     };
   }
 
-  if ('type' in item && item.type === 'file_summary') {
-    const targets = item.diffs
-      .map((file) => file.fullPath || file.file_name)
-      .filter((target): target is string => Boolean(target));
-    const targetPreview = targets.length ? formatFileTargetPreview(targets, { workspaceRoots }) : '';
-    return {
-      label: targetPreview
-        ? t('messages.processReceipt.fileEditTargets', {
-            count: item.diffs.length,
-            target: targetPreview,
-            defaultValue: 'Edited {{count}} files: {{target}}',
-          })
-        : t('messages.processReceipt.fileEdits', {
-            count: item.diffs.length,
-            defaultValue: 'Edited {{count}} files',
-          }),
-      icon: 'edit',
-      defaultExpanded: false,
-      hasDetail: item.diffs.length > 1,
-    };
-  }
-
   switch (item.type) {
     case 'agent_status':
       return {
@@ -667,7 +637,7 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   if ('type' in item && item.type === 'thinking') return 'thinking';
   if (
     'type' in item &&
-    ['tool_summary', 'file_summary', 'tool_call', 'tool_group'].includes(item.type)
+    ['tool_summary', 'tool_call', 'tool_group'].includes(item.type)
   ) {
     return 'tool';
   }
@@ -739,13 +709,19 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
 const MessageList: React.FC<{
   className?: string;
   emptySlot?: React.ReactNode;
+  /** Live first-submit echo only; never added to canonical history or Turn state. */
+  pendingMessage?: IMessageText;
+  /** The real progress/result row has committed, so the submit echo can retire. */
+  onPendingMessageReady?: () => void;
   /** Windowed-history paging (nomi surfaces): prepend the next older message
    *  window when the user scrolls to the top. Omitted on chats that still load
    *  their whole transcript at once. */
   onLoadOlder?: () => void | boolean | Promise<void | boolean>;
   hasMoreOlder?: boolean;
   loadingOlder?: boolean;
-}> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder }) => {
+  /** Product opt-in; preserve the latest reply across automatic process collapse. */
+  followTurnCompletion?: boolean;
+}> = ({ emptySlot, pendingMessage, onPendingMessageReady, onLoadOlder, hasMoreOlder, loadingOlder, followTurnCompletion = false }) => {
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
@@ -868,7 +844,17 @@ const MessageList: React.FC<{
       activeRequestMessageId: conversationContext?.activeRequestMessageId,
     })), [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, list]);
 
-  const displayList = useMemo<IProcessedItem[]>(() => {
+  const pausedFileTurnId = useMemo(() => {
+    const pausedTurnId = conversationContext?.executionPause?.turnId;
+    if (!pausedTurnId) return undefined;
+    // A pause is not a closed Turn. Only typed terminal metadata can override
+    // a stale pause projection; provisional text and tail position cannot.
+    const finished = list.some((message) => message.turn_id === pausedTurnId && getMessageBusinessIdentity(message) &&
+      getProcessedItemTurnEndedAt(message) !== undefined);
+    return finished ? undefined : pausedTurnId;
+  }, [conversationContext?.executionPause?.turnId, list]);
+
+  const turnPresentation = useMemo(() => {
     const itemById = new Map<string, IRenderableItem>();
     const rawModelInput: TurnDisclosureInputItem[] = processedList.map((item) => {
       const id = getProcessedItemAnchorId(item);
@@ -979,35 +965,50 @@ const MessageList: React.FC<{
       })
       .filter((item): item is IProcessedItem => Boolean(item));
 
-    // ── Turn deliverables: aggregate each successfully closed turn's verified
-    // file artifacts and surface them as one card below that turn's last item
-    // (its final assistant reply, when one exists). ──
     const turnGates = new Map<string, TurnGateInfo>();
     for (const entry of disclosureItems) {
       if ('type' in entry && entry.type === 'turn_process_disclosure') {
         turnGates.set(entry.msg_id, { running: entry.running, state: entry.state });
       }
     }
-
-    const candidates: TurnDeliverableCandidate[] = [];
+    const fileTurnGates = new Map([...turnGates].filter(([id]) => id !== pausedFileTurnId));
+    const imageCandidates: TurnImageCandidate[] = [];
     for (const entry of modelInput) {
       const item = itemById.get(entry.id);
-      if (!item) continue;
-      const candidate: TurnDeliverableCandidate = {
-        turnId: entry.turnId,
-        role: entry.role,
-        processState: entry.processState ?? 'completed',
-      };
-      if ('type' in item && item.type === 'tool_summary') {
-        candidate.toolMessages = item.messages;
-      } else if ('type' in item && item.type === 'file_summary') {
-        candidate.fileDiffs = item.diffs;
-        candidate.fileDiffSourceMessageIds = item.sourceMessageIds;
-      }
-      candidates.push(candidate);
+      if (item?.type === 'tool_summary') imageCandidates.push({ turnId: entry.turnId, toolMessages: item.messages });
     }
+    const verifiedImagesByTurn = collectVerifiedTurnImages(imageCandidates, fileTurnGates, workspaceRoots);
+    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn };
+  }, [
+    conversationContext?.activeRequestMessageId,
+    conversationContext?.activeTurnId,
+    conversationContext?.activeTurnStartedAt,
+    conversationContext?.isTurnStateHydrated,
+    conversationContext?.isProcessing,
+    conversationContext?.stopNotice,
+    creationTaskOwnerMessageIds,
+    processedList,
+    pausedFileTurnId,
+    t,
+    toolLanguage,
+    workspaceRoots,
+  ]);
 
-    const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
+  const closedTurnIds = useMemo(() => [...turnPresentation.fileTurnGates]
+    .filter(([, gate]) => !gate.running)
+    .map(([turnId]) => turnId as MessageId), [turnPresentation.fileTurnGates]);
+  const turnFileSummaries = useTurnFiles(conversationContext?.conversation_id, closedTurnIds);
+
+  const displayList = useMemo<IProcessedItem[]>(() => {
+    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn } = turnPresentation;
+    const deliverablesByTurn = new Map<MessageId, TurnDeliverableItem[]>();
+    for (const [id, gate] of fileTurnGates) {
+      if (gate.running) continue;
+      const turnId = id as MessageId;
+      const summary = turnFileSummaries.get(turnId);
+      const items = buildTurnFileItems(summary, verifiedImagesByTurn.get(turnId));
+      if (items.length || summary?.complete === false) deliverablesByTurn.set(turnId, items);
+    }
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
     const getDisplayItemTurnId = (entry: IProcessedItem): MessageId | undefined => {
@@ -1048,8 +1049,9 @@ const MessageList: React.FC<{
           id: `turn-deliverables-${turnId}`,
           turn_id: turnId,
           items,
+          partial: turnFileSummaries.get(turnId)?.complete === false,
           sourceMessageIds: Array.from(
-            new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
+            new Set(items.flatMap((item) => item.sourceMessageIds))
           ),
           created_at: getProcessedItemCreatedAt(entry),
         });
@@ -1078,19 +1080,7 @@ const MessageList: React.FC<{
       }
     });
     return withOutputs;
-  }, [
-    conversationContext?.activeRequestMessageId,
-    conversationContext?.activeTurnId,
-    conversationContext?.activeTurnStartedAt,
-    conversationContext?.isTurnStateHydrated,
-    conversationContext?.isProcessing,
-    conversationContext?.stopNotice,
-    creationTaskOwnerMessageIds,
-    processedList,
-    t,
-    toolLanguage,
-    workspaceRoots,
-  ]);
+  }, [turnPresentation, turnFileSummaries]);
 
   const lastUserTextIndex = useMemo(
     () =>
@@ -1124,7 +1114,12 @@ const MessageList: React.FC<{
     [displayList]
   );
 
-  // Use auto-scroll hook
+  const followedTurn = followTurnCompletion
+    ? displayList.findLast((item): item is ITurnProcessDisclosureVO => item.type === 'turn_process_disclosure')
+    : undefined;
+
+  // The rendered Turn already resolves canonical lifecycle and history state.
+  // Reuse it for scrolling rather than keeping another completion listener.
   const {
     handleScrollerRef,
     handleContentRef,
@@ -1139,6 +1134,7 @@ const MessageList: React.FC<{
   } = useAutoScroll({
     messages: list,
     itemCount: displayList.length + (pauseError ? 1 : 0),
+    followTurn: followedTurn ? { id: followedTurn.msg_id, running: followedTurn.running } : undefined,
   });
   const handleColumnRef = useConversationColumnRef(handleContentRef);
 
@@ -1299,7 +1295,13 @@ const MessageList: React.FC<{
     scrollToBottom('smooth');
   };
 
-  const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
+  const renderTurnDisclosure = (item: ITurnProcessDisclosureVO | undefined, highlighted: boolean) => {
+    if (!item) return <TurnProcessDisclosure<IRenderableItem>
+      preparationLabel={t('conversation.pending.preparing')}
+      renderProcessItem={() => null}
+      getProcessItemKey={getProcessedItemAnchorId}
+      getProcessItemState={getProcessItemState}
+    />;
     const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
     const presentation = delegatedTurnPresentation(item, linkedDelegation);
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
@@ -1389,12 +1391,12 @@ const MessageList: React.FC<{
     );
   };
 
-  const renderItem = (_index: number, item: (typeof displayList)[0]) => {
+  const renderItem = (_index: number, item: (typeof displayList)[0], renderKey = item.id) => {
     const highlighted = matchesTargetMessage(item, highlightedMessageId);
     if ('type' in item && item.type === 'turn_process_disclosure') {
       return (
         <div
-          key={item.id}
+          key={renderKey}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-disclosure'
           className='min-w-0 message-item m-t-10px turn_process_disclosure'
@@ -1429,7 +1431,7 @@ const MessageList: React.FC<{
           <TurnDeliverablesCard
             items={item.items}
             workspace={conversationContext?.workspace}
-            partial={hasMoreOlder === true}
+            partial={item.partial}
           />
         </div>
       );
@@ -1450,7 +1452,7 @@ const MessageList: React.FC<{
         </div>
       );
     }
-    if ('type' in item && ['file_summary', 'tool_summary'].includes(item.type)) {
+    if ('type' in item && item.type === 'tool_summary') {
       return (
         <div
           key={item.id}
@@ -1467,7 +1469,7 @@ const MessageList: React.FC<{
       source.type === 'text' && source.position === 'left' && source.turn_id === item.turn_id &&
       getProcessedItemSourceMessageIds(source).includes(continuation));
     return (
-      <React.Fragment key={(item as TMessage).id}>
+      <React.Fragment key={renderKey}>
       {!sourceLoaded && <div role='status' data-testid='missing-reply-continuation' className='text-t-tertiary text-sm m-t-10px'>
         {t('messages.missingReplyContinuation')}
         {hasMoreOlder && onLoadOlder && <button type='button' disabled={loadingOlder} onClick={() => void onLoadOlder()}>
@@ -1476,7 +1478,7 @@ const MessageList: React.FC<{
       </div>}
       <MessageItem
         message={item as TMessage}
-        key={(item as TMessage).id}
+        key={renderKey}
         highlighted={highlighted}
         hideActions={
           isActiveProcessTextItem(item, _index) ||
@@ -1487,11 +1489,60 @@ const MessageList: React.FC<{
     );
   };
 
-  if (displayList.length === 0 && isMessageListLoading) {
+  // These are React keys only. Runtime state and timing continue to come from
+  // the ordinary timeline, including a later canonical root replacing its
+  // accepted-user boundary. Keep the first request/status DOM nodes mounted.
+  const initialRenderKeys = useRef<{ conversationId?: ConversationId; renderKey?: string; requestMessageId?: MessageId }>({});
+  const savedKeys = initialRenderKeys.current.conversationId === conversationContext?.conversation_id ? initialRenderKeys.current : undefined;
+  const hasPendingPresentation = Boolean(pendingMessage && pendingMessage.conversation_id === conversationContext?.conversation_id);
+  const initialRenderKey = hasPendingPresentation ? pendingMessage!.id : savedKeys?.renderKey;
+  const initialRequestIndex = displayList.findIndex(item => item.type === 'text' && item.position === 'right'
+    && item.conversation_id === conversationContext?.conversation_id && (savedKeys?.requestMessageId
+      ? getMessageBusinessIdentity(item) === savedKeys.requestMessageId : hasPendingPresentation));
+  const initialRequest = initialRequestIndex >= 0 ? displayList[initialRequestIndex] : undefined;
+  const initialRequestMessageId = initialRequest?.type === 'text' ? getMessageBusinessIdentity(initialRequest) : undefined;
+  const initialProgressIndex = initialRequestIndex >= 0 && displayList[initialRequestIndex + 1]?.type === 'turn_process_disclosure'
+    ? initialRequestIndex + 1 : hasPendingPresentation && initialRequestIndex < 0
+      ? displayList.findIndex(item => item.type === 'turn_process_disclosure') : -1;
+  const hasInitialResult = Boolean(pauseError || (initialRequestIndex >= 0 && list.some(message =>
+    message.conversation_id === conversationContext?.conversation_id && (isTerminalAssistantItem(message)
+      || getProcessedItemTurnEndedAt(message) !== undefined))));
+  const showPendingMessage = hasPendingPresentation && initialRequestIndex < 0 && !hasInitialResult;
+  const showPreparation = hasPendingPresentation && initialProgressIndex < 0 && !hasInitialResult;
+  useLayoutEffect(() => {
+    if (hasPendingPresentation) {
+      initialRenderKeys.current = { conversationId: conversationContext?.conversation_id,
+        renderKey: pendingMessage!.id, requestMessageId: initialRequestMessageId };
+      // A user-created notification can precede the send receipt/Turn state.
+      // Only the committed replacement progress or result ends preparation.
+      if (initialRequestMessageId && (initialProgressIndex >= 0 || hasInitialResult)) onPendingMessageReady?.();
+    } else if (initialRenderKeys.current.conversationId !== conversationContext?.conversation_id) {
+      initialRenderKeys.current = {};
+    }
+  }, [hasPendingPresentation, pendingMessage, initialRequestMessageId, initialProgressIndex, hasInitialResult, conversationContext?.conversation_id, onPendingMessageReady]);
+
+  const preparationRow = showPreparation ? <React.Fragment key={`${initialRenderKey}-progress`}>
+    <div key={`${initialRenderKey}-progress`} className='min-w-0 message-item m-t-10px turn_process_disclosure' data-testid='initial-message-preparing'>
+      {renderTurnDisclosure(undefined, false)}
+    </div>
+  </React.Fragment> : null;
+  const renderedRows: React.ReactNode[] = [];
+  if (showPendingMessage && pendingMessage) renderedRows.push(<React.Fragment key={`${initialRenderKey}-request`}>
+    {renderItem(-1, pendingMessage, `${initialRenderKey}-request`)}
+  </React.Fragment>);
+  if (showPreparation && initialRequestIndex < 0) renderedRows.push(preparationRow);
+  displayList.forEach((item, index) => {
+    const key = initialRenderKey && index === initialProgressIndex ? `${initialRenderKey}-progress`
+      : initialRenderKey && index === initialRequestIndex ? `${initialRenderKey}-request` : item.id;
+    renderedRows.push(<React.Fragment key={key}>{renderItem(index, item, key)}</React.Fragment>);
+    if (showPreparation && index === initialRequestIndex) renderedRows.push(preparationRow);
+  });
+
+  if (displayList.length === 0 && isMessageListLoading && !showPendingMessage && !showPreparation) {
     return <MessageListSkeleton />;
   }
 
-  if (displayList.length === 0 && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
+  if (displayList.length === 0 && !showPendingMessage && !showPreparation && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -1517,9 +1568,7 @@ const MessageList: React.FC<{
           >
             <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
-              {displayList.map((item, index) => (
-                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
-              ))}
+              {renderedRows}
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               <div className='h-20px' />
             </div>

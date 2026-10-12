@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Spin } from '@arco-design/web-react';
+import { Button, Spin } from '@arco-design/web-react';
 import React, { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 
 import RemoteConnectSection from './RemoteConnectSection';
 import type { WorkspaceTabProps } from '../../types';
@@ -24,6 +26,8 @@ import CompanionMcpSettings from './CompanionMcpSettings';
  * machine because LAN access is off.
  */
 const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
+  const navigate = useNavigate();
+  const { t } = useTranslation();
   const { profile } = companion;
 
   const pendingPairings = usePairingAttention(profile ? companionId : null);
@@ -47,6 +51,10 @@ const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
 
   return (
     <div className='flex flex-col gap-16px py-8px'>
+      <div className='flex items-center justify-between gap-12px rd-10px bg-fill-1 px-12px py-10px'>
+        <span className='text-13px text-t-secondary'>{t('settings.deviceConnections.globalHint')}</span>
+        <Button size='small' onClick={() => navigate('/connections')}>{t('settings.deviceConnections.phoneTask')}</Button>
+      </div>
       {/* IM 渠道：按伙伴接待（platform → companionId 反向视图）/ Per-companion IM channels */}
       <RemoteConnectSection companionId={profile.companion_id} companionName={profile.name} />
       {/* 实体机器人：绑到这只伙伴的硬件设备 / Physical robots bound to this companion */}

@@ -53,6 +53,8 @@ export interface PreviewTab {
   originalContent?: string; // 原始内容，用于对比 / Original content for comparison
   fileReadError?: boolean;
   fileRefreshing?: boolean;
+  /** A source-file change asks the Office artifact reader to reconcile its version. */
+  fileRevision?: number;
 }
 
 export interface PreviewContextValue {

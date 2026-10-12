@@ -192,3 +192,23 @@ async fn live_agnes_flash_video() {
     eprintln!("AGNES_LIVE Flash video: {}", result.as_ref().map(|_| "ok: completed MP4").unwrap_or_else(|error| error));
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }
+
+/// Recheck only the restored v2.0 contract. One submit, no queue retries;
+/// accepted jobs are polled to distinguish connectivity from usable output.
+#[tokio::test]
+#[ignore = "requires an Agnes key on stdin and creates one real v2.0 video task"]
+async fn live_agnes_v20_video() {
+    let (auth, redactor) = live_auth();
+    let request = TaskRequest::VideoGeneration(VideoGenRequest {
+        prompt: "A blue glass cube slowly rotates on a white studio background, fixed camera.".into(),
+        // Use precisely the pre-eaf6a0b defaults: 1152x768, 24 fps, 121 frames.
+        seconds: None, size: None, resolution: None, inputs: vec![], extra: json!({}),
+    });
+    let http = nomifun_net::http_client();
+    let registry = AdapterRegistry::new(default_adapters());
+    eprintln!("AGNES_LIVE v2.0 video: starting native /v1/videos contract");
+    let result = video(&http, &registry, call(&auth, "agnes-video-v2.0", "agnes.video_jobs", request), &redactor)
+        .await.map_err(|error| redactor.redact(&error));
+    eprintln!("AGNES_LIVE v2.0 video: {}", result.as_ref().map(|_| "ok: completed MP4").unwrap_or_else(|error| error));
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+}

@@ -82,3 +82,79 @@ fn idmm_invalid_projection_metadata_fails_closed() {
     let row=projection(&id,"idmm_notice","waiting_for_human",json!({"reference":{"status":"waiting_for_human","created_at":1234}}));
     assert!(canonical_message_response(&row.session_id.clone(),1,row).is_err());
 }
+
+fn accepted_input_event() -> nomifun_agent_contracts::SessionEventRecord {
+    let message_id = Uuid::now_v7().to_string();
+    nomifun_agent_contracts::SessionEventRecord {
+        agent_session_id: Uuid::now_v7().to_string().into(), seq: 9,
+        event_id: message_id.clone().into(), producer_id: "session_api".into(),
+        idempotency_key: "accepted-input".into(),
+        kind: nomifun_agent_contracts::SessionEventKind("message/user-accepted".into()),
+        kind_version: 1, correlation_id: message_id.into(), causation_event_id: None,
+        // The display adapter consumes the Store's resolved payload rather
+        // than assuming every accepted event has inline JSON.
+        payload: nomifun_agent_contracts::SessionEventPayloadRef::Stored("accepted-payload".into()),
+    }
+}
+
+#[test]
+fn canonical_accepted_input_preserves_every_surface_and_the_exact_display_body() {
+    let event = accepted_input_event();
+    let message_uuid = Uuid::parse_str(event.event_id.as_ref()).unwrap();
+    let display_at_ms = message_uuid.as_bytes()[..6].iter()
+        .fold(0_i64, |time, byte| (time << 8) | i64::from(*byte));
+    let body = "用户消息\n\n[[NOMI_FILES]]\nD:/work/附件.png";
+    for (origin, hidden, platform) in [
+        (None, false, None),
+        (Some("companion"), false, None),
+        (Some("channel"), false, Some("telegram")),
+        (Some("cron"), true, None),
+    ] {
+        let input = json!({"content":body,"hidden":hidden,"origin":origin,"channel_platform":platform});
+        let wire = NomiCoreSessionOwner::canonical_accepted_input_wire_event(
+            &event.agent_session_id, 1_000, &event, &input,
+        ).unwrap();
+        let wire = serde_json::to_value(wire).unwrap();
+        assert_eq!(wire["name"], "message.userCreated");
+        assert_eq!(wire["data"]["conversation_id"], event.agent_session_id.as_ref());
+        assert_eq!(wire["data"]["msg_id"], event.event_id.as_ref());
+        assert_eq!(wire["data"]["content"], body);
+        assert_eq!(wire["data"]["hidden"], hidden);
+        assert_eq!(wire["data"]["origin"], json!(origin));
+        assert_eq!(wire["data"]["channel_platform"], json!(platform));
+        assert_eq!(wire["data"]["created_at"], 1_009);
+        assert_eq!(wire["data"]["display_at_ms"], display_at_ms);
+        assert!(wire["data"]["idmm_decision"].is_null());
+    }
+}
+
+#[test]
+fn canonical_accepted_input_keeps_validated_idmm_provenance() {
+    let event = accepted_input_event();
+    let explanation = decision();
+    let input = json!({"content":"简单","hidden":false,"origin":"idmm","idmm_decision":explanation});
+    let wire = NomiCoreSessionOwner::canonical_accepted_input_wire_event(
+        &event.agent_session_id, 1_000, &event, &input,
+    ).unwrap();
+    let wire = serde_json::to_value(wire).unwrap();
+    assert_eq!(wire["data"]["content"], "简单");
+    assert_eq!(wire["data"]["origin"], "idmm");
+    assert_eq!(wire["data"]["idmm_decision"], serde_json::to_value(&explanation).unwrap());
+
+    let mut invalid = explanation;
+    invalid.source = IdmmDecisionSource::Rule;
+    let invalid = json!({"content":"简单","idmm_decision":invalid});
+    assert!(NomiCoreSessionOwner::canonical_accepted_input_wire_event(
+        &event.agent_session_id, 1_000, &event, &invalid,
+    ).is_err());
+    assert!(NomiCoreSessionOwner::canonical_accepted_input_wire_event(
+        &AgentSessionId::from(Uuid::now_v7().to_string()), 1_000, &event, &input,
+    ).is_err());
+    let mut invalid_event = event.clone();
+    let invalid_id = Uuid::new_v4().to_string();
+    invalid_event.event_id = invalid_id.clone().into();
+    invalid_event.correlation_id = invalid_id.into();
+    assert!(NomiCoreSessionOwner::canonical_accepted_input_wire_event(
+        &invalid_event.agent_session_id, 1_000, &invalid_event, &input,
+    ).is_err());
+}

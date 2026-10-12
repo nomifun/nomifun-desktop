@@ -3,7 +3,7 @@ use nomifun_common::McpSource;
 use crate::adapter::{DetectedServer, McpAgentAdapter};
 use crate::error::McpError;
 
-use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, parse_standard_list_output, run_cli};
+use super::cli_helpers::{DETECT_TIMEOUT, is_cli_installed, parse_standard_list_output, run_cli_strict, validate_list_output};
 
 const CLI_NAME: &str = "gemini";
 
@@ -29,8 +29,8 @@ impl McpAgentAdapter for GeminiAdapter {
             return Err(McpError::AgentNotInstalled(CLI_NAME.into()));
         }
 
-        let (stdout, _stderr) = run_cli(CLI_NAME, &["mcp", "list"], DETECT_TIMEOUT).await?;
-        Ok(parse_standard_list_output(&stdout))
+        let stdout = run_cli_strict(CLI_NAME, &["mcp", "list"], DETECT_TIMEOUT).await?;
+        validate_list_output(&stdout, parse_standard_list_output(&stdout))
     }
 }
 

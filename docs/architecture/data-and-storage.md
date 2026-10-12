@@ -42,18 +42,52 @@ every host — the desktop shell included (see
 [`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)) — takes the
 `NOMIFUN_DATA_DIR` value literally as the final data root (the shell no
 longer appends `Nomi`; the clap `env` binding is shared with `nomicore`,
-which previously ignored the variable). A legacy dataset at
-`NomiFun/Nomi<suffix>` is moved into `NomiFun<suffix>` by a one-shot
-automatic migration on the first boot after upgrading (crash-safe,
-resume-on-next-boot; deferred to the next launch if the old app instance
-is still running), and absolute paths persisted in the database are
-rewritten once after the move. Paths shown or persisted on Windows no
+which previously ignored the variable). Historical self-export paths normalize
+to the current channel default; retired datasets are not imported. Paths shown or persisted on Windows no
 longer carry the `\\?\` extended-length prefix.
 The v3 contract does not copy a pre-existing product dataset from
 `<system temp>/nomifun-data` or any other legacy root into the active
 data directory. A detected historical managed dataset is moved intact to a
 retired/quarantine location by the dataset reset state machine. NomiFun then
 creates a new v3 dataset rather than rewriting historical database paths.
+
+### Relocating the current dataset
+
+Settings moves the entire current dataset to an empty folder on restart. This
+preserves Session history, attachments, configuration, encryption keys, browser
+profiles and managed workspaces, including `conversations/` held by an older
+separate work root. External projects and external knowledge-base roots retain
+their exact paths. The dataset generation and entity identities stay unchanged.
+
+The four `/api/system/storage-relocation/{prepare,start,status,cancel}` routes
+preflight and schedule one durable operation. Active Turns, unresolved Effects,
+native checkpoints and unfinished Patch recovery block scheduling. HTTP writes
+close after scheduling. Hosts complete the offline operation before opening
+runtime caches, logs or native browser profiles, while holding the source data
+and work-root locks. A copied sibling staging directory receives full size and
+checksum verification plus current-schema, reference and SQLite validation.
+
+Only typed, owned mutable paths change in the copied database. Current managed
+Session resources transition through canonical `session/agent-binding-changed`
+events with location-only proof; historical Events, Payloads and Snapshots stay
+immutable. Default workspaces use logical `managed-session` references resolved
+by the host. Knowledge mounts under `.nomi/knowledge` are regenerated from typed
+bindings; other links/reparse points fail preflight without following targets.
+
+Historical managed attachment paths resolve through the same Session's typed
+relocation proof chain to the current root. Resolution belongs only to the read
+projection; original message text remains immutable. Every move records its
+location change even when resources already use logical references. New
+workspace attachment markers use relative paths; external file paths stay exact.
+
+A fixed control directory outside the movable roots stores the plan and sole
+atomic active-location pointer. Root descriptors make old CLI/env roots resolve
+that committed location. Publication seals the old root against reopening it;
+the original data is retained. Interrupted publication resumes from exact
+operation receipts. Failure before publication leaves the old root usable and
+records a retryable/cancellable failure. Existing datasets are never overwritten
+or merged. Relocation is separate from backup, restore and destructive startup
+reset and grants no schema conversion or reset authority.
 
 ### One directory per channel, one state
 
@@ -158,6 +192,14 @@ is retired as a whole and replaced with a new empty v3 dataset. There is no
 table-by-table historical migration, compatibility read path, ID normalization,
 or downgrade path.
 
+Destructive-release startup probes SQLx lineage read-only before classifying identity tables. A
+historical database with v3-looking identities is still rebuilt if its lineage
+is incompatible. That reset reason is independent of the previously consumed
+one-time legacy retirement marker. The database, WAL/SHM and managed side
+stores, including `browser-v4`, are retired together. New plans use a frozen v3
+root registry while v1/v2 plans remain resumable. Failed inspection and damage to a supported schema/data contract preserve
+the source and fail closed. More migration rows cannot identify a newer app. Backup/restore never run this startup rebuild policy.
+
 The baseline contract is checked at runtime:
 
 - every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
@@ -246,11 +288,12 @@ Each conversation owns a directory the agent can freely read and write:
 
 - `work_dir` — the runtime work directory; falls back to the data dir when
   not set explicitly. Sources, in order: `--work-dir` flag → the
-  UI-selected workspace persisted in `dir-config.json` → env
+  work-root binding persisted in `dir-config.json` → env
   `NOMIFUN_WORK_DIR` → `<data_dir>`. An inherited `NOMIFUN_WORK_DIR` that
   names a default data-root location or a directory that no longer exists
   is ignored (protection against stale self-exports across auto-update
-  restarts).
+  restarts). Settings relocation writes the new data root as the staged
+  work-root binding; it does not create a separate empty workspace dataset.
 - `workspace_id` — the canonical AgentSession's bare lowercase UUIDv7. A
   temporary-workspace projection also exposes the same value as
   `extra.temp_workspace_id`. It is always 36 characters. Directory names do
@@ -361,31 +404,21 @@ bindings are stored in the main database as
 knowledge bases' own managed directories (URL-sourced bases keep their
 fetched markdown snapshots in a `snapshots/` subdirectory there).
 
-## Bundled bun runtime
+## Managed execution components
 
-NomiFun ships its own `bun` runtime (1.3.13) so MCP servers and tool
-subprocesses do not require a system Node.js install:
+Release binaries contain OfficeCLI only. Node/Bun use fixed-version, hash-verified
+managed downloads and reuse prepared approved artifacts offline. `nomifun_runtime::init(&data_dir)` anchors its cache at
+`<data_dir>/runtime`; downloads, local extraction, and admission all use
+`resolve_tool`. Consumers read the verified path instead of guessing cache names. Consumers use returned
+absolute paths and capability admission; synchronous Bun discovery is cache-only
+and never impersonates Node or modifies system PATH. Process trees remain owned by
+`nomi-process-runtime`.
 
-| Step | What happens |
-| --- | --- |
-| Build time | The bun binary for the target OS/arch is **zstd-compressed** and embedded into `nomifun-runtime` via `include_dir!`. |
-| First run | `nomifun_runtime::init(&data_dir)` extracts the binary into a **`<data_dir>/runtime/`** subtree (see the runtime-cache details below). |
-| Boot | `enhance_process_path()` prepends the bun bin dir to the process `PATH` **before any tokio thread is built** (the order is enforced in both host `main.rs` files). |
-| Spawn | `nomi_process_runtime::ChildProcessBuilder` inherits the boot-time merged `PATH`, so `npx`, `bun`, and other JS tools resolve correctly. |
-| Cleanup | `nomi_process_runtime::ProcessSupervisor` or `kill_process_tree` owns and reaps Agent / MCP child-process trees. |
-
-The runtime cache is anchored to the backend's `data_dir`:
-[`nomifun_runtime::init(&data_dir)`](../../crates/backend/nomifun-runtime/src/cache.rs)
-records `<data_dir>/runtime` as the cache root, so on the desktop the bun
-binary extracts under `<data_dir>/runtime/bun-<version>-<sha12>/` —
-i.e. `%LOCALAPPDATA%\NomiFun\runtime\bun-…\` by default on Windows
-(the per-user app-data equivalents on macOS/Linux), or
-`$NOMIFUN_DATA_DIR/runtime/bun-…/` when the env var is set. When
-`init` has not been called (the `mcp-*` subcommands, unit tests, `build.rs`)
-the cache falls back to the platform cache dir via `dirs::cache_dir()`:
-`%LOCALAPPDATA%\nomifun\runtime\` on Windows, `~/Library/Caches/nomifun/runtime/`
-on macOS, `$XDG_CACHE_HOME/nomifun/runtime/` (or `~/.cache/nomifun/runtime/`)
-on Linux.
+Uninitialized library consumers use the platform cache root through
+`dirs::cache_dir()`. Both runtime binaries and Office HTML artifacts are
+disposable cache data. See [External tools](external-tools.md) for supply,
+identity, developer overrides, notices, diagnostics, and the bounded preview
+cache lifecycle.
 
 ## Logs
 
@@ -403,14 +436,16 @@ backend reaches them through the seam: `nomifun_ai_agent::nomi_config::logging::
 On a brand-new install the boot sequence is:
 
 ```
-1. nomifun-runtime::init           extract bun into OS cache
-2. enhance_process_path             prepend cache bin dir to PATH
-3. bootstrap::init_environment      resolve work_dir / log_dir, init tracing,
-                                    take the exclusive {data_dir}/server.lock
+0. bootstrap::prepare_startup_storage_root
+                                    resolve the fixed locator; finish any armed offline relocation
+1. nomifun-runtime::init           anchor managed runtime cache under the selected data root
+2. enhance_process_path             discover user command paths
+3. bootstrap::init_environment      resolve work_dir, take exclusive data/work-root locks,
+                                    then create log_dir and initialize tracing
 4. bootstrap::prepare_v3_dataset    check generation; hard reset/quarantine as a whole
 5. bootstrap::init_data_layer       initialize/open the v3 database baseline
-6. bootstrap::write_v3_receipt      write and finalize the dataset reset receipt
-7. AppServices::from_config         instantiate every service
+6. AppServices::from_config         initialize services and managed side stores
+7. bootstrap::finalize_data_layer   write and finalize the dataset reset receipt
 8. ensure_admin_credentials (web)   pre-seed admin if NOMIFUN_ADMIN_PASSWORD is set
 9. create_router → axum::serve      bind and start serving
 ```
@@ -418,7 +453,7 @@ On a brand-new install the boot sequence is:
 Step 3 is where a second backend on an already-claimed data dir fails fast
 (see "One directory, one state" above).
 
-In the desktop shell step 6 is skipped, but the desktop is not the old blanket
+In the desktop shell step 8 is skipped, but the desktop is not the old blanket
 `--local` story: it uses `TrustLocalToken` and trusts only its own WebView's
 per-boot secret. In the web host, if no admin exists and no
 `NOMIFUN_ADMIN_PASSWORD` is set, the install enters **interactive first-run
@@ -447,7 +482,7 @@ non-loopback bind address.
 - **Companion data** — the bundle recursively includes
   `<data_dir>/companion/` (the install-wide memory database + per-companion
   profiles; see the [Companions guide](../guides/companions.md)).
-- **Bun runtime cache** — disposable; will be re-extracted on next boot.
+- **managed runtime cache** — disposable; will be re-extracted on next boot.
 
 Offline CLI commands are provided by `nomicore`:
 
@@ -465,7 +500,7 @@ invalid or historical source fails closed. A complete bundle contains the
 WAL-safe database snapshot,
 the persistent encryption key when present, the companion file domain, and
 managed conversation workspaces. Logs, `server.lock`, database WAL/SHM
-sidecars, runtime/Bun caches, browser profiles, process/session scratch data,
+sidecars, runtime/managed runtime caches, browser profiles, process/session scratch data,
 and custom external workspaces are excluded.
 
 Every payload file has a portable relative path, byte size, and SHA-256 digest

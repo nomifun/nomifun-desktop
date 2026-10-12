@@ -7,7 +7,8 @@ const BACKEND_ERROR_KIND_MAP: Record<string, PreviewErrorKind> = {
   FILE_NOT_FOUND: 'not_found',
   NOT_FOUND: 'not_found',
   TIMEOUT: 'timeout',
-  OFFICECLI_PORT_TIMEOUT: 'timeout',
+  PREPARATION_TIMEOUT: 'timeout',
+  RENDER_TIMEOUT: 'timeout',
 };
 
 const PREVIEW_ERROR_I18N_KEY_MAP: Record<PreviewErrorKind, string> = {

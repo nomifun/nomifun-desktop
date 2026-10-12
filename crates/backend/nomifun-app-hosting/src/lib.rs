@@ -4,10 +4,12 @@ mod environment;
 mod files;
 mod model;
 mod owner;
+mod relocation;
 
 pub use environment::{ExecutableReport, EnvironmentReport, detect_environment};
 pub use model::{AppDetails, AppError, AppMetadata, AppOperation, AppRecord, AppSettings, AppSettingsPatch, AppState, ImportKind, LocalConnection};
 pub use owner::HostingOwner;
+pub use relocation::{OfflineHostedAppInventory, inspect_offline_hosted_apps, rewrite_offline_hosted_app_registries};
 
 /// Reuse the shared process decoder, including Windows native code pages and
 /// incremental UTF-8 handling, rather than guessing encoding in the renderer.

@@ -8,10 +8,8 @@ fn user_owned_producers_cannot_depend_on_instance_event_broadcaster() {
         ("channel/pairing", include_str!("../../nomifun-channel/src/pairing.rs")),
         ("companion/events", include_str!("../../nomifun-companion/src/events.rs")),
         ("cron/events", include_str!("../../nomifun-cron/src/events.rs")),
-        ("cron/executor", include_str!("../../nomifun-cron/src/executor.rs")),
         ("file/service", include_str!("../../nomifun-file/src/service.rs")),
         ("file/watch_service", include_str!("../../nomifun-file/src/watch_service.rs")),
-        ("office/watch_manager", include_str!("../../nomifun-office/src/watch_manager.rs")),
         ("ssh/events", include_str!("../../nomifun-ssh/src/events.rs")),
         ("terminal/events", include_str!("../../nomifun-terminal/src/events.rs")),
     ];
@@ -30,4 +28,11 @@ fn user_owned_producers_cannot_depend_on_instance_event_broadcaster() {
             "{name} must not bypass the shared owner-scoped event bus"
         );
     }
+
+    // Canonical cron execution no longer emits realtime events itself. Its
+    // event emitter above owns the user boundary; keep execution from acquiring
+    // either broad audience dependency during future changes.
+    let executor = include_str!("../../nomifun-cron/src/executor.rs");
+    assert!(!executor.contains("EventBroadcaster"), "cron execution must not emit instance-wide events");
+    assert!(!executor.contains("WebSocketManager"), "cron execution must not bypass the owner event emitter");
 }

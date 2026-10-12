@@ -640,6 +640,9 @@ async fn remove_entry_source(
 struct ExportBaseRequest {
     /// Absolute destination path of the zip package.
     dest_path: String,
+    /// Only set after the user explicitly confirms replacement of a file.
+    #[serde(default)]
+    overwrite: bool,
 }
 
 async fn export_base(
@@ -654,6 +657,7 @@ async fn export_base(
             &state.service,
             knowledge_base_id.as_str(),
             std::path::Path::new(&req.dest_path),
+            req.overwrite,
         )
         .await?,
     )))
@@ -1103,6 +1107,57 @@ mod tests {
     async fn json_body(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn export_route_rejects_directory_paths_and_requires_overwrite_confirmation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = test_app(&dir.path().join("data"));
+        let created = app.clone().oneshot(
+            Request::post("/api/knowledge/bases")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"export fixture","description":""}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = json_body(created).await;
+        let kb_id = created["data"]["knowledge_base_id"].as_str().unwrap();
+        let endpoint = format!("/api/knowledge/bases/{kb_id}/export");
+        let destination = dir.path().join("bundle.zip");
+        std::fs::create_dir(&destination).unwrap();
+
+        let response = app.clone().oneshot(
+            Request::post(&endpoint)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "dest_path": destination }).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["code"], "KNOWLEDGE_EXPORT_DESTINATION_INVALID");
+
+        std::fs::remove_dir(&destination).unwrap();
+        std::fs::write(&destination, "previous package").unwrap();
+        let response = app.clone().oneshot(
+            Request::post(&endpoint)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "dest_path": destination }).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["code"], "KNOWLEDGE_EXPORT_DESTINATION_EXISTS");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous package");
+
+        let response = app.oneshot(
+            Request::post(&endpoint)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({
+                    "dest_path": destination,
+                    "overwrite": true,
+                }).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(zip::ZipArchive::new(std::fs::File::open(&destination).unwrap()).is_ok());
     }
 
     #[tokio::test]

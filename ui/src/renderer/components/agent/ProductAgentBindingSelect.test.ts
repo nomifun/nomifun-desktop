@@ -13,7 +13,10 @@ describe('product Agent selection', () => {
       body: { success: false, code, error: 'provider/private-model internal failure' },
     });
     expect(productAgentErrorReason(error('MODEL_ROUTE_FEATURES_MISSING', 422))).toBe('modelChanged');
+    expect(productAgentErrorReason(error('AGENT_SESSION_MODEL_INCOMPATIBLE', 422))).toBe('modelChanged');
     expect(productAgentErrorReason(error('REMOTE_SESSION_BUSY', 409))).toBe('busy');
+    expect(productAgentErrorReason(error('AGENT_SESSION_TURN_ACTIVE', 409))).toBe('busy');
+    expect(productAgentErrorReason(error('COMPANION_AGENT_DEFAULT_SAVE_FAILED', 500))).toBe('partialSave');
     expect(productAgentErrorReason(error('INTERNAL_ERROR', 500))).toBe('saveFailed');
     expect(productAgentErrorReason(new Error('fetch failed'))).toBe('saveFailed');
   });

@@ -55,6 +55,8 @@
     "batchDelete": "Delete ({{count}})",
     "batchDeleteConfirm": "Delete {{count}} selected topics?",
     "batchDeleteSuccess": "{{count}} topics deleted",
+    "batchDeletePartial": "Deleted {{deleted}} sessions; {{failed}} failed. Failed sessions remain selected for retry.",
+    "batchDeleteFailed": "Failed to delete {{count}} sessions. They remain selected for retry.",
     "batchNoSelection": "Please select topics first",
     "export": "Export",
     "exportDialogTitle": "Export Topics",
@@ -97,8 +99,7 @@
   "noModelConfigured": "No model configured. Please configure in settings.",
   "createFailed": "Failed to create conversation",
   "pending": {
-    "creating": "Creating conversation…",
-    "startingAutoWork": "Starting AutoWork…"
+    "preparing": "Preparing…"
   },
   "createError": {
     "pathVariants": {
@@ -198,9 +199,9 @@
       "send_feedback": "Send feedback with logs so the team can investigate."
     },
     "codes": {
-      "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
-        "title": "Conversation Agent configuration is incompatible",
-        "body": "This conversation’s saved agent configuration is incompatible with the current configuration. Confirm a compatible configuration through the conversation’s agent selector, or start a new conversation. Existing records are preserved."
+      "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
+        "title": "Confirm this conversation’s Agent configuration",
+        "body": "The upgrade changes permissions, tool sources, or execution requirements, so this conversation’s Agent configuration cannot be updated automatically. Confirm its configuration through the conversation’s Agent selector to continue. Existing records are preserved."
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "Task interrupted by app exit",
@@ -763,27 +764,10 @@
     "frozenSessionConfigHint": "Collaboration stays frozen for this conversation. Use the Agent selector to switch the Agent from the next turn.",
     "frozenAgentUnavailable": "This conversation no longer has a valid frozen Agent binding. Start a new conversation.",
     "agentSwitch": {
-      "title": "Switch Agent in this conversation",
-      "currentLabel": "Current",
-      "nextTurnLabel": "Next turn",
-      "loading": "Checking the target Agent, model, and resources…",
-      "nextTurn": "The conversation, title, message history, and input draft stay in place. The new Agent takes effect from your next message.",
-      "modelPreserved": "Keep the current model: {{model}}",
-      "continueTask": "Hand off the current task",
-      "continueTaskDescription": "Carry structured facts and verified artifact references from the latest closed task.",
-      "contextOnly": "Chat context only",
-      "contextOnlyDescription": "Keep this conversation's messages without importing the previous Agent's task ledger.",
-      "dataOnlyWarning": "The handoff is historical data only. Old requirements do not enter the new Agent's completion gate; the new Agent must re-read the workspace and re-check material facts.",
-      "handoffUnavailable": "The latest closed Turn has no structured task state that can be handed off safely.",
-      "capabilityDiff": "Capability changes",
-      "gained": "Added: {{items}}",
-      "lost": "Removed: {{items}}",
-      "resourceDiff": "Resource changes",
-      "retainedResources": "Retained and revalidated: {{count}}",
-      "droppedResources": "No longer carried: {{count}}",
+      "loading": "Switching Agent…",
       "blocked": "Cannot switch yet: {{reason}}",
-      "confirm": "Switch Agent",
       "success": "Switched to {{agent}}. It takes effect from your next message.",
+      "unavailable": "This Agent cannot be selected right now.",
       "failed": "Agent switch failed: {{error}}",
       "waitForTurn": "Wait for the current response to finish before switching Agents.",
       "openModelHub": "Open Model Hub",
@@ -797,7 +781,7 @@
         "AGENT_SESSION_HANDOFF_RECOVERY_PENDING": "Complete or explicitly clear the pending Patch recovery first.",
         "AGENT_SESSION_MODEL_INCOMPATIBLE": "The current model does not satisfy the target Agent. Choose a compatible model first.",
         "AGENT_SESSION_RESOURCE_REQUIRED": "The target Agent still needs configured resources.",
-        "AGENT_SESSION_BINDING_CHANGED": "The Session configuration changed. Preview the switch again.",
+        "AGENT_SESSION_BINDING_CHANGED": "The Agent configuration changed. Try again.",
         "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED": "This Session type does not support Agent switching."
       },
       "transitionMarker": "{{from}} → {{to}} · effective from the next message"
@@ -909,16 +893,6 @@
   },
   "skills": {
     "loaded": "Loaded Skills"
-  },
-  "mcp": {
-    "loaded": "Loaded MCP",
-    "managementHint": "If an MCP looks abnormal, review its JSON configuration and run an availability check in MCP management.",
-    "openSettings": "Open MCP management",
-    "status": {
-      "loaded": "Loaded",
-      "failed": "Failed",
-      "unsupported": "Unsupported"
-    }
   },
   "capabilityPicker": {
     "unavailable": "Removed or unavailable",

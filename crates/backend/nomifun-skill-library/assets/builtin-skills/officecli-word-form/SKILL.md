@@ -7,36 +7,16 @@ description: "Use this skill to create fillable Word forms (.docx) with real Con
 
 **This skill is INDEPENDENT, not a scene layer on docx.** A form's payload — `<w:sdt>` controls, `<w:ffData>` legacy fields, `<w:fldChar>` mail-merge, `documentProtection` — is a distinct element class from docx's paragraph/heading/style primitives. Its QA is different too: docx's Delivery Gate cares about visual layout and live PAGE fields, this skill's cares about data plumbing (protection enforced / alias+tag / items injected / name ≤ 20 / no underscore anti-pattern). **Reverse handoff:** if the user's document has no fillable fields (report, letter, memo, thesis, proposal), route to `officecli-docx` or a docx scene skill — don't use this one.
 
-## BEFORE YOU START (CRITICAL)
+## Managed component setup
 
-**If `officecli` is not installed:**
+Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** component and the exact
+verified executable. Follow [the shared runtime instructions](references/runtime.md) before
+running any example. Read the Host-owned Office component context resource at
+the exact `read_context_resource` ID appended to the compiled Skill body.
+Every `officecli` example means that bound executable, never an ambient PATH tool.
 
-`macOS / Linux`
-
-```bash
-if ! command -v officecli >/dev/null 2>&1; then
-    curl -fsSL https://d.officecli.ai/install.sh | bash
-fi
-```
-
-`Windows (PowerShell)`
-
-```powershell
-if (-not (Get-Command officecli -ErrorAction SilentlyContinue)) {
-    irm https://d.officecli.ai/install.ps1 | iex
-}
-```
-
-Verify: `officecli --version`
-
-Do not run remote installer scripts without explicit user confirmation. If the
-user does not approve a pipe-to-shell installer, use the official release page,
-checksum/signature instructions if provided, or a manual binary download from
-https://github.com/iOfficeAI/OfficeCLI/releases.
-
-If `officecli` is still not found after first install, open a new terminal and run the verify command again.
-
-If the install command above fails (e.g. blocked by security policy, no network access, or insufficient permissions), install manually — download the binary for your platform from https://github.com/iOfficeAI/OfficeCLI/releases — then re-run the verify command.
+Standalone use outside NomiFun uses the exact official scoped package
+`@officecli/officecli@1.0.156`; the shared instructions cover verification.
 
 ## Help-First Rule
 

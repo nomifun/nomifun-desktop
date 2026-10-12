@@ -132,6 +132,17 @@ impl McpConnectionTestService {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> McpConnectionTestResult {
+        if nomifun_runtime::managed_command_tool(command).is_some() {
+            match nomifun_runtime::resolve_cached_managed_command(command, args) {
+                Ok(Some(_)) => {},
+                Ok(None) => return error_result(McpConnectionTestErrorCode::CommandStartFailed,
+                    "Managed Bun must be prepared before testing this MCP connection. Prepare the component and retry.".into(),
+                    Some(serde_json::json!({"owner_code":"COMPONENT_PREPARATION_REQUIRED","component":"bun","phase":"runtime_preparation","retryable":true}))),
+                Err(_) => return error_result(McpConnectionTestErrorCode::CommandStartFailed,
+                    "The prepared Bun component is unavailable or has changed. Check component preparation and retry.".into(),
+                    Some(serde_json::json!({"owner_code":"MCP_RUNTIME_PREPARATION_FAILED","component":"bun","phase":"runtime_preparation","retryable":false}))),
+            }
+        }
         let is_package_runner = protocol::is_package_runner(command, args);
         let timeout = if is_package_runner {
             self.package_bootstrap_timeout
@@ -154,6 +165,14 @@ impl McpConnectionTestService {
                     );
                 }
                 let (code, failure_kind) = match error.code() {
+                    "MCP_RUNTIME_PREPARATION_TIMEOUT" => (
+                        McpConnectionTestErrorCode::Timeout,
+                        Some("runtime_preparation_timeout"),
+                    ),
+                    "MCP_RUNTIME_PREPARATION_FAILED" => (
+                        McpConnectionTestErrorCode::CommandStartFailed,
+                        Some("runtime_preparation_failed"),
+                    ),
                     "MCP_TIMEOUT" => (
                         McpConnectionTestErrorCode::Timeout,
                         Some(if is_package_runner {
@@ -193,19 +212,26 @@ impl McpConnectionTestService {
                 if let Some(failure_kind) = failure_kind {
                     details["failure_kind"] = serde_json::json!(failure_kind);
                 }
+                if error.code().starts_with("MCP_RUNTIME_PREPARATION_") {
+                    details["phase"] = serde_json::json!("runtime_preparation");
+                    details["component"] = serde_json::json!("bun");
+                    let retryable = error.code() == "MCP_RUNTIME_PREPARATION_TIMEOUT"
+                        || nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun)
+                            .error.is_some_and(|failure| failure.retryable);
+                    details["retryable"] = serde_json::json!(retryable);
+                }
                 if code == McpConnectionTestErrorCode::Timeout {
                     details["timeout_seconds"] = serde_json::json!(timeout.as_secs());
-                    details["phase"] = serde_json::json!(if is_package_runner {
-                        "package_bootstrap"
-                    } else {
-                        "handshake"
-                    });
+                    details["phase"] =
+                        serde_json::json!(if error.code() == "MCP_RUNTIME_PREPARATION_TIMEOUT" {
+                            "runtime_preparation"
+                        } else if is_package_runner {
+                            "package_bootstrap"
+                        } else {
+                            "handshake"
+                        });
                 }
-                error_result(
-                    code,
-                    error.message().to_owned(),
-                    Some(details),
-                )
+                error_result(code, error.message().to_owned(), Some(details))
             }
         }
     }
@@ -254,7 +280,11 @@ impl McpConnectionTestService {
                     details["status"] = serde_json::json!(status);
                 }
                 add_endpoint_detail_fields(&mut details, url);
-                error_result(code, error.message().to_owned(), Some(details))
+                error_result(
+                    code,
+                    error.message().to_owned(),
+                    Some(details),
+                )
             }
         }
     }
@@ -327,6 +357,23 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn unprepared_bun_connection_test_is_a_preparation_result_not_a_late_spawn() {
+        assert!(nomifun_runtime::resolve_cached_managed_command("bun", &[]).unwrap().is_none());
+        let service = McpConnectionTestService::new(reqwest::Client::new());
+        let result = service.test_connection("unprepared", &McpServerTransport::Stdio {
+            command: "bun".into(), args: vec!["nonexistent.js".into()], env: HashMap::new()
+        }).await;
+        assert!(!result.success);
+        let details = result.details.unwrap();
+        assert_eq!(details["owner_code"], "COMPONENT_PREPARATION_REQUIRED");
+        assert_eq!(details["phase"], "runtime_preparation");
+        assert_eq!(
+            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun).phase,
+            nomifun_runtime::ToolPreparationPhase::Idle
+        );
+    }
+
     #[tokio::test]
     async fn stdio_timeout_cleans_up_process_group() {
         let marker_path = std::env::temp_dir().join(format!(

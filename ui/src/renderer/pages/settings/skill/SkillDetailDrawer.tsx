@@ -10,15 +10,13 @@ import { Button, Drawer, Spin } from '@arco-design/web-react';
 import { Code, FileText, FolderOpen, Lightning, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { resolveSkillDisplay, type SkillDisplay } from './skillDisplay';
+import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
 
 type SkillDetailDrawerProps = {
   visible: boolean;
   skill: SkillInfo | null;
   localeKey: string;
-  /** Settings-only presentation metadata; file reads continue to use canonical `skill`. */
-  display?: SkillDisplay;
   isAutoInjected: boolean;
   onClose: () => void;
 };
@@ -29,11 +27,11 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
   visible,
   skill,
   localeKey,
-  display: displayOverride,
   isAutoInjected,
   onClose,
 }) => {
   const { t } = useTranslation();
+  const getSkillDisplay = useSkillDisplay(localeKey);
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -70,7 +68,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     void loadContent();
   }, [loadContent, skill, visible]);
 
-  const display = skill ? displayOverride ?? resolveSkillDisplay(skill, localeKey) : null;
+  const display = skill ? getSkillDisplay(skill) : null;
   const previewContent = useMemo(() => stripSkillFrontmatter(content).trim(), [content]);
 
   const sourceLabel = isAutoInjected
@@ -118,7 +116,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                     : 'bg-primary-1 text-primary-6',
                 ].join(' ')}
               >
-                {isAutoInjected ? <Lightning theme='filled' size={20} /> : skill.name.charAt(0)}
+                {isAutoInjected ? <Lightning theme='filled' size={20} /> : display.name.charAt(0)}
               </div>
               <div className='min-w-0 flex-1'>
                 <div className='flex flex-wrap items-center gap-8px'>
@@ -156,7 +154,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                 </div>
                 <div className='mt-2px text-11px text-t-tertiary'>SKILL.md</div>
               </div>
-              <div className='flex rounded-[100px] bg-fill-2 p-3px' role='tablist'>
+              <div className='nomi-pill-tabs flex rounded-[100px] bg-fill-2 p-3px' role='tablist'>
                 {([
                   ['preview', t('settings.skillsHub.detailPreview', { defaultValue: 'Preview' }), FileText],
                   ['source', t('settings.skillsHub.detailSource', { defaultValue: 'Source' }), Code],
@@ -175,7 +173,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                     }}
                     className={[
                       'flex cursor-pointer items-center gap-5px rounded-[100px] px-10px py-5px text-11px font-600 transition-colors',
-                      viewMode === mode ? 'bg-base text-t-primary shadow-sm' : 'text-t-tertiary hover:text-t-secondary',
+                      viewMode === mode ? 'bg-[var(--pill-tab-active-bg,var(--bg-base))] text-t-primary shadow-sm' : 'text-t-tertiary hover:text-t-secondary',
                     ].join(' ')}
                   >
                     <Icon size={12} />

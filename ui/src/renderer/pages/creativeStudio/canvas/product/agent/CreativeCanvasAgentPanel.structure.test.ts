@@ -28,7 +28,7 @@ describe('Creative Canvas Agent product integration', () => {
       'pending.skillIds',
       'serializeCreativeCanvasAgentModelInput',
       'selectCreativeCanvasAgentContextNodes',
-      'CREATIVE_STUDIO_PLANNING_SKILLS',
+      'usePlanningSkillOptions(i18n.language)',
       'projectCreativeCanvasAgentProposals',
       'proposalProjection.artifacts',
       'proposalApplyRef.current',

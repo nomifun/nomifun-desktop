@@ -43,7 +43,14 @@ opusic-sys = { workspace = true }
 symphonia = { workspace = true }
 # Silero VAD (ONNX Runtime). Loading is fallible at runtime and every failure
 # path degrades to the energy VAD, so this is never a hard requirement.
-ort = { workspace = true }
+
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+# API 27 distributions do not include Intel macOS; use the pinned 1.23.2 ABI.
+# Silero uses the common inference API; match the bundled Intel runtime ABI.
+ort = { workspace = true, features = ["api-23"] }
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+ort = { workspace = true, features = ["api-27"] }
 
 [dev-dependencies]
 # Self dev-dependency with `test-support` on: the integration tests need

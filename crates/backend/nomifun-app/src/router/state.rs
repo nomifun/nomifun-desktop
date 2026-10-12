@@ -49,7 +49,7 @@ use nomifun_mcp::{
     QwenAdapter,
 };
 use nomifun_office::{
-    OfficeRouterState, OfficecliWatchManager, ProxyService,
+    OfficeRouterState, OfficePreviewService,
     SnapshotService as OfficeSnapshotService,
 };
 use nomifun_skill_library::{ExternalPathsManager, SkillRouterState};
@@ -115,6 +115,8 @@ pub struct ModuleStates {
     /// Nomi-core product.  It shares the Session owner above and persists its
     /// control-plane facts in the Nomi-core database tables.
     pub(crate) nomi_core_agent_api: NomiCoreAgentApiState,
+    /// Keeps the weak management ports alive without making a Kernel/runtime cycle.
+    pub(crate) _session_management_state: Arc<NomiCoreAgentApiState>,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -206,7 +208,7 @@ pub(crate) async fn try_build_module_states(
     );
     conversation_owner.install_idmm(Arc::downgrade(&idmm_service))?;
     let idmm_state = IdmmRouterState::new(idmm_service.clone(), conversation_owner.clone());
-    let (nomi_core_agent_api, nomi_core_wave4_owners, mcp_catalog_publisher) =
+    let (nomi_core_agent_api, nomi_core_wave4_owners, mcp_catalog_publisher, session_management_owner) =
         build_nomi_core_agent_api_state(
             services,
             conversation_owner.clone(),
@@ -243,7 +245,6 @@ pub(crate) async fn try_build_module_states(
     nomi_core_wave4_owners
         .install_channel(
             Arc::clone(&channel_components.manager),
-            Arc::clone(&channel_components.pairing_service),
             Arc::clone(&channel_components.repository),
             Arc::clone(&services.customer_service_service),
         )
@@ -270,6 +271,9 @@ pub(crate) async fn try_build_module_states(
         services,
         conversation_owner.clone(),
     );
+    let session_management_state = Arc::new(nomi_core_agent_api.clone());
+    session_management_owner.install(&session_management_state, &agent_execution)
+        .map_err(|error| anyhow::anyhow!("Session management owner installation failed: {error}"))?;
     nomi_core_agent_api
         .wave5_owner
         .install_runtime_owners(
@@ -360,6 +364,7 @@ pub(crate) async fn try_build_module_states(
         office: build_office_state(services),
         shell: build_shell_state(services),
         nomi_core_agent_api,
+        _session_management_state: session_management_state,
     };
 
     tracing::info!(
@@ -386,6 +391,7 @@ async fn build_nomi_core_agent_api_state(
     NomiCoreAgentApiState,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     Arc<dyn nomifun_mcp::service::McpCatalogPublisher>,
+    Arc<super::session_management::Host>,
 )> {
     const CONTRACT_VERSION: &str = "1.0.0";
     let builtin_plan = super::nomi_core_builtins::build(
@@ -396,6 +402,7 @@ async fn build_nomi_core_agent_api_state(
     .await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
     let wave5_owner = Arc::clone(&builtin_plan.wave5_owner);
+    let session_management_owner = Arc::clone(&builtin_plan.session_management_owner);
     let robot_owner = builtin_plan.robot_owner.clone();
     #[cfg(feature = "browser-use")]
     let browser_owner = Arc::clone(&builtin_plan.browser_owner);
@@ -501,13 +508,16 @@ async fn build_nomi_core_agent_api_state(
 
     let schema_digest = digest_payload(&agent_store_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
-    let installation_role_bindings =
+    let mut installation_role_bindings =
         super::nomi_core_tool_discovery::installation_binding(&materialized)?;
+    installation_role_bindings.extend(
+        super::nomi_core_wave2::declared_role_bindings(&materialized)?,
+    );
     #[cfg(feature = "browser-use")]
     let installation_role_bindings = {
         let mut bindings = installation_role_bindings;
         // Provider ownership and live resource readiness are separate facts.
-        // A dev host without packaged CEF can still own the Attached Chrome
+        // A host without an embedded native surface can still own the Attached Chrome
         // provider contract; an unavailable concrete Browser resource then
         // narrows the tool surface instead of invalidating the whole Agent.
         let browser_provider_owned = services.browser_resources.is_some()
@@ -534,20 +544,25 @@ async fn build_nomi_core_agent_api_state(
         canonical_schema_manifest_digest: schema_digest.clone(),
         target_contribution_manifest_digest: seed.target_first_party_contribution_digest.clone(),
         host_target: nomi_core_runtime_target(),
-        host_surface: if cfg!(any(feature = "browser-use", feature = "computer-use")) {
-            "desktop".to_owned()
-        } else {
-            "headless".to_owned()
-        },
+        // The App consumes Agent plans through the desktop-class renderer and
+        // WebUI. Optional native adapters do not select this product surface.
+        host_surface: "desktop".to_owned(),
         availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
     };
     let templates = OfficialTemplateCatalog::load()?;
     let compiler = PresetRevisionCompiler::new()
         .with_canonical_registry(Arc::clone(&kernel), environment.clone())
+        .with_resource_ceiling_policy(super::nomi_core_wave2::resource_ceiling_policy(&materialized)?)
         .with_consumer_validator(super::nomi_core_tool_discovery::validate_snapshot);
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
+    let session_capabilities = Arc::new(super::session_capabilities::GlobalSessionCapabilities {
+        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
+        skills: Arc::clone(&services.skill_paths),
+        mcp: services.app_mcp_sources.clone(),
+        app_mcp: services.app_mcp_sources.clone(),
+    });
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
         catalog,
@@ -561,12 +576,7 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     ))
-    .with_session_capabilities_resolver(Arc::new(super::session_capabilities::GlobalSessionCapabilities {
-        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
-        skills: Arc::clone(&services.skill_paths),
-        mcp: services.app_mcp_sources.clone(),
-        app_mcp: services.app_mcp_sources.clone(),
-    })));
+    .with_session_capabilities_resolver(session_capabilities.clone()));
     control_plane.retire_replaced_app_plugin_configuration(
         &nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
     ).await?;
@@ -630,6 +640,7 @@ async fn build_nomi_core_agent_api_state(
             services.authoritative_user_id.clone(),
             conversation_owner,
             control_plane,
+            session_capabilities,
             remote_repository,
             services.nomi_core_remote_runtime.clone(),
             resource_bindings,
@@ -649,6 +660,7 @@ async fn build_nomi_core_agent_api_state(
         ),
         wave4_owners,
         mcp_catalog_publisher,
+        session_management_owner,
     ))
 }
 
@@ -1050,6 +1062,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     });
 
     SystemRouterState {
+        database_pool: pool.clone(),
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool.clone()))),
         provider_service: ProviderService::new(
@@ -1961,19 +1974,10 @@ pub fn build_cron_state(
 /// Build the default `OfficeRouterState` from application services.
 pub fn build_office_state(services: &AppServices) -> OfficeRouterState {
     let data_dir = services.data_dir.as_path();
-    let allowed_roots = default_allowed_roots(Some(services.work_dir.as_path()));
-
-    let spawner: Arc<dyn nomifun_office::ProcessSpawner> = Arc::new(nomifun_office::DefaultProcessSpawner);
-    let watch_manager = Arc::new(OfficecliWatchManager::new(spawner, services.event_bus.clone()));
-
-    let snapshot_service = Arc::new(OfficeSnapshotService::new(data_dir));
-    let proxy_service = Arc::new(ProxyService::new(watch_manager.clone()));
-
     OfficeRouterState {
-        watch_manager,
-        snapshot_service,
-        proxy_service,
-        allowed_roots,
+        preview_service: Arc::new(OfficePreviewService::new(data_dir)),
+        snapshot_service: Arc::new(OfficeSnapshotService::new(data_dir)),
+        allowed_roots: default_allowed_roots(Some(services.work_dir.as_path())),
     }
 }
 

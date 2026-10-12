@@ -72,21 +72,20 @@
 /* ---- forehead reply bubble ---- */
 
 .nomi-companion-bubble {
-  /* 聊天态：index.tsx 把原生窗口按屏幕比例放大后，CSS 才能真正撑出这些尺寸
-     （紧凑桌面态窗口装不下）。横向几乎铺满窗口、纵向吃掉「可用高度 =
-     100vh − 预留(立绘高+输入条)」，都带上限——既舒展又不喧宾夺主。 */
+  /* 聊天态原生窗口提供立绘上方的空间；气泡保持紧凑，长回复在正文内滚动。
+     可用高度扣除立绘和输入条，避免正文挤压伙伴。 */
   display: flex;
   flex-direction: column;
-  max-width: min(calc(var(--companion-content-width) * 0.94), 560px);
-  max-height: clamp(180px, calc(100vh - var(--companion-reserve, 300px)), 560px);
+  max-width: min(calc(var(--companion-content-width) * 0.94), 440px);
+  max-height: clamp(160px, calc(100vh - var(--companion-reserve, 300px)), 360px);
   margin-bottom: 8px;
-  padding: 11px 14px;
+  padding: 10px 12px;
   border-radius: 16px;
   border: 1px solid var(--border-base);
   background: var(--bg-base);
   color: var(--text-primary);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 20px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   position: relative;
   animation: nomi-bubble-in 0.22s ease-out;

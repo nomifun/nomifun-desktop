@@ -105,5 +105,8 @@ pub use tool::{
 pub use tool_discovery::{
     AgentToolDiscoveryCandidate, AgentToolDiscoveryPort,
     MAX_MATCHES as MAX_TOOL_DISCOVERY_MATCHES,
+    MAX_VISIBLE_TOOL_DEFINITIONS, RUNTIME_CONTROL_TOOL_SLOTS,
+    MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS, INITIAL_VISIBLE_TOOL_DEFINITIONS,
+    VISIBLE_TOOL_DEFINITION_BYTE_BUDGET,
 };
 pub use turn::{AgentControlRejectionState, AgentTurnRequest, AgentTurnResult, AgentTurnTerminal};

@@ -1,4 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "bundle": {}
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
+  }
 }

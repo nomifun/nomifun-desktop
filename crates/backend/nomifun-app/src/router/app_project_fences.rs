@@ -232,9 +232,12 @@ pub(super) async fn release_workspace_runtime(state: &NomiCoreAgentApiState, app
     let mut owned = Vec::new();
     for id in ids {
         let current = store.get_live_session(&id).await.map_err(agent_session_store_error)?;
-        if current.remote_binding_provenance.is_some() { continue; }
-        let (_, template) = state.control_plane.saved_binding_presentation(&owner.0, &agent_binding_dto(&current.agent_binding)?).await?;
-        if template.is_none_or(|template| template.as_str() != "app.developer") { continue; }
+        if current.remote_binding_provenance.is_some() || current.parent_session_id.is_some()
+            || current.fork_base_payload_id.is_some() { continue; }
+        // Cleanup proves the application's exact current project and opening
+        // provenance, not an Agent template. A legal older User configuration
+        // may release its own idle host without being promoted to Official or
+        // gaining application editing, tool grants, or history conversion.
         let opening = store.read_events(&id, None, 1).await.map_err(agent_session_store_error)?.events.into_iter().next();
         let from_app_entry = opening.is_some_and(|event| {
             let key = event.idempotency_key.as_ref();

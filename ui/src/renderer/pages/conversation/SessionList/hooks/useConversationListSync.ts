@@ -5,6 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import { isAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { conversationSshHostId } from '../../utils/conversationSshBinding';
@@ -19,6 +20,7 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { isAuthoritativeCompletionRuntimeIdle } from '../../platforms/authoritativeTurnLifecyclePolicy';
 
 import { isOrdinaryWorkConversation } from './conversationListFilter';
+import { createConversationListRefresher } from './conversationListRefresher';
 
 /**
  * Whitelist of message types that indicate content generation is in progress.
@@ -182,69 +184,83 @@ const subscribeConversationListSync = (listener: () => void) => {
 
 const getConversationListSyncSnapshot = (): ConversationListSyncSnapshot => snapshotState;
 
-const refreshConversations = () => {
-  void ipcBridge.database.getUserConversations
-    .invoke({ limit: 10000 })
-    .then((result) => {
-      const items = result?.items;
-      if (items && Array.isArray(items)) {
-        // Companion conversations — the desktop bubble, the chat tab, AND every
-        // IM-channel turn — all share ONE per-companion session that lives in
-        // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
-        // companion row, identified by any companion marker in `extra`
-        // (companionSession / companionId / channelPlatform). The previous
-        // carve-out that KEPT channel-sourced companion sessions visible here
-        // is exactly what leaked IM chats into the work space — it is removed,
-        // which also fixes Slack/Discord (source==='nomifun') being mis-bucketed.
-        //
-        // SSH-bound sessions are the one excluded family that still needs a
-        // sidebar home (spec §10 top-level group): collect them in the SAME pass
-        // so the group never costs a second full fetch.
-        const filteredData: TChatConversation[] = [];
-        const sshConversations: TChatConversation[] = [];
-        for (const conversation of items) {
-          if (isOrdinaryWorkConversation(conversation)) {
-            filteredData.push(conversation);
-          } else if (conversationSshHostId(conversation) != null) {
-            sshConversations.push(conversation);
-          }
-        }
-        conversationsState = filteredData;
-        sshConversationsState = isSameConversationList(sshConversationsState, sshConversations)
-          ? sshConversationsState
-          : sshConversations;
-        for (const conversation of items) {
-          const activeTurnId = getExactSidebarActiveTurnId(conversation);
-          if (activeTurnId) {
-            activeTurnIdsState.set(conversation.id, activeTurnId);
-          } else if (conversation.status === 'finished' || getConversationPauseNotice(conversation)) {
-            activeTurnIdsState.delete(conversation.id);
-            clearGenerating(conversation.id);
-          }
-        }
-        // Track every listed Session so events for dedicated Companion/SSH
-        // surfaces do not trigger a redundant work-list refresh.
-        conversation_idsState = new Set(items.map((conversation) => conversation.id));
-        emitStoreChange();
-        return;
+const conversationListRefresher = createConversationListRefresher({
+  load: async () => {
+    const result = await ipcBridge.database.getUserConversations.invoke({ limit: 10000 });
+    if (!Array.isArray(result?.items)) {
+      throw new Error('Conversation history response has no Session list');
+    }
+    return result.items;
+  },
+  apply: (items) => {
+    // Companion conversations — the desktop bubble, the chat tab, AND every
+    // IM-channel turn — all share ONE per-companion session that lives in
+    // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
+    // companion row, identified by any companion marker in `extra`
+    // (companionSession / companionId / channelPlatform). The previous
+    // carve-out that KEPT channel-sourced companion sessions visible here
+    // is exactly what leaked IM chats into the work space — it is removed,
+    // which also fixes Slack/Discord (source==='nomifun') being mis-bucketed.
+    //
+    // SSH-bound sessions are the one excluded family that still needs a
+    // sidebar home (spec §10 top-level group): collect them in the SAME pass
+    // so the group never costs a second full fetch.
+    const filteredData: TChatConversation[] = [];
+    const sshConversations: TChatConversation[] = [];
+    for (const conversation of items) {
+      if (isOrdinaryWorkConversation(conversation)) {
+        filteredData.push(conversation);
+      } else if (conversationSshHostId(conversation) != null) {
+        sshConversations.push(conversation);
       }
+    }
+    conversationsState = filteredData;
+    sshConversationsState = isSameConversationList(sshConversationsState, sshConversations)
+      ? sshConversationsState
+      : sshConversations;
+    for (const conversation of items) {
+      const activeTurnId = getExactSidebarActiveTurnId(conversation);
+      if (activeTurnId) {
+        activeTurnIdsState.set(conversation.id, activeTurnId);
+      } else if (conversation.status === 'finished' || getConversationPauseNotice(conversation)) {
+        activeTurnIdsState.delete(conversation.id);
+        clearGenerating(conversation.id);
+      }
+    }
+    // Track every listed Session so events for dedicated Companion/SSH
+    // surfaces do not trigger a redundant work-list refresh.
+    conversation_idsState = new Set(items.map((conversation) => conversation.id));
+    emitStoreChange();
+  },
+  remove: (conversationId) => {
+    conversationsState = conversationsState.filter((conversation) => conversation.id !== conversationId);
+    sshConversationsState = sshConversationsState.filter((conversation) => conversation.id !== conversationId);
+    conversation_idsState.delete(conversationId);
+    activeTurnIdsState.delete(conversationId);
+    generatingConversationIdsState = new Set(generatingConversationIdsState);
+    generatingConversationIdsState.delete(conversationId);
+    completionUnreadConversationIdsState = new Set(completionUnreadConversationIdsState);
+    completionUnreadConversationIdsState.delete(conversationId);
+    emitStoreChange();
+  },
+  onError: (error) => {
+    console.error('[SessionList] Failed to load conversations:', error);
+    if (isAuthExpiredHttpError(error)) {
+      // Authentication loss is an explicit boundary, unlike a transient read failure.
+      conversationsState = [];
+      sshConversationsState = [];
+      conversation_idsState = new Set();
+      activeTurnIdsState = new Map();
+      generatingConversationIdsState = new Set();
+      completionUnreadConversationIdsState = new Set();
+      activeConversationIdState = null;
+      emitStoreChange();
+    }
+  },
+});
 
-      conversationsState = [];
-      sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
-      conversation_idsState = new Set();
-      activeTurnIdsState = new Map();
-      generatingConversationIdsState = new Set();
-      emitStoreChange();
-    })
-    .catch((error) => {
-      console.error('[SessionList] Failed to load conversations:', error);
-      conversationsState = [];
-      sshConversationsState = sshConversationsState.length === 0 ? sshConversationsState : [];
-      conversation_idsState = new Set();
-      activeTurnIdsState = new Map();
-      generatingConversationIdsState = new Set();
-      emitStoreChange();
-    });
+const refreshConversations = () => {
+  void conversationListRefresher.refresh();
 };
 
 const markGenerating = (conversation_id: ConversationId) => {
@@ -300,6 +316,9 @@ const initializeConversationListSyncStore = () => {
   refreshConversations();
 
   addEventListener('chat.history.refresh', refreshConversations);
+  addEventListener('conversation.deleted', (conversationId) => {
+    void conversationListRefresher.deleted(conversationId);
+  });
   // WebSocket delivery has no replay: any gap (reconnect, server lag resync)
   // may have dropped conversation.listChanged frames (delete/create while
   // offline), so reload the durable conversation snapshot.
@@ -308,9 +327,8 @@ const initializeConversationListSyncStore = () => {
   ipcBridge.agentPlatform.sessions.onAgentChanged.on(() => refreshConversations());
   ipcBridge.conversation.listChanged.on((event) => {
     if (event.action === 'deleted') {
-      activeTurnIdsState.delete(event.conversation_id);
-      clearGenerating(event.conversation_id);
-      clearCompletionUnreadState(event.conversation_id);
+      void conversationListRefresher.deleted(event.conversation_id);
+      return;
     }
     refreshConversations();
   });
@@ -413,7 +431,12 @@ const initializeConversationListSyncStore = () => {
 
 export const useConversationListSync = () => {
   useEffect(() => {
-    initializeConversationListSyncStore();
+    if (isStoreInitialized) {
+      // A re-mounted authenticated layout must re-read history after login.
+      refreshConversations();
+    } else {
+      initializeConversationListSyncStore();
+    }
   }, []);
 
   const { conversations, sshConversations, generatingConversationIds, completionUnreadConversationIds } =

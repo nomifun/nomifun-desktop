@@ -51,7 +51,7 @@ In the **data directory**. Its location depends on which host you are running:
 - **Web (`nomifun-web`)**: whatever you pass to `--data-dir` (or `NOMIFUN_DATA_DIR`), taken literally. With neither set it defaults to the **same per-user dir as the desktop app**, so a dev `bun run serve:web` and the installed app see one shared state.
 - **Docker**: the named volume you mount to `/data` (for example `nomifun-data:/data`).
 
-The data directory contains the SQLite database (`nomifun-backend.db*`), per-agent state, the Bun cache, log files, and any embedded extension data. Back it up like a database. Because every host defaults to the same directory, the backend guards it with an exclusive `server.lock` — a second backend instance on the same data dir fails fast instead of corrupting state.
+The data directory contains the SQLite database (`nomifun-backend.db*`), per-agent state, the managed runtime cache, log files, and any embedded extension data. Back it up like a database. Because every host defaults to the same directory, the backend guards it with an exclusive `server.lock` — a second backend instance on the same data dir fails fast instead of corrupting state.
 
 For the full lifecycle and `work-dir` semantics, see [Configuration Reference](./configuration.md#data-directory-and-work-directory-semantics).
 
@@ -148,7 +148,7 @@ access has its own admin password because it is reachable from another browser.
 
 Yes for the server: `nomifun-web` is one statically-linked Rust binary plus the `ui/dist/` directory it serves. SQLite is statically linked, TLS uses rustls — there is no `libsqlite`, no `openssl` dependency at runtime. Build with `cargo build --release -p nomifun-web`.
 
-The agent runtime (bun) is *not* embedded by default; install it system-wide or use the `NOMIFUN_EMBED_BUN=1` build flag to bundle it into the binary. See the [bun-on-PATH](../guides/web-server-deployment.md#bun-must-be-on-the-system-path) section.
+Release binaries embed OfficeCLI. Node is prepared through verified managed download before backend startup; Bun is prepared when a feature requests it. Prepared components are reused offline across application updates while their approved version is unchanged. The first Node preparation requires network access. Debug builds can embed OfficeCLI with `NOMIFUN_EMBED_OFFICECLI=1` or use validated explicit development overrides. See [External tools](../architecture/external-tools.md).
 
 The desktop shell also produces a single binary (`nomifun-desktop`), but for distribution you typically want the platform-native packaging via `bun run build` once installer signing is set up.
 

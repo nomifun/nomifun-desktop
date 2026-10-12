@@ -29,7 +29,7 @@ Session tree. The selected companion then has two first-level modes:
 | Cohabit | Dedicated companion conversation | One continuous history across desktop, IM and robot inputs, plus a concise status / memory / connection summary |
 | Manage | Overview | Name, figure, desktop visibility, level, persona, Agent and model / voice / vision slots |
 | Manage | Memory & knowledge | Only this companion's memories and knowledge bindings |
-| Manage | Connections & devices | IM channels, physical robots and companion-scoped MCP connections |
+| Manage | Channels & Robots | IM channels, physical robots and companion-scoped MCP connections |
 | Manage | Evolution / Skills | Learning cadence, collection inputs, retention, quiet hours and generated / configured skills |
 | Manage | History / Migration & deletion | Day-based chat reading, package transfer and irreversible deletion |
 
@@ -55,7 +55,7 @@ inserts a companion row in the work Session tree.
    carries a "default" badge). The default companion is the fallback whenever
    a channel has no explicit binding (see the channels section below).
 3. In **Manage → Overview** you can rename it, swap its character, tune its
-   persona, **pick its chat model**, and toggle the desktop window. Quiet hours
+   persona, **pick its Agent and chat model**, and toggle the desktop window. Quiet hours
    and learning controls live under **Manage → Evolution**.
 4. **Deleting a companion** cascades: its **memories**, skills, companion
    conversations, runtime state (XP, …), and `('companion', companionId)` knowledge
@@ -71,6 +71,36 @@ inserts a companion row in the work Session tree.
 On disk each companion is a directory — `{data_dir}/companion/companions/{companion_id}/config.json`,
 **the directory is the source of truth** — which is also the unit the
 companion bundle exports and imports.
+
+### Changing a companion's Agent
+
+Use **Manage → Overview → Model configuration → Agent settings** to select the
+companion's Agent. The Cohabit composer provides the same selector. The official
+Companion Agent is the default. Click **Edit Agent** below the selector to open
+the selected official or personal Agent in **Agent settings**. Official Agents
+have stable editable identities for your account; companions using the same
+Agent share its saved configuration while keeping their own persona and resources.
+You can also create a personal Agent and select it for a companion. After editing the currently
+selected Agent, return to the companion selector and click **Apply latest
+setup** to explicitly apply its new revision to the current Session. The selected Agent must keep
+the Companion capability and resource, and its model and other capabilities
+must be available in the current environment. Unavailable choices explain why
+they cannot be selected.
+
+Saving applies an explicit Agent transition to the companion's existing idle
+Session. Its next message uses the new Agent while preserving the same chat
+history, current chat model and companion ownership. Desktop, IM and robot entry
+points continue to use that Session; tools remain governed by the selected
+Agent's capabilities and connection permissions. If no Session exists yet, the
+selection becomes that companion's default for its first chat.
+
+Finish or end the current work before changing an Agent while a reply is running,
+a Turn is paused for recovery, or effects remain unsettled. If the current
+Session was updated but its future default could not be saved, the UI states
+that partial outcome and offers **Apply latest setup** to retry; the current
+Session continues with its committed setup. Other failed saves do not make the
+displayed choice authoritative. Switching Agents never transfers
+the companion's memories, knowledge bases or robot permissions to another companion.
 
 ### Multiple desktop companions on screen
 
@@ -315,6 +345,7 @@ To verify a multi-companion setup end to end, walk through in order:
 | --- | --- |
 | List / create companions | `GET/POST /api/companion/companions` |
 | Companion detail / update / delete | `GET/PATCH/DELETE /api/companion/companions/{companionId}` |
+| Companion Agent options / save and apply | `GET/PUT /api/product-agent-bindings/companion/{companionId}` |
 | Install-wide config (collect / learn / default companion) | `GET/PATCH /api/companion/config` |
 | One companion's memories / add a memory | `GET /api/companion/memories?companion_id={companionId}`, `POST /api/companion/memories` (`companion_id` = the owner; omitted lets the server resolve it) |
 | Edit a memory (content / pin / status only — never its owner) | `PUT /api/companion/memories/{memoryId}` (`companion_id` = the companion *asking*; another companion's memory is a 404) |

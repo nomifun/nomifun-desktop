@@ -14,8 +14,9 @@ import {
   loadCreativeStudioTemplateRoute,
   loadKnowledgeDetailRoute,
   loadResourcePageBoundary,
+  loadConversationRoute,
 } from './routePreload';
-const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
+const Conversation = React.lazy(loadConversationRoute);
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
 const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));
@@ -158,7 +159,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/apps/new' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/apps/import' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/apps/:id' element={withRouteFallback(AppWorkspaceRoute)} />
-            <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
+            <Route path='/connections' element={withRouteFallback(OpenCapabilitiesPage)} />
+            <Route path='/open-capabilities' element={<Navigate to='/connections?task=browser' replace />} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
             <Route element={<SessionShellRoute />}>
@@ -171,9 +173,9 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
             <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
             <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
-            <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />
+            <Route path='/settings/tools' element={<Navigate to='/connections?task=tools' replace />} />
             <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
-            <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
+            <Route path='/settings/webui' element={<Navigate to='/connections?task=browser' replace />} />
             <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />

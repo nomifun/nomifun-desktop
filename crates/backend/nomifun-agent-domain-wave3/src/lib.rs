@@ -1316,6 +1316,11 @@ fn capability_manifest(
                 )),
                 effect_class: action.effect_class,
                 presentation: ToolPresentationKind::FunctionTool,
+                required_resource_operations: Some(action.requirements.iter().fold(BTreeMap::new(), |mut requirements, requirement| {
+                    requirements.entry(ResourceKind::from(requirement.resource_kind))
+                        .or_insert_with(BTreeSet::new).insert(requirement.operation.to_owned());
+                    requirements
+                })),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

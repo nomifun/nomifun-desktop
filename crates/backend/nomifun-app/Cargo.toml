@@ -25,6 +25,10 @@ name = "webui_lan_smoke"
 path = "tests/webui_lan_smoke.rs"
 
 [[test]]
+name = "relay_listener_smoke"
+path = "tests/relay_listener_smoke.rs"
+
+[[test]]
 name = "skills_builtin_e2e"
 path = "tests/skills_builtin_e2e.rs"
 
@@ -60,6 +64,10 @@ path = "tests/agent_provider_health_e2e.rs"
 name = "official_preset_catalog_integrity"
 path = "tests/official_preset_catalog_integrity.rs"
 required-features = ["browser-use", "computer-use"]
+
+[[test]]
+name = "official_companion_resource_supply"
+path = "tests/official_companion_resource_supply.rs"
 
 [[test]]
 name = "connection_test_e2e"
@@ -194,7 +202,6 @@ qqbot = ["nomifun-channel/qqbot"]
 # The canonical AgentPlatform Computer Role owns the native screen/input
 # implementation; web/headless builds omit the native stack entirely.
 computer-use = [
-    "nomifun-ai-agent/computer-use",
     "dep:nomi-computer",
     "dep:nomi-types",
 ]

@@ -78,9 +78,13 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
 
   useEffect(() => {
     if (!conversationId) return;
-    return ipcBridge.conversation.listChanged.on((event) => {
+    const unsubscribeList = ipcBridge.conversation.listChanged.on((event) => {
       if (event.conversation_id === conversationId && event.action !== 'deleted') void mutate();
     });
+    const unsubscribeAgent = ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
+      if (String(event.agent_session_id) === String(conversationId)) void mutate();
+    });
+    return () => { unsubscribeList(); unsubscribeAgent(); };
   }, [conversationId, mutate]);
 
   const memoryCount = (status?.memories_active ?? 0) + (status?.memories_archived ?? 0);
@@ -173,7 +177,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
             ? t('nomi.cohabit.robotOnline', { count: robotCount, defaultValue: '{{count}} 台机器人已绑定' })
             : t('nomi.cohabit.noRobot', { defaultValue: '尚未绑定机器人' })}</strong>
           <span>{t('nomi.cohabit.channelsHint', { defaultValue: '消息渠道与 MCP 在管理中配置' })}</span>
-          <button type='button' onClick={() => onManage('remote')}>{t('nomi.cohabit.manageConnections', { defaultValue: '管理连接与设备' })}</button>
+          <button type='button' onClick={() => onManage('remote')}>{t('nomi.cohabit.manageConnections', { defaultValue: '管理渠道与机器人' })}</button>
         </section>
 
         {status && (

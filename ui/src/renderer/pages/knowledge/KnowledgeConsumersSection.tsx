@@ -12,6 +12,7 @@ import { Down, FolderOpen, LinkOne, Message, Robot, Terminal, Unlink, User } fro
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBinding, IKnowledgeConsumer, KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
 import { useKnowledgeConsumers } from './useKnowledge';
+import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from './KnowledgeErrorFeedback';
 import type { KnowledgeBaseId } from '@/common/types/ids';
 
 interface KnowledgeConsumersSectionProps {
@@ -64,7 +65,7 @@ export function removeBaseFromBinding(binding: IKnowledgeBinding, baseId: Knowle
 /** Compact "who is using this base?" list with a bounded expanded state. */
 const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ baseId }) => {
   const { t } = useTranslation();
-  const { consumers, loading, refresh } = useKnowledgeConsumers(baseId);
+  const { consumers, loading, error, refresh } = useKnowledgeConsumers(baseId);
   const [open, setOpen] = useState(false);
   const [removingKey, setRemovingKey] = useState<string | null>(null);
 
@@ -145,13 +146,7 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
           await refresh();
           ArcoMessage.success(t('knowledge.consumers.removeOk', { defaultValue: '已取消挂载' }));
         } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          ArcoMessage.error(
-            t('knowledge.consumers.removeFailed', {
-              defaultValue: '取消挂载失败：{{message}}',
-              message,
-            })
-          );
+          showKnowledgeErrorMessage(e, 'operation', t);
         } finally {
           setRemovingKey(null);
         }
@@ -185,11 +180,12 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
       </div>
 
       <div className='mt-12px min-h-0 flex-1'>
+        {error && <KnowledgeErrorNotice error={error} onRetry={() => void refresh()} />}
         {loading && consumers.length === 0 ? (
           <div className='grid min-h-136px place-items-center rd-9px bg-[var(--color-fill-1)] text-12px text-[var(--color-text-3)]'>
             {t('common.loading', { defaultValue: '加载中…' })}
           </div>
-        ) : consumers.length === 0 ? (
+        ) : consumers.length === 0 && !error ? (
           <div className='grid min-h-136px place-items-center rd-9px border border-dashed border-[var(--color-border-2)] text-12px text-[var(--color-text-3)]'>
             {t('knowledge.consumers.empty', { defaultValue: '暂无挂载' })}
           </div>

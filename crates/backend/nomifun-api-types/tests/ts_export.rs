@@ -4,6 +4,8 @@ use ts_rs::{Config, TS};
 use nomifun_api_types::model_gateway::*;
 
 use nomifun_api_types::{
+    PrepareStorageRelocationRequest, StorageRelocationBlocker,
+    StorageRelocationOperationRequest, StorageRelocationResponse, SystemInfoResponse,
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
     FetchModelsResponse, HealthStatus,
     KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryCapabilities, KnowledgeEntryKind,
@@ -52,6 +54,15 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
         std::fs::write(&path, generated)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
     }
+}
+
+#[test]
+fn export_storage_relocation_bindings() {
+    export_binding_if_changed::<PrepareStorageRelocationRequest>("PrepareStorageRelocationRequest.ts");
+    export_binding_if_changed::<StorageRelocationOperationRequest>("StorageRelocationOperationRequest.ts");
+    export_binding_if_changed::<StorageRelocationBlocker>("StorageRelocationBlocker.ts");
+    export_binding_if_changed::<StorageRelocationResponse>("StorageRelocationResponse.ts");
+    export_binding_if_changed::<SystemInfoResponse>("SystemInfoResponse.ts");
 }
 
 #[test]
