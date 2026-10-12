@@ -10,7 +10,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_file::{FileService, IFileService, ZipEntry};
+use nomifun_file::{FileService, IFileService, PathAuthority, ZipEntry};
 use nomifun_realtime::UserEventSink;
 
 /// No-op broadcaster for tests that don't need event verification.
@@ -293,6 +293,79 @@ async fn create_zip_rejects_nonexistent_disk_entry_in_sandbox() {
     let result = svc.create_zip(zip_path.to_str().unwrap(), entries, None).await;
     assert!(result.is_err());
     assert!(!zip_path.exists());
+}
+
+#[tokio::test]
+async fn missing_optional_root_does_not_break_text_or_existing_disk_exports() {
+    let root = tempfile::tempdir().unwrap();
+    let svc = FileService::new(Arc::new(NoopBroadcaster), vec![
+        root.path().to_path_buf(), root.path().join("absent-optional-root"),
+    ]);
+    let source = root.path().join("source.txt");
+    fs::write(&source, "source bytes").unwrap();
+    for (name, entries) in [
+        ("text.zip", vec![ZipEntry::Text { name: "a.txt".into(), content: "text bytes".into() }]),
+        ("disk.zip", vec![ZipEntry::Disk { name: "source.txt".into(), file_path: source.to_string_lossy().into_owned() }]),
+    ] {
+        let output = root.path().join(name);
+        assert!(svc.create_zip(output.to_str().unwrap(), entries, None).await.unwrap());
+        assert!(zip::ZipArchive::new(fs::File::open(output).unwrap()).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn create_zip_scoped_keeps_destination_and_source_authority_separate() {
+    let application = tempfile::tempdir().unwrap();
+    let selected = tempfile::tempdir().unwrap();
+    let source = application.path().join("source.txt");
+    fs::write(&source, "source bytes").unwrap();
+    let svc = make_service(application.path());
+    let output = selected.path().join("selected.zip");
+    assert!(svc.create_zip_scoped(output.to_str().unwrap(), vec![ZipEntry::Disk {
+        name: "source.txt".into(), file_path: source.to_string_lossy().into_owned(),
+    }], None,
+        &PathAuthority::Confined(vec![selected.path().to_path_buf()]),
+        &PathAuthority::Confined(vec![application.path().to_path_buf()]),
+    ).await.unwrap());
+}
+
+#[tokio::test]
+async fn concurrent_zip_publication_preserves_the_winner_and_cleans_temporary_files() {
+    let root = tempfile::tempdir().unwrap();
+    let svc = make_service(root.path());
+    let output = root.path().join("collision.zip");
+    let path = output.to_str().unwrap();
+    let entries = |text: &str| vec![ZipEntry::Text { name: "a.txt".into(), content: text.into() }];
+    let (first, second) = tokio::join!(
+        svc.create_zip(path, entries("first"), None),
+        svc.create_zip(path, entries("second"), None),
+    );
+    let expected = match (first, second) {
+        (Ok(true), Err(nomifun_common::AppError::Conflict(_))) => "first",
+        (Err(nomifun_common::AppError::Conflict(_)), Ok(true)) => "second",
+        outcomes => panic!("one publish must win without overwriting: {outcomes:?}"),
+    };
+    let mut archive = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+    let mut actual = String::new();
+    archive.by_name("a.txt").unwrap().read_to_string(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn zip_rejects_unsafe_and_duplicate_archive_names_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let svc = make_service(root.path());
+    let output = root.path().join("unsafe.zip");
+    for name in ["", "../escape", "/absolute", "a/../escape", "C:/drive", "a\\b", "a//b", "a/", "a\0b"] {
+        assert!(svc.create_zip(output.to_str().unwrap(), vec![ZipEntry::Text {
+            name: name.into(), content: "x".into(),
+        }], None).await.is_err(), "must reject {name:?}");
+        assert!(!output.exists());
+    }
+    let entries = (0..2).map(|_| ZipEntry::Text { name: "duplicate".into(), content: "x".into() }).collect();
+    assert!(svc.create_zip(output.to_str().unwrap(), entries, None).await.is_err());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 // -----------------------------------------------------------------------

@@ -96,6 +96,18 @@ pub trait IFileService: Send + Sync {
         request_id: Option<String>,
     ) -> Result<bool, AppError>;
 
+    /// Package files under explicit, separate destination and source policies.
+    /// A UI folder selection may permit publication outside the default roots
+    /// without widening the archive's disk-entry read authority.
+    async fn create_zip_scoped(
+        &self,
+        path: &str,
+        entries: Vec<ZipEntry>,
+        request_id: Option<String>,
+        output_authority: &PathAuthority,
+        source_authority: &PathAuthority,
+    ) -> Result<bool, AppError>;
+
     /// Cancel an in-progress ZIP operation by its `request_id`.
     /// Returns `true` if a matching operation was found and cancelled.
     async fn cancel_zip(&self, request_id: &str) -> bool;

@@ -83,6 +83,34 @@ async fn post_json(
 }
 
 #[tokio::test]
+async fn workspace_list_supports_explicit_external_workspace_scope() {
+    let application = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let nested = workspace.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("asset.bin"), [0, 255]).unwrap();
+    let router = make_router(application.path());
+
+    let (status, _, _) = post_json(router.clone(), "/api/fs/list", serde_json::json!({
+        "root": workspace.path(),
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "default listing must remain confined");
+
+    let (status, response, raw) = post_json(router.clone(), "/api/fs/list", serde_json::json!({
+        "root": workspace.path(), "workspace": workspace.path(),
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(response["data"].as_array().unwrap().len(), 1);
+    assert_eq!(response["data"][0]["relative_path"], "nested/asset.bin");
+
+    let outside = tempfile::tempdir().unwrap();
+    let (status, _, _) = post_json(router, "/api/fs/list", serde_json::json!({
+        "root": outside.path(), "workspace": workspace.path(),
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "scope must not admit unrelated roots");
+}
+
+#[tokio::test]
 async fn browse_accepts_the_webui_picker_wire_format() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();

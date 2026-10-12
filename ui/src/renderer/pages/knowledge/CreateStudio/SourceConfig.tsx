@@ -18,11 +18,12 @@
  */
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Message, Switch } from '@arco-design/web-react';
+import { Button, Input, Switch } from '@arco-design/web-react';
 import { FolderOpen, Info } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isDesktopShell } from '@renderer/utils/platform';
 import KnowledgeUrlEntriesEditor from '../KnowledgeUrlEntriesEditor';
+import { showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 import {
   MAX_KNOWLEDGE_SOURCE_ENTRIES,
   type KnowledgeUrlDraft,
@@ -134,7 +135,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
           update({ rootPath: files[0] });
         }
       } catch (e) {
-        Message.error(String(e));
+        showKnowledgeErrorMessage(e, 'operation', t);
       }
     };
 
@@ -293,7 +294,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
           update({ importPath: files[0] });
         }
       } catch (e) {
-        Message.error(String(e));
+        showKnowledgeErrorMessage(e, 'operation', t);
       }
     };
 

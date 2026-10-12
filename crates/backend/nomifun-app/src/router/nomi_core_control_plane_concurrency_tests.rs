@@ -107,6 +107,37 @@ fn candidate(instructions: &str) -> (AgentPresetRevision, ResolvedSnapshotEnvelo
 }
 
 #[tokio::test]
+async fn sqlite_revision_reads_preserve_canonical_contribution_lock_order() {
+    let database = nomifun_db::init_database_memory_with_owner(
+        CommonUserId::parse(OWNER.to_owned()).unwrap(),
+    ).await.unwrap();
+    let store = NomiCoreControlPlaneStore::new(database.pool().clone());
+    store.insert_preset(preset()).await.unwrap();
+    let (mut revision, mut snapshot) = candidate("Canonical locks");
+    revision.contribution_locks = [
+        ("a-source", "z-contribution"), ("z-source", "a-contribution"),
+    ].into_iter().map(|(source, contribution)| nomifun_agent_contracts::ContributionLock {
+        source_kind: nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin,
+        source_identity: source.into(), mount_id: None, mcp_binding_id: None,
+        contribution_id: contribution.into(), contract_digest: "a".repeat(64).into(),
+    }).collect();
+    revision.contribution_locks.sort();
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    snapshot.content.preset_revision_ref = revision.reference.clone();
+    snapshot.snapshot_ref.snapshot_digest = digest_payload(&snapshot.content).unwrap();
+    store.append_revision(None, revision.clone(), snapshot.clone(), "Canonical locks".into(), None).await.unwrap();
+    let sql_order: Vec<String> = sqlx::query_scalar(
+        "SELECT contribution_id FROM agent_preset_contribution_locks WHERE revision_id = ? ORDER BY contribution_id",
+    ).bind(revision.reference.revision_id()).fetch_all(database.pool()).await.unwrap();
+    assert_eq!(sql_order, ["a-contribution", "z-contribution"]);
+    let loaded = store.get_revision(&revision.reference).await.unwrap().unwrap();
+    assert_eq!(loaded.contribution_locks[0].contribution_id.as_ref(), "z-contribution");
+    assert_eq!(loaded, revision);
+    assert_eq!(store.get_snapshot(&loaded.reference).await.unwrap(), Some(snapshot));
+    database.close().await;
+}
+
+#[tokio::test]
 async fn write_admission_precedes_validation_reads_and_still_allows_readers() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("db.sqlite");

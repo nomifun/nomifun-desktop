@@ -257,6 +257,8 @@ export interface AgentBindingSummary {
 
 export interface AgentPresetLibraryResponse {
   official_templates: OfficialPresetTemplate[];
+  /** Stable, owner-scoped editable configurations; templates remain copy baselines. */
+  official_presets: Partial<Record<OfficialPresetKey, AgentPresetSummary>>;
   user_presets: AgentPresetSummary[];
   active_bindings: AgentBindingSummary[];
   fresh_start: {
@@ -651,6 +653,8 @@ export interface ApplyAgentSessionSwitchRequest {
   selection: AgentSwitchSelection;
   handoff_mode: AgentHandoffMode;
   expected_binding_version: number;
+  /** Concurrency precondition from preview, never an authorization grant. */
+  expected_resolved_snapshot_ref?: ResolvedSnapshotRef;
   model?: { provider_id: ProviderId; model: string };
 }
 

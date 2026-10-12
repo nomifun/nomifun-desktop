@@ -29,6 +29,7 @@ const general: GuidAgentSelection = { kind: 'template', templateKey: 'assistant.
 const coding: GuidAgentSelection = { kind: 'template', templateKey: 'coding.codex' };
 const preview = {
   can_apply: true, expected_binding_version: 4,
+  target: { resolved_snapshot_ref: { snapshot_id: 'target-snapshot', snapshot_digest: 'b'.repeat(64) } },
   // Resource differences are informational. The renderer adds no asset gate.
   resources: { retained: [], dropped: [{ resource_kind: 'workspace', resource_id: 'previous' }], missing_kinds: ['knowledge_base'] },
   handoff: { available: true }, blockers: [],
@@ -116,6 +117,7 @@ describe('current conversation Agent switching', () => {
     expect(request).toEqual({
       selection: { kind: 'template', template_key: 'assistant.general' },
       handoff_mode: 'continue_task', expected_binding_version: 4,
+      expected_resolved_snapshot_ref: preview.target.resolved_snapshot_ref,
     });
     expect(idempotencyKey).toMatch(/^[\da-f-]{36}$/);
     expect(ports.refresh).toHaveBeenCalledWith(firstSession);

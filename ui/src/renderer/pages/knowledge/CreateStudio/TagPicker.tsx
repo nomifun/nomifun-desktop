@@ -14,9 +14,10 @@
  */
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Message, Spin } from '@arco-design/web-react';
+import { Spin } from '@arco-design/web-react';
 import { CheckOne } from '@icon-park/react';
 import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';
+import { showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 
 // ─── Props ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ const TagPicker: React.FC<TagPickerProps> = ({ value, onChange, tags, createTag 
       onChange([...value, newTag.key]);
       setInputValue('');
     } catch (err) {
-      Message.error(String(err));
+      showKnowledgeErrorMessage(err, 'operation', t);
     } finally {
       setCreating(false);
     }

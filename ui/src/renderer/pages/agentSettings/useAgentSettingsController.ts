@@ -6,12 +6,9 @@ import type {
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
   AgentPresetSummary,
-  ChatRouteRecord,
-  OfficialPresetKey,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import {
-  AGENT_CHAT_MODEL_TASK,
   cloneAgentPresetDocument,
   cloneDraft,
   isDraftDirty,
@@ -20,6 +17,7 @@ import {
   agentUiErrorKey,
   agentUiErrorSubjects,
   isAgentModelConfigurationMissing,
+  TEMPLATE_I18N_PATH,
   type AgentEditorReturn,
 } from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
@@ -34,7 +32,7 @@ type Selection =
   | { kind: 'preset'; preset: AgentPresetSummary }
   | null;
 
-type BusyAction = 'save' | 'fork' | 'create' | 'open' | 'delete' | null;
+type BusyAction = 'save' | 'create' | 'open' | 'delete' | null;
 
 const emptyCatalog: AgentCatalogResponse = {
   modules: [],
@@ -48,6 +46,16 @@ export const upsertPresetSummary = (
   library: AgentPresetLibraryResponse,
   preset: AgentPresetSummary
 ): AgentPresetLibraryResponse => {
+  if (preset.source === 'official') {
+    return {
+      ...library,
+      official_presets: Object.fromEntries(
+        Object.entries(library.official_presets).map(([key, current]) =>
+          [key, current.preset_id === preset.preset_id ? preset : current]
+        )
+      ),
+    };
+  }
   const existingIndex = library.user_presets.findIndex(
     (candidate) => candidate.preset_id === preset.preset_id
   );
@@ -126,7 +134,7 @@ export function useAgentSettingsController() {
           if (currentTemplate) return { kind: 'template', template: currentTemplate };
         }
         if (current?.kind === 'preset') {
-          const currentPreset = nextLibrary.user_presets.find(
+          const currentPreset = [...nextLibrary.user_presets, ...Object.values(nextLibrary.official_presets)].find(
             (preset) => preset.preset_id === current.preset.preset_id
           );
           if (currentPreset) return { kind: 'preset', preset: currentPreset };
@@ -164,16 +172,15 @@ export function useAgentSettingsController() {
     );
   }, [mutate]);
 
-  const openTemplate = useCallback((template: OfficialPresetTemplate) => {
-    editingDrafts?.rememberSelection({ kind: 'template', template_key: template.template_key });
-    setSelection({ kind: 'template', template });
-    clearEditorState();
-    setError(null);
-  }, [clearEditorState, editingDrafts]);
-
   const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
     editingDrafts?.rememberSelection({ kind: 'preset', preset_id: response.preset.preset_id });
     const nextDraft = cloneDraft(response.draft);
+    if (response.preset.source === 'official' && nextDraft.source_template_key &&
+        (!response.revision || nextDraft.display_name === nextDraft.source_template_key)) {
+      const path = TEMPLATE_I18N_PATH[nextDraft.source_template_key];
+      nextDraft.display_name = t(`agentSettings.template.${path}.name`);
+      nextDraft.description ??= t(`agentSettings.template.${path}.description`);
+    }
     setEditor({
       ...response,
       draft: nextDraft,
@@ -182,10 +189,10 @@ export function useAgentSettingsController() {
         : undefined,
     });
     setDraftState(nextDraft);
-    setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
+    setSavedDraft(response.revision || response.preset.source === 'official' ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
     return nextDraft;
-  }, [editingDrafts]);
+  }, [editingDrafts, t]);
 
   const openPreset = useCallback(
     async (preset: AgentPresetSummary, returned?: Extract<AgentEditorReturn, { kind: 'preset' }>['draft']) => {
@@ -219,6 +226,15 @@ export function useAgentSettingsController() {
     [applyEditor, reportError, t, editingDrafts]
   );
 
+  const openTemplate = useCallback(async (template: OfficialPresetTemplate) => {
+    const preset = library?.official_presets[template.template_key];
+    if (!preset) {
+      reportError({ code: 'PRESET_NOT_FOUND' }, 'open');
+      return;
+    }
+    await openPreset(preset);
+  }, [library, openPreset, reportError]);
+
   const createPreset = useCallback(
     async (displayName: string) => {
       setBusyAction('create');
@@ -234,39 +250,6 @@ export function useAgentSettingsController() {
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (createError) {
         reportError(createError, 'create');
-      } finally {
-        setBusyAction(null);
-      }
-    },
-    [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError]
-  );
-
-  const forkTemplate = useCallback(
-    async (
-      templateKey: OfficialPresetKey,
-      displayName: string,
-      modelRouteRefs: Record<string, string>,
-      chatRouteRecords: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>
-    ) => {
-      setBusyAction('fork');
-      setError(null);
-      try {
-        const response = await agentPlatform.createFromTemplate.invoke({
-          template_id: templateKey,
-          request: {
-            reuse_existing: false,
-            display_name: displayName,
-            model_route_refs: modelRouteRefs,
-            chat_route_records: chatRouteRecords,
-          },
-        });
-        applyEditor(response);
-        await publishPresetSummary(response.preset);
-        await refreshPresetLibraries();
-        await publishPresetSummary(response.preset);
-        setSelection({ kind: 'preset', preset: response.preset });
-      } catch (forkError) {
-        reportError(forkError, 'fork');
       } finally {
         setBusyAction(null);
       }
@@ -411,7 +394,6 @@ export function useAgentSettingsController() {
     createPreset,
     createConfiguredPreset,
     discardChanges,
-    forkTemplate,
     deletePreset,
     setDraft,
     saveRevision,

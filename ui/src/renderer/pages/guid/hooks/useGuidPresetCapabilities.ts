@@ -48,35 +48,34 @@ export const requiredResourceKindsForDocument = (
     catalog
   );
 
-/** Load the stable capability and resource defaults used by Guid. */
+/** Load the saved capability and resource defaults used by Guid. */
 export const useGuidPresetCapabilities = (
-  presetId: AgentPresetId | undefined
+  presetId: AgentPresetId | undefined,
+  revisionDigest?: string,
 ): GuidPresetCapabilityState => {
-  const [state, setState] = useState<GuidPresetCapabilityState>(emptyState);
+  const sourceKey = presetId ? `${presetId}:${revisionDigest ?? 'draft'}` : undefined;
+  const [state, setState] = useState<{
+    sourceKey: string | undefined;
+    value: GuidPresetCapabilityState;
+  }>(() => ({ sourceKey: undefined, value: emptyState() }));
 
   useEffect(() => {
     let cancelled = false;
     if (!presetId) {
-      setState(emptyState());
+      setState({ sourceKey, value: emptyState() });
       return undefined;
     }
 
-    setState({
-      capabilityIds: new Set<string>(),
-      actionIds: new Set<string>(),
-      requiredResourceKinds: new Set<string>(),
-      idmm: createDefaultIdmmConfig(),
-      isLoading: true,
-      error: undefined,
-    });
+    setState({ sourceKey, value: { ...emptyState(), isLoading: true } });
     void Promise.all([
       agentPlatform.getEditor.invoke({ preset_id: presetId }),
       agentPlatform.capabilities.invoke(),
     ])
       .then(([editor, catalog]) => {
         if (cancelled) return;
-        // Guid launches only executable summaries, so prefer the persisted
-        // stable Revision over a transient editor draft whenever available.
+        // Saved official and personal Agents use the stable Revision. A newly
+        // initialized official configuration has only its baseline draft until
+        // its first launch or save; reading it must never prepare a Revision.
         const document = editor.revision?.document ?? editor.draft.document;
         const capabilityIds = new Set(
           document.enabled_capabilities.map((selection) => selection.capability.id)
@@ -87,14 +86,17 @@ export const useGuidPresetCapabilities = (
           )
         );
         setState({
-          capabilityIds,
-          actionIds,
-          requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
-          idmm: structuredClone(
-            document.runtime_policy?.idmm ?? createDefaultIdmmConfig()
-          ),
-          isLoading: false,
-          error: undefined,
+          sourceKey,
+          value: {
+            capabilityIds,
+            actionIds,
+            requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
+            idmm: structuredClone(
+              document.runtime_policy?.idmm ?? createDefaultIdmmConfig()
+            ),
+            isLoading: false,
+            error: undefined,
+          },
         });
       })
       .catch((error) => {
@@ -102,20 +104,17 @@ export const useGuidPresetCapabilities = (
         const normalizedError =
           error instanceof Error ? error : new Error('Failed to resolve Agent capabilities');
         console.error('Failed to load selected Agent capabilities:', normalizedError);
-        setState({
-          capabilityIds: new Set<string>(),
-          actionIds: new Set<string>(),
-          requiredResourceKinds: new Set<string>(),
-          idmm: createDefaultIdmmConfig(),
-          isLoading: false,
-          error: normalizedError,
-        });
+        setState({ sourceKey, value: { ...emptyState(), error: normalizedError } });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [presetId]);
+  }, [presetId, revisionDigest, sourceKey]);
 
-  return state;
+  // Effect cleanup and the next request happen after render. Fence the old
+  // requirements immediately when the same Agent gains a new saved Revision.
+  return state.sourceKey === sourceKey
+    ? state.value
+    : { ...emptyState(), isLoading: Boolean(presetId) };
 };

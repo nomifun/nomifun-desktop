@@ -190,6 +190,10 @@ IDMM 自动输入在正式 `message/user-accepted` 内容中保存服务端作�
 
 UI 直接消费当前 stream 与 Message projection，不保留缺少旧协议 marker 时启动的本地终态加工状态机。错误使用明确的当前 error code；不以旧错误文字猜测其含义。
 
+会话记录导出复用 canonical `message-history` 投影及其完整 Payload hydration，按服务端消息游标读取所有历史窗口并恢复时间顺序，不以单页上限截断记录，也不另建 transcript reader。服务端 `next_cursor` 来自原始投影窗口的最旧 sequence，展示过滤导致空页时仍继续读取，不用可见消息补造分页边界。项目文件使用现有递归工作区清单；历史或文件读取失败必须使导出失败，不能用空记录或缺失文件替代后报告成功。ZIP 目的地遵循用户目录选择器的 host 路径范围，来源文件单独按工作区范围校验；此人工导出入口不扩大 Agent 文件操作权限。归档在临时文件中完成后发布，既有目标文件不被覆盖，取消及失败不留下部分归档。
+
+Agent transition 的展示 `reference` 保持严格的 typed Payload，不混入 `last_event_id` 等投影诊断。所有消息查询在同一读取事务内，按精确 Session、sequence 和投影身份从 canonical Event 及已解析 Payload 重新生成 transition reference，现存展示投影不成为 transition 事实来源。读取验证投影摘要、事件边界、Payload 所属 Session 及存储迁移 proof；事实缺失或损坏拒绝读取，不删字段后兼容、不改写历史事件，也不在查询中重建数据库。
+
 所有新准入输入在 Runtime 派发前，从同一 Turn 已提交的 typed accepted event 与已解析 Payload 发布
 `message.userCreated`，普通文字、桌面伙伴、消息渠道与 IDMM 共用这条通知；幂等重放不重复发布。
 会话窗口以服务端消息身份即时合并输入，不等待任务终态或发起窗口的本地历史刷新。
@@ -212,7 +216,11 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 `extra.ssh_host_id` 回填或镜像资源身份；资源切换后的展示和链路状态必须匹配当前 binding。
 远程命令的目录和环境属于真实长驻 shell，由 SSH owner 管理，不是另一份 Session 内容或环境台账。
 
-内置 Agent 的界面名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏的内部会话配置只保存稳定模板 key，并按完整官方 seed 核验后修正显示元数据。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；新旧会话使用同一个名称来源。个人 Agent 仍使用其冻结身份，名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
+官方 Agent 为每个 owner 保留稳定可编辑的 Preset 身份，保存通过同一不可变 Revision 链；发布 seed 只初始化尚未保存的配置，不覆盖用户修改。官方产品入口准备会话时读取该 owner 已保存的配置，模型或扩展变体仍由现有 Revision/Snapshot 路径冻结。官方身份由 host 验证的 owner、来源与稳定模板 key 确认，不以当前 seed 或最新可变配置的 payload 相等性判断历史身份。
+
+内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
+
+伙伴始终使用 `companion.default`。保存官方伙伴配置不自动更新已有 Session；用户可显式预览并应用同一个伙伴 Agent 的最新配置。此入口复用 canonical Agent switch 的版本围栏、空闲校验、Runtime 清理与效果结算，只允许伙伴模板，保留模型、资源身份及其已选参数，操作授权由新配置重新校验。活动或暂停回合及缺失资源阻止更新，不新建另一份伙伴会话或绑定账本。
 
 已有会话的创作模式、模型选择、参数与素材草稿按会话 ID 保存到持久浏览器存储；完整 key 同时隔离 backend dataset 与 Agent data generation。重启恢复用户最后选择的模式，包括明确选择的“日常对话”，不从最近生成任务反推或覆盖选择。欢迎页草稿及待提交准入状态仍使用会话级临时存储。新建创作会话的状态移交与后续编辑使用同一 writer，权威会话删除通知同时清理其草稿；这些界面编辑偏好不授予 Agent 权限，也不改变 canonical 事实链。
 

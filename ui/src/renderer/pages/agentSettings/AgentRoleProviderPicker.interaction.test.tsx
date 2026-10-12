@@ -1,19 +1,22 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
+import { SWRConfig } from 'swr';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import {
-  asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, createEmptyAgentPresetDocument,
+  asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument,
   type AgentCatalogResponse, type AgentPresetDocument, type AgentPresetDraft, type CapabilityModuleCatalogItem, type RoleProviderSelection,
 } from '@/common/types/agentPlatform';
+import * as authContext from '@/renderer/hooks/context/AuthContext';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import AgentRoleProviderPicker from './AgentRoleProviderPicker';
 import AgentPresetEditor from './AgentPresetEditor';
-import OfficialTemplateOverview from './OfficialTemplateOverview';
+import { useAgentSettingsController } from './useAgentSettingsController';
 import { providerSelectionKey, relevantRoleIds, selectRoleProvider } from './roleProviders';
 
 const i18n = createInstance();
@@ -50,24 +53,57 @@ function mount(document = initial(), currentCatalog = catalog, disabled = false)
   };
   return { ...render(<I18nextProvider i18n={i18n}><Harness /></I18nextProvider>), state: () => current, saved: () => saved };
 }
-afterEach(cleanup);
+afterEach(() => { cleanup(); mock.restore(); });
 
 describe('component implementation selection', () => {
-  test('template customization passes the Provider choice to the normal create action', async () => {
-    let saved: AgentPresetDocument | undefined;
-    const result = render(<I18nextProvider i18n={i18n}><MemoryRouter>
-      <OfficialTemplateOverview busy={false} catalog={catalog} template={{
-        template_key: 'chat.minimal', immutable: true, forkable: true,
-        seed: { enabled_capabilities: [{ capability, action_allowlist: ['platform.search/search'] }], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] },
-        role_coverage: { required_capability_categories: [], required_capability_ids: [], required_resource_kinds: [], required_runtime_features: [] },
-      }} onSave={(_name, document) => { saved = document; }} />
-    </MemoryRouter></I18nextProvider>);
+  test('official editor saves the Provider choice as a revision of the same preset', async () => {
+    spyOn(authContext, 'useAuth').mockReturnValue({ user: null } as ReturnType<typeof authContext.useAuth>);
+    const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000021'),
+      source_template_key: 'chat.minimal', display_name: 'Official research', document: initial() };
+    original.current_revision = { preset_id: original.preset_id, revision: 1, revision_digest: asDigestHex('b'.repeat(64)) };
+    original.document.chat_route_records.agent_chat = { schema: 'nomifun.chat-route-record.v1', task: 'agent_chat', failovers: [], primary: {
+      model_route_id: 'test-route', model_route_revision: 1, provider_id: 'test-provider', model: 'test-model', protocol: 'openai_chat',
+      connection_config_ref: 'test-config', config_revision_digest: asDigestHex('c'.repeat(64)), credential_ref: 'test-credential', features: ['text_input', 'text_output'],
+    } };
+    const preset = { preset_id: original.preset_id, display_name: original.display_name,
+      source: 'official' as const, source_template_key: 'chat.minimal' as const, bound_target_count: 1,
+      current_stable_revision: original.current_revision };
+    spyOn(agentPlatform.library, 'invoke').mockResolvedValue({ official_templates: [], official_presets: { 'chat.minimal': preset },
+      user_presets: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: 1, user_preset_count: 0 } });
+    spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue(catalog);
+    spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue({ preset, draft: original,
+      revision: { reference: original.current_revision, document: original.document, created_by: 'owner', created_at_ms: 1 } });
+    const save = spyOn(agentPlatform.saveRevision, 'invoke').mockImplementation(async ({ request }) => ({ preset,
+      revision: { reference: { ...original.current_revision!, revision: 2 }, document: request.draft.document, created_by: 'owner', created_at_ms: 2 },
+      resolved_snapshot_ref: { snapshot_id: asResolvedSnapshotId('0190f5fe-7c00-7a00-8000-000000000022'), snapshot_digest: asDigestHex('d'.repeat(64)) } }));
+    const create = spyOn(agentPlatform.createPreset, 'invoke');
+    const Harness = () => {
+      const settings = useAgentSettingsController();
+      const opened = useRef(false);
+      useEffect(() => {
+        if (!settings.library || opened.current) return;
+        opened.current = true;
+        void settings.openPreset(preset);
+      }, [settings.library, settings.openPreset]);
+      if (!settings.editor || !settings.draft) return null;
+      return <AgentPresetEditor editor={settings.editor} draft={settings.draft} catalog={settings.catalog}
+        busyAction={settings.busyAction} dirty={settings.dirty} onDraftChange={settings.setDraft}
+        onSave={() => { void settings.saveRevision(); }} onStartConversation={() => {}} />;
+    };
+    const result = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map() }}><MemoryRouter><Harness />
+    </MemoryRouter></SWRConfig></I18nextProvider>);
     const view = within(result.container);
-    fireEvent.click(view.getByRole('tab', { name: en.providers.title }));
+    fireEvent.click(await view.findByRole('tab', { name: en.providers.title }));
     fireEvent.change(view.getByRole('combobox', { name: 'Web search' }), { target: { value: providerSelectionKey(selection) } });
-    fireEvent.click(view.getByRole('button', { name: en.workbench.saveAsMine }));
-    expect(saved?.system_role_provider_overrides.search).toEqual(selection);
-    expect(saved?.enabled_capabilities.map(item => item.capability)).toEqual([capability]);
+    fireEvent.click(view.getByRole('button', { name: 'common.save' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    const saved = save.mock.calls[0][0];
+    expect(saved.preset_id).toBe(original.preset_id);
+    expect(saved.request.expected_current_revision).toEqual(original.current_revision);
+    expect(saved.request.draft.document.system_role_provider_overrides.search).toEqual(selection);
+    expect(saved.request.draft.document.enabled_capabilities).toEqual(original.document.enabled_capabilities);
+    expect(original.document.system_role_provider_overrides).toEqual({});
+    expect(create).not.toHaveBeenCalled();
   });
 
   test('professional generation preset saves through the existing form without a chat model', () => {

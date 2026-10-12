@@ -464,15 +464,28 @@ async fn agent_switch_retains_available_extensions_drops_removed_sources_and_run
     })).await;
     assert_eq!(preview["can_apply"], true, "unavailable extensions must not block an idle Agent change: {preview}");
     assert_eq!(preview["blockers"], json!([]));
+    let target_snapshot = preview["target"]["resolved_snapshot_ref"].clone();
+    let mut stale_snapshot = target_snapshot.clone();
+    stale_snapshot["snapshot_digest"] = json!("b".repeat(64));
+    let (status, stale) = response_with_idempotency(&fixture.router, "PUT", &format!("/api/agent-sessions/{id}/agent"), json!({
+        "selection": target_selection, "handoff_mode": "context_only", "expected_binding_version": before["binding_version"],
+        "expected_resolved_snapshot_ref": stale_snapshot
+    }), Some(&uuid::Uuid::now_v7().to_string())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["code"], "AGENT_SESSION_BINDING_CHANGED");
+    assert_eq!(stale["details"]["stage"], "target_preview");
+    assert_eq!(fixture.binding(id).await, before, "a stale target reference never submits a transition");
     let switch_key = uuid::Uuid::now_v7().to_string();
     let (status, switched) = response_with_idempotency(&fixture.router, "PUT", &format!("/api/agent-sessions/{id}/agent"), json!({
-        "selection": target_selection, "handoff_mode": "context_only", "expected_binding_version": before["binding_version"]
+        "selection": target_selection, "handoff_mode": "context_only", "expected_binding_version": before["binding_version"],
+        "expected_resolved_snapshot_ref": target_snapshot
     }), Some(&switch_key)).await;
     assert_eq!(status, StatusCode::OK, "{switched}");
     assert_eq!(switched["data"]["conversation"]["conversation_id"], id);
     let retained = selection(&[SKILL_B], &[&fixture.server_b]);
     assert_eq!(fixture.state(id).await["selection"], retained);
     let after = fixture.binding(id).await;
+    assert_eq!(after["resolved_snapshot_ref"], target_snapshot, "the preview target with retained global extensions stays stable through apply");
     assert_eq!(after["binding_version"].as_u64().unwrap(), before["binding_version"].as_u64().unwrap() + 1);
     assert!(after["typed_resource_bindings"].as_array().unwrap().iter().all(|binding|
         binding["resource_kind"] != "mcp_server" || binding["resource_id"] != fixture.server_a),

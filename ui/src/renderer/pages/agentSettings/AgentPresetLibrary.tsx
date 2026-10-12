@@ -34,13 +34,15 @@ const AgentPresetLibrary: React.FC<Props> = ({
 }) => {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
-  const [mode, setMode] = useState<'mine' | 'official'>(selection?.kind === 'preset' ? 'mine' : 'official');
+  const selectedSource = selection?.kind === 'preset' ? selection.preset.source : 'official';
+  const [mode, setMode] = useState<'mine' | 'official'>(selectedSource === 'user' ? 'mine' : 'official');
   const tabRefs = useRef(new Map<'mine' | 'official', HTMLButtonElement>());
-  useEffect(() => { setMode(selection?.kind === 'preset' ? 'mine' : 'official'); }, [selection?.kind]);
+  useEffect(() => { setMode(selectedSource === 'user' ? 'mine' : 'official'); }, [selectedSource]);
   const matches = (name: string, description = '') => `${name} ${description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
   const templates = library.official_templates.filter((template) => {
     const path = TEMPLATE_I18N_PATH[template.template_key];
-    return matches(t(`agentSettings.template.${path}.name`), t(`agentSettings.template.${path}.description`));
+    const preset = library.official_presets[template.template_key];
+    return matches(preset && preset.display_name !== template.template_key ? preset.display_name : t(`agentSettings.template.${path}.name`), preset?.description ?? t(`agentSettings.template.${path}.description`));
   });
   const presets = library.user_presets.filter((preset) => matches(preset.display_name, preset.description));
   const activateTab = (next: 'mine' | 'official') => {
@@ -74,11 +76,14 @@ const AgentPresetLibrary: React.FC<Props> = ({
       {mode === 'official' ? <div className={styles.libraryList}>
         {templates.map((template) => {
           const path = TEMPLATE_I18N_PATH[template.template_key];
-          const name = t(`agentSettings.template.${path}.name`);
-          const selected = selection?.kind === 'template' && selection.template.template_key === template.template_key;
-          return <button type='button' key={template.template_key} className={`${styles.libraryRow} ${selected ? styles.libraryRowActive : ''}`} aria-pressed={selected} disabled={busy} onClick={() => onSelectTemplate(template)}>
-            <span className={styles.libraryIcon}><TemplateIcon templateKey={template.template_key} /></span>
-            <span className={styles.libraryCopy}><span className={styles.libraryName}>{name}</span><span className={styles.libraryMeta}>{template.template_key === 'assistant.general' && <em>{t('agentSettings.library.recommended')}</em>}{t('agentSettings.library.moduleCount', { count: templateModuleCount(template) })}</span></span>
+          const preset = library.official_presets[template.template_key];
+          const name = preset && preset.display_name !== template.template_key ? preset.display_name : t(`agentSettings.template.${path}.name`);
+          const opening = openingPresetId === preset?.preset_id;
+          const selected = (selection?.kind === 'template' && selection.template.template_key === template.template_key) ||
+            (selection?.kind === 'preset' && selection.preset.preset_id === preset?.preset_id) || opening;
+          return <button type='button' key={template.template_key} className={`${styles.libraryRow} ${selected ? styles.libraryRowActive : ''}`} aria-pressed={selected} aria-busy={opening} disabled={busy} onClick={() => onSelectTemplate(template)}>
+            <span className={styles.libraryIcon}>{opening ? <Loading theme='outline' size={18} className='animate-spin' /> : <TemplateIcon templateKey={template.template_key} />}</span>
+            <span className={styles.libraryCopy}><span className={styles.libraryName}>{name}</span><span className={styles.libraryMeta}>{template.template_key === 'assistant.general' && <em>{t('agentSettings.library.recommended')}</em>}{dirtyPresetId === preset?.preset_id ? t('agentSettings.status.dirty') : preset?.current_stable_revision ? t('agentSettings.status.saved') : t('agentSettings.library.moduleCount', { count: templateModuleCount(template) })}</span></span>
           </button>;
         })}
       </div> : <div className={styles.libraryList}>

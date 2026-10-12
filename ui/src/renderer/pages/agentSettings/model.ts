@@ -23,15 +23,12 @@ export type AgentEditingDocument = Omit<
   AgentPresetDocument,
   'model_route_refs' | 'chat_route_records'
 >;
-export type TemplateEditingState = {
-  displayName: string;
-  document: AgentEditingDocument;
-  activeTab: string;
+export type AgentEditorReturn = {
+  version: 1;
+  search: string;
+  kind: 'preset';
+  draft: Omit<AgentPresetDraft, 'document'> & { document: AgentEditingDocument };
 };
-export type AgentEditorReturn = { version: 1; search: string } & (
-  | { kind: 'template'; templateKey: OfficialPresetKey; editing: TemplateEditingState }
-  | { kind: 'preset'; draft: Omit<AgentPresetDraft, 'document'> & { document: AgentEditingDocument } }
-);
 
 export function editingDocument(document: AgentPresetDocument): AgentEditingDocument {
   const {
@@ -48,14 +45,6 @@ export function agentEditorReturn(state: unknown, search: string): AgentEditorRe
     : null;
   if (!value || value.version !== 1 || value.search !== search) return null;
   const params = new URLSearchParams(search);
-  if (
-    value.kind === 'template' &&
-    value.editing &&
-    typeof value.editing.displayName === 'string' &&
-    Array.isArray(value.editing.document?.enabled_capabilities) &&
-    (!params.has('template') || params.get('template') === value.templateKey) &&
-    !params.has('preset')
-  ) return value;
   if (
     value.kind === 'preset' &&
     value.draft &&

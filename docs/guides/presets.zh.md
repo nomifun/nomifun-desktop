@@ -1,134 +1,53 @@
 # Agent 工作台
 
-> 本页按 05 §15 的当前合同更新。用户可见的产品名称是 **Agent 工作台**，
-> 公共 UI 路由是 `/agent`；`AgentPreset` 只是后端 authoring aggregate 的内部名称。
-> Plugin Action/Binding 以 Unified Plugin Core 为准；本页不定义 Plugin 作者合同。
+从侧边栏进入 **Agent**（`/agent`），可直接编辑官方 Agent，或创建自己的 Agent。官方列表包含日常对话、通用、编程、伙伴、客服和创作六个入口。
 
-## 入口与最短路径
+## 直接编辑官方 Agent
 
-从首页侧边栏进入 **Agent**（`/agent`），然后：
+1. 在官方列表选择要调整的 Agent，例如 **伙伴**。
+2. 在能力页启用或停用能力，调整具体操作；在组件页选择合法的能力实现。
+3. 在设置页调整名称、描述、人设与指令，在运行策略页调整默认行为。
+4. 配置可用的对话模型，然后点击 **保存**。
 
-1. 新建 Agent；
-2. 选择轻量、通用、全面或自定义创建种子；
-3. 编辑身份、指令、模型路由、能力、技能和 typed resources；
-4. 查看来源、可用性与影响提示；
-5. 保存并试用；
-6. 在 `/agent-sessions/:agentSessionId` 中继续使用生成的 Session。
+保存修改的是当前用户的官方 Agent 配置，保留同一个 Agent 身份；不要求创建副本。其他用户的配置互不影响。后续从对应官方入口创建会话时使用这份已保存配置。官方模板更新不会覆盖当前数据集里已保存的能力、指令或组件选择。
 
-Runtime、网络、系统和提供商管理仍属于全局设置，尤其是
-`/settings/execution-engines`；它们不是 Agent 工作台的编辑内容。
+官方伙伴保留“伙伴”和“伙伴记忆”两项核心能力，其余能力和操作可自由调整。
 
-## 领域边界
+已有会话继续使用它们冻结的配置。对桌面伙伴，在伙伴概览或聊天窗口的 Agent 控件中选择 **应用已保存的更新**，查看能力变化并确认，即可在同一个空闲会话中应用已保存的伙伴配置。活动回合、暂停回合或未结算效果会阻止更新；伙伴模型及仍需使用的资源选择、参数保留，停用能力后移除的资源在预览中显示。增加能力所需的资源尚未配置时，先按提示补齐资源。预览后配置再次改变时，需要重新预览并确认。
 
-| 对象 | 所属方 | Agent 工作台能做什么 |
-| --- | --- | --- |
-| Package / Agent Module | Agent 平台内部 | 只读取已正式物化的内置来源和 provenance |
-| Unified Plugin Action | Plugin Core | 按稳定 Action ID 发现并调用已启用 Plugin 的 Agent Binding |
-| Capability Catalog | 平台能力目录域 | 查询能力、来源、合同、支持的消费者和 availability |
-| Skill Catalog | 平台技能目录域 | 选择 instruction/workflow；Skill 本身不是执行器 |
-| AgentPreset | Agent authoring 域 | 保存用户意图和当前 Revision 引用 |
-| AgentPresetRevision | Agent authoring 域 | 保存不可变 payload、ContributionLock 和 revision digest |
-| Agent Session | Agent 运行域 | 消费冻结的 Snapshot，不反向改写 Revision |
+需要独立的个人 Agent 时，可以点击 **创建副本**。此操作明确创建新身份，不改变原来的官方 Agent 配置。个人 Agent 可以删除，官方入口保留。
 
-Unified Plugin Core 不是 Agent 子系统。安装、启停、配置、Credential、generation
-DataRoot 和 Service 生命周期由 Plugin Core 负责；Agent 只在消费者边界读取
-`agent.*` Binding，并以稳定 `plugin:<plugin_id>/<action_id>` 调用 Action。
+## 创建个人 Agent
 
-## 四种创建种子
+点击 **新建** 创建空白 Agent，选择能力、组件实现、身份、指令与运行策略，然后保存。保存后可以通过 **使用 Agent** 开始会话，也可以在支持个人 Agent 的产品选择器中选择它。具体知识库、工作区或伙伴等资源由会话或对应产品入口配置，工作台不保存另一份资源绑定。
 
-四种模式是创建时的 seed，不是四种持久化类型：
+## 能力和扩展
 
-| 种子 | 初始内容 | 不会自动做什么 |
-| --- | --- | --- |
-| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP 或 Plugin |
-| 通用 | 官方常用 Capability/Skill | 不吸收用户安装的全部扩展 |
-| 全面 | 官方 Coding 基线 | 不安装或纳入全部 Plugin |
-| 自定义 | 空白或可选种子 | 不允许填写内部 ID、Digest 或 Runtime 参数 |
+工作台读取平台能力目录中已启用、完成物化且支持当前消费者的能力。未安装或不可用的能力不能通过编辑配置获得执行权限。操作授权、依赖闭包、冲突和组件兼容性由服务端统一校验。需要多个合法实现之一时，在组件页明确选择来源。
 
-所有创建结果都进入同一条主链：
+MCP 与 Skill 使用全局扩展目录及会话选择，不通过官方预设或个人 Agent 保存扩展总开关。安装、凭证、启停和服务生命周期由各自的设置与 Plugin Core 管理。
 
-```text
-创建种子
-  → AgentPreset Draft
-  → canonical Compiler
-  → AgentPresetRevision + ContributionLock[]
-  → ResolvedSnapshot
-  → AgentSession / AgentBinding
-```
+## 保存与会话边界
 
-模板更新只影响以后创建的 Draft；已有 Revision 不会静默漂移。
+编辑内容先存在于草稿。保存由 canonical compiler 校验，并原子创建不可变 `AgentPresetRevision`，推进当前 Revision 指针。官方配置与个人配置共用这条保存链，不增加第二份配置或权限台账。
 
-## 能力、技能与来源
+会话创建时冻结实际使用的能力、组件、模型、工具合同和资源到 Snapshot。保存 Agent 不改写已记录的 Revision、Snapshot、会话事件或正在执行的回合。已有会话的配置变化必须通过已有 canonical binding transition，在空闲、资源清理和效果结算边界显式提交。
 
-工作台从平台 Capability Catalog 查询能力。Catalog 条目至少包含稳定能力 ID、合同
-digest、owner、来源 Package 或 Unified Plugin provenance、支持的消费者、typed contribution、所需资源和
-按消费者区分的 availability。
+官方模板是用于初始化和显式复制的发布基线。模板更新只影响尚未保存的默认配置；已保存的个人官方配置不会静默漂移。
 
-Capability 没有独立版本号。Preset、依赖和冲突只引用稳定能力 ID；内置实现由 Package
-版本、合同 digest、ContributionLock 与 Snapshot digest 冻结，因此更新实现不需要同步改写工作台引用。
-
-- 只有已启用并完成 materialization 的内置贡献，以及已启用 Plugin 的 Agent Binding，才能进入正式发现面；
-- Plugin Draft、Preview DataRoot、Credential 和私有 generation DataRoot 不会进入 Agent Snapshot；
-- 标记为 non-Agent-only 的能力不会出现在 Agent picker；
-- 能力不可用、合同不匹配或资源缺失时显示可解释状态，并 fail closed；
-- Skill 只提供 instruction/workflow 和资源说明，不自动扩张 Snapshot。
-
-如果同一 canonical 能力存在多个合法实现，用户只能在能力详情中显式选择来源。
-选择结果由服务端生成 ContributionLock；前端不提交内部 Artifact digest
-来驱动执行。
-
-## Revision 与 Snapshot
-
-用户编辑内容先存在于不可执行 Draft。Save 成功后，服务端原子创建不可变
-`AgentPresetRevision`，并推进当前 Revision 指针。Preview、Save 和 Test 使用同一个
-canonical Compiler；Test 创建普通 AgentSession，不创建 test-only Session。
-
-Revision digest 覆盖规范化的：
-
-```text
-payload + contribution_locks
-```
-
-Snapshot 进一步冻结本次实际执行所需的 Capability、Provider/Model route、Tool schema、
-typed resource binding、Runtime feature、initial/on-demand 分组和 Snapshot digest。
-Session Open 读取已保存 Snapshot，不在每个 Turn 中重新选择 latest 来源，也不静默
-切换 Provider 或 fallback。
-
-数据库迁移记录如下：
-
-- `061_agent_snapshot_naming.sql` 将 `conversations`、
-  `agent_execution_participants`、`agent_execution_template_participants` 和
-  `cron_jobs` 的物理列统一改名为 `agent_snapshot`，不保留 alias 或双写；
-- `062_agent_preset_contribution_locks.sql` 为
-  `nomi_agent_preset_revisions` 增加 `contribution_locks_json`，并要求其为合法 JSON
-  数组；
-- 旧 baseline 中的 `preset_snapshot` 只是 migration source，不是当前运行时字段；
-- `preset_id`/`preset_revision` 若仍出现，只表示 AgentPreset provenance，不恢复旧
-  resolver 或旧兼容模型。
-
-## Canonical API（机器资源名）
-
-工作台使用以下 canonical API；API 的稳定机器名称不代表 UI 必须显示“Preset”：
+## API 与实现入口
 
 | 用途 | Endpoint |
 | --- | --- |
-| 官方创建种子 | `GET /api/agent-preset-templates?source=official` |
-| 创建 AgentPreset | `POST /api/agent-presets` |
-| 从官方种子创建 Draft | `POST /api/agent-presets/from-template/{template_id}` |
-| 读取编辑器 | `GET /api/agent-presets/{preset_id}/editor` |
-| Preview / Save / Revision | `/api/agent-presets/{preset_id}/...` |
-| 平台能力 Catalog | `GET /api/capabilities` |
-| Agent Session | `/api/agent-sessions/*` |
-| Agent Binding | `/api/agent-bindings/*` |
+| 模板及当前用户的官方、个人配置目录 | `GET /api/agent-preset-templates` |
+| 创建个人 Agent | `POST /api/agent-presets` |
+| 从官方初始模板显式创建个人配置 | `POST /api/agent-presets/from-template/{template_id}`，`reuse_existing=false` |
+| 为官方产品入口准备已保存配置 | 同上，`reuse_existing=true` |
+| 读取统一编辑器 | `GET /api/agent-presets/{preset_id}/editor` |
+| 保存不可变 Revision | `POST /api/agent-presets/{preset_id}/revisions` |
+| 能力和组件目录 | `GET /api/agent-catalog` |
+| 会话及显式 Agent 更新 | `/api/agent-sessions/*` |
 
-客户端不得提交 Snapshot digest、内部 Revision ID、完整 Binding 或裸
-canonical JSON。服务端负责 owner 检查、Catalog resolve、ContributionLock、Revision/
-Snapshot digest 和 typed failure。
+目录中的 `official_templates` 是初始模板；`official_presets` 按模板 key 返回当前用户的稳定可编辑身份；`user_presets` 只包含个人 Agent。客户端不能把模板、来源标记或内部 ID 当作授权，owner、能力与 Snapshot 校验由服务端负责。
 
-## 实现边界
-
-Agent revision、Snapshot、Session 与 Module 授权的当前实现见
-[Agent Session 架构](../architecture/agent-session.zh.md)。
-
-Plugin 的创建、预览、安装、配置和 Backup 请见
-[插件平台架构](../architecture/plugin-platform.zh.md)。
+当前运行边界见 [Agent Session 架构](../architecture/agent-session.zh.md)，Plugin 管理见 [插件平台架构](../architecture/plugin-platform.zh.md)。

@@ -72,6 +72,12 @@ On disk each companion is a directory — `{data_dir}/companion/companions/{comp
 **the directory is the source of truth** — which is also the unit the
 companion bundle exports and imports.
 
+### Extending the Companion Agent
+
+In **Manage → Overview → Agent setup**, click **Edit Agent** to edit your account's official Companion Agent directly. Add capabilities or adjust instructions, then save. All companions share this official Agent configuration; each companion keeps its own persona, model, memory, and resource ownership.
+
+A newly created companion conversation uses the saved configuration. For an existing conversation, click **Apply saved updates**, review the capability and resource changes, and confirm. The update takes effect from the next message while preserving the same conversation's history and current model. An active reply, unsettled effects, or missing resources blocks application and shows the reason. Saving the configuration never automatically rewrites an existing conversation, accepted input, or runtime checkpoint.
+
 ### Multiple desktop companions on screen
 
 Every companion with the desktop-companion switch enabled gets its own desktop

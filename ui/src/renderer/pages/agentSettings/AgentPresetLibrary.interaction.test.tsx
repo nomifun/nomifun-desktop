@@ -80,6 +80,7 @@ const preset: AgentPresetSummary = {
 };
 
 const library: AgentPresetLibraryResponse = {
+  official_presets: {},
   official_templates: [
     {
       template_key: 'chat.minimal',
@@ -113,6 +114,26 @@ const library: AgentPresetLibraryResponse = {
 afterEach(() => cleanup());
 
 describe('AgentPreset library deletion', () => {
+  test('an editable official Agent stays selected in the official tab and has no delete action', () => {
+    const official: AgentPresetSummary = { ...preset, source: 'official', display_name: 'Minimal',
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000201') };
+    let selected = '';
+    const result = render(<I18nextProvider i18n={testI18n}><AgentPresetLibrary
+      library={{ ...library, official_presets: { 'chat.minimal': official } }}
+      selection={{ kind: 'preset', preset: official }} busy={false} creating={false}
+      openingPresetId={null} deletingPresetId={null}
+      onSelectTemplate={template => { selected = template.template_key; }}
+      onSelectPreset={() => {}} onCreatePreset={() => {}} onDeletePreset={() => {}}
+    /></I18nextProvider>);
+    const page = within(result.container);
+    expect(page.getByRole('tab', { name: /Official presets/ }).getAttribute('aria-selected')).toBe('true');
+    const row = page.getByRole('button', { name: /Minimal/ });
+    expect(row.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(row);
+    expect(selected).toBe('chat.minimal');
+    expect(page.queryByRole('button', { name: /Delete Agent/ })).toBeNull();
+    expect(page.queryByRole('button', { name: /Research Agent/ })).toBeNull();
+  });
   test('library tabs use one roving focus stop and support Arrow, Home and End', async () => {
     const result = render(
       <I18nextProvider i18n={testI18n}>

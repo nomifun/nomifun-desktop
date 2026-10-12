@@ -20,6 +20,10 @@ import type {
 } from '@/common/adapter/ipcBridge';
 import type { I18nKey } from '@/renderer/services/i18n';
 import type { KnowledgeBaseId } from '@/common/types/ids';
+import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from './knowledgeError';
+import { KnowledgeErrorDetails } from './KnowledgeErrorFeedback';
+
+export { knowledgeErrorText } from './knowledgeError';
 
 const KNOWLEDGE_OPEN_PREFETCH_TTL_MS = 30_000;
 
@@ -79,7 +83,7 @@ export function prefetchKnowledgeBaseOpen(
 export function useKnowledgeBases() {
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<KnowledgeErrorPresentation | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -89,7 +93,8 @@ export function useKnowledgeBases() {
       setError(null);
     } catch (e) {
       console.error('Failed to load knowledge bases', e);
-      setError(String(e));
+      const error = normalizeKnowledgeError(e, 'load');
+      setError(error.handled ? null : error);
     } finally {
       setLoading(false);
     }
@@ -127,7 +132,7 @@ export function useKnowledgeBase(
   const [loading, setLoading] = useState(Boolean(id));
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesLoaded, setFilesLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<KnowledgeErrorPresentation | null>(null);
   const requestRef = useRef(0);
   const activeIdRef = useRef(id);
   activeIdRef.current = id;
@@ -136,7 +141,8 @@ export function useKnowledgeBase(
     promise: Promise<IKnowledgeFileEntry[]>;
   } | null>(null);
   const filesRequestGenerationRef = useRef(0);
-  const filesLoadedRef = useRef(false);
+  const filesRequestedRef = useRef(false);
+  const filesErrorRef = useRef<KnowledgeErrorPresentation | null>(null);
 
   const loadFiles = useCallback(async (): Promise<IKnowledgeFileEntry[]> => {
     if (!id) return [];
@@ -145,6 +151,7 @@ export function useKnowledgeBase(
     }
 
     setFilesLoading(true);
+    filesRequestedRef.current = true;
     const generation = ++filesRequestGenerationRef.current;
     const promise = (async () => {
       try {
@@ -156,8 +163,10 @@ export function useKnowledgeBase(
           generation === filesRequestGenerationRef.current
         ) {
           setFiles(list);
-          filesLoadedRef.current = true;
           setFilesLoaded(true);
+          const recoveredError = filesErrorRef.current;
+          setError((current) => current === recoveredError ? null : current);
+          filesErrorRef.current = null;
         }
         return list;
       } catch (e) {
@@ -166,7 +175,9 @@ export function useKnowledgeBase(
           generation === filesRequestGenerationRef.current
         ) {
           console.error('Failed to load knowledge files', e);
-          setError(String(e));
+          const error = normalizeKnowledgeError(e, 'load');
+          filesErrorRef.current = error.handled ? null : error;
+          setError(error.handled ? null : error);
         }
         throw e;
       } finally {
@@ -209,7 +220,7 @@ export function useKnowledgeBase(
       setBase(info);
       setError(null);
 
-      if (filesLoadedRef.current) {
+      if (filesRequestedRef.current) {
         filesRequestRef.current = null;
         filesRequestGenerationRef.current += 1;
         await loadFiles();
@@ -217,7 +228,8 @@ export function useKnowledgeBase(
     } catch (e) {
       if (request !== requestRef.current) return;
       console.error('Failed to load knowledge base', e);
-      setError(String(e));
+      const error = normalizeKnowledgeError(e, 'load');
+      setError(error.handled ? null : error);
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
@@ -225,7 +237,8 @@ export function useKnowledgeBase(
 
   useEffect(() => {
     const request = ++requestRef.current;
-    filesLoadedRef.current = false;
+    filesRequestedRef.current = false;
+    filesErrorRef.current = null;
     filesRequestRef.current = null;
     filesRequestGenerationRef.current += 1;
     setFiles([]);
@@ -273,7 +286,8 @@ export function useKnowledgeBase(
       } catch (e) {
         if (request !== requestRef.current) return;
         console.error('Failed to load knowledge base', e);
-        setError(String(e));
+        const error = normalizeKnowledgeError(e, 'load');
+        setError(error.handled ? null : error);
         setLoading(false);
       }
     })();
@@ -310,7 +324,7 @@ export function useKnowledgeBase(
 export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
   const [consumers, setConsumers] = useState<IKnowledgeConsumer[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<KnowledgeErrorPresentation | null>(null);
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -321,7 +335,8 @@ export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
       setError(null);
     } catch (e) {
       console.error('Failed to load knowledge consumers', e);
-      setError(String(e));
+      const error = normalizeKnowledgeError(e, 'load');
+      setError(error.handled ? null : error);
     } finally {
       setLoading(false);
     }
@@ -359,12 +374,6 @@ export function addKnowledgeContent(
   });
 }
 
-/** Human-readable message for a knowledge API failure (prefers the backend-provided message). */
-export function knowledgeErrorText(e: unknown): string {
-  if (isBackendHttpError(e) && e.backendMessage.trim()) return e.backendMessage;
-  return e instanceof Error ? e.message : String(e);
-}
-
 /** True when the error is the autogen 409 — no AI completer/provider configured. */
 export function isAutogenNoProviderError(e: unknown): boolean {
   return isBackendHttpError(e) && e.status === 409;
@@ -374,7 +383,7 @@ type TranslateFn = (key: I18nKey, options?: Record<string, unknown>) => string;
 
 /**
  * Surface a URL-source fetch outcome (create-time `source_fetch` / refresh-source
- * response). Failures get a sticky notification listing each failed URL; a fully
+ * response). Failures retain the outcome summary and keep technical details collapsed; a fully
  * successful run shows `okMessage` when provided (callers pass none at create
  * time, where the regular "created" toast already covers it).
  */
@@ -390,7 +399,9 @@ export function notifySourceFetchResult(t: TranslateFn, summary: IKnowledgeSourc
           { key: 'summary' },
           t('knowledge.source.fetchSummary', { fetched: summary.fetched, failed: summary.failed })
         ),
-        ...summary.errors.map((line, i) => createElement('span', { key: i, className: 'text-12px break-all' }, line))
+        createElement(KnowledgeErrorDetails, {
+          technicalDetails: normalizeKnowledgeError(summary.errors.join('\n')).technicalDetails,
+        })
       ),
       duration: 10000,
     });

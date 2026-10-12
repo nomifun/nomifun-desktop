@@ -116,6 +116,7 @@ export const useConversationAgentSwitch = ({
         selection: wireSelection,
         handoff_mode: preview.handoff.available ? 'continue_task' : 'context_only',
         expected_binding_version: preview.expected_binding_version,
+        expected_resolved_snapshot_ref: preview.target.resolved_snapshot_ref,
       }, request.idempotencyKey);
       // A completed switch remains successful even if its projection refresh fails.
       await operations.refresh(sessionId).catch((error) => {

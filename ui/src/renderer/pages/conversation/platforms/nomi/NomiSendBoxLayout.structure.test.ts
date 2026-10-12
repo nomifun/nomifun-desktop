@@ -156,6 +156,7 @@ describe('Nomi sendbox control layout', () => {
     expect(agentSwitchSource.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);
     expect(agentSwitchSource.includes('agentPlatform.sessions.applyAgentSwitch.invoke')).toBe(true);
     expect(agentSwitchSource.includes('expected_binding_version')).toBe(true);
+    expect(agentSwitchSource.includes('expected_resolved_snapshot_ref: preview.target.resolved_snapshot_ref')).toBe(true);
     expect(agentSwitchSource.includes('handoff_mode')).toBe(true);
     expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
     expect(chatSource.includes('creation.draft remain mounted')).toBe(true);

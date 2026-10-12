@@ -418,7 +418,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 }
 
 #[tokio::test]
-async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
+async fn message_history_http_cursor_preserves_tool_details_and_crosses_filtered_pages() {
     const TRUST:&str = "settlement-history-cursor";
     async fn call(
         router:axum::Router,
@@ -454,13 +454,14 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
     let store=nomifun_agent_session::AgentSessionStore::from_pool(
         services.database.pool().clone(),
     ).await.unwrap();
-    let (_,turn)=store.start_turn(
+    let (input,turn)=store.start_turn(
         &typed_session,
         nomifun_agent_contracts::EventProducerId::from("session_api"),
         nomifun_agent_contracts::IdempotencyKey::from("settlement-http-turn"),
         nomifun_agent_contracts::OperationId::from("settlement-http-turn"),
         nomifun_agent_contracts::StrictJsonValue(json!({"content":"exercise settlement projection"})),
     ).await.unwrap();
+    let root_message_id=input.record.unwrap().event_id.as_ref().to_owned();
     let turn_started=turn.record.unwrap().event_id;
     let projection_id=uuid::Uuid::now_v7().to_string();
     let tool=nomifun_agent_contracts::SessionEventAppend {
@@ -472,7 +473,7 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
             kind:nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
             kind_version:1,
             correlation_id:nomifun_agent_contracts::CorrelationId::from(projection_id.clone()),
-            causation_event_id:Some(turn_started),
+            causation_event_id:Some(turn_started.clone()),
             payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
                 nomifun_agent_contracts::StrictJsonValue(json!({
                     "operation_id":"settlement-http-operation","call_id":"settlement-http-call",
@@ -502,9 +503,35 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
     };
     store.append_event(&result).await.unwrap();
 
+    // The canonical projection window can contain presentation-only rows.
+    // An empty reasoning body is filtered by the renderer-facing mapper; it
+    // still consumes a raw pagination slot and must carry a usable boundary.
+    for (suffix,content) in [("visible","Inspect the workspace"),("empty"," ")] {
+        let identity=format!("settlement-http-thinking-{suffix}");
+        store.append_event(&nomifun_agent_contracts::SessionEventAppend {
+            agent_session_id:typed_session.clone(),
+            event_id:nomifun_agent_contracts::EventId::from(identity.clone()),
+            producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+            idempotency_key:nomifun_agent_contracts::IdempotencyKey::from(identity),
+            semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind:nomifun_agent_contracts::SessionEventKind("thinking/content-part".to_owned()),
+                kind_version:1,
+                correlation_id:nomifun_agent_contracts::CorrelationId::from(uuid::Uuid::now_v7().to_string()),
+                causation_event_id:Some(turn_started.clone()),
+                payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                    nomifun_agent_contracts::StrictJsonValue(json!({
+                        "content":content,"turn_id":root_message_id,
+                    })),
+                ),
+            },
+        }).await.unwrap();
+    }
+
     let mut cursor:Option<String>=None;
     let mut items=Vec::new();
     let mut total=None;
+    let mut filtered_pages=0;
+    let mut page_count=0;
     loop {
         let path=cursor.as_ref().map_or_else(
             || format!("/api/agent-sessions/{session_id}/message-history?page_size=1"),
@@ -514,16 +541,29 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
         assert_eq!(status,StatusCode::OK,"{page}");
         let data=&page["data"];
         let page_items=data["items"].as_array().unwrap();
-        assert_eq!(page_items.len(),1,"{page}");
+        assert!(page_items.len()<=1,"{page}");
+        page_count+=1;
+        if page_items.is_empty() {
+            filtered_pages+=1;
+            assert!(data["has_more"].as_bool().unwrap(),"{page}");
+        }
         let page_total=data["total"].as_u64().unwrap();
         assert_eq!(*total.get_or_insert(page_total),page_total);
-        let item=page_items[0].clone();
-        cursor=Some(format!("{}:{}",item["created_at"].as_i64().unwrap(),item["message_id"].as_str().unwrap()));
-        items.push(item);
-        if !data["has_more"].as_bool().unwrap() { break; }
-        assert!(items.len()<10,"history cursor did not converge");
+        items.extend(page_items.iter().cloned());
+        if !data["has_more"].as_bool().unwrap() {
+            assert!(data.get("next_cursor").is_none(),"terminal page must not advertise another window");
+            break;
+        }
+        let next_cursor=data["next_cursor"].as_str().expect("every nonterminal raw window has a cursor");
+        if let Some(previous)=&cursor {
+            let timestamp=|value:&str| value.split_once(':').unwrap().0.parse::<i64>().unwrap();
+            assert!(timestamp(next_cursor)<timestamp(previous),"history cursor must advance across filtered pages");
+        }
+        cursor=Some(next_cursor.to_owned());
+        assert!(page_count<10,"history cursor did not converge");
     }
-    assert_eq!(items.len() as u64,total.unwrap());
+    assert_eq!(filtered_pages,1);
+    assert_eq!(items.len() as u64+filtered_pages,total.unwrap());
     let unique=items.iter().map(|item| item["message_id"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(unique.len(),items.len());
     let tools=items.iter().filter(|item| item["type"]=="tool_call").collect::<Vec<_>>();
@@ -531,6 +571,172 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
     assert_eq!(tools[0]["status"],"error");
     assert_eq!(tools[0]["content"]["status"],"error");
     assert!(tools[0]["content"]["output"].as_str().unwrap().contains("Do not retry"));
+    let thinking=items.iter().find(|item| item["type"]=="thinking").unwrap();
+    assert_eq!(thinking["content"]["content"],"Inspect the workspace");
+    assert_eq!(thinking["content"]["status"],"done");
+    assert!(items.iter().any(|item| item["message_id"]==root_message_id),"the oldest accepted input must survive the filtered head window");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn message_history_http_cursor_reads_persisted_relocation_projections_from_canonical_facts() {
+    const TRUST: &str = "relocation-history-projection";
+    async fn call(router: &axum::Router, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let response = router.clone().oneshot(Request::builder()
+            .method(if body.is_some() { "POST" } else { "GET" }).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(body.unwrap_or_else(|| json!({})).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let provider = create_chat_provider(&router, TRUST, "Relocated history", "relocation-history-model", 1).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"relocation-history-model"});
+    let (status, preset) = call(&router, "/api/agent-presets", Some(json!({
+        "display_name":"Relocated history","document":{
+            "schema_version":"1.0.0","model_route_refs":{},"chat_route_records":{},
+            "enabled_capabilities":[{
+                "capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/search"],
+            }],
+            "skill_bindings":[],"system_role_provider_overrides":{},
+            "persona":"History export fixture","instructions":"Preserve the managed workspace history","starter_prompts":[],
+        },
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let (status, session) = call(&router, "/api/agent-sessions", Some(json!({
+        "preset_id":preset["data"]["preset"]["preset_id"],"model":model,"title":"Relocated history",
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let workspace = session["data"]["agent_binding"]["typed_resource_bindings"].as_array().unwrap()
+        .iter().find(|resource| resource["resource_kind"] == "workspace").unwrap();
+    assert_eq!(workspace["resource_id"], "default-workspace");
+    assert_eq!(workspace["typed_parameters"], serde_json::to_value(
+        nomifun_agent_contracts::managed_workspace_parameters()).unwrap());
+    assert!(services.work_dir.join("conversations").join(session_id).is_dir(),
+        "API Session creation must materialize its managed relative workspace");
+    let typed_session = nomifun_agent_contracts::AgentSessionId::from(session_id);
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    let operation = nomifun_agent_contracts::OperationId::from(uuid::Uuid::now_v7().to_string());
+    let (input, turn) = store.start_turn(&typed_session,
+        nomifun_agent_contracts::EventProducerId::from("session_api"),
+        nomifun_agent_contracts::IdempotencyKey::from("relocation-history-input"),
+        operation.clone(), nomifun_agent_contracts::StrictJsonValue(json!({"content":"Keep this history after moving storage"})),
+    ).await.unwrap();
+    let root_message_id = input.record.unwrap().event_id.as_ref().to_owned();
+    let terminal_id = uuid::Uuid::now_v7().to_string();
+    store.append_turn_terminal(&nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id:typed_session.clone(),
+        event_id:nomifun_agent_contracts::EventId::from(terminal_id.clone()),
+        producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key:nomifun_agent_contracts::IdempotencyKey::from(terminal_id),
+        semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind:nomifun_agent_contracts::SessionEventKind("turn/completed".into()),kind_version:1,
+            correlation_id:nomifun_agent_contracts::CorrelationId::from(operation.as_ref()),
+            causation_event_id:Some(turn.record.unwrap().event_id),
+            payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(nomifun_agent_contracts::StrictJsonValue(
+                json!({"model_steps":0,"finish_reason":"completed","finished_at_ms":0}),
+            )),
+        },
+    }, &operation).await.unwrap();
+
+    // Move the isolated data root to the existing work root, so the running
+    // fixture's managed Workspace location already equals the proven target.
+    let relocation_id = nomifun_agent_contracts::OperationId::from(uuid::Uuid::now_v7().to_string());
+    let moved = store.relocate_managed_workspaces(&services.data_dir, &services.work_dir,
+        &services.work_dir, &relocation_id).await.unwrap();
+    assert_eq!(moved.changed_sessions, 1);
+    let event_id = format!("storage-relocation:{}:{session_id}", relocation_id.as_ref());
+    let event_before: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE event_id=?")
+        .bind(&event_id).fetch_one(services.database.pool()).await.unwrap();
+    let mut canonical_payload: Value = serde_json::from_str(&event_before).unwrap();
+    assert!(canonical_payload.get("last_event_id").is_none());
+    let transition = serde_json::from_value::<nomifun_agent_contracts::AgentBindingChangedPayloadV1>(canonical_payload.clone())
+        .unwrap();
+    transition.validate_storage_relocation().unwrap();
+    assert_eq!(transition.workspace_relocation.as_ref().unwrap()
+        .managed_session_namespace.as_ref().unwrap().agent_session_id, typed_session);
+
+    // Reproduce the current-generation persisted projection pollution, even
+    // after the writer is fixed. A consumer must reconstruct from the event.
+    let projection_id = format!("agent-transition:{}", relocation_id.as_ref());
+    let raw: String = sqlx::query_scalar("SELECT projection_json FROM agent_messages WHERE session_id=? AND projection_id=?")
+        .bind(session_id).bind(&projection_id).fetch_one(services.database.pool()).await.unwrap();
+    let mut projection: Value = serde_json::from_str(&raw).unwrap();
+    projection["reference"]["last_event_id"] = json!(event_id);
+    sqlx::query("UPDATE agent_messages SET projection_json=?,semantic_digest=? WHERE session_id=? AND projection_id=?")
+        .bind(projection.to_string()).bind(nomifun_agent_contracts::digest_payload(&projection).unwrap().0)
+        .bind(session_id).bind(&projection_id).execute(services.database.pool()).await.unwrap();
+
+    let mut cursor = String::new();
+    let mut messages = Vec::new();
+    let mut empty_pages = 0;
+    for page_number in 0..4 {
+        let (status, page) = call(&router,
+            &format!("/api/agent-sessions/{session_id}/message-history?page_size=1&cursor={cursor}"), None).await;
+        assert_eq!(status, StatusCode::OK, "persisted diagnostics must not corrupt canonical history: {page}");
+        let items = page["data"]["items"].as_array().unwrap();
+        empty_pages += usize::from(items.is_empty());
+        messages.extend(items.iter().cloned());
+        if page["data"]["has_more"] == false { break; }
+        let next = page["data"]["next_cursor"].as_str().unwrap();
+        assert_ne!(next, cursor);
+        cursor = next.to_owned();
+        assert!(page_number < 3, "relocation history cursor did not converge");
+    }
+    assert_eq!(empty_pages, 1, "storage relocation is hidden, while its raw cursor advances");
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().any(|message| message["message_id"] == root_message_id
+        && message["content"]["content"] == "Keep this history after moving storage"));
+    assert!(messages.iter().all(|message| message["content"].get("agent_transition").is_none()));
+    let (status, detail) = call(&router,
+        &format!("/api/agent-sessions/{session_id}/message-history/{root_message_id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["data"]["content"]["content"], "Keep this history after moving storage");
+    let (status, detail) = call(&router,
+        &format!("/api/agent-sessions/{session_id}/message-history/{}", relocation_id.as_ref()), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "hidden storage metadata is not an Agent switch message: {detail}");
+    let event_after: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE event_id=?")
+        .bind(&event_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(event_after, event_before, "projection recovery must not rewrite canonical facts");
+
+    // Exercise the actual export endpoint with the complete hydrated history.
+    // Both destinations belong to this fixture's isolated temporary directory.
+    messages.sort_by_key(|message| message["created_at"].as_i64().unwrap());
+    let conversation = json!({"id":session_id,"name":"Relocated history","type":"nomi"});
+    let exported = json!({"version":1,"conversation":conversation,"messages":messages});
+    let selected_directory = services.work_dir.parent().unwrap().join("selected-export");
+    for directory in [&services.work_dir, &selected_directory] {
+        fs::create_dir_all(directory).unwrap();
+        let output = directory.join("relocated-conversation.zip");
+        let (status, result) = call(&router, "/api/fs/zip", Some(json!({
+            "path":output,"files":[{"name":"conversation.json","content":exported.to_string()}],
+        }))).await;
+        assert_eq!(status, StatusCode::OK, "{}: {result}", output.display());
+        assert_eq!(result["data"], true, "{}: {result}", output.display());
+        let mut archive = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        assert_eq!(archive.len(), 1);
+        let restored: Value = serde_json::from_reader(archive.by_name("conversation.json").unwrap()).unwrap();
+        assert_eq!(restored, exported, "ZIP must preserve the complete history at {}", output.display());
+        assert_eq!(restored["messages"].as_array().unwrap().len(), 2);
+        assert!(restored["messages"].as_array().unwrap().iter().any(|message|
+            message["message_id"] == root_message_id
+                && message["content"]["content"] == "Keep this history after moving storage"));
+    }
+
+    // A clean cached projection cannot authorize reading a damaged canonical
+    // relocation proof. Both export history and single-message hydration fail.
+    canonical_payload["request_digest"] = json!("0".repeat(64));
+    sqlx::query("UPDATE agent_events SET inline_json=? WHERE event_id=?")
+        .bind(canonical_payload.to_string()).bind(&event_id).execute(services.database.pool()).await.unwrap();
+    for path in [format!("/api/agent-sessions/{session_id}/message-history?page_size=500"),
+        format!("/api/agent-sessions/{session_id}/message-history/{root_message_id}")] {
+        let (status, failure) = call(&router, &path, None).await;
+        assert!(!status.is_success(), "damaged canonical proof must fail closed: {failure}");
+    }
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -4543,8 +4749,12 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         path: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+        let mut request = Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
+        if method == "PUT" && path.ends_with("/agent") {
+            request = request.header("idempotency-key", uuid::Uuid::now_v7().to_string());
+        }
+        let response = router.oneshot(request
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
@@ -4804,6 +5014,142 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
                 .contains("robot")),
         "an unbound Robot must not reach the model tool surface: {model_request}"
     );
+
+    // The library's owner-scoped official ID is directly editable. Saving a
+    // revision must not silently replace this existing Companion Session.
+    const ADDED_RULE: &str = "OFFICIAL_COMPANION_EXTENDED_RULES_V2";
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let official_id = library["data"]["official_presets"]["companion.default"]["preset_id"]
+        .as_str().expect("editable owner-scoped official Companion ID");
+    let (status, editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{editor}");
+    assert_eq!(editor["data"]["preset"]["source"], "official");
+    let mut draft = editor["data"]["draft"].clone();
+    let original_instructions = draft["document"]["instructions"].as_str().unwrap().to_owned();
+    draft["document"]["instructions"] = json!(format!("{original_instructions}\nOFFICIAL_COMPANION_EXTENDED_RULES_V1"));
+    draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+        "capability": {"id": "web.research"}, "action_allowlist": ["web.research/search"]
+    }));
+    let (status, saved) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision": editor["data"]["revision"]["reference"], "draft": draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["data"]["preset"]["preset_id"], official_id);
+    assert_eq!(saved["data"]["preset"]["source"], "official");
+    assert_eq!(saved["data"]["revision"]["document"]["enabled_capabilities"],
+        draft["document"]["enabled_capabilities"]);
+    assert_eq!(saved["data"]["revision"]["document"]["instructions"], draft["document"]["instructions"]);
+
+    let old_binding = unchanged["data"]["agent_snapshot"]["canonical_binding"].clone();
+    let (status, reopened) = call(router.clone(), "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["conversation_id"], conversation_id,
+        "reopening the Companion must retain its existing Session after the official edit");
+    let session_path = format!("/api/agent-sessions/{conversation_id}");
+    let (status, frozen) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{frozen}");
+    assert_eq!(frozen["data"]["session"]["agent_binding"], old_binding);
+    let selection = json!({ "kind": "template", "template_key": "companion.default" });
+    let preview_path = format!("{session_path}/agent-switch/preview");
+    let (status, preview) = call(router.clone(), "POST", &preview_path,
+        json!({"selection": selection})).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    assert_eq!(preview["data"]["capabilities"]["gained"], json!(["web.research"]));
+    assert_eq!(preview["data"]["model"]["preserved"], true);
+    assert_eq!(preview["data"]["model"]["provider_id"], provider_id);
+    assert_eq!(preview["data"]["model"]["model"], "step-3.7-flash");
+    assert_eq!(preview["data"]["resources"]["dropped"], json!([]));
+    let (status, still_frozen) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{still_frozen}");
+    assert_eq!(still_frozen["data"]["session"]["agent_binding"], old_binding,
+        "preview must preserve the frozen Session binding");
+
+    // A second edit invalidates the exact preview, even though the source
+    // Session's binding version has not changed.
+    draft["current_revision"] = saved["data"]["revision"]["reference"].clone();
+    draft["document"]["instructions"] = json!(format!("{original_instructions}\n{ADDED_RULE}"));
+    let (status, saved_again) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision": saved["data"]["revision"]["reference"], "draft": draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{saved_again}");
+    let switch_path = format!("{session_path}/agent");
+    let (status, stale) = call(router.clone(), "PUT", &switch_path, json!({
+        "selection": selection, "handoff_mode": "context_only",
+        "expected_binding_version": preview["data"]["expected_binding_version"],
+        "expected_resolved_snapshot_ref": preview["data"]["target"]["resolved_snapshot_ref"],
+    })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["code"], "AGENT_SESSION_BINDING_CHANGED");
+    assert_eq!(stale["details"]["stage"], "target_preview");
+    let (status, rejected_binding) = call(router.clone(), "GET", &session_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{rejected_binding}");
+    assert_eq!(rejected_binding["data"]["session"]["agent_binding"], old_binding);
+
+    let (status, current_preview) = call(router.clone(), "POST", &preview_path,
+        json!({"selection": selection})).await;
+    assert_eq!(status, StatusCode::OK, "{current_preview}");
+    assert_eq!(current_preview["data"]["can_apply"], true, "{current_preview}");
+    assert_ne!(current_preview["data"]["target"]["resolved_snapshot_ref"],
+        preview["data"]["target"]["resolved_snapshot_ref"]);
+    let (status, applied) = call(router.clone(), "PUT", &switch_path, json!({
+        "selection": selection, "handoff_mode": "context_only",
+        "expected_binding_version": current_preview["data"]["expected_binding_version"],
+        "expected_resolved_snapshot_ref": current_preview["data"]["target"]["resolved_snapshot_ref"],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["data"]["conversation"]["conversation_id"], conversation_id);
+    assert_eq!(applied["data"]["effective_from"], "next_turn");
+    let refreshed = &applied["data"]["conversation"]["agent_snapshot"];
+    let new_binding = &refreshed["canonical_binding"];
+    assert_eq!(new_binding["binding_version"].as_u64(),
+        Some(old_binding["binding_version"].as_u64().unwrap() + 1));
+    assert_eq!(new_binding["typed_resource_bindings"], old_binding["typed_resource_bindings"],
+        "refresh must retain the exact Companion, Memory and Scheduler definitions");
+    assert_eq!(new_binding["resolved_snapshot_ref"], current_preview["data"]["target"]["resolved_snapshot_ref"]);
+    assert_eq!(new_binding["preset_revision_ref"]["preset_id"], current_preview["data"]["target"]["preset_id"]);
+    assert_eq!(new_binding["preset_revision_ref"]["revision"], current_preview["data"]["target"]["preset_revision"]);
+    assert_eq!(refreshed["enabled_capability_actions"]["web.research"], json!(["web.research/search"]));
+    let (status, preserved_history) = call(router.clone(), "GET",
+        &format!("{session_path}/message-history?page_size=50"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{preserved_history}");
+    for message in history_items {
+        assert_eq!(preserved_history["data"]["items"].as_array().unwrap().iter()
+            .find(|retained| retained["message_id"] == message["message_id"]), Some(message),
+            "applying the new official revision must retain existing history");
+    }
+
+    let (status, next_turn) = call(router.clone(), "POST", &format!("{session_path}/turns"), json!({
+        "idempotency_key": uuid::Uuid::now_v7().to_string(),
+        "input": {"content": "Continue with your extended official capabilities."},
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{next_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'",
+            ).bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("refreshed Companion turn must complete using the same Session");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let continued = requests[1].body_json::<Value>().unwrap();
+    assert_eq!(continued["model"], "step-3.7-flash");
+    let rules = continued["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(rules.contains(ADDED_RULE), "the applied official instructions must reach the next real model request");
+    assert!(continued["messages"].to_string().contains(REPLY), "the same canonical history must reach the refreshed Runtime");
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    assert_eq!(library["data"]["official_presets"]["companion.default"]["preset_id"], official_id);
+    assert_eq!(library["data"]["user_presets"], json!([]), "editing the official Agent must not require a copy");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
