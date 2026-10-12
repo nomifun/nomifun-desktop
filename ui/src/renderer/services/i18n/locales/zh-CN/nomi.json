@@ -121,7 +121,22 @@
     "modelRequiredHint": "配置后即可在这里延续桌面、IM 与机器人的同一段相处历史。",
     "configureModel": "配置模型",
     "sessionFailed": "伙伴会话暂时无法打开",
-    "sessionFailedHint": "检查模型与 Agent 配置后再试一次。"
+    "sessionFailedHint": "检查模型与 Agent 配置后再试一次。",
+    "quickAgent": "Agent",
+    "quickModel": "模型",
+    "quickModelPlaceholder": "选择模型",
+    "modelDefaultSaveFailed": "当前会话模型已切换，默认模型保存失败，请重试。",
+    "quickSettingsSaving": "保存中…",
+    "quickSettings": {
+      "state": "状态",
+      "desktopOnly": "请在桌面端设置桌面形象",
+      "automaticMood": "自动（{{mood}}）",
+      "automaticMoodHint": "自动跟随伙伴情绪",
+      "manualMoodHint": "手动保持，切回“自动”时恢复",
+      "saveFailed": "保存失败，已保留原值。",
+      "saved": "已保存",
+      "expandNeedsRoom": "增大窗口后显示伙伴信息"
+    }
   },
   "remote": {
     "showAllPlatforms": "查看全部 {{count}} 个渠道"
@@ -421,6 +436,7 @@
     "mcpAgentRequired": "当前 Agent 未启用 MCP 连接能力，请切换为伙伴预设或在 Agent 工作台配置。",
     "modelConfig": "对话模型",
     "modelConfigHint": "用于新建伙伴会话和重建远程连接的默认模型；已打开的本地会话继续使用冻结模型。",
+    "sessionModelConfigHint": "空闲时切换当前会话模型，下一条消息生效；同时保存为伙伴默认模型。",
     "modelProvider": "服务商",
     "modelName": "模型",
     "modelMissing": "请先为该伙伴配置对话模型",

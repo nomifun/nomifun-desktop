@@ -393,8 +393,14 @@ impl Learner {
         // `companion_state` row until 2026-08, which made the whole family share
         // one mood — the last run to finish overwrote everyone's.
         if let Some(mood) = &output.mood {
+            let _mood_guard = self.registry.lock_mood_updates().await;
+            // The owner may have selected a manual emotion during the model
+            // call. Keep learning its automatic mood, but broadcast the current
+            // effective emotion instead of overwriting the desktop display.
+            let current = self.registry.get(&owner).await
+                .ok_or_else(|| AppError::NotFound(format!("companion '{owner}' not found")))?;
             self.store.set_companion_state(&owner, MOOD_KEY, mood).await?;
-            self.emitter.emit_mood_changed(&owner, mood);
+            self.emitter.emit_mood_changed(&owner, current.effective_mood(mood));
         }
         run.summary = output.diary;
 
@@ -612,6 +618,69 @@ mod tests {
         // Cursor advanced: a second run sees no events.
         let run2 = learner.run_for(&companion_id).await.unwrap();
         assert_eq!(run2.status, "no_events");
+    }
+
+    #[tokio::test]
+    async fn learning_keeps_automatic_mood_but_broadcasts_a_new_manual_preference() {
+        struct ChangeMoodDuringCompletion {
+            registry: Arc<CompanionRegistry>,
+            companion_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl CompanionCompleter for ChangeMoodDuringCompletion {
+            async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
+                self.registry.patch(&self.companion_id, serde_json::json!({"mood_override": "happy"})).await?;
+                Ok(r#"{"memories":[],"mood":"sleepy"}"#.into())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, companion_id) = make_learner(dir.path(), "{}").await;
+        let broadcaster = Arc::new(RecordingBroadcaster::default());
+        let learner = Learner {
+            completer: Arc::new(ChangeMoodDuringCompletion { registry: learner.registry.clone(), companion_id: companion_id.clone() }),
+            emitter: CompanionEventEmitter::new(broadcaster.clone(), "owner-a"),
+            ..learner
+        };
+
+        assert_eq!(learner.run_for(&companion_id).await.unwrap().status, "ok");
+        assert_eq!(learner.store.get_companion_state(&companion_id, MOOD_KEY).await.unwrap().as_deref(), Some("sleepy"));
+        let events = broadcaster.events.lock().unwrap();
+        let moods: Vec<_> = events.iter().filter(|event| event.name == "companion.mood-changed").collect();
+        assert_eq!(moods.len(), 1);
+        assert_eq!(moods[0].data["mood"], "happy");
+        assert_eq!(moods[0].data["companion_id"], companion_id);
+    }
+
+    #[tokio::test]
+    async fn learning_mood_commit_fails_closed_when_its_profile_vanishes() {
+        struct RemoveOwnerDuringCompletion {
+            registry: Arc<CompanionRegistry>,
+            companion_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl CompanionCompleter for RemoveOwnerDuringCompletion {
+            async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
+                self.registry.remove(&self.companion_id).await?;
+                Ok(r#"{"memories":[],"mood":"sleepy"}"#.into())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_event(dir.path());
+        let (learner, companion_id) = make_learner(dir.path(), "{}").await;
+        let broadcaster = Arc::new(RecordingBroadcaster::default());
+        let learner = Learner {
+            completer: Arc::new(RemoveOwnerDuringCompletion { registry: learner.registry.clone(), companion_id: companion_id.clone() }),
+            emitter: CompanionEventEmitter::new(broadcaster.clone(), "owner-a"),
+            ..learner
+        };
+        assert!(matches!(learner.run_for(&companion_id).await, Err(AppError::NotFound(_))));
+        assert_eq!(learner.store.get_companion_state(&companion_id, MOOD_KEY).await.unwrap(), None);
+        assert!(!broadcaster.events.lock().unwrap().iter().any(|event| event.name == "companion.mood-changed"));
     }
 
     /// XP used to be granted to EVERY companion on the theory that one shared

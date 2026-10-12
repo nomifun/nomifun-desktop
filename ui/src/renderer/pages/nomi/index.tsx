@@ -22,6 +22,7 @@ import { AsideHost } from './workspace/AsideHost';
 import WorkspaceHeader from './workspace/WorkspaceHeader';
 import type { CompanionWorkspaceMode } from './workspace/WorkspaceHeader';
 import CompanionCohabitView from './workspace/CompanionCohabitView';
+import { useResponsiveInfoPanel } from './workspace/useResponsiveInfoPanel';
 import { WORKSPACE_TABS, isWorkspaceTabKey } from './workspace/types';
 import type { WorkspaceTabKey } from './workspace/types';
 import OverviewTab from './workspace/tabs/OverviewTab';
@@ -98,9 +99,25 @@ const NomiWorkspacePage: React.FC = () => {
     toggle: toggleSider,
   } = useContentSiderCollapse(SIDER_COLLAPSE_STORAGE_KEY, false);
   const {
-    collapsed: infoPanelCollapsed,
-    toggle: toggleInfoPanel,
+    collapsed: infoPanelManuallyCollapsed,
+    setCollapsed: setInfoPanelManuallyCollapsed,
   } = useContentSiderCollapse(INFO_PANEL_COLLAPSE_STORAGE_KEY, false);
+  const {
+    containerRef: workspaceRef,
+    collapsed: infoPanelCollapsed,
+    canExpand: canExpandInfoPanel,
+    toggle: toggleResponsiveInfoPanel,
+  } = useResponsiveInfoPanel({
+    manuallyCollapsed: infoPanelManuallyCollapsed,
+    setManuallyCollapsed: setInfoPanelManuallyCollapsed,
+  });
+  const toggleInfoPanel = useCallback(() => {
+    if (infoPanelCollapsed && !canExpandInfoPanel) {
+      Message.info(t('nomi.cohabit.quickSettings.expandNeedsRoom', { defaultValue: '增大窗口后显示伙伴信息' }));
+      return;
+    }
+    toggleResponsiveInfoPanel();
+  }, [canExpandInfoPanel, infoPanelCollapsed, t, toggleResponsiveInfoPanel]);
 
   const resize = useResizableSplit({
     unit: 'px',
@@ -484,7 +501,7 @@ const NomiWorkspacePage: React.FC = () => {
               resizeHandle={resize.createDragHandle({ className: 'right-0' })}
             />
           )}
-          <div className={styles.workspaceColumn}>
+          <div ref={workspaceRef} className={styles.workspaceColumn}>
             {workspace}
           </div>
         </AsideHost>

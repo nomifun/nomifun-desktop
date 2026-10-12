@@ -54,7 +54,7 @@ pub use memory_search::{
     CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
 };
 pub use profile::{
-    CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, CompanionSkillConfig,
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionMood, CompanionProfileConfig, CompanionSkillConfig,
     CompanionWindowConfig, CustomFigureMeta, HeadBox, SharedArchiveConfig, SharedCompanionConfig,
 };
 pub use registry::CompanionRegistry;

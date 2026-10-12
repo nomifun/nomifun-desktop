@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { Button, Spin } from '@arco-design/web-react';
 import { BookOne, Connection, Data, Right, RobotOne, SettingTwo } from '@icon-park/react';
@@ -17,6 +17,9 @@ import { ExecutionProvider } from '@/renderer/pages/conversation/execution/Execu
 import { PreviewProvider } from '@/renderer/pages/conversation/Preview';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import CompanionConversation from '../companion/CompanionConversation';
+import CompanionAppearanceQuickSettings from './CompanionAppearanceQuickSettings';
+import CompanionAgentModelQuickSettings from './CompanionAgentModelQuickSettings';
+import { useCompanionConversationUpdates } from './useCompanionConversationUpdates';
 import type { CompanionHandle, WorkspaceTabKey } from './types';
 import styles from './CompanionCohabitView.module.css';
 
@@ -35,11 +38,28 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   const [conversationId, setConversationId] = useState<ConversationId | null>(null);
   const [sessionError, setSessionError] = useState(false);
   const [robotCount, setRobotCount] = useState(0);
+  const [appearanceSaving, setAppearanceSaving] = useState(false);
+  const [agentModelSaving, setAgentModelSaving] = useState(false);
+  const quickSettingsSaving = appearanceSaving || agentModelSaving;
+  const activeCompanionId = useRef(companionId);
+  activeCompanionId.current = companionId;
+  const modelConfigured = Boolean(profile?.model);
+  const onAppearanceSavingChange = useCallback((saving: boolean) => {
+    if (activeCompanionId.current === companionId) setAppearanceSaving(saving);
+  }, [companionId]);
+  const onAgentModelSavingChange = useCallback((saving: boolean) => {
+    if (activeCompanionId.current === companionId) setAgentModelSaving(saving);
+  }, [companionId]);
+
+  useEffect(() => {
+    setAppearanceSaving(false);
+    setAgentModelSaving(false);
+  }, [companionId]);
 
   useEffect(() => {
     setConversationId(null);
     setSessionError(false);
-    if (!profile?.model) return;
+    if (!modelConfigured) return;
     let cancelled = false;
     void ipcBridge.companion.ensureCompanionSession
       .invoke({ companion_id: companionId })
@@ -52,7 +72,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
     return () => {
       cancelled = true;
     };
-  }, [companionId, profile?.model?.provider_id, profile?.model?.model]);
+  }, [companionId, modelConfigured]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,7 +88,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
     };
   }, [companionId]);
 
-  const { data: conversation, isLoading, mutate } = useSWR<NomiConversation | null>(
+  const { data: conversation, error: conversationError, isLoading, mutate } = useSWR<NomiConversation | null>(
     conversationId ? `conversation/${conversationId}` : null,
     async () => {
       const row = await getConversationOrNull(conversationId!);
@@ -76,19 +96,12 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
     }
   );
 
-  useEffect(() => {
-    if (!conversationId) return;
-    const unsubscribeList = ipcBridge.conversation.listChanged.on((event) => {
-      if (event.conversation_id === conversationId && event.action !== 'deleted') void mutate();
-    });
-    const unsubscribeAgent = ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
-      if (String(event.agent_session_id) === String(conversationId)) void mutate();
-    });
-    return () => { unsubscribeList(); unsubscribeAgent(); };
-  }, [conversationId, mutate]);
+  useCompanionConversationUpdates(conversationId, mutate);
+  const refreshConversation = useCallback(() => {
+    void mutate().catch(() => {});
+  }, [mutate]);
 
   const memoryCount = (status?.memories_active ?? 0) + (status?.memories_archived ?? 0);
-  const modelLabel = profile?.model?.model ?? t('nomi.overview.modelMissingShort', { defaultValue: '未配置' });
   const growthBase = status ? Math.max(0, (status.level - 1) ** 2 * 100) : 0;
   const growthNext = status ? Math.max(100, status.level ** 2 * 100) : 100;
   const growthPercent = status
@@ -150,18 +163,16 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
 
         <section className={styles.infoGroup}>
           <div className={styles.infoTitle}><SettingTwo size='16' />{t('nomi.cohabit.currentState', { defaultValue: '当前状态' })}</div>
-          <strong>{t(`nomi.moods.${status?.mood ?? 'content'}`, { defaultValue: status?.mood ?? 'content' })}</strong>
-          <span>{profile?.appearance.companion_enabled
-            ? t('nomi.cohabit.desktopVisible', { defaultValue: '桌面显示已开启' })
-            : t('nomi.cohabit.desktopHidden', { defaultValue: '桌面显示已隐藏' })}</span>
-          <button type='button' onClick={() => onManage('overview')}>{t('nomi.cohabit.manageState', { defaultValue: '管理形象与状态' })}</button>
+          <CompanionAppearanceQuickSettings key={companionId} companion={companion} disabled={quickSettingsSaving} onSavingChange={onAppearanceSavingChange} />
         </section>
 
         <section className={styles.infoGroup}>
           <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.mind', { defaultValue: '心智配置' })}</div>
-          <strong>{t('nomi.cohabit.agent', { defaultValue: '伙伴 Agent' })}</strong>
-          <span>{modelLabel}</span>
-          <button type='button' onClick={() => onManage('overview')}>{t('nomi.cohabit.manageMind', { defaultValue: '管理人格与模型' })}</button>
+          <CompanionAgentModelQuickSettings key={companionId} companion={companion} conversation={conversation} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
+          {conversationError && <span role='alert'>
+            {t('agentSettings.productBinding.loadFailed')}
+            <button type='button' onClick={refreshConversation}>{t('agentSettings.actions.retry')}</button>
+          </span>}
         </section>
 
         <section className={styles.infoGroup}>

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { Message } from '@arco-design/web-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
@@ -13,16 +13,18 @@ import type { IProvider, TChatConversation } from '@/common/config/storage';
 import NomiChat from '@/renderer/pages/conversation/platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/nomi/useNomiModelSelection';
 import type { useCompanion } from '../useNomi';
-import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
+import ProductAgentBindingSelect, { productAgentErrorReason } from '@/renderer/components/agent/ProductAgentBindingSelect';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
+import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { saveCompanionChatModel, type CompanionChatModel } from './saveCompanionChatModel';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 interface Props {
   /** 该伙伴的唯一专属 nomi 会话。 */
   conversation: NomiConversation;
-  /** 伙伴 profile + 乐观 patch 通道（模型唯一事实源入口）。 */
+  /** 伙伴 profile defaults; the current Session owns its frozen model. */
   companion: ReturnType<typeof useCompanion>;
   /** Dedicated /nomi cohabit surface: configuration lives beside the chat. */
   compact?: boolean;
@@ -35,35 +37,54 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
   const { groups } = useModelsForTask('chat');
   const [modelSaving, setModelSaving] = useState(false);
   const [agentSaving, setAgentSaving] = useState(false);
+  const [retryModel, setRetryModel] = useState<{ provider: IProvider; model: string } | null>(null);
   const savingRef = useRef(false);
+  const agentSavingRef = useRef(false);
+  const sessionModelRef = useRef<CompanionChatModel>({ provider_id: conversation.model.id, model: conversation.model.use_model });
+  useEffect(() => {
+    sessionModelRef.current = { provider_id: conversation.model.id, model: conversation.model.use_model };
+  }, [conversation.id, conversation.model.id, conversation.model.use_model]);
+  useEffect(() => { setRetryModel(null); }, [conversation.id]);
   const initialModel = useMemo(() => {
-    if (!profile?.model) return undefined;
-    const provider = groups.find(({ provider }) => provider.id === profile.model?.provider_id)?.provider;
-    if (provider) return { ...provider, use_model: profile.model.model };
-    return { ...conversation.model, id: profile.model.provider_id, use_model: profile.model.model };
-  }, [profile?.model?.provider_id, profile?.model?.model, groups, conversation.model]);
+    const provider = groups.find(({ provider }) => provider.id === conversation.model.id)?.provider;
+    return provider ? { ...provider, use_model: conversation.model.use_model } : conversation.model;
+  }, [groups, conversation.model]);
+  const sessionBlocked = getConversationRuntimeAuthority(conversation) !== 'idle' || Boolean(conversation.runtime?.active_turn_id)
+    || conversation.extra.execution_phase === 'paused' || Boolean(conversation.execution_attempt_id);
   const refreshSession = useCallback(() => {
     void refreshConversationCache(conversation.id).catch(() => {
       Message.error(t('agentSettings.productBinding.loadFailed'));
     });
   }, [conversation.id, t]);
   const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
-    if (savingRef.current || agentSaving) return false;
+    if (savingRef.current || agentSavingRef.current || sessionBlocked) return false;
     savingRef.current = true;
     setModelSaving(true);
     try {
-      const saved = await patchCompanion({ model: { provider_id: provider.id, model: modelName } });
-      if (!saved) return false;
-      refreshSession();
+      const result = await saveCompanionChatModel({
+        conversation,
+        sessionModel: sessionModelRef.current,
+        profileModel: profile?.model,
+        next: { provider_id: provider.id, model: modelName },
+        patchCompanion,
+        onSessionChanged: (model) => { sessionModelRef.current = model; refreshSession(); },
+      });
+      if (result.status === 'default-save-failed') {
+        setRetryModel({ provider, model: modelName });
+        Message.error(t('nomi.cohabit.modelDefaultSaveFailed', { defaultValue: '当前会话模型已切换，默认模型保存失败，请重试。' }));
+      } else {
+        setRetryModel(null);
+        refreshSession();
+      }
       return true;
-    } catch {
-      Message.error(t('nomi.chat.modelSaveFailed'));
+    } catch (error) {
+      Message.error(t(`agentSettings.productBinding.${productAgentErrorReason(error)}`));
       return false;
     } finally {
       savingRef.current = false;
       setModelSaving(false);
     }
-  }, [agentSaving, patchCompanion, refreshSession, t]);
+  }, [conversation, profile?.model, sessionBlocked, patchCompanion, refreshSession, t]);
   const modelSelection = useNomiModelSelection({
     initialModel,
     onSelectModel,
@@ -76,8 +97,8 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       conversation_id={conversation.id}
       workspace={workspace}
       modelSelection={modelSelection}
-      modelSelectionHint={t('nomi.chat.modelConfigHint')}
-      modelSelectionDisabled={modelSaving || agentSaving}
+      modelSelectionHint={t('nomi.chat.sessionModelConfigHint', { defaultValue: '空闲时切换当前会话模型，下一条消息生效；同时保存为伙伴默认模型。' })}
+      modelSelectionDisabled={modelSaving || agentSaving || sessionBlocked}
       emptySlot={!profile?.model
         ? <div className='p-20px text-center text-t-secondary'>{t('nomi.chat.modelMissing')}</div>
         : compact
@@ -107,10 +128,12 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
         defaultTemplateKey='companion.default'
         model={conversation.model}
         conversationId={conversation.id}
-        disabled={modelSaving}
+        disabled={modelSaving || sessionBlocked}
         onChanged={refreshSession}
-        onSavingChange={setAgentSaving}
+        onSavingChange={(saving) => { agentSavingRef.current = saving; setAgentSaving(saving); }}
       />}
+      extraRightTools={!compact && retryModel ? <Button size='mini' type='text' loading={modelSaving} disabled={agentSaving || sessionBlocked}
+        onClick={() => void onSelectModel(retryModel.provider, retryModel.model)}>{t('agentSettings.actions.retry')}</Button> : undefined}
       agent_name={profile?.name}
       creationEnabled={false}
       creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}

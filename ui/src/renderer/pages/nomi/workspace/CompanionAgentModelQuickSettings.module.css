@@ -1,0 +1,47 @@
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.label {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 24px;
+}
+
+.control {
+  min-width: 0;
+}
+
+.hint {
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: rgb(var(--danger-6));
+}
+
+.popup {
+  max-width: 320px;
+}
+
+.popup :global(.arco-select-option) {
+  height: auto;
+  min-height: 28px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

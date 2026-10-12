@@ -68,7 +68,10 @@ pub struct CompanionStatus {
     pub companion_id: Option<String>,
     pub xp: i64,
     pub level: i64,
+    /// Effective displayed emotion, including an optional profile override.
     pub mood: String,
+    /// Latest learning output, retained while a manual emotion is selected.
+    pub automatic_mood: String,
     pub memories_active: i64,
     pub memories_archived: i64,
     pub model_configured: bool,
@@ -606,8 +609,26 @@ impl CompanionService {
         // actually changed it (RFC 7396 patches need not mention `model`).
         let prev = self.registry.get(id).await;
         let prev_model = prev.as_ref().and_then(|p| p.model.clone());
+        let mood_guard = if patch.get("mood_override").is_some() {
+            Some(self.registry.lock_mood_updates().await)
+        } else {
+            None
+        };
+        // Read before committing so a damaged/closed runtime store cannot make
+        // PATCH fail after the new preference has already been persisted.
+        let automatic_mood = if patch.get("mood_override").is_some() {
+            self.get_companion(id).await?;
+            Some(self.store.get_companion_state(id, crate::store::MOOD_KEY).await?
+                .unwrap_or_else(|| "content".into()))
+        } else {
+            None
+        };
         let profile = self.registry.patch(id, patch).await?;
         self.emitter.emit_companion_updated(&profile.companion_id, &profile);
+        if let Some(automatic_mood) = automatic_mood {
+            self.emitter.emit_mood_changed(id, profile.effective_mood(&automatic_mood));
+        }
+        drop(mood_guard);
 
         let model_changed = prev_model.as_ref() != profile.model.as_ref();
         if model_changed {
@@ -701,20 +722,20 @@ impl CompanionService {
     /// One companion's status: its own xp/level/mood, its own memory counters,
     /// that companion's companion model flag.
     pub async fn companion_status(&self, id: &str) -> Result<CompanionStatus, AppError> {
+        let mood_guard = self.registry.lock_mood_updates().await;
         let profile = self.get_companion(id).await?;
+        let automatic_mood = self.store.get_companion_state(id, crate::store::MOOD_KEY).await?
+            .unwrap_or_else(|| "content".into());
+        let mood = profile.effective_mood(&automatic_mood).to_owned();
+        drop(mood_guard);
         let cfg = self.config.read().await.clone();
         let xp = self.store.get_companion_state_i64(id, "xp").await?;
         Ok(CompanionStatus {
             companion_id: Some(profile.companion_id),
             xp,
             level: level_for_xp(xp),
-            // Mood is this companion's own since 2026-08 (it was one global row, so
-            // whichever loop finished last set the whole family's mood).
-            mood: self
-                .store
-                .get_companion_state(id, crate::store::MOOD_KEY)
-                .await?
-                .unwrap_or_else(|| "content".into()),
+            mood,
+            automatic_mood,
             // Memory is owned per companion, and this snapshot is rendered per
             // companion: count only what THIS companion can read.
             memories_active: self.store.count_memories("active", Some(id)).await?,
@@ -1130,6 +1151,7 @@ impl CompanionService {
             level: level_for_xp(0),
             // No companion exists to have a mood of its own.
             mood: "content".into(),
+            automatic_mood: "content".into(),
             // No companion exists to own anything: the only rows left are
             // vestigial unowned ones, so the unscoped count IS the honest total.
             memories_active: self.store.count_memories("active", None).await?,
@@ -3133,6 +3155,67 @@ mod tests {
         assert_eq!(patched.name, "新名");
         assert!(patched.appearance.companion_enabled);
         assert_eq!(svc.get_companion(&a.companion_id).await.unwrap().name, "新名");
+    }
+
+    #[tokio::test]
+    async fn mood_override_survives_restart_and_clearing_restores_latest_automatic_mood() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let b = svc.create_companion("乙", "ink").await.unwrap();
+        svc.store.set_companion_state(&a.companion_id, crate::store::MOOD_KEY, "sleepy").await.unwrap();
+        let patched = svc.patch_companion(&a.companion_id, serde_json::json!({"mood_override": "happy"})).await.unwrap();
+        assert_eq!(patched.mood_override, Some(crate::profile::CompanionMood::Happy));
+        let status = svc.companion_status(&a.companion_id).await.unwrap();
+        assert_eq!(status.mood, "happy");
+        assert_eq!(status.automatic_mood, "sleepy");
+        assert_eq!(svc.companion_status(&b.companion_id).await.unwrap().mood, "content");
+
+        svc.close_storage().await;
+        drop(svc);
+        let svc = service(dir.path()).await;
+        assert_eq!(svc.get_companion(&a.companion_id).await.unwrap().mood_override, Some(crate::profile::CompanionMood::Happy));
+        assert_eq!(svc.companion_status(&a.companion_id).await.unwrap().mood, "happy");
+        // Learning still owns and updates its original runtime row while the
+        // manual preference keeps the displayed emotion stable.
+        svc.store.set_companion_state(&a.companion_id, crate::store::MOOD_KEY, "worried").await.unwrap();
+        let status = svc.companion_status(&a.companion_id).await.unwrap();
+        assert_eq!(status.mood, "happy");
+        assert_eq!(status.automatic_mood, "worried");
+
+        let cleared = svc.patch_companion(&a.companion_id, serde_json::json!({"mood_override": null})).await.unwrap();
+        assert_eq!(cleared.mood_override, None);
+        let status = svc.companion_status(&a.companion_id).await.unwrap();
+        assert_eq!(status.mood, "worried");
+        assert_eq!(status.automatic_mood, "worried");
+        assert_eq!(svc.store.get_companion_state(&a.companion_id, crate::store::MOOD_KEY).await.unwrap().as_deref(), Some("worried"));
+    }
+
+    #[tokio::test]
+    async fn invalid_mood_override_patch_preserves_the_entire_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let profile_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR).join(&a.companion_id);
+        let before = std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap();
+        for invalid in [serde_json::json!("auto"), serde_json::json!("angry"), serde_json::json!(1), serde_json::json!({})] {
+            let result = svc.patch_companion(&a.companion_id, serde_json::json!({"name": "不应保存", "mood_override": invalid})).await;
+            assert!(matches!(result, Err(AppError::BadRequest(_))));
+            assert_eq!(svc.get_companion(&a.companion_id).await.unwrap(), a);
+            assert_eq!(std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn mood_override_patch_fails_before_saving_when_runtime_store_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let a = svc.create_companion("甲", "ink").await.unwrap();
+        svc.close_storage().await;
+        assert!(svc.patch_companion(&a.companion_id, serde_json::json!({"mood_override": "happy"})).await.is_err());
+        assert_eq!(svc.get_companion(&a.companion_id).await.unwrap(), a);
+        let profile_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR).join(&a.companion_id);
+        assert_eq!(CompanionProfileConfig::load(&profile_dir).unwrap().unwrap(), a);
     }
 
     #[tokio::test]

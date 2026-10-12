@@ -92,7 +92,3 @@
 .growthLine span { color: var(--color-text-3); font-size: 11px; }
 .progress { height: 5px; overflow: hidden; border-radius: 999px; background: var(--color-fill-3); }
 .progress span { display: block; height: 100%; border-radius: inherit; background: rgb(var(--primary-6)); }
-
-@container (max-width: 760px) {
-  .layout:not([data-info-panel-collapsed='true']) { grid-template-columns: minmax(0, 1fr) 260px; }
-}

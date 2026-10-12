@@ -414,6 +414,30 @@ pub struct CompanionVoiceConfig {
     pub vad: CompanionVadConfig,
 }
 
+/// User-selectable companion emotions. Learning keeps its own latest mood in
+/// the existing runtime state; this type only constrains a manual preference.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompanionMood {
+    Happy,
+    Content,
+    Sleepy,
+    Worried,
+    Excited,
+}
+
+impl CompanionMood {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Happy => "happy",
+            Self::Content => "content",
+            Self::Sleepy => "sleepy",
+            Self::Worried => "worried",
+            Self::Excited => "excited",
+        }
+    }
+}
+
 /// Per-companion profile persisted as `companion/companions/{companion_id}/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -436,6 +460,10 @@ pub struct CompanionProfileConfig {
     pub name: String,
     /// Which character renders in the companion window (mochi/ink/roux/pixel/bolt/boo).
     pub character: String,
+    /// A manual emotion held until cleared. `None` follows the latest learned
+    /// mood without overwriting that runtime fact.
+    #[serde(default)]
+    pub mood_override: Option<CompanionMood>,
     pub persona: PersonaConfig,
     /// Per-companion companion-chat model (定时学习 / 进化 carry their own).
     #[serde(
@@ -497,6 +525,7 @@ impl CompanionProfileConfig {
             seq,
             name: name.to_owned(),
             character: character.to_owned(),
+            mood_override: None,
             persona: PersonaConfig::default(),
             model: None,
             fallback_model: None,
@@ -509,6 +538,12 @@ impl CompanionProfileConfig {
             order_index: None,
             created_at: now_ms(),
         }
+    }
+
+    /// Resolve the displayed emotion from the manual preference and the latest
+    /// learned value. The preference never replaces the learning output.
+    pub fn effective_mood<'a>(&self, automatic_mood: &'a str) -> &'a str {
+        self.mood_override.map(CompanionMood::as_str).unwrap_or(automatic_mood)
     }
 
     /// Every Provider reference this profile holds, labelled for diagnostics.
@@ -946,6 +981,23 @@ mod tests {
         let profile: CompanionProfileConfig = serde_json::from_value(raw).unwrap();
         assert!(profile.skills.enabled.is_empty());
         assert!(profile.skills.disabled_auto.is_empty());
+        assert_eq!(profile.mood_override, None);
+    }
+
+    #[test]
+    fn mood_preference_roundtrips_and_invalid_durable_value_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut profile = CompanionProfileConfig::new("手动情绪", "ink", 1);
+        profile.mood_override = Some(CompanionMood::Worried);
+        profile.save(dir.path()).unwrap();
+        let loaded = CompanionProfileConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.mood_override, Some(CompanionMood::Worried));
+        assert_eq!(loaded.effective_mood("sleepy"), "worried");
+
+        let mut raw = serde_json::to_value(profile).unwrap();
+        raw["mood_override"] = serde_json::json!("furious");
+        std::fs::write(CompanionProfileConfig::config_path(dir.path()), raw.to_string()).unwrap();
+        assert!(CompanionProfileConfig::load(dir.path()).is_err());
     }
 
     #[test]

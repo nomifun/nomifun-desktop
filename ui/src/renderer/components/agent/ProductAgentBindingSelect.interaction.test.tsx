@@ -294,6 +294,76 @@ test('allows Agent selection before model setup and prevents selecting incompati
   expect(save.mock.calls[0][0].request).toEqual({ selection: { kind: 'template', template_key: 'chat.minimal' } });
 });
 
+test('the sidebar Agent dropdown can retry a partial default save without management-page actions', async () => {
+  let state: ProductAgentOptions = { ...structuredClone(initial), needs_model: false,
+    options: [initial.options[0], { selection: { kind: 'preset', preset_id: 'personal-companion' }, display_name: 'My Companion', available: true, reason: null }],
+  };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    if (save.mock.calls.length === 1) throw new BackendHttpError({ method: 'PUT', path: '/private', status: 500,
+      body: { code: 'COMPANION_AGENT_DEFAULT_SAVE_FAILED', error: 'private disk detail' } });
+    return { selection: request.selection, needs_model: false };
+  });
+  const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, toast, success]) restores.push(() => spy.mockRestore());
+  let refreshes = 0;
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect targetKind='companion' targetId='sidebar-companion' defaultTemplateKey='companion.default'
+      layout='stacked' showManagementActions={false} onChanged={() => { refreshes++; }} />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  await waitFor(() => expect(view.container.querySelector('.arco-select')).toBeTruthy());
+  fireEvent.click(view.container.querySelector('.arco-select')!);
+  fireEvent.click(await view.findByText('My Companion'));
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Current conversation updated; retry saving the default setup'));
+  expect(refreshes).toBe(1);
+  expect(success).not.toHaveBeenCalled();
+  expect(view.queryByRole('link', { name: 'Edit Agent' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Apply latest setup' })).toBeNull();
+  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[1][0].request.selection).toEqual({ kind: 'preset', preset_id: 'personal-companion' });
+  expect(refreshes).toBe(2);
+});
+
+test('an immediate partial-save retry keeps the submitted Agent while its options refresh is pending', async () => {
+  const personal = { kind: 'preset' as const, preset_id: 'personal-companion' };
+  const state: ProductAgentOptions = { ...structuredClone(initial), needs_model: false,
+    options: [initial.options[0], { selection: personal, display_name: 'My Companion', available: true, reason: null }],
+  };
+  const pendingRefreshes: Array<(options: ProductAgentOptions) => void> = [];
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(() => {
+    if (options.mock.calls.length === 1) return Promise.resolve(state);
+    return new Promise((resolve) => pendingRefreshes.push(resolve));
+  });
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    if (save.mock.calls.length === 1) throw new BackendHttpError({ method: 'PUT', path: '/private', status: 500,
+      body: { code: 'COMPANION_AGENT_DEFAULT_SAVE_FAILED', error: 'private disk detail' } });
+    return { selection: request.selection, needs_model: false };
+  });
+  const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, toast, success]) restores.push(() => spy.mockRestore());
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><MemoryRouter><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect targetKind='companion' targetId='sidebar-pending-refresh' defaultTemplateKey='companion.default'
+      layout='stacked' showManagementActions={false} />
+  </I18nextProvider></MemoryRouter></SWRConfig>);
+  await waitFor(() => expect(view.container.querySelector('.arco-select')).toBeTruthy());
+  fireEvent.click(view.container.querySelector('.arco-select')!);
+  fireEvent.click(await view.findByText('My Companion'));
+  await waitFor(() => expect(view.getByRole('button', { name: 'Retry' })).toBeTruthy());
+  expect(pendingRefreshes.length).toBeGreaterThan(0);
+  expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Companion');
+  expect(view.container.querySelector('.arco-select-view')?.textContent).not.toContain('My Companion');
+  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].request.selection).toEqual(personal);
+  await act(async () => { pendingRefreshes.splice(0).forEach((resolve) => resolve({ ...state, selection: personal })); });
+  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+});
+
 test('rechecks options when the model changes and displays fetch failures instead of a default selection', async () => {
   const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async ({ model }) => {
     if (model?.model === 'unreachable') throw new Error('private raw HTTP error');

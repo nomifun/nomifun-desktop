@@ -21,6 +21,9 @@ type Props = {
   conversationId?: string | null;
   disabled?: boolean;
   compact?: boolean;
+  /** Keep the sidebar's quick control to one full-width dropdown. */
+  layout?: 'inline' | 'stacked';
+  showManagementActions?: boolean;
   onChanged?: () => void;
   onSavingChange?: (saving: boolean) => void;
 };
@@ -33,12 +36,12 @@ export function productAgentErrorReason(error: unknown): 'modelChanged' | 'busy'
   if (isBackendHttpError(error)) {
     if (error.code === 'COMPANION_AGENT_DEFAULT_SAVE_FAILED') return 'partialSave';
     if (error.code.startsWith('MODEL_') || error.code === 'AGENT_SESSION_MODEL_INCOMPATIBLE') return 'modelChanged';
-    if (error.code.endsWith('_BUSY') || error.code === 'AGENT_SESSION_TURN_ACTIVE') return 'busy';
+    if (error.code.endsWith('_BUSY') || ['AGENT_SESSION_TURN_ACTIVE', 'AGENT_SESSION_EFFECTS_UNSETTLED', 'AGENT_SESSION_HANDOFF_RECOVERY_PENDING'].includes(error.code)) return 'busy';
   }
   return 'saveFailed';
 }
 
-const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, disabled = false, compact = false, onChanged, onSavingChange }) => {
+const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, disabled = false, compact = false, layout = 'inline', showManagementActions = true, onChanged, onSavingChange }) => {
   const { t } = useTranslation();
   const selectedModel = model?.id && model.use_model ? { provider_id: model.id, model: model.use_model } : undefined;
   const key = ['product-agent-options', targetKind, targetId, selectedModel?.provider_id ?? '', selectedModel?.model ?? ''];
@@ -49,11 +52,12 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
   const savingRef = useRef(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string>();
+  const [retrySelection, setRetrySelection] = useState<ProductAgentSelection | null>(null);
   const { data, error, isLoading, mutate } = useSWR<ProductAgentOptions>(key,
     () => agentPlatform.productBindingOptions.invoke({ target_kind: targetKind, target_id: targetId, model: selectedModel }),
     { shouldRetryOnError: false });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useEffect(() => { setSaveError(undefined); }, [requestKey]);
+  useEffect(() => { setSaveError(undefined); setRetrySelection(null); }, [requestKey]);
   const current = () => mounted.current && activeRequest.current === requestKey;
 
   const nameFor = (option: ProductAgentOptions['options'][number]): string => {
@@ -78,23 +82,26 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
         target_kind: targetKind, target_id: targetId,
         request: { selection: option.selection, ...(selectedModel ? { model: selectedModel } : {}), ...(activeId ? { conversation_id: activeId } : {}) },
       });
+      onChanged?.();
       if (!current()) return;
       await mutate({ ...data, selection: result.selection, needs_model: result.needs_model }, { revalidate: true });
       if (!current()) return;
       Message.success(t('agentSettings.productBinding.saved'));
-      onChanged?.();
+      setRetrySelection(null);
     } catch (reason) {
-      if (!current()) return;
       const category = productAgentErrorReason(reason);
+      if (category === 'partialSave') onChanged?.();
+      if (!current()) return;
       const message = t(`agentSettings.productBinding.${category}`);
       setSaveError(message);
+      if (category === 'partialSave') setRetrySelection(option.selection);
       Message.error(message);
       void mutate();
     } finally {
       savingRef.current = false;
+      onSavingChange?.(false);
       if (mounted.current) {
         setSaving(false);
-        onSavingChange?.(false);
       }
     }
   };
@@ -143,10 +150,10 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
               {!option.available && <small className={styles.reason}>{t(`agentSettings.productBinding.reasons.${option.reason ?? 'capability'}`)}</small>}
             </span>
           </Menu.Item>)}
-          {canEdit && <Menu.Item key='edit-agent'>
+          {showManagementActions && canEdit && <Menu.Item key='edit-agent'>
             <Link to={editPath}>{t('agentSettings.productBinding.editAgent')}</Link>
           </Menu.Item>}
-          {canApplyLatest && <Menu.Item key='apply-latest' disabled={!selected?.available} aria-disabled={!selected?.available}
+          {showManagementActions && canApplyLatest && <Menu.Item key='apply-latest' disabled={!selected?.available} aria-disabled={!selected?.available}
             onClick={() => void change(productSelectionValue(data.selection), true)}>
             {t('agentSettings.productBinding.applyLatest')}
           </Menu.Item>}
@@ -167,9 +174,10 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
       </span>
     </Tooltip>
   );
-  return <div className='flex min-w-0 max-w-full flex-col items-end gap-4px'>
-    <div className='flex min-w-0 max-w-full flex-col items-end gap-2px'>
-      <NomiSelect size='mini' contentFit contentMaxWidth='min(220px, 100%)'
+  return <div className={`flex min-w-0 max-w-full flex-col ${layout === 'stacked' ? 'w-full items-stretch' : 'items-end'} gap-4px`}>
+    <div className={`flex min-w-0 max-w-full flex-col ${layout === 'stacked' ? 'w-full items-stretch' : 'items-end'} gap-2px`}>
+      <NomiSelect size='mini' contentFit={layout !== 'stacked'} contentMaxWidth='min(220px, 100%)'
+        className={layout === 'stacked' ? 'w-full' : undefined}
         value={productSelectionValue(data.selection)} loading={saving} disabled={disabled || saving}
         onChange={(next: string) => void change(next)}
         dropdownMenuClassName={styles.popup}
@@ -187,7 +195,7 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
           </NomiSelect.Option>;
         })}
       </NomiSelect>
-      {canApplyLatest && <div className='flex min-w-0 items-center gap-6px'>
+      {showManagementActions && canApplyLatest && <div className='flex min-w-0 items-center gap-6px'>
         {canEdit && <Link to={editPath} className={styles.editLink}>{t('agentSettings.productBinding.editAgent')}</Link>}
         <Tooltip content={t('agentSettings.productBinding.applyLatestHint')}>
           <Button size='mini' type='text' className={styles.applyButton} loading={saving} disabled={disabled || saving || !selected?.available}
@@ -200,6 +208,8 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     {data.needs_model && <span className={styles.hint}>{t('agentSettings.productBinding.chooseModelLater')}</span>}
     {currentUnavailable && <span role='status' className={styles.hint}>{currentUnavailable}</span>}
     {saveError && <span role='alert' className={styles.hint}>{saveError}</span>}
+    {retrySelection && !showManagementActions && <Button size='mini' type='text' loading={saving} disabled={disabled || saving}
+      onClick={() => void change(productSelectionValue(retrySelection), true)}>{t('agentSettings.actions.retry')}</Button>}
   </div>;
 };
 

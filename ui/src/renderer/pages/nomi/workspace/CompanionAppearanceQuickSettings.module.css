@@ -1,0 +1,7 @@
+.settings { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.row { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 8px; }
+.label { color: var(--color-text-3); font-size: 12px; }
+.select { width: 100%; min-width: 0; }
+.hint { color: var(--color-text-3); font-size: 11px; line-height: 17px; }
+.error { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; color: rgb(var(--danger-6)); font-size: 11px; line-height: 17px; }
+.error button { color: inherit; }

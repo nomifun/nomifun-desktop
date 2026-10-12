@@ -121,7 +121,22 @@
     "modelRequiredHint": "Then desktop, IM, and robot entry points can continue the same shared history here.",
     "configureModel": "Configure model",
     "sessionFailed": "The companion conversation cannot open right now",
-    "sessionFailedHint": "Check the model and Agent configuration, then try again."
+    "sessionFailedHint": "Check the model and Agent configuration, then try again.",
+    "quickAgent": "Agent",
+    "quickModel": "Model",
+    "quickModelPlaceholder": "Select model",
+    "modelDefaultSaveFailed": "The conversation model changed, but saving the default model failed. Please retry.",
+    "quickSettingsSaving": "Saving…",
+    "quickSettings": {
+      "state": "State",
+      "desktopOnly": "Set the desktop figure in the desktop app",
+      "automaticMood": "Automatic ({{mood}})",
+      "automaticMoodHint": "Follows the companion's mood automatically",
+      "manualMoodHint": "Kept manually until you select Automatic",
+      "saveFailed": "Saving failed. The previous value was kept.",
+      "saved": "Saved",
+      "expandNeedsRoom": "Enlarge the window to show companion info"
+    }
   },
   "remote": {
     "showAllPlatforms": "View all {{count}} channels"
@@ -421,6 +436,7 @@
     "mcpAgentRequired": "This Agent does not allow MCP connections. Choose the Companion preset or configure the Agent in the workbench.",
     "modelConfig": "Chat model",
     "modelConfigHint": "Default model for new companion conversations and rebuilt remote connections. An existing local conversation keeps its frozen model.",
+    "sessionModelConfigHint": "Change the current conversation model while idle. It applies to the next message and is also saved as the companion's default.",
     "modelProvider": "Provider",
     "modelName": "Model",
     "modelMissing": "Configure a chat model for this companion first",

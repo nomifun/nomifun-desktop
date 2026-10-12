@@ -36,6 +36,10 @@ Session tree. The selected companion then has two first-level modes:
 The native desktop quick window is the lightweight path into the same product:
 it switches companions, shows the latest turns, accepts a quick reply, and
 deep-links to Cohabit or Manage. It never appears in the work Session sidebar.
+
+The Cohabit page keeps its docked companion-info sidebar and top controls. The sidebar offers dropdown editing for desktop visibility, mood, Agent and model without opening Manage. Desktop visibility controls the native figure window and is editable in the desktop app. Mood follows learning automatically unless you select a manual emotion, which stays until you return to Automatic and resumes the latest learned mood. Agent and model changes require an idle conversation, apply from the next message and preserve the same Session and history; a failed default save has a separate retry.
+
+The sidebar hides when the available conversation workspace is narrower than 840px and returns at 872px, while respecting a manual close. The existing top sidebar button restores the same docked sidebar when there is enough room; otherwise it asks you to enlarge the window.
 The collapsed figure exposes up to three alternative companions directly. If
 the target already has a visible desktop window it is brought forward; otherwise
 the target is created at the current position and replaces the current figure

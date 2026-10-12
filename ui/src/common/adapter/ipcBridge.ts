@@ -4475,6 +4475,8 @@ export interface ICompanionStatus {
   xp: number;
   level: number;
   mood: string;
+  /** Latest learned mood, retained while a manual emotion is selected. */
+  automatic_mood: string;
   memories_active: number;
   memories_archived: number;
   model_configured: boolean;
@@ -4637,6 +4639,8 @@ export interface ICompanionSkillConfig {
   disabled_auto: string[];
 }
 
+export type ICompanionMood = 'happy' | 'content' | 'sleepy' | 'worried' | 'excited';
+
 export interface ICompanionProfile {
   companion_id: CompanionId;
   control_robot_id?: string | null;
@@ -4645,6 +4649,8 @@ export interface ICompanionProfile {
   name: string;
   /** Character id (mochi/ink/roux/pixel/bolt/boo); unknown → default. */
   character: string;
+  /** Manual emotion held until cleared; null follows the latest learned mood. */
+  mood_override: ICompanionMood | null;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
   /** 备用对话模型: replayed once when the main model's turn fails. */
@@ -4738,6 +4744,7 @@ export type ICompanionProfilePatch = {
   control_robot_id?: string | null;
   name?: string;
   character?: string;
+  mood_override?: ICompanionMood | null;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
   fallback_model?: ICompanionModelRef | null;

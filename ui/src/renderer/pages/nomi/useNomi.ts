@@ -20,6 +20,7 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...prev,
   ...(patch.name !== undefined ? { name: patch.name } : {}),
   ...(patch.character !== undefined ? { character: patch.character } : {}),
+  ...(patch.mood_override !== undefined ? { mood_override: patch.mood_override } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
   ...(patch.model !== undefined ? { model: patch.model } : {}),
   ...(patch.fallback_model !== undefined ? { fallback_model: patch.fallback_model } : {}),
@@ -116,11 +117,13 @@ export const useCompanion = (companionId: CompanionId | null) => {
    * optimistically (mirrors the legacy patchConfig behavior).
    */
   const patchCompanion = useCallback(
-    async (patch: ICompanionProfilePatch) => {
+    async (patch: ICompanionProfilePatch, options: { optimistic?: boolean } = {}) => {
       if (!companionId) return undefined;
-      setData((prev) =>
-        prev.companion_id === companionId && prev.profile ? { ...prev, profile: mergeProfile(prev.profile, patch) } : prev
-      );
+      if (options.optimistic !== false) {
+        setData((prev) =>
+          prev.companion_id === companionId && prev.profile ? { ...prev, profile: mergeProfile(prev.profile, patch) } : prev
+        );
+      }
       try {
         const saved = await ipcBridge.companion.patchCompanion.invoke({ companion_id: companionId, patch });
         setData((prev) => (prev.companion_id === companionId ? { ...prev, profile: saved } : prev));
@@ -135,7 +138,7 @@ export const useCompanion = (companionId: CompanionId | null) => {
         // mints/propagates the companion session. Refresh status now so 总览's
         // 「未配置模型」warning clears and ChatTab activates the session promptly,
         // instead of waiting on the config-updated WS echo.
-        if (patch.model) void refreshStatus();
+        if (patch.model || patch.mood_override !== undefined) await refreshStatus();
         return saved;
       } catch (e) {
         // Roll back the optimistic merge to the server's truth.

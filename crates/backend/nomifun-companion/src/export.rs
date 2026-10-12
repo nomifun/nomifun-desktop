@@ -1011,6 +1011,13 @@ fn imported_patch(
         "appearance".to_owned(),
         localized_appearance(profile, has_figure)?,
     );
+    if let Some(mood_override) = profile.mood_override {
+        patch.insert(
+            "mood_override".to_owned(),
+            serde_json::to_value(mood_override)
+                .map_err(|error| AppError::Internal(format!("serialize imported mood preference: {error}")))?,
+        );
+    }
     if let Some(model) = &profile.model {
         patch.insert(
             "model".to_owned(),
@@ -2286,6 +2293,7 @@ mod tests {
                 serde_json::json!({
                     "persona": {"preset": "sassy", "custom": "喜欢用颜文字"},
                     "model": {"provider_id": provider_id, "model": "claude-fable-5"},
+                    "mood_override": "happy",
                     "appearance": {"companion_enabled": true, "companion_x": 7, "quiet_start": "22:00", "quiet_end": "08:00"}
                 }),
             )
@@ -2350,6 +2358,7 @@ mod tests {
         assert_eq!(imported.character, "ink");
         assert_eq!(imported.persona, profile.persona);
         assert_eq!(imported.model, profile.model);
+        assert_eq!(imported.mood_override, profile.mood_override);
         assert_eq!(imported.appearance, profile.appearance);
         assert_eq!(store_b.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 57);
         assert_eq!(

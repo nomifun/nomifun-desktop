@@ -23,7 +23,7 @@ use nomifun_common::{
 };
 use nomifun_db::IProviderRepository;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::profile::{
     CompanionEvolveConfig, CompanionLearnConfig, CompanionProfileConfig, RetiredSharedLearnEvolve,
@@ -152,11 +152,18 @@ pub struct CompanionRegistry {
     /// Lock order: this lock is always acquired BEFORE the roster map below.
     watermark: RwLock<u64>,
     inner: RwLock<HashMap<String, CompanionProfileConfig>>,
+    /// Serializes only effective-mood commits/events across the profile and the
+    /// existing automatic-mood row. Never held while invoking a model.
+    mood_updates: Mutex<()>,
     provider_repo: Option<std::sync::Arc<dyn IProviderRepository>>,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
 }
 
 impl CompanionRegistry {
+    pub(crate) async fn lock_mood_updates(&self) -> MutexGuard<'_, ()> {
+        self.mood_updates.lock().await
+    }
+
     /// Synchronous fail-closed boot-time scan. Every directory below
     /// `companions_dir` is a durable entity directory and therefore must carry a
     /// valid `config.json` whose canonical UUIDv7 matches the directory name.
@@ -320,6 +327,7 @@ impl CompanionRegistry {
             shared_dir,
             watermark: RwLock::new(watermark),
             inner: RwLock::new(companions),
+            mood_updates: Mutex::new(()),
             provider_repo,
             provider_lifecycle,
         })
@@ -976,6 +984,7 @@ mod tests {
             shared_dir: dir.path().join("shared"),
             watermark: RwLock::new(0),
             inner: RwLock::new(HashMap::new()),
+            mood_updates: Mutex::new(()),
             provider_repo: None,
             provider_lifecycle: None,
         };
