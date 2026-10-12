@@ -112,7 +112,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 普通新建和产品入口从目标冻结授权补齐宿主可提供的确定性资源：Workspace、Process Session、项目记忆、素材库、Scheduler，以及适用的 Terminal、Browser 和 Computer。伙伴、客户、Canvas 等产品身份只取真实目标 ID；Workspace 和 Process 使用同一工作根。Browser/Computer 的已发布 Role 合同可以冻结而设备环境仍未绑定，宿主环境不可用时省略该可选资源。知识库、渠道、SSH 主机和机器人只继承实际选项，不补造连接或凭证。真实 owner 不匹配、存储 I/O/损坏、合同或 Provider 不一致，以及 native checkpoint 和未知效果等执行安全问题继续拒绝操作。
 
-已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；已有伙伴会话可在会话内的更新入口，经空闲、已结算边界通过原 canonical preview/apply 使用最新配置。转换验证精确目标 Snapshot 和 binding version，保留 Session 与旧历史，不增加配置升级或绑定账本。
+已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；伙伴显式“应用最新设定”经空闲、已结算边界复用 canonical Agent switch，在同一 Session 操作围栏与 binding version 校验内准备并提交当前 owner 已保存的配置。直接 Session preview/apply 还须验证此前预览的精确目标 Snapshot。两者均保留 Session 与旧历史，不增加配置升级或绑定账本。
 
 `knowledge.management` 使用现有知识领域服务提供列表、详情、托管建库、元数据与 URL 来源更新、删除。建库后来源或文档失败返回已创建的真实 ID 与各项状态，重试针对该库处理；新库必须在空闲边界通过现有知识选择器挂载，不能修改当前 Turn 的冻结绑定。`session.management` 提供 canonical 会话查询和创建、向其他空闲普通本地会话发送输入、取消精确 Turn，以及真实 PTY 和关联 AgentExecution 的管理。输入沿用原 canonical 幂等与 binding/context 围栏；终端写入、重启和停止核验 owner、行版本与 PTY epoch；协作修改继续要求当前 lead/attempt 关系及精确版本。查询结果和终端输出是数据，不授予目标会话权限，不重放未知效果，也不新增效果账本。
 
@@ -249,8 +249,6 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 
 内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
 
-伙伴始终使用 `companion.default`。保存官方伙伴配置不自动更新已有 Session；用户可在会话内预览并应用同一个伙伴 Agent 的最新配置。此入口复用 canonical Agent switch 的版本围栏、空闲校验、Runtime 清理与效果结算，只允许伙伴模板，保留模型，按新授权协调仍可用的资源身份与已选参数并补齐宿主默认资源。缺少可选目标仅关闭对应 Action；活动或暂停回合、未结算效果及必要资源或合同校验失败继续阻止更新，不新建另一份伙伴会话或绑定账本。
-
 已有会话的创作模式、模型选择、参数与素材草稿按会话 ID 保存到持久浏览器存储；完整 key 同时隔离 backend dataset 与 Agent data generation。重启恢复用户最后选择的模式，包括明确选择的“日常对话”，不从最近生成任务反推或覆盖选择。欢迎页草稿及待提交准入状态仍使用会话级临时存储。新建创作会话的状态移交与后续编辑使用同一 writer，权威会话删除通知同时清理其草稿；这些界面编辑偏好不授予 Agent 权限，也不改变 canonical 事实链。
 
 欢迎页首条文字消息在目标路由和会话查询缓存就绪后直接进入正式会话，不显示独立的创建遮罩或按固定延时切换页面。当前提交的临时回显只在对应 Session 的真实时间轴呈现，复用正式用户气泡与附件布局；它不写入消息历史、不提供 Turn 身份或运行证明。用户消息通知先于发送回执和执行状态到达时，准备行持续显示，直到正式时间轴的工作状态或结果行提交；气泡与状态行保留 React 展示身份，后续 canonical root 确认也不重新挂载该状态行。准备行不创建计时边界，计时仍使用原时间轴的已准入请求与 canonical Turn 开始、结束边界。输入框在原有的真实用户消息边界释放提交交互，展示等待不延长输入阻断。失败或交接完成时按 Session 与幂等键清理展示，首条投递继续通过 canonical 准入校验和 initial-only 围栏。
@@ -274,6 +272,12 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 Channel 从当前 owner 和 typed binding 找 Session。存在会话记录但没有 authority binding 时应报告冲突，不能选择最早的旧记录自动回绑。新建、重置与取消均调用 canonical owner。
 
 Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保留各自业务配置及监督状态，但会话输入、准入、取消与终态必须引用 canonical Turn receipt。Conversation 名称不代表另一个存储源。
+
+伙伴的产品 Agent 选择可以使用官方“伙伴”模板或兼容的个人 Agent。兼容性要求保留伙伴能力与必需的 `companion` 资源；资源解析始终以目标伙伴的精确身份为准，不能继承另一个伙伴的身份或记忆资源。伙伴产品会话由 owner-scoped canonical opening 事实确认，具体伙伴归属再从 typed binding 派生，与所选 Agent 是否来自官方模板无关；普通 Agent 会话仅挂载伙伴资源不会成为该伙伴的产品会话。桌面、Channel 与 Robot 继续引用同一个现役 Session。
+
+模型与扩展派生可能把执行 binding 指向隐藏的 Session-only Preset，它不能替代用户原先选择的可编辑 Agent 身份。选择器通过现有 typed Agent transition 的 `request_digest` 验证原始选择命令，不按名称或相似配置猜测来源，也不增加来源绑定账本。初次创建前保存的产品选择仍是创作意图；编辑个人 Agent 后须显式应用最新设定，才改变当前 Session 的冻结版本。
+
+保存伙伴 Agent 选择时，服务端在同一 Session owner 的操作围栏内验证目标归属、当前 binding 版本、可用模型与能力、资源完整性及运行清理。已有空闲 Session 使用现有 `session/agent-binding-changed` 事务切换，保留 Session 身份、当前模型、已选扩展和可继续使用的资源；旧 Revision、Snapshot 和历史事件不可改写。伙伴产品默认值供后续创建使用，不能代替当前 Session 的 canonical binding，也不能由 UI 投影补造已生效状态。已提交切换后默认值持久化失败时，API 明确报告当前设定已生效，并允许显式重试默认值保存。活动或暂停 Turn、Remote / Attempt 绑定、未结算效果、仍在运行的进程和待处理恢复继续阻断切换；切换不重放旧 checkpoint、工具或完成账本。
 
 AgentExecution 的正常结算、重启恢复与人工采纳通过同一个 Session 输出查询读取精确 Turn 的终态、正文和工具效果。查询在同一事务中只解析该 Turn 的事件窗口，不扫描整个 Session 的历史。正文限于该 Turn 的 canonical assistant 内容，不能读取 UI 投影、推理文本或后续 Turn。产物来自该 Turn 已结算的文件操作或发布回执，并验证工作区身份、路径、字节数与摘要；目录扫描、模型声称已保存和旧工具展示 marker 都不是产物证据。同路径的后续写入、修改和删除按事件顺序决定最终可交付状态。
 

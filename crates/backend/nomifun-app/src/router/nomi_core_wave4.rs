@@ -660,6 +660,7 @@ impl Wave4TurnMiddlewareHostPort for NomiCoreChannelWave4Owner {
 /// One Nomi-core composition object for the two Wave 4 packages that share
 /// Companion/Channel product state.
 pub(crate) struct NomiCoreWave4Owners {
+    pub(crate) companion: Arc<nomifun_companion::CompanionAgentCapabilityOwner>,
     pub(crate) channel: Arc<NomiCoreChannelWave4Owner>,
     action_port: Arc<dyn Wave4HostPort>,
     context_port: Arc<dyn Wave4ContextHostPort>,
@@ -699,6 +700,7 @@ impl NomiCoreWave4Owners {
                     ),
             );
         Self {
+            companion,
             channel,
             action_port,
             context_port,

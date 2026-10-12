@@ -20,8 +20,6 @@ This is the current development entry point. Rust types, the Session event regis
 
 Official Agents have stable, owner-scoped editable Presets and use the same immutable revision save path as personal Agents. Release seeds initialize unsaved defaults without overwriting saved customizations. Official product launches resolve the owner's saved configuration; model and extension variants continue through the existing Revision/Snapshot path. Historical official identity is validated from host-owned source, owner, and template identity rather than equality with today's seed or mutable configuration.
 
-Saving does not change an existing Session. A companion can preview and apply its saved `companion.default` configuration inline through the canonical Agent switch path at an idle, settled boundary. The update retains the model, reconciles usable resource identities and selected parameters under the new grants, and supplies available host defaults. Missing optional targets disable their dependent Actions. Other Agent identities, active or paused Turns, unsettled effects, and failed mandatory resource or contract checks retain their existing fences.
-
 `engine_history.rs` reads typed canonical events and resolved payloads. It does not read Message projections to determine model roles. Native closed turns replay their structured journal. Missing Runtime records fail closed rather than falling back to chat text.
 
 An accepted input that fails or is cancelled before Runtime startup remains valid context together with its explicit terminal fact. It does not acquire fabricated Runtime, tool or completion evidence.
@@ -84,7 +82,7 @@ Frozen `CapabilityActionDescriptor.required_resource_operations` has explicit op
 
 Ordinary creation and product entry supply deterministic host resources under the target's frozen grants: Workspace, Process Session, project memory, asset library, Scheduler, and applicable Terminal, Browser and Computer resources. Product identity uses the actual Companion, Customer or Canvas target ID; Workspace and Process share one root. Published Browser/Computer Role contracts may be frozen while their optional live environment remains unbound. Knowledge bases, channels, SSH hosts and robots require actual selections, without invented connections or credentials. Owner mismatches, storage I/O or corruption, contract/Provider mismatches, native checkpoint safety and unknown effects retain their fail-closed boundaries.
 
-Saved official customizations are not overwritten by release seeds. The owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` returns a read-only merged draft and missing Module/Action/Package Skill additions. Persona, instructions, model, Runtime settings, existing extensions and pinned Skill versions remain authored choices. The UI shows additions before saving through the existing SaveRevision `expected_current_revision` CAS and does not replace unsaved edits. Saving leaves existing Sessions unchanged. An existing Companion Session's inline update uses canonical preview/apply at an idle, settled boundary with exact target Snapshot and binding-version checks, retaining its identity and historical artifacts without a separate upgrade or binding ledger.
+Saved official customizations are not overwritten by release seeds. The owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` returns a read-only merged draft and missing Module/Action/Package Skill additions. Persona, instructions, model, Runtime settings, existing extensions and pinned Skill versions remain authored choices. The UI shows additions before saving through the existing SaveRevision `expected_current_revision` CAS and does not replace unsaved edits. Saving leaves existing Sessions unchanged. A Companion's explicit Apply latest command uses the canonical Agent switch at an idle, settled boundary, preparing and committing the current owned configuration under the Session operation and binding-version fences. Direct Session preview/apply additionally requires the exact previewed target Snapshot. Both retain the Session and historical artifacts without a separate upgrade or binding ledger.
 
 `knowledge.management` uses the existing domain service for list, inspect, managed creation, metadata/URL-source updates and deletion. Partial creation returns the committed base ID and actual document/source status, so retries repair that base. Mounting uses the existing knowledge selector at an idle boundary; a tool cannot rewrite the running Turn's frozen binding. `session.management` queries and creates canonical Sessions, sends input to another idle ordinary local conversation, cancels an exact observed Turn, and manages real PTYs and linked AgentExecutions. Input uses canonical idempotency and binding/context fences. Terminal input/relaunch/stop check owner, row version and PTY epoch; Execution mutations require the active lead/attempt relation and exact versions. Target results and terminal output are data, not borrowed authority or permission to replay unknown effects. Effects settle through the existing canonical chain.
 
@@ -192,6 +190,38 @@ One `ModelFailureDiagnostic` carries model-request refinements and evidence from
 Failures, current pauses and rejected requests share one error presentation. Model or provider failures automatically unlock the composer after the existing owner proves cleanup and native resource release and commits canonical `turn/failed`; the user does not need to end the Turn again. The same owner may settle an already-saved current-generation typed model failure pause during startup, Session reads or the next admission. Its transaction rechecks the exact pause revision, execution fence, Snapshot, current-generation cleanup receipt and absence of pending/unknown effects. It never runs a model, replays a tool, or changes failure into success or cancellation. Unproven cleanup, unknown effects, manual pauses and other recovery pauses retain their native fences and explicit recovery authority. Genuine pause notes derive only from verified current state and never enter Message history or invent failed terminals. Rejected requests remain transient within their originating Session, and an admitted request's canonical error replaces its HTTP fallback.
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
+
+Companion product Agent selections may use the official Companion template or
+a compatible personal Agent. Compatibility requires the Companion capability
+and required `companion` resource. Resource resolution uses the exact target
+companion and cannot inherit another companion's identity or memory resources.
+The owner-scoped canonical opening fact identifies the Companion product
+Session; its typed binding establishes the exact companion ownership regardless
+of whether the selected Agent is an official template. A regular Agent Session
+that mounts a Companion resource does not become that companion's product
+Session. Desktop, Channel and Robot continue to reference the same current Session.
+
+Model and extension derivation may bind execution to a hidden Session-only
+Preset. That cache ID cannot replace the user's original editable Agent choice.
+The selector proves the original selection command against the existing typed
+Agent transition's `request_digest`, without name/configuration inference or a
+second source-binding ledger. The product selection saved before initial
+creation remains authoring intent. Editing a personal Agent requires an explicit
+application of its latest setup before the current Session's frozen version changes.
+
+Saving a Companion selection validates target ownership, the current binding
+version, model and capability availability, complete resources and runtime
+cleanup under the same Session owner's operation fence. An existing idle
+Session changes through the existing `session/agent-binding-changed` transaction,
+preserving its identity, current model, selected extensions and still-applicable
+resources. Previous Revisions, Snapshots and events remain immutable. The
+product default supplies subsequent Session creation; it neither replaces the
+current Session's canonical binding nor lets a UI projection claim application.
+If default persistence fails after a committed transition, the API reports that
+the current setup is already active and permits an explicit retry of the default.
+Active or paused Turns, Remote and Attempt bindings, unsettled effects, running
+processes and pending recovery retain their switch fences. The transition never
+replays a checkpoint, tool call or completion ledger.
 
 IDMM explanations are typed metadata on canonical accepted input. Only the
 trusted IDMM command can supply `idmm_decision`; public input cannot claim the

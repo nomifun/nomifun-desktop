@@ -439,7 +439,7 @@ export type ProductAgentSelection =
   | { kind: 'template'; template_key: OfficialPresetKey }
   | { kind: 'preset'; preset_id: string };
 
-export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'removed';
+export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'companion' | 'removed';
 
 export interface ProductAgentOptions {
   selection: ProductAgentSelection;

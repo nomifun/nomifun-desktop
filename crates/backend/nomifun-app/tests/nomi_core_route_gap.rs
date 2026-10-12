@@ -4746,27 +4746,56 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     services.database.close().await;
 }
 
-#[tokio::test]
-async fn companion_entry_is_fixed_to_its_official_agent() {
-    const TRUST: &str = "companion-product-agent";
-    async fn call(
-        router: axum::Router,
-        method: &str,
-        path: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        let mut request = Request::builder().method(method).uri(path)
-            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
-        if method == "PUT" && path.ends_with("/agent") {
-            request = request.header("idempotency-key", uuid::Uuid::now_v7().to_string());
-        }
-        let response = router.oneshot(request
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
+const COMPANION_AGENT_TEST_TRUST: &str = "companion-product-agent";
+
+async fn companion_agent_test_request(
+    router: axum::Router,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(path)
+        .header("x-nomi-local-trust", COMPANION_AGENT_TEST_TRUST).header("content-type", "application/json");
+    if method == "PUT" && path.ends_with("/agent") {
+        request = request.header("idempotency-key", uuid::Uuid::now_v7().to_string());
     }
-    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let response = router.oneshot(request
+        .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_else(|error|
+        panic!("{method} {path} returned {status}: {error}; {}", String::from_utf8_lossy(&bytes))))
+}
+
+// Save a core-only official configuration explicitly. Release defaults must not overwrite authored choices.
+async fn save_companion_core_agent_for_fixture(router: axum::Router) {
+    let call = companion_agent_test_request;
+    let (status, original_library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{original_library}");
+    let official_id = original_library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
+    let (status, original_editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{original_editor}");
+    let mut core_draft = original_editor["data"]["draft"].clone();
+    core_draft["document"]["enabled_capabilities"] = json!([
+        {"capability":{"id":"companion"},"action_allowlist":["companion/evolve","companion/learn"]},
+        {"capability":{"id":"companion.memory"},"action_allowlist":["companion.memory/recall","companion.memory/write"]},
+        {"capability":{"id":"knowledge"},"action_allowlist":["knowledge/read","knowledge/search"]},
+        {"capability":{"id":"channel.messaging"},"action_allowlist":["channel.messaging/reply"]},
+        {"capability":{"id":"robot"},"action_allowlist":["robot/vision"]},
+        {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/create","automation.schedule/delete","automation.schedule/list","automation.schedule/update"]}
+    ]);
+    let (status, saved_core) = call(router.clone(), "POST",
+        &format!("/api/agent-presets/{official_id}/revisions"), json!({
+            "expected_current_revision":original_editor["data"]["revision"]["reference"], "draft":core_draft,
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{saved_core}");
+}
+
+#[tokio::test]
+async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_and_model() {
+    let call = companion_agent_test_request;
+    let (router, services) = common::build_local_trust_app(COMPANION_AGENT_TEST_TRUST).await;
     common::materialize_builtin_skills_for_fixture(&services).await;
     let upstream = wiremock::MockServer::start().await;
     const REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
@@ -4801,28 +4830,7 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    // Simulate an owner who saved the earlier, incomplete official recipe.
-    // The new seed must not silently overwrite this saved configuration.
-    let (status, original_library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{original_library}");
-    let official_id = original_library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
-    let (status, original_editor) = call(router.clone(), "GET",
-        &format!("/api/agent-presets/{official_id}/editor"), json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{original_editor}");
-    let mut old_draft = original_editor["data"]["draft"].clone();
-    old_draft["document"]["enabled_capabilities"] = json!([
-        {"capability":{"id":"companion"},"action_allowlist":["companion/evolve","companion/learn"]},
-        {"capability":{"id":"companion.memory"},"action_allowlist":["companion.memory/recall","companion.memory/write"]},
-        {"capability":{"id":"knowledge"},"action_allowlist":["knowledge/read","knowledge/search"]},
-        {"capability":{"id":"channel.messaging"},"action_allowlist":["channel.messaging/reply"]},
-        {"capability":{"id":"robot"},"action_allowlist":["robot/vision"]},
-        {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/create","automation.schedule/delete","automation.schedule/list","automation.schedule/update"]}
-    ]);
-    let (status, old_saved) = call(router.clone(), "POST",
-        &format!("/api/agent-presets/{official_id}/revisions"), json!({
-            "expected_current_revision":original_editor["data"]["revision"]["reference"], "draft":old_draft,
-        })).await;
-    assert_eq!(status, StatusCode::OK, "{old_saved}");
+    save_companion_core_agent_for_fixture(router.clone()).await;
     let (status, selected_default) = call(router.clone(), "PUT",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
             "selection": { "kind": "template", "template_key": "companion.default" },
@@ -4998,8 +5006,10 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
     assert_eq!(status, StatusCode::OK, "{options}");
     assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
         "the implicit official choice must remain a template selection rather than a personal Agent");
-    assert_eq!(options["data"]["options"].as_array().unwrap().len(), 1,
-        "Companion must not expose generic Agent alternatives");
+    let minimal_option = options["data"]["options"].as_array().unwrap().iter()
+        .find(|option| option["selection"]["template_key"] == "chat.minimal").unwrap();
+    assert_eq!(minimal_option["available"], false);
+    assert_eq!(minimal_option["reason"], "companion", "Agents must retain the Companion persona contract");
     let target_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
         .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
@@ -5017,7 +5027,537 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
             "preset_id": minimal_id
         })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{selected}");
-    assert_eq!(selected["code"], "CAPABILITY_UNAVAILABLE_ON_PLATFORM");
+    assert_eq!(selected["code"], "COMPANION_AGENT_REQUIRED");
+    let (status, unchanged) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged["data"]["preset_id"], preset_id);
+    assert_eq!(unchanged["data"]["agent_snapshot"]["enabled_capabilities"], snapshot["enabled_capabilities"]);
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "the chat turn must use exactly one model request");
+    let model_request = requests[0].body_json::<Value>().unwrap();
+    assert!(
+        model_request["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|tool| !tool["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("robot")),
+        "an unbound Robot must not reach the model tool surface: {model_request}"
+    );
+
+    // A personal Companion Agent can customize its instructions without
+    // creating another Session or granting access to another Companion.
+    let (status, official_editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{official_editor}");
+    let mut document = official_editor["data"]["draft"]["document"].clone();
+    document["instructions"] = json!("COMPANION_CUSTOM_INSTRUCTION_V1");
+    let (status, custom) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name": "Personal Companion Agent", "document": document,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{custom}");
+    let custom_id = custom["data"]["preset"]["preset_id"].as_str().unwrap();
+    let custom_selection = json!({ "kind": "preset", "preset_id": custom_id });
+    let (status, options) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/companion/{companion_id}?provider_id={provider_id}&model=step-3.7-flash"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["data"]["options"].as_array().unwrap().iter()
+        .find(|option| option["selection"] == custom_selection).unwrap()["available"], true);
+
+    let (status, other) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({"name":"Another Companion", "character":"ink"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_id = other["data"]["companion_id"].as_str().unwrap();
+    let (status, cross_target) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{other_id}"), json!({
+            "selection": custom_selection, "conversation_id": conversation_id,
+        })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{cross_target}");
+    let (status, missing_profile) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{}", uuid::Uuid::now_v7()), json!({
+            "selection": custom_selection,
+        })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "model-free writes must validate the real profile: {missing_profile}");
+
+    let (status, other_provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Future Companion default",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": {"api_keys":["test-only"]}, "enabled": true,
+        "initial_model":{"model":"step-3.7-flash","enabled":true,
+            "capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","provider_params":{}}]},
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{other_provider}");
+    let future_model = json!({"provider_id":other_provider["data"]["provider_id"],"model":"step-3.7-flash"});
+    let (status, differently_routed) = call(router.clone(), "POST", "/api/agent-presets/from-template/companion.default", json!({
+        "display_name":"companion.default", "reuse_existing":true, "model":future_model,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{differently_routed}");
+    let (status, custom_editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{custom_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{custom_editor}");
+    let mut routed_draft = custom_editor["data"]["draft"].clone();
+    for field in ["model_route_refs", "chat_route_records"] {
+        routed_draft["document"][field] = differently_routed["data"]["draft"]["document"][field].clone();
+    }
+    let (status, routed) = call(router.clone(), "POST", &format!("/api/agent-presets/{custom_id}/revisions"), json!({
+        "expected_current_revision":routed_draft["current_revision"], "draft":routed_draft,
+        "reason":"Authored model differs from the frozen Companion Session",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{routed}");
+    let product_path = format!("/api/product-agent-bindings/companion/{companion_id}");
+    sqlx::query("CREATE TRIGGER fixture_companion_default_failure BEFORE INSERT ON product_agent_selections WHEN NEW.target_kind = 'companion' BEGIN SELECT RAISE(FAIL, 'fixture default write failure'); END")
+        .execute(services.database.pool()).await.unwrap();
+    let (status, applied) = call(router.clone(), "PUT", &product_path, json!({
+        "selection": custom_selection, "model": future_model,
+    })).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{applied}");
+    assert_eq!(applied["code"], "COMPANION_AGENT_DEFAULT_SAVE_FAILED");
+    assert_eq!(applied["details"]["active_agent_applied"], true);
+    let (status, authoritative) = call(router.clone(), "GET", &product_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{authoritative}");
+    assert_eq!(authoritative["data"]["selection"], custom_selection,
+        "an active model variant must retain the original authorial selection, including after default persistence failure");
+    let (status, repeated_failure) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{repeated_failure}");
+    assert_eq!(repeated_failure["code"], "COMPANION_AGENT_DEFAULT_SAVE_FAILED");
+    sqlx::query("DROP TRIGGER fixture_companion_default_failure").execute(services.database.pool()).await.unwrap();
+    let (status, retry) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection,"model":future_model})).await;
+    assert_eq!(status, StatusCode::OK, "explicit retry must reconcile defaults without switching again: {retry}");
+    let (status, current) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    assert_ne!(current["data"]["preset_id"], custom_id, "a different authored Chat route must produce an immutable Session-only variant");
+    assert_eq!(current["data"]["extra"]["companion_session"], true);
+    assert_eq!(current["data"]["extra"]["companion_id"], companion_id);
+    assert_eq!(current["data"]["agent_snapshot"]["resolved_model"]["provider_id"], provider_id,
+        "changing the profile Agent must preserve this Session's frozen model");
+    let resources = current["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().filter(|resource| matches!(resource["resource_kind"].as_str(), Some("companion"|"companion_memory")))
+        .all(|resource| resource["resource_id"] == companion_id));
+    let (status, reopened) = call(router.clone(), "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["conversation_id"], conversation_id);
+    let (status, turn) = call(router.clone(), "POST",
+        &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(), "input":{"content":"use the personal Agent"},
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'")
+                .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("custom Companion turn must complete");
+    let requests = upstream.received_requests().await.unwrap();
+    let actual = requests.last().unwrap().body_json::<Value>().unwrap();
+    let system = actual["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(system.contains("COMPANION_CUSTOM_INSTRUCTION_V1"), "custom Agent instructions must reach the real model: {system}");
+    assert!(system.contains("Agent-bound companion"), "the exact Companion persona must remain effective");
+
+    // Editing the selected preset is frozen until an explicit reapply. Reapply
+    // uses a canonical Agent transition and retains all previous messages.
+    let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{custom_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{editor}");
+    let mut draft = editor["data"]["draft"].clone();
+    draft["document"]["instructions"] = json!("COMPANION_CUSTOM_INSTRUCTION_V2");
+    let (status, saved) = call(router.clone(), "POST", &format!("/api/agent-presets/{custom_id}/revisions"), json!({
+        "expected_current_revision": draft["current_revision"], "draft": draft, "reason":"Companion settings reapply regression",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, frozen) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{frozen}");
+    assert_eq!(frozen["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"], current["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"]);
+    let (status, reapplied) = call(router.clone(), "PUT", &product_path, json!({
+        "selection": custom_selection, "conversation_id": conversation_id,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "model-free reapply must preserve the active model: {reapplied}");
+    let (status, latest) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{latest}");
+    assert_ne!(latest["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"], frozen["data"]["agent_snapshot"]["canonical_binding"]["preset_revision_ref"]);
+    let transition_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(transition_count, 2);
+    let (status, noop) = call(router.clone(), "PUT", &product_path, json!({"selection":custom_selection})).await;
+    assert_eq!(status, StatusCode::OK, "exact reapply must be a successful no-op: {noop}");
+    let after_noop: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(after_noop, transition_count);
+    let (status, turn) = call(router.clone(), "POST",
+        &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
+            "idempotency_key":uuid::Uuid::now_v7().to_string(), "input":{"content":"use the reapplied Agent"},
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'")
+                .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 3 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("reapplied Companion turn must complete");
+    let requests = upstream.received_requests().await.unwrap();
+    let actual = requests.last().unwrap().body_json::<Value>().unwrap();
+    let system = actual["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(system.contains("COMPANION_CUSTOM_INSTRUCTION_V2"), "explicit reapply must reach the actual model: {system}");
+    assert!(!system.contains("COMPANION_CUSTOM_INSTRUCTION_V1"), "the old Agent instructions must not remain active");
+    let (status, history) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{conversation_id}/message-history?page_size=100"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert!(history["data"]["items"].as_array().unwrap().iter().any(|message| message["content"]["content"] == REPLY));
+
+    // Equal compiled contracts can belong to different authored Agents. The
+    // explicit source choice must survive cache reuse and later source edits.
+    let (status, author) = call(router.clone(), "GET", &format!("/api/agent-presets/{custom_id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{author}");
+    let (status, alias) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name":"Personal Companion Agent", "document":author["data"]["draft"]["document"],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{alias}");
+    let alias_id = alias["data"]["preset"]["preset_id"].as_str().unwrap();
+    let alias_selection = json!({"kind":"preset","preset_id":alias_id});
+    let (status, selected_alias) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    assert_eq!(status, StatusCode::OK, "{selected_alias}");
+    let (status, alias_options) = call(router.clone(), "GET", &product_path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{alias_options}");
+    assert_eq!(alias_options["data"]["selection"], alias_selection);
+    let alias_transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(alias_transitions, 3, "a distinct authored selection needs an exact immutable target transition");
+    let (status, alias_noop) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    assert_eq!(status, StatusCode::OK, "{alias_noop}");
+    let alias_noop_transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed'")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(alias_noop_transitions, alias_transitions);
+    let mut alias_draft = alias["data"]["draft"].clone();
+    alias_draft["document"]["instructions"] = json!("COMPANION_CUSTOM_INSTRUCTION_V3");
+    let (status, saved_alias) = call(router.clone(), "POST", &format!("/api/agent-presets/{alias_id}/revisions"), json!({
+        "expected_current_revision":alias_draft["current_revision"],"draft":alias_draft,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{saved_alias}");
+    let (status, alias_reapplied) = call(router.clone(), "PUT", &product_path, json!({"selection":alias_selection})).await;
+    assert_eq!(status, StatusCode::OK, "{alias_reapplied}");
+    let (status, turn) = call(router.clone(), "POST", &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
+        "idempotency_key":uuid::Uuid::now_v7().to_string(),"input":{"content":"use the selected authored Agent"},
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'")
+                .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 4 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("reapplied authored alias must complete");
+    let requests = upstream.received_requests().await.unwrap();
+    let actual = requests.last().unwrap().body_json::<Value>().unwrap();
+    let system = actual["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(system.contains("COMPANION_CUSTOM_INSTRUCTION_V3"), "the selected source's edits must reach the model: {system}");
+
+    let (status, generic) = call(router.clone(), "POST", "/api/agent-sessions", json!({
+        "preset_id":custom_id, "model":{"provider_id":provider_id,"model":"step-3.7-flash"},
+        "resource_selections":[
+            {"resource_kind":"companion","resource_id":companion_id},
+            {"resource_kind":"companion_memory","resource_id":companion_id},
+            {"resource_kind":"scheduler","resource_id":"installation-scheduler"},
+        ],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{generic}");
+    let generic_id = generic["data"]["agent_session_id"].as_str().unwrap();
+    let (status, generic_projection) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{generic_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{generic_projection}");
+    assert!(generic_projection["data"]["extra"]["companion_session"].is_null(),
+        "a resource grant alone must not turn a personal Agent launch into the product's unique Companion Session");
+
+    let (status, future_default) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{other_id}"), json!({
+            "selection":custom_selection, "model":{"provider_id":provider_id,"model":"step-3.7-flash"},
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{future_default}");
+    let (status, configured_other) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{other_id}"), json!({"model":{"provider_id":provider_id,"model":"step-3.7-flash"}})).await;
+    assert_eq!(status, StatusCode::OK, "{configured_other}");
+    let (status, future_thread) = call(router.clone(), "POST",
+        &format!("/api/companion/companions/{other_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{future_thread}");
+    let future_id = future_thread["data"]["conversation_id"].as_str().unwrap();
+    let (status, future_projection) = call(router.clone(), "GET",
+        &format!("/api/agent-sessions/{future_id}/projection"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{future_projection}");
+    assert_eq!(future_projection["data"]["extra"]["companion_id"], other_id);
+    assert_eq!(future_projection["data"]["agent_snapshot"]["preset_name"], "Personal Companion Agent",
+        "the resolver must honor saved personal selections for newly opened Companion Sessions");
+
+    let session = nomifun_agent_contracts::AgentSessionId::from(conversation_id.to_owned());
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    store.start_turn(&session, nomifun_agent_contracts::EventProducerId::from("session_api"),
+        nomifun_agent_contracts::IdempotencyKey::from(uuid::Uuid::now_v7().to_string()),
+        nomifun_agent_contracts::OperationId::from(uuid::Uuid::now_v7().to_string()),
+        nomifun_agent_contracts::StrictJsonValue(json!({"content":"active settings fence"}))).await.unwrap();
+    let before_default = sqlx::query_scalar::<_,String>("SELECT selection_json FROM product_agent_selections WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    let (status, busy) = call(router.clone(), "PUT", &product_path, json!({
+        "selection":{"kind":"template","template_key":"companion.default"}, "model":future_model,
+    })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+    assert_eq!(busy["code"], "AGENT_SESSION_TURN_ACTIVE");
+    let after_default = sqlx::query_scalar::<_,String>("SELECT selection_json FROM product_agent_selections WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(after_default, before_default, "busy changes must not mutate the saved default");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_history() {
+    let call = companion_agent_test_request;
+    let (router, services) = common::build_local_trust_app(COMPANION_AGENT_TEST_TRUST).await;
+    common::materialize_builtin_skills_for_fixture(&services).await;
+    let upstream = wiremock::MockServer::start().await;
+    const REPLY: &str = "COMPANION_CHAT_WITHOUT_DEVICE_OK";
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path_regex(".*/chat/completions$"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"companion\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                )),
+        )
+        .mount(&upstream)
+        .await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Companion Agent regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": [],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({ "name": "Agent-bound companion", "character": "ink" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{companion}");
+    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
+    let (status, patched) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    save_companion_core_agent_for_fixture(router.clone()).await;
+    let (status, selected_default) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
+            "selection": { "kind": "template", "template_key": "companion.default" },
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
+            "resource_selections": [
+                { "resource_kind": "companion", "resource_id": companion_id },
+                { "resource_kind": "companion_memory", "resource_id": companion_id },
+                { "resource_kind": "scheduler", "resource_id": "installation-scheduler" }
+            ]
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{selected_default}");
+    let frozen_resources = selected_default["data"]["agent_binding"]["typed_resource_bindings"]
+        .as_array().expect("typed product resources");
+    assert_eq!(frozen_resources.len(), 3);
+    assert!(frozen_resources.iter().all(|resource|
+        resource["resource_kind"] != "robot" && resource["resource_kind"] != "channel"));
+    let path = format!("/api/companion/companions/{companion_id}/companion/threads");
+    let ((status, thread), (other_status, other_thread)) = tokio::join!(
+        call(router.clone(), "POST", &path, json!({})),
+        call(router.clone(), "POST", &path, json!({})),
+    );
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(other_status, StatusCode::OK, "{other_thread}");
+    assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent home/sidebar/device opens must share the first conversation");
+    let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
+    let (status, projected) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projected}");
+    let snapshot = &projected["data"]["agent_snapshot"];
+    let preset_id = projected["data"]["preset_id"].as_str().unwrap().to_owned();
+    let enabled = snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(enabled, std::collections::BTreeSet::from([
+        "agent.tool-discovery", "automation.schedule", "channel.messaging", "companion",
+        "companion.memory", "knowledge", "robot",
+    ]));
+    for (module, expected) in [
+        ("companion", &["companion/evolve", "companion/learn"][..]),
+        ("companion.memory", &["companion.memory/recall", "companion.memory/write"][..]),
+        ("knowledge", &["knowledge/read", "knowledge/search"][..]),
+        ("channel.messaging", &["channel.messaging/reply"][..]),
+        ("robot", &["robot/vision"][..]),
+        ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"][..]),
+        ("agent.tool-discovery", &["tool.discovery.rank"][..]),
+    ] {
+        let actual = snapshot["enabled_capability_actions"][module].as_array().unwrap().iter()
+            .map(|action| action.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected.iter().copied().collect(), "{module}");
+    }
+    assert_eq!(snapshot["preset_name"], "companion.default");
+    assert_eq!(projected["data"]["extra"]["companion_session"], true);
+    assert_eq!(projected["data"]["extra"]["companion_id"], companion_id);
+    assert_eq!(projected["data"]["extra"]["product_agent_target_kind"], "companion");
+    assert_eq!(projected["data"]["extra"]["product_agent_target_id"], companion_id);
+    let (status, warmed) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{conversation_id}/warmup"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{warmed}");
+    let failed_key = uuid::Uuid::now_v7().to_string();
+    let (status, failed_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{conversation_id}/turns"),
+        json!({
+            "idempotency_key": failed_key,
+            "input": {
+                "content": "exercise pre-model cleanup",
+                "inject_skills": ["not-selected"]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed_turn}");
+    let failed_operation = failed_turn["data"]["operation_id"].as_str().unwrap().to_owned();
+    let failed_error = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let row = sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT state, error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+            )
+            .bind(conversation_id)
+            .bind(&failed_operation)
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+            if row.0 == "failed" {
+                break row.1.unwrap_or_default();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("pre-model Companion failure did not reach a durable terminal");
+    let failed_error: Value = serde_json::from_str(&failed_error).expect("canonical pre-model failure diagnostics");
+    assert_eq!(failed_error["model_steps"], 0, "an unselected Skill must fail before the model starts");
+    assert_eq!(failed_error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
+    assert_eq!(failed_error["error"]["agentTemplateKey"], "companion.default");
+    let detail = failed_error["error"]["detail"].as_str().expect("native Skill admission diagnostic");
+    assert!(detail.contains("Agent Skills: requested Skill is not in this Agent Snapshot"), "{failed_error}");
+    assert!(!detail.contains("turn no longer admits progress"), "cleanup masked the preparation failure: {failed_error}");
+    let (status, turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{conversation_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "hello without a robot or IM channel" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    let durable_history = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{conversation_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            let items = history["data"]["items"].as_array().unwrap();
+            if let Some(reply) = items
+                .iter()
+                .find(|message| message["content"]["content"] == REPLY)
+                && items.iter().any(|message| {
+                    message["type"] == "agent_status"
+                        && message["content"]["turn_summary"] == true
+                        && message["content"]["status"] == "prepared"
+                        && message["msg_id"] == reply["message_id"]
+                })
+            {
+                break history;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("Companion reply without a Robot or IM binding did not become durable");
+    let history_items = durable_history["data"]["items"].as_array().unwrap();
+    let reply = history_items
+        .iter()
+        .find(|message| message["content"]["content"] == REPLY)
+        .expect("durable Companion reply");
+    let turn_summary = history_items
+        .iter()
+        .find(|message| {
+            message["type"] == "agent_status"
+                && message["content"]["turn_summary"] == true
+                && message["content"]["status"] == "prepared"
+                && message["msg_id"] == reply["message_id"]
+        })
+        .expect("completed turn must expose one durable renderer summary");
+    assert_eq!(turn_summary["position"], "center");
+    assert_ne!(turn_summary["message_id"], turn_summary["msg_id"]);
+    assert!(turn_summary["content"]["turn_id"].as_str().is_some());
+    let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(conversation_count, 0, "canonical Companion must not write the retired Conversation Store");
+    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(session_count, 1, "concurrent ensure must create one canonical AgentSession");
+    let (status, options) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
+        "the implicit official choice must remain a template selection rather than a personal Agent");
+    let minimal_option = options["data"]["options"].as_array().unwrap().iter()
+        .find(|option| option["selection"]["template_key"] == "chat.minimal").unwrap();
+    assert_eq!(minimal_option["available"], false);
+    assert_eq!(minimal_option["reason"], "companion", "Agents must retain the Companion persona contract");
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(target_count, 1);
+
+    let (status, minimal) = call(router.clone(), "POST",
+        "/api/agent-presets/from-template/chat.minimal", json!({
+            "display_name": "chat.minimal", "reuse_existing": true,
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" }
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{minimal}");
+    let minimal_id = minimal["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, selected) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
+            "preset_id": minimal_id
+        })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{selected}");
+    assert_eq!(selected["code"], "COMPANION_AGENT_REQUIRED");
     let (status, unchanged) = call(
         router.clone(),
         "GET",

@@ -84,6 +84,24 @@ pub struct PresetRevisionCompiler {
 type ConsumerValidator = dyn Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync;
 
 impl PresetRevisionCompiler {
+    /// Give an explicitly selected authored Agent its own immutable identity
+    /// when its executable contract equals another Session-local cache. The
+    /// saved contract is copied without resolving current defaults or modules.
+    pub(crate) fn derive_session_identity(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        source_revision: &AgentPresetRevision,
+        source_snapshot: &ResolvedSnapshotEnvelope,
+    ) -> Result<(AgentPresetRevision, ResolvedSnapshotEnvelope), ControlPlaneError> {
+        let revision = derived_revision(owner, preset_id, source_revision.payload.clone(),
+            source_revision.contribution_locks.clone(), "Explicit Session Agent identity")?;
+        let snapshot = KernelAgentPresetCompiler::derive_model_snapshot(
+            source_revision, source_snapshot, saved_snapshot_request(revision.clone(), source_snapshot),
+        ).map_err(kernel_compile_error)?;
+        Ok((revision, snapshot))
+    }
+
     /// A Session model change derives from immutable facts. It deliberately
     /// does not obtain a registry, catalog, installation default or extension
     /// resolver: none of those sources owns the Session's frozen authority.

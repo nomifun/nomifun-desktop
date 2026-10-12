@@ -90,6 +90,7 @@
     "chooseModelLater": "Choose an Agent first, then configure a compatible chat model.",
     "loadFailed": "Could not load Agent options. Please retry.",
     "saveFailed": "Could not update the Agent. Please try again later.",
+    "partialSave": "The current conversation was updated, but the default setup could not be saved. Retry with Apply latest setup.",
     "modelChanged": "The current model is incompatible with this Agent. Options have been refreshed; please select again.",
     "busy": "Wait for the current reply to finish before switching Agents.",
     "unavailableAgent": "Unavailable Agent",
@@ -99,11 +100,17 @@
       "vision": "The current model does not support image understanding",
       "model": "The current chat model is unavailable",
       "capability": "Required capabilities are unavailable in this environment",
+      "companion": "Enable the Companion capability to preserve the companion's persona and memory",
       "removed": "This Agent was removed or has no saved revision"
     },
     "label": "Agent setup",
     "saved": "Agent updated",
-    "companionHint": "Changes apply to this companion's desktop, robot and IM conversations. The official Companion is used by default."
+    "companionHint": "Used for this companion's desktop, robot and IM conversations. Switch after the current task finishes.",
+    "officialTag": "Official",
+    "customTag": "Custom",
+    "applyLatest": "Apply latest setup",
+    "applyLatestHint": "After editing and saving the current Agent, apply its latest setup to this companion's existing conversation.",
+    "editAgent": "Edit Agent"
   },
   "library": {
     "ariaLabel": "Agent library",
@@ -210,9 +217,16 @@
     "vision": "Use robot vision", "display": "Use robot display", "motion": "Control motion", "device": "Use device tools", "tool_discovery_rank": "Discover tools"
   },
   "effects": {
-    "pure": "No external effect", "read_local": "Reads local data", "read_sensitive": "Reads sensitive data",
-    "write_reversible": "Reversible change", "write_durable": "Durable change", "execute_local": "Runs on this device",
-    "external_transmit": "Sends data externally", "destructive": "Destructive action", "irreversible": "Irreversible action", "physical": "Physical action"
+    "pure": "No external effect",
+    "read_local": "Reads local data",
+    "read_sensitive": "Reads sensitive data",
+    "write_reversible": "Reversible change",
+    "write_durable": "Durable change",
+    "execute_local": "Runs on this device",
+    "external_transmit": "Sends data externally",
+    "destructive": "Destructive action",
+    "irreversible": "Irreversible action",
+    "physical": "Physical action"
   },
   "availability": {
     "offline": "The selected device is offline. Reconnect it and refresh the catalog.",
@@ -439,7 +453,11 @@
     "dependencyActionPermissions": "Actions available to dependency calls",
     "moduleUnavailableSummary": "{{count}} enabled modules, actions, or runtime conditions need attention.",
     "searchModules": "Search modules, actions or resources",
-    "moduleStatus": { "all": "All", "enabled": "Effective", "attention": "Needs attention" },
+    "moduleStatus": {
+      "all": "All",
+      "enabled": "Effective",
+      "attention": "Needs attention"
+    },
     "moduleCategories": "Module categories",
     "moduleCategoryCount": "{{enabled}} enabled, {{total}} total",
     "moduleCatalog": "Capability modules and dependencies",

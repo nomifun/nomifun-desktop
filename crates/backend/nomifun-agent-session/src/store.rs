@@ -2039,6 +2039,40 @@ impl AgentSessionStore {
         })
     }
 
+    /// Typed binding transitions resolved from their canonical events and
+    /// Payloads in one read transaction, newest first. Product presentation
+    /// can prove an original authoring choice without reading Message caches.
+    pub async fn agent_binding_transitions(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<AgentBindingChangedPayloadV1>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let rows = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM agent_events WHERE session_id = ? AND kind = 'session/agent-binding-changed' ORDER BY seq DESC",
+        ).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
+        let mut transitions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event = event_from_row(row)?;
+            let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload_value_for_event_tx(&mut tx, &event).await?)?;
+            if event.kind_version != 1 || transition.transition_id.as_ref() != event.correlation_id.as_ref()
+                || transition.effective_after_seq.checked_add(1) != Some(event.seq)
+                || transition.previous_binding_ref.binding_version.checked_add(1) != Some(transition.next_binding_ref.binding_version)
+                || transition.next_binding_ref.binding_version > session.agent_binding.binding_version
+            {
+                return Err(SessionStoreError::InvalidEvent("Agent transition differs from its canonical binding boundary".into()));
+            }
+            if transition.workspace_relocation.is_some() {
+                transition.validate_storage_relocation().map_err(SessionStoreError::InvalidPayload)?;
+            }
+            transitions.push(transition);
+        }
+        tx.commit().await?;
+        Ok(transitions)
+    }
+
     pub async fn active_capability_ids(
         &self,
         session_id: &AgentSessionId,

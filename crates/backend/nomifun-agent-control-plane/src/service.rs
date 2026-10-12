@@ -922,6 +922,26 @@ impl AgentControlPlane {
         target_preset_id: &str,
         explicit_model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
     ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let replacement = self.resolve_agent_session_agent_binding_candidate(owner, current,
+            target_preset_id, explicit_model).await?;
+        if replacement.preset_revision_ref == current.preset_revision_ref
+            && replacement.resolved_snapshot_ref == current.resolved_snapshot_ref
+        {
+            return Err(ControlPlaneError::canonical("AGENT_SESSION_AGENT_UNCHANGED",
+                axum::http::StatusCode::CONFLICT, "the selected Agent is already active in this Session"));
+        }
+        Ok(replacement)
+    }
+
+    /// Resolve the validated execution candidate before the product owner
+    /// decides whether an exact match represents the same authored selection.
+    pub async fn resolve_agent_session_agent_binding_candidate(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+        target_preset_id: &str,
+        explicit_model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
         let current_contract: AgentBindingValue = wire_cast(current)?;
         let (current_revision, _) = self
             .load_binding_artifacts(owner, &current_contract)
@@ -946,16 +966,52 @@ impl AgentControlPlane {
             )
         })?;
         replacement.typed_resource_bindings.clear();
-        if replacement.preset_revision_ref == current.preset_revision_ref
-            && replacement.resolved_snapshot_ref == current.resolved_snapshot_ref
-        {
-            return Err(ControlPlaneError::canonical(
-                "AGENT_SESSION_AGENT_UNCHANGED",
-                axum::http::StatusCode::CONFLICT,
-                "the selected Agent is already active in this Session",
-            ));
-        }
         Ok(replacement)
+    }
+
+    /// Preserve the admitted immutable execution facts while giving a
+    /// different explicitly selected authored Agent a distinct target identity.
+    /// The caller must prove that its authorial selection changed.
+    pub async fn distinguish_agent_session_binding_identity(
+        &self,
+        owner: &UserId,
+        binding: &AgentBindingValueDto,
+        target_preset_id: &str,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let _guard = self.template_launch_lock.lock().await;
+        let target = self.owned_preset(owner, target_preset_id).await?;
+        let contract: AgentBindingValue = wire_cast(binding)?;
+        let (revision, snapshot) = self.load_binding_artifacts(owner, &contract).await?;
+        let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
+        let (revision, snapshot) = self.compiler.derive_session_identity(owner, preset_id.clone(), &revision, &snapshot)?;
+        let reference = revision.reference.clone();
+        let mut replacement = session_binding_from_stable_artifacts(reference.clone(), Some(revision.clone()), Some(snapshot.clone()))?;
+        self.store.insert_preset_with_revision(StoredPreset {
+            session_only: true,
+            preset: AgentPreset { preset_id, owner_user_id: Some(owner.clone()), source: AgentPresetSource::User,
+                display_name: target.preset.display_name, description: target.preset.description,
+                current_stable_revision: Some(reference) },
+        }, revision, snapshot).await?;
+        replacement.binding_version = binding.binding_version;
+        self.validate_agent_binding(owner, &replacement).await?;
+        wire_cast(&replacement)
+    }
+
+    /// Compare already admitted immutable execution contracts while ignoring
+    /// their cache identities. Product owners use this only after proving the
+    /// selected authored Agent itself has not changed.
+    pub async fn same_agent_session_execution_contract(
+        &self,
+        owner: &UserId,
+        left: &AgentBindingValueDto,
+        right: &AgentBindingValueDto,
+    ) -> Result<bool, ControlPlaneError> {
+        let (left_revision, left_snapshot) = self.load_binding_artifacts(owner, &wire_cast(left)?).await?;
+        let (right_revision, right_snapshot) = self.load_binding_artifacts(owner, &wire_cast(right)?).await?;
+        Ok(left_revision.payload == right_revision.payload
+            && left_revision.contribution_locks == right_revision.contribution_locks
+            && same_non_model_revision_contract(&left_revision, &right_revision)
+            && same_execution_snapshot_contract(&left_snapshot, &right_snapshot))
     }
 
     /// Replace only the exact Chat route of an existing Session binding.

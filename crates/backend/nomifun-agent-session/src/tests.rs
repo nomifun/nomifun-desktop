@@ -372,6 +372,10 @@ async fn agent_transition_reads_rederive_old_contaminated_references_without_rew
         let store = AgentSessionStore::open_in_memory().await.unwrap();
         let (id, event, payload) = transition_read_fixture(&store, key, relocation, stored_proof).await;
         let (expected, serialized, semantic_digest) = persist_contaminated_transition_projection(&store, &event, &payload).await;
+        let transitions = store.agent_binding_transitions(&id).await.unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(serde_json::to_value(&transitions[0]).unwrap(), payload,
+            "typed transition queries must hydrate canonical inline and stored Payloads without consuming Message caches");
         let before_head = store.head(&id).await.unwrap();
         let before_events = store.read_events(&id, None, 100).await.unwrap().events;
         let pages = [store.messages_after(&id, 0).await.unwrap(),
@@ -477,6 +481,7 @@ async fn agent_transition_reads_reject_stored_payload_damage_and_foreign_session
                 .bind(payload_id.as_ref()).execute(store.test_pool()).await.unwrap();
         }
         assert_transition_reads_fail_closed(&store, &id, case).await;
+        assert!(store.agent_binding_transitions(&id).await.is_err(), "typed transition queries must reject {case}");
     }
 }
 
