@@ -176,7 +176,7 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
           <button type='button' className={styles.primaryButton} onClick={onCreate}>{t('guid.showcase.create')}</button>
         </div>
       </div> : <div key={collapsed ? 'compact' : 'expanded'} className={collapsed ? styles.compactStage : styles.stage}
-        style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
+        style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, ${collapsed ? 'max-content' : '1fr'}))` }}>
         {visible.map((companion) => {
           const meta = customFigureMetaOf(companion);
           const figureHeight = fitShowcaseFigure(meta?.aspect ?? 1, Math.min(slotWidth - 18, 210), meta ? 216 : 136);
