@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { isDesktopShell } from '@/renderer/utils/platform';
+import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import AppImportDialog from './AppImportDialog';
 import AppImportForm from './AppImportForm';
 import AppPreview from './AppPreview';
@@ -54,10 +55,11 @@ export default function AppWorkspace({ app, mode, conversation, projectHistory, 
     <div className={styles.workspaceBody}>
       <section className={styles.conversationPane} aria-label={t('appHosting.workspace.conversation')}>{projectHistory}<div className={styles.projectConversation}>{conversation}</div></section>
       <aside className={styles.inspector} aria-label={t('appHosting.workspace.inspector')}>
+        <div className={styles.inspectorContent}>
         {error && <Alert type='error' content={error} closable onClose={() => setError('')} />}
         {configurationError && <Alert type='warning' content={configurationError} />}
         {mode === 'import' && <AppImportForm app={app} developmentBusy={developmentBusy} onFileOperationChange={onFileOperationChange} onImported={onAppChanged} />}
-        {!app && mode !== 'import' && <div className={styles.panelEmpty}><h2>{t('appHosting.workspace.inspector')}</h2><p>{t('appHosting.workspace.createHint')}</p></div>}
+        {!app && mode !== 'import' && <div className={`${styles.panelEmpty} ${styles.inspectorCard}`}><h2>{t('appHosting.workspace.inspector')}</h2><p>{t('appHosting.workspace.createHint')}</p></div>}
         {app && <>
           <div className={styles.inspectorControls}>
           <div className={styles.sectionHeading}><h2>{app.name}</h2><Tag color={app.state === 'running' ? 'green' : app.state === 'failed' ? 'red' : 'gray'}>{t(`appHosting.state.${app.state}`)}</Tag></div>
@@ -71,7 +73,10 @@ export default function AppWorkspace({ app, mode, conversation, projectHistory, 
             </>}
             <Button disabled={runDisabled} onClick={() => void run(app, 'rebuild')}>{t('appHosting.actions.rebuild')}</Button>
           </div>
-          {app.description && <p className={styles.inspectorDescription}>{app.description}</p>}
+          {app.description && <div className={styles.copyableText}>
+            <p className={styles.inspectorDescription}>{app.description}</p>
+            <CopyIconButton text={app.description} size={14} className={styles.copyIcon} />
+          </div>}
           <p role='status' className={styles.muted}>{t(configurationBusy ? 'appHosting.workspace.configuring'
             : developmentBusy ? 'appHosting.workspace.developing' : !hasRunConfiguration ? 'appHosting.workspace.awaitingConfiguration' : 'appHosting.workspace.configured')}</p>
           </div>
@@ -80,15 +85,22 @@ export default function AppWorkspace({ app, mode, conversation, projectHistory, 
           <AppSettingsForm key={`${app.id}.settings`} app={app} compact={mode === 'edit' || Boolean(app.development_session_id)} developmentBusy={developmentBusy || configurationBusy} onSaved={onAppChanged} />
           <AppPreview key={`${app.id}.preview`} app={app} previewFileChange={previewFileChange} previewBusy={working} previewDisabled={working || developmentBusy || configurationBusy}
             onPreview={() => run(app, 'preview')} />
-          <details className={styles.details}><summary>{t('appHosting.details')}</summary><p className={styles.directory}>{app.directory}</p>
+          <details className={`${styles.details} ${styles.inspectorCard}`}><summary>{t('appHosting.details')}</summary>
+            <div className={`${styles.copyableText} ${styles.directoryRow}`}>
+              <p className={styles.directory}>{app.directory}</p>
+              <CopyIconButton text={app.directory} tooltip={t('common.copyPath')} size={14} className={styles.copyIcon} />
+            </div>
             <p className={styles.muted}>{t('appHosting.workspace.directoryHint')}</p>
             {filePanel && <div className={styles.filePanel}>{filePanel}</div>}
             {isDesktopShell() && <Button size='small' onClick={() => void ipcBridge.shell.openFolderWith.invoke({ folder_path: app.directory, tool: 'explorer' }).catch((e: unknown) => setError(appErrorMessage(e)))}>{t('appHosting.actions.folder')}</Button>}
             {app.output ? <pre>{app.output}</pre> : <p className={styles.muted}>{t('appHosting.workspace.noOutput')}</p>}
           </details>
-          {developmentBusy && <p className={styles.muted}>{t('appHosting.workspace.workspaceBusy')}</p>}
-          <div className={styles.actions}><Button disabled={runDisabled} onClick={() => setOverwrite(true)}>{t('appHosting.overwrite.action')}</Button><Button status='danger' type='text' disabled={runDisabled} onClick={remove}>{t('appHosting.actions.delete')}</Button></div>
         </>}
+        </div>
+        {app && <footer className={styles.inspectorFooter}>
+          {developmentBusy && <p className={styles.muted}>{t('appHosting.workspace.workspaceBusy')}</p>}
+          <div className={styles.actions}><Button disabled={runDisabled} onClick={() => setOverwrite(true)}>{t('appHosting.overwrite.action')}</Button><Button status='danger' type='outline' disabled={runDisabled} onClick={remove}>{t('appHosting.actions.delete')}</Button></div>
+        </footer>}
       </aside>
     </div>
     {overwrite && app && <AppImportDialog overwrite={app} developmentBusy={developmentBusy} onFileOperationChange={onFileOperationChange} onClose={() => setOverwrite(false)} onImported={onAppChanged} />}

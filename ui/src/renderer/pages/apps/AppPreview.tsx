@@ -68,7 +68,7 @@ export default function AppPreview({ app, onPreview, previewBusy = false, previe
       returnFocus.current = null;
     }
   }, [expanded, requested, embeddable, running]);
-  return <section ref={section} tabIndex={-1} className={styles.previewSection} aria-label={t('appHosting.workspace.preview')}>
+  return <section ref={section} tabIndex={-1} className={`${styles.previewSection} ${styles.inspectorCard}`} aria-label={t('appHosting.workspace.preview')}>
     <div className={styles.sectionHeading}><h3>{t('appHosting.workspace.preview')}</h3>
       <div className={styles.actions}>
         {running && openable && <Button type='text' size='small' onClick={() => void openExternalUrl(url!)}>{t('appHosting.workspace.openWindow')}</Button>}

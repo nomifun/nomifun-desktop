@@ -45,7 +45,7 @@ export default function AppImportForm({ app, developmentBusy = false, onFileOper
       if (selected?.[0]) { setSource(selected[0]); setArchive(undefined); }
     } catch (e) { setError(appErrorMessage(e)); }
   };
-  return <section className={styles.settings} aria-label={t('appHosting.import.title')}>
+  return <section className={`${styles.settings} ${styles.inspectorCard}`} aria-label={t('appHosting.import.title')}>
     <h3>{t('appHosting.import.title')}</h3><p>{t('appHosting.import.manualHint')}</p>
     {error && <Alert type='error' content={error} />}
     {!app && <label>{t('appHosting.name')}<Input value={name} onChange={setName} aria-label={t('appHosting.name')} /></label>}

@@ -5,6 +5,7 @@ import { Alert, Button, Input, Radio, Select } from '@arco-design/web-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { openExternalUrl } from '@/renderer/utils/platform';
+import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { appErrorMessage, editableAppSettings, parseAppEnvironment } from './appHostingModel';
 import styles from './AppsPage.module.css';
 
@@ -81,13 +82,16 @@ export default function AppSettingsForm({ app, onSaved, compact = false, develop
   };
   const metadata = <>
     <label>{t('appHosting.name')}<Input value={name} disabled={busy} onChange={(value) => { markDirty('name'); setName(value); }} aria-label={t('appHosting.name')} /></label>
-    <label>{t('appHosting.description')}<Input.TextArea value={description} disabled={busy} onChange={(value) => { markDirty('description'); setDescription(value); }} rows={2} aria-label={t('appHosting.description')} /></label>
+    <label><span className={styles.fieldHeading}>{t('appHosting.description')}
+      {description && <CopyIconButton text={description} size={14} className={styles.copyIcon} />}
+    </span><Input.TextArea value={description} disabled={busy} onChange={(value) => { markDirty('description'); setDescription(value); }} rows={2} aria-label={t('appHosting.description')} /></label>
     <label>{t('appHosting.tags')}<Input value={tags} disabled={busy} onChange={(value) => { markDirty('tags'); setTags(value); }} aria-label={t('appHosting.tags')} placeholder={t('appHosting.workspace.tagsHint')} /></label>
   </>;
   return <form className={styles.settings} onSubmit={(event) => { event.preventDefault(); void save(); }}>
     {error && <Alert type='error' content={error} />}
-    {compact ? <details><summary>{t('appHosting.actions.edit')}</summary><div className={styles.settings}>{metadata}</div></details> : metadata}
-    <details className={styles.advanced}>
+    {compact ? <details className={styles.inspectorCard}><summary>{t('appHosting.actions.edit')}</summary><div className={styles.settings}>{metadata}</div></details>
+      : <div className={`${styles.settings} ${styles.inspectorCard}`}>{metadata}</div>}
+    <details className={styles.inspectorCard}>
       <summary>{t('appHosting.workspace.advanced')}</summary>
       <div className={styles.settings}>
         <p>{t('appHosting.settings.hint')}</p>

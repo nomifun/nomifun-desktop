@@ -29,7 +29,7 @@ export default function AppsPage() {
     <div className={styles.toolbar}>
       <div className={styles.actions}><Button type='primary' icon={<Plus />} onClick={() => void navigate('/apps/new')}>{t('appHosting.create.action')}</Button>
         <Button onClick={() => void navigate('/apps/import')}>{t('appHosting.import.action')}</Button></div>
-      <Input.Search value={search} onChange={(value) => { setSearch(value); setPage(1); }} allowClear
+      <Input.Search className={styles.appSearch} value={search} onChange={(value) => { setSearch(value); setPage(1); }} allowClear
         placeholder={t('appHosting.home.search')} aria-label={t('appHosting.home.search')} />
     </div>
     <section className={styles.categories} aria-label={t('appHosting.home.categories')}>
