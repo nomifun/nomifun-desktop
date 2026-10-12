@@ -612,6 +612,11 @@ async fn build_nomi_core_agent_api_state(
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
+    let session_capabilities = Arc::new(super::session_capabilities::GlobalSessionCapabilities {
+        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
+        skills: Arc::clone(&services.skill_paths),
+        mcp: Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
+    });
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
         catalog,
@@ -625,11 +630,7 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     ))
-    .with_session_capabilities_resolver(Arc::new(super::session_capabilities::GlobalSessionCapabilities {
-        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
-        skills: Arc::clone(&services.skill_paths),
-        mcp: Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
-    })));
+    .with_session_capabilities_resolver(session_capabilities.clone()));
     let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
         .map_err(|error| {
             anyhow::anyhow!("{}: {}", error.code(), error.message())
@@ -692,6 +693,7 @@ async fn build_nomi_core_agent_api_state(
             services.authoritative_user_id.clone(),
             conversation_owner,
             control_plane,
+            session_capabilities,
             remote_repository,
             services.nomi_core_remote_runtime.clone(),
             resource_bindings,

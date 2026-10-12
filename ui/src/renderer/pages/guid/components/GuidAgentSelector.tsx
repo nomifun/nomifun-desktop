@@ -7,6 +7,7 @@
 import type { AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useClick, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
+import { Spin } from '@arco-design/web-react';
 import { Check, Code, Down, Edit, Magic, MessageOne, Right, Robot, Search, User } from '@icon-park/react';
 import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,8 @@ export type GuidAgentSelectorProps = {
   selectedLabelOverride?: string;
   disabled?: boolean;
   disabledReason?: string;
+  switching?: boolean;
+  switchingLabel?: string;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -52,6 +55,8 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   selectedLabelOverride,
   disabled = false,
   disabledReason,
+  switching = false,
+  switchingLabel,
   onSelectTemplate,
   onSelectPreset,
 }) => {
@@ -165,9 +170,10 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
         ref={refs.setReference}
         type='button'
         className={styles.trigger}
-        disabled={disabled}
-        title={disabled ? disabledReason ?? selectedLabel : selectedLabel}
+        disabled={disabled || switching}
+        title={switching ? switchingLabel ?? selectedLabel : disabled ? disabledReason ?? selectedLabel : selectedLabel}
         aria-label={selectedLabel}
+        aria-busy={switching || undefined}
         data-testid='guid-agent-selector'
         data-agent-identity
         data-agent-name={selectedLabel}
@@ -175,7 +181,8 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       >
         <Robot theme='outline' size={18} fill='currentColor' />
         <span className={styles.triggerLabel}>{selectedLabel}</span>
-        <Down theme='outline' size={12} fill='currentColor' className={open ? styles.chevronOpen : undefined} />
+        {switching ? <Spin size={12} aria-label={switchingLabel} />
+          : <Down theme='outline' size={12} fill='currentColor' className={open ? styles.chevronOpen : undefined} />}
       </button>
       {open && (
         <FloatingPortal>

@@ -53,6 +53,14 @@ a different binding. Repeated preparation of an already-current binding is a no-
 
 Session reasoning uses one native `reasoning_effort` field defined by the shared contract. No lossy mirrors or fallback columns are maintained.
 
+### Switching Agents in a conversation
+
+Selecting another Agent applies the change directly, with a local waiting state in the selector. There is no capability/resource review dialog or handoff confirmation. The host still provides preview and version CAS, uses `continue_task` when a verified handoff is available, and otherwise preserves ordinary data context. Messages, composer drafts and Session identity remain intact; the target Agent takes effect on the next Turn. Active or paused Turns, unsettled effects, patch recovery, Remote and Attempt bindings retain their execution fences and produce a concise explanation.
+
+Resources are resolved under the target Agent's grants; unused assets do not expose tools. A usable explicit project may remain as a working directory with no file-operation grants so a later upgrade preserves that choice. The host resolves available defaults under the target grants; removed or temporarily unavailable optional assets do not block other resources. Actions without their optional resource remain unavailable, without invented connections, credentials or authority. When Knowledge remains readable but loses write-back permission, the switch disables its write-back policy and retains reading; explicit policy updates still verify every mounted base. Workspace and process resources use the same root: a usable explicit project is retained, otherwise the existing host materialization prepares this Session's managed workspace. A lower-level Agent does not fail because an unused former workspace is unavailable. The next Turn still passes target-resource and native Runtime admission. Ownership, contract integrity and storage failures cannot be bypassed as missing assets.
+
+Available global Skill and MCP selections carry forward. Removed Skills, disabled MCP servers and servers without published tools are omitted; Package Skills must also be declared by the target Agent. The existing compiler produces an exact target Snapshot and resource definitions, without reusing old MCP authority or changing old Snapshots. A Canvas or Channel asset mounted in an ordinary conversation does not imply a fixed product identity. Actual Canvas business sessions, Companion, Customer and Cron ownership retain their own binding fences.
+
 ### Relocating the same current dataset
 
 A storage-location change preserves the installation owner, storage generation, Session/Turn identities, encryption

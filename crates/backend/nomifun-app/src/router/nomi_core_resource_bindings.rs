@@ -137,6 +137,22 @@ impl ResourceSelectionResolutionError {
         )
     }
 
+    fn resolution_failed(kind: &str, id: &str, error: impl std::fmt::Display) -> Self {
+        Self::new(
+            "RESOURCE_BINDING_RESOLUTION_FAILED",
+            format!("the selected resource could not be read: {error}"),
+            json!({ "resource_kind": kind, "resource_id": id }),
+        )
+    }
+
+    fn domain_error(kind: &str, id: &str, error: nomifun_common::AppError) -> Self {
+        match error {
+            nomifun_common::AppError::NotFound(_) => Self::not_found(kind, id),
+            nomifun_common::AppError::Forbidden(_) => Self::forbidden(kind),
+            error => Self::resolution_failed(kind, id, error),
+        }
+    }
+
     fn is_runtime_unavailable(&self) -> bool {
         self.code == "RESOURCE_SELECTION_UNAVAILABLE"
     }
@@ -250,6 +266,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         .await
     }
 
+    #[cfg(test)]
     async fn resolve_selected(
         &self,
         owner_id: &str,
@@ -265,6 +282,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             action_allowlists,
             mcp_locks,
             true,
+            false,
         )
         .await
     }
@@ -277,6 +295,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         action_allowlists: &FrozenActionAllowlists,
         mcp_locks: &[ResolvedMcpToolLock],
         require_all_kinds: bool,
+        omit_unusable_optional_selections: bool,
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
         if selections.len() > MAX_RESOURCE_SELECTIONS {
             return Err(ResourceSelectionResolutionError::invalid(format!(
@@ -457,7 +476,10 @@ impl NomiCoreResourceBindingResolverRegistry {
                 Ok(resolved) => resolved,
                 Err(error)
                     if OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
-                        && error.is_runtime_unavailable() =>
+                        && (error.is_runtime_unavailable()
+                            || (omit_unusable_optional_selections
+                                && matches!(error.code(), "RESOURCE_SELECTION_NOT_FOUND"
+                                    | "RESOURCE_OPERATION_NOT_ALLOWED"))) =>
                 {
                     tracing::info!(
                         resource_kind = %kind,
@@ -477,6 +499,9 @@ impl NomiCoreResourceBindingResolverRegistry {
                 // required for this exact selection.
                 operations.retain(|operation| resolved.allowed_operations.contains(operation));
                 if operations.is_empty() {
+                    if omit_unusable_optional_selections {
+                        continue;
+                    }
                     return Err(ResourceSelectionResolutionError::new(
                         "RESOURCE_OPERATION_NOT_ALLOWED",
                         "the selected Knowledge base grants no operation used by this Agent",
@@ -487,6 +512,9 @@ impl NomiCoreResourceBindingResolverRegistry {
                     ));
                 }
             } else if !operations.is_subset(&resolved.allowed_operations) {
+                if omit_unusable_optional_selections && optional_unbound_resource_kind(kind) {
+                    continue;
+                }
                 return Err(ResourceSelectionResolutionError::new(
                     "RESOURCE_OPERATION_NOT_ALLOWED",
                     "the selected resource cannot satisfy the Agent capability grant",
@@ -535,8 +563,32 @@ impl NomiCoreResourceBindingResolverRegistry {
         &self,
         control_plane: &AgentControlPlane,
         owner: &nomifun_agent_contracts::UserId,
+        binding: AgentBindingValueDto,
+        selections: &[AgentResourceSelectionDto],
+    ) -> Result<AgentBindingValueDto, ResourceSelectionResolutionError> {
+        self.resolve_saved_binding(control_plane, owner, binding, selections, false).await
+    }
+
+    /// Agent selection carries forward only usable enhancement resources.
+    /// Missing targets omit their Actions; infrastructure and exact MCP locks
+    /// still receive the same authoritative resolution as normal admission.
+    pub(crate) async fn resolve_for_agent_switch(
+        &self,
+        control_plane: &AgentControlPlane,
+        owner: &nomifun_agent_contracts::UserId,
+        binding: AgentBindingValueDto,
+        selections: &[AgentResourceSelectionDto],
+    ) -> Result<AgentBindingValueDto, ResourceSelectionResolutionError> {
+        self.resolve_saved_binding(control_plane, owner, binding, selections, true).await
+    }
+
+    async fn resolve_saved_binding(
+        &self,
+        control_plane: &AgentControlPlane,
+        owner: &nomifun_agent_contracts::UserId,
         mut binding: AgentBindingValueDto,
         selections: &[AgentResourceSelectionDto],
+        omit_unusable_optional_selections: bool,
     ) -> Result<AgentBindingValueDto, ResourceSelectionResolutionError> {
         let (_, _revision, snapshot) = control_plane
             .saved_binding_artifacts(owner, &binding)
@@ -592,12 +644,14 @@ impl NomiCoreResourceBindingResolverRegistry {
             &snapshot.content.mcp_tool_locks,
         );
         binding.typed_resource_bindings = self
-            .resolve_selected(
+            .resolve_selected_with_requirement(
                 owner.as_ref(),
                 &selections,
                 &capability_ids,
                 &action_allowlists,
                 &snapshot.content.mcp_tool_locks,
+                true,
+                omit_unusable_optional_selections,
             )
             .await?
             .into_iter()
@@ -659,6 +713,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             &capability_ids,
             &action_allowlists,
             &snapshot.content.mcp_tool_locks,
+            false,
             false,
         )
         .await
@@ -736,6 +791,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             &capability_ids,
             &action_allowlists,
             &snapshot.content.mcp_tool_locks,
+            false,
             false,
         )
         .await
@@ -1271,10 +1327,10 @@ impl ProductResourceAuthority {
                 nomifun_ssh::SshServiceError::NotFound => {
                     ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id)
                 }
-                other => ResourceSelectionResolutionError::unavailable(
+                other => ResourceSelectionResolutionError::resolution_failed(
                     self.kind,
                     &request.resource_id,
-                    other.to_string(),
+                    other,
                 ),
             })?;
         Ok(ServerResolvedResource {
@@ -1297,7 +1353,7 @@ impl ProductResourceAuthority {
             .knowledge
             .get_base_info(&request.resource_id)
             .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
+            .map_err(|error| ResourceSelectionResolutionError::domain_error(self.kind, &request.resource_id, error))?;
         if !info.root_exists {
             return Err(ResourceSelectionResolutionError::unavailable(
                 self.kind,
@@ -1363,7 +1419,7 @@ impl ProductResourceAuthority {
             .companion
             .get_companion(&request.resource_id)
             .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
+            .map_err(|error| ResourceSelectionResolutionError::domain_error(self.kind, &request.resource_id, error))?;
         Ok(ServerResolvedResource {
             resource_id: companion.companion_id,
             allowed_operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
@@ -1381,7 +1437,7 @@ impl ProductResourceAuthority {
             .channels
             .get_plugin(&request.resource_id)
             .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?
+            .map_err(|error| ResourceSelectionResolutionError::resolution_failed(self.kind, &request.resource_id, error))?
             .ok_or_else(|| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
         if !channel.enabled {
             return Err(ResourceSelectionResolutionError::unavailable(
@@ -1435,11 +1491,7 @@ impl ProductResourceAuthority {
                 .binding_for_plugin(&channel.channel_plugin_id)
                 .await
                 .map_err(|error| {
-                    ResourceSelectionResolutionError::unavailable(
-                        self.kind,
-                        &request.resource_id,
-                        error.to_string(),
-                    )
+                    ResourceSelectionResolutionError::domain_error(self.kind, &request.resource_id, error)
                 })?;
             if current.as_deref() != Some(cs_agent_id.as_str()) {
                 return Err(ResourceSelectionResolutionError::forbidden(self.kind));
@@ -1468,7 +1520,7 @@ impl ProductResourceAuthority {
             .mcp_servers
             .find_by_id(&request.resource_id)
             .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?
+            .map_err(|error| ResourceSelectionResolutionError::resolution_failed(self.kind, &request.resource_id, error))?
             .ok_or_else(|| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
         if !server.enabled {
             return Err(ResourceSelectionResolutionError::unavailable(
@@ -1617,13 +1669,13 @@ impl ProductResourceAuthority {
             .workshop
             .require_creative_studio_owner(&request.owner_id)
             .await
-            .map_err(|_| ResourceSelectionResolutionError::forbidden(self.kind))?;
+            .map_err(|error| ResourceSelectionResolutionError::domain_error(self.kind, &request.resource_id, error))?;
         if self.kind == "canvas" {
             self.dependencies
                 .workshop
                 .get_creative_canvas(&request.resource_id)
                 .await
-                .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
+                .map_err(|error| ResourceSelectionResolutionError::domain_error(self.kind, &request.resource_id, error))?;
             Ok(ServerResolvedResource {
                 resource_id: request.resource_id,
                 allowed_operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
@@ -2044,6 +2096,63 @@ mod tests {
             .await
             .unwrap();
         assert!(bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_switch_omits_only_missing_optional_assets_and_keeps_infrastructure() {
+        struct MissingKnowledge;
+        #[async_trait]
+        impl NomiCoreResourceAuthority for MissingKnowledge {
+            async fn resolve(&self, request: ResourceAuthorityRequest) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+                Err(ResourceSelectionResolutionError::not_found("knowledge_base", &request.resource_id))
+            }
+        }
+        let resolver = NomiCoreResourceBindingResolverRegistry::from_authorities([
+            ("workspace".to_owned(), Arc::new(RecordingAuthority { allowed: BTreeSet::from(["read".into()]) }) as Arc<dyn NomiCoreResourceAuthority>),
+            ("knowledge_base".to_owned(), Arc::new(MissingKnowledge) as Arc<dyn NomiCoreResourceAuthority>),
+        ]).unwrap();
+        let capabilities = BTreeSet::from(["workspace.files".to_owned(), "knowledge".to_owned()]);
+        let actions = BTreeMap::from([
+            ("workspace.files".to_owned(), BTreeSet::from([ActionId::from("workspace.files/read")])),
+            ("knowledge".to_owned(), BTreeSet::from([ActionId::from("knowledge/search")])),
+        ]);
+        let selections = [
+            AgentResourceSelectionDto { resource_kind: "workspace".into(), resource_id: DEFAULT_WORKSPACE_RESOURCE_ID.into() },
+            AgentResourceSelectionDto { resource_kind: "knowledge_base".into(), resource_id: "deleted-base".into() },
+        ];
+        let bindings = resolver.resolve_selected_with_requirement("owner", &selections, &capabilities, &actions, &[], true, true).await.unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].resource_kind.as_ref(), "workspace");
+        assert_eq!(bindings[0].operations, BTreeSet::from(["read".to_owned()]));
+        assert_eq!(resolver.resolve_selected("owner", &selections, &capabilities, &actions, &[]).await.unwrap_err().code(), "RESOURCE_SELECTION_NOT_FOUND",
+            "explicit resource admission remains strict");
+    }
+
+    #[tokio::test]
+    async fn agent_switch_preserves_optional_resource_storage_and_owner_failures() {
+        struct FailedKnowledge(&'static str);
+        #[async_trait]
+        impl NomiCoreResourceAuthority for FailedKnowledge {
+            async fn resolve(&self, request: ResourceAuthorityRequest) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+                Err(if self.0 == "RESOURCE_OWNER_MISMATCH" {
+                    ResourceSelectionResolutionError::forbidden("knowledge_base")
+                } else {
+                    ResourceSelectionResolutionError::domain_error("knowledge_base", &request.resource_id,
+                        nomifun_common::AppError::Internal("storage read failed".into()))
+                })
+            }
+        }
+        for code in ["RESOURCE_OWNER_MISMATCH", "RESOURCE_BINDING_RESOLUTION_FAILED"] {
+            let resolver = NomiCoreResourceBindingResolverRegistry::from_authorities([
+                ("knowledge_base".to_owned(), Arc::new(FailedKnowledge(code)) as Arc<dyn NomiCoreResourceAuthority>),
+            ]).unwrap();
+            let error = resolver.resolve_selected_with_requirement("owner",
+                &[AgentResourceSelectionDto { resource_kind: "knowledge_base".into(), resource_id: "base".into() }],
+                &BTreeSet::from(["knowledge".to_owned()]),
+                &BTreeMap::from([("knowledge".to_owned(), BTreeSet::from([ActionId::from("knowledge/search")]))]),
+                &[], true, true).await.unwrap_err();
+            assert_eq!(error.code(), code);
+        }
     }
 
     #[tokio::test]

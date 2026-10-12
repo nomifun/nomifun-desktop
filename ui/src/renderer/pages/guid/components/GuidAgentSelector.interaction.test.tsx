@@ -54,6 +54,20 @@ const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
 afterEach(cleanup);
 
 describe('Guid Agent selector', () => {
+  test('keeps Agent switching feedback inside the selector', () => {
+    const { page } = renderSelector({
+      switching: true,
+      switchingLabel: 'Switching Agent…',
+      selectedLabelOverride: 'Current Agent',
+    });
+    const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
+    expect(trigger.textContent).toBe('Current Agent');
+    expect(trigger.disabled).toBe(true);
+    expect(trigger.getAttribute('aria-busy')).toBe('true');
+    expect(trigger.title).toBe('Switching Agent…');
+    expect(page.queryByRole('dialog')).toBeNull();
+  });
+
   test('supports a current-session label while an Agent switch is pending', () => {
     const { page } = renderSelector({
       disabled: true,

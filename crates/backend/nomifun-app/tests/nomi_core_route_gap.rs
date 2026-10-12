@@ -1547,6 +1547,7 @@ async fn effectful_coding_session_switches_same_workspace_to_read_only_with_new_
     const CONTENT: &str = "SOURCE_WORKSPACE_WRITE_ONCE\n";
     const REPLY: &str = "SOURCE_WORKSPACE_WRITE_DONE";
     const CALL: &str = "effectful-source-write";
+    const TARGET_CALL: &str = "effectful-target-write";
     async fn call(router: &axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(path)
             .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
@@ -1567,13 +1568,14 @@ async fn effectful_coding_session_switches_same_workspace_to_read_only_with_new_
             let body = request.body_json::<Value>().unwrap();
             let mut requests = captured.lock().unwrap();
             requests.push(body.clone());
-            assert!(requests.len() <= 2, "the source must not replay a write or loop controls");
-            let (delta, finish) = if requests.len() == 1 {
+            assert!(requests.len() <= 4, "each Agent must settle exactly one requested write");
+            let call_id = if requests.len() <= 2 { CALL } else { TARGET_CALL };
+            let (delta, finish) = if requests.len() == 1 || requests.len() == 3 {
                 assert!(body["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == "write_file"));
-                (json!({"role":"assistant","tool_calls":[{"index":0,"id":CALL,"type":"function",
+                (json!({"role":"assistant","tool_calls":[{"index":0,"id":call_id,"type":"function",
                     "function":{"name":"write_file","arguments":json!({"path":"switch-proof.txt","content":CONTENT}).to_string()}}]}), "tool_calls")
             } else {
-                assert!(body["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == CALL),
+                assert!(body["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == call_id),
                     "the actual owner result must reach the next source model request");
                 (json!({"role":"assistant","content":REPLY}), "stop")
             };
@@ -1676,6 +1678,105 @@ async fn effectful_coding_session_switches_same_workspace_to_read_only_with_new_
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
         .fetch_one(services.database.pool()).await.unwrap(), 0);
     assert_eq!(requests.lock().unwrap().len(), 2, "switching must not replay the completed write");
+
+    let minimal_selection = json!({"kind":"template","template_key":"chat.minimal"});
+    let coding_selection = json!({"kind":"template","template_key":"coding.codex"});
+    // A useful project stays selected across a lower Agent with no file grant.
+    for selection in [&minimal_selection, &coding_selection] {
+        let (status, preview) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/agent-switch/preview"),
+            json!({"selection":selection})).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+        let (status, switched) = call(&router, "PUT", &format!("/api/agent-sessions/{sid}/agent"), json!({
+            "selection":selection,"handoff_mode":"context_only",
+            "expected_binding_version":preview["data"]["expected_binding_version"]
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{switched}");
+        let binding = store.get_live_session(&session).await.unwrap().agent_binding;
+        let selected_workspace = binding.typed_resource_bindings.iter().find(|binding| binding.resource_kind.as_ref() == "workspace").unwrap();
+        assert_eq!(selected_workspace.resource_id, source_workspace.resource_id);
+        assert_eq!(selected_workspace.typed_parameters, source_workspace.typed_parameters);
+        if selection == &minimal_selection {
+            assert!(selected_workspace.operations.is_empty(), "keeping a project selection grants no file Actions");
+        } else {
+            assert_eq!(selected_workspace.operations, source_workspace.operations);
+            let process = binding.typed_resource_bindings.iter().find(|binding| binding.resource_kind.as_ref() == "process_session").unwrap();
+            assert_eq!(process.typed_parameters, selected_workspace.typed_parameters);
+        }
+    }
+
+    // A low-level Agent can ignore the old project's assets. Losing that
+    // external directory must not block the change or cause us to recreate it.
+    // Use a Session that has not started a native host, so the fixture can
+    // remove its own project on Windows without a process cwd holding it open.
+    let original_session = session;
+    let unavailable_workspace = tempfile::tempdir().unwrap();
+    let external_root = unavailable_workspace.path().to_path_buf();
+    let (status, unavailable) = call(&router, "POST", "/api/agent-sessions", json!({
+        "preset_id":source["data"]["preset"]["preset_id"], "model":model,
+        "workspace":unavailable_workspace.path().to_str().unwrap(),
+        "resource_selections":[
+            {"resource_kind":"workspace","resource_id":"default-workspace"},
+            {"resource_kind":"process_session","resource_id":"managed-process-session"},
+            {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+        ]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{unavailable}");
+    let sid = unavailable["data"]["agent_session_id"].as_str().unwrap();
+    let session = AgentSessionId::from(sid.to_owned());
+    unavailable_workspace.close().unwrap();
+    let (status, preview) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/agent-switch/preview"),
+        json!({"selection":minimal_selection})).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    let (status, minimal) = call(&router, "PUT", &format!("/api/agent-sessions/{sid}/agent"), json!({
+        "selection":minimal_selection,"handoff_mode":"context_only",
+        "expected_binding_version":preview["data"]["expected_binding_version"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "an unavailable unused project must not block a downgrade: {minimal}");
+    assert!(store.get_live_session(&session).await.unwrap().agent_binding.typed_resource_bindings.is_empty());
+
+    // Re-selecting the higher Agent supplies its real infrastructure bindings.
+    // The managed directory is materialized by the ordinary next-Turn path.
+    let (status, preview) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/agent-switch/preview"),
+        json!({"selection":coding_selection})).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    let (status, coding) = call(&router, "PUT", &format!("/api/agent-sessions/{sid}/agent"), json!({
+        "selection":coding_selection,"handoff_mode":"context_only",
+        "expected_binding_version":preview["data"]["expected_binding_version"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{coding}");
+    let coding_binding = store.get_live_session(&session).await.unwrap().agent_binding;
+    assert_eq!(coding_binding.typed_resource_bindings.iter().map(|binding| binding.resource_kind.as_ref()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["workspace", "process_session", "project_memory"]));
+    for resource in coding_binding.typed_resource_bindings.iter().filter(|binding|
+        matches!(binding.resource_kind.as_ref(), "workspace" | "process_session")) {
+        assert_eq!(resource.typed_parameters, nomifun_agent_contracts::managed_workspace_parameters());
+    }
+    let managed_root = services.work_dir.join("conversations").join(sid);
+    assert_eq!(coding["data"]["conversation"]["extra"]["workspace"], managed_root.to_str().unwrap());
+    let (status, started) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/turns"), json!({
+        "idempotency_key":uuid::Uuid::now_v7().to_string(),
+        "input":{"content":format!("请使用 write_file 一次创建 switch-proof.txt，正文准确为 {CONTENT}。完成这一个写入后直接回复 {REPLY}，不要读取文件、执行命令或重复写入。")}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let operation = OperationId::from(started["data"]["operation_id"].as_str().unwrap().to_owned());
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let receipt = store.read_turn_receipt(&session, &operation).await.unwrap();
+            if receipt.status == TurnReceiptStatus::Completed { break; }
+            assert_eq!(receipt.status, TurnReceiptStatus::Running, "{receipt:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("the upgraded Agent must execute and settle its real Workspace write");
+    assert_eq!(std::fs::read(managed_root.join("switch-proof.txt")).unwrap(), CONTENT.as_bytes());
+    assert!(!external_root.exists(), "switching never recreates an unavailable external project");
+    let effects = store.list_effects(&session).await.unwrap();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(store.list_effects(&original_session).await.unwrap(), source_effects, "the original effect receipt remains unchanged");
+    assert!(effects.iter().all(|effect| effect.state == AgentEffectState::Returned));
+    assert_eq!(requests.lock().unwrap().len(), 4);
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
