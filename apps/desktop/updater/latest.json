@@ -1,19 +1,11 @@
 {
-  "version": "0.8.6",
-  "notes": "- Replace the legacy plugin system with application hosting and project\n  sessions.\n- Add responsive quick settings to the companion sidebar.\n- Download runtime components on demand: desktop startup no longer\n  provisions Node and prefers user-installed tools or verified caches;\n  Terminal, MCP, and Relay download components only after an explicit user\n  choice, while the DIY cutout model prepares silently after authenticated\n  startup.\n- Preserve gateway routes and validate native task responses; scope chat\n  fingerprints to referenced connections and guard embedding batches with\n  the selected task configuration.\n- Derive agent resource controls from granted actions.\n- Unify collaboration controls across sessions: new and active\n  conversations share collaboration drafts and execution admission, the\n  composer tool entry is preserved, and the model, policy, and template\n  panel is compacted.\n- Refine the app workspace and search controls, compact the project\n  session selector, fit home companion controls to their content, simplify\n  code preview with line numbers, and unify the attachment preview and\n  browser sidebar layout.",
-  "pub_date": "2026-10-12T18:33:44.127Z",
+  "version": "0.8.7",
+  "notes": "- Request system permissions on demand instead of at startup; make default\n  models optional, allow hiding contract details, and polish identity and\n  behavior settings.\n- Rework knowledge writeback: show compact writeback notices inside turns,\n  decouple and bound turn writeback, and fix reentrant locking.\n- Close macOS compatibility and native lifecycle gaps; remove the\n  redundant startup window.\n- Own app project sessions correctly and stop composer update loops.\n- Unify canonical tool proposal recovery and managed component process\n  invocation.",
+  "pub_date": "2026-10-13T18:58:20.478Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRBRlIwU01hQ3B1b0ZrTXlLMlFYWHkyMS9JSFZIUlFBb08rRUlwdDFrOWVDdWNJTU9DVDB6L0dRQlk3bFUxdU9Td1c1NE92Z1RxVzdRYldSSHBhalFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODI1MTY2CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClczL2FZa2xiOC9vOEdkVlh6WEV3ZFE4VGJ4alMxbW1YUG9MY0R2KzlrYktLcCtKR1BpemZzWmM2NlZTcHBSVk5vckFVOEY5Ym53YmszZklBYkxLOUFBPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.6/NomiFun.app.tar.gz"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZWSUlCR2pYa0Zib1VGYmlYbGZYZnp3eWYzTTkvOHFScVZlWXVoQzM2UXhBWk5hS0c2RGNlYUJkRVAyNWJMR2JXUWpESmhYK1EvTml5N2wvVGdSVmc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODI2MjE4CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClBjdWNRUHh0YURWTGRYb2hzeGNwV2liMzk1SFNGVWs2ZDMzZTlQZ1hFYWFWZUxsS2R0UFd4Z0c0MS9NNm85WG9mTGY0WkQ1Q09xZWRsckZEbGhSMkFBPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.6/NomiFun_0.8.6_x64.app.tar.gz"
-    },
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODE1ZGpYdEFzZGJDVlBqSnlFSHRvTVQvenZFWlIyOGl6UzI1ejZzWFhlbnIrRkdSNDJWNGNHeG1jUWN3dzRGZ0FyeWlXUzBsOElQUnFldmoxMHkySGdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODMwMDIwCWZpbGU6Tm9taUZ1bl8wLjguNl94NjQtc2V0dXAuZXhlCk1OZDJFc1RmdHc0ZnMrVS92bE55RW16VjR3bThGMWcyOThpdWlzek9xUDF3SGpUZWFGT2pnSitxSVhiNG1PaHR0WE1nb1gyaGh0Z2hNeitnM2RBMkRBPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.6/NomiFun_0.8.6_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODkzdjhqQ1lwcXhMTTFWMDczZTg1RkNzTnYrazRwTStDNWppSFRJWmdyQVg1MXNUcDl3UGc2Y1o0eEQzczZRRmhsSkphVTNpL0U3RlpTRlFhbkw5NUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTE3ODQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClpXckFiQVQ5U0lpUGplcVJWcDh5VHlyOWlMUzc4YS81MThzbytBUHBCRmpoSms1VXZ4b2E2RjVwOHpNTzE3ZzlscEh2R2F1RUJYRDA3eXRveDNKNER3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.7/NomiFun.app.tar.gz"
     }
   }
 }
