@@ -392,20 +392,26 @@
     "unknown": "Availability could not be confirmed. Refresh the catalog before enabling this module."
   },
   "sections": {
-    "basic": "Agent details",
-    "basicHint": "Define its identity, model and working style",
+    "basic": "Basic information",
+    "basicHint": "Give this Agent a clear name and purpose.",
+    "behavior": "Role and working style",
+    "behaviorHint": "Describe its role and how you want it to approach the work.",
     "capabilities": "Capability modules",
     "capabilitiesHint": "Choose product modules, then refine their permitted actions"
   },
   "fields": {
     "name": "Name",
+    "namePlaceholder": "Give this Agent a recognizable name",
     "description": "Purpose",
+    "descriptionPlaceholder": "Describe what it does well and when to use it",
     "defaultModel": "Default model",
     "defaultModelPlaceholder": "No default model",
     "defaultModelHint": "Optional. You can choose a model when starting a conversation.",
     "defaultModelFailed": "Could not set this model. Try again or check the model configuration.",
     "persona": "Role",
-    "instructions": "Instructions"
+    "personaPlaceholder": "For example: You are a careful, friendly research assistant who explains complex ideas clearly.",
+    "instructions": "Instructions",
+    "instructionsPlaceholder": "For example: Lead with the conclusion, then explain the evidence. State uncertainty clearly and avoid guessing."
   },
   "status": {
     "dirty": "Unsaved",

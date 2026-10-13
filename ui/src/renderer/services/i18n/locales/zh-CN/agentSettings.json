@@ -392,20 +392,26 @@
     "unknown": "暂时无法确认可用性，请刷新目录后再启用。"
   },
   "sections": {
-    "basic": "Agent 信息",
-    "basicHint": "定义身份、模型和工作方式",
+    "basic": "基本信息",
+    "basicHint": "为这个 Agent 定义清晰的名称和用途。",
+    "behavior": "角色与工作方式",
+    "behaviorHint": "描述它的角色，以及你希望它如何完成工作。",
     "capabilities": "能力模块",
     "capabilitiesHint": "先选择产品模块，再细化允许的操作"
   },
   "fields": {
     "name": "名称",
+    "namePlaceholder": "给这个 Agent 起一个易于识别的名称",
     "description": "用途",
+    "descriptionPlaceholder": "描述它擅长什么、适合哪些场景",
     "defaultModel": "默认模型",
     "defaultModelPlaceholder": "不设置默认模型",
     "defaultModelHint": "可留空，创建会话时再选择模型。",
     "defaultModelFailed": "无法设置此模型，请重试或检查模型配置。",
     "persona": "角色定位",
-    "instructions": "工作要求"
+    "personaPlaceholder": "例如：你是一位严谨、友好的研究助手，善于把复杂问题讲清楚。",
+    "instructions": "工作要求",
+    "instructionsPlaceholder": "例如：先给结论，再说明依据；信息不确定时明确标注，避免猜测。"
   },
   "status": {
     "dirty": "未保存",

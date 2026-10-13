@@ -19,6 +19,7 @@ import {
   Edit,
   MessageOne,
   Save,
+  User,
 } from '@icon-park/react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -161,7 +162,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </div>
     </header>
     <AgentEditorTabs tabs={tabs} active={activeTab} onChange={setActiveTab} idPrefix='agent' label={t('agentSettings.title')} />
-    <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''}`}>
+    <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''} ${activeTab === 'settings' ? styles.identityBody : ''}`}>
       {recommendation && onApplyRecommendation && onDismissRecommendation && <AgentRecommendedCapabilities
         recommendation={recommendation} catalog={catalog} busy={busy || dirty} saving={busyAction === 'save'}
         onApply={onApplyRecommendation} onDismiss={onDismissRecommendation} />}
@@ -171,78 +172,85 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       {activeTab === 'providers' && <div role='tabpanel' id='agent-panel-providers' aria-labelledby='agent-tab-providers'>
         <AgentRoleProviderPicker document={draft.document} catalog={catalog} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}
-      <div hidden={activeTab !== 'settings'} role='tabpanel' id='agent-panel-settings' aria-labelledby='agent-tab-settings'>
-        <section className={styles.section} id='agent-settings-basic'>
-        <div className={styles.sectionHeading}>
-          <div>
-            <h3>{t('agentSettings.sections.basic')}</h3>
-            <p>{t('agentSettings.sections.basicHint')}</p>
+      <div className={styles.identityPanel} hidden={activeTab !== 'settings'} role='tabpanel' id='agent-panel-settings' aria-labelledby='agent-tab-settings'>
+        <section className={styles.identityCard} id='agent-settings-basic' aria-labelledby='agent-identity-heading'>
+          <div className={styles.identityHeading}>
+            <span className={styles.identitySectionIcon} aria-hidden='true'><User theme='outline' size={18} /></span>
+            <div>
+              <h3 id='agent-identity-heading'>{t('agentSettings.sections.basic')}</h3>
+              <p>{t('agentSettings.sections.basicHint')}</p>
+            </div>
           </div>
-        </div>
-        <div className={styles.formGrid}>
-          <label className={styles.field}>
-            <span>{t('agentSettings.fields.name')}</span>
-            <Input
-              value={draft.display_name}
-              maxLength={80}
-              disabled={busy}
-              onChange={(displayName: string) =>
-                onDraftChange({ ...draft, display_name: displayName })
-              }
-              onInput={(event) =>
-                onDraftChange({ ...draft, display_name: (event.target as HTMLInputElement).value })
-              }
-            />
-          </label>
-          <div className={styles.field}>
-            <span>{t('agentSettings.fields.defaultModel')}</span>
-            <AgentDefaultModelPicker
-              presetId={draft.preset_id}
-              record={chatRouteRecord}
-              disabled={busy}
-              onChange={applyChatRouteRecord}
-              onPendingChange={setModelPending}
-            />
+          <div className={styles.identityFields}>
+            <label className={styles.field}>
+              <span>{t('agentSettings.fields.name')}</span>
+              <Input
+                value={draft.display_name}
+                placeholder={t('agentSettings.fields.namePlaceholder')}
+                maxLength={80}
+                disabled={busy}
+                onChange={(displayName: string) => onDraftChange({ ...draft, display_name: displayName })}
+                onInput={(event) => onDraftChange({ ...draft, display_name: (event.target as HTMLInputElement).value })}
+              />
+            </label>
+            <div className={styles.field}>
+              <div className={styles.modelFieldHeading}>
+                <span>{t('agentSettings.fields.defaultModel')}<small>{t('common.optional')}</small></span>
+                {onOpenModels && <Button className={styles.modelManagement} type='text' size='mini' disabled={busy} onClick={onOpenModels}>
+                  {t('agentSettings.workbench.manageModels')}
+                </Button>}
+              </div>
+              <AgentDefaultModelPicker
+                presetId={draft.preset_id}
+                record={chatRouteRecord}
+                disabled={busy}
+                onChange={applyChatRouteRecord}
+                onPendingChange={setModelPending}
+              />
+            </div>
+            <label className={`${styles.field} ${styles.fieldWide}`}>
+              <span>{t('agentSettings.fields.description')}</span>
+              <Input
+                value={draft.description ?? ''}
+                placeholder={t('agentSettings.fields.descriptionPlaceholder')}
+                maxLength={240}
+                disabled={busy}
+                onChange={(description: string) => onDraftChange({ ...draft, description: description || undefined })}
+              />
+            </label>
           </div>
-          <label className={`${styles.field} ${styles.fieldWide}`}>
-            <span>{t('agentSettings.fields.description')}</span>
-            <Input
-              value={draft.description ?? ''}
-              maxLength={240}
-              disabled={busy}
-              onChange={(description: string) =>
-                onDraftChange({
-                  ...draft,
-                  description: description || undefined,
-                })
-              }
-            />
-          </label>
-          <label className={`${styles.field} ${styles.fieldWide}`}>
-            <span>{t('agentSettings.fields.persona')}</span>
-            <Input.TextArea
-              value={draft.document.persona}
-              autoSize={{ minRows: 2, maxRows: 5 }}
-              disabled={busy}
-              onChange={(persona: string) =>
-                patchDocument((document) => ({ ...document, persona }))
-              }
-            />
-          </label>
-          <label className={`${styles.field} ${styles.fieldWide}`}>
-            <span>{t('agentSettings.fields.instructions')}</span>
-            <Input.TextArea
-              value={draft.document.instructions}
-              autoSize={{ minRows: 4, maxRows: 10 }}
-              disabled={busy}
-              onChange={(instructions: string) =>
-                patchDocument((document) => ({ ...document, instructions }))
-              }
-            />
-          </label>
-        </div>
-      </section>
-        {onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
+        </section>
+        <section className={styles.identityCard} aria-labelledby='agent-behavior-heading'>
+          <div className={styles.identityHeading}>
+            <span className={styles.identitySectionIcon} aria-hidden='true'><Edit theme='outline' size={18} /></span>
+            <div>
+              <h3 id='agent-behavior-heading'>{t('agentSettings.sections.behavior')}</h3>
+              <p>{t('agentSettings.sections.behaviorHint')}</p>
+            </div>
+          </div>
+          <div className={styles.writingFields}>
+            <label className={styles.field}>
+              <span>{t('agentSettings.fields.persona')}</span>
+              <Input.TextArea
+                value={draft.document.persona}
+                placeholder={t('agentSettings.fields.personaPlaceholder')}
+                autoSize={{ minRows: 4, maxRows: 10 }}
+                disabled={busy}
+                onChange={(persona: string) => patchDocument((document) => ({ ...document, persona }))}
+              />
+            </label>
+            <label className={styles.field}>
+              <span>{t('agentSettings.fields.instructions')}</span>
+              <Input.TextArea
+                value={draft.document.instructions}
+                placeholder={t('agentSettings.fields.instructionsPlaceholder')}
+                autoSize={{ minRows: 4, maxRows: 10 }}
+                disabled={busy}
+                onChange={(instructions: string) => patchDocument((document) => ({ ...document, instructions }))}
+              />
+            </label>
+          </div>
+        </section>
       </div>
       {activeTab === 'runtime' && <AgentRuntimePolicyPanel idPrefix='agent' document={draft.document} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />}
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
