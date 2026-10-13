@@ -318,8 +318,7 @@ mod tests {
 
     fn record(event: AgentEngineEvent) -> super::super::engine_history::EngineHistoryRecord {
         super::super::engine_history::EngineHistoryRecord {
-            sequence: 1, event_json: serde_json::to_string(&event).unwrap(),
-            model_operation_id: None, model_claimed: false,
+            event_json: serde_json::to_string(&event).unwrap(),
         }
     }
 

@@ -1013,7 +1013,7 @@ mod tests {
         };
         assert_eq!(reopened.step, Some(1));
         assert_eq!(reopened.status.as_deref(), Some("thinking"));
-        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2, operation_id: OperationId::from("model:2") }).await.unwrap();
+        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2, operation_id: OperationId::from("model:2"), correction_source: None }).await.unwrap();
         let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
             panic!("expected old step completion before the new model step");
         };

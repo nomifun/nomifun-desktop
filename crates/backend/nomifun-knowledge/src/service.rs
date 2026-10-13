@@ -6,11 +6,11 @@
 //! rather than cached in the database.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::future::Future;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
+use nomifun_agent_contracts::{KnowledgeWritebackDiagnostic, KnowledgeWritebackStage};
 
 use futures_util::{StreamExt, stream};
 use nomifun_api_types::{
@@ -63,6 +63,7 @@ use tokio::sync::{
     OwnedRwLockWriteGuard, RwLock as AsyncRwLock, Semaphore,
 };
 use tokio_util::sync::CancellationToken;
+use tokio::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
@@ -97,7 +98,6 @@ pub const BINDING_KINDS: &[&str] = &["workpath", "terminal", "companion"];
 /// extractor entirely; `auto` lets the agent decide against a high bar.
 pub const WRITEBACK_EAGERNESS: &[&str] = &["manual", "auto"];
 
-const TURN_WRITEBACK_LLM_TIMEOUT: Duration = Duration::from_secs(45);
 const KNOWLEDGE_PATH_INSPECTION_TIMEOUT: Duration = Duration::from_secs(6);
 const KNOWLEDGE_FILE_IO_TIMEOUT: Duration = Duration::from_secs(20);
 const KNOWLEDGE_BLOCKING_INSPECTION_CONCURRENCY: usize = 32;
@@ -484,23 +484,18 @@ pub struct WriteOutcome {
 /// evaluates each completed turn, while manual mode reaches this boundary only
 /// after explicit user save/record intent. Once here, eagerness shapes candidate
 /// extraction and [`resolve_write_policy`] decides whether this surface may write.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnWritebackRequest {
     pub mounts: Vec<KnowledgeMountInfo>,
     pub binding: KnowledgeBinding,
     pub surface: WriteSurface,
     pub user_text: String,
     pub assistant_text: String,
-    /// Effective model for this write-back. Conversation callers resolve the
-    /// explicit knowledge-model preference first and otherwise capture the
-    /// model that actually answered the turn. `None` is retained for callers
-    /// without a provider-backed conversation model.
+    /// Original selected model captured by the completed Turn's host. No
+    /// later binding/model lookup may replace it. `None` is retained for
+    /// non-provider domain seams.
     pub model: Option<ProviderWithModel>,
-    /// On a manual retry of a partial result, logical targets already written
-    /// by the previous attempt are excluded. Failed paths are deliberately not
-    /// a whitelist: a new extraction may correct casing or a wrong-folder
-    /// suggestion and must remain eligible.
-    pub excluded_targets: Option<Vec<(KnowledgeBaseId, String)>>,
+    pub captured_configuration: Option<Arc<nomifun_model_invoke::ResolvedTaskConfig>>,
     /// Process-local cancellation for explicit conversation clear/reset/delete.
     /// It is observed only at cancel-safe boundaries; an atomic filesystem
     /// publication already in progress is always awaited to completion.
@@ -517,42 +512,29 @@ pub enum TurnWritebackStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnWritebackPhase {
-    Extracting,
-    Writing,
-}
-
-#[derive(Debug, Clone)]
-pub struct TurnWritebackFailure {
-    pub kb_id: Option<KnowledgeBaseId>,
-    pub rel_path: Option<String>,
-    pub error: String,
+struct WritebackFailure {
+    stage: KnowledgeWritebackStage,
+    code: String,
+    detail: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct TurnWritebackReport {
     pub status: TurnWritebackStatus,
-    pub candidates: usize,
     pub written: Vec<WriteOutcome>,
-    pub failures: Vec<TurnWritebackFailure>,
+    pub diagnostic: Option<KnowledgeWritebackDiagnostic>,
 }
 
 impl TurnWritebackReport {
     fn status(status: TurnWritebackStatus) -> Self {
-        Self { status, candidates: 0, written: Vec::new(), failures: Vec::new() }
+        Self { status, written: Vec::new(), diagnostic: None }
     }
 
-    pub fn failed(error: impl Into<String>) -> Self {
+    pub fn failed(diagnostic: KnowledgeWritebackDiagnostic) -> Self {
         Self {
             status: TurnWritebackStatus::Failed,
-            candidates: 0,
             written: Vec::new(),
-            failures: vec![TurnWritebackFailure {
-                kb_id: None,
-                rel_path: None,
-                error: error.into(),
-            }],
+            diagnostic: Some(diagnostic),
         }
     }
 }
@@ -5465,28 +5447,22 @@ impl KnowledgeService {
         Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op })
     }
 
-    pub async fn finalize_turn_writeback(&self, req: TurnWritebackRequest) -> TurnWritebackReport {
-        self.finalize_turn_writeback_with_progress(req, |_| async {}).await
+    pub async fn capture_writeback_configuration(
+        &self, model: Option<&ProviderWithModel>,
+    ) -> Result<Option<Arc<nomifun_model_invoke::ResolvedTaskConfig>>, AppError> {
+        match self.completer() {
+            Some(completer) => completer.capture_writeback_configuration(model).await,
+            None => Ok(None),
+        }
     }
 
-    /// Same as [`Self::finalize_turn_writeback`], but reports coarse visible
-    /// progress to the caller without turning write-back into a durable queue.
-    pub async fn finalize_turn_writeback_with_progress<F, Fut>(
-        &self,
-        req: TurnWritebackRequest,
-        mut progress: F,
-    ) -> TurnWritebackReport
-    where
-        F: FnMut(TurnWritebackPhase) -> Fut,
-        Fut: Future<Output = ()>,
-    {
+    pub async fn finalize_turn_writeback(&self, req: TurnWritebackRequest) -> TurnWritebackReport {
+        let started = Instant::now();
         if req.mounts.is_empty() {
             return TurnWritebackReport::status(TurnWritebackStatus::Disabled);
         }
         if turn_writeback_is_cancelled(&req) {
-            return TurnWritebackReport::failed(
-                "knowledge write-back was cancelled because the conversation changed",
-            );
+            return TurnWritebackReport::failed(writeback_diagnostic(KnowledgeWritebackStage::Cancelled, "CONFLICT", started));
         }
 
         let policy = resolve_write_policy(req.surface, &req.binding);
@@ -5499,56 +5475,67 @@ impl KnowledgeService {
         }
 
         let Some(completer) = self.completer() else {
-            return TurnWritebackReport::status(TurnWritebackStatus::NoCompleter);
+            let mut report = TurnWritebackReport::status(TurnWritebackStatus::NoCompleter);
+            let mut diagnostic = writeback_diagnostic(KnowledgeWritebackStage::Resolve, "PROVIDER_UNAVAILABLE", started);
+            diagnostic.detail = Some("No knowledge extraction model completer is available".into());
+            report.diagnostic = Some(diagnostic);
+            return report;
         };
-        progress(TurnWritebackPhase::Extracting).await;
 
         let redacted_user = nomi_redact::redact_secrets_owned(req.user_text.clone());
         let redacted_assistant =
             nomi_redact::redact_secrets_owned(req.assistant_text.clone());
         let eagerness = crate::context::WritebackEagerness::parse(Some(req.binding.writeback_eagerness.as_str()));
+        let limits = if let Some(configuration) = req.captured_configuration.as_deref() {
+            match autogen::KnowledgeWritebackLimits::default().for_configuration(configuration) {
+                Ok(limits) => limits,
+                Err(error) => {
+                    let mut diagnostic = writeback_diagnostic(KnowledgeWritebackStage::Validate, error.error_code(), started);
+                    diagnostic.detail = Some(local_writeback_detail(error));
+                    return TurnWritebackReport::failed(diagnostic);
+                }
+            }
+        } else { Default::default() };
         let prompt = crate::turn_writeback::build_turn_writeback_prompt(
             &req.mounts,
             eagerness,
             &redacted_user,
             &redacted_assistant,
+            limits,
         );
-
-        let completion = complete_turn_writeback_llm(
-            &completer,
-            req.model.as_ref(),
-            crate::turn_writeback::TURN_WRITEBACK_SYSTEM,
-            &prompt,
-            "extract",
-        );
-        let completion_result = if let Some(cancellation) = req.cancellation.as_ref() {
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    Err("knowledge write-back was cancelled because the conversation changed".to_owned())
-                }
-                result = completion => result,
-            }
-        } else {
-            completion.await
-        };
-        let raw = match completion_result {
-            Ok(raw) => raw,
-            Err(e) => {
-                tracing::debug!(error = %e, "turn writeback provider call failed");
-                return TurnWritebackReport::failed(e);
-            }
-        };
-        if turn_writeback_is_cancelled(&req) {
-            return TurnWritebackReport::failed(
-                "knowledge write-back was cancelled because the conversation changed",
-            );
+        let input_bytes = crate::turn_writeback::TURN_WRITEBACK_SYSTEM.len().saturating_add(prompt.len());
+        if input_bytes > limits.input_max_utf8_bytes || input_bytes.div_ceil(3) > limits.input_max_tokens_estimate {
+            let mut diagnostic = writeback_diagnostic(KnowledgeWritebackStage::Validate, "USER_LLM_PROVIDER_CONTEXT_TOO_LARGE", started);
+            diagnostic.detail = Some("The configured context cannot fit the required knowledge rules and complete mounted base identities".into());
+            diagnostic.input_tokens_estimate = Some(input_bytes.div_ceil(3) as u64);
+            diagnostic.output_token_limit = Some(limits.output_max_tokens);
+            return TurnWritebackReport::failed(diagnostic);
         }
-        let out = match crate::turn_writeback::parse_turn_writeback_output(&raw) {
+
+        let completion = match completer.complete_writeback(autogen::KnowledgeWritebackCompletionRequest {
+            system: crate::turn_writeback::TURN_WRITEBACK_SYSTEM, user: &prompt,
+            model: req.model.as_ref(), expected_configuration: req.captured_configuration.as_deref(),
+            cancellation: req.cancellation.as_ref(), limits,
+        }).await {
+            Ok(completion) => completion,
+            Err(error) => return TurnWritebackReport::failed(error.diagnostic),
+        };
+        let mut diagnostic = completion.diagnostic;
+        if turn_writeback_is_cancelled(&req) {
+            diagnostic.stage = KnowledgeWritebackStage::Cancelled;
+            diagnostic.code = Some("CONFLICT".into());
+            diagnostic.detail = Some("Knowledge write-back was cancelled before file publication".into());
+            diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            return TurnWritebackReport::failed(diagnostic);
+        }
+        let out = match crate::turn_writeback::parse_turn_writeback_output(&completion.text) {
             Ok(out) => out,
-            Err(e) => {
-                tracing::debug!(error = %e, "turn writeback output unparseable");
-                return TurnWritebackReport::failed(e);
+            Err(error) => {
+                diagnostic.stage = KnowledgeWritebackStage::Validate;
+                diagnostic.code = Some("USER_LLM_PROVIDER_INVALID_RESPONSE".into());
+                diagnostic.detail = Some(error);
+                diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                return TurnWritebackReport::failed(diagnostic);
             }
         };
 
@@ -5557,41 +5544,27 @@ impl KnowledgeService {
             return TurnWritebackReport::status(TurnWritebackStatus::NoCandidate);
         }
         if candidate_count > TURN_WRITEBACK_MAX_CANDIDATES {
-            let mut report = TurnWritebackReport::failed(format!(
-                "turn writeback produced {candidate_count} candidates; maximum is {TURN_WRITEBACK_MAX_CANDIDATES}"
-            ));
-            report.candidates = candidate_count;
-            return report;
+            diagnostic.stage = KnowledgeWritebackStage::Validate;
+            diagnostic.code = Some("USER_LLM_PROVIDER_INVALID_RESPONSE".into());
+            diagnostic.detail = Some(format!("Knowledge extraction returned {candidate_count} candidates; the maximum is {TURN_WRITEBACK_MAX_CANDIDATES}"));
+            diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            return TurnWritebackReport::failed(diagnostic);
         }
-        progress(TurnWritebackPhase::Writing).await;
 
         let mounted_ids: HashSet<KnowledgeBaseId> =
             req.mounts.iter().map(|m| m.knowledge_base_id.clone()).collect();
         let bound_kb_ids: Vec<KnowledgeBaseId> =
             req.mounts.iter().map(|m| m.knowledge_base_id.clone()).collect();
-        let excluded_targets = req.excluded_targets.as_ref().map(|targets| {
-            targets
-                .iter()
-                .map(|(kb_id, rel_path)| {
-                    (
-                        kb_id.clone(),
-                        portable_turn_writeback_lock_path(rel_path),
-                    )
-                })
-                .collect::<HashSet<_>>()
-        });
         let mut seen = HashSet::new();
         let mut written = Vec::new();
-        let mut failures = Vec::new();
+        let mut failure: Option<WritebackFailure> = None;
         let mut accepted_chars = 0usize;
         for candidate in out.candidates {
             if turn_writeback_is_cancelled(&req) {
-                failures.push(TurnWritebackFailure {
-                    kb_id: None,
-                    rel_path: None,
-                    error:
-                        "knowledge write-back was cancelled because the conversation changed"
-                            .into(),
+                failure.get_or_insert(WritebackFailure {
+                    stage: KnowledgeWritebackStage::Cancelled,
+                    code: "CONFLICT".into(),
+                    detail: "Knowledge write-back was cancelled before file publication".into(),
                 });
                 break;
             }
@@ -5603,10 +5576,10 @@ impl KnowledgeService {
             let content = candidate.content.trim();
 
             if rel_path.is_empty() || content.is_empty() {
-                failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: if rel_path.is_empty() { None } else { Some(rel_path) },
-                    error: "candidate must include kb_id, rel_path and content".into(),
+                failure.get_or_insert(WritebackFailure {
+                    stage: KnowledgeWritebackStage::Validate,
+                    code: "USER_LLM_PROVIDER_INVALID_RESPONSE".into(),
+                    detail: "Each candidate must include a nonempty kb_id, rel_path and content".into(),
                 });
                 continue;
             }
@@ -5614,18 +5587,18 @@ impl KnowledgeService {
             if content_chars > TURN_WRITEBACK_MAX_CANDIDATE_CHARS
                 || accepted_chars.saturating_add(content_chars) > TURN_WRITEBACK_MAX_TOTAL_CHARS
             {
-                failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: Some(rel_path),
-                    error: "candidate content exceeds the bounded write-back size".into(),
+                failure.get_or_insert(WritebackFailure {
+                    stage: KnowledgeWritebackStage::Validate,
+                    code: "USER_LLM_PROVIDER_INVALID_RESPONSE".into(),
+                    detail: "Candidate content exceeds the bounded write-back size".into(),
                 });
                 continue;
             }
             if !mounted_ids.contains(&kb_id) {
-                failures.push(TurnWritebackFailure {
-                    kb_id: Some(kb_id),
-                    rel_path: Some(rel_path),
-                    error: "candidate kb_id is not mounted in this session".into(),
+                failure.get_or_insert(WritebackFailure {
+                    stage: KnowledgeWritebackStage::Validate,
+                    code: "FORBIDDEN".into(),
+                    detail: "The candidate knowledge base is not mounted in this completed Turn".into(),
                 });
                 continue;
             }
@@ -5634,10 +5607,10 @@ impl KnowledgeService {
             let row = match self.require_base(kb_id.as_str()).await {
                 Ok(row) => row,
                 Err(error) => {
-                    failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(rel_path),
-                        error: error.to_string(),
+                    failure.get_or_insert(WritebackFailure {
+                        stage: KnowledgeWritebackStage::Write,
+                        code: error.error_code().into(),
+                        detail: local_writeback_detail(&error),
                     });
                     continue;
                 }
@@ -5646,10 +5619,10 @@ impl KnowledgeService {
             let _tree_guard = match self.acquire_document_tree_read_lock(&row).await {
                 Ok(guard) => guard,
                 Err(error) => {
-                    failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(rel_path),
-                        error: error.to_string(),
+                    failure.get_or_insert(WritebackFailure {
+                        stage: KnowledgeWritebackStage::Write,
+                        code: error.error_code().into(),
+                        detail: local_writeback_detail(&error),
                     });
                     continue;
                 }
@@ -5658,37 +5631,34 @@ impl KnowledgeService {
             let resolution = match self.resolve_write_target(&bound_kb_ids, &spec).await {
                 Ok(resolution) => resolution,
                 Err(error) => {
-                    failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(rel_path),
-                        error: error.to_string(),
+                    failure.get_or_insert(WritebackFailure {
+                        stage: KnowledgeWritebackStage::Write,
+                        code: error.error_code().into(),
+                        detail: local_writeback_detail(&error),
                     });
                     continue;
                 }
             };
             let portable_lock_path =
                 portable_turn_writeback_lock_path(&resolution.canonical_rel_path);
-            if excluded_targets
-                .as_ref()
-                .is_some_and(|targets| {
-                    targets.contains(&(kb_id.clone(), portable_lock_path.clone()))
-                })
-            {
-                continue;
-            }
             if !seen.insert((kb_id.clone(), portable_lock_path.clone())) {
                 continue;
             }
-            let _candidate_guard = match self
-                .acquire_turn_writeback_target_lock(&kb_id, &portable_lock_path)
-                .await
-            {
+            let acquisition = self.acquire_turn_writeback_target_lock(&kb_id, &portable_lock_path);
+            let acquired = if let Some(cancellation) = req.cancellation.as_ref() {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(AppError::Conflict("knowledge write-back was cancelled".into())),
+                    result = acquisition => result,
+                }
+            } else { acquisition.await };
+            let _candidate_guard = match acquired {
                 Ok(guard) => guard,
                 Err(error) => {
-                    failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(rel_path),
-                        error: error.to_string(),
+                    failure.get_or_insert(WritebackFailure {
+                        stage: if turn_writeback_is_cancelled(&req) { KnowledgeWritebackStage::Cancelled } else { KnowledgeWritebackStage::Write },
+                        code: error.error_code().into(),
+                        detail: local_writeback_detail(&error),
                     });
                     continue;
                 }
@@ -5704,10 +5674,10 @@ impl KnowledgeService {
                     {
                         Ok(file) => file.content,
                         Err(e) => {
-                            failures.push(TurnWritebackFailure {
-                                kb_id: Some(kb_id),
-                                rel_path: Some(resolution.canonical_rel_path),
-                                error: e.to_string(),
+                            failure.get_or_insert(WritebackFailure {
+                                stage: KnowledgeWritebackStage::Write,
+                                code: e.error_code().into(),
+                                detail: local_writeback_detail(&e),
                             });
                             continue;
                         }
@@ -5724,12 +5694,10 @@ impl KnowledgeService {
 
                 let final_rel_path = resolution.canonical_rel_path.clone();
                 if turn_writeback_is_cancelled(&req) {
-                    failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(final_rel_path),
-                        error:
-                            "knowledge write-back was cancelled because the conversation changed"
-                                .into(),
+                    failure.get_or_insert(WritebackFailure {
+                        stage: KnowledgeWritebackStage::Cancelled,
+                        code: "CONFLICT".into(),
+                        detail: "Knowledge write-back was cancelled before file publication".into(),
                     });
                     break;
                 }
@@ -5759,25 +5727,32 @@ impl KnowledgeService {
                             op: resolution.op,
                         });
                     }
-                    Err(e) => failures.push(TurnWritebackFailure {
-                        kb_id: Some(kb_id),
-                        rel_path: Some(final_rel_path),
-                        error: e.to_string(),
-                    }),
+                    Err(error) => {
+                        failure.get_or_insert(WritebackFailure {
+                            stage: KnowledgeWritebackStage::Write,
+                            code: error.error_code().into(),
+                            detail: local_writeback_detail(&error),
+                        });
+                    }
                 }
                 continue;
             }
 
         }
 
-        let status = match (written.is_empty(), failures.is_empty()) {
+        let status = match (written.is_empty(), failure.is_none()) {
             (false, true) => TurnWritebackStatus::Written,
             (false, false) => TurnWritebackStatus::Partial,
             (true, true) => TurnWritebackStatus::NoCandidate,
             (true, false) => TurnWritebackStatus::Failed,
         };
 
-        TurnWritebackReport { status, candidates: candidate_count, written, failures }
+        diagnostic.stage = failure.as_ref().map(|failure| failure.stage)
+            .unwrap_or(if turn_writeback_is_cancelled(&req) { KnowledgeWritebackStage::Cancelled } else { KnowledgeWritebackStage::Write });
+        diagnostic.code = failure.as_ref().map(|failure| failure.code.clone());
+        diagnostic.detail = failure.as_ref().map(|failure| failure.detail.clone());
+        diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        TurnWritebackReport { status, written, diagnostic: Some(diagnostic) }
     }
 
     async fn acquire_turn_writeback_target_lock(
@@ -11376,32 +11351,23 @@ fn first_heading(path: &Path) -> Option<String> {
     Some(title.chars().take(60).collect())
 }
 
-async fn complete_turn_writeback_llm(
-    completer: &Arc<dyn KnowledgeCompleter>,
-    model: Option<&ProviderWithModel>,
-    system: &'static str,
-    prompt: &str,
-    stage: &'static str,
-) -> Result<String, String> {
-    let completion = async {
-        match model {
-            Some(model) => {
-                let effective_model = model.use_model.as_deref().unwrap_or(&model.model);
-                completer
-                    .complete_with(system, prompt, &model.provider_id, effective_model)
-                    .await
-            }
-            None => completer.complete(system, prompt).await,
-        }
-    };
-    match tokio::time::timeout(TURN_WRITEBACK_LLM_TIMEOUT, completion).await {
-        Ok(Ok(raw)) => Ok(raw),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err(format!(
-            "turn writeback {stage} timed out after {}s",
-            TURN_WRITEBACK_LLM_TIMEOUT.as_secs()
-        )),
+fn writeback_diagnostic(stage: KnowledgeWritebackStage, code: &str, started: Instant) -> KnowledgeWritebackDiagnostic {
+    let mut diagnostic = KnowledgeWritebackDiagnostic::new(stage);
+    diagnostic.code = Some(code.into());
+    diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    diagnostic
+}
+
+fn local_writeback_detail(value: impl std::fmt::Display) -> String {
+    let mut output = String::new();
+    for ch in nomi_redact::redact_secrets_owned(value.to_string()).chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\t') { continue; }
+        if output.len() + ch.len_utf8() > 2048 { break; }
+        output.push(ch);
     }
+    let output = output.trim();
+    if output.is_empty() { "Knowledge file operation did not return a confirmed result".into() }
+    else { output.to_owned() }
 }
 
 /// Direct write-back must never ask a model to recreate an existing document:
@@ -15431,6 +15397,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KnowledgeCompleter for PausedOverviewCompleter {
+        async fn complete_writeback(&self, request: autogen::KnowledgeWritebackCompletionRequest<'_>) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+            test_complete_writeback(self, request).await
+        }
         async fn complete(
             &self,
             _system: &str,
@@ -15444,6 +15413,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KnowledgeCompleter for FakeCompleter {
+        async fn complete_writeback(&self, request: autogen::KnowledgeWritebackCompletionRequest<'_>) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+            test_complete_writeback(self, request).await
+        }
         async fn complete(&self, system: &str, _user: &str) -> Result<String, AppError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if system == autogen::OVERVIEW_SYSTEM {
@@ -17316,6 +17288,44 @@ mod tests {
         last_override: std::sync::Mutex<Option<(String, String)>>,
     }
 
+    // Scripted domain tests do not emulate a provider stream. The production
+    // seam remains required and never falls back to the autogen completion.
+    async fn test_complete_writeback(
+        completer: &dyn KnowledgeCompleter,
+        request: autogen::KnowledgeWritebackCompletionRequest<'_>,
+    ) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+        let started = Instant::now();
+        let mut diagnostic = KnowledgeWritebackDiagnostic::new(KnowledgeWritebackStage::Stream);
+        diagnostic.input_tokens_estimate = Some(request.system.len().saturating_add(request.user.len()).div_ceil(3) as u64);
+        diagnostic.output_token_limit = Some(request.limits.output_max_tokens);
+        let call = async {
+            if let Some(model) = request.model {
+                completer.complete_with(request.system, request.user, &model.provider_id, model.use_model.as_deref().unwrap_or(&model.model)).await
+            } else { completer.complete(request.system, request.user).await }
+        };
+        let result = if let Some(cancellation) = request.cancellation {
+            tokio::select! { biased;
+                _ = cancellation.cancelled() => Err(AppError::Conflict("cancelled test completion".into())),
+                result = call => result,
+            }
+        } else { call.await };
+        diagnostic.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        match result {
+            Ok(text) => {
+                diagnostic.output_bytes = Some(text.len() as u64);
+                if text.len() > request.limits.output_max_utf8_bytes {
+                    diagnostic.code = Some("USER_LLM_PROVIDER_INVALID_RESPONSE".into());
+                    return Err(autogen::KnowledgeWritebackCompletionError { diagnostic });
+                }
+                Ok(autogen::KnowledgeWritebackCompletion { text, diagnostic })
+            }
+            Err(error) => {
+                diagnostic.code = Some(error.error_code().into());
+                Err(autogen::KnowledgeWritebackCompletionError { diagnostic })
+            }
+        }
+    }
+
     impl ScriptedCompleter {
         fn new(replies: &[&str]) -> Arc<Self> {
             Arc::new(Self {
@@ -17335,6 +17345,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KnowledgeCompleter for ScriptedCompleter {
+        async fn complete_writeback(&self, request: autogen::KnowledgeWritebackCompletionRequest<'_>) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+            test_complete_writeback(self, request).await
+        }
         async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.last_system.lock().unwrap() = system.to_owned();
@@ -17370,6 +17383,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KnowledgeCompleter for ConcurrentDirectMergeCompleter {
+        async fn complete_writeback(&self, request: autogen::KnowledgeWritebackCompletionRequest<'_>) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+            test_complete_writeback(self, request).await
+        }
         async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
             if system == crate::turn_writeback::TURN_WRITEBACK_SYSTEM {
                 let marker = if user.contains("alpha-user") { "Alpha" } else { "Beta" };
@@ -17399,6 +17415,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KnowledgeCompleter for ConcurrentCaseAliasMergeCompleter {
+        async fn complete_writeback(&self, request: autogen::KnowledgeWritebackCompletionRequest<'_>) -> Result<autogen::KnowledgeWritebackCompletion, autogen::KnowledgeWritebackCompletionError> {
+            test_complete_writeback(self, request).await
+        }
         async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
             if system == crate::turn_writeback::TURN_WRITEBACK_SYSTEM {
                 let (marker, rel_path) = if user.contains("alpha-user") {
@@ -21882,6 +21901,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_finalizer_cancel_while_waiting_for_a_document_never_publishes_later() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (service, _, _) = durable_sqlite_service(&database, &dir.path().join("data"), Arc::new(NoopBroadcaster));
+        let service = Arc::new(service);
+        let base = service.create_base("cancellation", "", None, None).await.unwrap();
+        let id = base.knowledge_base_id;
+        let target = PathBuf::from(base.root_path).join("waiting.md");
+        let held = service.acquire_turn_writeback_target_lock(&id, "waiting.md").await.unwrap();
+        let reply = serde_json::json!({"candidates":[{"kb_id":id,"rel_path":"waiting.md","content":"# Durable note"}]}).to_string();
+        let completer = ScriptedCompleter::new(&[&reply]);
+        service.set_completer(completer.clone());
+        let token = CancellationToken::new();
+        let request = TurnWritebackRequest {
+            mounts: service.mount_info_for_bases(std::slice::from_ref(&id)).await.unwrap(),
+            binding: KnowledgeBinding { enabled:true,writeback:true,writeback_eagerness:"auto".into(),kb_ids:vec![id],..Default::default() },
+            surface:WriteSurface::RegularChat,user_text:"Remember this lesson".into(),assistant_text:"A durable lesson".into(),
+            model:None,captured_configuration:None,cancellation:Some(token.clone()),
+        };
+        let owner = service.clone();
+        let task = tokio::spawn(async move { owner.finalize_turn_writeback(request).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if service.turn_writeback_locks.lock().unwrap().values().any(|lock| lock.strong_count() >= 2) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the actual candidate must reach the held document lock");
+        assert_eq!(completer.calls.load(Ordering::SeqCst), 1);
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), task).await
+            .expect("cancellation must not wait for an unrelated writer").unwrap();
+        assert_eq!(result.status, TurnWritebackStatus::Failed);
+        assert!(result.written.is_empty());
+        assert!(!target.exists());
+        drop(held);
+        tokio::task::yield_now().await;
+        assert!(!target.exists(), "a cancelled waiter cannot later acquire and publish");
+    }
+
+    #[tokio::test]
     async fn sqlite_writeback_finalizer_create_then_update_preserves_body_and_identity() {
         let dir = tempfile::TempDir::new().unwrap();
         let database = nomifun_db::init_database_memory().await.unwrap();
@@ -21926,13 +21985,13 @@ mod tests {
             user_text: "Remember this durable lesson.".into(),
             assistant_text: "Preserve the index and add the new note.".into(),
             model: None,
-            excluded_targets: None,
+            captured_configuration: None,
             cancellation: None,
         })).await.expect("a prior candidate must not make the next update refresh under a tree reader");
 
         assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
         assert_eq!(report.written.len(), 2, "{report:?}");
-        assert!(report.failures.is_empty(), "{report:?}");
+        assert!(report.diagnostic.as_ref().is_none_or(|diagnostic| diagnostic.code.is_none()), "{report:?}");
         assert_eq!(report.written[0].op, WriteOp::Create);
         assert_eq!(report.written[1].op, WriteOp::Update);
         assert_eq!(std::fs::read_to_string(root.join("notes/finalizer.md")).unwrap(), "# A durable finalizer note");
@@ -22117,7 +22176,7 @@ mod tests {
                 user_text: "请分析为什么回写没有产出。".into(),
                 assistant_text: "结论：触发时机应放在最终答复之后。".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
@@ -22178,7 +22237,7 @@ mod tests {
                     model: "configured-name".into(),
                     use_model: Some("effective-name".into()),
                 }),
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
@@ -22229,15 +22288,15 @@ mod tests {
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
-        assert_eq!(report.candidates, TURN_WRITEBACK_MAX_CANDIDATES + 1);
+        assert!(report.diagnostic.as_ref().unwrap().detail.as_deref().unwrap().contains("maximum is 8"));
         assert!(report.written.is_empty());
-        assert!(report.failures[0].error.contains("maximum is 8"));
+        assert_eq!(report.diagnostic.as_ref().unwrap().code.as_deref(), Some("USER_LLM_PROVIDER_INVALID_RESPONSE"));
         assert!(
             svc.list_files(&kb_id)
                 .await
@@ -22278,7 +22337,7 @@ mod tests {
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
@@ -22289,6 +22348,12 @@ mod tests {
             1,
             "one background attempt must make exactly one extraction call; retry is user-driven"
         );
+        let diagnostic = report.diagnostic.as_ref().unwrap();
+        assert_eq!(diagnostic.stage, KnowledgeWritebackStage::Validate);
+        assert_eq!(diagnostic.code.as_deref(), Some("USER_LLM_PROVIDER_INVALID_RESPONSE"));
+        assert!(diagnostic.input_tokens_estimate.is_some_and(|value| value > 0));
+        assert_eq!(diagnostic.output_token_limit, Some(16_384));
+        assert!(report.written.is_empty());
     }
 
     #[tokio::test]
@@ -22319,7 +22384,7 @@ mod tests {
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
@@ -22364,14 +22429,14 @@ mod tests {
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
 
         assert_eq!(report.status, TurnWritebackStatus::Failed);
         assert_eq!(report.written.len(), 0);
-        assert!(report.failures[0].error.contains("hidden from review and search"));
+        assert_eq!(report.diagnostic.as_ref().unwrap().code.as_deref(), Some("BAD_REQUEST"));
     }
 
     #[tokio::test]
@@ -22417,7 +22482,7 @@ mod tests {
                 user_text: "请补充这个经验。".into(),
                 assistant_text: "结论：应保留旧内容并追加新经验。".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;
@@ -22462,7 +22527,7 @@ mod tests {
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
             model: None,
-            excluded_targets: None,
+            captured_configuration: None,
             cancellation: None,
         };
 
@@ -22525,7 +22590,7 @@ mod tests {
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
             model: None,
-            excluded_targets: None,
+            captured_configuration: None,
             cancellation: None,
         };
 
@@ -22593,7 +22658,7 @@ mod tests {
                 user_text: "u".into(),
                 assistant_text: "a".into(),
                 model: None,
-                excluded_targets: None,
+                captured_configuration: None,
                 cancellation: None,
             })
             .await;

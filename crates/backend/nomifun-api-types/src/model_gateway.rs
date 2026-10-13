@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ModelTask, ProviderModelInput, ProviderModelResponse};
 
 /// Local synchronization provenance. Never forwarded to a model service.
-pub const MODEL_GATEWAY_CATALOG_BASELINE_PARAM: &str = "_nomifun_gateway_catalog_baseline";
+pub use nomifun_agent_contracts::MODEL_GATEWAY_CATALOG_BASELINE_PARAM;
 
 fn serialize_i64_decimal<S: serde::Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&value.to_string())

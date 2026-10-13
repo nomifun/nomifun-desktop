@@ -44,7 +44,7 @@ pub use call::{
 pub use chat_executor::{
     OpaqueCredentialLease, OpaqueCredentialResolver, SingleAttemptFrame,
     SingleAttemptFraming, SingleAttemptHttpExecutor, SingleAttemptRequest,
-    SingleAttemptStream,
+    SingleAttemptStream, SingleAttemptResponseBudget,
 };
 pub use error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
 pub use default_model::default_model_preference_key;

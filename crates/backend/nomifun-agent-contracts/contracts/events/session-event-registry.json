@@ -1102,6 +1102,54 @@
       "replay_rule": "cache_metadata_only"
     },
     {
+      "kind": "turn/knowledge-writeback-started",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-knowledge-writeback-started/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/completed"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "turn/knowledge-writeback-settled",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-knowledge-writeback-settled/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/knowledge-writeback-started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
       "kind": "compaction/completed",
       "version": 1,
       "persistence": "persistent",

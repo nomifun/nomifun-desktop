@@ -28,6 +28,9 @@ pub(crate) struct AnthropicDecoder {
     usage: Map<String, Value>,
     budget: crate::wire_budget::WireBudget,
     argument_parser: Arc<dyn ToolArgumentParser>,
+    // Standalone idle observation only. Reasoning events retain their existing
+    // atomic delivery and this bit never enters an Agent event or checkpoint.
+    last_frame_semantic_progress: bool,
 }
 
 enum Block {
@@ -55,20 +58,26 @@ impl AnthropicDecoder {
     pub(crate) fn with_argument_parser(argument_parser: Arc<dyn ToolArgumentParser>) -> Self {
         Self { native: None, started: false, terminal: false, output_closed: false,
             incomplete_block: false, next_index: 0, active: None, call_ids: BTreeSet::new(),
-            finish: None, usage: Map::new(), budget: crate::wire_budget::WireBudget::default(), argument_parser }
+            finish: None, usage: Map::new(), budget: crate::wire_budget::WireBudget::default(), argument_parser,
+            last_frame_semantic_progress: false }
     }
+
+    pub(crate) fn has_deferred_semantic_progress(&self) -> bool { self.last_frame_semantic_progress }
 
     pub(crate) fn decode(
         &mut self,
         frame: &ProviderWireFrame,
     ) -> Option<Result<Vec<ChatModelEvent>, ChatModelError>> {
+        self.last_frame_semantic_progress = false;
         let named = frame.event.trim().to_ascii_lowercase();
         let declared = frame.data.get("type").and_then(Value::as_str);
         if named == "json"
             && declared == Some("message")
             && frame.data.get("role").and_then(Value::as_str) == Some("assistant")
         {
-            return Some(self.decode_complete_message(&frame.data));
+            let result = self.decode_complete_message(&frame.data);
+            if result.is_err() { self.last_frame_semantic_progress = false; }
+            return Some(result);
         }
         let kind = if matches!(named.as_str(), "message" | "json") {
             declared.unwrap_or(&named)
@@ -112,7 +121,9 @@ impl AnthropicDecoder {
                 "Anthropic event name contradicts its payload type",
             )));
         }
-        Some(self.decode_native(kind, &frame.data))
+        let result = self.decode_native(kind, &frame.data);
+        if result.is_err() { self.last_frame_semantic_progress = false; }
+        Some(result)
     }
 
     fn decode_complete_message(
@@ -343,6 +354,7 @@ impl AnthropicDecoder {
                     Some(Value::String(value)) if value.len() <= MAX_SIGNATURE => value.clone(),
                     _ => return Err(invalid("Invalid initial Anthropic thinking signature")),
                 };
+                self.last_frame_semantic_progress |= !text.is_empty();
                 Block::Thinking {
                     text: text.to_owned(),
                     signature,
@@ -375,6 +387,7 @@ impl AnthropicDecoder {
                 if data.is_empty() || data.len() > MAX_THINKING_OPAQUE_BYTES {
                     return Err(invalid("Invalid Anthropic redacted thinking block"));
                 }
+                self.last_frame_semantic_progress = true;
                 Block::RedactedThinking {
                     data: data.to_owned(),
                 }
@@ -417,6 +430,7 @@ impl AnthropicDecoder {
                     return Err(invalid("Anthropic thinking text limit exceeded"));
                 }
                 text.push_str(delta);
+                self.last_frame_semantic_progress |= !delta.is_empty();
             }
             (Block::Thinking { signature, .. }, "signature_delta") => {
                 let value = string(delta, "signature")?;
@@ -569,6 +583,62 @@ fn index(value: &Value) -> Result<u64, ChatModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native(decoder: &mut AnthropicDecoder, kind: &str, data: Value) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        decoder.decode(&ProviderWireFrame { event: kind.into(), data, diagnostic: None }).unwrap()
+    }
+
+    fn start(decoder: &mut AnthropicDecoder) {
+        native(decoder, "message_start", serde_json::json!({"type":"message_start","message":{
+            "id":"msg_progress","type":"message","role":"assistant","content":[],"stop_reason":null,
+            "usage":{"input_tokens":1,"output_tokens":0}}})).unwrap();
+    }
+
+    #[test]
+    fn deferred_thinking_progress_does_not_change_atomic_events_or_accept_empty_signature_frames() {
+        let mut decoder = AnthropicDecoder::default(); start(&mut decoder);
+        native(&mut decoder,"content_block_start",serde_json::json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"thinking","thinking":""}})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        let events = native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"thinking_delta","thinking":"grounded native thought"}})).unwrap();
+        assert!(events.is_empty(), "reasoning remains atomic until its signed block closes");
+        assert!(decoder.has_deferred_semantic_progress());
+        native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"thinking_delta","thinking":""}})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"signature_delta","signature":"opaque-signature"}})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        let events = native(&mut decoder,"content_block_stop",serde_json::json!({"type":"content_block_stop","index":0})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        assert!(matches!(events.as_slice(), [ChatModelEvent::ProviderReasoningBlock {
+            block: ChatProviderReasoning::AnthropicThinking {text,signature,..}
+        }] if text == "grounded native thought" && signature == "opaque-signature"));
+        native(&mut decoder,"content_block_start",serde_json::json!({"type":"content_block_start","index":1,
+            "content_block":{"type":"redacted_thinking","data":"private-opaque-data"}})).unwrap();
+        assert!(decoder.has_deferred_semantic_progress());
+        native(&mut decoder,"ping",serde_json::json!({"type":"ping"})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+    }
+
+    #[test]
+    fn rejected_native_thinking_frames_never_publish_deferred_progress() {
+        let mut decoder = AnthropicDecoder::default(); start(&mut decoder);
+        native(&mut decoder,"content_block_start",serde_json::json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"thinking","thinking":""}})).unwrap();
+        native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"thinking_delta","thinking":"observed progress"}})).unwrap();
+        assert!(decoder.has_deferred_semantic_progress());
+        assert!(native(&mut decoder,"content_block_delta",serde_json::json!({"type":"content_block_delta","index":1,
+            "delta":{"type":"thinking_delta","thinking":"wrong block"}})).is_err());
+        assert!(!decoder.has_deferred_semantic_progress());
+        let mut decoder = AnthropicDecoder::default();
+        assert!(native(&mut decoder,"json",serde_json::json!({"id":"msg_invalid","type":"message","role":"assistant",
+            "content":[{"type":"thinking","thinking":"valid thought","signature":"signed"},{"type":"unsupported"}],
+            "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})).is_err());
+        assert!(!decoder.has_deferred_semantic_progress(), "an invalid composite frame cannot retain earlier subframe progress");
+    }
 
     #[test]
     fn complete_json_message_is_projected_through_the_native_lifecycle() {

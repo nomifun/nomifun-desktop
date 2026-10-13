@@ -7,6 +7,9 @@ use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tower::ServiceExt;
 
+#[path = "engine_knowledge_writeback_tests.rs"]
+mod knowledge_writeback_tests;
+
 type HostMap = BTreeMap<String, Weak<ConversationRuntimeHost>>;
 static HOSTS: OnceLock<Mutex<HostMap>> = OnceLock::new();
 
@@ -40,22 +43,29 @@ struct Fixture {
     voice_execution:Arc<nomifun_agent_execution::AgentExecutionEngine>,
     message: SendMessageData,
     database_path: PathBuf,
+    knowledge_base: Option<(nomifun_common::KnowledgeBaseId, PathBuf)>,
 }
 
 impl Fixture {
     async fn new(scenario: &str) -> Self {
-        Self::build_delivery(scenario, vec![], vec![], None, false,None,
+        Self::build_delivery(scenario, vec![], vec![], None, false,None,false,
             #[cfg(feature = "browser-use")] None,
         ).await
     }
 
     async fn with_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>) -> Self {
-        Self::build_delivery(scenario, files, inject_skills, origin, true,None,
+        Self::build_delivery(scenario, files, inject_skills, origin, true,None,false,
             #[cfg(feature = "browser-use")] None,
         ).await
     }
 
-    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>,
+    async fn with_knowledge(scenario: &str, model_base: &str) -> Self {
+        Self::build_delivery(scenario, vec![], vec![], None, false,Some(model_base),true,
+            #[cfg(feature = "browser-use")] None,
+        ).await
+    }
+
+    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -106,14 +116,28 @@ impl Fixture {
         draft["document"]["enabled_capabilities"] = json!([{
             "capability":{"id":"workspace.files"}, "action_allowlist":["workspace.files/read"]
         }]);
+        if knowledge {
+            draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+                "capability":{"id":"knowledge"}, "action_allowlist":["knowledge/search","knowledge/read","knowledge/write"]
+            }));
+        }
         api(&router, &format!("/api/agent-presets/{preset}/revisions"), json!({
             "expected_current_revision":draft["current_revision"], "draft":draft,
             "reason":"isolated cleanup fault regression"
         })).await;
-        let session = api(&router, "/api/agent-sessions", json!({
+        let knowledge_base = if knowledge {
+            let base = services.knowledge_service.create_base("Writeback fixture", "", None, None).await.unwrap();
+            Some((base.knowledge_base_id, PathBuf::from(base.root_path)))
+        } else { None };
+        let mut create_session = json!({
             "preset_id":preset, "model":model,
             "resource_selections":[{"resource_kind":"workspace", "resource_id":"default-workspace"}]
-        })).await;
+        });
+        if let Some((base, _)) = &knowledge_base {
+            create_session["resource_selections"].as_array_mut().unwrap().push(json!({"resource_kind":"knowledge_base", "resource_id":base}));
+            create_session["knowledge_policy"] = json!({"writeback":true,"writeback_eagerness":"auto"});
+        }
+        let session = api(&router, "/api/agent-sessions", create_session).await;
         let id = session["agent_session_id"].as_str().unwrap();
         #[cfg(feature = "browser-use")]
         if browser.is_some() {
@@ -154,7 +178,7 @@ impl Fixture {
         let message = SendMessageData { content:"cancel before model dispatch".into(), msg_id:"cleanup-wire".into(),
             source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
-        Self { _directory:directory, _router:router, runtime, services, host, owner,api_state,voice_control,voice_execution, message, database_path }
+        Self { _directory:directory, _router:router, runtime, services, host, owner,api_state,voice_control,voice_execution, message, database_path, knowledge_base }
     }
 
     fn pool(&self) -> &nomifun_db::SqlitePool { self.services.database.pool() }
@@ -288,7 +312,7 @@ async fn voice_actual_lazy_recovery_admits_known_queued_original_key_once_and_un
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
     let server=tokio::spawn(async move{loop {let(mut socket,_)=listener.accept().await.unwrap();let _=socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;let _=socket.shutdown().await;}});
     let model_base=format!("http://{address}/v1");
-    let fixture=Fixture::build_delivery("voice-lazy-recovery-original-key",vec![],vec![],None,false,Some(&model_base),#[cfg(feature="browser-use")]None).await;
+    let fixture=Fixture::build_delivery("voice-lazy-recovery-original-key",vec![],vec![],None,false,Some(&model_base),false,#[cfg(feature="browser-use")]None).await;
     fixture.voice_execution.shutdown().await.unwrap();let owner=fixture.host.options.user_id.clone();let session=fixture.host.options.conversation_id.clone();let id=AgentSessionId::from(session.clone());
     let store=fixture.owner.canonical().store();let binding=store.get_live_session(&id).await.unwrap().agent_binding.binding_version;let data_dir=fixture.services.data_dir.clone();std::fs::write(data_dir.join("storage-generation"),nomifun_common::generate_id()).unwrap();
     let namespace=super::super::mobile_voice_authority::current_voice_namespace(&data_dir).unwrap();let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir.clone()));let journal=shared.get_or_open().await.unwrap();
@@ -1011,7 +1035,7 @@ mod browser_terminal_recovery {
     async fn recovery_scenario(poison_only_final_unlock: bool) {
         let factory = Arc::new(FaultBrowserFactory { poison_only_final_unlock, ..Default::default() });
         let (model, calls, model_task) = model_fixture(if poison_only_final_unlock { 2 } else { 1 }).await;
-        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,None,
+        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,None,false,
             Some((factory.clone(), model))).await;
         let session: AgentSessionId = fixture.host.options.conversation_id.clone().into();
         let store = fixture.owner.canonical().store();

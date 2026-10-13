@@ -25,7 +25,7 @@ import {
   composeMessage,
   mergeToolCallContent,
   mergeTextMessageContent,
-  normalizeKnowledgeWritebackState,
+  mergeAgentStatusContent,
   normalizeToolCallContent,
   normalizeToolGroupContent,
   normalizeWireAgentMessageMetadata,
@@ -117,28 +117,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     return list || [];
   }
 
-  if (message.type === 'text' && message.content.knowledge_writeback && message.msg_id) {
-    const existingIdx = index.msgIdIndex.get(getMessageIndexKey(message)!);
-    if (existingIdx !== undefined && existingIdx < list.length) {
-      const existingMsg = list[existingIdx];
-      if (existingMsg.type === 'text') {
-        const newList = list.slice();
-        newList[existingIdx] = {
-          ...existingMsg,
-          content: {
-            ...mergeTextMessageContent(existingMsg.content, message.content),
-            content: existingMsg.content.content,
-          },
-        };
-        return newList;
-      }
-    }
-
-    const newIdx = list.length;
-    index.msgIdIndex.set(getMessageIndexKey(message)!, newIdx);
-    return list.concat(message);
-  }
-
   if (!list?.length) {
     // Update index when adding first message
     const msgIndexKey = getMessageIndexKey(message);
@@ -221,20 +199,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
           };
           return newList;
         }
-        const existingIsWritebackOnly =
-          existingMsg.position === 'left' &&
-          existingMsg.content.content.length === 0 &&
-          Boolean(existingMsg.content.knowledge_writeback);
-        if (existingIsWritebackOnly && message.position === 'left') {
-          const newList = list.slice();
-          newList[existingIdx] = {
-            ...existingMsg,
-            ...message,
-            id: existingMsg.id,
-            content: mergeTextMessageContent(existingMsg.content, message.content),
-          };
-          return newList;
-        }
         // User messages (right position) are complete — skip if already exists to prevent duplicates
         if (message.position === 'right') {
           if (message.content.idmm_decision) {
@@ -308,6 +272,18 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     if (existingIdx !== undefined && existingIdx < list.length) {
       const existingMsg = list[existingIdx];
       const newList = list.slice();
+      if (existingMsg.type === 'agent_status' && message.type === 'agent_status'
+        && existingMsg.content.turn_summary && message.content.turn_summary) {
+        newList[existingIdx] = {
+          ...existingMsg,
+          ...message,
+          id: existingMsg.id,
+          message_id: existingMsg.message_id ?? message.message_id,
+          created_at: existingMsg.created_at ?? message.created_at,
+          content: mergeAgentStatusContent(existingMsg.content, message.content),
+        };
+        return newList;
+      }
       newList[existingIdx] = {
         ...existingMsg,
         ...message,
@@ -726,14 +702,12 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
   if (msg.type !== 'text') return msg;
   const parsed = parseJsonRecord(msg.content);
   if (!parsed || typeof parsed.content !== 'string') return msg;
-  const knowledgeWriteback = normalizeKnowledgeWritebackState(parsed.knowledge_writeback);
   return {
     ...msg,
     turn_id: msg.turn_id,
     content: {
       content: parsed.content,
       ...normalizeDecodedTextMetadata(parsed),
-      ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
       ...normalizeWireAgentMessageMetadata(parsed),
     },
   };
@@ -899,6 +873,10 @@ export const mergeFetchedMessagesForConversation = (
         content,
         status: content.status === 'error' ? 'error' : dbMessage.status,
       };
+    }
+    if (dbMessage.type === 'agent_status' && streamMessage.type === 'agent_status'
+      && dbMessage.content.turn_summary && streamMessage.content.turn_summary) {
+      return { ...dbMessage, content: mergeAgentStatusContent(streamMessage.content, dbMessage.content) };
     }
     return dbMessage;
   });

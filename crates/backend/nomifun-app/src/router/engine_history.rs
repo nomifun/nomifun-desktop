@@ -14,17 +14,13 @@ use serde_json::Value;
 use super::engine_session_host::EngineTurnReceipt;
 
 pub struct EngineHistoryRecord {
-    pub sequence: i64,
     pub event_json: String,
-    pub model_operation_id: Option<String>,
-    pub model_claimed: bool,
 }
 
 pub struct EngineHistoryTurn {
     pub source_seq: u64,
     pub unstarted_terminal: bool,
     pub operation_id: String,
-    pub root_message_id: String,
     pub receipt_status: String,
     pub root_content_json: String,
     pub request_payload_json: String,
@@ -296,20 +292,13 @@ async fn load_selected(
                 .get("data")
                 .and_then(|data| data.get("operation_id"))
                 .or_else(|| runtime_event.get("operation_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let model_claimed = model_operation_id
-                .as_ref()
-                .is_some_and(|operation| facts.operation_ids.contains(operation));
+                .and_then(Value::as_str);
             serialized_bytes = serialized_bytes
                 .saturating_add(event_json.len())
-                .saturating_add(model_operation_id.as_ref().map_or(0, String::len));
-            records.push(EngineHistoryRecord {
-                sequence: i64::try_from(sequence).map_err(failure)?,
-                event_json,
-                model_operation_id,
-                model_claimed,
-            });
+                .saturating_add(model_operation_id.map_or(0, str::len));
+            // Keep the journal's signed sequence validation at this boundary.
+            i64::try_from(sequence).map_err(failure)?;
+            records.push(EngineHistoryRecord { event_json });
         }
         if window.turns.is_empty() && serialized_bytes > window_budget {
             let authorized = facts.events.iter().filter(|event| event.kind.0 == "turn/resume-authorized" && event.correlation_id == turn.correlation_id)
@@ -346,7 +335,6 @@ async fn load_selected(
             source_seq: root.seq,
             unstarted_terminal,
             operation_id,
-            root_message_id: root.event_id.as_ref().to_owned(),
             receipt_status,
             request_payload_json: root_content_json.clone(),
             root_content_json,

@@ -1679,6 +1679,7 @@ impl NomiCoreSessionOwner {
     /// immediately usable again instead of remaining permanently busy.
     pub(crate) async fn reconcile_orphaned_active_turns(self: &Arc<Self>, engine_sessions: Arc<super::engine_session_host::EngineSessionHost>) -> Result<usize, AppError> {
         let _ = self.native_engines.set(Arc::downgrade(&engine_sessions));
+        engine_sessions.interrupt_stale_knowledge_writebacks().await?;
         let failed_pauses: Vec<(String, String)> = sqlx::query_as(
             "SELECT h.session_id,json_extract(s.owner_ref_json,'$.principal_id') FROM agent_session_heads h \
              JOIN agent_sessions s ON s.agent_session_id=h.session_id WHERE s.state='live' AND h.status='paused' \
@@ -1758,6 +1759,55 @@ impl NomiCoreSessionOwner {
                 "created_at": now_ms(),
             }),
         )
+    }
+
+    /// A write-back updates the original completed Turn's display only. It
+    /// never emits a second completion frame or claims current input authority.
+    fn knowledge_writeback_summary_wire_event(
+        session_id: &AgentSessionId,
+        message: MessageResponse,
+    ) -> Option<WebSocketMessage<Value>> {
+        if message.conversation_id != session_id.as_ref()
+            || message.r#type != MessageType::AgentStatus
+            || message.content.get("turn_summary").and_then(Value::as_bool) != Some(true)
+            || message.content.get("turn_state").and_then(Value::as_str) != Some("completed")
+            || message.content.pointer("/knowledge_writeback/event_seq").and_then(Value::as_u64).is_none_or(|seq| seq == 0)
+        {
+            return None;
+        }
+        let root = message.content.get("turn_id").and_then(Value::as_str)?.to_owned();
+        let message_id = message.msg_id?;
+        Some(WebSocketMessage::new("message.stream", json!({
+            "conversation_id":session_id, "msg_id":message_id, "turn_id":root,
+            "type":"agent_status", "data":message.content,
+            "hidden":false, "stream_complete":true, "created_at":message.created_at,
+        })))
+    }
+
+    pub(super) async fn publish_knowledge_writeback_summary(
+        &self,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<(), AppError> {
+        let store = self.canonical.store();
+        let session = match store.get_live_session(session_id).await {
+            Ok(session) => session,
+            Err(nomifun_agent_session::SessionStoreError::NotFound(_) | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(()),
+            Err(error) => return Err(agent_session_store_error(error)),
+        };
+        let projection = match store.turn_history_for_operation(&session.owner_ref, session_id, operation_id).await {
+            Ok(Some(projection)) => projection,
+            Ok(None) | Err(nomifun_agent_session::SessionStoreError::NotFound(_) | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(()),
+            Err(error) => return Err(agent_session_store_error(error)),
+        };
+        let created_at = store.session_created_at(session_id).await.map_err(agent_session_store_error)?;
+        if let Some(message) = canonical_message_response(session_id, created_at, projection)
+            .map_err(|error| AppError::Conflict(error.message))?
+            .and_then(|message| Self::knowledge_writeback_summary_wire_event(session_id, message))
+        {
+            self.user_events.send_to_user(&session.owner_ref.principal_id, message);
+        }
+        Ok(())
     }
 
     fn canonical_turn_paused_wire_event(
@@ -2937,6 +2987,9 @@ impl NomiCoreSessionOwner {
         let generation = self.canonical.store().native_execution_generation(
             session_id, &receipt.target_operation_id,
         ).await.map_err(agent_session_store_error)?;
+        if let Some(engines) = self.native_engines.get().and_then(std::sync::Weak::upgrade) {
+            engines.cancel_knowledge_writeback(session_id, &receipt.target_operation_id)?;
+        }
         self.runtime_sessions.cancel_runtime_turn(
             session_id.as_ref(),
             generation,
@@ -3975,7 +4028,11 @@ impl nomifun_companion::CompanionArchiveSessionPort for NomiCoreSessionOwner {
         owner_id: &str,
         session_id: &str,
     ) -> Result<(), AppError> {
+        let _operation_fence = self.session_operation_lock(session_id).write_owned().await;
         self.get_session(owner_id, session_id).await?;
+        if let Some(engines) = self.native_engines.get().and_then(std::sync::Weak::upgrade) {
+            engines.cancel_and_join_knowledge_writebacks(&AgentSessionId::from(session_id.to_owned())).await?;
+        }
         if let Some(runtime) = self.runtime_sessions.get_runtime(session_id) {
             runtime.clear_context().await?;
         }
@@ -6090,6 +6147,36 @@ mod session_boundary_tests {
         assert_eq!(wire.data["data"]["content"], "terminal synthesis");
         assert_eq!(wire.data["stream_complete"], true);
         assert!(wire.data.get("turn_id").is_none());
+    }
+
+    #[test]
+    fn knowledge_writeback_realtime_projection_keeps_the_original_completed_turn() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678912";
+        let projection = |state: &str| MessageProjection {
+            session_id:session_id.clone(),projection_id:"turn-summary:original".into(),first_seq:10,last_seq:42,
+            presentation_intent:"turn_summary".into(),message_type:Some("agent_status".into()),message_status:Some("finish".into()),
+            projection:json!({"correlation_id":"0190f5fe-7c00-7a00-8abc-012345678913", "source_message_id":root,
+                "state":state,"started_seq":10,"finished_seq":20,"started_at_ms":100,"finished_at_ms":200,
+                "knowledge_writeback":{"status":"partial","event_seq":42,"written":[{"kb_id":"0190f5fe-7c00-7a00-8abc-012345678914","rel_path":"notes/saved.md"}]}}),
+            semantic_digest:"digest".into(),
+        };
+        let message = canonical_message_response(&session_id, 1_000, projection("completed")).unwrap().unwrap();
+        let wire = NomiCoreSessionOwner::knowledge_writeback_summary_wire_event(&session_id, message.clone()).unwrap();
+        assert_eq!(wire.name, "message.stream");
+        assert_eq!(wire.data["turn_id"], root);
+        assert_eq!(wire.data["msg_id"], super::super::engine_journal::canonical_assistant_message_id(root).unwrap());
+        assert_eq!(wire.data["type"], "agent_status");
+        assert_eq!(wire.data["data"], message.content);
+        assert_eq!(wire.data["data"]["turn_state"], "completed");
+        assert_eq!(wire.data["data"]["finished_at_ms"], 200);
+        assert_eq!(wire.data["data"]["knowledge_writeback"]["event_seq"], 42);
+        assert_eq!(wire.data["stream_complete"], true);
+        assert!(wire.data.get("runtime").is_none());
+        assert!(wire.data.get("can_send_message").is_none());
+        let running = canonical_message_response(&session_id, 1_000, projection("running")).unwrap().unwrap();
+        assert!(NomiCoreSessionOwner::knowledge_writeback_summary_wire_event(&session_id, running).is_none());
+        assert!(NomiCoreSessionOwner::knowledge_writeback_summary_wire_event(&AgentSessionId::from("another-session"), message).is_none());
     }
 
     #[test]
@@ -15142,6 +15229,7 @@ async fn clear_nomi_core_agent_session_context(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    let _operation_fence = state.session_owner.session_operation_lock(session_id.as_ref()).write_owned().await;
     let observation = state
         .session_owner
         .canonical()
@@ -15153,6 +15241,9 @@ async fn clear_nomi_core_agent_session_context(
             "AGENT_SESSION_TURN_ACTIVE",
             "wait for the active Turn before clearing model context",
         ));
+    }
+    if let Some(engines) = state.session_owner.native_engines.get().and_then(std::sync::Weak::upgrade) {
+        engines.cancel_and_join_knowledge_writebacks(&session_id).await?;
     }
     if let Some(runtime) = state
         .session_owner

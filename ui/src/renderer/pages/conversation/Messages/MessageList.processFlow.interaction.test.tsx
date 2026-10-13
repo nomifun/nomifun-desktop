@@ -86,6 +86,61 @@ test('a restored automatic write-back notice sits under its answer and before th
   } finally { load.mockRestore(); }
 });
 
+test('independent write-back stays under the completed answer while the next Turn continues', async () => {
+  const kb = parseKnowledgeBaseId('0190f5fe-7c00-7a00-8000-000000000001');
+  const next = messageId(210);
+  const summary = (status: 'running' | 'written', event_seq: number): TMessage => ({
+    id: 'independent-summary', msg_id: messageId(202), turn_id: turnId, type: 'agent_status', position: 'center',
+    conversation_id: conversationId, created_at: 3, content: { backend: 'nomi', status: 'prepared',
+      turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 3000,
+      knowledge_writeback: { status, event_seq, written: status === 'written' ? [{ kb_id: kb, rel_path: 'notes/loops.md' }] : [] } },
+  });
+  function Updates() {
+    const add = useAddOrUpdateMessage();
+    return <>
+      <button onClick={() => add(summary('written', 12))}>Confirm saved knowledge</button>
+      <button onClick={() => add(summary('running', 11))}>Deliver late progress</button>
+      <output data-testid='knowledge-current-busy'>{String(useConversationContextSafe()?.isProcessing)}</output>
+    </>;
+  }
+  const initial: TMessage[] = [
+    { id: 'old-user', msg_id: turnId, type: 'text', position: 'right', conversation_id: conversationId,
+      created_at: 1, content: { content: 'First request' } },
+    { id: 'old-answer', msg_id: messageId(201), turn_id: turnId, type: 'text', position: 'left',
+      conversation_id: conversationId, status: 'finish', created_at: 2, content: { content: 'The first answer is complete.' } },
+    summary('running', 11),
+    { id: 'new-user', msg_id: next, type: 'text', position: 'right', conversation_id: conversationId,
+      created_at: 4, content: { content: 'Continue with a second request' } },
+    { id: 'new-thinking', msg_id: messageId(211), turn_id: next, type: 'thinking', position: 'left',
+      conversation_id: conversationId, created_at: 5, content: { content: 'Work on the next answer', status: 'thinking' } },
+  ];
+  const load = spyOn(ipcBridge.knowledge.getBase, 'invoke').mockResolvedValue({ name: 'Python basics', knowledge_base_id: kb } as never);
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+      <PreviewProvider persistNamespace='independent-knowledge-turn' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', isProcessing: true,
+          isTurnStateHydrated: true, activeTurnId: next, activeRequestMessageId: next, activeTurnStartedAt: 4000 }}>
+          <MessageListProvider initialValue={initial}><Updates /><MessageList emptySlot={<span>Welcome</span>} /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </ThemeProvider></I18nextProvider></MemoryRouter>);
+    const notice = await page.findByTestId('knowledge-writeback-notice');
+    expect(notice.textContent).toContain('Saving knowledge');
+    const answer = page.container.querySelector('#message-old-answer')!;
+    expect(answer).toBeTruthy();
+    await waitFor(() => expect(answer.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('The first answer is complete.'));
+    const nextRequest = page.container.querySelector('#message-new-user')!;
+    expect(answer.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notice.compareDocumentPosition(nextRequest) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(page.getByRole('button', { name: 'Confirm saved knowledge' }));
+    await waitFor(() => expect(notice.textContent).toContain('Knowledge saved · 1'));
+    fireEvent.click(page.getByRole('button', { name: 'Deliver late progress' }));
+    await waitFor(() => expect(page.getByTestId('knowledge-current-busy').textContent).toBe('true'));
+    expect(page.getAllByTestId('knowledge-writeback-notice')).toHaveLength(1);
+    expect(notice.textContent).toContain('Knowledge saved · 1');
+  } finally { load.mockRestore(); }
+});
+
 test.each([
   { errorAt: undefined, cleanupProven: true, pausedAt: 10, expected: 1, projected: true },
   { errorAt: 11, cleanupProven: true, pausedAt: 10, expected: 1, projected: false },

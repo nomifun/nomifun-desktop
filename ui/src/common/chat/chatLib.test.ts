@@ -13,7 +13,10 @@ import {
 import {
   composeMessage,
   joinPath,
-  mergeTextMessageContent,
+  mergeAgentStatusContent,
+  normalizeAgentStatusContent,
+  normalizeKnowledgeWritebackState,
+  isKnowledgeWritebackPresentation,
   mergeToolCallContent,
   normalizeAgentStreamError,
   normalizeToolCallContent,
@@ -92,6 +95,45 @@ const baseWire = (overrides: Record<string, unknown>) =>
     ...overrides,
   }) as any;
 
+describe('canonical knowledge write-back presentation', () => {
+  const target = { kb_id: parseKnowledgeBaseId('019b0000-0000-7000-8000-000000000003'), rel_path: 'notes.md' };
+  const summary = (status: string, eventSeq?: number) => normalizeAgentStatusContent({
+    backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', finished_at_ms: 1000,
+    knowledge_writeback: { status, written: status === 'written' ? [target] : [], event_seq: eventSeq },
+  });
+
+  test('normalizes only canonical presentation sequences, retaining old genuine terminal targets', () => {
+    expect(summary('written').knowledge_writeback).toEqual({ status: 'written', written: [target] });
+    expect(summary('running', 12).knowledge_writeback).toEqual({ status: 'running', written: [], event_seq: 12 });
+    for (const event_seq of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(normalizeKnowledgeWritebackState({ status: 'running', event_seq })).toBeUndefined();
+    }
+    expect(normalizeKnowledgeWritebackState({ status: 'running' })).toBeUndefined();
+    expect(normalizeKnowledgeWritebackState({ status: 'writing', event_seq: 12 })).toBeUndefined();
+    expect(normalizeKnowledgeWritebackState({ status: 'failed', event_seq: 13, written: [target], detail: 'Disk full' }))
+      .toEqual({ status: 'failed', event_seq: 13, written: [target], detail: 'Disk full' });
+    expect(normalizeKnowledgeWritebackState({ status: 'written', written: [{ kb_id: 'invalid', rel_path: 'notes.md' }] })?.written).toEqual([]);
+  });
+
+  test('a delayed running event and old terminal metadata cannot replace a newer settled result', () => {
+    const settled = summary('written', 13);
+    for (const stale of [summary('running', 12), summary('written'), summary('running', 13)]) {
+      expect(mergeAgentStatusContent(settled, stale).knowledge_writeback).toEqual(settled.knowledge_writeback);
+    }
+    expect(mergeAgentStatusContent(summary('written'), summary('running', 12)).knowledge_writeback?.status).toBe('running');
+  });
+
+  test('only correlated post-Turn metadata is presentation-only and text never carries write-back state', () => {
+    const receipt = baseWire({ type: 'agent_status', turn_id: SECOND_MESSAGE_ID, data: summary('running', 12) });
+    expect(isKnowledgeWritebackPresentation(receipt)).toBe(true);
+    expect(isKnowledgeWritebackPresentation({ ...receipt, turn_id: undefined })).toBe(false);
+    expect(isKnowledgeWritebackPresentation({ ...receipt, data: summary('written') })).toBe(false);
+    expect(isKnowledgeWritebackPresentation({ ...receipt, data: { ...receipt.data, turn_state: 'running' } })).toBe(false);
+    const text = transformMessage(baseWire({ type: 'content', data: { content: 'Answer', knowledge_writeback: { status: 'running', event_seq: 12 } } }));
+    expect(text?.content).toEqual({ content: 'Answer', cronMeta: undefined });
+  });
+});
+
 describe('typed gateway terminal errors', () => {
   const cases = [
     ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The model gateway balance is insufficient. Top up the account to continue.'],
@@ -169,62 +211,6 @@ describe('joinPath compatibility export', () => {
   test('preserves UNC and URI prefixes', () => {
     expect(joinPath('//server/share/project', '../cat.png')).toBe('//server/share/cat.png');
     expect(joinPath('https://example.com/assets', 'cat.png')).toBe('https://example.com/assets/cat.png');
-  });
-});
-
-describe('knowledge writeback attempt ordering', () => {
-  test('does not let a delayed older attempt overwrite a newer manual retry', () => {
-    const merged = mergeTextMessageContent(
-      {
-        content: 'Final answer.',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-2',
-          started_at: 200,
-          updated_at: 220,
-        },
-      },
-      {
-        content: '',
-        knowledge_writeback: {
-          status: 'failed',
-          attempt_id: 'attempt-1',
-          started_at: 100,
-          // Deliberately later than attempt-2's latest progress timestamp:
-          // generation order must come from started_at, not delivery time.
-          updated_at: 999,
-          retryable: true,
-        },
-      }
-    );
-
-    expect(merged.knowledge_writeback?.attempt_id).toBe('attempt-2');
-    expect(merged.knowledge_writeback?.status).toBe('writing');
-  });
-
-  test('keeps terminal state monotonic within one attempt', () => {
-    const merged = mergeTextMessageContent(
-      {
-        content: 'Final answer.',
-        knowledge_writeback: {
-          status: 'written',
-          attempt_id: 'attempt-1',
-          started_at: 100,
-          updated_at: 200,
-        },
-      },
-      {
-        content: '',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-1',
-          started_at: 100,
-          updated_at: 300,
-        },
-      }
-    );
-
-    expect(merged.knowledge_writeback?.status).toBe('written');
   });
 });
 
@@ -581,34 +567,6 @@ describe('transformMessage runtime field normalization', () => {
     if (message?.type !== 'agent_status') throw new Error('expected agent_status message');
     expect(message.content.started_at_ms).toBe(4_000_000);
     expect(message.content.finished_at_ms).toBe(4_002_000);
-  });
-
-  test('preserves persisted knowledge writeback state when hydrating text messages', () => {
-    const message = transformMessage(
-      baseWire({
-        type: 'content',
-        data: {
-          content: 'Final answer.',
-          knowledge_writeback: {
-            status: 'failed',
-            attempt_id: 'attempt-1',
-            retryable: true,
-            failures: [{
-              kb_id: parseKnowledgeBaseId('019b0000-0000-7000-8000-000000000001'),
-              rel_path: 'notes.md',
-              error: 'disk full',
-            }],
-          },
-        },
-      })
-    );
-
-    expect(message?.type).toBe('text');
-    if (message?.type !== 'text') throw new Error('expected text message');
-    expect(message.content.content).toBe('Final answer.');
-    expect(message.content.knowledge_writeback?.status).toBe('failed');
-    expect(message.content.knowledge_writeback?.retryable).toBe(true);
-    expect(message.content.knowledge_writeback?.failures?.[0]?.error).toBe('disk full');
   });
 
   test('converts live user-created events into right-side messages for the active conversation', () => {

@@ -78,6 +78,35 @@ flowchart LR
 
 应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
+### 回合完成后的知识回写
+
+主 Turn 在原工具效果、原生任务和资源清理确认后正常提交终态并释放输入；知识提炼与回写由
+原 `EngineKernelSession` 的独立现役 `EngineTaskGroup` 持有，不加入主 Turn 的清理等待。
+任务固定原 owner、Session、Turn operation、Snapshot、知识资源、回答正文及模型，不读取
+后继 Turn 的活动状态或当前 binding。开始与结算记录追加到同一 canonical Event/Payload 链，
+不会改写原 Turn 终态、结束时间、模型上下文或 checkpoint，也不增加任务表或执行账本。
+
+回写状态从原 operation 的 canonical Turn summary 投影，实时帧只更新该原回合的展示；它
+不发布第二次 `turn.completed`，不改变后继回合的忙碌状态。精确取消只命中原取消收据的
+operation。清空上下文在原 Session 操作围栏内取消并等待回写退出；Session 绑定切换、删除、
+淘汰和关闭通过统一 session teardown 取消、join 全部回写后才释放资源。文件原子发布已经
+开始时等待真实结果，不能把取消请求当作“未写入”证明。启动在开放 routes 前把前进程
+未结算的回写标记为中断、保留已确认结果，不自动重放提炼或文件写入。
+
+回写提炼使用独立的有界完成合同，在原 Turn 准备时捕获该模型的真实 task 配置，派发前按
+同一 task 的有效连接、凭证、协议和预算复核；无关模型配置的版本变化不使回写失效。提炼
+共享现役协议编码、参数合并及单次 HTTP executor，不构造已关闭 Turn 的模型因果，也不
+重开 Runtime。连接等待、首帧与无实际内容进度的停滞分别有界；持续有效输出不受额外
+45 秒整请求时限切断。协议解码器确认的在途思考增量也算生成进度，完整思考块仍按原
+规范原子交付；空帧与签名不能延长等待。输入预算按已声明的上下文容量及 input-only 语义分配，完整保留
+知识库身份并安全缩减超大说明和正文；输出与原始响应字节另有限额。未知模型上限保留
+供应商缺省，不按品牌推断结构化输出支持或盲目增加请求参数。
+
+回写结果沿同一 canonical observation 保存 typed 阶段、共享错误码、真实计量和安全
+provider 诊断。未测量的信息缺省，不能补造为零；prompt、响应正文与凭证不进入诊断。
+界面以原回合的紧凑提示展开、折叠和复制这些证据，复用全局异常的诊断展示，保持主回合
+的生命周期与原完成时间。既有当前代自由详情只读保留，新的结果不重复写两套说明。
+
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 
 ### 受管组件调用

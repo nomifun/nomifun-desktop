@@ -7816,6 +7816,377 @@
     "title": "TargetPackageInventoryPayload",
     "type": "object"
   },
+  "turn_knowledge_writeback_settled": {
+    "$defs": {
+      "KnowledgeWritebackDiagnostic": {
+        "additionalProperties": false,
+        "description": "Bounded observations, never response text, request bodies or credentials.\n`code` uses the shared application/Agent error vocabulary; success has no\nerror code. Token estimates are local byte-based pressure estimates, not\nprovider tokenization or billing claims.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "description": "Locally authored, credential-redacted explanation. Provider response\nprose and rejected JSON values must never enter this field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "first_frame_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens_estimate": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_token_limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_diagnostic": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelFailureDiagnostic"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "received_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "received_frames": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stage": {
+            "$ref": "#/$defs/KnowledgeWritebackStage"
+          }
+        },
+        "required": [
+          "stage"
+        ],
+        "type": "object"
+      },
+      "KnowledgeWritebackNoticeFile": {
+        "additionalProperties": false,
+        "properties": {
+          "kb_id": {
+            "type": "string"
+          },
+          "rel_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kb_id",
+          "rel_path"
+        ],
+        "type": "object"
+      },
+      "KnowledgeWritebackNoticeStatus": {
+        "enum": [
+          "running",
+          "written",
+          "partial",
+          "failed",
+          "no_candidate",
+          "no_completer",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "KnowledgeWritebackStage": {
+        "enum": [
+          "resolve",
+          "connect",
+          "first_frame",
+          "stream",
+          "decode",
+          "validate",
+          "write",
+          "settle",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "ModelFailureDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "authScheme": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contentType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "httpStatus": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "modelName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerParam": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "$ref": "#/$defs/ModelFailureReason"
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retryAfterMs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "transportDetail": {
+            "description": "Redacted locally authored OS/transport cause only, never provider prose.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ModelFailureReason": {
+        "description": "Presentation-only evidence. Retry and settlement remain governed by the\nexisting broker code/directive, not by these diagnostic refinements.",
+        "enum": [
+          "auth_failed",
+          "invalid_key",
+          "expired_key",
+          "billing_required",
+          "insufficient_quota",
+          "insufficient_balance",
+          "spend_limit_reached",
+          "subscription_expired",
+          "model_not_in_plan",
+          "permission_denied",
+          "model_permission_denied",
+          "model_not_found",
+          "endpoint_missing",
+          "non_api_response",
+          "auth_scheme_mismatch",
+          "rate_limited",
+          "dns_failure",
+          "connection_failed",
+          "tls_failure",
+          "proxy_failure",
+          "request_timeout",
+          "upstream_server_error",
+          "provider_overloaded",
+          "provider_unavailable",
+          "network_failure",
+          "stream_interrupted",
+          "invalid_response",
+          "invalid_request",
+          "unsupported_feature",
+          "content_policy",
+          "prompt_too_long",
+          "configuration_error",
+          "invalid_endpoint",
+          "credentials_missing",
+          "credential_target_mismatch"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "detail": {
+        "description": "Already committed observations remain immutable; new writers only\nemit the structured diagnostic below.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "diagnostic": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/KnowledgeWritebackDiagnostic"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/KnowledgeWritebackNoticeStatus"
+      },
+      "written": {
+        "items": {
+          "$ref": "#/$defs/KnowledgeWritebackNoticeFile"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "operation_id",
+      "status",
+      "written"
+    ],
+    "title": "KnowledgeWritebackSettledV1",
+    "type": "object"
+  },
+  "turn_knowledge_writeback_started": {
+    "$defs": {
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "execution_instance_id": {
+        "type": "string"
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "resolved_snapshot_ref": {
+        "$ref": "#/$defs/ResolvedSnapshotRef"
+      }
+    },
+    "required": [
+      "operation_id",
+      "resolved_snapshot_ref",
+      "binding_version",
+      "execution_instance_id"
+    ],
+    "title": "KnowledgeWritebackStartedV1",
+    "type": "object"
+  },
   "turn_workspace_files_observed": {
     "$defs": {
       "ObservedFileOperation": {

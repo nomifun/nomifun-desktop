@@ -22,6 +22,7 @@ pub mod cc_switch;
 pub mod factory;
 pub mod image_generation;
 pub mod knowledge_completer;
+mod knowledge_writeback_completion;
 pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;

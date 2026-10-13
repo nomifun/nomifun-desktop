@@ -152,6 +152,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-model-invoke/src/chat_sse.rs"),
                     include_str!("../../../nomifun-model-invoke/src/chat_deadline.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/adapter.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/provider_params.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/broker.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/retry.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/provider_errors.rs"),
@@ -275,6 +276,11 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_model_facts.rs"),
                     include_str!("engine_tool_host.rs"),
                     include_str!("engine_kernel_session.rs"),
+                    include_str!("engine_knowledge_writeback.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/knowledge_writeback_completion.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/knowledge_completer.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/knowledge_writeback_notice.rs"),
+                    include_str!("../../../nomifun-agent-session/src/knowledge_writeback.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
                     include_str!("../../../nomifun-agent-session/src/store.rs"),
                     include_str!("../../../nomifun-agent-session/src/context_snapshot.rs"),
@@ -396,6 +402,7 @@ pub(crate) fn factory(
                 capability_state: active,
                 active: tokio::sync::Mutex::new(None),
                 last_terminal_root: std::sync::Mutex::new(None),
+                pending_writeback_release: std::sync::Mutex::new(None),
                 unstarted_cancelled_root: std::sync::Mutex::new(None),
                 model_configuration: Default::default(),
                 tools: tools.clone(),
@@ -428,6 +435,7 @@ struct ActiveTurn {
     event_buffer: super::runtime_event_buffer::AgentEventBuffer,
     cleanup_records: std::collections::VecDeque<AgentEngineEvent>,
     assistant_text_by_step: BTreeMap<u16, String>,
+    writeback_configuration: Result<Option<Arc<nomifun_model_invoke::ResolvedTaskConfig>>, KnowledgeWritebackDiagnostic>,
 }
 
 struct PreparationFlight {
@@ -461,6 +469,7 @@ struct ConversationRuntimeHost {
     capability_state: Arc<SessionCapabilityState>,
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
     last_terminal_root: std::sync::Mutex<Option<String>>,
+    pending_writeback_release: std::sync::Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>,
     unstarted_cancelled_root: std::sync::Mutex<Option<String>>,
     model_configuration: super::chat_broker_host::TurnModelConfiguration,
     tools: Arc<JoinedTools>,
@@ -496,6 +505,14 @@ impl ConversationRuntimeHost {
             .lock()
             .map(|last| last.as_deref() == Some(root))
             .map_err(|_| error("terminal root state poisoned"))
+    }
+
+    fn release_pending_knowledge_writeback(&self, root: &str) -> Result<(), AppError> {
+        let mut pending = self.pending_writeback_release.lock()
+            .map_err(|_| error("Knowledge release ownership poisoned"))?;
+        if pending.as_ref().is_some_and(|(owned_root, _)| owned_root == root)
+            && let Some((_, release)) = pending.take() { let _ = release.send(()); }
+        Ok(())
     }
 
     async fn confirm_unstarted_cancellation(&self, message: &SendMessageData) -> Result<bool, AppError> {
@@ -629,6 +646,7 @@ impl ConversationRuntimeHost {
             event_buffer: Default::default(),
             cleanup_records: Default::default(),
             assistant_text_by_step: BTreeMap::new(),
+            writeback_configuration: Ok(None),
         });
         journal.attach_runtime(active.as_ref().expect("published above").cancellation.clone())?;
         *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
@@ -800,6 +818,18 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let facts = self.session_host.capture_turn_model_configuration(
             &admitted, &self.model_configuration,
         ).await.map_err(|error| self.preparation_error(root, "model_configuration", error))?;
+        let configuration = if message.origin.as_deref().is_none_or(str::is_empty) {
+            let pin = self.resources.capture_knowledge_writeback_configuration(&message.content, self.options.model.as_ref()).await;
+            if pin.as_ref().is_ok_and(|configuration| configuration.is_some())
+                && let Some(model) = &self.options.model
+                && self.session_host.verify_writeback_model_configuration(&self.model_configuration, admitted.operation_id(), model).await.is_err() {
+                let mut diagnostic = KnowledgeWritebackDiagnostic::new(KnowledgeWritebackStage::Resolve);
+                diagnostic.code = Some("NOMIFUN_SESSION_CONFIGURATION_CHANGED".into());
+                diagnostic.detail = Some("Knowledge extraction configuration changed during original Turn preparation".into());
+                Err(diagnostic)
+            } else { pin }
+        } else { Ok(None) };
+        if let Some(turn) = self.active.lock().await.as_mut() { turn.writeback_configuration = configuration; }
         let patch_recovery = super::runtime_patch_recovery::load(
             self.session_host.as_ref(),
             &admitted,
@@ -1095,6 +1125,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 // committed. Retry that release, never append or reinterpret the
                 // already-recorded outcome during SDK teardown.
                 self.resources.finish_browser_turn(self.root(message)).await?;
+                self.release_pending_knowledge_writeback(self.root(message))?;
                 self.supervision.note_progress(&self.options.conversation_id, None,
                     nomifun_idmm::IdmmProgressPhase::Terminal);
                 return Ok(());
@@ -1121,6 +1152,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 // become durable owner Knowledge through this desktop-chat
                 // policy. Their domains need an explicit write authority.
                 (matches!(event, AgentEngineEvent::TurnCompleted { .. })
+                    && turn.root == self.root(message)
                     && message.origin.as_deref().is_none_or(str::is_empty))
                 .then(|| {
                     let assistant = turn
@@ -1129,54 +1161,21 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                         .rev()
                         .find_map(|(_, text)| (!text.trim().is_empty()).then(|| text.clone()))
                         .unwrap_or_default();
-                    // Capture display ownership before awaiting write-back.
-                    let notice_journal = (turn.root == self.root(message)).then(|| turn.journal.clone());
-                    (message.content.clone(), assistant, notice_journal)
+                    (message.content.clone(), assistant, turn.operation.clone(), turn.writeback_configuration.clone())
                 })
             })
         };
-        if let Some((user_text, assistant_text, journal)) = writeback_input {
-            match self
-                .resources
-                .finalize_knowledge_writeback(
-                    user_text,
-                    assistant_text,
-                    self.options.model.clone(),
-                )
-                .await
-            {
-                Ok(Some(report)) => {
-                    if matches!(report.status, nomifun_knowledge::TurnWritebackStatus::Written | nomifun_knowledge::TurnWritebackStatus::Partial)
-                        && !report.written.is_empty() && let Some(journal) = &journal {
-                        let notice = nomifun_agent_contracts::KnowledgeWritebackNotice {
-                            status: if report.status == nomifun_knowledge::TurnWritebackStatus::Partial {
-                                nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Partial
-                            } else { nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Written },
-                            written: report.written.iter().map(|file| nomifun_agent_contracts::KnowledgeWritebackNoticeFile {
-                                kb_id: file.kb_id.as_str().into(), rel_path: file.final_rel_path.clone(),
-                            }).collect(),
-                        };
-                        if let Err(error) = journal.note_knowledge_writeback(notice).await {
-                            tracing::warn!(%error, "Knowledge write-back notice could not be attached");
-                        }
-                    }
-                    tracing::info!(
-                        agent_session_id = %self.options.conversation_id,
-                        status = ?report.status,
-                        candidates = report.candidates,
-                        written = report.written.len(),
-                        failures = report.failures.len(),
-                    "turn-final Knowledge write-back completed"
-                    )
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    agent_session_id = %self.options.conversation_id,
-                    %error,
-                    "turn-final Knowledge write-back could not run"
-                ),
+        // Register the exact root's cancellation/cleanup ownership before its
+        // terminal becomes observable. Extraction is gated until the main
+        // terminal and native final release below have both succeeded.
+        let mut writeback_rejection = None;
+        let mut writeback_release = if let Some((user_text, assistant_text, operation, configuration)) = writeback_input {
+            match self.resources.prepare_knowledge_writeback(operation.clone().into(), user_text,
+                assistant_text, self.options.model.clone(), configuration, self.session_host.clone()) {
+                Ok(release) => release,
+                Err(error) => { writeback_rejection = Some((operation, error)); None }
             }
-        }
+        } else { None };
         if matches!(event, AgentEngineEvent::TurnInputScope { .. } | AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::SteeringDeferred { .. }) {
             return Err(error("control records must be committed by the platform owner"));
         }
@@ -1224,7 +1223,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         );
-        self.append_record(
+        let recorded = self.append_record(
             message
                 .source_message_id
                 .as_deref()
@@ -1233,13 +1232,27 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             model_operation,
             terminal,
         )
-        .await?;
+        .await;
+        if let Err(record_error) = recorded {
+            if terminal && self.terminal_already_recorded(self.root(message))?
+                && let Some(release) = writeback_release.take() {
+                *self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))? =
+                    Some((self.root(message).to_owned(), release));
+            }
+            return Err(record_error);
+        }
         if matches!(event, AgentEngineEvent::TurnStarted { .. }) {
             self.open_steering().await?;
         }
         if let AgentEngineEvent::ToolCompleted { result, .. } = event {
             self.tools.mark_observed(result.call_id.as_ref())?;
         }
+        }
+        if let Some(release) = writeback_release { let _ = release.send(()); }
+        if let Some((operation, error)) = writeback_rejection {
+            if let Err(error) = self.resources.reject_knowledge_writeback(operation.into(), error, self.session_host.clone()).await {
+                tracing::warn!(%error, "Knowledge task refusal could not be recorded");
+            }
         }
         let phase = match event {
             AgentEngineEvent::ToolStarted { .. }
@@ -1345,6 +1358,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
     }
     async fn cleanup_session(&self) -> Result<(), AppError> {
         self.resources.cleanup_session().await?;
+        self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))?.take();
         let terminal_root = self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))?.clone();
         if let Some(root) = terminal_root { self.resources.finish_browser_turn(&root).await?; }
         self.session_host.retire_kernel_session_after_teardown(

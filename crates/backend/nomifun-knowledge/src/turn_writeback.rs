@@ -9,9 +9,11 @@ use serde::Deserialize;
 
 use crate::context::WritebackEagerness;
 
-const USER_TEXT_MAX_CHARS: usize = 12_000;
-const ASSISTANT_TEXT_MAX_CHARS: usize = 24_000;
 const TOC_LINES_PER_BASE_MAX: usize = 24;
+const MOUNT_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+const MOUNT_CONTEXT_PER_BASE_MAX_BYTES: usize = 8 * 1024;
+const USER_TEXT_MAX_BYTES: usize = 20 * 1024;
+const TRUNCATION_MARKER: &str = "\n[truncated]\n";
 
 /// Strict-JSON contract for extracting durable knowledge from one completed turn.
 ///
@@ -35,17 +37,16 @@ Rules:\n\
 - If nothing qualifies, return {\"candidates\":[]}.";
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnWritebackCandidate {
     pub kb_id: KnowledgeBaseId,
-    #[serde(default)]
     pub rel_path: String,
-    #[serde(default)]
     pub content: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnWritebackOutput {
-    #[serde(default)]
     pub candidates: Vec<TurnWritebackCandidate>,
 }
 
@@ -54,6 +55,7 @@ pub fn build_turn_writeback_prompt(
     eagerness: WritebackEagerness,
     user_text: &str,
     assistant_text: &str,
+    limits: crate::autogen::KnowledgeWritebackLimits,
 ) -> String {
     let eagerness_label = match eagerness {
         WritebackEagerness::Manual => "manual",
@@ -76,61 +78,87 @@ pub fn build_turn_writeback_prompt(
     prompt.push_str(&format!("- eagerness: {eagerness_label}\n"));
     prompt.push_str(&format!("- rule: {eagerness_rule}\n\n"));
     prompt.push_str("Mounted knowledge bases:\n");
-    for m in mounts {
-        prompt.push_str(&format!("- kb_id: {}\n", m.knowledge_base_id));
-        prompt.push_str(&format!("  name: {}\n", m.name));
+    let mount_start = prompt.len();
+    let input_budget = limits.input_max_utf8_bytes.min(limits.input_max_tokens_estimate.saturating_mul(3));
+    let available = input_budget.saturating_sub(TURN_WRITEBACK_SYSTEM.len() + prompt.len() + 128);
+    // Complete identifiers always survive. Optional descriptions and TOCs
+    // share only the remaining metadata allowance, so a verbose first base
+    // cannot hide another selected base's identity.
+    let headers = mounts.iter().map(|mount| format!("- kb_id: {}\n  name: {}\n", mount.knowledge_base_id, truncate_text(&mount.name, 128)))
+        .collect::<Vec<_>>();
+    let mut remaining_headers = headers.iter().map(String::len).sum::<usize>();
+    let mount_budget = (available / 5).min(MOUNT_CONTEXT_MAX_BYTES).max(remaining_headers);
+    for (index, (m, header)) in mounts.iter().zip(headers).enumerate() {
+        prompt.push_str(&header);
+        remaining_headers = remaining_headers.saturating_sub(header.len());
+        let allowance = mount_budget.saturating_sub(prompt.len() - mount_start + remaining_headers)
+            .checked_div(mounts.len() - index).unwrap_or(0).min(MOUNT_CONTEXT_PER_BASE_MAX_BYTES);
+        let mut context = String::new();
         if !m.description.trim().is_empty() {
-            prompt.push_str(&format!("  description: {}\n", one_line(&m.description)));
+            context.push_str(&format!("  description: {}\n", one_line(&m.description)));
         }
         if let Some(summary) = m.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            prompt.push_str(&format!("  summary: {}\n", one_line(summary)));
+            context.push_str(&format!("  summary: {}\n", one_line(summary)));
         }
-        prompt.push_str(&format!("  mount_path: {}\n", m.rel_path));
+        context.push_str(&format!("  mount_path: {}\n", one_line(&m.rel_path)));
         if !m.toc.is_empty() {
-            prompt.push_str("  known_paths:\n");
+            context.push_str("  known_paths:\n");
             for line in m.toc.iter().take(TOC_LINES_PER_BASE_MAX) {
-                prompt.push_str(&format!("    - {}\n", one_line(line)));
+                let line = format!("    - {}\n", one_line(line));
+                if context.len() + line.len() > MOUNT_CONTEXT_PER_BASE_MAX_BYTES {
+                    context.push_str("    [Additional known paths omitted by the extraction input budget]\n");
+                    break;
+                }
+                context.push_str(&line);
             }
         }
+        let context = truncate_text(&context, allowance);
+        prompt.push_str(&context);
+        if !context.ends_with('\n') { prompt.push('\n'); }
     }
     prompt.push_str("\nCompleted turn:\n<user>\n");
-    prompt.push_str(&truncate_chars(user_text, USER_TEXT_MAX_CHARS));
+    let user_budget = (available / 5).min(USER_TEXT_MAX_BYTES);
+    prompt.push_str(&truncate_text(user_text, user_budget));
     prompt.push_str("\n</user>\n<assistant>\n");
-    prompt.push_str(&bounded_assistant_text(assistant_text));
+    let assistant_budget = input_budget.saturating_sub(TURN_WRITEBACK_SYSTEM.len() + prompt.len() + "\n</assistant>\n".len());
+    prompt.push_str(&truncate_text(assistant_text, assistant_budget));
     prompt.push_str("\n</assistant>\n");
     prompt
 }
 
 pub fn parse_turn_writeback_output(raw: &str) -> Result<TurnWritebackOutput, String> {
     let slice = extract_json_object(raw).ok_or_else(|| "no JSON object found".to_owned())?;
-    serde_json::from_str::<TurnWritebackOutput>(slice).map_err(|e| format!("invalid turn writeback JSON: {e}"))
-}
-
-/// Exact assistant slice used by the turn-final prompt. Conversation state
-/// persists only this bounded value so a manual retry reproduces a multi-segment
-/// answer without duplicating an arbitrarily large transcript in message JSON.
-pub fn bounded_assistant_text(text: &str) -> String {
-    truncate_chars(text, ASSISTANT_TEXT_MAX_CHARS)
+    serde_json::from_str::<TurnWritebackOutput>(slice).map_err(|error| {
+        // Serde's Display may echo an invalid field/value from the response.
+        // Keep only locally authored structure diagnostics.
+        format!("invalid turn writeback JSON: {:?} at line {}, column {}", error.classify(), error.line(), error.column())
+    })
 }
 
 fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    truncate_text(s, 768).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(s: &str, max_chars: usize) -> String {
+fn truncate_text(s: &str, max_bytes: usize) -> String {
     let trimmed = s.trim();
-    // A durable retry may feed back the exact already-bounded prompt slice.
-    // Keep the truncation marker intact instead of clipping it a second time.
-    if trimmed.ends_with("\n[truncated]")
-        && trimmed.chars().count() <= max_chars + "\n[truncated]".chars().count()
-    {
+    if trimmed.len() <= max_bytes {
         return trimmed.to_owned();
     }
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_owned();
+    let mut out = String::new();
+    let limit = max_bytes.saturating_sub(TRUNCATION_MARKER.len());
+    let head_limit = limit / 2;
+    for ch in trimmed.chars() {
+        if out.len() + ch.len_utf8() > head_limit { break; }
+        out.push(ch);
     }
-    let mut out: String = trimmed.chars().take(max_chars).collect();
-    out.push_str("\n[truncated]");
+    if max_bytes >= TRUNCATION_MARKER.len() { out.push_str(TRUNCATION_MARKER); }
+    let tail_limit = max_bytes.saturating_sub(out.len());
+    let mut tail_start = trimmed.len();
+    for (start, _) in trimmed.char_indices().rev() {
+        if trimmed.len() - start > tail_limit { break; }
+        tail_start = start;
+    }
+    out.push_str(&trimmed[tail_start..]);
     out
 }
 
@@ -191,6 +219,60 @@ mod tests {
         assert!(parse_turn_writeback_output(raw).is_err());
     }
 
+    #[test]
+    fn only_an_explicit_empty_candidates_array_means_no_candidate() {
+        assert!(parse_turn_writeback_output(r#"{"candidates":[]}"#).unwrap().candidates.is_empty());
+        let kb_id = KnowledgeBaseId::new();
+        for raw in [
+            "{}".to_owned(),
+            r#"{"candidates":null}"#.to_owned(),
+            r#"{"candidates":[],"result":"ignored"}"#.to_owned(),
+            format!(r#"{{"candidates":[{{"kb_id":"{kb_id}","content":"body"}}]}}"#),
+            format!(r#"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"a.md"}}]}}"#),
+        ] {
+            assert!(parse_turn_writeback_output(&raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn extraction_budget_preserves_a_normal_cjk_answer_and_bounds_large_mounts() {
+        let mount = KnowledgeMountInfo {
+            knowledge_base_id: KnowledgeBaseId::new(), name: "Python 基础".into(), description: "可复用教程".into(),
+            rel_path: ".nomi/knowledge/python".into(), toc: vec![], summary: None, live_sources: vec![],
+        };
+        let answer = "知".repeat(5000);
+        let prompt = build_turn_writeback_prompt(std::slice::from_ref(&mount), WritebackEagerness::Auto, "解释 Python 正则", &answer, Default::default());
+        assert!(prompt.contains(&answer));
+        assert!(!prompt.contains(TRUNCATION_MARKER));
+        let mut large_mount = mount;
+        large_mount.summary = Some("🙂".repeat(10_000));
+        large_mount.toc = vec!["a".repeat(8192); TOC_LINES_PER_BASE_MAX];
+        let prompt = build_turn_writeback_prompt(&vec![large_mount; 10], WritebackEagerness::Auto, &"🙂".repeat(100_000), &"知".repeat(100_000), Default::default());
+        assert!(prompt.len() + TURN_WRITEBACK_SYSTEM.len() <= crate::autogen::KnowledgeWritebackLimits::default().input_max_utf8_bytes);
+        assert!(prompt.ends_with("\n</assistant>\n"));
+        assert!(prompt.contains(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn smaller_context_keeps_every_base_identity_and_answer_end_without_exhausting_output() {
+        let first = KnowledgeMountInfo { knowledge_base_id: KnowledgeBaseId::new(), name: "First".into(), description: "d".repeat(5000),
+            rel_path: ".nomi/knowledge/first".into(), toc: vec!["long path".repeat(1000); 24], summary: Some("summary".repeat(1000)), live_sources: vec![] };
+        let mut second = first.clone(); second.knowledge_base_id = KnowledgeBaseId::new(); second.name = "Second".into();
+        let limits = crate::autogen::KnowledgeWritebackLimits::default().for_configuration(&crate::autogen::test_writeback_configuration(Some(8192), None)).unwrap();
+        let answer = format!("Opening\n{}\nFinal durable conclusion", "知".repeat(12_000));
+        let user = format!("{}\nPlease record the final conclusion", "长".repeat(12_000));
+        let prompt = build_turn_writeback_prompt(&[first.clone(), second.clone()], WritebackEagerness::Manual, &user, &answer, limits);
+        for base in [&first, &second] { assert!(prompt.contains(base.knowledge_base_id.as_str())); }
+        assert!(prompt.len() + TURN_WRITEBACK_SYSTEM.len() <= limits.input_max_utf8_bytes);
+        assert!(prompt.contains("Final durable conclusion"));
+        assert!(prompt.contains("Please record the final conclusion"));
+        assert!(prompt.contains(TRUNCATION_MARKER));
+        assert_eq!(limits.output_max_tokens, 2048);
+        let normal = "知".repeat(5000);
+        let medium = crate::autogen::KnowledgeWritebackLimits::default().for_configuration(&crate::autogen::test_writeback_configuration(Some(16_384), None)).unwrap();
+        assert!(build_turn_writeback_prompt(&[first,second], WritebackEagerness::Auto,"Remember the lesson", &normal, medium).contains(&normal));
+    }
+
     /// The disposition has to reach the model, and the two dispositions must
     /// never render the same rule text — a silent collapse would hand Manual
     /// sessions the self-directed instruction.
@@ -211,12 +293,13 @@ mod tests {
             WritebackEagerness::Auto,
             "u",
             "a",
+            Default::default(),
         );
         assert!(auto.contains("eagerness: auto"));
         assert!(auto.contains("runbook.md — Runbook"));
         assert!(!auto.contains("EMPTY candidates array"));
 
-        let manual = build_turn_writeback_prompt(&[mount], WritebackEagerness::Manual, "u", "a");
+        let manual = build_turn_writeback_prompt(&[mount], WritebackEagerness::Manual, "u", "a", Default::default());
         assert!(manual.contains("eagerness: manual"));
         assert!(manual.contains("EMPTY candidates array"));
     }

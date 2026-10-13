@@ -17,6 +17,9 @@ use thiserror::Error;
 
 pub const CHAT_MODEL_CONTRACT_VERSION: &str = "chat-model-v1";
 
+/// Local catalog provenance; never forwarded to model services.
+pub const MODEL_GATEWAY_CATALOG_BASELINE_PARAM: &str = "_nomifun_gateway_catalog_baseline";
+
 macro_rules! string_ref {
     ($name:ident) => {
         #[derive(
@@ -954,7 +957,7 @@ pub enum ChatModelErrorCode {
 
 /// Presentation-only evidence. Retry and settlement remain governed by the
 /// existing broker code/directive, not by these diagnostic refinements.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFailureReason {
     AuthFailed, InvalidKey, ExpiredKey, BillingRequired, InsufficientQuota, InsufficientBalance, SpendLimitReached,
@@ -1042,7 +1045,7 @@ impl ModelFailureReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelFailureDiagnostic {
     pub reason: ModelFailureReason,

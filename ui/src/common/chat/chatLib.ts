@@ -24,7 +24,8 @@ import {
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
-import { normalizeModelFailureDiagnostic, type ModelFailureDiagnostic } from './providerDiagnostic';
+import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail, type ModelFailureDiagnostic } from './providerDiagnostic';
+import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnostic } from './knowledgeWritebackDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
@@ -92,40 +93,27 @@ export type CronMessageMeta = {
 };
 
 type KnowledgeWritebackStatus =
-  | 'started'
-  | 'extracting'
-  | 'writing'
+  | 'running'
   | 'written'
   | 'partial'
   | 'failed'
   | 'no_candidate'
   | 'no_completer'
-  | 'disabled'
+  | 'cancelled'
   | 'interrupted';
 
 type KnowledgeWritebackFile = {
-  kb_id?: KnowledgeBaseId | null;
-  rel_path?: string | null;
-};
-
-type KnowledgeWritebackFailure = {
-  kb_id?: KnowledgeBaseId | null;
-  rel_path?: string | null;
-  error?: string;
+  kb_id: KnowledgeBaseId;
+  rel_path: string;
 };
 
 export type KnowledgeWritebackState = {
   status: KnowledgeWritebackStatus;
-  attempt_id?: string;
-  attempt_generation?: number;
-  started_at?: number;
-  updated_at?: number;
-  finished_at?: number | null;
-  retryable?: boolean;
-  candidates?: number;
-  written?: KnowledgeWritebackFile[];
-  failures?: KnowledgeWritebackFailure[];
-  interrupted_at?: number;
+  written: KnowledgeWritebackFile[];
+  detail?: string;
+  diagnostic?: KnowledgeWritebackDiagnostic;
+  /** Canonical Event sequence; absent only on a pre-decoupling terminal receipt. */
+  event_seq?: number;
 };
 
 export type IMessageText = IMessage<
@@ -156,8 +144,6 @@ export type IMessageText = IMessage<
     senderAgentType?: string;
     /** Sender Agent's conversation id — lets the renderer resolve preset avatars via conversation extras. */
     senderConversationId?: ConversationId;
-    /** Turn-final knowledge write-back state, rendered under the assistant message. */
-    knowledge_writeback?: KnowledgeWritebackState;
   }
 >;
 
@@ -345,7 +331,7 @@ export type IMessageAgentStatus = IMessage<
     has_active_session?: boolean;
     /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
     turn_summary?: boolean;
-    /** Successful targets from the owning Turn's canonical terminal receipt. */
+    /** Display-only write-back progress/results belonging to this canonical Turn. */
     knowledge_writeback?: KnowledgeWritebackState;
     turn_state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
     started_seq?: number;
@@ -361,7 +347,6 @@ type ResponseTextData = {
   continuation_of_message_id?: unknown;
   replace?: boolean;
   cronMeta?: CronMessageMeta;
-  knowledge_writeback?: unknown;
   idmm_decision?: unknown;
   teammate_message?: unknown;
   sender_name?: unknown;
@@ -418,89 +403,37 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const KNOWLEDGE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>([
-  'started',
-  'extracting',
-  'writing',
+  'running',
   'written',
   'partial',
   'failed',
   'no_candidate',
   'no_completer',
-  'disabled',
+  'cancelled',
   'interrupted',
 ]);
-
-const normalizeKnowledgeWritebackFiles = (value: unknown): KnowledgeWritebackFile[] | undefined => {
-  if (!Array.isArray(value)) return undefined;
-  return value
-    .filter(isObject)
-    .map((file) => ({
-      ...(file.kb_id === null
-        ? { kb_id: null }
-        : typeof file.kb_id === 'string'
-          ? { kb_id: parseKnowledgeBaseId(file.kb_id) }
-          : {}),
-      ...(typeof file.rel_path === 'string' || file.rel_path === null ? { rel_path: file.rel_path } : {}),
-    }));
-};
-
-const normalizeKnowledgeWritebackFailures = (value: unknown): KnowledgeWritebackFailure[] | undefined => {
-  if (!Array.isArray(value)) return undefined;
-  return value
-    .filter(isObject)
-    .map((failure) => ({
-      ...(failure.kb_id === null
-        ? { kb_id: null }
-        : typeof failure.kb_id === 'string'
-          ? { kb_id: parseKnowledgeBaseId(failure.kb_id) }
-          : {}),
-      ...(typeof failure.rel_path === 'string' || failure.rel_path === null ? { rel_path: failure.rel_path } : {}),
-      ...(typeof failure.error === 'string' ? { error: failure.error } : {}),
-    }));
-};
 
 export const normalizeKnowledgeWritebackState = (value: unknown): KnowledgeWritebackState | undefined => {
   if (!isObject(value) || typeof value.status !== 'string') return undefined;
   if (!KNOWLEDGE_WRITEBACK_STATUSES.has(value.status as KnowledgeWritebackStatus)) return undefined;
-  const written = normalizeKnowledgeWritebackFiles(value.written);
-  const failures = normalizeKnowledgeWritebackFailures(value.failures);
+  const eventSeq = Number.isSafeInteger(value.event_seq) && (value.event_seq as number) > 0
+    ? value.event_seq as number : undefined;
+  if (eventSeq === undefined && value.status !== 'written' && value.status !== 'partial') return undefined;
+  if (value.event_seq !== undefined && eventSeq === undefined) return undefined;
+  const written = Array.isArray(value.written) ? value.written.flatMap(file => {
+    if (!isObject(file) || typeof file.kb_id !== 'string' || typeof file.rel_path !== 'string') return [];
+    try { return [{ kb_id: parseKnowledgeBaseId(file.kb_id), rel_path: file.rel_path }]; } catch { return []; }
+  }) : [];
+  const diagnostic = normalizeKnowledgeWritebackDiagnostic(value.diagnostic);
+  const detail = diagnostic ? undefined : sanitizeDiagnosticDetail(value.detail);
   return {
     status: value.status as KnowledgeWritebackStatus,
-    ...(typeof value.attempt_id === 'string' ? { attempt_id: value.attempt_id } : {}),
-    ...(Number.isSafeInteger(value.attempt_generation) && (value.attempt_generation as number) >= 0
-      ? { attempt_generation: value.attempt_generation as number }
-      : {}),
-    ...(typeof value.started_at === 'number' ? { started_at: value.started_at } : {}),
-    ...(typeof value.updated_at === 'number' ? { updated_at: value.updated_at } : {}),
-    ...(typeof value.finished_at === 'number' || value.finished_at === null ? { finished_at: value.finished_at } : {}),
-    ...(typeof value.retryable === 'boolean' ? { retryable: value.retryable } : {}),
-    ...(typeof value.candidates === 'number' ? { candidates: value.candidates } : {}),
-    ...(written ? { written } : {}),
-    ...(failures ? { failures } : {}),
-    ...(typeof value.interrupted_at === 'number' ? { interrupted_at: value.interrupted_at } : {}),
+    written,
+    ...(diagnostic ? { diagnostic } : {}),
+    ...(detail ? { detail } : {}),
+    ...(eventSeq !== undefined ? { event_seq: eventSeq } : {}),
   };
 };
-
-const knowledgeWritebackTime = (state: KnowledgeWritebackState | undefined): number | undefined => {
-  if (!state) return undefined;
-  return state.updated_at ?? state.finished_at ?? state.interrupted_at ?? state.started_at;
-};
-
-const RUNNING_KNOWLEDGE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>([
-  'started',
-  'extracting',
-  'writing',
-]);
-
-const TERMINAL_KNOWLEDGE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>([
-  'written',
-  'partial',
-  'failed',
-  'no_candidate',
-  'no_completer',
-  'disabled',
-  'interrupted',
-]);
 
 const preferKnowledgeWritebackState = (
   existing: KnowledgeWritebackState | undefined,
@@ -509,61 +442,25 @@ const preferKnowledgeWritebackState = (
   if (!existing) return incoming;
   if (!incoming) return existing;
 
-  const existingAttempt = existing.attempt_id;
-  const incomingAttempt = incoming.attempt_id;
+  // Presentation follows the immutable Event chain, never arrival time or a
+  // renderer-owned attempt ledger. Old terminal metadata has no event_seq.
+  if (existing.event_seq === undefined && incoming.event_seq === undefined) return incoming;
+  return (incoming.event_seq ?? 0) > (existing.event_seq ?? 0) ? incoming : existing;
+};
 
-  // An identified attempt is authoritative over a legacy/unidentified state.
-  // This also prevents an old persisted projection from replacing the first
-  // frame of a manual retry.
-  if (existingAttempt && !incomingAttempt) return existing;
-  if (!existingAttempt && incomingAttempt) return incoming;
+export const mergeAgentStatusContent = (
+  existing: IMessageAgentStatus['content'],
+  incoming: IMessageAgentStatus['content'],
+): IMessageAgentStatus['content'] => {
+  const knowledgeWriteback = preferKnowledgeWritebackState(existing.knowledge_writeback, incoming.knowledge_writeback);
+  return { ...incoming, ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}) };
+};
 
-  if (existingAttempt && incomingAttempt && existingAttempt !== incomingAttempt) {
-    const existingGeneration = existing.attempt_generation;
-    const incomingGeneration = incoming.attempt_generation;
-    if (existingGeneration !== undefined || incomingGeneration !== undefined) {
-      if (existingGeneration === undefined) return incoming;
-      if (incomingGeneration === undefined) return existing;
-      if (incomingGeneration !== existingGeneration) {
-        return incomingGeneration > existingGeneration ? incoming : existing;
-      }
-    }
-    // Attempt IDs are opaque; started_at is the generation ordering contract.
-    // Fall back to each attempt's best event timestamp only for legacy frames
-    // that omitted started_at.
-    const existingStarted = existing.started_at ?? knowledgeWritebackTime(existing);
-    const incomingStarted = incoming.started_at ?? knowledgeWritebackTime(incoming);
-    if (existingStarted === undefined && incomingStarted === undefined) return incoming;
-    if (existingStarted === undefined) return incoming;
-    if (incomingStarted === undefined) return existing;
-    if (incomingStarted !== existingStarted) {
-      return incomingStarted > existingStarted ? incoming : existing;
-    }
-    const existingTime = knowledgeWritebackTime(existing);
-    const incomingTime = knowledgeWritebackTime(incoming);
-    if (existingTime === undefined && incomingTime === undefined) return incoming;
-    if (existingTime === undefined) return incoming;
-    if (incomingTime === undefined) return existing;
-    return incomingTime >= existingTime ? incoming : existing;
-  }
-
-  // Within one attempt, terminal states are monotonic. A delayed extracting or
-  // writing frame must never resurrect a completed/failed attempt.
-  const existingTerminal = TERMINAL_KNOWLEDGE_WRITEBACK_STATUSES.has(existing.status);
-  const incomingTerminal = TERMINAL_KNOWLEDGE_WRITEBACK_STATUSES.has(incoming.status);
-  if (existingTerminal && RUNNING_KNOWLEDGE_WRITEBACK_STATUSES.has(incoming.status)) {
-    return existing;
-  }
-  if (incomingTerminal && RUNNING_KNOWLEDGE_WRITEBACK_STATUSES.has(existing.status)) {
-    return incoming;
-  }
-
-  const existingTime = knowledgeWritebackTime(existing);
-  const incomingTime = knowledgeWritebackTime(incoming);
-  if (existingTime === undefined && incomingTime === undefined) return incoming;
-  if (existingTime === undefined) return incoming;
-  if (incomingTime === undefined) return existing;
-  return incomingTime >= existingTime ? incoming : existing;
+/** Post-Turn write-back updates carry presentation facts, never activity authority. */
+export const isKnowledgeWritebackPresentation = (message: IResponseMessage): boolean => {
+  if (message.type !== 'agent_status' || !message.turn_id || !isObject(message.data)) return false;
+  return message.data.turn_summary === true && message.data.turn_state === 'completed'
+    && normalizeKnowledgeWritebackState(message.data.knowledge_writeback)?.event_seq !== undefined;
 };
 
 const isResponseTextData = (data: unknown): data is ResponseTextData =>
@@ -579,27 +476,21 @@ export const mergeTextMessageContent = (
   existing: IMessageText['content'],
   incoming: IMessageText['content']
 ): IMessageText['content'] => {
-  const { replace: _existingReplace, knowledge_writeback: existingWriteback, ...existingRest } = existing;
-  const { replace: incomingReplace, knowledge_writeback: incomingWriteback, ...incomingRest } = incoming;
-  const knowledgeWriteback = preferKnowledgeWritebackState(existingWriteback, incomingWriteback);
+  const { replace: _existingReplace, ...existingRest } = existing;
+  const { replace: incomingReplace, ...incomingRest } = incoming;
 
   return {
     ...existingRest,
     ...incomingRest,
     content: incomingReplace ? incoming.content : existing.content + incoming.content,
     ...(incomingReplace ? { replace: true } : {}),
-    ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
   };
 };
 
 export const preferTextMessageVersion = (primary: IMessageText, secondary: IMessageText): IMessageText => {
   const primaryIsReplace = isTextContentReplacement(primary.content);
   const secondaryIsReplace = isTextContentReplacement(secondary.content);
-  const mergePreferredWriteback = (preferred: IMessageText, fallback: IMessageText): IMessageText => {
-    const knowledgeWriteback = preferKnowledgeWritebackState(
-      fallback.content.knowledge_writeback,
-      preferred.content.knowledge_writeback
-    );
+  const mergePreferredMetadata = (preferred: IMessageText, fallback: IMessageText): IMessageText => {
     const interaction = preferred.content.interaction ?? fallback.content.interaction;
     // Durable history is passed as primary and owns the decision explanation,
     // even while a longer live text fragment wins the body.
@@ -607,12 +498,11 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
       ? preferred.content.observations : fallback.content.observations;
     const managedFilePaths = primary.content.managed_file_paths ?? secondary.content.managed_file_paths;
-    if (!knowledgeWriteback && !interaction && !observations && !decision && !managedFilePaths) return preferred;
+    if (!interaction && !observations && !decision && !managedFilePaths) return preferred;
     return {
       ...preferred,
       content: {
         ...preferred.content,
-        ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
         ...(interaction ? { interaction } : {}),
         ...(decision ? { idmm_decision: decision } : {}),
         ...(observations ? { observations } : {}),
@@ -622,12 +512,12 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
   };
 
   if (primaryIsReplace !== secondaryIsReplace) {
-    return primaryIsReplace ? mergePreferredWriteback(primary, secondary) : mergePreferredWriteback(secondary, primary);
+    return primaryIsReplace ? mergePreferredMetadata(primary, secondary) : mergePreferredMetadata(secondary, primary);
   }
 
   return secondary.content.content.length > primary.content.content.length
-    ? mergePreferredWriteback(secondary, primary)
-    : mergePreferredWriteback(primary, secondary);
+    ? mergePreferredMetadata(secondary, primary)
+    : mergePreferredMetadata(primary, secondary);
 };
 
 export type IMessageThinking = IMessage<
@@ -1025,7 +915,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const data = message.data;
       const isRichData = isResponseTextData(data);
       const shouldReplace = message.replace === true || (isRichData && data.replace === true);
-      const persistedWriteback = isRichData ? normalizeKnowledgeWritebackState(data.knowledge_writeback) : undefined;
       const decision = isRichData ? normalizeIdmmDecisionExplanation(data.idmm_decision) : undefined;
       return {
         id: uuid(),
@@ -1040,7 +929,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               content: toDisplayText(data.content),
               cronMeta: normalizeCronMessageMeta(data.cronMeta),
               ...(shouldReplace ? { replace: true } : {}),
-              ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
               ...(decision ? { idmm_decision: decision } : {}),
               ...normalizeTextContinuation(data),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),

@@ -6014,6 +6014,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -6388,6 +6389,7 @@ dependencies = [
  "junction",
  "libc",
  "nomi-redact",
+ "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",

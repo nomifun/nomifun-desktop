@@ -292,12 +292,33 @@ pub struct SingleAttemptFrame {
 pub type SingleAttemptStream =
     Pin<Box<dyn Stream<Item = Result<SingleAttemptFrame, InvokeError>> + Send>>;
 
+/// Per-attempt wire accounting, shared with its caller only for bounded
+/// diagnostics. It contains no response content or execution authority.
+/// Create a fresh budget for each invocation; clones observe that same call.
+#[derive(Clone)]
+pub struct SingleAttemptResponseBudget {
+    max_bytes: usize,
+    received: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SingleAttemptResponseBudget {
+    pub fn new(max_bytes: usize) -> Result<Self, InvokeError> {
+        if max_bytes == 0 { return Err(InvokeError::config("response byte budget must be positive")); }
+        Ok(Self { max_bytes, received: Default::default() })
+    }
+
+    pub fn received_bytes(&self) -> u64 {
+        self.received.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Generic HTTP executor with exactly one request send per invocation.
 pub struct SingleAttemptHttpExecutor {
     http: reqwest::Client,
     credentials: Arc<dyn OpaqueCredentialResolver>,
     authenticator: Arc<dyn SingleAttemptAuthenticator>,
     max_line_bytes: usize,
+    response_budget: Option<SingleAttemptResponseBudget>,
 }
 
 impl SingleAttemptHttpExecutor {
@@ -316,7 +337,15 @@ impl SingleAttemptHttpExecutor {
             credentials,
             authenticator: Arc::new(DefaultSingleAttemptAuthenticator),
             max_line_bytes: Self::DEFAULT_MAX_LINE_BYTES,
+            response_budget: None,
         }
+    }
+
+    /// Opt-in for bounded standalone work. Ordinary Agent streams preserve
+    /// their existing framing and response policy.
+    pub fn with_response_budget(mut self, budget: SingleAttemptResponseBudget) -> Self {
+        self.response_budget = Some(budget);
+        self
     }
 
     /// Execute one request.  This method intentionally has no retry loop,
@@ -359,8 +388,15 @@ impl SingleAttemptHttpExecutor {
         let json_response = request.framing == SingleAttemptFraming::Sse
             && json_chat_protocol(&request.protocol)
             && response_is_json(&response);
-        let bytes = response.bytes_stream().map(|chunk| {
+        let response_budget = self.response_budget.clone();
+        let bytes = response.bytes_stream().map(move |chunk| {
             chunk.map_err(net_err).and_then(|bytes| {
+                if let Some(budget) = &response_budget {
+                    let previous = budget.received.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    if previous.saturating_add(bytes.len() as u64) > budget.max_bytes as u64 {
+                        return Err(InvokeError::parse("provider response exceeds the configured byte budget"));
+                    }
+                }
                 if bytes.len() > sse::MAX_FRAME_BYTES {
                     return Err(InvokeError::parse("provider transport chunk exceeds the framing limit"));
                 }

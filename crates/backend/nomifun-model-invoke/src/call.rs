@@ -290,6 +290,9 @@ impl ResolvedTaskConfig {
                     .collect::<std::collections::BTreeMap<_, _>>()
             && self.context_limit == other.context_limit
             && self.output_limit == other.output_limit
+            && (self.task != nomifun_api_types::ModelTask::Chat
+                || self.provider_params.get(nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM)
+                    == other.provider_params.get(nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM))
             && self.bedrock_config == other.bedrock_config
     }
 
@@ -462,6 +465,23 @@ mod tests {
             },
             extra: json!({}),
         }
+    }
+
+    #[test]
+    fn chat_configuration_pin_compares_context_budget_semantics_but_ignores_unrelated_revisions() {
+        let config = ResolvedTaskConfig {
+            provider_id:"p".into(), config_revision:1, platform:"custom".into(), model:"m".into(),
+            task:ModelTask::Chat, traits:vec![], protocol:"openai.chat_text".into(),
+            connection:connection("https://api.example/v1"), transport:Default::default(),
+            provider_params:json!({"_nomifun_context_limit_kind":"input_only"}),
+            context_limit:Some(8192), output_limit:Some(4096), bedrock_config:None,
+        };
+        let mut changed = config.clone();
+        changed.config_revision = 2;
+        changed.provider_params[nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM] = json!({"updated":"unrelated"});
+        assert!(config.matches_invocation_configuration(&changed));
+        changed.provider_params[ nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM ] = json!("combined");
+        assert!(!config.matches_invocation_configuration(&changed));
     }
 
     #[test]

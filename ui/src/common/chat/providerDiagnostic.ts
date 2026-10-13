@@ -49,7 +49,7 @@ export function diagnosticEndpoint(value: unknown): string | undefined {
   } catch { return undefined; }
 }
 
-const safeTransportDetail = (value: unknown): string | undefined => {
+export const sanitizeDiagnosticDetail = (value: unknown): string | undefined => {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   return redactSensitiveText(value.slice(0, 2000))
     .replace(/((?:proxy-authorization|authorization|x-api-key|api[_ -]?key)\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]')
@@ -77,7 +77,7 @@ export function normalizeModelFailureDiagnostic(value: unknown): ModelFailureDia
     && !/[\x00-\x1f\x7f]/.test(data.modelName) && !credentialLike(data.modelName)) result.modelName = redactSensitiveText(data.modelName);
   if (typeof data.contentType === 'string' && data.contentType.length <= 128
     && !/[\x00-\x1f\x7f]/.test(data.contentType)) result.contentType = redactSensitiveText(data.contentType);
-  const detail = safeTransportDetail(data.transportDetail);
+  const detail = sanitizeDiagnosticDetail(data.transportDetail);
   if (detail) result.transportDetail = detail;
   return result;
 }

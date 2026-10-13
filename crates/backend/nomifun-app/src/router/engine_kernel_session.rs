@@ -121,6 +121,8 @@ fn constraints_allow_action(
 
 #[path = "engine_mcp_resources.rs"]
 mod mcp_resources;
+#[path = "engine_knowledge_writeback.rs"]
+mod knowledge_writeback;
 
 struct Turn {
     operation: String,
@@ -142,6 +144,7 @@ struct State {
 /// Created only by EngineSessionHost from genuine owner-resolved facts.
 pub struct EngineKernelSession {
     resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup,
+    knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks,
     resource_settlement_failed: std::sync::atomic::AtomicBool,
     source: Arc<()>,
     session_id: AgentSessionId,
@@ -372,6 +375,7 @@ impl EngineKernelSession {
         super::nomi_core_mcp_catalog::validate_resources(&compiled, &registry, principal)?;
         Ok(Self {
             resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup::new(32)?,
+            knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks::new(session.agent_binding().binding_version)?,
             resource_settlement_failed: false.into(),
             source,
             session_id,
@@ -430,9 +434,6 @@ impl EngineKernelSession {
     }
     pub fn active_state(&self) -> &Arc<SessionCapabilityState> {
         &self.active
-    }
-    pub fn workspace(&self) -> &str {
-        &self.workspace
     }
     pub(super) fn workspace_root_identity(&self) -> Option<&std::path::Path> {
         self.git_root.as_deref()
@@ -541,6 +542,22 @@ impl EngineKernelSession {
         }))
     }
 
+    pub(super) async fn capture_knowledge_writeback_configuration(
+        &self, user_text: &str, model: Option<&nomifun_common::ProviderWithModel>,
+    ) -> Result<Option<Arc<nomifun_model_invoke::ResolvedTaskConfig>>, nomifun_agent_contracts::KnowledgeWritebackDiagnostic> {
+        let diagnostic = || {
+            let mut value = nomifun_agent_contracts::KnowledgeWritebackDiagnostic::new(
+                nomifun_agent_contracts::KnowledgeWritebackStage::Resolve);
+            value.code = Some("USER_LLM_PROVIDER_CONFIG_ERROR".into());
+            value.detail = Some("Knowledge extraction could not prepare the original selected model configuration".into());
+            value
+        };
+        let Some(binding) = self.knowledge_binding().map_err(|_| diagnostic())? else { return Ok(None); };
+        if !binding.writeback || (binding.writeback_eagerness == "manual"
+            && !explicitly_requests_knowledge_writeback(user_text)) { return Ok(None); }
+        self.knowledge.capture_writeback_configuration(model).await.map_err(|_| diagnostic())
+    }
+
     /// Deterministic first-pass retrieval for the accepted user turn. The
     /// model still keeps knowledge/search and knowledge/read for refinement,
     /// but it no longer has to remember to perform the first query itself.
@@ -609,40 +626,6 @@ impl EngineKernelSession {
         )))
     }
 
-    /// Run the real turn-final write-back executor after a completed answer.
-    /// Automatic mode evaluates every turn; manual mode reaches the extractor
-    /// only when the accepted user text explicitly asks to persist Knowledge.
-    pub async fn finalize_knowledge_writeback(
-        &self,
-        user_text: String,
-        assistant_text: String,
-        model: Option<nomifun_common::ProviderWithModel>,
-    ) -> Result<Option<nomifun_knowledge::TurnWritebackReport>, AppError> {
-        let Some(binding) = self.knowledge_binding()? else {
-            return Ok(None);
-        };
-        if !binding.writeback
-            || (binding.writeback_eagerness == "manual"
-                && !explicitly_requests_knowledge_writeback(&user_text))
-        {
-            return Ok(None);
-        }
-        let mounts = self.knowledge.mount_info_for_bases(&binding.kb_ids).await?;
-        Ok(Some(
-            self.knowledge
-                .finalize_turn_writeback(nomifun_knowledge::TurnWritebackRequest {
-                    mounts,
-                    binding,
-                    surface: nomifun_knowledge::WriteSurface::RegularChat,
-                    user_text,
-                    assistant_text,
-                    model,
-                    excluded_targets: None,
-                    cancellation: None,
-                })
-                .await,
-        ))
-    }
     /// Subtractive ceiling of this Session, not another Agent capability grant.
     pub fn allows_capability(&self, id: &nomifun_agent_contracts::CapabilityId) -> bool {
         let selected = self.compiled
@@ -1336,6 +1319,7 @@ impl EngineKernelSession {
             } else {
                 let tools = state.tools.clone();
                 self.resource_tasks.close()?;
+                self.knowledge_writebacks.close()?;
                 if let Some(tools) = &tools {
                     tools.close_session()?;
                 }
@@ -1343,6 +1327,8 @@ impl EngineKernelSession {
                 let owner = self.clone();
                 let executor = tokio::runtime::Handle::try_current().map_err(failure)?;
                 let task = executor.spawn(async move {
+                    let knowledge = guard_effect_settlement(|| owner.knowledge_writebacks.join()).await
+                        .map_err(|error| error.to_string());
                     let prior = match prior {
                         Some(done) => done.await,
                         None => Ok(()),
@@ -1366,6 +1352,7 @@ impl EngineKernelSession {
                     if prior.is_err() {tracing::warn!(stage="prior_turn_settlement","prior resource cleanup failed; current owned settlement must independently prove shutdown");}
                     settled?;
                     robot_closed?;
+                    knowledge?;
                     owner.state.lock().map_err(|_|"resource state poisoned".to_owned())?.kernel_release_started=true;
                     owner
                         .kernel

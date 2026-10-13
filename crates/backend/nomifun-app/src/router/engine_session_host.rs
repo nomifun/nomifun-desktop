@@ -5,7 +5,7 @@
 use std::sync::{Arc, Weak};
 
 use nomifun_agent_contracts::{
-    AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1,
+    AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1, AgentSessionId, OperationId,
     AgentHandoffEnvelopeV1, AgentHandoffMode, AgentPresetRevision, PrincipalRef,
     ResolvedSnapshotEnvelope, ResolvedSnapshotRef, SessionPayloadBody, digest_bytes,
 };
@@ -135,6 +135,60 @@ impl EngineSessionHost {
             .upgrade()
             .map(|owner| owner.canonical().store().clone())
             .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))
+    }
+
+    /// Process-owned write-back receipts are reconciled before routes open.
+    /// An orphan is observed as interrupted; its writes are never replayed.
+    pub(super) async fn interrupt_stale_knowledge_writebacks(&self) -> Result<usize, AppError> {
+        self.canonical_store()?.interrupt_stale_knowledge_writebacks(&self.execution_instance_id)
+            .await.map_err(|error| AppError::Conflict(format!("Knowledge write-back recovery: {error}")))
+    }
+
+    pub(super) fn execution_instance_id(&self) -> &str {
+        &self.execution_instance_id
+    }
+
+    pub(super) async fn verify_writeback_model_configuration(
+        &self, configuration: &super::chat_broker_host::TurnModelConfiguration,
+        operation: &str, model: &nomifun_common::ProviderWithModel,
+    ) -> Result<(), AppError> {
+        configuration.verify_writeback_model(&self.pool, operation, model).await
+            .map_err(|_| AppError::Conflict("Knowledge extraction model configuration differs from the original Turn".into()))
+    }
+
+    fn existing_kernel_session(&self, session: &AgentSessionId)
+        -> Result<Option<Arc<super::engine_kernel_session::EngineKernelSession>>, AppError> {
+        let sessions = self.kernel_sessions.lock()
+            .map_err(|_| AppError::Conflict("Engine resource handles poisoned".into()))?;
+        Ok(sessions.get(session.as_ref()).and_then(Weak::upgrade))
+    }
+
+    /// The canonical cancellation receipt, not whichever Turn is now active,
+    /// supplies the immutable operation that owns this write-back.
+    pub(super) fn cancel_knowledge_writeback(&self, session: &AgentSessionId, operation: &OperationId)
+        -> Result<bool, AppError> {
+        match self.existing_kernel_session(session)? {
+            Some(resources) => resources.cancel_knowledge_writeback(operation.as_ref()),
+            None => Ok(false),
+        }
+    }
+
+    /// Context clearing keeps the reusable resource owner open for later Turns.
+    /// Caller holds the Session operation fence against new admissions.
+    pub(super) async fn cancel_and_join_knowledge_writebacks(&self, session: &AgentSessionId)
+        -> Result<(), AppError> {
+        if let Some(resources) = self.existing_kernel_session(session)? {
+            resources.cancel_and_join_knowledge_writebacks().await?;
+        }
+        Ok(())
+    }
+
+    /// Publish a fresh view of the original canonical summary without sending
+    /// Turn completion or changing any current Runtime processing authority.
+    pub(super) async fn publish_knowledge_writeback_summary(&self, session: &AgentSessionId, operation: &OperationId)
+        -> Result<(), AppError> {
+        self.owner.upgrade().ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))?
+            .publish_knowledge_writeback_summary(session, operation).await
     }
 
     /// Exact revision-selected Skill bytes, with inventory/hash verification.

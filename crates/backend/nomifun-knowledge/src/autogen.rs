@@ -13,15 +13,121 @@
 use std::path::Path;
 
 use nomifun_common::AppError;
+use nomifun_common::ProviderWithModel;
+use nomifun_agent_contracts::KnowledgeWritebackDiagnostic;
+use nomifun_model_invoke::ResolvedTaskConfig;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::service::is_md;
+
+/// Frozen input for the independent completed-Turn extraction. Its dedicated
+/// provider seam cannot fall back to the unbounded autogen completion path.
+pub struct KnowledgeWritebackCompletionRequest<'a> {
+    pub system: &'a str,
+    pub user: &'a str,
+    pub model: Option<&'a ProviderWithModel>,
+    /// Exact model configuration captured by the completed Turn's host.
+    /// A changed configuration refuses the extraction instead of borrowing
+    /// a later Turn's provider connection.
+    pub expected_configuration: Option<&'a ResolvedTaskConfig>,
+    pub cancellation: Option<&'a CancellationToken>,
+    pub limits: KnowledgeWritebackLimits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnowledgeWritebackLimits {
+    pub input_max_utf8_bytes: usize,
+    pub input_max_tokens_estimate: usize,
+    pub output_max_tokens: u32,
+    pub output_max_utf8_bytes: usize,
+    pub response_max_bytes: usize,
+}
+
+impl Default for KnowledgeWritebackLimits {
+    fn default() -> Self {
+        // A 5,000-character CJK answer is ~15 KiB; it fits without clipping.
+        // Byte caps are independent of provider tokenization and SSE overhead.
+        Self { input_max_utf8_bytes: 96 * 1024, input_max_tokens_estimate: 32_768,
+            output_max_tokens: 16_384, output_max_utf8_bytes: 512 * 1024,
+            response_max_bytes: 4 * 1024 * 1024 }
+    }
+}
+
+impl KnowledgeWritebackLimits {
+    /// Allocate a useful input and output share for a known smaller model.
+    /// Token pressure follows the runtime's conservative UTF-8/3 estimate;
+    /// this neither claims model tokenization nor changes provider defaults.
+    pub fn for_configuration(mut self, configuration: &ResolvedTaskConfig) -> Result<Self, AppError> {
+        let mut preferred_output_ceiling = Self::default().output_max_tokens;
+        if let Some(output) = configuration.output_limit {
+            let output = u32::try_from(output).ok().filter(|value| *value > 0)
+                .ok_or_else(|| AppError::BadRequest("Knowledge model output token limit must be positive and fit its request contract".into()))?;
+            self.output_max_tokens = self.output_max_tokens.min(output);
+            preferred_output_ceiling = output;
+        }
+        let thinking_output = if nomifun_model_invoke::protocol_requires_output_ceiling(&configuration.protocol)
+            && configuration.provider_params.pointer("/thinking/type").and_then(serde_json::Value::as_str) == Some("enabled") {
+            let thinking = configuration.provider_params.pointer("/thinking/budget_tokens").and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| AppError::BadRequest("Knowledge extraction requires a numeric explicit thinking budget".into()))?;
+            let cap = u64::from(self.output_max_tokens);
+            if thinking >= cap {
+                return Err(AppError::BadRequest("The original thinking budget leaves no final response space within the independent knowledge extraction output ceiling".into()));
+            }
+            // Preserve the original thinking control. Reallocate input only
+            // when necessary, preferring useful final JSON room inside the
+            // existing ceiling rather than rejecting a valid smaller cap.
+            Some(thinking.saturating_add((u64::from(preferred_output_ceiling) / 4).min(4096)).min(cap) as u32)
+        } else { None };
+        if let Some(context) = configuration.context_limit {
+            let context = usize::try_from(context).ok().filter(|value| *value > 0)
+                .ok_or_else(|| AppError::BadRequest("Knowledge model context token limit must be positive".into()))?;
+            let reserve = 1024.min(context / 4);
+            let input_only = configuration.provider_params.get(nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM)
+                .and_then(serde_json::Value::as_str) == Some("input_only");
+            let output = if input_only { 0 } else {
+                let share = (context / 4).max(1).min(u32::MAX as usize) as u32;
+                self.output_max_tokens = self.output_max_tokens.min(share.max(thinking_output.unwrap_or(0)));
+                self.output_max_tokens as usize
+            };
+            let input = context.saturating_sub(reserve).saturating_sub(output);
+            self.input_max_tokens_estimate = self.input_max_tokens_estimate.min(input);
+            self.input_max_utf8_bytes = self.input_max_utf8_bytes.min(input.saturating_mul(3));
+        }
+        Ok(self)
+    }
+}
+
+pub struct KnowledgeWritebackCompletion {
+    pub text: String,
+    pub diagnostic: KnowledgeWritebackDiagnostic,
+}
+
+#[derive(Debug)]
+pub struct KnowledgeWritebackCompletionError {
+    pub diagnostic: KnowledgeWritebackDiagnostic,
+}
 
 /// LLM seam for knowledge autogen (same pattern as `CompanionCompleter` in
 /// `nomifun-companion`). The knowledge crate holds only the trait; provider/model
 /// selection is the implementor's concern.
 #[async_trait::async_trait]
 pub trait KnowledgeCompleter: Send + Sync {
+    /// Capture only the exact invocation configuration. A non-provider test
+    /// seam has no connection to freeze; production must override this.
+    async fn capture_writeback_configuration(
+        &self,
+        _model: Option<&ProviderWithModel>,
+    ) -> Result<Option<std::sync::Arc<ResolvedTaskConfig>>, AppError> {
+        Ok(None)
+    }
+
+    /// One bounded, cancellable extraction; no retry, task or Session mutation.
+    async fn complete_writeback(
+        &self,
+        request: KnowledgeWritebackCompletionRequest<'_>,
+    ) -> Result<KnowledgeWritebackCompletion, KnowledgeWritebackCompletionError>;
+
     /// Run a one-shot completion using the implementor's default
     /// provider/model selection (the first enabled provider/model).
     async fn complete(&self, system: &str, user: &str) -> Result<String, AppError>;
@@ -32,10 +138,8 @@ pub trait KnowledgeCompleter: Send + Sync {
     /// fakes) keep compiling and behaving unchanged; the production
     /// completer overrides this to honor the caller's pick. Used by the
     /// user-facing autogen/description endpoints where the UI lets the user
-    /// pick a model, and by turn-final write-back after the conversation layer
-    /// has resolved the user's knowledge-model preference or the model that
-    /// actually answered the turn. Callers without an explicit provider-backed
-    /// model keep using [`Self::complete`].
+    /// pick a model. Completed-Turn write-back uses the distinct required
+    /// [`Self::complete_writeback`] boundary and cannot take this fallback.
     async fn complete_with(
         &self,
         system: &str,
@@ -289,8 +393,74 @@ fn read_prefix_lossy(path: &Path, limit: usize) -> Option<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_writeback_configuration(context: Option<i64>, output: Option<i64>) -> ResolvedTaskConfig {
+    ResolvedTaskConfig {
+        provider_id: "test-provider".into(), config_revision: 1, platform: "openai".into(), model: "test-model".into(),
+        task: nomifun_api_types::ModelTask::Chat, traits: vec![], protocol: "openai.chat_text".into(),
+        connection: nomifun_model_invoke::ResolvedConnection { role: "default".into(), base_url: "https://unused.invalid".into(),
+            auth: nomifun_model_invoke::AuthMaterial { scheme: nomifun_model_invoke::AuthScheme::Bearer, credentials: serde_json::json!({}) },
+            extra: serde_json::json!({}) },
+        transport: Default::default(), provider_params: serde_json::json!({}), context_limit: context, output_limit: output, bedrock_config: None,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writeback_limits_reserve_useful_output_for_a_smaller_known_context() {
+        let limits = KnowledgeWritebackLimits::default().for_configuration(&test_writeback_configuration(Some(8192), None)).unwrap();
+        assert_eq!(limits.output_max_tokens, 2048);
+        assert_eq!(limits.input_max_tokens_estimate, 5120);
+        assert_eq!(limits.input_max_utf8_bytes, 15_360);
+        assert!(limits.input_max_tokens_estimate + limits.output_max_tokens as usize + 1024 <= 8192);
+        let limited = KnowledgeWritebackLimits::default().for_configuration(&test_writeback_configuration(Some(8192), Some(1000))).unwrap();
+        assert_eq!(limited.output_max_tokens, 1000);
+        assert!(limited.input_max_tokens_estimate > limits.input_max_tokens_estimate);
+        let unknown = KnowledgeWritebackLimits::default().for_configuration(&test_writeback_configuration(None, None)).unwrap();
+        assert_eq!(unknown.input_max_utf8_bytes, 96 * 1024);
+        assert_eq!(unknown.output_max_tokens, 16_384);
+        assert!(KnowledgeWritebackLimits::default().for_configuration(&test_writeback_configuration(Some(0), None)).is_err());
+    }
+
+    #[test]
+    fn writeback_input_only_context_does_not_lose_its_separate_output_allowance() {
+        let mut configuration = test_writeback_configuration(Some(8192), Some(12_000));
+        configuration.provider_params[nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM] = serde_json::json!("input_only");
+        let limits = KnowledgeWritebackLimits::default().for_configuration(&configuration).unwrap();
+        assert_eq!(limits.output_max_tokens, 12_000);
+        assert_eq!(limits.input_max_tokens_estimate, 7168);
+    }
+
+    #[test]
+    fn writeback_allocates_final_json_space_without_changing_explicit_thinking() {
+        let mut configuration = test_writeback_configuration(Some(32_768), Some(16_384));
+        configuration.protocol = "anthropic.messages".into();
+        configuration.provider_params = serde_json::json!({"thinking":{"type":"enabled","budget_tokens":8192}});
+        let limits = KnowledgeWritebackLimits::default().for_configuration(&configuration).unwrap();
+        assert_eq!(limits.output_max_tokens, 12_288);
+        assert_eq!(limits.input_max_tokens_estimate, 19_456);
+        assert_eq!(limits.for_configuration(&configuration).unwrap(), limits, "provider revalidation must preserve every allocated budget");
+        assert_eq!(configuration.provider_params["thinking"]["budget_tokens"], 8192);
+        configuration.output_limit = Some(15_000);
+        configuration.provider_params["thinking"]["budget_tokens"] = serde_json::json!(12_000);
+        let limits = KnowledgeWritebackLimits::default().for_configuration(&configuration).unwrap();
+        assert_eq!(limits.output_max_tokens, 15_000, "preferred final allowance is not a new hard minimum");
+        assert_eq!(limits.for_configuration(&configuration).unwrap(), limits);
+        configuration.output_limit = Some(1032);
+        configuration.provider_params["thinking"]["budget_tokens"] = serde_json::json!(1024);
+        assert_eq!(KnowledgeWritebackLimits::default().for_configuration(&configuration).unwrap().output_max_tokens, 1032);
+        configuration.provider_params[ nomifun_api_types::MODEL_CONTEXT_LIMIT_KIND_PARAM ] = serde_json::json!("input_only");
+        configuration.output_limit = Some(16_384);
+        configuration.provider_params["thinking"]["budget_tokens"] = serde_json::json!(8192);
+        let limits = KnowledgeWritebackLimits::default().for_configuration(&configuration).unwrap();
+        assert_eq!(limits.output_max_tokens, 16_384);
+        assert_eq!(limits.input_max_tokens_estimate, 31_744);
+        assert_eq!(limits.for_configuration(&configuration).unwrap(), limits);
+        configuration.provider_params["thinking"]["budget_tokens"] = serde_json::json!(16_384);
+        assert!(KnowledgeWritebackLimits::default().for_configuration(&configuration).is_err());
+    }
 
     #[test]
     fn parse_tolerates_fences_and_prose() {

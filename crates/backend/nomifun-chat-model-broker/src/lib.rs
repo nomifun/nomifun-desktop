@@ -15,6 +15,7 @@ pub mod engine_port;
 pub mod ports;
 pub mod production;
 mod provider_errors;
+mod provider_params;
 mod provider_reasoning;
 mod responses_decoder;
 mod retry;
@@ -24,6 +25,7 @@ pub mod recorded;
 pub mod responses_bridge;
 
 pub use adapter::*;
+pub use provider_params::{merge_chat_provider_params, configure_standalone_non_streaming, chat_request_uses_reasoning};
 pub use broker::*;
 pub use contracts::*;
 pub use engine_port::*;

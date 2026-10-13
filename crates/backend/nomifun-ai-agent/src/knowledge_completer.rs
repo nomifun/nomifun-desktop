@@ -1,5 +1,7 @@
-//! Production [`KnowledgeCompleter`]: resolves a default provider/model and
-//! runs a one-shot completion. Same layering as the companion learner's
+//! Production [`KnowledgeCompleter`]: completed-Turn extraction uses its
+//! dedicated bounded, cancellable shared-transport method. Other autogen
+//! calls resolve a default provider/model and run their existing one-shot
+//! completion. Same layering as the companion learner's
 //! `LiveCompanionCompleter` and the IDMM sidecar's `LiveCompleter` — the knowledge
 //! crate holds only the trait, this crate provides the provider-backed
 //! implementation, and the app layer wires it via
@@ -33,7 +35,7 @@ pub struct LiveKnowledgeCompleter {
 
 impl LiveKnowledgeCompleter {
     /// First enabled provider/model pair with an exact Chat capability.
-    async fn resolve_default_model(&self) -> Result<(String, String), AppError> {
+    pub(super) async fn resolve_default_model(&self) -> Result<(String, String), AppError> {
         resolve_default_model(
             &self.provider_repo,
             &self.provider_model_repo,
@@ -80,6 +82,20 @@ impl LiveKnowledgeCompleter {
 
 #[async_trait::async_trait]
 impl KnowledgeCompleter for LiveKnowledgeCompleter {
+    async fn capture_writeback_configuration(
+        &self,
+        model: Option<&nomifun_common::ProviderWithModel>,
+    ) -> Result<Option<Arc<nomifun_model_invoke::ResolvedTaskConfig>>, AppError> {
+        super::knowledge_writeback_completion::capture(self,model).await
+    }
+
+    async fn complete_writeback(
+        &self,
+        request: nomifun_knowledge::KnowledgeWritebackCompletionRequest<'_>,
+    ) -> Result<nomifun_knowledge::KnowledgeWritebackCompletion, nomifun_knowledge::KnowledgeWritebackCompletionError> {
+        super::knowledge_writeback_completion::complete(self, request).await
+    }
+
     async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
         let (provider_id, model) = self.resolve_default_model().await?;
         self.complete_for_model(system, user, &provider_id, &model).await

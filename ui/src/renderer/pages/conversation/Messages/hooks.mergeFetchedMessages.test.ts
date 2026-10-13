@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { parseConversationId, parseCronJobId, parseMessageId, type MessageId } from '@/common/types/ids';
-import type { TMessage } from '@/common/chat/chatLib';
+import { parseConversationId, parseCronJobId, parseKnowledgeBaseId, parseMessageId, type MessageId } from '@/common/types/ids';
+import type { KnowledgeWritebackState, TMessage } from '@/common/chat/chatLib';
 import { createStoredMessageMapper } from '@/common/adapter/storedMessageMapper';
 import {
   composeMessageForTest,
@@ -77,6 +77,67 @@ const textContent = (message: TMessage): string => {
   const value = (message.content as { content?: unknown }).content;
   return typeof value === 'string' ? value : '';
 };
+
+describe('independent canonical knowledge write-back updates', () => {
+  const target = { kb_id: parseKnowledgeBaseId('019b0000-0000-7000-8000-000000000010'), rel_path: 'notes.md' };
+  const summary = (status: KnowledgeWritebackState['status'], event_seq?: number) => baseMessage({
+    id: 'original-summary', msg_id: 'writeback-summary', turn_id: messageId('original-turn'), type: 'agent_status',
+    content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed',
+      started_at_ms: 1000, finished_at_ms: 2000,
+      knowledge_writeback: { status, event_seq, written: status === 'written' ? [target] : [] } },
+  });
+
+  test('late updates stay on the original summary and reject stale events without touching a newer answer', () => {
+    const original = fetchedMessage(summary('running', 11));
+    const next = baseMessage({ id: 'new-answer', msg_id: 'next-answer', turn_id: messageId('next-turn'),
+      content: { content: 'New answer' }, created_at: 2001 });
+    const written = { ...summary('written', 12), id: 'new-stream-key', created_at: 3000 };
+    let messages = composeMessageForTest(written, [original, next]);
+    messages = composeMessageForTest(summary('running', 11), messages);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ id: original.id, message_id: original.message_id,
+      created_at: original.created_at, turn_id: original.turn_id,
+      content: { turn_state: 'completed', finished_at_ms: 2000, knowledge_writeback: { status: 'written', event_seq: 12 } } });
+    expect(messages[1]).toBe(next);
+  });
+
+  test.each([
+    ['live newer', 12, 11], ['history newer', 11, 12], ['old terminal metadata', 12, undefined],
+  ] as const)('%s: history and stream reconcile using the canonical sequence', (_label, liveSeq, historySeq) => {
+    const live = summary(liveSeq === 12 ? 'written' : 'running', liveSeq);
+    const history = fetchedMessage(summary(historySeq === 11 ? 'running' : 'written', historySeq));
+    const merged = mergeFetchedMessagesForConversation([live], [history], history.conversation_id);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: history.id, message_id: history.message_id, created_at: history.created_at,
+      content: { turn_state: 'completed', knowledge_writeback: { status: 'written', event_seq: 12, written: [target] } } });
+  });
+
+  test('cold history retains cancelled receipts and settled files, with no retired Text projection', () => {
+    const restored = normalizeDbMessage({ ...summary('cancelled', 13), content: {
+      backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed',
+      knowledge_writeback: { status: 'cancelled', event_seq: 13, written: [target], detail: 'Cancelled after one file' },
+    } } as TMessage);
+    expect(restored).toMatchObject({ content: { turn_state: 'completed', knowledge_writeback: {
+      status: 'cancelled', event_seq: 13, written: [target], detail: 'Cancelled after one file' } } });
+    const text = normalizeDbMessage(baseMessage({ content: { content: 'Answer',
+      knowledge_writeback: { status: 'running', event_seq: 12 } } as any }));
+    expect(text.content).toEqual({ content: 'Answer' });
+  });
+
+  test('a stale history page preserves the newer failed diagnostic and its original summary identity', () => {
+    const diagnostic = { stage: 'stream' as const, code: 'USER_LLM_PROVIDER_STREAM_INTERRUPTED',
+      elapsed_ms: 1200, received_frames: 3, received_bytes: 400, output_bytes: 200,
+      input_tokens_estimate: 3000, output_token_limit: 1000,
+      provider_diagnostic: { reason: 'stream_interrupted' as const, requestId: 'req_123' } };
+    const live = summary('failed', 12);
+    if (live.type !== 'agent_status') throw new Error('expected summary');
+    live.content.knowledge_writeback!.diagnostic = diagnostic;
+    const history = fetchedMessage(summary('running', 11));
+    const merged = mergeFetchedMessagesForConversation([live], [history], history.conversation_id);
+    expect(merged[0]).toMatchObject({ id: history.id, message_id: history.message_id, turn_id: history.turn_id,
+      content: { knowledge_writeback: { status: 'failed', event_seq: 12, diagnostic } } });
+  });
+});
 
 describe('mergeFetchedMessagesForConversation', () => {
   test('history refresh during step two preserves its newer live text without rewriting step one', () => {
@@ -1183,97 +1244,6 @@ describe('composeMessageForTest', () => {
     expect(merged[0]).toEqual(updated);
   });
 
-  test('merges knowledge writeback state into the existing assistant text message', () => {
-    const text = baseMessage({
-      id: 'assistant-turn-1',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: { content: 'Final answer is already visible.' },
-    });
-    const writeback = baseMessage({
-      id: 'writeback-event',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: {
-        content: '',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-1',
-          retryable: false,
-        },
-      },
-    });
-
-    const merged = composeMessageForTest(writeback, [text]);
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0].id).toBe('assistant-turn-1');
-    expect(merged[0].type).toBe('text');
-    if (merged[0].type !== 'text') throw new Error('expected text message');
-    expect(merged[0].content.content).toBe('Final answer is already visible.');
-    expect(merged[0].content.knowledge_writeback?.status).toBe('writing');
-  });
-
-  test('keeps knowledge writeback visible when its event arrives before the assistant text', () => {
-    const writeback = baseMessage({
-      id: 'writeback-event',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: {
-        content: '',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-1',
-        },
-      },
-    });
-
-    const pending = composeMessageForTest(writeback, []);
-
-    expect(pending).toHaveLength(1);
-    expect(pending[0].type).toBe('text');
-    if (pending[0].type !== 'text') throw new Error('expected text message');
-    expect(pending[0].content.content).toBe('');
-    expect(pending[0].content.knowledge_writeback?.status).toBe('writing');
-  });
-
-  test('merges assistant text into an early knowledge writeback process row', () => {
-    const writeback = baseMessage({
-      id: 'writeback-event',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: {
-        content: '',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-1',
-          updated_at: 10,
-        },
-      },
-    });
-    const other = baseMessage({
-      id: 'other-turn',
-      msg_id: 'other-turn',
-      type: 'text',
-      content: { content: 'Another visible message.' },
-    });
-    const text = baseMessage({
-      id: 'assistant-turn-1',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: { content: 'Final answer arrived after the writeback event.' },
-    });
-
-    const pending = composeMessageForTest(writeback, [other]);
-    const merged = composeMessageForTest(text, pending);
-
-    expect(merged).toHaveLength(2);
-    expect(merged[1].id).toBe('writeback-event');
-    expect(merged[1].type).toBe('text');
-    if (merged[1].type !== 'text') throw new Error('expected text message');
-    expect(merged[1].content.content).toBe('Final answer arrived after the writeback event.');
-    expect(merged[1].content.knowledge_writeback?.status).toBe('writing');
-  });
 });
 
 describe('normalizeDbMessage', () => {
@@ -1653,71 +1623,6 @@ describe('normalizeDbMessage', () => {
     expect(committed.content.artifacts).toEqual([persistedArtifact]);
   });
 
-  test('preserves persisted knowledge writeback state from decoded text content', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'assistant-turn-1',
-        msg_id: 'assistant-turn-1',
-        type: 'text',
-        content: {
-          content: 'Final answer.',
-          knowledge_writeback: {
-            status: 'written',
-            updated_at: 20,
-            written: [
-              {
-                kb_id: '0190f5fe-7c00-7a00-8000-000000000001',
-                rel_path: 'patterns/final.md',
-              },
-            ],
-          },
-        } as any,
-      })
-    );
-
-    expect(normalized.type).toBe('text');
-    if (normalized.type !== 'text') throw new Error('expected text message');
-    expect(normalized.content.content).toBe('Final answer.');
-    expect(normalized.content.knowledge_writeback?.status).toBe('written');
-    expect(normalized.content.knowledge_writeback?.written?.[0]?.rel_path).toBe('patterns/final.md');
-  });
-
-  test('keeps newer persisted writeback state while preserving longer streaming text', () => {
-    const streaming = baseMessage({
-      id: 'assistant-turn-1',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: {
-        content: 'Final answer is already visible with the complete streamed text.',
-        knowledge_writeback: {
-          status: 'writing',
-          attempt_id: 'attempt-1',
-          updated_at: 10,
-        },
-      },
-    });
-    const persisted = baseMessage({
-      id: 'assistant-turn-1',
-      msg_id: 'assistant-turn-1',
-      type: 'text',
-      content: {
-        content: 'Final answer.',
-        knowledge_writeback: {
-          status: 'written',
-          attempt_id: 'attempt-1',
-          updated_at: 20,
-        },
-      },
-    });
-
-    const merged = mergeFetchedMessagesForConversation([streaming], fetchedMessages([persisted]), parseConversationId('0190f5fe-7c00-7a00-8000-000000000004'));
-
-    expect(merged).toHaveLength(1);
-    expect(merged[0].type).toBe('text');
-    if (merged[0].type !== 'text') throw new Error('expected text message');
-    expect(merged[0].content.content).toBe('Final answer is already visible with the complete streamed text.');
-    expect(merged[0].content.knowledge_writeback?.status).toBe('written');
-  });
 });
 
 describe('mergeThinkingStreamContent', () => {

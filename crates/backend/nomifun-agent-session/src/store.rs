@@ -70,6 +70,10 @@ mod turn_files;
 #[path = "history_transition_projection.rs"]
 mod history_transition_projection;
 
+#[path = "knowledge_writeback.rs"]
+mod knowledge_writeback;
+pub use knowledge_writeback::{KnowledgeWritebackStartRequest, KnowledgeWritebackStartReceipt};
+
 #[path = "native_execution.rs"]
 mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
@@ -298,6 +302,7 @@ pub struct AgentSessionStore {
 enum AppendSessionStatePolicy {
     LiveOnly,
     EffectSettlement,
+    KnowledgeWritebackSettlement,
     DeleteCleanupUncertainty,
 }
 
@@ -510,7 +515,8 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
-        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
+        if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
+            || knowledge_writeback::is_event(&append.semantic_event.kind.0) {
             return Err(SessionStoreError::ExecutionFenced);
         }
         if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
@@ -2583,7 +2589,7 @@ impl AgentSessionStore {
                 "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key, \
                  e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
                  JOIN agent_turns t ON t.session_id=e.session_id AND t.operation_id=? JOIN agent_events s ON s.event_id=t.started_event_id \
-                 WHERE e.session_id=? AND e.kind <> 'turn/workspace-files-observed' \
+                 WHERE e.session_id=? AND e.kind NOT IN ('turn/workspace-files-observed','turn/knowledge-writeback-started','turn/knowledge-writeback-settled') \
                  AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
                 .bind(turn_operation_id.as_ref()).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("native recovery fact budget exceeded".into())); }
@@ -2607,7 +2613,7 @@ impl AgentSessionStore {
             CausalityFactScope::SessionHistory => sqlx::query_as::<_, StoredEventRow>(
                 "SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version, \
                  correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
-                 WHERE session_id=? AND kind <> 'turn/workspace-files-observed' ORDER BY seq",
+                 WHERE session_id=? AND kind NOT IN ('turn/workspace-files-observed','turn/knowledge-writeback-started','turn/knowledge-writeback-settled') ORDER BY seq",
             ).bind(session_id.as_ref()).fetch_all(&mut *tx).await?,
         };
 
@@ -2944,6 +2950,7 @@ impl AgentSessionStore {
                 history.push(summary);
             }
         }
+        knowledge_writeback::hydrate(&mut tx, session_id, &mut history).await?;
         tx.commit().await?;
         Ok(history)
     }
@@ -3034,6 +3041,7 @@ impl AgentSessionStore {
         });
         let has_more = history.len() > limit as usize;
         history.truncate(limit as usize);
+        knowledge_writeback::hydrate(&mut tx, session_id, &mut history).await?;
         history_transition_projection::hydrate(&mut tx, session_id, &mut history).await?;
 
         let message_total = sqlx::query_scalar::<_, i64>(
@@ -4639,6 +4647,17 @@ impl AgentSessionStore {
                 }
                 &["live", "deleting"]
             }
+            AppendSessionStatePolicy::KnowledgeWritebackSettlement => {
+                if append.semantic_event.kind.0 != nomifun_agent_contracts::TURN_KNOWLEDGE_WRITEBACK_SETTLED {
+                    return Err(SessionStoreError::ExecutionFenced);
+                }
+                match session_row.state.as_str() {
+                    "live" | "deleting" => {},
+                    "deleted" => return Err(SessionStoreError::Deleted(append.agent_session_id.0.clone())),
+                    other => return Err(SessionStoreError::InvalidSession(format!("unknown AgentSession state {other}"))),
+                }
+                &["live", "deleting"]
+            }
             AppendSessionStatePolicy::DeleteCleanupUncertainty => {
                 if !matches!(
                     append.semantic_event.kind.0.as_str(),
@@ -5788,6 +5807,7 @@ async fn validate_semantic_event_tx(
     event: &SessionEventRecord,
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
+    knowledge_writeback::validate_event_tx(tx, event, payload).await?;
     if event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
         let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(payload.clone())?;
         observation.validate().map_err(SessionStoreError::InvalidPayload)?;
@@ -7629,6 +7649,10 @@ fn turn_history_projection_from_row(
         .map_err(|error| SessionStoreError::InvalidPayload(error.to_string()))?;
     if let Some(notice) = &knowledge_writeback {
         notice.validate().map_err(SessionStoreError::InvalidPayload)?;
+        if !matches!(notice.status, nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Written | nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Partial)
+            || notice.detail.is_some() || notice.diagnostic.is_some() || notice.event_seq.is_some() {
+            return Err(SessionStoreError::InvalidPayload("old Turn terminal Knowledge metadata must describe actual successful writes".into()));
+        }
     }
     let projection_id = format!("turn_summary:{}", row.started_event_id);
     let mut projection = json!({

@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::contracts::{
     ChatContentPart, ChatFinishReason, ChatMessage, ChatModelError, ChatModelErrorCode,
-    ChatModelEvent, ChatModelFeature, ChatModelRequest, ChatProtocol, ChatResponseFormat, ChatRole,
+    ChatModelEvent, ChatModelFeature, ChatModelInput, ChatModelRequest, ChatProtocol, ChatResponseFormat, ChatRole,
     ChatToolChoice, ChatToolResultPart, ChatUsage, ProviderCredentialRef,
     ProviderIdRef, ProviderResponseId, ProviderRoundId, ResolvedChatRoute, ToolCallId,
 };
@@ -61,6 +61,20 @@ pub trait ChatFrameDecoder: Send {
         &mut self,
         frame: ProviderWireFrame,
     ) -> Result<Vec<ChatModelEvent>, ChatModelError>;
+
+    /// Validated native content may be buffered until its complete reasoning
+    /// block is safe to deliver. Callers can renew idle waiting on that progress
+    /// without exposing partial blocks or changing the model event contract.
+    fn has_deferred_semantic_progress(&self) -> bool {
+        false
+    }
+
+    /// Last numeric output count actually reported by this attempt. Missing
+    /// provider counters remain unknown even though ChatUsage uses zero as
+    /// its established projection default.
+    fn reported_output_tokens(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[async_trait]
@@ -349,6 +363,7 @@ macro_rules! define_adapter {
             fn new_frame_decoder(&self) -> Option<Box<dyn ChatFrameDecoder>> {
                 Some(Box::new(AttemptFrameDecoder {
                     protocol: self.core.protocol,
+                    reported_output_tokens: None,
                     raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
                     responses: crate::responses_decoder::ResponsesDecoder::with_argument_parser(false, self.core.argument_parser.clone()),
                     anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(self.core.argument_parser.clone()),
@@ -359,6 +374,7 @@ macro_rules! define_adapter {
             fn new_frame_decoder_for(&self, request: &ChatModelRequest) -> Option<Box<dyn ChatFrameDecoder>> {
                 Some(Box::new(AttemptFrameDecoder {
                     protocol: self.core.protocol,
+                    reported_output_tokens: None,
                     raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
                     responses: crate::responses_decoder::ResponsesDecoder::with_argument_parser(request.input.preserve_native_responses_items, self.core.argument_parser.clone()),
                     anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(self.core.argument_parser.clone()),
@@ -373,7 +389,7 @@ macro_rules! define_adapter {
                 credential: &CredentialLease,
             ) -> Result<ProviderWireRequest, ChatModelError> {
                 self.core
-                    .encode(request, route, credential, $encoder(request, route))
+                    .encode(request, route, credential, $encoder(&request.input, &route.model))
             }
 
             async fn open_stream(
@@ -437,16 +453,15 @@ define_adapter!(
 );
 
 fn encode_anthropic_request(
-    request: &ChatModelRequest,
-    route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    model: &str,
 ) -> Result<Value, ChatModelError> {
-    let input = &request.input;
     let max_tokens = input.max_output_tokens.ok_or_else(|| ChatModelError::invalid_request(
         "Anthropic Messages requires an explicit output token ceiling",
     ))?;
     let system = combined_system_text(&input.instructions, &input.messages);
     let mut body = json!({
-        "model": route.model,
+        "model": model,
         "system": system,
         "messages": anthropic_messages(&input.messages),
         "stream": true,
@@ -499,10 +514,9 @@ fn encode_anthropic_request(
 }
 
 fn encode_openai_chat_request(
-    request: &ChatModelRequest,
-    route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    model: &str,
 ) -> Result<Value, ChatModelError> {
-    let input = &request.input;
     if let Some(reasoning) = &input.reasoning {
         if reasoning.max_reasoning_tokens.is_some()
             || matches!(reasoning.summary, crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed) {
@@ -517,7 +531,7 @@ fn encode_openai_chat_request(
     }
     messages.extend(input.messages.iter().flat_map(openai_messages));
     let mut body = json!({
-        "model": route.model,
+        "model": model,
         "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
@@ -560,17 +574,16 @@ fn encode_openai_chat_request(
 }
 
 fn encode_openai_responses_request(
-    request: &ChatModelRequest,
-    route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    model: &str,
 ) -> Result<Value, ChatModelError> {
-    let input = &request.input;
     if input.reasoning.as_ref().is_some_and(|reasoning| reasoning.max_reasoning_tokens.is_some()) {
         return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
             "OpenAI Responses does not expose a separate reasoning token budget; configure effort or the total output limit",
             crate::contracts::ChatRetryDirective::Never));
     }
     let mut body = json!({
-        "model": route.model,
+        "model": model,
         "instructions": input.instructions.join("\n\n"),
         "input": responses_items(&input.messages),
         "stream": true,
@@ -626,10 +639,9 @@ fn encode_openai_responses_request(
 }
 
 fn encode_gemini_request(
-    request: &ChatModelRequest,
-    _route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    _model: &str,
 ) -> Result<Value, ChatModelError> {
-    let input = &request.input;
     if matches!(input.prompt_cache, crate::contracts::PromptCachePolicy::Ephemeral) {
         return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
             "Gemini ephemeral caching requires an explicit cachedContent lifecycle; this adapter supports automatic caching",
@@ -711,10 +723,10 @@ fn encode_gemini_request(
 }
 
 fn encode_bedrock_request(
-    request: &ChatModelRequest,
-    route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    model: &str,
 ) -> Result<Value, ChatModelError> {
-    let mut body = encode_anthropic_request(request, route)?;
+    let mut body = encode_anthropic_request(input, model)?;
     // Bedrock selects the model and streaming operation in the request URL.
     let object = body.as_object_mut().expect("Messages encoder returns an object");
     object.remove("model");
@@ -724,13 +736,127 @@ fn encode_bedrock_request(
 }
 
 fn encode_vertex_request(
-    request: &ChatModelRequest,
-    route: &ResolvedChatRoute,
+    input: &ChatModelInput,
+    model: &str,
 ) -> Result<Value, ChatModelError> {
-    let mut body = encode_anthropic_request(request, route)?;
+    let mut body = encode_anthropic_request(input, model)?;
     body.as_object_mut().expect("Messages encoder returns an object").remove("model");
     body["anthropic_version"] = Value::String("vertex-2023-10-16".to_owned());
     Ok(body)
+}
+
+/// Encode a stateless, tool-free model input without inventing an Agent Turn
+/// or bypassing its causal admission. Routing and credentials stay with the
+/// standalone caller; protocol serialization uses the same Agent encoders.
+pub fn encode_standalone_chat_input(
+    protocol: ChatProtocol,
+    model: &str,
+    input: &ChatModelInput,
+    provider_params: &Value,
+    configured_output_limit: Option<i64>,
+) -> Result<Value, ChatModelError> {
+    if model.trim().is_empty() || !input.tools.is_empty() || input.provider_round_parent.is_some()
+        || input.preserve_native_responses_items
+        || !matches!(input.tool_choice, ChatToolChoice::Auto | ChatToolChoice::None)
+        || input.messages.iter().any(|message| matches!(message.role, ChatRole::Tool) || message.provider_round_id.is_some())
+        || input.messages.iter().flat_map(|message| &message.content)
+            .any(|part| !matches!(part, ChatContentPart::Text { .. })) {
+        return Err(ChatModelError::invalid_request("standalone completion requires stateless text input without tools or native history"));
+    }
+    let body = match protocol {
+        ChatProtocol::Anthropic => encode_anthropic_request(input, model),
+        ChatProtocol::OpenaiChat => encode_openai_chat_request(input, model),
+        ChatProtocol::OpenaiResponses => encode_openai_responses_request(input, model),
+        ChatProtocol::Gemini => encode_gemini_request(input, model),
+        ChatProtocol::Bedrock => encode_bedrock_request(input, model),
+        ChatProtocol::Vertex => encode_vertex_request(input, model),
+    }?;
+    let mut body = crate::provider_params::merge_chat_provider_params(body, provider_params, protocol, configured_output_limit)?;
+    if let Some(object) = body.as_object_mut() {
+        for key in ["tools", "tool_choice", "parallel_tool_calls", "toolConfig", "previous_response_id", "conversation"] {
+            object.remove(key);
+        }
+    }
+    Ok(body)
+}
+
+/// Every standalone call receives fresh protocol state. This supplies only
+/// decoding, never Runtime recovery or retained provider round authority.
+pub fn new_standalone_frame_decoder(protocol: ChatProtocol) -> Box<dyn ChatFrameDecoder> {
+    let argument_parser = Arc::new(JsonToolArgumentParser);
+    Box::new(AttemptFrameDecoder {
+        protocol,
+        reported_output_tokens: None,
+        raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+        responses: crate::responses_decoder::ResponsesDecoder::with_argument_parser(false, argument_parser.clone()),
+        anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(argument_parser.clone()),
+        argument_parser,
+    })
+}
+
+#[cfg(test)]
+mod standalone_input_tests {
+    use super::*;
+
+    fn input() -> ChatModelInput {
+        serde_json::from_value(json!({
+            "instructions":["Return concise JSON"], "messages":[{"role":"user","content":[{"type":"text","text":"A completed answer"}]}],
+            "tools":[],"tool_choice":{"mode":"none"},"max_output_tokens":4096,
+            "prompt_cache":"disabled","response_format":{"type":"text"}
+        })).unwrap()
+    }
+
+    #[test]
+    fn standalone_encoding_shares_protocol_fields_without_tools_or_provider_rounds() {
+        for protocol in [ChatProtocol::OpenaiChat,ChatProtocol::OpenaiResponses,ChatProtocol::Anthropic,
+            ChatProtocol::Gemini,ChatProtocol::Bedrock,ChatProtocol::Vertex] {
+            let body = encode_standalone_chat_input(protocol,"selected-model",&input(),
+                &json!({"temperature":0.2,"tools":[{"name":"forbidden"}],"previous_response_id":"old-round"}),Some(2048)).unwrap();
+            assert!(body.get("tools").is_none(),"{protocol:?}");
+            assert!(body.get("previous_response_id").is_none(),"{protocol:?}");
+            match protocol {
+                ChatProtocol::Gemini => assert_eq!(body["generationConfig"]["maxOutputTokens"],2048),
+                ChatProtocol::OpenaiResponses => assert_eq!(body["max_output_tokens"],2048),
+                _ => assert_eq!(body["max_tokens"],2048),
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_encoding_rejects_native_context_and_does_not_invent_output_or_schema_parameters() {
+        let mut value = input();
+        value.provider_round_parent = Some("retained-round".into());
+        assert!(encode_standalone_chat_input(ChatProtocol::OpenaiChat,"model",&value,&json!({}),None).is_err());
+        value.provider_round_parent = None;
+        value.max_output_tokens = None;
+        let body = encode_standalone_chat_input(ChatProtocol::OpenaiChat,"model",&value,&json!({}),None).unwrap();
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn standalone_decoder_distinguishes_missing_output_usage_from_reported_zero() {
+        for protocol in [ChatProtocol::OpenaiChat,ChatProtocol::OpenaiResponses,ChatProtocol::Anthropic,
+            ChatProtocol::Gemini,ChatProtocol::Bedrock,ChatProtocol::Vertex] {
+            let mut decoder = new_standalone_frame_decoder(protocol);
+            let frame = |data| ProviderWireFrame { event:"usage".into(),data,diagnostic:None };
+            decoder.decode_frame(frame(json!({"input_tokens":100}))).unwrap();
+            assert_eq!(decoder.reported_output_tokens(),None,"{protocol:?}");
+            decoder.decode_frame(frame(json!({"output_tokens":0}))).unwrap();
+            assert_eq!(decoder.reported_output_tokens(),Some(0),"{protocol:?}");
+            decoder.decode_frame(frame(json!({"output_tokens":123}))).unwrap();
+            assert_eq!(decoder.reported_output_tokens(),Some(123),"{protocol:?}");
+            decoder.decode_frame(frame(json!({"input_tokens":200}))).unwrap();
+            assert_eq!(decoder.reported_output_tokens(),Some(123),"{protocol:?}");
+        }
+        for alias in ["output_tokens","completion_tokens","output","candidatesTokenCount"] {
+            let data=json!({alias:37});
+            assert_eq!(output_tokens_from_usage(&data),Some(37));
+            assert_eq!(parse_usage(&data).output_tokens,37);
+        }
+        assert_eq!(output_tokens_from_usage(&json!({"input_tokens":100})),None);
+        assert_eq!(parse_usage(&json!({"input_tokens":100})).output_tokens,0);
+    }
 }
 
 fn insert_if_some(object: &mut Value, key: &str, value: Option<Value>) {
@@ -1303,6 +1429,7 @@ fn responses_format_value(format: &ChatResponseFormat) -> Value {
 
 struct AttemptFrameDecoder {
     protocol: ChatProtocol,
+    reported_output_tokens: Option<u64>,
     raw_decode_state: Arc<Mutex<RawDecodeState>>,
     responses: crate::responses_decoder::ResponsesDecoder,
     anthropic: crate::anthropic_decoder::AnthropicDecoder,
@@ -1310,10 +1437,39 @@ struct AttemptFrameDecoder {
 }
 
 impl ChatFrameDecoder for AttemptFrameDecoder {
+    fn reported_output_tokens(&self) -> Option<u64> {
+        self.reported_output_tokens
+    }
+
+    fn has_deferred_semantic_progress(&self) -> bool {
+        match self.protocol {
+            ChatProtocol::OpenaiResponses => self.responses.has_deferred_semantic_progress(),
+            protocol if protocol.uses_anthropic_messages() => self.anthropic.has_deferred_semantic_progress(),
+            _ => false,
+        }
+    }
+
     fn decode_frame(
         &mut self,
         frame: ProviderWireFrame,
     ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        let source = match self.protocol {
+            ChatProtocol::OpenaiResponses => frame.data.get("response").unwrap_or(&frame.data),
+            protocol if protocol.uses_anthropic_messages() => frame.data.get("message").unwrap_or(&frame.data),
+            ChatProtocol::Gemini => frame.data.get("usageMetadata").unwrap_or(&frame.data),
+            _ => &frame.data,
+        };
+        let reported = output_tokens_from_usage(source);
+        let result = self.decode_events(frame);
+        if result.is_ok() && let Some(reported) = reported {
+            self.reported_output_tokens = Some(reported);
+        }
+        result
+    }
+}
+
+impl AttemptFrameDecoder {
+    fn decode_events(&mut self, frame: ProviderWireFrame) -> Result<Vec<ChatModelEvent>, ChatModelError> {
         // Cloud exception headers are normalized outside Messages. Handle them
         // even after the native decoder has already selected a content lifecycle.
         if let Some(error) = crate::provider_errors::decode_with_context(
@@ -2241,10 +2397,7 @@ pub(crate) fn parse_usage(value: &Value) -> ChatUsage {
             source,
             &["input_tokens", "prompt_tokens", "input", "promptTokenCount"],
         ),
-        output_tokens: first_u64(
-            source,
-            &["output_tokens", "completion_tokens", "output", "candidatesTokenCount"],
-        ),
+        output_tokens: output_tokens_from_usage(value).unwrap_or(0),
         reasoning_tokens: first_u64(source, &["reasoning_tokens", "reasoning", "thoughtsTokenCount"])
             .max(nested_u64(
                 source,
@@ -2277,6 +2430,12 @@ pub(crate) fn parse_usage(value: &Value) -> ChatUsage {
 
 fn usage_from_nested(value: &Value) -> Option<ChatUsage> {
     value.get("usage").map(parse_usage)
+}
+
+fn output_tokens_from_usage(value: &Value) -> Option<u64> {
+    let source = value.get("usage").unwrap_or(value);
+    ["output_tokens", "completion_tokens", "output", "candidatesTokenCount"].iter()
+        .find_map(|key| source.get(*key).and_then(Value::as_u64))
 }
 
 fn first_u64(value: &Value, keys: &[&str]) -> u64 {

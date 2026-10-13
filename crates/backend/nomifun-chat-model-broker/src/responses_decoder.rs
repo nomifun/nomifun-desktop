@@ -30,6 +30,9 @@ pub(crate) struct ResponsesDecoder {
     refusal: bool,
     incomplete_item: bool,
     argument_parser: Arc<dyn ToolArgumentParser>,
+    // Standalone idle observation only; summary/opaque event delivery remains
+    // atomic and no additional Agent fact or recovery state is produced.
+    last_frame_semantic_progress: bool,
 }
 
 struct Item {
@@ -60,13 +63,17 @@ impl ResponsesDecoder {
             refusal: false,
             incomplete_item: false,
             argument_parser,
+            last_frame_semantic_progress: false,
         }
     }
+
+    pub(crate) fn has_deferred_semantic_progress(&self) -> bool { self.last_frame_semantic_progress }
 
     pub(crate) fn decode(
         &mut self,
         frame: &ProviderWireFrame,
     ) -> Option<Result<Vec<ChatModelEvent>, ChatModelError>> {
+        self.last_frame_semantic_progress = false;
         let named = frame.event.trim().to_ascii_lowercase();
         if frame
             .data
@@ -79,7 +86,9 @@ impl ResponsesDecoder {
         if named == "json"
             && frame.data.get("object").and_then(Value::as_str) == Some("response")
         {
-            return Some(self.decode_complete_response(&frame.data));
+            let result = self.decode_complete_response(&frame.data);
+            if result.is_err() { self.last_frame_semantic_progress = false; }
+            return Some(result);
         }
         let native_frame = declared.is_some_and(|kind| kind.starts_with("response."))
             || frame.data.get("response").is_some()
@@ -103,7 +112,9 @@ impl ResponsesDecoder {
             }
             &named
         };
-        Some(self.decode_native(kind, &frame.data))
+        let result = self.decode_native(kind, &frame.data);
+        if result.is_err() { self.last_frame_semantic_progress = false; }
+        Some(result)
     }
 
     fn decode_complete_response(
@@ -468,6 +479,7 @@ impl ResponsesDecoder {
         if done {
             item.finished_parts.insert(key);
         }
+        self.last_frame_semantic_progress |= reasoning && !delta.is_empty();
         // Reasoning is delivered atomically with its opaque continuation at
         // item.done, so empty summaries and consecutive blocks stay distinct.
         Ok(if reasoning || delta.is_empty() {
@@ -578,6 +590,7 @@ impl ResponsesDecoder {
                 }
                 if reasoning {
                     let encrypted_content = optional_text(value, "encrypted_content")?;
+                    self.last_frame_semantic_progress |= encrypted_content.is_some();
                     let text = summary.join("\n\n");
                     if !text.is_empty() || encrypted_content.is_some() {
                         events.push(ChatModelEvent::ReasoningBlock {
@@ -732,6 +745,62 @@ fn part_text(value: &Value, reasoning: bool) -> Result<(&str, &str), ChatModelEr
 mod tests {
     use super::*;
     use crate::adapter::ProviderWireFrame;
+
+    fn native(decoder: &mut ResponsesDecoder, kind: &str, data: Value) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        decoder.decode(&ProviderWireFrame {event:kind.into(),data,diagnostic:None}).unwrap()
+    }
+
+    fn reasoning_decoder() -> ResponsesDecoder {
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
+        native(&mut decoder,"response.created",serde_json::json!({"type":"response.created","response":{"id":"resp_progress"}})).unwrap();
+        native(&mut decoder,"response.output_item.added",serde_json::json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"thought","type":"reasoning","summary":[]}})).unwrap();
+        decoder
+    }
+
+    #[test]
+    fn deferred_summary_progress_keeps_atomic_delivery_and_ignores_empty_or_repeated_snapshots() {
+        let mut decoder = reasoning_decoder();
+        let events = native(&mut decoder,"response.reasoning_summary_text.delta",serde_json::json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":0,"item_id":"thought","summary_index":0,"delta":"grounded summary"})).unwrap();
+        assert!(events.is_empty(), "summary remains atomic until the reasoning item closes");
+        assert!(decoder.has_deferred_semantic_progress());
+        native(&mut decoder,"response.reasoning_summary_text.delta",serde_json::json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":0,"item_id":"thought","summary_index":0,"delta":""})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        native(&mut decoder,"response.reasoning_summary_text.done",serde_json::json!({"type":"response.reasoning_summary_text.done",
+            "output_index":0,"item_id":"thought","summary_index":0,"text":"grounded summary"})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        let item = serde_json::json!({"id":"thought","type":"reasoning","summary":[{"type":"summary_text","text":"grounded summary"}]});
+        let events = native(&mut decoder,"response.output_item.done",serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress());
+        assert!(matches!(events.as_slice(), [ChatModelEvent::ReasoningBlock {text,encrypted_content:None}] if text == "grounded summary"));
+        native(&mut decoder,"response.completed",serde_json::json!({"type":"response.completed","response":{
+            "id":"resp_progress","status":"completed","output":[item],"usage":{"input_tokens":1,"output_tokens":1}}})).unwrap();
+        assert!(!decoder.has_deferred_semantic_progress(), "corroborating terminal snapshots contain no new reasoning");
+    }
+
+    #[test]
+    fn new_opaque_reasoning_counts_as_progress_but_invalid_or_duplicate_frames_do_not() {
+        let mut decoder = reasoning_decoder();
+        let item = serde_json::json!({"id":"thought","type":"reasoning","summary":[],"encrypted_content":"private-opaque-data"});
+        native(&mut decoder,"response.output_item.done",serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item})).unwrap();
+        assert!(decoder.has_deferred_semantic_progress());
+        assert!(native(&mut decoder,"response.output_item.done",serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item})).is_err());
+        assert!(!decoder.has_deferred_semantic_progress());
+        let mut decoder = reasoning_decoder();
+        native(&mut decoder,"response.reasoning_summary_text.delta",serde_json::json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":0,"item_id":"thought","summary_index":0,"delta":"valid summary"})).unwrap();
+        assert!(decoder.has_deferred_semantic_progress());
+        assert!(native(&mut decoder,"response.reasoning_summary_text.delta",serde_json::json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":0,"item_id":"wrong-thought","summary_index":0,"delta":"wrong identity"})).is_err());
+        assert!(!decoder.has_deferred_semantic_progress());
+        let mut decoder = ResponsesDecoder::with_argument_parser(false,Arc::new(crate::JsonToolArgumentParser));
+        assert!(native(&mut decoder,"json",serde_json::json!({"id":"invalid_composite","object":"response","status":"completed",
+            "output":[{"id":"thought","type":"reasoning","summary":[],"encrypted_content":"valid opaque"},
+                {"id":"bad","type":"unsupported"}],"usage":{"input_tokens":1,"output_tokens":1}})).is_err());
+        assert!(!decoder.has_deferred_semantic_progress());
+    }
 
     #[test]
     fn complete_json_response_is_projected_through_the_native_lifecycle() {

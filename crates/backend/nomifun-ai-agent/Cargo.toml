@@ -70,7 +70,7 @@ browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true

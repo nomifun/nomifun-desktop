@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice,
-    TurnWorkspaceFilesObservedV1,
+    TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
@@ -577,6 +577,8 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<TurnWorkspaceFilesObservedV1>(&mut schemas, "turn_workspace_files_observed")?;
+    add_schema::<KnowledgeWritebackStartedV1>(&mut schemas, "turn_knowledge_writeback_started")?;
+    add_schema::<KnowledgeWritebackSettledV1>(&mut schemas, "turn_knowledge_writeback_settled")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;
     add_schema::<PlatformFeatureInventoryPayload>(
         &mut schemas,

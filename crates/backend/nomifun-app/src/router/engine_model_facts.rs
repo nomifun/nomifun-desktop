@@ -1,8 +1,5 @@
 //! Provider limits are platform facts, not an engine's context strategy.
 //! No credentials, mutable route selection or tokenizer claims are exposed.
-use nomifun_chat_model_broker::ChatRouteSelection;
-
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineModelLimits {
     pub context_tokens: Option<u32>,
@@ -13,8 +10,6 @@ pub struct EngineModelLimits {
 
 #[derive(Clone, Debug)]
 pub struct EngineRouteCandidateFacts {
-    pub provider_id: String,
-    pub model: String,
     pub limits: EngineModelLimits,
 }
 
@@ -23,16 +18,12 @@ pub struct EngineRouteCandidateFacts {
 /// This is not a reservation: the Broker revalidates routes on each invocation.
 #[derive(Clone, Debug)]
 pub struct EngineRouteModelFacts {
-    route: ChatRouteSelection,
     candidates: Vec<EngineRouteCandidateFacts>,
 }
 
 impl EngineRouteModelFacts {
-    pub(super) fn from_candidates(route: ChatRouteSelection, candidates: Vec<EngineRouteCandidateFacts>) -> Self {
-        Self { route, candidates }
-    }
-    pub fn route(&self) -> &ChatRouteSelection {
-        &self.route
+    pub(super) fn from_candidates(candidates: Vec<EngineRouteCandidateFacts>) -> Self {
+        Self { candidates }
     }
     pub fn candidates(&self) -> &[EngineRouteCandidateFacts] {
         &self.candidates
@@ -63,19 +54,17 @@ impl EngineRouteModelFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_agent_contracts::{ChatRouteIdentity, ModelRouteId};
 
     #[test]
     fn output_defaults_do_not_invent_a_wire_ceiling_and_custom_limits_remain_exact() {
         let mut facts=EngineRouteModelFacts {
-            route:ChatRouteIdentity::new("preset","agent.chat",ModelRouteId::from("route"),1),
-            candidates:vec![EngineRouteCandidateFacts {provider_id:"primary".into(),model:"provider-default".into(),
+            candidates:vec![EngineRouteCandidateFacts {
                 limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,context_is_input_only:false,compaction_threshold_pct:None}}],
         };
         assert_eq!(facts.configured_output_ceiling(),None);
         facts.candidates[0].limits.output_tokens=Some(100_000);
         assert_eq!(facts.configured_output_ceiling(),Some(100_000));
-        facts.candidates.push(EngineRouteCandidateFacts {provider_id:"backup".into(),model:"default".into(),
+        facts.candidates.push(EngineRouteCandidateFacts {
             limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,context_is_input_only:false,compaction_threshold_pct:None}});
         assert_eq!(facts.configured_output_ceiling(),Some(100_000),"unknown failover must not synthesize 4096");
         facts.candidates[1].limits.output_tokens=Some(32_000);
@@ -90,8 +79,6 @@ mod tests {
     fn route_preserves_primary_compaction_threshold_despite_smaller_failover() {
         let candidates = vec![
             EngineRouteCandidateFacts {
-                provider_id: "primary".into(),
-                model: "large".into(),
                 limits: EngineModelLimits {
                     context_tokens: Some(128_000),
                     output_tokens: Some(8_000),
@@ -100,8 +87,6 @@ mod tests {
                 },
             },
             EngineRouteCandidateFacts {
-                provider_id: "backup".into(),
-                model: "small".into(),
                 limits: EngineModelLimits {
                     context_tokens: Some(64_000),
                     output_tokens: Some(4_000),
@@ -111,7 +96,6 @@ mod tests {
             },
         ];
         let facts = EngineRouteModelFacts {
-            route: ChatRouteIdentity::new("preset", "agent.chat", ModelRouteId::from("route"), 1),
             candidates,
         };
         assert_eq!(facts.compaction_threshold_pct(), 90);

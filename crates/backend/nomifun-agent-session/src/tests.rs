@@ -42,6 +42,8 @@ mod idmm_tests;
 mod storage_relocation_tests;
 #[path = "app_project_tests.rs"]
 mod app_project_tests;
+#[path = "knowledge_writeback_tests.rs"]
+mod knowledge_writeback_tests;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())

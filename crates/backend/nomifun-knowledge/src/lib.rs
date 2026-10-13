@@ -55,8 +55,8 @@ pub use service::{
     AutogenOutcome, BoundKnowledgeBase, BoundKnowledgeDocument,
     BoundKnowledgeReadService, BoundKnowledgeSearchHit, ConsumerInfo,
     KnowledgeBinding, KnowledgeService, MountOutcome, PreparedMountPlan,
-    RefreshSourceSummary, TurnWritebackFailure, TurnWritebackReport,
-    TurnWritebackPhase, TurnWritebackRequest, TurnWritebackStatus, WriteMode,
+    RefreshSourceSummary, TurnWritebackReport,
+    TurnWritebackRequest, TurnWritebackStatus, WriteMode,
     WriteOp, WriteOutcome, WritePolicy, WriteRequest, WriteResolution,
     WriteSurface, WriteTargetSpec, decode_doc_handle, encode_doc_handle,
     resolve_write_policy,
@@ -66,6 +66,7 @@ pub use source_url::{
     HttpFetcher, PageFetcher, UnavailableBrowserRenderContentPort,
 };
 pub use state::KnowledgeRouterState;
+pub use autogen::{KnowledgeWritebackCompletion, KnowledgeWritebackCompletionError, KnowledgeWritebackCompletionRequest, KnowledgeWritebackLimits};
 pub use turn_writeback::{TurnWritebackCandidate, TurnWritebackOutput};
 pub use workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key, workpath_key};
 pub use workspace_binding::WorkspaceBindingLease;

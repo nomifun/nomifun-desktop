@@ -14,7 +14,7 @@ import FeedbackButton from '@renderer/components/base/FeedbackButton';
 import CopyIconButton from '@renderer/components/base/CopyIconButton';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import GatewayBillingAction, { gatewayActionError } from './GatewayBillingAction';
-import '../messages.css';
+import ErrorDiagnosticDetails, { modelFailureDiagnosticRows, type DiagnosticMetadataRow } from './ErrorDiagnosticDetails';
 
 interface ConversationErrorNoteProps {
   error?: AgentStreamErrorInfo;
@@ -65,30 +65,17 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[error.agentTemplateKey]}.name`)
     : error?.agentLabel;
   const date = timestamp !== undefined ? new Date(timestamp) : undefined;
-  const metadata = [
+  const metadata: DiagnosticMetadataRow[] = [
     [t('conversation.agentError.details.agent'), agentLabel],
     [t('conversation.agentError.details.model'), diagnostic ? diagnostic.modelName : error?.modelName],
     ...(diagnostic && error?.modelName && diagnostic.modelName !== error.modelName
-      ? [[t('conversation.agentError.details.sessionModel'), error.modelName]] : []),
-    ...([
-      ['httpStatus', diagnostic?.httpStatus],
-      ['providerId', diagnostic?.providerId],
-      ['endpoint', diagnostic?.endpoint],
-      ['protocol', diagnostic?.protocol],
-      ['authScheme', diagnostic?.authScheme],
-      ['providerCode', diagnostic?.providerCode],
-      ['providerType', diagnostic?.providerType],
-      ['providerParam', diagnostic?.providerParam],
-      ['requestId', diagnostic?.requestId],
-      ['retryAfterMs', diagnostic?.retryAfterMs],
-      ['contentType', diagnostic?.contentType],
-    ] as const).filter(([, value]) => value !== undefined)
-      .map(([label, value]) => [t(`conversation.agentError.details.${label}`), String(value)]),
+      ? [[t('conversation.agentError.details.sessionModel'), error.modelName] as const] : []),
+    ...modelFailureDiagnosticRows(diagnostic, label => t(`conversation.agentError.details.${label}`)),
     [t('conversation.agentError.details.timestamp'), date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined],
     [t('conversation.agentError.details.turn'), turnId],
     [t('conversation.agentError.details.session'), sessionId],
-    ...(messageId ? [[t('conversation.agentError.details.message'), messageId]] : []),
-    ...(creationTaskId ? [[t('conversation.agentError.details.creationTask'), creationTaskId]] : []),
+    ...(messageId ? [[t('conversation.agentError.details.message'), messageId] as const] : []),
+    ...(creationTaskId ? [[t('conversation.agentError.details.creationTask'), creationTaskId] as const] : []),
     [t('conversation.agentError.details.workspace'), error?.workspacePath],
   ];
   const diagnosticDetail = diagnostic?.transportDetail || rawDetail;
@@ -132,20 +119,8 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
         role='region'
         aria-label={t('conversation.agentError.expandDetails')}
       >
-        <dl className='message-error-note__context'>
-          {metadata.map(([label, value]) => (
-            <div className='message-error-note__context-row' key={label}>
-              <dt>{label}</dt>
-              <dd>{value || t('conversation.agentError.details.unavailable')}</dd>
-            </div>
-          ))}
-        </dl>
-        {diagnosticDetail && (
-          <div className='message-error-note__diagnostic'>
-            <div className='message-error-note__detail-label'>{t('conversation.agentError.details.rawDetail')}</div>
-            <pre className='message-error-note__detail-body'>{diagnosticDetail}</pre>
-          </div>
-        )}
+        <ErrorDiagnosticDetails metadata={metadata} unavailable={t('conversation.agentError.details.unavailable')}
+          detail={diagnosticDetail} detailLabel={t('conversation.agentError.details.rawDetail')} />
         {feedback && <div className='message-error-note__actions'>
           <FeedbackButton className='message-error-note__feedback' />
         </div>}
