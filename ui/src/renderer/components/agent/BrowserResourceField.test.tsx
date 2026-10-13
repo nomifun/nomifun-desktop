@@ -24,11 +24,19 @@ function setup(client: AttachedChromeClient, initial?: string) {
   return { ...render(<I18nextProvider i18n={i18n}><Harness /></I18nextProvider>), states };
 }
 
-test('reads connection state without connecting or blocking the default managed browser', async () => {
+test('keeps the default managed browser quiet and reads Chrome state only after opening its choices', async () => {
   let resolve!: (snapshot: AttachedChromeSnapshot | null) => void;
   let connects = 0;
-  const screen = setup({ snapshot: () => new Promise((done) => { resolve = done; }), connect: async () => { connects += 1; return connected; }, disconnect: async () => {} });
+  let reads = 0;
+  const screen = setup({ snapshot: () => { reads += 1; return new Promise((done) => { resolve = done; }); }, connect: async () => { connects += 1; return connected; }, disconnect: async () => {} });
   expect(screen.states.at(-1)).toBe(true);
+  expect(reads).toBe(0);
+  expect(screen.container.querySelector('span[role="status"]')).toBeNull();
+  expect(screen.queryByText(en.resources.browser.scope)).toBeNull();
+  expect(screen.queryByText(en.resources.browser.setup)).toBeNull();
+  expect(screen.queryByText(en.resources.browser.connect)).toBeNull();
+  fireEvent.click(screen.getByRole('combobox'));
+  expect(reads).toBe(1);
   await act(async () => resolve(null));
   expect(connects).toBe(0);
   expect(screen.getByTestId('selection').textContent).toBe('managed-browser');
@@ -39,6 +47,7 @@ test('connects explicitly, requires an explicit provider choice and disconnects 
   const disconnects: string[] = [];
   let connects = 0;
   const screen = setup({ snapshot: async () => null, connect: async () => { connects += 1; return connected; }, disconnect: async (incarnation) => { disconnects.push(incarnation); } });
+  fireEvent.click(screen.getByRole('combobox'));
   await waitFor(() => expect(screen.getByText(en.resources.browser.connect).closest('button')?.disabled).toBe(false));
   fireEvent.click(screen.getByText(en.resources.browser.connect));
   await screen.findByText(en.resources.browser.states.connected);
@@ -79,6 +88,8 @@ test('connection loss preserves the explicit choice and lets the user choose the
   fireEvent.click(options.at(-1)!);
   await waitFor(() => expect(screen.getByTestId('selection').textContent).toBe('managed-browser'));
   expect(screen.states.at(-1)).toBe(true);
+  expect(screen.container.querySelector('span[role="status"]')).toBeNull();
+  expect(screen.queryByText(en.resources.browser.scope)).toBeNull();
 });
 
 test('the provider client uses authenticated kind-specific endpoints and only sends the exact disconnect incarnation', async () => {

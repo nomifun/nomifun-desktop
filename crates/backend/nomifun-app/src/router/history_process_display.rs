@@ -17,9 +17,13 @@ pub(super) struct HistoricalToolObservation {
     pub args: Option<Value>,
     pub output: Option<String>,
     pub is_error: Option<bool>,
+    pub capability_id: Option<String>,
+    pub action_id: Option<String>,
+    pub result_seq: Option<u64>,
+    pub permission_required: Option<nomifun_engine_core::SystemPermissionRequired>,
 }
 
-fn observe_tool_event(event: &Value, observations: &mut HashMap<String, HistoricalToolObservation>) {
+fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<String, HistoricalToolObservation>) {
     // Cancellation can stop the Runtime before ToolCompleted is emitted. The
     // owner still commits its bounded settlement while cleanup is permitted.
     if event.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
@@ -30,6 +34,11 @@ fn observe_tool_event(event: &Value, observations: &mut HashMap<String, Historic
             let observation = observations.entry(result.call_id.as_ref().to_owned()).or_default();
             observation.output = Some(result.output_text());
             observation.is_error = Some(result.is_error);
+            observation.result_seq = Some(event_seq);
+            observation.permission_required = nomifun_engine_core::project_system_permission_required(
+                observation.capability_id.as_deref(), observation.action_id.as_deref(),
+                result.is_error, &result.output_text(),
+            );
         }
         return;
     }
@@ -43,12 +52,22 @@ fn observe_tool_event(event: &Value, observations: &mut HashMap<String, Historic
                 .or_default()
                 .args = Some(call.arguments.0);
         }
+        AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
+            let observation = observations.entry(call_id.as_ref().to_owned()).or_default();
+            observation.capability_id = Some(capability_id.as_ref().to_owned());
+            observation.action_id = Some(action_id.as_ref().to_owned());
+        }
         AgentEngineEvent::ToolCompleted { result, .. } => {
             let observation = observations
                 .entry(result.call_id.as_ref().to_owned())
                 .or_default();
             observation.output = Some(result.output_text());
             observation.is_error = Some(result.is_error);
+            observation.result_seq = Some(event_seq);
+            observation.permission_required = nomifun_engine_core::project_system_permission_required(
+                observation.capability_id.as_deref(), observation.action_id.as_deref(),
+                result.is_error, &result.output_text(),
+            );
         }
         _ => {}
     }
@@ -122,7 +141,7 @@ pub(super) async fn load_historical_tool_observations(
             .map(|(_, call_id)| *call_id)
             .collect::<BTreeSet<_>>();
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT event.inline_json, payload.body FROM agent_events event \
+            "SELECT event.seq, event.inline_json, payload.body FROM agent_events event \
              LEFT JOIN agent_payloads payload ON payload.payload_id = event.payload_id \
              WHERE event.session_id = ",
         );
@@ -135,8 +154,10 @@ pub(super) async fn load_historical_tool_observations(
             " AND COALESCE( \
              json_extract(event.inline_json, '$.event.call.call_id'), \
              json_extract(event.inline_json, '$.event.result.call_id'), \
+             json_extract(event.inline_json, '$.event.call_id'), \
              json_extract(CAST(payload.body AS TEXT), '$.value.event.call.call_id'), \
              json_extract(CAST(payload.body AS TEXT), '$.value.event.result.call_id') \
+             , json_extract(CAST(payload.body AS TEXT), '$.value.event.call_id') \
              ) IN (",
         );
         {
@@ -146,17 +167,18 @@ pub(super) async fn load_historical_tool_observations(
             }
         }
         query.push(") ORDER BY event.seq");
-        let rows: Vec<(Option<String>, Option<Vec<u8>>)> = query
+        let rows: Vec<(i64, Option<String>, Option<Vec<u8>>)> = query
             .build_query_as()
             .fetch_all(pool)
             .await
             .map_err(|error| AppError::Internal(error.to_string()))?;
 
         let mut by_call = HashMap::new();
-        for (inline, body) in rows {
+        for (seq, inline, body) in rows {
             let Some(payload) = resolved_progress_payload(inline, body)? else { continue };
             let Some(event) = payload.get("event") else { continue };
-            observe_tool_event(event, &mut by_call);
+            let seq = u64::try_from(seq).map_err(|error| AppError::Internal(error.to_string()))?;
+            observe_tool_event(event, seq, &mut by_call);
         }
         for (projection, call_id) in selected {
             let mut observation = by_call.remove(*call_id).unwrap_or_default();
@@ -182,7 +204,7 @@ mod tests {
         observe_tool_event(&json!({
             "event":"host_tool_settled", "call_id":"expected",
             "result": AgentToolResult::text(ToolCallId::from("different"), "foreign", false)
-        }), &mut observations);
+        }), 7, &mut observations);
         assert!(observations.is_empty());
     }
 
@@ -192,11 +214,11 @@ mod tests {
         observe_tool_event(&json!({
             "event": "tool_call_completed", "step": 1,
             "call": {"call_id": "call-1", "name": "read_file", "arguments": {"path": "src/app.ts"}}
-        }), &mut observations);
+        }), 7, &mut observations);
         observe_tool_event(&json!({
             "event": "tool_completed", "step": 1,
             "result": {"call_id": "call-1", "output": [{"type": "text", "text": "file contents"}], "is_error": false}
-        }), &mut observations);
+        }), 7, &mut observations);
         let observation = observations.get("call-1").unwrap();
         assert_eq!(observation.args.as_ref().unwrap()["path"], "src/app.ts");
         assert_eq!(observation.is_error, Some(false));
@@ -301,6 +323,65 @@ mod tests {
         assert_eq!(tool.projection_id,again.iter().find(|item|item.projection["tool_summary"]["call_id"]=="rejected-report").unwrap().projection_id);
         assert_eq!(before_events,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap());
         assert_eq!(before_projections,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_messages").fetch_one(&pool).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn system_permission_cold_history_uses_the_exact_committed_result_and_action() {
+        let (journal, pool) = test_fixture().await;
+        let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
+            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
+            "execution":"not_executed"}).to_string();
+        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
+        let mut exact_results = HashMap::new();
+        for (index, (capability, is_error, output)) in [
+            ("computer", true, carrier.as_str()), ("computer", false, carrier.as_str()),
+            ("browser", true, carrier.as_str()), ("computer", true, body.as_str()),
+        ].into_iter().enumerate() {
+            let call_id = format!("permission-{index}");
+            journal.append(json!({"event":"tool_call_completed","step":1,"call":{
+                "call_id":call_id,"name":"computer","arguments":{"action":"screenshot"}
+            }}).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+            journal.append(serde_json::to_string(&AgentEngineEvent::ToolStarted {
+                step: 1, call_id: call_id.clone().into(), capability_id: capability.into(),
+                action_id: "computer/observe".into(),
+            }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+            // The original owner call projection and native Runtime result
+            // share the same canonical chain; no second tool row is created.
+            journal.append(json!({"event":"host_tool_dispatch","dispatch":{
+                "operation_id":format!("operation-{index}"),"call_id":call_id,
+                "capability_id":capability,"action_id":"computer/observe","model_name":"computer"
+            }}).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+            journal.append(json!({"event":"host_tool_settled","operation_id":format!("operation-{index}"),
+                "call_id":call_id,"result":null,"error":"typed Kernel refusal"
+            }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
+            let completed = AgentEngineEvent::ToolCompleted { step: 1,
+                result: AgentToolResult::text(call_id.clone().into(), output, is_error),
+            };
+            let ack_seq = journal.append_with_receipt(serde_json::to_string(&completed).unwrap(),
+                None, EngineJournalWrite::Progress).await.unwrap().expect("canonical append ack");
+            let persisted: i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id = ? \
+                AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_completed' \
+                AND json_extract(inline_json,'$.event.result.call_id')=?")
+                .bind(session_id.as_ref()).bind(&call_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(ack_seq, persisted as u64);
+            exact_results.insert(call_id, ack_seq);
+        }
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
+        let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
+        for index in 0..4 {
+            let call_id = format!("permission-{index}");
+            let tools = history.iter().filter(|item| item.projection["tool_summary"]["call_id"] == call_id)
+                .collect::<Vec<_>>();
+            assert_eq!(tools.len(), 1);
+            let detail = details.get(&tools[0].projection_id).unwrap();
+            assert_eq!(detail.result_seq, exact_results.get(&call_id).copied());
+            assert_eq!(detail.permission_required.is_some(), index == 0);
+            assert_eq!(detail.is_error, Some(index != 1));
+            assert!(detail.turn_id.is_some());
+            assert_eq!(detail.action_id.as_deref(), Some("computer/observe"));
+        }
     }
 
     #[tokio::test]

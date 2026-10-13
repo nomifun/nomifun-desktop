@@ -126,6 +126,8 @@ pub(crate) enum RoleHostError {
     ResourceIdentityMismatch,
     StaleObservationGeneration,
     UnsupportedInput(String),
+    #[cfg(feature = "computer-use")]
+    PermissionRequired(nomi_computer::permissions::MissingComputerPermissions),
     ProviderUnavailable,
     ProviderFailure(String),
     EffectSettlementFailure(String),
@@ -144,6 +146,8 @@ impl RoleHostError {
             Self::ResourceIdentityMismatch => "ROLE_HOST_RESOURCE_IDENTITY_MISMATCH",
             Self::StaleObservationGeneration => "ROLE_HOST_STALE_OBSERVATION_GENERATION",
             Self::UnsupportedInput(_) => "ROLE_HOST_UNSUPPORTED_INPUT",
+            #[cfg(feature = "computer-use")]
+            Self::PermissionRequired(_) => "SYSTEM_PERMISSION_REQUIRED",
             Self::ProviderUnavailable => "ROLE_HOST_PROVIDER_UNAVAILABLE",
             Self::ProviderFailure(_) => "ROLE_HOST_PROVIDER_FAILURE",
             Self::EffectSettlementFailure(_) => "CAPABILITY_UNAVAILABLE",
@@ -186,6 +190,17 @@ impl fmt::Display for RoleHostError {
                     formatter,
                     "computer input was rejected before native effects: {message}"
                 )
+            }
+            #[cfg(feature = "computer-use")]
+            Self::PermissionRequired(missing) => {
+                write!(formatter, "{}", serde_json::json!({
+                    "schema": "system-permission-required.v1",
+                    "capability": "computer",
+                    "action_id": missing.action_id,
+                    "operation": missing.operation,
+                    "permissions": missing.permissions,
+                    "execution": "not_executed",
+                }))
             }
             Self::ProviderUnavailable => formatter.write_str("role provider is unavailable"),
             Self::ProviderFailure(message) => write!(formatter, "role provider failed: {message}"),
@@ -326,6 +341,15 @@ mod computer {
     pub(crate) trait ComputerToolPort: Send + Sync {
         fn clear_cached_observation(&self);
 
+        /// Fixtures supply explicit unknown state; native hosts probe current
+        /// grants only when an authorized invocation reaches this boundary.
+        fn permission_status(&self) -> nomi_computer::permissions::PermissionStatus {
+            nomi_computer::permissions::PermissionStatus {
+                accessibility: None,
+                screen_recording: None,
+            }
+        }
+
         async fn execute_authorized(&self, action_id: &str, input: serde_json::Value)
             -> ToolResult;
     }
@@ -334,6 +358,10 @@ mod computer {
     impl ComputerToolPort for ComputerTool {
         fn clear_cached_observation(&self) {
             ComputerTool::clear_cached_observation(self);
+        }
+
+        fn permission_status(&self) -> nomi_computer::permissions::PermissionStatus {
+            nomi_computer::permissions::permission_status()
         }
 
         async fn execute_authorized(
@@ -498,6 +526,17 @@ mod computer {
     }
 
     impl ComputerRoleHost {
+        fn check_permission(&self, action_id: &str, operation: &str) -> Result<(), RoleHostError> {
+            match nomi_computer::permissions::missing_permissions_for_operation(
+                action_id,
+                operation,
+                self.target.tool.permission_status(),
+            ) {
+                Some(missing) => Err(RoleHostError::PermissionRequired(missing)),
+                None => Ok(()),
+            }
+        }
+
         pub(super) fn new(
             target: Arc<ComputerTargetOwner>,
             session_id: nomifun_agent_contracts::AgentSessionId,
@@ -731,6 +770,7 @@ mod computer {
                     // cache and lease cannot survive even a failed observation.
                     target.observation = None;
                     self.target.tool.clear_cached_observation();
+                    self.check_permission(request.action_id, native_action)?;
                     let result = self
                         .target
                         .tool
@@ -798,6 +838,13 @@ mod computer {
                     // reports an error. Re-observe before any subsequent
                     // action; never mint authority from an effect result.
                     target.observation = None;
+                    if let Err(error) = self.check_permission(
+                        nomi_computer::capability::COMPUTER_INPUT_ACTION_ID,
+                        input["action"].as_str().expect("trusted action inserted above"),
+                    ) {
+                        self.target.tool.clear_cached_observation();
+                        return Err(error);
+                    }
                     let result = self
                         .target
                         .tool
@@ -1140,6 +1187,8 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
         stale_input: std::sync::atomic::AtomicBool,
         uncertain_input: std::sync::atomic::AtomicBool,
+        deny_accessibility: std::sync::atomic::AtomicBool,
+        deny_screen_recording: std::sync::atomic::AtomicBool,
     }
 
     #[cfg(feature = "computer-use")]
@@ -1319,6 +1368,14 @@ mod tests {
             // This port has no capture/snapshot cache; it only counts calls.
         }
 
+        fn permission_status(&self) -> nomi_computer::permissions::PermissionStatus {
+            use std::sync::atomic::Ordering;
+            nomi_computer::permissions::PermissionStatus {
+                accessibility: Some(!self.deny_accessibility.load(Ordering::SeqCst)),
+                screen_recording: Some(!self.deny_screen_recording.load(Ordering::SeqCst)),
+            }
+        }
+
         async fn execute_authorized(
             &self,
             _action_id: &str,
@@ -1430,6 +1487,89 @@ mod tests {
             action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
             input: serde_json::json!({"action":"observe"}),
         }
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn permission_required_is_typed_before_native_observation_or_input() {
+        use std::sync::atomic::Ordering;
+        use nomi_computer::permissions::ComputerPermissionKind;
+        let tool = Arc::new(FakeComputerToolPort::default());
+        tool.deny_accessibility.store(true, Ordering::SeqCst);
+        let (host, context) = computer_host(tool.clone());
+        let error = host.invoke(context.clone(), ComputerRoleOperation::Observe(computer_observe()))
+            .await.unwrap_err();
+        assert_eq!(error.code(), "SYSTEM_PERMISSION_REQUIRED");
+        let RoleHostError::PermissionRequired(missing) = &error else { panic!("{error}") };
+        assert_eq!(missing.permissions, vec![ComputerPermissionKind::Accessibility]);
+        assert_eq!(missing.operation, "observe");
+        let encoded: serde_json::Value = serde_json::from_str(&error.to_string()).unwrap();
+        assert_eq!(encoded["schema"], "system-permission-required.v1");
+        assert_eq!(encoded["execution"], "not_executed");
+        assert_eq!(encoded["permissions"], serde_json::json!(["accessibility"]));
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+
+        // Capturing pixels uses its own grant, independently from AX/input.
+        let pixels = host.invoke(context.clone(), ComputerRoleOperation::Observe(ComputerObserve {
+            action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+            input: serde_json::json!({"action":"screenshot"}),
+        })).await.unwrap();
+        let input = ComputerInput {
+            action: "left_click".to_owned(),
+            parameters: serde_json::json!({"x":10,"y":10}),
+            expected_generation: pixels.generation,
+        };
+        let error = host.invoke(context.clone(), ComputerRoleOperation::Input(input.clone()))
+            .await.unwrap_err();
+        assert!(matches!(error, RoleHostError::PermissionRequired(_)));
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1, "no native input was admitted");
+
+        // Grant restoration does not resurrect an input lease or replay it.
+        tool.deny_accessibility.store(false, Ordering::SeqCst);
+        let error = host.invoke(context.clone(), ComputerRoleOperation::Input(input.clone()))
+            .await.unwrap_err();
+        assert_eq!(error, RoleHostError::StaleObservationGeneration);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+        let pixels = host.invoke(context.clone(), ComputerRoleOperation::Observe(ComputerObserve {
+            action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+            input: serde_json::json!({"action":"screenshot"}),
+        })).await.unwrap();
+        host.invoke(context, ComputerRoleOperation::Input(ComputerInput {
+            expected_generation: pixels.generation,
+            ..input
+        })).await.unwrap();
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn missing_screen_grant_neither_requires_accessibility_nor_blocks_launch() {
+        use std::sync::atomic::Ordering;
+        use nomi_computer::permissions::ComputerPermissionKind;
+        let tool = Arc::new(FakeComputerToolPort::default());
+        tool.deny_screen_recording.store(true, Ordering::SeqCst);
+        let (host, context) = computer_host(tool.clone());
+        let error = host.invoke(context.clone(), ComputerRoleOperation::Observe(ComputerObserve {
+            action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+            input: serde_json::json!({"action":"screenshot"}),
+        })).await.unwrap_err();
+        let RoleHostError::PermissionRequired(missing) = error else { panic!("{error}") };
+        assert_eq!(missing.permissions, vec![ComputerPermissionKind::ScreenRecording]);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+        host.invoke(context.clone(), ComputerRoleOperation::Observe(computer_observe()))
+            .await.unwrap();
+        tool.deny_accessibility.store(true, Ordering::SeqCst);
+        host.invoke(context.clone(), ComputerRoleOperation::Launch(ComputerLaunch {
+            target: "fixture-app".to_owned(),
+            app: None,
+        })).await.unwrap();
+        for operation in ["cursor_position", "list_windows", "wait"] {
+            host.invoke(context.clone(), ComputerRoleOperation::Observe(ComputerObserve {
+                action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+                input: serde_json::json!({"action":operation}),
+            })).await.unwrap();
+        }
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 5);
     }
 
     #[cfg(feature = "computer-use")]
@@ -2375,6 +2515,61 @@ mod tests {
                 assert_eq!(tool.input_calls.load(Ordering::SeqCst), 1);
             }
         }
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_invoker_missing_permission_records_rejected_zero_effect() {
+        use nomifun_agent_session::{AgentEffectState, EffectStrategy};
+        use std::sync::atomic::Ordering;
+        let state = computer_fixture_state_handle().await;
+        let fixture = CanonicalComputerFixture::new("missing-permission-input-effect").await;
+        let tool = Arc::new(FakeComputerToolPort::default());
+        let invoker = ComputerRoleInvoker::new_with_test_executor(tool.clone(), fixture.store.clone());
+        let observed = fixture.invoke_actual_invoker(
+            &invoker,
+            state.clone(),
+            "observe-before-permission-revocation",
+            ComputerRoleOperation::Observe(computer_observe()),
+        ).await.unwrap();
+        let generation = observed.0["generation"].as_u64().unwrap();
+        tool.deny_accessibility.store(true, Ordering::SeqCst);
+        let error = fixture.invoke_actual_invoker(
+            &invoker,
+            state,
+            "permission-blocked-input",
+            ComputerRoleOperation::Input(ComputerInput {
+                action: "set_element_value".to_owned(),
+                parameters: serde_json::json!({"ref":7,"text":"must not execute"}),
+                expected_generation: generation,
+            }),
+        ).await.unwrap_err();
+        assert_eq!(error.code(), "SYSTEM_PERMISSION_REQUIRED");
+        assert!(matches!(error, RoleHostError::PermissionRequired(_)));
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1, "only the prior observation ran");
+        let effects = fixture.store.list_effects(&fixture.session_id).await.unwrap();
+        let [effect] = effects.as_slice() else { panic!("expected the canonical input effect") };
+        assert_eq!(effect.strategy, EffectStrategy::ExternalUncertainEffect);
+        assert_eq!(effect.state, AgentEffectState::Rejected);
+        assert!(!fixture.store.has_unsettled_effects(&fixture.session_id).await.unwrap());
+        assert_eq!(effect.bounded_observation.as_ref().unwrap()["error"]["code"], "SYSTEM_PERMISSION_REQUIRED");
+        let events = fixture.store.read_events(&fixture.session_id, None, 200).await.unwrap();
+        assert!(events.events.iter().any(|event| Some(&event.event_id) == effect.terminal_event_id.as_ref() && event.kind.0 == "effect/failed"));
+        assert!(!events.events.iter().any(|event| event.kind.0 == "effect/uncertain"));
+
+        tool.deny_accessibility.store(false, Ordering::SeqCst);
+        let host = fixture.host(&invoker).await;
+        let error = fixture.invoke(
+            &host,
+            "do-not-reuse-pre-permission-observation",
+            ComputerRoleOperation::Input(ComputerInput {
+                action: "set_element_value".to_owned(),
+                parameters: serde_json::json!({"ref":7,"text":"must not replay"}),
+                expected_generation: generation,
+            }),
+        ).await.unwrap_err();
+        assert_eq!(error, RoleHostError::StaleObservationGeneration);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

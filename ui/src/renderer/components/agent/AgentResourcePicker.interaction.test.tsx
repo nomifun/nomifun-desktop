@@ -82,6 +82,25 @@ describe('Agent resource picker', () => {
     expect(requests).toEqual([{ method: 'GET', body: undefined }, { method: 'DELETE', body: { incarnation: 'chrome-1' } }]);
   });
 
+  test('hides automatic Computer and default Browser setup while keeping session admission ready', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
+    restores.push(() => permissions.mockRestore());
+    let browserReads = 0;
+    globalThis.fetch = (async () => { browserReads += 1; throw new Error('must not preflight Chrome'); }) as typeof fetch;
+    const states: boolean[] = [];
+    const changes: AgentResourceSelectionValue[] = [];
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['computer', 'browser']} capabilityIds={['computer', 'browser']}
+      actionIds={['computer/observe', 'browser/navigate']} value={{}} onChange={(value) => changes.push(value)}
+      onAdmissionReadinessChange={(ready) => states.push(ready)} hideAutomaticBrowser
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(screen.container.querySelector('section')).toBeNull();
+    expect(permissions).not.toHaveBeenCalled();
+    expect(browserReads).toBe(0);
+    expect(changes).toEqual([]);
+  });
+
   test('a pointer click opens the companion menu without native label activation closing it', async () => {
     const loader = async () => inventory;
     function Harness() {
@@ -218,52 +237,20 @@ describe('Agent resource picker', () => {
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Select Robot' }).textContent).toContain('Offline bot'));
     await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(screen.getByText(en.resources.runtimeUnavailableCount.replace('{{count}}', '1'))).toBeTruthy();
+    expect(screen.getByText(en.resources.ready)).toBeTruthy();
   });
 
-  test('keeps missing Computer permissions advisory and links to Settings', async () => {
-    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
-      platform: 'macos', app_label: 'NomiFun', permissions: [
-        { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
-        { kind: 'accessibility', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
-        { kind: 'screen_recording', state: 'not_determined', can_request: true, can_open_settings: true, requires_restart_after_grant: true, capabilities: ['computer_use'] },
-      ],
-    });
-    restores.push(() => permissions.mockRestore());
-    const states: boolean[] = [];
-    const Location = () => <span data-testid='location'>{useLocation().pathname}{useLocation().search}</span>;
-    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
-      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
-    /><Location /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(permissions).toHaveBeenCalledTimes(1);
-    expect(screen.getByText(en.resources.computerPermissionNeeded)).toBeTruthy();
-    expect(screen.queryByText(en.resources.pickerTitle)).toBeNull();
-    fireEvent.click(screen.getByText(en.resources.configure));
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
-  });
-
-  test('does not block the Agent when Computer permission status cannot be checked', async () => {
-    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockRejectedValue(
-      new Error('permission service unavailable')
-    );
-    restores.push(() => permissions.mockRestore());
-    const states: boolean[] = [];
-    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/input']}
-      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
-    /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(await screen.findByText(en.resources.computerCheckFailed)).toBeTruthy();
-  });
-
-  test('does not probe or block a launch-only Computer capability', async () => {
+  test.each([
+    { actionIds: ['computer/observe'] },
+    { actionIds: ['computer/input'] },
+    { actionIds: ['computer/launch'] },
+    { actionIds: ['computer/observe', 'computer/a11y.observe'] },
+  ])('leaves Computer authorization to actual tool use for %j', async ({ actionIds }) => {
     const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
     restores.push(() => permissions.mockRestore());
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/launch']}
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={actionIds}
       value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
@@ -271,22 +258,20 @@ describe('Agent resource picker', () => {
     expect(screen.container.querySelector('section')).toBeNull();
   });
 
-  test('hides the Computer setup panel when every required permission is ready', async () => {
-    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
-      platform: 'macos', app_label: 'NomiFun', permissions: [
-        { kind: 'accessibility', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
-        { kind: 'screen_recording', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
-      ],
-    });
+  test('keeps concrete resource choices available without probing Computer grants or showing a permission summary', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
     restores.push(() => permissions.mockRestore());
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe', 'computer/a11y.observe']}
-      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
+      requiredKinds={['computer', 'companion']} capabilityIds={['computer']} actionIds={['computer/input']}
+      value={{ companion: 'companion-1' }} onChange={() => undefined}
+      loadInventory={async () => inventory} onAdmissionReadinessChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(permissions).toHaveBeenCalledTimes(1);
-    expect(screen.container.querySelector('section')).toBeNull();
+    expect(permissions).not.toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: 'Select Companion' }).textContent).toContain('Mochi');
+    expect(screen.queryByText(en.resources.kinds.computer)).toBeNull();
+    expect(screen.queryByText(en.resources.configure)).toBeNull();
   });
 
   test('filters dependent resources by the selected product owner', () => {

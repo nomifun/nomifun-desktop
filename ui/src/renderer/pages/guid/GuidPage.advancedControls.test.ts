@@ -17,6 +17,9 @@ describe('GuidPage advanced controls', () => {
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
     expect(source.includes('<AgentResourcePicker')).toBe(true);
+    expect(source.includes('hideAutomaticBrowser')).toBe(true);
+    expect(source.includes("resourceConfiguration={resourcePickerKinds.has('browser')")).toBe(true);
+    expect(source.includes("presentation='embedded'")).toBe(true);
     expect(source.includes('<KnowledgeControl')).toBe(true);
     expect(source.includes('knowledgeEnabled && (')).toBe(true);
     expect(source.indexOf('<KnowledgeControl')).toBeLessThan(

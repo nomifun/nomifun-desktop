@@ -32,6 +32,8 @@ export type GuidAgentSelectorProps = {
   disabledReason?: string;
   switching?: boolean;
   switchingLabel?: string;
+  /** Optional per-launch choices live inside the existing Agent menu. */
+  resourceConfiguration?: React.ReactNode;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -59,12 +61,16 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   switchingLabel,
   onSelectTemplate,
   onSelectPreset,
+  resourceConfiguration,
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [allPersonalAgents, setAllPersonalAgents] = useState(false);
+  const [resourceConfigurationOpen, setResourceConfigurationOpen] = useState(false);
+  const resourceConfigurationRef = useRef<HTMLDivElement>(null);
+  const resourceConfigurationId = useId();
   const searchRef = useRef<HTMLInputElement>(null);
   const mineHeading = useId();
   const templateHeading = useId();
@@ -80,6 +86,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     if (!next) {
       setQuery('');
       setAllPersonalAgents(false);
+      setResourceConfigurationOpen(false);
     }
   };
   const { refs, floatingStyles, context } = useFloating({
@@ -101,7 +108,19 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     ],
   });
   const click = useClick(context);
-  const dismiss = useDismiss(context);
+  const dismiss = useDismiss(context, {
+    outsidePress: (event) => {
+      // Arco Select portals its choices outside this floating Agent menu. The
+      // resource combobox still owns that popup, so choosing a resource must
+      // not dismiss the surrounding configuration before its click arrives.
+      if (!(event.target instanceof Node)) return true;
+      const target = event.target;
+      const controls = resourceConfigurationRef.current?.querySelectorAll('[aria-controls]') ?? [];
+      return !Array.from(controls).some((control) =>
+        control.getAttribute('aria-controls')?.split(' ').some((id) =>
+          document.getElementById(id)?.contains(target)));
+    },
+  });
   const role = useRole(context, { role: 'dialog' });
   const { getReferenceProps, getFloatingProps } = useInteractions([click, dismiss, role]);
 
@@ -145,6 +164,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     action();
   };
   const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('[data-agent-resource-configuration]')) return;
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     const choices = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-agent-choice]'));
     if (event.key === 'Enter' && event.target === searchRef.current) {
@@ -247,6 +267,21 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                   </section>
                 )}
                 {!isLoading && noMatches && <p className={styles.empty} role='status'>{t('guid.agentEntries.empty')}</p>}
+                {resourceConfiguration && !normalizedQuery && <div className={styles.resourceConfiguration} data-agent-resource-configuration>
+                  <button
+                    type='button'
+                    className={styles.resourceConfigurationToggle}
+                    aria-expanded={resourceConfigurationOpen}
+                    aria-controls={resourceConfigurationId}
+                    onClick={() => setResourceConfigurationOpen((current) => !current)}
+                  >
+                    <span>{t('agentSettings.resources.pickerTitle')}</span>
+                    <Down theme='outline' size={12} fill='currentColor' className={resourceConfigurationOpen ? styles.chevronOpen : undefined} />
+                  </button>
+                  {resourceConfigurationOpen && <div ref={resourceConfigurationRef} id={resourceConfigurationId} className={styles.resourceConfigurationContent}>
+                    {resourceConfiguration}
+                  </div>}
+                </div>}
               </div>
               <footer className={styles.footer}>
                 <Link className={styles.manageLink} to='/agent' onClick={() => changeOpen(false)}>{t('guid.agentEntries.manage')}</Link>

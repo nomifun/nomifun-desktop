@@ -14,6 +14,51 @@ pub struct PermissionStatus {
     pub screen_recording: Option<bool>,
 }
 
+/// The OS grant required by the exact native operation. These identities are
+/// also used by the existing system-permission settings API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerPermissionKind {
+    Accessibility,
+    ScreenRecording,
+}
+
+/// A confirmed pre-execution denial, separate from an arbitrary native error.
+/// Unknown grant state never manufactures a permission denial.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissingComputerPermissions {
+    pub action_id: String,
+    pub operation: String,
+    pub permissions: Vec<ComputerPermissionKind>,
+}
+
+/// Check only the prerequisite for this exact, already authorized operation.
+/// This function neither requests grants nor constructs a native device API.
+pub fn missing_permissions_for_operation(
+    action_id: &str,
+    operation: &str,
+    status: PermissionStatus,
+) -> Option<MissingComputerPermissions> {
+    use crate::capability::ComputerAction;
+    let action = ComputerAction::parse(action_id)?;
+    if ComputerAction::for_native_operation(operation) != Some(action) {
+        return None;
+    }
+    let missing = match (action, operation) {
+        (ComputerAction::Observe, "screenshot") if status.screen_recording == Some(false) => {
+            Some(ComputerPermissionKind::ScreenRecording)
+        }
+        (ComputerAction::A11yObserve, "observe") | (ComputerAction::Input, _)
+            if status.accessibility == Some(false) => Some(ComputerPermissionKind::Accessibility),
+        _ => None,
+    }?;
+    Some(MissingComputerPermissions {
+        action_id: action_id.to_owned(),
+        operation: operation.to_owned(),
+        permissions: vec![missing],
+    })
+}
+
 /// Live Accessibility (input synthesis / future a11y-tree) grant state.
 /// `None` where the platform has no such gate.
 pub fn accessibility_granted() -> Option<bool> {
@@ -306,5 +351,58 @@ mod tests {
             assert_eq!(s.accessibility, None);
             assert_eq!(s.screen_recording, None);
         }
+    }
+
+    #[test]
+    fn prerequisites_follow_the_exact_operation_and_confirmed_denial() {
+        use crate::capability::ComputerAction;
+        let denied = PermissionStatus {
+            accessibility: Some(false),
+            screen_recording: Some(false),
+        };
+        let cases = [
+            (ComputerAction::Observe, "screenshot", Some(ComputerPermissionKind::ScreenRecording)),
+            (ComputerAction::A11yObserve, "observe", Some(ComputerPermissionKind::Accessibility)),
+            (ComputerAction::Input, "type", Some(ComputerPermissionKind::Accessibility)),
+            (ComputerAction::Input, "click_element", Some(ComputerPermissionKind::Accessibility)),
+            (ComputerAction::Input, "focus_window", Some(ComputerPermissionKind::Accessibility)),
+            (ComputerAction::Observe, "cursor_position", None),
+            (ComputerAction::Observe, "list_windows", None),
+            (ComputerAction::Observe, "wait", None),
+            (ComputerAction::Launch, "launch", None),
+        ];
+        for (action, operation, expected) in cases {
+            let missing = missing_permissions_for_operation(action.id(), operation, denied);
+            assert_eq!(missing.as_ref().map(|value| value.permissions.as_slice()), expected.as_ref().map(std::slice::from_ref), "{operation}");
+            if let Some(missing) = missing {
+                assert_eq!(missing.action_id, action.id());
+                assert_eq!(missing.operation, operation);
+            }
+        }
+        for status in [
+            PermissionStatus { accessibility: None, screen_recording: None },
+            PermissionStatus { accessibility: Some(true), screen_recording: Some(true) },
+        ] {
+            assert!(missing_permissions_for_operation(ComputerAction::Observe.id(), "screenshot", status).is_none());
+            assert!(missing_permissions_for_operation(ComputerAction::A11yObserve.id(), "observe", status).is_none());
+            assert!(missing_permissions_for_operation(ComputerAction::Input.id(), "type", status).is_none());
+        }
+        assert!(missing_permissions_for_operation(ComputerAction::Observe.id(), "type", denied).is_none());
+        assert!(missing_permissions_for_operation("browser/observe", "screenshot", denied).is_none());
+    }
+
+    #[test]
+    fn available_permission_is_independent_of_unrelated_missing_grant() {
+        use crate::capability::ComputerAction;
+        assert!(missing_permissions_for_operation(
+            ComputerAction::Observe.id(),
+            "screenshot",
+            PermissionStatus { accessibility: Some(false), screen_recording: Some(true) },
+        ).is_none());
+        assert!(missing_permissions_for_operation(
+            ComputerAction::A11yObserve.id(),
+            "observe",
+            PermissionStatus { accessibility: Some(true), screen_recording: Some(false) },
+        ).is_none());
     }
 }

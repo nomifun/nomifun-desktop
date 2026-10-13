@@ -17,11 +17,6 @@ import {
   type AgentResourceSelectionValue,
   type UserAgentResourceKind,
 } from '@/renderer/hooks/agent/agentResourceSelection';
-import {
-  computerPermissionKindsForActions,
-  computerPermissionsReady,
-} from '@/renderer/hooks/system/systemPermissionModel';
-import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import styles from './AgentResourcePicker.module.css';
 import BrowserResourceField from './BrowserResourceField';
 
@@ -212,11 +207,14 @@ type Props = {
    */
   onAdmissionReadinessChange?: (ready: boolean) => void;
   disabled?: boolean;
+  /** The automatic browser needs no permanent launch-screen configuration. */
+  hideAutomaticBrowser?: boolean;
+  presentation?: 'panel' | 'embedded';
   loadInventory?: AgentResourceInventoryLoader;
   onNavigateToResource?: (route: string) => void;
 };
 
-const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [], companionBindings = false, capabilityIds, actionIds = [], value, onChange, onAdmissionReadinessChange, disabled = false, loadInventory = loadAgentResourceInventory, onNavigateToResource }) => {
+const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [], companionBindings = false, capabilityIds, actionIds = [], value, onChange, onAdmissionReadinessChange, disabled = false, hideAutomaticBrowser = false, presentation = 'panel', loadInventory = loadAgentResourceInventory, onNavigateToResource }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const requiredKey = [...requiredKinds].sort().join('\u0000');
@@ -229,18 +227,6 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const optional = useMemo(() => new Set<UserAgentResourceKind>(
     optionalKey ? optionalKey.split('\u0000') as UserAgentResourceKind[] : []
   ), [optionalKey]);
-  const needsComputer = required.has('computer');
-  const computerPermissionKinds = useMemo(
-    () => computerPermissionKindsForActions(actions),
-    [actions]
-  );
-  const needsComputerPermissionCheck = needsComputer && computerPermissionKinds.length > 0;
-  const computerPermissions = useSystemPermissions(needsComputerPermissionCheck);
-  const computerReady = !needsComputerPermissionCheck || (
-    !computerPermissions.loading &&
-    !computerPermissions.error &&
-    computerPermissionsReady(computerPermissions.status, actions)
-  );
   const multipleMcp = companionBindings || allowsMultipleMcpServers(capabilities);
   const [rosterRevision, setRosterRevision] = useState(0);
   const [browserReady, setBrowserReady] = useState(true);
@@ -339,10 +325,6 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     if (changed) onChange(next);
   }, [fields, inventory, loading, multipleMcp, onChange, required, value]);
 
-  const selectedRobot = value.robot
-    ? (inventory.options.robot ?? []).find((option) => option.value === value.robot)
-    : undefined;
-  const selectedRuntimeResourcesAvailable = !value.robot || selectedRobot?.selectable === true;
   const requiredFields = requiredAgentResourcePickerKinds(
     [...required].filter((kind) => {
       const pickerKind = kind === 'companion_memory' ? 'companion' : kind;
@@ -354,54 +336,23 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   // every granted capability's current environment to be healthy. Keeping
   // those axes separate lets ordinary chat continue while the affected tool
   // surface stays absent or reports an actionable error at invocation time.
-  const sessionResourcesReady = !pendingBlocksLaunch && (!fields.includes('browser') || browserReady);
-  const runtimeIssueCount = (value.robot && !selectedRuntimeResourcesAvailable ? 1 : 0)
-    + (needsComputerPermissionCheck && !computerPermissions.loading && !computerReady ? 1 : 0);
+  const automaticBrowserHidden = hideAutomaticBrowser && fields.length === 1
+    && fields[0] === 'browser' && (value.browser === undefined || value.browser === 'managed-browser');
+  const sessionResourcesReady = !pendingBlocksLaunch
+    && (automaticBrowserHidden || !fields.includes('browser') || browserReady);
   const resourceStatusKey = fields.includes('browser') && !browserReady
     ? 'agentSettings.resources.browser.connectionNeeded'
     : resolution.missingKinds.length || !sessionResourcesReady
-    ? 'agentSettings.resources.missingCount'
-    : runtimeIssueCount > 0
-      ? 'agentSettings.resources.runtimeUnavailableCount'
+      ? 'agentSettings.resources.missingCount'
       : 'agentSettings.resources.ready';
   useEffect(() => {
     onAdmissionReadinessChange?.(sessionResourcesReady);
     return () => onAdmissionReadinessChange?.(false);
   }, [onAdmissionReadinessChange, sessionResourcesReady]);
 
-  const showComputerSetup = needsComputerPermissionCheck
-    && !computerPermissions.loading
-    && !computerReady;
-  if (!fields.length) {
-    if (!showComputerSetup) return null;
-    return <section className={styles.computerNotice} aria-label={t('agentSettings.resources.kinds.computer')}>
-      <div className={styles.computerNoticeCopy}>
-        <strong>{t('agentSettings.resources.kinds.computer')}</strong>
-        <span className={computerPermissions.error ? styles.fieldError : undefined}>
-          {t(computerPermissions.error
-            ? 'agentSettings.resources.computerCheckFailed'
-            : 'agentSettings.resources.computerPermissionNeeded')}
-        </span>
-        <small>{t('agentSettings.resources.computerPermissionScope', {
-          permissions: computerPermissionKinds
-            .map((kind) => t(`settings.capabilityPermissions.permissions.${kind === 'screen_recording' ? 'screenRecording' : 'accessibility'}`))
-            .join(', '),
-        })}</small>
-      </div>
-      <Button
-        className={styles.emptyButton}
-        size='mini'
-        type='text'
-        icon={<LinkOne theme='outline' size={13} />}
-        onClick={(event) => {
-          event.preventDefault();
-          const route = '/settings/permissions?tab=computer-use';
-          if (onNavigateToResource) onNavigateToResource(route);
-          else void navigate(route);
-        }}
-      >{t('agentSettings.resources.configure')}</Button>
-    </section>;
-  }
+  // OS authorization is checked when a Computer action actually runs. A
+  // launch screen with no concrete resource choices has nothing to configure.
+  if (!fields.length || automaticBrowserHidden) return null;
   const kindName = (kind: string) => {
     const key = kind === 'mcp_server'
       ? 'mcpConnection'
@@ -431,48 +382,11 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
         : t('agentSettings.resources.robotPermissionsNotRequired');
     return [option.description, phase, authority].filter(Boolean).join(' · ');
   };
-  return <section className={styles.picker} aria-label={t('agentSettings.resources.pickerTitle')}>
-    <div className={styles.header}><div className={styles.headerCopy}><strong>{t('agentSettings.resources.pickerTitle')}</strong><span>{t(companionBindings ? 'agentSettings.resources.companionBindingHint' : 'agentSettings.resources.pickerHint')}</span></div>
-      <span className={`${styles.status} ${!resolution.missingKinds.length && sessionResourcesReady && runtimeIssueCount === 0 ? styles.statusReady : ''}`}>{t(resourceStatusKey, { count: resourceStatusKey === 'agentSettings.resources.runtimeUnavailableCount' ? runtimeIssueCount : missingChoiceCount })}</span>
-    </div>
+  return <section className={`${styles.picker} ${presentation === 'embedded' ? styles.pickerEmbedded : ''}`} aria-label={t('agentSettings.resources.pickerTitle')}>
+    {presentation === 'panel' && <div className={styles.header}><div className={styles.headerCopy}><strong>{t('agentSettings.resources.pickerTitle')}</strong><span>{t(companionBindings ? 'agentSettings.resources.companionBindingHint' : 'agentSettings.resources.pickerHint')}</span></div>
+      <span className={`${styles.status} ${!resolution.missingKinds.length && sessionResourcesReady ? styles.statusReady : ''}`}>{t(resourceStatusKey, { count: missingChoiceCount })}</span>
+    </div>}
     <div className={styles.fields}>
-      {showComputerSetup && <div className={styles.field}>
-        <span className={styles.fieldLabel}>{t('agentSettings.resources.kinds.computer')}</span>
-        <div className={styles.fieldControl}>
-          <div className='min-w-0 flex-1 text-12px text-t-primary'>
-            {computerPermissions.loading
-              ? t('agentSettings.resources.computerChecking')
-              : computerPermissions.error
-                ? t('agentSettings.resources.computerCheckFailed')
-                : computerReady
-                  ? t('agentSettings.resources.computerReady')
-                  : t('agentSettings.resources.computerPermissionNeeded')}
-          </div>
-          {!computerReady && !computerPermissions.loading && <Button
-            className={styles.emptyButton}
-            size='mini'
-            type='text'
-            icon={<LinkOne theme='outline' size={13} />}
-            onClick={(event) => {
-              event.preventDefault();
-              const route = '/settings/permissions?tab=computer-use';
-              if (onNavigateToResource) onNavigateToResource(route);
-              else void navigate(route);
-            }}
-          >{t('agentSettings.resources.configure')}</Button>}
-        </div>
-        <span className={`${styles.fieldHint} ${computerPermissions.error || !computerReady ? styles.fieldError : ''}`}>
-          {computerPermissions.loading
-            ? <Spin size={10} />
-            : computerPermissionKinds.length === 0
-              ? t('agentSettings.resources.computerPermissionNotRequired')
-              : t('agentSettings.resources.computerPermissionScope', {
-                permissions: computerPermissionKinds
-                  .map((kind) => t(`settings.capabilityPermissions.permissions.${kind === 'screen_recording' ? 'screenRecording' : 'accessibility'}`))
-                  .join(', '),
-              })}
-        </span>
-      </div>}
       {fields.map((kind) => {
       if (kind === 'browser') return <BrowserResourceField key={kind} value={value.browser}
         onChange={(browser) => onChange({ ...value, browser })} onReadinessChange={setBrowserReady} disabled={disabled} />;

@@ -209,5 +209,17 @@
   "export.unavailable": "Conversation export is unavailable",
   "unknownMessageType": "Unknown message type: {{type}}",
   "command": "Command:",
-  "processing": "Processing..."
+  "processing": "Processing...",
+  "systemPermission": {
+    "context": "This Computer action has not run. You can grant access or continue chatting.",
+    "title": "Computer action needs access",
+    "missing": "Required: {{permissions}}",
+    "checkFailedTitle": "Could not verify system access",
+    "checkFailed": "This action has not run. Check permissions again.",
+    "retryCheck": "Check again",
+    "grant": "Grant access",
+    "later": "Later",
+    "screenRecording": "Screen Recording",
+    "accessibility": "Accessibility"
+  }
 }

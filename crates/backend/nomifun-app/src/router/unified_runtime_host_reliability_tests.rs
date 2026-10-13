@@ -516,6 +516,53 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
 }
 
 #[tokio::test]
+async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_flush() {
+    use nomifun_agent_runtime::AgentToolResult;
+    use nomifun_chat_model_broker::ChatToolCall;
+    let fixture = Fixture::new("permission-result-sequence").await;
+    let host = fixture.host.clone();
+    let mut message = fixture.message.clone();
+    message.msg_id = message.source_message_id.clone().unwrap();
+    host.admit_preparation(&message, CancellationToken::new()).await.unwrap();
+    assert!(host.record_event(&message, &AgentEngineEvent::TurnStarted {
+        binding: host.engine_binding.clone(), turn_operation_id: "cleanup-retry-turn".into(),
+    }).await.unwrap().is_none());
+    for (index, is_error) in [true, false].into_iter().enumerate() {
+        let call_id = format!("permission-sequence-{index}");
+        host.record_event(&message, &AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall {
+            call_id: call_id.clone().into(), name: "read_file".into(),
+            arguments: StrictJsonValue(json!({"path":"README.md"})), provider_metadata: None,
+        }}).await.unwrap();
+        assert!(host.admit_tool(&message, &AgentEngineEvent::ToolStarted {
+            step: 1, call_id: call_id.clone().into(), capability_id: "workspace.files".into(),
+            action_id: "workspace.files/read".into(),
+        }).await.unwrap());
+        // Short text stays buffered until the result commits both records.
+        assert!(host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
+            step: 1, text: format!("buffered before {call_id}"),
+        }).await.unwrap().is_none());
+        let seq = host.record_event(&message, &AgentEngineEvent::ToolCompleted { step: 1,
+            result: AgentToolResult::text(call_id.clone().into(), "owner observation", is_error),
+        }).await.unwrap().expect("actual canonical ToolCompleted acknowledgement");
+        let persisted: i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? \
+            AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_completed' \
+            AND json_extract(inline_json,'$.event.result.call_id')=?")
+            .bind(&host.options.conversation_id).bind(&call_id).fetch_one(fixture.pool()).await.unwrap();
+        assert_eq!(seq, persisted as u64);
+        let text_seq: i64 = sqlx::query_scalar("SELECT MAX(seq) FROM agent_events WHERE session_id=? \
+            AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='output_text_delta'")
+            .bind(&host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+        assert!(text_seq < persisted, "result identity must not borrow the flushed text acknowledgement");
+        assert!(host.record_event(&message, &AgentEngineEvent::ReasoningDelta {
+            step: index as u16 + 2, text: "a later canonical observation".into(),
+        }).await.unwrap().is_none());
+        let head = fixture.owner.canonical().store().head(&host.options.conversation_id.clone().into()).await.unwrap();
+        assert!(head.last_seq > seq, "an unrelated later head is distinct from the result receipt");
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn claimed_preparation_cancel_keeps_same_cleanup_owner() {
     claimed_preparation_scenario(true).await;
 }

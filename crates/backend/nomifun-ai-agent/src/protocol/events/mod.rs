@@ -247,6 +247,7 @@ mod tests {
             identity: tool_call::ToolCallIdentity {
                 capability_id: Some("workspace.files".into()),
                 action_id: Some("workspace.files/read".into()),
+                ..Default::default()
             },
             call_id: "call-1".into(),
             name: "read_file".into(),

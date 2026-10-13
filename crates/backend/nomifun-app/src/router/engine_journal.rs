@@ -612,7 +612,7 @@ impl EngineTurnJournal {
         cursor: &Cursor,
         event: &Value,
         kind: EngineJournalWrite,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<u64>, AppError> {
         let next = cursor.sequence.saturating_add(1);
         let value = json!({
             "producer_seq": next,
@@ -637,12 +637,12 @@ impl EngineTurnJournal {
                 payload: payload_ref,
             },
         };
-        if kind == EngineJournalWrite::Progress {
-            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?;
+        let appended = if kind == EngineJournalWrite::Progress {
+            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
         } else {
-            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?;
-        }
-        Ok(())
+            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
+        };
+        Ok(appended.ack.map(|ack| ack.seq))
     }
 
     async fn append_assistant_part(
@@ -1093,11 +1093,19 @@ impl EngineTurnJournal {
     }
 
     pub async fn append(
+        &self, payload: String, model_operation: Option<String>, kind: EngineJournalWrite,
+    ) -> Result<(), AppError> {
+        self.append_with_receipt(payload, model_operation, kind).await.map(|_| ())
+    }
+
+    /// Return the acknowledgement of this exact progress record; the native
+    /// producer cursor and later message projections are different sequences.
+    pub async fn append_with_receipt(
         &self,
         payload: String,
         model_operation: Option<String>,
         kind: EngineJournalWrite,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<u64>, AppError> {
         if payload.len() > 8 * 1024 * 1024 {
             return Err(failure("record exceeds hard byte limit"));
         }
@@ -1163,7 +1171,7 @@ impl EngineTurnJournal {
                 cursor.pending_cleanup_write = Some((payload.clone(),model_operation.clone(),kind));
             }
             cursor.uncertain = true;
-            Self::append_progress(&journal, &cursor, &event_value, kind).await?;
+            let event_seq = Self::append_progress(&journal, &cursor, &event_value, kind).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
             if let Some(AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..})=&runtime_event {
                 if model_operation_id.as_ref()!=format!("{}:model:{step}",journal.operation.as_ref())||cleanup.operation_id!=*model_operation_id||cleanup.task_id.is_empty()
@@ -1195,7 +1203,7 @@ impl EngineTurnJournal {
             cursor.uncertain = false;
             cursor.pending_cleanup_write = None;
             journal.sequence.store(cursor.sequence, Ordering::Release);
-            Ok(())
+            Ok(event_seq)
         });
         task.await.map_err(failure)?
     }

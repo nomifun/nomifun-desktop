@@ -794,6 +794,16 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                     isLoading={agentSelection.isLoading}
                     loadError={agentSelection.loadError}
                     onRetry={agentSelection.refreshPresets}
+                    resourceConfiguration={resourcePickerKinds.has('browser') && (resourceSelectionValue.browser === undefined || resourceSelectionValue.browser === 'managed-browser') ? (
+                      <AgentResourcePicker
+                        requiredKinds={['browser']}
+                        capabilityIds={presetCapabilityIds}
+                        value={resourceSelectionValue}
+                        onChange={setResourceSelectionValue}
+                        presentation='embedded'
+                        disabled={guidInput.loading || !presetResourceResolutionReady}
+                      />
+                    ) : undefined}
                     onSelectPreset={(presetId) =>
                       handleSelectAgent({ kind: 'preset', presetId })
                     }
@@ -849,6 +859,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
               onAdmissionReadinessChange={setResourcePickerReady}
+              hideAutomaticBrowser
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />}
 

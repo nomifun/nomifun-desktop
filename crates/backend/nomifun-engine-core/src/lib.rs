@@ -9,11 +9,14 @@ mod error;
 mod context_resource;
 mod kernel;
 mod process;
+mod system_permission;
 mod tool;
 mod tool_schema;
 pub use tool_schema::model_tool_schema;
 
 pub use error::{EngineProcessError, EngineToolError};
+pub use system_permission::{SystemPermissionKind, SystemPermissionRequired, SYSTEM_PERMISSION_REQUIRED,
+    project_system_permission_required, system_permission_error_carrier};
 pub use context_resource::{EngineContextContent, EngineContextResource, EngineResourceQuery, EngineResourceRead, EngineResourceImageRead, EngineResourcePort};
 pub use context_resource::mcp_template_variables_schema;
 pub use kernel::{EngineToolExposure, KernelEngineToolInvoker, compile_engine_tool_plan};

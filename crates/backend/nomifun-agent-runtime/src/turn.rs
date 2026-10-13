@@ -3477,8 +3477,12 @@ async fn record_tool_result(
         // Only an ordinary owner invocation failure is a model-observable tool
         // result. Structural/host contract failures must terminate the turn;
         // allowing the model to continue would hide a failed enforcement layer.
-        Err(error @ AgentEngineError::ToolInvocation(_))
-        | Err(error @ AgentEngineError::CapabilityKernel { .. }) => {
+        Err(AgentEngineError::CapabilityKernel { code, message }) => {
+            let output = nomifun_engine_core::system_permission_error_carrier(&code, &message)
+                .unwrap_or_else(|| AgentEngineError::CapabilityKernel { code, message }.to_string());
+            AgentToolResult::text(call_id.clone(), output, true)
+        }
+        Err(error @ AgentEngineError::ToolInvocation(_)) => {
             AgentToolResult::text(call_id.clone(), error.to_string(), true)
         }
         Err(error) => return Err(error),
@@ -3894,6 +3898,36 @@ mod tests {
             assert!(result.is_error);
             assert_eq!(result.call_id.as_ref(),format!("settlement-{}",cases[index].0));
         }
+    }
+
+    #[tokio::test]
+    async fn system_permission_kernel_error_is_recorded_in_the_original_tool_result() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
+            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
+            "execution":"not_executed"}).to_string();
+        let (_, result) = record_tool_result("permission-call".into(), Err(AgentEngineError::CapabilityKernel {
+            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(),
+        }), &sink, 1).await.unwrap();
+        assert!(result.is_error);
+        assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
+            result.is_error, &result.output_text()).is_some());
+        let recorded = sink.0.lock().unwrap()[0].clone();
+        let AgentEngineEvent::ToolCompleted { result: persisted, .. } = recorded
+            else { panic!("denial must use the ordinary canonical tool result") };
+        assert_eq!(persisted.output_text(), result.output_text());
+        let (_, unrelated) = record_tool_result("unrelated-call".into(), Err(AgentEngineError::ToolInvocation(body)),
+            &sink, 2).await.unwrap();
+        assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
+            unrelated.is_error, &unrelated.output_text()).is_none());
     }
 
     #[test]
