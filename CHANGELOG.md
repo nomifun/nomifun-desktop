@@ -5,6 +5,19 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.7 - 2026-10-14
+
+- Request system permissions on demand instead of at startup; make default
+  models optional, allow hiding contract details, and polish identity and
+  behavior settings.
+- Rework knowledge writeback: show compact writeback notices inside turns,
+  decouple and bound turn writeback, and fix reentrant locking.
+- Close macOS compatibility and native lifecycle gaps; remove the
+  redundant startup window.
+- Own app project sessions correctly and stop composer update loops.
+- Unify canonical tool proposal recovery and managed component process
+  invocation.
+
 ## v0.8.6 - 2026-10-13
 
 - Replace the legacy plugin system with application hosting and project
