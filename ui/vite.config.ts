@@ -104,9 +104,6 @@ export default defineConfig(({ mode }) => {
       outDir: 'dist',
       emptyOutDir: true,
       reportCompressedSize: false,
-      rollupOptions: {
-        input: { main: resolve(__dirname, 'index.html'), startup: resolve(__dirname, 'startup.html') },
-      },
     },
   };
 });

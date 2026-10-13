@@ -1,7 +1,7 @@
 import { Spin } from '@arco-design/web-react';
 import React from 'react';
 
-const AppLoader: React.FC<{ label?: string; loading?: boolean; children?: React.ReactNode }> = ({ label, loading = true, children }) => {
+const AppLoader: React.FC<{ label?: string }> = ({ label }) => {
   return (
     <div
       role='status'
@@ -16,9 +16,8 @@ const AppLoader: React.FC<{ label?: string; loading?: boolean; children?: React.
         color: 'var(--color-text-2)',
       }}
     >
-      {loading && <Spin dot />}
+      <Spin dot />
       {label ? <span>{label}</span> : null}
-      {children}
     </div>
   );
 };
