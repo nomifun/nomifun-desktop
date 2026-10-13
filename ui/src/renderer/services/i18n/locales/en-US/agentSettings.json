@@ -475,6 +475,25 @@
     "computerPermissionNeeded": "Computer actions are unavailable for now. The Agent remains usable and these actions recover after you grant access.",
     "computerPermissionScope": "This Agent needs: {{permissions}}. OS access does not expand the Agent's capability boundary.",
     "computerPermissionNotRequired": "This Agent only launches apps or URLs and needs neither Screen Recording nor Accessibility.",
+    "browser": {
+      "managed": "NomiFun browser",
+      "attached": "Existing Chrome",
+      "scope": "Existing Chrome uses the browser on the computer running NomiFun. It attaches without launching or closing Chrome or copying your profile. It supports observing and interacting with existing tabs; new tabs, uploads and downloads are unavailable.",
+      "setup": "On macOS or Windows, open Chrome 144 or later, enable remote debugging at chrome://inspect/#remote-debugging, approve Chrome's prompt, then connect here.",
+      "connect": "Connect Chrome",
+      "connectionNeeded": "Check the selected Chrome connection",
+      "disconnect": "Disconnect",
+      "refresh": "Refresh",
+      "failed": "Could not complete the connection request. Check Chrome's remote debugging settings, or refresh before trying again. If a session is using Chrome, finish its task before disconnecting.",
+      "selectedUnavailable": "This launch still selects existing Chrome. Connect it again or explicitly choose the NomiFun browser before starting.",
+      "states": {
+        "disconnected": "Chrome is not connected",
+        "connected": "Chrome is connected",
+        "connection_lost": "Chrome connection was lost",
+        "disconnecting": "Chrome is disconnecting",
+        "cleanup_failed": "Chrome disconnection could not be confirmed"
+      }
+    },
     "configure": "Configure",
     "bindingPolicyTitle": "Manage capability grants and resource bindings separately",
     "bindingPolicyBody": "The Agent configuration grants capabilities; the session or product scene binds knowledge, workspaces, devices, and connections. An unbound resource or unready environment disables only the affected tools and does not block the Agent's other capabilities.",

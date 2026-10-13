@@ -12,31 +12,40 @@ NomiFun 将桌面范围的 Computer 自动化与会话中的原生浏览器区�
 
 Windows 原生输入已有真实 smoke 验证。macOS、frame、dialog、文件和打包等完整产品验收仍在进行，请参阅[架构说明](../architecture/browser-platform.zh.md)中的当前限制。
 
-## 可选 Attached Chrome（Windows，实施中）
+## 可选 Attached Chrome（macOS 与 Windows）
 
 Agent session 的 `browser` 能力可以由一个附着的、正在运行的 Chrome 提供，
-而不必使用内嵌 Browser Workspace。该 Provider 是安装级的：在 Chrome 的
-`chrome://inspect/#remote-debugging` 中启用远程调试并批准提示后，通过
-`POST /api/browser-providers/attached-chrome` 连接一次，再把 session 绑定到
-`attached-chrome` Provider 资源。同一路由的 `GET`/`DELETE` 用于读取和释放
-附加连接。
+而不必使用内嵌 Browser Workspace。该 Provider 是安装级的。创建含 Browser
+动作的会话前，在资源选择器旁操作：在运行 NomiFun 的电脑上打开 Chrome 144
+或更新版本，在 `chrome://inspect/#remote-debugging` 中启用远程调试并批准
+提示，点击「连接 Chrome」，再明确将浏览器资源选为「已打开的 Chrome」。
+连接不会改变默认的 NomiFun 浏览器选择。「刷新状态」读取当前连接，
+「断开连接」只释放确切的已观察连接。这些控件调用
+`GET`/`POST`/`DELETE /api/browser-providers/attached-chrome`。
 
 不要求重启 Chrome，不创建替代 Profile，也不导入 Cookie、密码或历史。断开
 只释放连接和自动化状态，不关闭用户浏览器或标签。Agent 持有 run 时，浏览器
 可变操作 fail closed。
 
-前端接线与完整 iframe/文件/对话框验收矩阵仍在进行；Provider 及其 REST 面
-已在 `nomifun-app`（`browser_workspace_provider/attached_provider.rs`）实现。
-Edge、macOS 和 Linux 尚未声明支持。这项能力与内嵌浏览器、本地/厂商搜索相互
-独立。
+明确选中的 Chrome 连接丢失时，资源选择器保留原选择；需重新连接或明确改选
+NomiFun 浏览器后才能开始。Session 只冻结 `browser`/`attached-chrome` 的
+kind/id，所属、动作权限和连接身份仍由服务端派生。Quick Start 复用同一
+typed 资源选择合同，缺省使用 NomiFun 浏览器。
+
+此 Provider 可观察、导航和操作已有标签页；不支持新建标签、上传、下载或
+任意 evaluate。macOS 与 Windows 的发现实现和前端连接流程已具备，真实
+个人 Chrome 及完整 iframe/对话框产品验收仍需原生验证。Edge 与 Linux 不
+支持。这项能力与内嵌浏览器、本地/厂商搜索相互独立。
 
 ## 可选网页研究
 
 `web.research` 能力模块独立于模型厂商的原生搜索承担公网检索。查询通过隔离
 后台浏览器运行时执行，不读取会话登录态；启用它不授予 Browser 自动化权限。
 
-Windows 桌面会识别已安装的 Chrome 120+；没有合格安装时不能启用。发现过程
-不启动浏览器，实际查询才启动隔离运行时并核对版本。
+Windows 与 macOS 桌面会识别已安装的 Chrome 120+；macOS 从
+`/Applications/Google Chrome.app` 和 `~/Applications/Google Chrome.app` 发现安装。
+没有合格安装时不能启用。发现过程不启动浏览器，实际查询才使用独立临时
+Profile 启动隔离运行时并核对版本，不读取个人 Chrome Profile。
 搜索词发送给 Bing，引擎域名通过 Google Public DNS（HTTPS）解析，不读取会话
 登录态。Chrome 更新导致旧绑定失效时需重启应用。
 

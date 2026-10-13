@@ -55,11 +55,33 @@ impl ShellService {
     /// Browser capability and its run ownership. Trusted user-clicked links use
     /// [`Self::open_external`] instead.
     pub async fn launch(&self, target: &str, app: Option<&str>) -> Result<(), ShellError> {
+        let target = target.trim();
+        let app = app.map(str::trim);
         validate_launch_target(target)?;
         validate_agent_launch_is_not_web(target)?;
         if let Some(app) = app {
+            validate_launch_target(app)?;
             validate_agent_launch_app_is_not_browser(app)?;
         }
+        #[cfg(target_os = "macos")]
+        {
+            // Bare application names need LaunchServices resolution; a plain
+            // `open <name>` treats them as files. Keep existing paths and
+            // protocols as targets, and wait for `open` to report handoff
+            // failures without waiting for the launched application to exit.
+            let args = if let Some(app) = app {
+                vec!["-a", app, "--", target]
+            } else if leading_scheme(target).is_none()
+                && !target.contains(['/', '\\'])
+                && !Path::new(target).exists()
+            {
+                vec!["-a", target, "--"]
+            } else {
+                vec!["--", target]
+            };
+            return self.opener.run_command("/usr/bin/open", &args, None).await;
+        }
+        #[cfg(not(target_os = "macos"))]
         match app {
             Some(app) => self.opener.open_with_detached(target, app),
             None => self.opener.open_detached(target),
@@ -82,13 +104,24 @@ impl ShellService {
         }
     }
 
-    fn detect_vscode(&self) -> Option<&'static str> {
+    fn detect_vscode(&self) -> Option<String> {
         if self.opener.is_tool_available("code") {
-            return Some("code");
+            return Some("code".to_owned());
         }
-        if cfg!(target_os = "macos") {
-            let app_path = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-            return self.opener.is_tool_available(app_path).then_some(app_path);
+        #[cfg(target_os = "macos")]
+        {
+            // Finder installations can be system-wide or per-user. Neither
+            // requires VS Code's optional shell-command installation.
+            let applications = std::iter::once(std::path::PathBuf::from("/Applications"))
+                .chain(dirs::home_dir().map(|home| home.join("Applications")));
+            for directory in applications {
+                let app_path = directory.join("Visual Studio Code.app/Contents/Resources/app/bin/code");
+                if let Some(program) = app_path.to_str()
+                    && self.opener.is_tool_available(program)
+                {
+                    return Some(program.to_owned());
+                }
+            }
         }
         None
     }
@@ -96,7 +129,7 @@ impl ShellService {
     async fn open_folder_vscode(&self, path: &Path) -> Result<(), ShellError> {
         let program = self.detect_vscode()
             .ok_or_else(|| ShellError::ToolNotInstalled("vscode".to_owned()))?;
-        self.opener.run_command(program, &[&path.to_string_lossy()], None).await
+        self.opener.run_command(&program, &[&path.to_string_lossy()], None).await
     }
 
     async fn open_folder_terminal(&self, path: &Path) -> Result<(), ShellError> {
@@ -309,20 +342,40 @@ fn validate_launch_target(target: &str) -> Result<(), ShellError> {
 }
 
 /// Fail closed on Agent-initiated web-page opens through the OS browser.
-/// Matching is on the scheme prefix (`http:`/`https:`) rather than `://`,
-/// because browsers normalize scheme-only forms such as `https:example.com`
-/// back to a real web navigation, and the substring check also catches wrapper
-/// protocols such as `microsoft-edge:https://…`.
+/// Match leading schemes at each protocol nesting level. Local POSIX paths
+/// can contain `http:` in their filenames without being web navigation.
 fn validate_agent_launch_is_not_web(target: &str) -> Result<(), ShellError> {
-    let lower = target.to_ascii_lowercase();
-    if lower.contains("http:") || lower.contains("https:") {
-        return Err(ShellError::InvalidTarget(format!(
-            "opening web URLs through the operating-system browser is not available to Agent \
-             tools ({target:?}). Use the bound Browser Module actions to read or interact \
-             with web pages."
-        )));
+    let mut rest = target.trim();
+    for _ in 0..8 {
+        let Some((scheme, inner)) = leading_scheme(rest) else {
+            return Ok(());
+        };
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+            return Err(ShellError::InvalidTarget(format!(
+                "opening web URLs through the operating-system browser is not available to Agent \
+                 tools ({target:?}). Use the bound Browser Module actions to read or interact \
+                 with web pages."
+            )));
+        }
+        rest = inner.trim_start_matches(['/', '\\']).trim_start();
     }
     Ok(())
+}
+
+fn leading_scheme(target: &str) -> Option<(&str, &str)> {
+    let colon = target.find(':')?;
+    // A drive-letter path is not a protocol.
+    if colon < 2 {
+        return None;
+    }
+    let scheme = &target[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return None;
+    }
+    Some((scheme, &target[colon + 1..]))
 }
 
 /// Browser and generic URL-opener executables that must not be selected as
@@ -341,18 +394,26 @@ const AGENT_BLOCKED_OPENER_APPS: &[&str] = &[
     "rundll32",
     "google-chrome",
     "google-chrome-stable",
+    "google chrome",
+    "google chrome beta",
+    "google chrome dev",
+    "google chrome canary",
     "chrome",
     "chromium",
     "chromium-browser",
     "firefox",
     "msedge",
     "microsoft-edge",
+    "microsoft edge",
     "edge",
     "brave",
     "brave-browser",
+    "brave browser",
     "opera",
     "vivaldi",
     "safari",
+    "safari technology preview",
+    "tor browser",
 ];
 
 fn validate_agent_launch_app_is_not_browser(app: &str) -> Result<(), ShellError> {
@@ -362,7 +423,7 @@ fn validate_agent_launch_app_is_not_browser(app: &str) -> Result<(), ShellError>
         .next()
         .unwrap_or(app)
         .to_ascii_lowercase();
-    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    let base = base.strip_suffix(".exe").or_else(|| base.strip_suffix(".app")).unwrap_or(&base);
     if AGENT_BLOCKED_OPENER_APPS.contains(&base) {
         return Err(ShellError::InvalidTarget(format!(
             "opening a target with the {app:?} browser/opener is not available to Agent \
@@ -382,7 +443,7 @@ mod tests {
     use std::fs;
 
     struct RecordingOpener {
-        installed_program: Option<&'static str>,
+        installed_program: Option<String>,
         commands: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::path::PathBuf>)>>,
     }
 
@@ -404,7 +465,7 @@ mod tests {
         }
 
         fn is_tool_available(&self, program: &str) -> bool {
-            self.installed_program == Some(program)
+            self.installed_program.as_deref() == Some(program)
         }
     }
 
@@ -430,14 +491,16 @@ mod tests {
     #[tokio::test]
     async fn vscode_launch_uses_the_detected_program_or_fails_without_spawning() {
         let programs = [
-            Some("code"),
+            Some("code".to_owned()),
             None,
             #[cfg(target_os = "macos")]
-            Some("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+            Some("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code".to_owned()),
+            #[cfg(target_os = "macos")]
+            dirs::home_dir().map(|home| home.join("Applications/Visual Studio Code.app/Contents/Resources/app/bin/code").to_string_lossy().into_owned()),
         ];
         for program in programs {
             let opener = Arc::new(RecordingOpener {
-                installed_program: program,
+                installed_program: program.clone(),
                 commands: std::sync::Mutex::new(Vec::new()),
             });
             let service = ShellService::new(opener.clone());
@@ -452,6 +515,49 @@ mod tests {
                 assert!(commands.is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_launch_resolves_application_names_and_preserves_target_arguments() {
+        let opener = Arc::new(RecordingOpener {
+            installed_program: None,
+            commands: std::sync::Mutex::new(Vec::new()),
+        });
+        let service = ShellService::new(opener.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("saved http: report.txt");
+        fs::write(&file, "report").unwrap();
+        let file = file.to_str().unwrap();
+
+        service.launch(" TextEdit ", None).await.unwrap();
+        service.launch("Thing 2.0.app", None).await.unwrap();
+        service.launch(file, None).await.unwrap();
+        service.launch(file, Some(" TextEdit ")).await.unwrap();
+        service.launch("mailto:redacted@example.invalid", None).await.unwrap();
+
+        let commands = opener.commands.lock().unwrap();
+        let expected = [
+            vec!["-a", "TextEdit", "--"],
+            vec!["-a", "Thing 2.0.app", "--"],
+            vec!["--", file],
+            vec!["-a", "TextEdit", "--", file],
+            vec!["--", "mailto:redacted@example.invalid"],
+        ];
+        assert_eq!(commands.len(), expected.len());
+        for (command, expected_args) in commands.iter().zip(expected) {
+            assert_eq!(command.0, "/usr/bin/open");
+            assert_eq!(command.1, expected_args);
+            assert_eq!(command.2, None);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_failed_launch_handoff_is_reported() {
+        let service = ShellService::new(Arc::new(crate::opener::DefaultSystemOpener));
+        let result = service.launch("__nomifun_missing_application_for_launch_test__", None).await;
+        assert!(matches!(result, Err(ShellError::CommandFailed(_))));
     }
 
     #[test]
@@ -629,7 +735,11 @@ mod tests {
         ));
         // A browser as the opening app is the same bypass even for a
         // non-URL target: browsers navigate bare-domain arguments.
-        for app in ["msedge", "chrome", "Firefox", "/usr/bin/google-chrome", "xdg-open"] {
+        for app in [
+            "msedge", "chrome", "Firefox", "/usr/bin/google-chrome", "xdg-open",
+            "Google Chrome", "/Applications/Google Chrome.app", "Safari.app",
+            "Microsoft Edge.app", "Brave Browser", "Tor Browser",
+        ] {
             assert!(
                 matches!(
                     svc.launch("example.com", Some(app)).await,

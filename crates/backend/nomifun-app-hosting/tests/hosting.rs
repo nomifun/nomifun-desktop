@@ -197,8 +197,63 @@ async fn restart_reconciles_exact_identity_and_never_kills_a_reused_pid() {
     let restarted = owner(&root).await;
     assert_eq!(restarted.get(&app.id).await.unwrap().state, AppState::Failed);
     assert!(probe_process_identity(identity.pid).unwrap().is_some(), "a mismatched process identity must never be killed");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(restarted.get(&app.id).await.unwrap().pid, Some(identity.pid), "root-only proof must retain cleanup evidence");
+        let error = restarted.operate(&app.id, AppOperation::Stop).await.unwrap_err();
+        assert!(error.to_string().contains("cleanup remains unproven"));
+        assert_eq!(restarted.get(&app.id).await.unwrap().state, AppState::Failed);
+        unrelated.shutdown().await.unwrap();
+        restarted.operate(&app.id, AppOperation::Stop).await.unwrap();
+    }
     restarted.shutdown().await.unwrap();
     unrelated.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn restart_retains_gone_root_with_live_group_as_unknown_and_stop_cannot_clear_it() {
+    use std::process::Stdio;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("original");
+    write(&source, "index.html", "<p>recovery proof fixture</p>");
+    let registry_root = temp.path().join("hosting");
+    let host = owner(&registry_root).await;
+    let app = host.import(&source, None, ImportKind::Artifact).await.unwrap();
+    host.shutdown().await.unwrap();
+    let marker = temp.path().join("child.pid");
+    let exit_gate = temp.path().join("root.exit");
+    // Model the older persisted root whose parent ownership no longer exists.
+    // The child expires by itself; no fixture cleanup uses a recycled PID.
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.args(["-c", "/bin/sleep 10 & printf '%s\\n' \"$!\" > \"$1\"; while [ ! -f \"$2\" ]; do /bin/sleep 0.01; done", "hosting-root"])
+        .arg(&marker).arg(&exit_gate).process_group(0)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+    let mut root = command.spawn().unwrap();
+    let identity = capture_child_identity(&root).unwrap();
+    wait_for(&marker).await;
+    let descendant = fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap();
+    let registry = registry_root.join("registry").join(format!("{}.json", app.id));
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    stored["identity"] = serde_json::to_value(&identity).unwrap();
+    stored["record"]["state"] = "running".into();
+    stored["record"]["pid"] = identity.pid.into();
+    fs::write(&registry, serde_json::to_vec(&stored).unwrap()).unwrap();
+    fs::write(&exit_gate, b"exit").unwrap();
+    root.wait().await.unwrap();
+    assert!(probe_process_identity(descendant).unwrap().is_some(), "fixture descendant must survive its root");
+
+    let restarted = owner(&registry_root).await;
+    let state = restarted.get(&app.id).await.unwrap();
+    assert_eq!(state.state, AppState::Failed);
+    assert_eq!(state.pid, Some(identity.pid));
+    assert!(state.last_error.as_deref().unwrap().contains("cleanup could not be confirmed"));
+    let error = restarted.operate(&app.id, AppOperation::Stop).await.unwrap_err();
+    assert!(error.to_string().contains("cleanup remains unproven"));
+    assert_eq!(restarted.get(&app.id).await.unwrap().state, AppState::Failed);
+    let retained: serde_json::Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(retained["identity"], serde_json::to_value(identity).unwrap());
+    assert!(probe_process_identity(descendant).unwrap().is_some(), "root-only proof must not signal or clear the surviving group");
 }
 
 #[tokio::test]

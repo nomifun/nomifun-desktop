@@ -31,6 +31,7 @@ use std::{
 
 const MAX_DOWNLOADS: usize = 4;
 const MAX_DOWNLOAD_HISTORY: usize = 64;
+mod permissions;
 
 enum DialogCompletion {
     Alert(RcBlock<dyn Fn()>),
@@ -90,11 +91,13 @@ struct State {
 pub(crate) struct NativeInteractions {
     page: Weak<Page>,
     state: RefCell<State>,
+    pub(super) permissions: permissions::Permissions,
 }
 
 impl NativeInteractions {
     pub(crate) fn new(page: Weak<Page>) -> Rc<Self> {
         Rc::new(Self {
+            permissions: permissions::Permissions::new(page.clone()),
             page,
             state: RefCell::new(State::default()),
         })
@@ -250,6 +253,7 @@ impl NativeInteractions {
     /// Call before navigation, close, renderer loss, and an input-owner change.
     /// Completion ownership is removed first, so a late sheet callback is inert.
     pub(crate) fn drain_dialogs(&self) {
+        self.permissions.drain();
         let (dialog, panel) = {
             let mut state = self.state.borrow_mut();
             (state.dialog.take(), state.open_panel.take())
@@ -593,6 +597,7 @@ impl NativeInteractions {
     /// An input-owner or visible-tab change revokes outstanding user choices,
     /// while a previously admitted native download remains independently owned.
     pub(crate) fn cancel_user_panels(self: &Rc<Self>) {
+        self.permissions.drain();
         let panel = self.state.borrow_mut().open_panel.take();
         if let Some(panel) = panel {
             unsafe {

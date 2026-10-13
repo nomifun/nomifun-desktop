@@ -114,6 +114,15 @@ pub(crate) async fn resolve_command_for_spawn(
     env: Option<&HashMap<String, String>>,
     cwd: Option<&Path>,
 ) -> Result<(String, Vec<String>), crate::error::TerminalError> {
+    #[cfg(unix)]
+    if command == SHELL_SENTINEL {
+        // GUI launchers need not export SHELL. Use the same account resolver
+        // as startup PATH discovery, and reject an invalid explicit override
+        // before it can be replaced by a bare-name PATH search.
+        nomifun_runtime::resolve_login_shell().map_err(|error| {
+            nomifun_common::AppError::BadRequest(format!("cannot resolve terminal login shell: {error}"))
+        })?;
+    }
     if nomifun_runtime::managed_command_tool(command).is_some() {
         let default_env = HashMap::new();
         let prepared = nomifun_runtime::prepare_managed_command_with_env(command, args, env.unwrap_or(&default_env), cwd).await
@@ -173,10 +182,16 @@ pub fn default_login_shell() -> String {
 
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_owned())
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+        nomifun_runtime::resolve_login_shell()
+            .map(|shell| shell.to_string_lossy().into_owned())
+            // Synchronous metadata callers preserve an invalid explicit
+            // setting; actual spawn above rejects it before any PTY effect.
+            .unwrap_or_else(|_| std::env::var("SHELL").unwrap_or_else(|_| SHELL_SENTINEL.to_owned()))
     }
+    #[cfg(not(any(windows, unix)))]
+    { "/bin/sh".to_owned() }
 }
 
 /// Parse the JSON args array stored on a row, tolerating malformed values.

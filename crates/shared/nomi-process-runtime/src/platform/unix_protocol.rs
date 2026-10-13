@@ -34,6 +34,10 @@ pub(super) enum FrameKind {
     Quiescing = 7,
     Failure = 8,
     Registered = 9,
+    /// macOS PTY launcher sealed its own session while retaining the payload.
+    PtySealed = 10,
+    PtySeal = 11,
+    PtyTerminate = 12,
 }
 
 impl FrameKind {
@@ -48,6 +52,9 @@ impl FrameKind {
             7 => Some(Self::Quiescing),
             8 => Some(Self::Failure),
             9 => Some(Self::Registered),
+            10 => Some(Self::PtySealed),
+            11 => Some(Self::PtySeal),
+            12 => Some(Self::PtyTerminate),
             _ => None,
         }
     }

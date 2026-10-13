@@ -12,6 +12,7 @@
 
 use axum::Json;
 use nomifun_api_types::ApiResponse;
+use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
 
 const PLATFORM: &str = if cfg!(target_os = "macos") {
@@ -269,39 +270,82 @@ pub(super) async fn request_system_permission(
 /// but still need a recovery path after the user previously denied them.
 pub(super) async fn open_permission_settings(
     Json(body): Json<PermissionRequestBody>,
-) -> Json<ApiResponse<()>> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     #[cfg(target_os = "macos")]
     {
-        let url = match body.kind.as_str() {
-            "accessibility" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-            }
-            "screen_recording" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-            }
-            "microphone" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-            }
-            "camera" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
-            "location" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"
-            }
-            "local_network" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
-            }
-            "notifications" => "x-apple.systempreferences:com.apple.Notifications-Settings.extension?bundleIdentifier=com.nomifun.desktop",
-            "full_disk_access" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-            }
-            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy",
-        };
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        let bundle_id = macos_bundle_identifier();
+        let url = permission_settings_url(&body.kind, bundle_id.as_deref());
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("/usr/bin/open").args(["--", &url]).output()
+        })
+        .await
+        .map_err(|error| AppError::Internal(format!("System Settings launch task failed: {error}")))?
+        .map_err(|error| AppError::Internal(format!("Could not open System Settings: {error}")))?;
+        if !output.status.success() {
+            let detail: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(512).collect();
+            return Err(AppError::Internal(format!("macOS refused to open System Settings ({}): {detail}", output.status)));
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = body.kind;
     }
-    Json(ApiResponse::ok(()))
+    Ok(Json(ApiResponse::ok(())))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn permission_settings_url(kind: &str, bundle_id: Option<&str>) -> String {
+    if kind == "notifications" {
+        let base = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+        // A bare/server process has no app bundle. Open the notification
+        // inventory then, instead of inventing a production identity. Bundle
+        // identifiers are restricted here so they cannot alter URL parameters.
+        return match bundle_id.filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))) {
+            Some(id) => format!("{base}?id={id}"),
+            None => base.to_owned(),
+        };
+    }
+    let pane = match kind {
+        "accessibility" => "Privacy_Accessibility",
+        "screen_recording" => "Privacy_ScreenCapture",
+        "microphone" => "Privacy_Microphone",
+        "camera" => "Privacy_Camera",
+        "location" => "Privacy_LocationServices",
+        "local_network" => "Privacy_LocalNetwork",
+        "full_disk_access" => "Privacy_AllFiles",
+        _ => "Privacy",
+    };
+    format!("x-apple.systempreferences:com.apple.preference.security?{pane}")
+}
+
+/// CoreFoundation's main bundle identifies the exact running app, including
+/// the development bundle. It is safe to read on an Axum worker and does not
+/// require an AppKit main-thread marker or trigger any permission request.
+#[cfg(target_os = "macos")]
+fn macos_bundle_identifier() -> Option<String> {
+    use std::ffi::{CStr, c_char, c_void};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFBundleGetMainBundle() -> *const c_void;
+        fn CFBundleGetIdentifier(bundle: *const c_void) -> *const c_void;
+        fn CFStringGetLength(string: *const c_void) -> isize;
+        fn CFStringGetCString(string: *const c_void, buffer: *mut c_char, capacity: isize, encoding: u32) -> u8;
+    }
+    // These are Get-rule references owned by CoreFoundation. Copy the UTF-8
+    // identifier immediately; no CF pointer crosses an async boundary.
+    unsafe {
+        let bundle = CFBundleGetMainBundle();
+        if bundle.is_null() { return None; }
+        let identifier = CFBundleGetIdentifier(bundle);
+        if identifier.is_null() { return None; }
+        let length = CFStringGetLength(identifier);
+        if !(1..=4096).contains(&length) { return None; }
+        let mut bytes = vec![0u8; length as usize * 4 + 1];
+        const UTF8: u32 = 0x0800_0100;
+        if CFStringGetCString(identifier, bytes.as_mut_ptr().cast(), bytes.len() as isize, UTF8) == 0 { return None; }
+        CStr::from_ptr(bytes.as_ptr().cast()).to_str().ok().map(str::to_owned)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +396,26 @@ pub(super) async fn request_computer_permission(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_settings_use_the_current_bundle_and_do_not_invent_an_identity() {
+        for id in ["com.nomifun.desktop", "com.nomifun.desktop.dev", "org.example.custom-build"] {
+            assert!(permission_settings_url("notifications", Some(id)).ends_with(&format!("?id={id}")));
+        }
+        for id in [None, Some(""), Some("com.nomifun.desktop&unexpected=true")] {
+            assert_eq!(permission_settings_url("notifications", id), "x-apple.systempreferences:com.apple.Notifications-Settings.extension");
+        }
+        assert!(permission_settings_url("screen_recording", None).ends_with("?Privacy_ScreenCapture"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_bundle_identity_can_be_read_without_an_appkit_main_thread() {
+        // CLI test hosts commonly have no bundle, which is an honest None.
+        // This read-only probe must also complete on a non-main worker.
+        let result = std::thread::spawn(macos_bundle_identifier).join().unwrap();
+        if let Some(id) = result { assert!(!id.is_empty()); }
+    }
 
     #[test]
     fn inventory_covers_backend_probeable_host_permissions() {

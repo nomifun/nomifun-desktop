@@ -26,6 +26,7 @@ pub use store::{
     RuntimeStateObservation,
     NativeTurnMutationFence,NativeInputContextFence,
     NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS,
+    CommittedNativeToolCallCausation, CommittedToolCallCausation, NativeExecutionScope,
     NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED,
     NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation,
     NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates,

@@ -233,6 +233,9 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
+    // SAFETY: discover/apply PATH before storage relocation can create
+    // Tokio/SQLite workers, as well as before this host's server runtime.
+    let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
     // Normalize only this application's published historical default
     // locations to the one canonical channel root. Explicit Web deployments
     // (for example /data) remain literal and no parallel Agent root is probed.
@@ -240,11 +243,7 @@ fn main() -> Result<ExitCode> {
         nomifun_app::bootstrap::prepare_startup_storage_root(args.data_dir.clone(), cli.work_dir.as_deref())?;
     cli.local = insecure_no_auth;
 
-    // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
-    // any worker thread / tokio runtime exists.
     nomifun_runtime::init(&cli.data_dir);
-    // SAFETY: called before the tokio runtime (and its threads) is built.
-    let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -6211,6 +6211,7 @@ dependencies = [
  "image",
  "junction",
  "keepawake",
+ "libc",
  "mime_guess",
  "nomi-browser-engine",
  "nomi-process-runtime",
@@ -6221,8 +6222,11 @@ dependencies = [
  "nomifun-runtime",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-user-notifications",
  "open",
+ "plist",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6631,7 +6635,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "wait-timeout",
  "zip 2.4.2",
  "zstd",
 ]
@@ -6643,6 +6646,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "dirs 6.0.0",
  "futures-util",
  "http-body-util",
  "nomi-process-runtime",
@@ -7469,6 +7473,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.1",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -11884,15 +11890,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
 dependencies = [
  "cc",
- "libc",
-]
-
-[[package]]
-name = "wait-timeout"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
-dependencies = [
  "libc",
 ]
 

@@ -143,7 +143,7 @@ async fn managed_office_resource() -> (String, EngineContextResource) {
         Ok(tool) => serde_json::json!({"component":"officecli","status":"ready",
             "source":"https://github.com/iOfficeAI/OfficeCLI","package":"@officecli/officecli",
             "executable_path":tool.executable_path,"version":tool.version,"digest":tool.digest,
-            "execution_mode":"one_shot","environment":{"OFFICECLI_NO_AUTO_RESIDENT":"1"}}),
+            "execution_mode":"one_shot","environment":{"OFFICECLI_NO_AUTO_RESIDENT":"1","OFFICECLI_SKIP_UPDATE":"1"}}),
         Err(_) => serde_json::json!({"component":"officecli","status":"unavailable",
             "code":"MANAGED_COMPONENT_UNAVAILABLE","message":"The approved Office component could not be admitted; report the dependency failure and use the application component diagnostics."}),
     };
@@ -236,6 +236,7 @@ mod tests {
                 assert_eq!(value["package"], "@officecli/officecli");
                 assert_eq!(value["execution_mode"], "one_shot");
                 assert_eq!(value["environment"]["OFFICECLI_NO_AUTO_RESIDENT"], "1");
+                assert_eq!(value["environment"]["OFFICECLI_SKIP_UPDATE"], "1");
                 assert!(std::path::Path::new(value["executable_path"].as_str().unwrap()).is_absolute());
                 assert!(!value["version"].as_str().unwrap().is_empty());
                 let digest = value["digest"].as_str().unwrap();

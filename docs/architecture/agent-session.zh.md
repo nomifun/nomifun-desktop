@@ -151,6 +151,10 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 普通新建和产品入口从目标冻结授权补齐宿主可提供的确定性资源：Workspace、Process Session、项目记忆、素材库、Scheduler，以及适用的 Terminal、Browser 和 Computer。伙伴、客户、Canvas 等产品身份只取真实目标 ID；Workspace 和 Process 使用同一工作根。Browser/Computer 的已发布 Role 合同可以冻结而设备环境仍未绑定，宿主环境不可用时省略该可选资源。知识库、渠道、SSH 主机和机器人只继承实际选项，不补造连接或凭证。真实 owner 不匹配、存储 I/O/损坏、合同或 Provider 不一致，以及 native checkpoint 和未知效果等执行安全问题继续拒绝操作。
 
+同一物理 ComputerTool 的各 Session Host 共用设备操作锁与当前观察授权，不能各自保留可消费同一个 ref/截图缓存的独立授权。输入所需 `generation` 来自这次 Observe 精确已提交的 `tool/call-started.seq`；Store 在同一读取事务中核验当前 Session/Turn、原生租约与 typed claim、确切调用身份和未结算状态，并返回完整 canonical Snapshot，由 Host 在共享操作锁内与当前调用 context 精确比对。首次 execution fence 为零仍合法，恢复前的事实、已完成调用和已有 native settlement 不能重新产生观察授权。不以内存计数、时间戳、随机数或 head cursor 替代该事实来源。
+
+观察授权同时绑定当前 Session、Turn、原生 execution generation/fence、完整 Snapshot、Provider、principal 和资源 binding。旧请求或其他 Session 猜测当前数字都会在执行器前拒绝，且不撤销合法持有者的观察。被准入的新观察在设备调用前撤销旧授权与缓存，失败不恢复；Input/Launch 在调用前撤销授权，设备调用返回后清理纯运行时缓存。当前 Input 的截图几何保留到该次已准入调用结束，效果结果不生成下一次输入凭据。缓存及授权只约束当前原生设备调用，不是新的 Session、绑定、checkpoint 或持久账本，也不能从历史 ToolResult 恢复。
+
 已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；伙伴显式“应用最新设定”经空闲、已结算边界复用 canonical Agent switch，在同一 Session 操作围栏与 binding version 校验内准备并提交当前 owner 已保存的配置。直接 Session preview/apply 还须验证此前预览的精确目标 Snapshot。两者均保留 Session 与旧历史，不增加配置升级或绑定账本。
 
 `knowledge.management` 使用现有知识领域服务提供列表、详情、托管建库、元数据与 URL 来源更新、删除。建库后来源或文档失败返回已创建的真实 ID 与各项状态，重试针对该库处理；新库必须在空闲边界通过现有知识选择器挂载，不能修改当前 Turn 的冻结绑定。`session.management` 提供 canonical 会话查询和创建、向其他空闲普通本地会话发送输入、取消精确 Turn，以及真实 PTY 和关联 AgentExecution 的管理。输入沿用原 canonical 幂等与 binding/context 围栏；终端写入、重启和停止核验 owner、行版本与 PTY epoch；协作修改继续要求当前 lead/attempt 关系及精确版本。查询结果和终端输出是数据，不授予目标会话权限，不重放未知效果，也不新增效果账本。

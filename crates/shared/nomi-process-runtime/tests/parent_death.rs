@@ -321,16 +321,24 @@ mod macos_parent_death {
     #[tokio::test]
     #[serial_test::serial]
     async fn abrupt_harness_exit_kills_the_owned_process_group() {
-        assert_abrupt_harness_exit_kills_owned_group(false).await;
+        assert_abrupt_harness_exit_kills_owned_group(false, false).await;
     }
 
     #[tokio::test]
     #[serial_test::serial]
     async fn abrupt_harness_exit_kills_the_owned_pty_session() {
-        assert_abrupt_harness_exit_kills_owned_group(true).await;
+        assert_abrupt_harness_exit_kills_owned_group(true, false).await;
     }
 
-    async fn assert_abrupt_harness_exit_kills_owned_group(pty: bool) {
+    // The launcher must retain exact session authority across host death.
+    // Removing a parent lease check and signalling a cached SID is unsafe.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn abrupt_harness_exit_kills_separate_pty_job_control_groups() {
+        assert_abrupt_harness_exit_kills_owned_group(true, true).await;
+    }
+
+    async fn assert_abrupt_harness_exit_kills_owned_group(pty: bool, separate_job: bool) {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let leader_marker = directory.path().join("leader.pid");
         let grandchild_marker = directory.path().join("grandchild.pid");
@@ -343,7 +351,7 @@ mod macos_parent_death {
             .arg(&leader_marker)
             .arg(&grandchild_marker);
         if pty {
-            command.arg("pty");
+            command.arg(if separate_job { "pty-job-control" } else { "pty" });
         }
         let child = command
             .arg(&start_gate)
@@ -369,6 +377,17 @@ mod macos_parent_death {
             ProcessExitWatch::register(leader_pid).expect("leader kqueue watch should register");
         let mut grandchild_watch = ProcessExitWatch::register(grandchild_pid)
             .expect("grandchild kqueue watch should register");
+        if separate_job {
+            // These queries happen while the harness still owns the unreaped
+            // leader and the test's registered generation watches are live.
+            // Prove that the fixture is job control within the same session,
+            // rather than a deliberate escape to another session.
+            assert_eq!(unsafe { libc::getsid(leader_pid as libc::pid_t) }, leader_pid as libc::pid_t);
+            assert_eq!(unsafe { libc::getsid(grandchild_pid as libc::pid_t) }, leader_pid as libc::pid_t);
+            assert_eq!(unsafe { libc::getpgid(grandchild_pid as libc::pid_t) }, grandchild_pid as libc::pid_t);
+            assert_ne!(leader_pid, grandchild_pid);
+            eprintln!("PTY job-control fixture: leader={leader_pid}, SID={leader_pid}, separate job PGID={grandchild_pid}");
+        }
 
         publish_gate(&exit_gate);
         harness_watch
@@ -383,14 +402,14 @@ mod macos_parent_death {
         harness.0.take();
         assert!(
             status.success(),
-            "harness failed before deliberate _exit (pty={pty}): {status:?}"
+            "harness failed before deliberate _exit (pty={pty}, separate_job={separate_job}): {status:?}"
         );
 
         leader_watch
             .wait_terminated(Duration::from_secs(5), "leader")
             .await;
         grandchild_watch
-            .wait_terminated(Duration::from_secs(5), "grandchild")
+            .wait_terminated(Duration::from_secs(5), if separate_job { "job-control grandchild" } else { "grandchild" })
             .await;
         group_cleanup.armed = false;
     }

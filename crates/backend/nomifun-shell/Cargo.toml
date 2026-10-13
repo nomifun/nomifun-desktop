@@ -13,6 +13,7 @@ async-trait.workspace = true
 axum.workspace = true
 open.workspace = true
 which.workspace = true
+dirs.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

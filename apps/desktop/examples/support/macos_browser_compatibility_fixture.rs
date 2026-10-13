@@ -13,6 +13,7 @@ pub(crate) struct Receipt {
     pub user_agent: String,
     pub javascript_user_agent: Option<String>,
     pub case: Option<String>,
+    pub media_probe: Option<serde_json::Value>,
 }
 
 pub(crate) struct Fixture {
@@ -91,6 +92,14 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         receipts.push(Receipt {
             path: path.into(), user_agent, javascript_user_agent: parameters.get("ua").cloned(),
             case: parameters.get("case").cloned(),
+            media_probe: path.starts_with("/media-").then(|| {
+                let flag = |key: &str| parameters.get(key).and_then(|value| match value.as_str() { "true" => Some(true), "false" => Some(false), _ => None });
+                let count = |key: &str| parameters.get(key).and_then(|value|value.parse::<u32>().ok()).filter(|value|*value <= 256);
+                let error_name = parameters.get("error_name").map(|value| value.as_str()).filter(|value| matches!(*value, "NotAllowedError"|"NotFoundError"|"NotReadableError"|"SecurityError"|"AbortError"|"InvalidStateError"|"OverconstrainedError"|"TypeError"|"UnknownError"));
+                let visibility = parameters.get("visibility_state").map(|value|value.as_str()).filter(|value|matches!(*value,"visible"|"hidden"));
+                serde_json::json!({"secure_context":flag("secure_context"),"get_user_media":flag("get_user_media"),"enumerate_devices":flag("enumerate_devices"),"video_device_count":count("video_device_count"),"audio_device_count":count("audio_device_count"),"error_name":error_name,
+                    "visibility_state":visibility,"document_has_focus":flag("document_has_focus"),"trusted":flag("trusted")})
+            }),
         });
     }
     match path {
@@ -110,6 +119,46 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         "/popup" => html(&mut stream, 200, &ua_page("popup", "Compatibility popup ready", false)),
         "/redirect-final" => html(&mut stream, 200, &simple_page("Compatibility redirects settled", "")),
         "/forbidden" => html(&mut stream, 403, &simple_page("Compatibility HTTP 403 site content", "")),
+        "/media-permission" => {
+            let case = serde_json::to_string(&parameters.get("case").cloned().unwrap_or_default()).unwrap();
+            let user_ready = parameters.get("user_ready").is_some_and(|value|value == "true");
+            html(&mut stream, 200, &simple_page("Compatibility media permission", &format!(r#"
+                const media = navigator.mediaDevices;
+                const probe = () => ({{case:{case}, secure_context:isSecureContext, get_user_media:typeof media?.getUserMedia === 'function', enumerate_devices:typeof media?.enumerateDevices === 'function', visibility_state:document.visibilityState, document_has_focus:document.hasFocus()}});
+                const safeName = error => ['NotAllowedError','NotFoundError','NotReadableError','SecurityError','AbortError','InvalidStateError','OverconstrainedError','TypeError'].includes(error?.name) ? error.name : 'UnknownError';
+                const report = (path, extra = {{}}) => fetch(path + '?' + new URLSearchParams({{...probe(),...extra}}));
+                void report('/media-probe');
+                document.addEventListener('visibilitychange', () => {{ void report('/media-visibility-probe'); }});
+                window.addEventListener('focus', () => {{ void report('/media-focus-probe'); }});
+                window.addEventListener('blur', () => {{ void report('/media-focus-probe'); }});
+                if (probe().enumerate_devices) {{
+                  media.enumerateDevices().then(devices => report('/media-device-probe', {{video_device_count:devices.filter(device => device.kind === 'videoinput').length,audio_device_count:devices.filter(device => device.kind === 'audioinput').length}}), error => report('/media-device-probe', {{error_name:safeName(error)}}));
+                }}
+                const start = () => {{
+                  if (!probe().get_user_media) {{ void report('/media-denied', {{error_name:'TypeError'}}); return; }}
+                  try {{
+                    media.getUserMedia({{video:true}}).then(stream => {{
+                      stream.getTracks().forEach(track => track.stop());
+                      void report('/media-unexpected-grant');
+                    }}, error => report('/media-denied', {{error_name:safeName(error)}}));
+                  }} catch (error) {{ void report('/media-denied', {{error_name:safeName(error)}}); }}
+                }};
+                if ({user_ready}) {{
+                  const button = document.createElement('button');
+                  button.type = 'button'; button.textContent = 'Start media permission: ' + {case};
+                  button.style.cssText = 'font:20px system-ui;padding:18px;margin:16px';
+                  document.body.append(button);
+                  button.onclick = event => {{
+                    if (!event.isTrusted || document.visibilityState !== 'visible' || !document.hasFocus()) {{
+                      void report('/media-start-blocked', {{trusted:event.isTrusted}}); return;
+                    }}
+                    button.disabled = true;
+                    void report('/media-user-start', {{trusted:event.isTrusted}});
+                    start();
+                  }};
+                }} else setTimeout(start, 300);
+            "#)));
+        }
         "/reload" => html(&mut stream, 200, &simple_page("Compatibility reload ready", r#"
             const count = Number(sessionStorage.getItem('compat-reload-count') || 0);
             document.getElementById('state').textContent = 'reload-count=' + count;
@@ -118,7 +167,7 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
               setTimeout(() => location.reload(), 120);
             }
         "#)),
-        "/ua-report" | "/ua-fetch" => reply(&mut stream, 204, "text/plain", b"", ""),
+        "/ua-report" | "/ua-fetch" | "/media-probe" | "/media-device-probe" | "/media-visibility-probe" | "/media-focus-probe" | "/media-start-blocked" | "/media-user-start" | "/media-denied" | "/media-unexpected-grant" => reply(&mut stream, 204, "text/plain", b"", ""),
         "/ua-image" => reply(&mut stream, 200, "image/gif", b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;", ""),
         _ => reply(&mut stream, 404, "text/plain", b"Fixture not found", ""),
     }

@@ -90,6 +90,7 @@ pub(crate) fn reduce(s: &mut PageSnapshot, update: Update) -> Vec<BrowserNavigat
             s.load.response_status = None;
             s.load.cancellation_reason = None;
             s.dialog = None;
+            s.blocked_permissions.clear();
             s.permission_requests.clear();
             if bootstrap { None } else { Some(trace(s, Kind::Requested, url)) }
         }
@@ -226,6 +227,21 @@ mod tests {
         reduce(&mut s, Update::Cancelled(Cancel::UserStop));
         assert_eq!(s.lifecycle, BrowserTabLifecycle::Stopped);
         assert_eq!(s.load.content_state, Content::None);
+    }
+    #[test]
+    fn reload_starts_a_new_document_without_old_permission_denials() {
+        let mut s = PageSnapshot::default();
+        begin(&mut s, "https://example.com/");
+        reduce(&mut s, Update::Finished { url: "https://example.com/".into() });
+        let generation = s.document_generation;
+        s.blocked_permissions = vec!["camera".into(), "microphone".into()];
+        s.permission_requests.push(nomifun_browser_platform::runtime::BrowserPermissionRequest {
+            request_id: "old-camera".into(), kind: "camera".into(), origin: "https://example.com".into(),
+        });
+        reduce(&mut s, Update::Begin { url: Some("https://example.com/".into()), source: Source::UserCommand, bootstrap: false });
+        assert!(s.document_generation > generation);
+        assert!(s.blocked_permissions.is_empty());
+        assert!(s.permission_requests.is_empty());
     }
     #[test]
     fn real_blank_popup_can_have_content_without_counting_bootstrap() {

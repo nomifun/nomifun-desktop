@@ -273,6 +273,7 @@ impl Engine {
             blocked_inputs: AtomicUsize::new(0),
             dialog_draining: AtomicBool::new(false),
             change_listener: Mutex::new(None),
+            shortcut_listener: Mutex::new(None),
             popup_sender: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             downloads: Mutex::new(vec![]),
@@ -411,6 +412,18 @@ impl Engine {
                 if page.input_locked() {
                     page.blocked_inputs.fetch_add(1, Ordering::Relaxed);
                     return true;
+                }
+                if let Some(action) = crate::shortcuts::event_action(event) {
+                    let listener = page.shortcut_listener.lock().unwrap().clone();
+                    if let Some(listener) = listener {
+                        // A held accelerator must never create/close a series
+                        // of tabs or replay after an input-owner transition.
+                        if event.isARepeat() { return true; }
+                        let _ = listener(action, page.snapshot().document_generation);
+                        // A stale or busy host drops the command. Falling
+                        // through could let Cmd+W close the desktop window.
+                        return true;
+                    }
                 }
                 return false;
             }
@@ -576,6 +589,7 @@ pub struct Page {
     blocked_inputs: AtomicUsize,
     dialog_draining: AtomicBool,
     change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    shortcut_listener: Mutex<Option<Arc<dyn Fn(crate::BrowserShortcutAction, u64) -> bool + Send + Sync>>>,
     pub(crate) popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
     pending: Mutex<BTreeMap<Uuid, Box<dyn FnOnce(&'static str) + Send>>>,
     downloads: Mutex<Vec<BrowserDownloadSnapshot>>,
@@ -659,6 +673,11 @@ impl Page {
     }
     pub fn set_change_listener(&self, listener: Arc<dyn Fn() + Send + Sync>) {
         *self.change_listener.lock().unwrap() = Some(listener);
+    }
+    /// Called synchronously on AppKit's main thread for this focused child.
+    /// The host must verify its exact active target before emitting an event.
+    pub fn set_shortcut_listener(&self, listener: Arc<dyn Fn(crate::BrowserShortcutAction, u64) -> bool + Send + Sync>) {
+        *self.shortcut_listener.lock().unwrap() = Some(listener);
     }
     pub(crate) fn changed(&self, update: impl FnOnce(&mut PageSnapshot)) {
         self.metadata.send_modify(update);
@@ -907,12 +926,15 @@ impl Page {
     }
     pub async fn reply_permission(
         self: &Arc<Self>,
-        _id: String,
-        _generation: u64,
-        _allow: bool,
-        _cancel: CancellationToken,
+        id: String,
+        generation: u64,
+        allow: bool,
+        cancel: CancellationToken,
     ) -> Result<(), String> {
-        Err("BROWSER_UNSUPPORTED_ACTION".into())
+        self.mutate(move |n| {
+            if cancel.is_cancelled() { return Err("BROWSER_CANCELLED".into()); }
+            n.interactions.permissions.reply(&id, generation, allow)
+        }).await
     }
     pub fn user_download_snapshot(&self) -> Vec<BrowserDownloadSnapshot> {
         self.downloads.lock().unwrap().clone()

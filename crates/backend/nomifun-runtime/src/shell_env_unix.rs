@@ -1,4 +1,4 @@
-//! Bounded Linux startup-shell probing; no reader thread may outlive startup.
+//! Bounded Unix shell probing, invoked in an isolated startup helper.
 
 use std::io::{self, ErrorKind};
 use std::os::fd::AsRawFd;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 struct ProbeChild {
     process: ManagedChildProcess,
@@ -43,6 +43,7 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
         builder.spawn_managed().ok()?
     };
     let mut child = ProbeChild { process, runtime };
+    let result = (|| {
     let stdout = child.process.child_mut().stdout.take()?;
     // The pipe is owned exclusively here. Nonblocking reads let the one
     // startup thread enforce the deadline even if descendants retain stdout.
@@ -57,14 +58,14 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
     let mut buffer = [0; 8192];
     loop {
         if start.elapsed() >= timeout {
-            tracing::warn!("Linux login shell PATH probe timed out");
+            tracing::warn!("Unix login shell PATH probe timed out");
             return None;
         }
         let drained = match read_nonblocking(stdout.as_raw_fd(), &mut buffer) {
             Ok(0) => true,
             Ok(length) => {
                 if output.len() + length > MAX_OUTPUT_BYTES {
-                    tracing::warn!("Linux login shell PATH probe exceeded output limit");
+                    tracing::warn!("Unix login shell PATH probe exceeded output limit");
                     return None;
                 }
                 output.extend_from_slice(&buffer[..length]);
@@ -91,6 +92,15 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    })();
+    // A parsed PATH is only admissible after the exact managed owner proves
+    // the whole shell tree empty. Returning it before this shutdown succeeds
+    // would let the outer helper exit zero while destroying a pending relay.
+    if let Err(error) = child.runtime.block_on(child.process.shutdown()) {
+        tracing::warn!(%error, "login shell PATH probe cleanup was not proven");
+        return None;
+    }
+    result
 }
 
 fn read_nonblocking(fd: std::os::fd::RawFd, buffer: &mut [u8]) -> io::Result<usize> {
@@ -149,6 +159,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn timeout_cleans_up_the_probe_process_group() {
         let directory = tempfile::tempdir().unwrap();

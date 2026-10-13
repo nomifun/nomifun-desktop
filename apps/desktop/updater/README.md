@@ -103,6 +103,8 @@ bun run build:win --config apps/desktop/tauri.updater.conf.json
 
 # macOS (arm64 .app.tar.gz + .sig):
 bun run build:mac --config apps/desktop/tauri.updater.conf.json
+# macOS (Intel x86_64 .app.tar.gz + .sig):
+bun run build:mac intel --config apps/desktop/tauri.updater.conf.json
 
 # Linux (AppImage + .sig for updater; deb/rpm remain manual installers):
 bun run build:linux --config apps/desktop/tauri.updater.conf.json
@@ -197,6 +199,10 @@ stale `latest.json` whose version does not match the release version.
    - `dist/desktop/NomiFun_<version>_aarch64.dmg` for manual install.
    - `target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
      plus `NomiFun.app.tar.gz.sig` for auto-update.
+   Intel builds use `dist/desktop/NomiFun_<version>_x64.dmg` and
+   `target/x86_64-apple-darwin/release/bundle/macos/NomiFun_<version>_x64.app.tar.gz`
+   plus its `.sig`. `release:mac -Architecture intel` selects those assets;
+   same-version append preserves the other Mac architecture's updater entry.
    For Windows, the updater `.exe` is also the normal manual installer; upload
    any `.msi` only if the build generated one.
 7. Verify the GitHub `latest.json` version, platform set, and signatures match

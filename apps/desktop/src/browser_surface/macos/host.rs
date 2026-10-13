@@ -152,6 +152,26 @@ impl DesktopBrowserRuntime {
             revision.bump();
         });
         page.set_change_listener(changed.clone());
+        let shortcut_metadata = metadata.clone();
+        let shortcut_runtime = self.weak.clone();
+        let shortcut_app = self.app.clone();
+        let shortcut_session = self.request.key.agent_session_id.clone();
+        page.set_shortcut_listener(Arc::new(move |action, document_generation| {
+            let Some(runtime) = shortcut_runtime.upgrade() else { return false; };
+            if runtime.input_locked.load(Ordering::Acquire) || runtime.closing.is_cancelled() { return false; }
+            let target = shortcut_metadata.lock().unwrap_or_else(|error| error.into_inner()).target.clone();
+            if target.document_generation != document_generation { return false; }
+            let Ok(state) = runtime.state.try_lock() else { return false; };
+            if state.closed || !state.visible || !state.input_enabled || state.surface_cancel.is_cancelled()
+                || state.active.as_ref() != Some(&target.tab_id) { return false; }
+            drop(state);
+            let Some(main) = shortcut_app.get_webview("main") else { return false; };
+            if matches!(action, nomifun_browser_macos::BrowserShortcutAction::Address | nomifun_browser_macos::BrowserShortcutAction::NewTab)
+                && main.set_focus().is_err() { return false; }
+            #[derive(Clone, serde::Serialize)]
+            struct Shortcut<'a> { agent_session_id: &'a str, target: BrowserTabTarget, action: nomifun_browser_macos::BrowserShortcutAction }
+            shortcut_app.emit_to("main", "browser-capability-shortcut", Shortcut { agent_session_id: &shortcut_session, target, action }).is_ok()
+        }));
         changed();
         Arc::new(NativeTab {
             close_gate: Mutex::new(()),
@@ -898,7 +918,11 @@ impl DesktopBrowserRuntime {
                 let tab = self.target(&state, &target)?.clone();
                 tab.view.page.cancel_user_download(download_id).await.map_err(native_error)?;
             }
-            BrowserTabCommand::Permission { .. } => return Err(WorkspaceError::UnsupportedAction),
+            BrowserTabCommand::Permission { target, request_id, allow } => {
+                if !state.input_enabled || state.active.as_ref() != Some(&target.tab_id) { return Err(WorkspaceError::NotActionable); }
+                let tab = self.target(&state, &target)?;
+                tab.view.page.reply_permission(request_id, target.document_generation, allow, cancel.clone()).await.map_err(native_error)?;
+            }
             BrowserTabCommand::Create { url } => {
                 drop(state);
                 self.create_tab(&url, &cancel, &scope).await?;

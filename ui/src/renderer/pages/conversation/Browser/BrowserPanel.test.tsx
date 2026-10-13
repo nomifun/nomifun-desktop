@@ -212,9 +212,9 @@ test('native address shortcut focuses and selects the chrome address; new-tab dr
   await act(async () => screen.shortcut({agent_session_id:'session-1',target,action:'address'}));
   expect(document.activeElement).toBe(address);
   expect(address.selectionStart).toBe(0); expect(address.selectionEnd).toBe(address.value.length);
-  fireEvent.keyDown(address,{key:'t',ctrlKey:true});
+  fireEvent.keyDown(address,{key:'t',metaKey:true});
   expect(address.value).toBe('');
-  fireEvent.keyDown(address,{key:'w',ctrlKey:true});
+  fireEvent.keyDown(address,{key:'w',metaKey:true});
   expect(address.value).toBe(initial.runtime!.tabs[0]!.url);
   expect(screen.commands).toEqual([]);
 });

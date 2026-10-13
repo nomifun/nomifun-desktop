@@ -33,6 +33,7 @@ import {
   useGuidSend,
   type GuidSendDeps,
 } from './useGuidSend';
+import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 
 const STORAGE_GENERATION = '0190f5fe-7c00-7a00-8000-000000000001';
 const PRESET_CONVERSATION_ID =
@@ -737,6 +738,25 @@ describe('useGuidSend HTTP behavior', () => {
       knowledge_policy: knowledgePolicy,
     });
     expect(Object.keys((calls[0].body as { resource_selections: object[] }).resource_selections[0])).toEqual(['resource_kind', 'resource_id']);
+  });
+
+  test('creates a canonical session with the explicitly selected Attached Chrome provider and no connection or authority overlay', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const resourceSelections = resolveAgentResourceSelections(['browser'], { browser: 'attached-chrome' }).selections;
+    const hook = renderHook(() => useGuidSend(createDeps({
+      selection: { kind: 'preset', presetId: PRESET_ID },
+      selectedPreset: PRESET,
+      workspaceEnabled: false,
+      resourceSelections,
+    })));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(calls[0].body).toEqual({
+      model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      preset_id: PRESET_ID,
+      title: INPUT,
+      resource_selections: [{ resource_kind: 'browser', resource_id: 'attached-chrome' }],
+    });
   });
 
   test('minimal Agent creation relies on the saved binding without a session capability overlay', async () => {

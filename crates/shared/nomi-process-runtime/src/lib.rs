@@ -7,6 +7,9 @@
 mod capability;
 mod command_builder;
 #[cfg(target_os = "macos")]
+#[path = "platform/darwin_application.rs"]
+mod darwin_application;
+#[cfg(target_os = "macos")]
 mod darwin_registered;
 mod io;
 mod outcome;
@@ -23,11 +26,15 @@ pub use command_builder::{
     resolve_command_path,
 };
 #[cfg(target_os = "macos")]
+pub use darwin_application::{DarwinApplicationExit, DarwinLaunchedApplicationObserver, launched_application_peer_pid, own_launched_application};
+#[cfg(target_os = "macos")]
 pub use darwin_registered::{
     DarwinGenerationTerminationOutcome, DarwinRegisteredChildAuthority,
     own_registered_child_process,
 };
 pub use platform::poller::{PlatformLifecycleMetrics, platform_lifecycle_metrics};
+#[cfg(unix)]
+pub use platform::startup::run_isolated_startup_probe;
 pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
     CleanupReport, EncodingMetadata, ProcessOutcome, OutputChunk, OutputCursor,

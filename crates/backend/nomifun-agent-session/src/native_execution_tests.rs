@@ -8,6 +8,9 @@ mod native_pause_tests;
 #[path = "workspace_file_observation_tests.rs"]
 mod workspace_file_observation_tests;
 
+#[path = "tool_call_causation_tests.rs"]
+mod tool_call_causation_tests;
+
 struct Fixture { session: AgentSessionLiveRecord, root: EventId, started: EventId }
 
 fn route() -> ChatRouteIdentity { ChatRouteIdentity::new("coding.codex@1", nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT, "chat-route".into(), 4) }

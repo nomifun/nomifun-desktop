@@ -37,6 +37,12 @@ mod workspace_observation;
 mod workspace_read_dir;
 mod zip_source;
 mod zip_cancellation;
+#[cfg(unix)]
+mod unix_delete;
+#[cfg(unix)]
+mod unix_directory;
+#[cfg(unix)]
+mod unix_publication;
 #[cfg(windows)]
 mod windows_read;
 #[cfg(windows)]

@@ -54,6 +54,34 @@ beforeEach(() => {
 afterEach(() => { cleanup(); restores.splice(0).forEach((restore) => restore()); globalThis.fetch = realFetch; });
 
 describe('Agent resource picker', () => {
+  test('exposes connected Chrome as an explicit Browser binding and preserves it when the connection is released', async () => {
+    let connection: { incarnation: string; state: 'connected'; chromium_major: number } | null = { incarnation: 'chrome-1', state: 'connected', chromium_major: 144 };
+    const requests: Array<{ method: string; body?: unknown }> = [];
+    globalThis.fetch = (async (_input, init) => {
+      requests.push({ method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (init?.method === 'DELETE') connection = null;
+      return new Response(JSON.stringify({ success: true, data: connection }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const ready: boolean[] = [];
+    function Harness() {
+      const [value, setValue] = useState<AgentResourceSelectionValue>({ browser: 'attached-chrome' });
+      return <><AgentResourcePicker requiredKinds={['browser']} capabilityIds={['browser']} value={value} onChange={setValue}
+        onAdmissionReadinessChange={(state) => ready.push(state)} />
+        <output data-testid='browser-selection'>{value.browser}</output></>;
+    }
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
+    await screen.findByText(en.resources.browser.states.connected);
+    await waitFor(() => expect(ready.at(-1)).toBe(true));
+    expect(screen.getByRole('combobox', { name: 'Select Browser resource' }).textContent).toContain(en.resources.browser.attached);
+    fireEvent.click(screen.getByText(en.resources.browser.disconnect));
+    await screen.findByText(en.resources.browser.selectedUnavailable);
+    await waitFor(() => expect(ready.at(-1)).toBe(false));
+    expect(screen.getByText(en.resources.browser.connectionNeeded)).toBeTruthy();
+    expect(screen.queryByText(en.resources.missingCount.replace('{{count}}', '0'))).toBeNull();
+    expect(screen.getByTestId('browser-selection').textContent).toBe('attached-chrome');
+    expect(requests).toEqual([{ method: 'GET', body: undefined }, { method: 'DELETE', body: { incarnation: 'chrome-1' } }]);
+  });
+
   test('a pointer click opens the companion menu without native label activation closing it', async () => {
     const loader = async () => inventory;
     function Harness() {

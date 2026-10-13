@@ -30,9 +30,11 @@ static PUBLICATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn is_workspace_owner_component(component: &OsStr) -> bool {
     let Some(component) = component.to_str() else { return false };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
+    // The product reserves ASCII case aliases on these hosts. This policy
+    // also applies to case-sensitive APFS; it is not a volume-case heuristic.
     { component.eq_ignore_ascii_case(WORKSPACE_OWNER_DIRECTORY) }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     { component == WORKSPACE_OWNER_DIRECTORY }
 }
 
@@ -896,6 +898,38 @@ fn read_verified_page(namespace: &ArtifactNamespace, id: &str, verified: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn owner_namespace_rejects_ascii_case_aliases_before_any_io() {
+        for name in [".nomifun", ".NOMIFUN", ".NomiFun"] {
+            assert!(is_workspace_owner_component(OsStr::new(name)));
+            assert!(matches!(
+                normalized_workspace_relative(&format!("{name}/artifacts/receipt"), false),
+                Err(AppError::NotFound(_)),
+            ));
+        }
+        assert!(!is_workspace_owner_component(OsStr::new(".nomifun-notes")));
+        assert!(normalized_workspace_relative("notes/.NOMIFUN/file", false).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_uppercase_owner_tree_is_not_an_agent_workspace_target() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".NOMIFUN/artifacts")).unwrap();
+        let receipt = root.path().join(".NOMIFUN/artifacts/receipt");
+        fs::write(&receipt, b"owned receipt").unwrap();
+        let canonical_root = fs::canonicalize(root.path()).unwrap();
+        let canonical_receipt = fs::canonicalize(&receipt).unwrap();
+        assert!(matches!(crate::path_safety::reject_workspace_owner_canonical_path(
+            &canonical_root, &canonical_receipt,
+        ), Err(AppError::NotFound(_))));
+        assert!(crate::path_safety::validate_workspace_candidate(
+            &root.path().join(".NOMIFUN/artifacts/new-file"), root.path(),
+        ).is_err());
+        assert_eq!(fs::read(receipt).unwrap(), b"owned receipt");
+    }
 
     #[test]
     fn outcome_marker_inside_error_details_is_not_publication_uncertainty() {

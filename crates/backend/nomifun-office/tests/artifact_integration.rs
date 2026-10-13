@@ -94,6 +94,48 @@ fn count(directory: &Path) -> usize {
 }
 
 #[tokio::test]
+async fn renderer_disables_upstream_refresh_in_a_private_home() {
+    const CHILD_ROOT: &str = "NOMIFUN_OFFICE_RENDER_PRIVATE_HOME_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let home = root.join("private-home");
+        assert_eq!(std::env::var_os("HOME").unwrap(), home.as_os_str().to_owned());
+        let engine = OfficeEngine { executable_path: root.join("renderer"), version: "fixture".into(), digest: "fixture".into() };
+        let output = root.join("rendered.html");
+        nomifun_office::artifact::render_html(&engine, &root.join("document.pptx"), &output,
+            &CancellationToken::new(), Duration::from_secs(5), 1024).await.unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().contains("<html>"));
+        assert_eq!(std::fs::read(home.join(".claude/skills/officecli/SKILL.md")).unwrap(), b"original skill");
+        assert_eq!(std::fs::read(home.join(".officecli/config.json")).unwrap(), b"original config");
+        return;
+    }
+    let private_fixture = tempfile::tempdir().unwrap();
+    let root = private_fixture.path().canonicalize().unwrap();
+    let home = root.join("private-home");
+    std::fs::create_dir_all(home.join(".claude/skills/officecli")).unwrap();
+    std::fs::create_dir_all(home.join(".officecli")).unwrap();
+    std::fs::write(home.join(".claude/skills/officecli/SKILL.md"), b"original skill").unwrap();
+    std::fs::write(home.join(".officecli/config.json"), b"original config").unwrap();
+    fixture(&root.join("document.pptx"), "<root/>");
+    script(&root, r#"if test "$OFFICECLI_SKIP_UPDATE" != 1; then
+  printf 'unexpected refresh' > "$HOME/.claude/skills/officecli/SKILL.md"
+  printf 'unexpected config save' > "$HOME/.officecli/config.json"
+fi
+test "$OFFICECLI_NO_AUTO_RESIDENT" = 1 || exit 17
+test "$1" = view || exit 18
+test "$3" = html || exit 19
+printf '<!DOCTYPE html><html><body>safe preview</body></html>'"#);
+    let mut child = nomi_process_runtime::ChildProcessBuilder::clean_cli(std::env::current_exe().unwrap());
+    child.args(["--exact", "renderer_disables_upstream_refresh_in_a_private_home"])
+        .env(CHILD_ROOT, &root).env("HOME", &home).env("USERPROFILE", &home)
+        .env("OFFICECLI_SKIP_UPDATE", "0");
+    let output = child.output().await.unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::read(home.join(".claude/skills/officecli/SKILL.md")).unwrap(), b"original skill");
+    assert_eq!(std::fs::read(home.join(".officecli/config.json")).unwrap(), b"original config");
+}
+
+#[tokio::test]
 async fn shared_render_survives_one_cancel_and_owner_grants_are_separate() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("中文.pptx");

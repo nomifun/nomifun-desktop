@@ -10,6 +10,8 @@ mod notices;
 mod progress;
 mod resolver;
 mod shell_env;
+#[cfg(unix)]
+mod login_shell;
 
 pub use cache::{init, runtime_root};
 pub use managed::{
@@ -25,3 +27,5 @@ pub use resolver::{
     resolve_command_in, resolve_command_path,
 };
 pub use shell_env::enhance_process_path;
+#[cfg(unix)]
+pub use login_shell::resolve_login_shell;

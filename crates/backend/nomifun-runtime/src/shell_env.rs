@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-#[path = "shell_env_linux.rs"]
-mod linux;
+#[cfg(unix)]
+#[path = "shell_env_unix.rs"]
+mod unix;
 
 /// Enhance the current process's `PATH`. Returns the merged PATH string
 /// for logging/debugging.
@@ -36,7 +36,10 @@ mod linux;
 /// `unsafe` on Rust 2024.
 pub unsafe fn enhance_process_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
-    let login = login_shell_path();
+    // SAFETY: the caller guarantees that the host is still single-threaded.
+    // The managed probe runs in an isolated process, so its lifecycle workers
+    // never invalidate the set_var precondition in this host.
+    let login = unsafe { login_shell_path() };
     let extras = platform_extra_bins();
     // Cache-only: PATH discovery must never trigger a first-start download.
     let bun_dir = crate::managed::cached_tool(crate::ToolId::Bun)
@@ -320,13 +323,29 @@ fn extract_probe_path(raw: &str) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn login_shell_path() -> Option<String> {
-    let shell = std::env::var("SHELL").ok()?;
-    if !Path::new(&shell).is_absolute() {
-        tracing::debug!(%shell, "SHELL is not absolute, skipping login shell probe");
-        return None;
+unsafe fn login_shell_path() -> Option<String> {
+    // SAFETY: forwarded from enhance_process_path's startup-only contract.
+    let result = unsafe {
+        nomi_process_runtime::run_isolated_startup_probe(
+            LOGIN_SHELL_TIMEOUT + Duration::from_secs(1),
+            unix::MAX_OUTPUT_BYTES,
+            || {
+                // Account lookup also stays in the helper: libc may lazily
+                // initialize name-service internals during getpwuid_r.
+                let shell = crate::resolve_login_shell()?;
+                run_login_shell_path(shell.to_str().expect("resolved shell is UTF-8"), None)
+                    .map(String::into_bytes)
+                    .ok_or_else(|| std::io::Error::other("login shell PATH probe failed"))
+            },
+        )
+    };
+    match result {
+        Ok(bytes) => String::from_utf8(bytes).ok(),
+        Err(error) => {
+            tracing::debug!(%error, "isolated login shell PATH probe failed");
+            None
+        }
     }
-    run_login_shell_path(&shell, None)
 }
 
 /// Spawn `shell` as an **interactive login** shell and capture the
@@ -343,79 +362,13 @@ fn login_shell_path() -> Option<String> {
 /// `home_override` lets tests point the child at a scratch `$HOME` (and
 /// drops `ZDOTDIR` so zsh resolves its rc files under that `$HOME`); in
 /// production it is `None` and the real environment is inherited.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn run_login_shell_path(shell: &str, home_override: Option<&Path>) -> Option<String> {
-    linux::run(shell, home_override, LOGIN_SHELL_TIMEOUT)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn run_login_shell_path(shell: &str, home_override: Option<&Path>) -> Option<String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use wait_timeout::ChildExt;
-
-    let mut cmd = Command::new(shell);
-    cmd.args(["-i", "-l", "-c", PATH_PROBE_SNIPPET])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    if let Some(home) = home_override {
-        cmd.env("HOME", home);
-        cmd.env_remove("ZDOTDIR");
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(%shell, error = %e, "login shell spawn failed");
-            return None;
-        }
-    };
-
-    // Drain stdout on a dedicated thread. An interactive shell may emit a
-    // PATH long enough to fill the pipe buffer (deadlocks a read-after-wait)
-    // AND — unlike the old non-interactive probe — may never exit if a
-    // startup file blocks. Reading on a separate thread lets the timeout
-    // below fire and `kill()` the child, which closes the pipe and unblocks
-    // this reader. The thread is always joined before we return, so no
-    // worker thread outlives `enhance_process_path`'s `set_var`.
-    let mut stdout_handle = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout_handle.read_to_string(&mut buf);
-        buf
-    });
-
-    let status = match child.wait_timeout(LOGIN_SHELL_TIMEOUT) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            tracing::warn!("login shell PATH probe timed out");
-            return None;
-        }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            tracing::debug!(error = %e, "login shell wait_timeout errored");
-            return None;
-        }
-    };
-
-    let stdout = reader.join().ok()?;
-
-    if !status.success() {
-        tracing::debug!(?status, "login shell exited non-zero");
-        return None;
-    }
-
-    extract_probe_path(&stdout)
+    unix::run(shell, home_override, LOGIN_SHELL_TIMEOUT)
 }
 
 #[cfg(not(unix))]
-fn login_shell_path() -> Option<String> {
+unsafe fn login_shell_path() -> Option<String> {
     None
 }
 

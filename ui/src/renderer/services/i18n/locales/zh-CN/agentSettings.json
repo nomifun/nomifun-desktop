@@ -475,6 +475,25 @@
     "computerPermissionNeeded": "电脑操作暂不可用；不影响继续对话，授权后即可恢复相关动作。",
     "computerPermissionScope": "本 Agent 需要：{{permissions}}。系统授权不会扩大 Agent 的能力范围。",
     "computerPermissionNotRequired": "本 Agent 仅使用启动应用/网址动作，不需要屏幕录制或辅助功能权限。",
+    "browser": {
+      "managed": "NomiFun 浏览器",
+      "attached": "已打开的 Chrome",
+      "scope": "已打开的 Chrome 指运行 NomiFun 的电脑上的浏览器。连接不会启动或关闭 Chrome，也不会复制个人资料；可以观察和操作已有标签页，暂不支持新建标签页、上传和下载。",
+      "setup": "在 macOS 或 Windows 上打开 Chrome 144 或更新版本，在 chrome://inspect/#remote-debugging 启用远程调试并批准 Chrome 提示，再点击连接。",
+      "connect": "连接 Chrome",
+      "connectionNeeded": "请确认所选 Chrome 的连接",
+      "disconnect": "断开连接",
+      "refresh": "刷新状态",
+      "failed": "未能完成连接操作。请检查 Chrome 远程调试设置，或先刷新状态再重试；若已有会话正在使用 Chrome，请先完成任务再断开。",
+      "selectedUnavailable": "本次会话仍选择已打开的 Chrome，请重新连接或明确改选 NomiFun 浏览器后再开始。",
+      "states": {
+        "disconnected": "尚未连接 Chrome",
+        "connected": "已连接 Chrome",
+        "connection_lost": "Chrome 连接已丢失",
+        "disconnecting": "正在断开 Chrome",
+        "cleanup_failed": "无法确认 Chrome 已断开"
+      }
+    },
     "configure": "去配置",
     "bindingPolicyTitle": "能力授权与资源绑定分开管理",
     "bindingPolicyBody": "Agent 配置决定允许哪些能力；会话或场景再绑定知识库、工作区、设备和连接。未绑定或运行环境未就绪时，只停用受影响的工具，不阻止 Agent 使用其他能力。",

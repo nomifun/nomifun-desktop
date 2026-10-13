@@ -1,5 +1,6 @@
 // Only an explicitly configured installed identity may replace ad-hoc signing.
 // This module never enumerates certificates or changes Keychain access policy.
+import { MACOS_APPLICATION_ENTITLEMENTS, macosCodeSigningArguments } from './macos-signing.mjs';
 export function macosDevelopmentSigningIdentity(environment = process.env) {
   const configured = environment.NOMIFUN_MACOS_DEV_SIGN_IDENTITY;
   if (configured === undefined) return '-';
@@ -16,6 +17,6 @@ export function macosDevelopmentSigningNotice(environment = process.env) {
     : null;
 }
 
-export function macosDevelopmentSealArguments(appPath, identity) {
-  return ['--force', ...(identity === '-' ? [] : ['--options', 'runtime', '--timestamp']), '--sign', identity, appPath];
+export function macosDevelopmentSealArguments(appPath, identity, entitlementsPath = MACOS_APPLICATION_ENTITLEMENTS) {
+  return macosCodeSigningArguments(appPath, identity, { application: true, entitlementsPath });
 }

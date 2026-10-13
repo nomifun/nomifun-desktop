@@ -71,6 +71,12 @@ mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
 use native_execution::reject_unleased_native_turn_tx;
 
+#[path = "tool_call_causation.rs"]
+mod tool_call_causation;
+pub use tool_call_causation::{
+    CommittedNativeToolCallCausation, CommittedToolCallCausation, NativeExecutionScope,
+};
+
 #[path = "idmm_notice.rs"]
 mod idmm_notice;
 
@@ -2438,34 +2444,10 @@ impl AgentSessionStore {
         capability_module: &nomifun_agent_contracts::CapabilityId,
         action_id: &nomifun_agent_contracts::ActionId,
     ) -> Result<EventId, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT e.event_id FROM agent_events e \
-             JOIN agent_turns t ON t.session_id = e.session_id \
-              AND t.turn_id = ? AND t.started_event_id = e.causation_event_id \
-              AND t.state IN ('accepted', 'running') \
-             WHERE e.session_id = ? AND e.kind = 'tool/call-started' \
-              AND json_extract(e.inline_json, '$.operation_id') = ? \
-              AND json_extract(e.inline_json, '$.capability_id') = ? \
-              AND json_extract(e.inline_json, '$.action_id') = ? \
-             ORDER BY e.seq LIMIT 2",
-        )
-        .bind(turn_id.as_ref())
-        .bind(session_id.as_ref())
-        .bind(operation_id.as_ref())
-        .bind(capability_module.as_ref())
-        .bind(action_id.as_ref())
-        .fetch_all(&self.pool)
-        .await?;
-        match rows.as_slice() {
-            [event_id] => Ok(EventId::from(event_id.clone())),
-            [] => Err(SessionStoreError::InvalidEvent(
-                "effect requires its exact committed tool/call-started predecessor".into(),
-            )),
-            _ => Err(SessionStoreError::InvalidEvent(
-                "effect tool/call-started predecessor is ambiguous".into(),
-            )),
-        }
+        Ok(self
+            .tool_call_causation(session_id, turn_id, operation_id, capability_module, action_id)
+            .await?
+            .event_id)
     }
 
     pub async fn observe(

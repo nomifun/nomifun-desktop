@@ -221,16 +221,35 @@ export async function tauriSetAutostart(enabled: boolean): Promise<void> {
 export type TauriNotificationPermissionState = 'default' | 'denied' | 'granted' | 'unavailable';
 
 export async function tauriNotificationPermissionState(): Promise<TauriNotificationPermissionState> {
+  if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const granted = await invoke<boolean | null>('plugin:notification|is_permission_granted');
+    return granted === true ? 'granted' : granted === false ? 'denied' : 'default';
+  }
   if (typeof window === 'undefined' || typeof window.Notification === 'undefined') return 'unavailable';
   return window.Notification.permission;
 }
 
 export async function tauriRequestNotificationPermission(): Promise<TauriNotificationPermissionState> {
+  if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const state = await invoke<import('@tauri-apps/api/core').PermissionState>('plugin:notification|request_permission');
+    if (state === 'granted' || state === 'denied') return state;
+    return state === 'prompt' || state === 'prompt-with-rationale' ? 'default' : 'unavailable';
+  }
   const mod = await import('@tauri-apps/plugin-notification');
   return mod.requestPermission();
 }
 
 export async function tauriSendNotification(opts: { title: string; body: string; icon?: string }): Promise<void> {
+  if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    // The Web API shim caches permissions and its constructor cannot expose
+    // delivery errors. Await the native callback instead of claiming success
+    // as soon as a Notification object is constructed.
+    await invoke('plugin:notification|notify', { options: opts });
+    return;
+  }
   const mod = await import('@tauri-apps/plugin-notification');
   let granted = await mod.isPermissionGranted();
   if (!granted) granted = (await mod.requestPermission()) === 'granted';

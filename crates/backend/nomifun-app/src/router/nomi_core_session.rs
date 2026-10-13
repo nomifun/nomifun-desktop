@@ -12547,20 +12547,27 @@ mod agent_switch_resource_tests {
     }
 
     #[test]
-    fn computer_and_workspace_still_require_bindings() {
+    fn unbound_computer_does_not_block_switch_but_workspace_still_requires_binding() {
         let required = BTreeSet::from([
             "browser".to_owned(),
             "computer".to_owned(),
             "workspace".to_owned(),
         ]);
         let bound = BTreeSet::from(["workspace".to_owned()]);
-        assert_eq!(
-            missing_agent_switch_resource_kinds(&required, &bound),
-            vec!["computer".to_owned()]
-        );
+        // The frozen Computer Role can remain selected while its optional
+        // device environment is unavailable. Only bound actions are runnable;
+        // omitting the device must not waive the workspace identity contract.
+        assert!(missing_agent_switch_resource_kinds(&required, &bound).is_empty());
         assert_eq!(
             missing_agent_switch_resource_kinds(&required, &BTreeSet::new()),
-            vec!["computer".to_owned(), "workspace".to_owned()]
+            vec!["workspace".to_owned()]
+        );
+        assert_eq!(
+            missing_agent_switch_resource_kinds(
+                &required,
+                &BTreeSet::from(["browser".to_owned(), "computer".to_owned()]),
+            ),
+            vec!["workspace".to_owned()]
         );
     }
 

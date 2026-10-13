@@ -165,6 +165,7 @@ struct ActiveWatchdog {
     config: WatchdogConfig,
     kqueue_fd: RawFd,
     leader_exit_observed: bool,
+    pty_launcher_admitted: bool,
 }
 
 fn classify_receipt(
@@ -233,6 +234,7 @@ pub(super) unsafe fn run_watchdog(config: WatchdogConfig) -> ! {
         config,
         kqueue_fd,
         leader_exit_observed: false,
+        pty_launcher_admitted: false,
     };
 
     if unsafe {
@@ -482,8 +484,14 @@ pub(super) unsafe fn run_watchdog(config: WatchdogConfig) -> ! {
             )
         };
     }
-    unsafe { libc::close(watchdog.config.registration_fd) };
-    watchdog.config.registration_fd = -1;
+    if watchdog.config.external_session {
+        // ACK admits a surviving session launcher. Keep its authenticated
+        // endpoint for the final session-seal receipt across host death.
+        watchdog.pty_launcher_admitted = true;
+    } else {
+        unsafe { libc::close(watchdog.config.registration_fd) };
+        watchdog.config.registration_fd = -1;
+    }
     if watchdog.config.fault == FAULT_EXIT_AFTER_ACK {
         unsafe {
             exit_without_group(
@@ -645,6 +653,21 @@ pub(super) unsafe fn run_watchdog(config: WatchdogConfig) -> ! {
         }
         match unsafe { control_ready(watchdog.config.control_fd) } {
             Ok(false) => {}
+            Ok(true) if watchdog.config.external_session => {
+                let deadline = match Deadline::after(std::time::Duration::from_millis(100)) {
+                    Ok(deadline) => deadline,
+                    Err(_) => unsafe { quiesce_and_kill(watchdog, leader, EXIT_CONTROL_FAILED) },
+                };
+                match recv_frame(watchdog.config.control_fd, watchdog.config.nonce, deadline) {
+                    Ok(frame) if frame.kind() == FrameKind::PtyTerminate
+                        && frame.pid() == leader && frame.pgid() == leader => {
+                        if send_frame(watchdog.config.registration_fd, &frame, deadline).is_err() {
+                            unsafe { quiesce_and_kill(watchdog, leader, EXIT_CONTROL_FAILED) };
+                        }
+                    }
+                    _ => unsafe { quiesce_and_kill(watchdog, leader, EXIT_CONTROL_FAILED) },
+                }
+            }
             _ => unsafe { quiesce_and_kill(watchdog, leader, EXIT_CONTROL_FAILED) },
         }
     }
@@ -1040,6 +1063,14 @@ unsafe fn quiesce_and_kill(
     leader: libc::pid_t,
     _reason: libc::c_int,
 ) -> ! {
+    if watchdog.config.external_session && !watchdog.pty_launcher_admitted {
+            // No ACK means the pre-exec child cannot start user code. Closing
+            // its registration peer fails that bootstrap without signalling
+            // any cached numeric process identity. The host may die between
+            // any two syscalls, so even a presently live host is not a reason
+            // to signal a pre-ACK child that can safely fail its bootstrap.
+            unsafe { exit_without_group(watchdog.config, watchdog.kqueue_fd, 0) };
+    }
     if let Ok(observation) = unsafe {
         observe_processes(
             watchdog.kqueue_fd,
@@ -1053,6 +1084,16 @@ unsafe fn quiesce_and_kill(
     if let Ok(deadline) = Deadline::after(std::time::Duration::from_millis(EXIT_PREPARE_MS)) {
         let quiescing = Frame::new(FrameKind::Quiescing, watchdog.config.nonce, leader, leader);
         let _ = send_frame(watchdog.config.control_fd, &quiescing, deadline);
+    }
+    if watchdog.config.external_session && watchdog.pty_launcher_admitted {
+        // The host can disappear during any syscall below. Give every admitted
+        // PTY seal to its surviving launcher, including ordinary cancellation,
+        // rather than alternating host leases with cached numeric SID signals.
+        if let Ok(deadline) = Deadline::after(std::time::Duration::from_millis(100)) {
+            let request = Frame::new(FrameKind::PtySeal, watchdog.config.nonce, leader, leader);
+            let _ = send_frame(watchdog.config.registration_fd, &request, deadline);
+        }
+        unsafe { await_pty_launcher_seal(watchdog.config, leader) };
     }
     let mut kill_attempt = 0_u32;
     let kill_result = unsafe {
@@ -1093,6 +1134,205 @@ unsafe fn quiesce_and_kill(
         }) {
             unsafe { finish_after_group_seal(watchdog.config) };
         }
+    }
+}
+
+/// Host-death authority stays with the live PTY session launcher. It is the
+/// payload's real parent and keeps that exact Child lease through its seal.
+/// A cached SID/PGID here never authorizes a signal after the host has died.
+unsafe fn await_pty_launcher_seal(config: WatchdogConfig, leader: libc::pid_t) -> ! {
+    loop {
+        match unsafe { control_ready(config.registration_fd) } {
+            Ok(false) => unsafe { raw_poll_delay(10) },
+            Ok(true) => break,
+            Err(_) => unsafe { libc::_exit(EXIT_MONITOR_FAILED) },
+        }
+    }
+    // Darwin uses SOCK_STREAM. A short poll may wait for readiness, but after
+    // consuming the first byte the entire frame gets one receive budget: a
+    // partial frame's offset must never be discarded and parsed as new input.
+    let deadline = match Deadline::after(std::time::Duration::from_secs(5)) {
+        Ok(deadline) => deadline,
+        Err(_) => unsafe { libc::_exit(EXIT_MONITOR_FAILED) },
+    };
+    match recv_expected(config.registration_fd, config.nonce, FrameKind::PtySealed, deadline) {
+        Ok(frame) if frame.pid() == leader && frame.pgid() == leader => {
+            unsafe { finish_after_group_seal(config) };
+        }
+        // No valid receipt is not proof of session cleanup. In particular,
+        // never fall back to signalling a recycled SID/PGID on peer loss.
+        _ => unsafe { libc::_exit(EXIT_MONITOR_FAILED) },
+    }
+}
+
+/// Fork the actual PTY payload after nonce admission. Only that child returns
+/// to the standard library's exec path; the original host Child becomes an
+/// allocation-free session launcher and retains the payload's waitpid lease.
+///
+/// # Safety
+/// Call only from the post-fork pre-exec child after controlling-PTY setup.
+pub(super) unsafe fn fork_pty_payload(
+    registration_fd: RawFd,
+    nonce: Nonce,
+    deadline: Deadline,
+) -> Result<(), libc::c_int> {
+    const SIGNALS: [libc::c_int; 8] = [
+        libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM,
+        libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCHLD,
+    ];
+    let host = unsafe { libc::getppid() };
+    if host <= 1 || unsafe { libc::getsid(0) } != unsafe { libc::getpid() } {
+        return Err(libc::ECHILD);
+    }
+    deadline_active(deadline)?;
+    let mut saved: [libc::sigaction; SIGNALS.len()] = unsafe { std::mem::zeroed() };
+    for (index, signal) in SIGNALS.iter().enumerate() {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = if *signal == libc::SIGCHLD { libc::SIG_DFL } else { libc::SIG_IGN };
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        if unsafe { libc::sigaction(*signal, &action, &mut saved[index]) } == -1 {
+            let errno = last_errno();
+            for prior in 0..index {
+                unsafe { libc::sigaction(SIGNALS[prior], &saved[prior], std::ptr::null_mut()) };
+            }
+            return Err(errno);
+        }
+    }
+    if let Err(errno) = deadline_active(deadline) {
+        for (index, signal) in SIGNALS.iter().enumerate() {
+            unsafe { libc::sigaction(*signal, &saved[index], std::ptr::null_mut()) };
+        }
+        return Err(errno);
+    }
+    let payload = unsafe { libc::fork() };
+    if payload <= 0 {
+        let errno = last_errno();
+        for (index, signal) in SIGNALS.iter().enumerate() {
+            if unsafe { libc::sigaction(*signal, &saved[index], std::ptr::null_mut()) } == -1 {
+                return Err(last_errno());
+            }
+        }
+        return if payload == 0 { Ok(()) } else { Err(errno) };
+    }
+    // The launcher must not keep Rust's exec-error pipe or PTY slave alive.
+    // The payload retains their original copies until exec. No Rust destructor
+    // or runtime is entered in this parent branch.
+    let descriptor_cleanup = unsafe { close_unknown_fds(registration_fd, registration_fd, deadline) };
+    for descriptor in 0..=2 {
+        unsafe { libc::close(descriptor) };
+    }
+    unsafe { run_pty_launcher(host, payload, registration_fd, nonce, descriptor_cleanup.is_err()) };
+}
+
+unsafe fn run_pty_launcher(
+    host: libc::pid_t,
+    payload: libc::pid_t,
+    registration_fd: RawFd,
+    nonce: Nonce,
+    force_cleanup: bool,
+) -> ! {
+    loop {
+        let mut observation: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let observed = unsafe {
+            libc::waitid(libc::P_PID, payload as libc::id_t, &mut observation,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if force_cleanup || unsafe { libc::getppid() } != host
+            || observed == 0 && observation.si_pid == payload
+            || observed == -1 && last_errno() != libc::EINTR
+        {
+            break;
+        }
+        match unsafe { control_ready(registration_fd) } {
+            Ok(false) => {}
+            Ok(true) => {
+                let deadline = match Deadline::after(std::time::Duration::from_millis(100)) {
+                    Ok(deadline) => deadline,
+                    Err(_) => break,
+                };
+                let leader = unsafe { libc::getpid() };
+                match recv_frame(registration_fd, nonce, deadline) {
+                    Ok(frame) if frame.pid() == leader && frame.pgid() == leader
+                        && frame.kind() == FrameKind::PtyTerminate => {
+                        // This is our exact unreaped child; its PID cannot be
+                        // recycled until this launcher consumes its waitpid.
+                        unsafe { libc::kill(payload, libc::SIGTERM) };
+                    }
+                    _ => break,
+                }
+            }
+            Err(_) => break,
+        }
+        unsafe { raw_poll_delay(10) };
+    }
+    // The known direct payload may itself call setsid and leave our session.
+    // Its real unreaped Child lease still pins its PID independently of SID.
+    // Verify that lease before every positive-PID signal; ECHILD never grants
+    // cached-PID fallback and never produces a seal receipt.
+    loop {
+        match unsafe { kill_unreaped_payload(payload) } {
+            Ok(()) => break,
+            Err(libc::ECHILD | libc::EPROTO) => unsafe { libc::_exit(EXIT_MONITOR_FAILED) },
+            Err(_) => unsafe { raw_poll_delay(50) },
+        }
+    }
+    // Our own live PID is the session leader, so it cannot be recycled while
+    // executing this loop. The payload remains our exact unreaped child even
+    // if the host has died. Preserve both authorities on transient failure.
+    while unsafe { super::macos_session::seal_current_session() }.is_err() {
+        unsafe { raw_poll_delay(10) };
+    }
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(payload, &mut status, 0) };
+        if waited == payload { break; }
+        if waited == -1 && last_errno() != libc::EINTR {
+            unsafe { libc::_exit(EXIT_MONITOR_FAILED) };
+        }
+    }
+    // Both the contained session and the exact known payload are now terminal.
+    // Send the nonce receipt after consuming the payload's real status, while
+    // our own live PID still anchors the sealed session until exit below.
+    if let Ok(deadline) = Deadline::after(std::time::Duration::from_millis(100)) {
+        let leader = unsafe { libc::getpid() };
+        let receipt = Frame::new(FrameKind::PtySealed, nonce, leader, leader);
+        let _ = send_frame(registration_fd, &receipt, deadline);
+    }
+    unsafe { libc::close(registration_fd) };
+    if libc::WIFEXITED(status) {
+        unsafe { libc::_exit(libc::WEXITSTATUS(status)) };
+    }
+    if libc::WIFSIGNALED(status) {
+        let signal = libc::WTERMSIG(status);
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_DFL;
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+        let mut unblocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigemptyset(&mut unblocked) };
+        unsafe { libc::sigaddset(&mut unblocked, signal) };
+        unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &unblocked, std::ptr::null_mut()) };
+        unsafe { libc::kill(libc::getpid(), signal) };
+    }
+    unsafe { libc::_exit(EXIT_MONITOR_FAILED) }
+}
+
+unsafe fn kill_unreaped_payload(payload: libc::pid_t) -> Result<(), libc::c_int> {
+    loop {
+        let mut observation: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::waitid(libc::P_PID, payload as libc::id_t, &mut observation,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) } == -1 {
+            let errno = last_errno();
+            if errno == libc::EINTR { continue; }
+            return Err(errno);
+        }
+        if observation.si_pid == payload { return Ok(()); }
+        if observation.si_pid != 0 { return Err(libc::EPROTO); }
+        // waitid just proved our exact direct unreaped child. SIGCHLD has a
+        // default action without SA_NOCLDWAIT, and no other thread/reaper exists
+        // in this raw launcher, so its PID cannot recycle across this syscall.
+        if unsafe { libc::kill(payload, libc::SIGKILL) } == 0 { return Ok(()); }
+        return Err(last_errno());
     }
 }
 

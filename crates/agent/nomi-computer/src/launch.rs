@@ -13,8 +13,9 @@
 //!      workspace's `shellexecute-on-windows` feature), the same path a
 //!      double-click uses — no `cmd /c start` window-title quirk, no dialog.
 //!
-//! macOS/Linux fall through to `open` / `xdg-open` (which already resolve apps by
-//! name well enough); the Start-Menu resolution is Windows-only.
+//! macOS resolves bare application names with LaunchServices (`open -a`) and
+//! checks the launch command's exit status. Linux uses `xdg-open`; the
+//! Start-Menu resolution is Windows-only.
 
 /// Reject the degenerate targets that make the Windows shell pop a "cannot find"
 /// dialog: empty/whitespace, or a string that is nothing but path separators
@@ -116,23 +117,31 @@ const AGENT_BLOCKED_OPENER_APPS: &[&str] = &[
     "rundll32",
     "google-chrome",
     "google-chrome-stable",
+    "google chrome",
+    "google chrome beta",
+    "google chrome dev",
+    "google chrome canary",
     "chrome",
     "chromium",
     "chromium-browser",
     "firefox",
     "msedge",
     "microsoft-edge",
+    "microsoft edge",
     "edge",
     "brave",
     "brave-browser",
+    "brave browser",
     "opera",
     "vivaldi",
     "safari",
+    "safari technology preview",
+    "tor browser",
 ];
 
 /// Reject browser/opener executables as the `app` parameter for Agent
 /// launches. Matching is on the lowercased executable basename (path prefix
-/// and a trailing `.exe` are stripped).
+/// and trailing `.exe` / macOS `.app` extensions are stripped).
 pub fn validate_agent_launch_app(app: &str) -> Result<(), String> {
     let base = app
         .trim()
@@ -140,7 +149,10 @@ pub fn validate_agent_launch_app(app: &str) -> Result<(), String> {
         .next()
         .unwrap_or(app)
         .to_ascii_lowercase();
-    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".app"))
+        .unwrap_or(&base);
     if AGENT_BLOCKED_OPENER_APPS.contains(&base) {
         return Err(format!(
             "opening a target with the {app:?} browser/opener is not available to Agent \
@@ -172,10 +184,13 @@ fn is_url(target: &str) -> bool {
 /// URLs are rejected) reliably via the OS shell, optionally opening it WITH a
 /// specific `app`. Detached. Returns a human-readable success message.
 pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
+    let target = target.trim();
+    let app = app.map(str::trim);
     validate_launch_target(target)?;
     validate_absolute_launch_path(target, "launch target")?;
     validate_agent_web_target(target)?;
     if let Some(app) = app {
+        validate_launch_target(app)?;
         validate_agent_launch_app(app)?;
         validate_absolute_launch_path(app, "launch application")?;
     }
@@ -186,8 +201,55 @@ pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
         .unwrap_or_else(|e| Err(format!("launch task failed: {e}")))
 }
 
+/// Construct macOS LaunchServices arguments without a shell. `open <name>`
+/// treats a name as a file, whereas `open -a <name>` resolves an application.
+/// The explicit `--` also keeps a user-selected path from becoming an option.
+#[cfg(any(target_os = "macos", test))]
+fn macos_open_command(target: &str, app: Option<&str>) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if let Some(app) = app {
+        command.args(["-a", app, "--", target]);
+    } else if leading_scheme(target).is_none()
+        && !target.contains(['/', '\\'])
+        && !std::path::Path::new(target).exists()
+    {
+        command.args(["-a", target, "--"]);
+    } else {
+        command.args(["--", target]);
+    }
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
+    // `open` exits after submitting the LaunchServices request, without
+    // waiting for the launched app to quit. Waiting for this short-lived
+    // command is necessary: a successful spawn alone does not prove that an
+    // application exists or that macOS accepted the launch.
+    let output = macos_open_command(target, app)
+        .output()
+        .map_err(|error| format!("failed to submit {target:?} to macOS LaunchServices: {error}"))?;
+    if !output.status.success() {
+        let detail: String = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .chars()
+            .take(512)
+            .collect();
+        return Err(format!(
+            "macOS could not open {target:?}{} ({}): {detail}. Use the exact application name or an existing file/application path.",
+            app.map(|app| format!(" with {app:?}")).unwrap_or_default(),
+            output.status,
+        ));
+    }
+    Ok(match app {
+        Some(app) => format!("Opened {target:?} with {app:?} via macOS LaunchServices."),
+        None => format!("Opened {target:?} via macOS LaunchServices."),
+    })
+}
+
 /// Blocking launch (runs on a `spawn_blocking` thread): resolve the target if it
 /// is a bare Windows app name, then ShellExecute it.
+#[cfg(not(target_os = "macos"))]
 fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
     // Opening a target WITH a specific app (e.g. a URL in a chosen browser):
     // the app handler resolves it; no Start-Menu lookup.
@@ -509,12 +571,44 @@ mod tests {
         assert!(validate_agent_launch_app("xdg-open").is_err());
         assert!(validate_agent_launch_app("/usr/bin/google-chrome").is_err());
         assert!(validate_agent_launch_app("C:\\Program Files\\MSEdge.EXE").is_err());
+        for app in [
+            "Google Chrome", "Google Chrome.app", "/Applications/Safari.app",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "Microsoft Edge.app", "Brave Browser", "Tor Browser.app",
+        ] {
+            assert!(validate_agent_launch_app(app).is_err(), "{app}");
+        }
         let error = validate_agent_launch_app("msedge").unwrap_err();
         assert!(error.contains("browser navigate"), "must steer to the managed Browser: {error}");
         // Ordinary applications remain usable as the opener.
         assert!(validate_agent_launch_app("notepad").is_ok());
         assert!(validate_agent_launch_app("acrobat").is_ok());
         assert!(validate_agent_launch_app("vlc").is_ok());
+        assert!(validate_agent_launch_app("/System/Applications/TextEdit.app").is_ok());
+    }
+
+    #[test]
+    fn macos_launch_resolves_app_names_and_keeps_paths_as_arguments() {
+        let args = |target, app| {
+            macos_open_command(target, app)
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(args("NomiDefinitelyMissingApplication", None), ["-a", "NomiDefinitelyMissingApplication", "--"]);
+        assert_eq!(args("应用名称", None), ["-a", "应用名称", "--"]);
+        assert_eq!(args("/tmp/a document.txt", None), ["--", "/tmp/a document.txt"]);
+        assert_eq!(args("mailto:redacted@example.invalid", None), ["--", "mailto:redacted@example.invalid"]);
+        assert_eq!(args("-aCalculator", Some("TextEdit")), ["-a", "TextEdit", "--", "-aCalculator"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_missing_application_is_an_error_without_claiming_a_launch() {
+        let unique = format!("NomiDefinitelyMissingApplication-{}", std::process::id());
+        let error = launch_blocking(&unique, None).unwrap_err();
+        assert!(error.contains("macOS could not open"), "{error}");
+        assert!(error.contains(&unique), "{error}");
     }
 
     #[test]

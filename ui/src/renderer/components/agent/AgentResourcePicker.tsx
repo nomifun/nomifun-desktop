@@ -23,6 +23,7 @@ import {
 } from '@/renderer/hooks/system/systemPermissionModel';
 import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import styles from './AgentResourcePicker.module.css';
+import BrowserResourceField from './BrowserResourceField';
 
 export type AgentResourceOption = {
   value: string;
@@ -242,6 +243,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   );
   const multipleMcp = companionBindings || allowsMultipleMcpServers(capabilities);
   const [rosterRevision, setRosterRevision] = useState(0);
+  const [browserReady, setBrowserReady] = useState(true);
   useEffect(() => {
     if (!required.has('companion') && !required.has('companion_memory')) return;
     const refresh = () => setRosterRevision((previous) => previous + 1);
@@ -255,7 +257,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   }, [optionalKinds, required]);
   const fields = useMemo(() => requiredAgentResourcePickerKinds([...required, ...optionalKey.split('\u0000')]), [required, optionalKey]);
   const [inventory, setInventory] = useState<AgentResourceInventory>(emptyInventory);
-  const [pending, setPending] = useState<ReadonlySet<UserAgentResourceKind>>(() => new Set(fields));
+  const [pending, setPending] = useState<ReadonlySet<UserAgentResourceKind>>(() => new Set(fields.filter((kind) => kind !== 'browser')));
   const loading = pending.size > 0;
   const resolution = useMemo(() => resolveAgentResourceSelections(required, value), [required, value]);
   const missingChoiceCount = requiredAgentResourcePickerKinds(resolution.missingKinds).length;
@@ -271,10 +273,10 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
 
   useEffect(() => {
     let cancelled = false;
-    setPending(new Set(fields));
+    setPending(new Set(fields.filter((kind) => kind !== 'browser')));
     setInventory(emptyInventory());
     // A slow MCP/device request must not disable the independently loaded roster.
-    for (const kind of fields) {
+    for (const kind of fields.filter((kind) => kind !== 'browser')) {
       const kinds = kind === 'customer' && fields.includes('channel') ? [kind, 'channel'] as const : [kind];
       void loadInventory(kinds, capabilities, actions).then((next) => {
         if (!cancelled) setInventory((previous) => ({
@@ -297,7 +299,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     const next = { ...value };
     let changed = false;
     for (const kind of fields) {
-      if (inventory.errors[kind]) continue;
+      if (kind === 'browser' || inventory.errors[kind]) continue;
       if (kind === 'knowledge_base') {
         const selected = selectedKnowledgeResourceIds(next);
         const available = new Set(fieldOptions(kind, next).map((option) => option.value));
@@ -347,15 +349,17 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
       return !optional.has(pickerKind as UserAgentResourceKind);
     })
   );
-  const pendingBlocksLaunch = [...pending].some((kind) => requiredFields.includes(kind));
+  const pendingBlocksLaunch = [...pending].some((kind) => kind !== 'browser' && requiredFields.includes(kind));
   // A Session needs its required bindings to be resolved, but it does not need
   // every granted capability's current environment to be healthy. Keeping
   // those axes separate lets ordinary chat continue while the affected tool
   // surface stays absent or reports an actionable error at invocation time.
-  const sessionResourcesReady = !pendingBlocksLaunch;
+  const sessionResourcesReady = !pendingBlocksLaunch && (!fields.includes('browser') || browserReady);
   const runtimeIssueCount = (value.robot && !selectedRuntimeResourcesAvailable ? 1 : 0)
     + (needsComputerPermissionCheck && !computerPermissions.loading && !computerReady ? 1 : 0);
-  const resourceStatusKey = resolution.missingKinds.length || !sessionResourcesReady
+  const resourceStatusKey = fields.includes('browser') && !browserReady
+    ? 'agentSettings.resources.browser.connectionNeeded'
+    : resolution.missingKinds.length || !sessionResourcesReady
     ? 'agentSettings.resources.missingCount'
     : runtimeIssueCount > 0
       ? 'agentSettings.resources.runtimeUnavailableCount'
@@ -470,6 +474,8 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
         </span>
       </div>}
       {fields.map((kind) => {
+      if (kind === 'browser') return <BrowserResourceField key={kind} value={value.browser}
+        onChange={(browser) => onChange({ ...value, browser })} onReadinessChange={setBrowserReady} disabled={disabled} />;
       const options = fieldOptions(kind);
       const loading = pending.has(kind);
       const error = inventory.errors[kind];

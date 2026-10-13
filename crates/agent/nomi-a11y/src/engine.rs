@@ -36,6 +36,24 @@ impl Rect {
     pub fn is_empty(&self) -> bool {
         self.w <= 0.0 || self.h <= 0.0
     }
+
+    /// Choose an integer screen point near the OS bounds' center, inside their
+    /// half-open area and the native input's i32 range. Reject geometry with no
+    /// representable interior point instead of truncating onto a neighbor.
+    pub fn pixel_center(&self) -> Option<(i32, i32)> {
+        fn axis_point(origin: f64, extent: f64) -> Option<i32> {
+            if !origin.is_finite() || !extent.is_finite() || extent <= 0.0 { return None; }
+            let end = origin + extent;
+            if !end.is_finite() || end <= origin { return None; }
+            let first = origin.ceil().max(f64::from(i32::MIN));
+            let last = (end.ceil() - 1.0).min(f64::from(i32::MAX));
+            if first > last { return None; }
+            let point = (origin + extent / 2.0).floor().clamp(first, last);
+            if !point.is_finite() || point < origin || point >= end { return None; }
+            Some(point as i32)
+        }
+        Some((axis_point(self.x, self.w)?, axis_point(self.y, self.h)?))
+    }
 }
 
 /// Where an element entry came from.
@@ -166,6 +184,9 @@ impl Default for ObserveOpts {
 /// silent no-op.
 #[derive(Debug, thiserror::Error)]
 pub enum A11yError {
+    /// The requested capability/action is unavailable before any mutation was
+    /// admitted. Only this explicit rejection can authorize a guarded input
+    /// fallback; an arbitrary backend error does not prove zero effect.
     #[error("not supported ({capability}): {hint}")]
     Unsupported { capability: String, hint: String },
     #[error("element not found: {0}")]
@@ -174,6 +195,11 @@ pub enum A11yError {
     Stale(String),
     #[error("permission required: {0}")]
     Permission(String),
+    /// A mutating request reached the native API, but its acknowledgement was
+    /// lost or timed out. The effect may have occurred; callers must record the
+    /// uncertainty and observe again without automatically retrying the action.
+    #[error("accessibility action effect is uncertain: {0}")]
+    Uncertain(String),
     #[error("accessibility backend error: {0}")]
     Backend(String),
 }
@@ -190,6 +216,21 @@ pub trait A11yEngine: Send + Sync {
     /// snapshot. Element `bounds` are in OS accessibility coordinates.
     fn observe(&self, opts: &ObserveOpts) -> Result<Snapshot, A11yError>;
 
+    /// Resolve a retained element for a pixel gesture without performing any
+    /// semantic action. Implementations must validate the snapshot generation,
+    /// owning window and live element before returning OS screen coordinates.
+    /// An unavailable validator does not authorize use of cached coordinates.
+    fn resolve_pixel_target(
+        &self,
+        _target: &Target,
+        _generation: SnapshotGen,
+    ) -> Result<Rect, A11yError> {
+        Err(A11yError::Unsupported {
+            capability: "pixel gesture target validation".to_string(),
+            hint: "This accessibility backend cannot validate a retained ref for pixel input.".to_string(),
+        })
+    }
+
     /// Perform `action` on the element addressed by `target`. `Ref` targets are
     /// validated against `generation` and rejected if stale.
     fn invoke(
@@ -201,4 +242,46 @@ pub trait A11yEngine: Send + Sync {
 
     /// Raise/activate a window by its owning process id.
     fn focus_window(&self, pid: i32) -> Result<Effect, A11yError>;
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::Rect;
+
+    #[test]
+    fn pixel_center_keeps_negative_one_pixel_point_inside_half_open_bounds() {
+        let bounds = Rect { x: -1.0, y: 10.0, w: 1.0, h: 1.0 };
+        assert_eq!(bounds.pixel_center(), Some((-1, 10)),
+            "MAC38 integer pointer target must remain inside [-1, 0), not truncate -0.5 to 0");
+    }
+
+    #[test]
+    fn pixel_center_rejects_subpixel_bounds_without_any_integer_point() {
+        for bounds in [
+            Rect { x: 0.2, y: 0.2, w: 0.2, h: 0.2 },
+            Rect { x: -0.4, y: -0.4, w: 0.2, h: 0.2 },
+        ] {
+            assert_eq!(bounds.pixel_center(), None,
+                "MAC38 an integer input point must actually exist inside the half-open bounds: {bounds:?}");
+        }
+    }
+
+    #[test]
+    fn pixel_center_preserves_negative_origins_and_rejects_clamped_geometry() {
+        let bounds = Rect { x: -1200.0, y: 42.0, w: 80.0, h: 20.0 };
+        assert_eq!(bounds.pixel_center(), Some((-1160, 52)));
+        for invalid in [
+            Rect { x: f64::NAN, ..bounds },
+            Rect { w: f64::INFINITY, ..bounds },
+            Rect { x: f64::MAX, w: f64::MAX, ..bounds },
+            Rect { x: f64::from(i32::MAX) + 1.0, ..bounds },
+            Rect { x: f64::from(i32::MIN) - 100.0, ..bounds },
+            Rect { h: 0.0, ..bounds },
+        ] {
+            assert_eq!(invalid.pixel_center(), None, "{invalid:?}");
+        }
+        assert_eq!(Rect { x: f64::from(i32::MAX), ..bounds }.pixel_center(), Some((i32::MAX, 52)));
+        let subpixel_with_integer = Rect { x: -0.2, y: 0.2, w: 0.8, h: 1.2 };
+        assert_eq!(subpixel_with_integer.pixel_center(), Some((0, 1)));
+    }
 }

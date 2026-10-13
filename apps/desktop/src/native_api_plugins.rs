@@ -20,6 +20,9 @@ pub(crate) fn dialog<R: Runtime>() -> NativeApiPlugin<R> {
     }
 }
 pub(crate) fn notification<R: Runtime>() -> NativeApiPlugin<R> {
+    #[cfg(target_os = "macos")]
+    let inner = crate::macos_notifications::init();
+    #[cfg(not(target_os = "macos"))]
     let inner = tauri_plugin_notification::init();
     // The official notification JS API uses the plugin's Notification shim.
     // Retain it only in first-party top-level documents, never in browser pages

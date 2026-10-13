@@ -6,7 +6,6 @@ const AUTOMATIC_AGENT_RESOURCE_IDS: Readonly<Record<string, string>> = {
   process_session: 'managed-process-session',
   terminal: 'managed-terminal',
   asset_library: 'creative-studio-assets',
-  browser: 'managed-browser',
   computer: 'local-desktop',
   scheduler: 'installation-scheduler',
 };
@@ -19,6 +18,7 @@ const USER_AGENT_RESOURCE_KINDS = [
   'robot',
   'mcp_server',
   'canvas',
+  'browser',
 ] as const;
 
 /**
@@ -111,7 +111,9 @@ export const resolveAgentResourceSelections = (
     }
     const automaticId = AUTOMATIC_AGENT_RESOURCE_IDS[resourceKind];
     const pickerKind = pickerKindForResourceKind(resourceKind);
-    const resourceId = automaticId ?? (pickerKind ? value[pickerKind] : undefined);
+    const resourceId = resourceKind === 'browser'
+      ? value.browser ?? 'managed-browser'
+      : automaticId ?? (pickerKind ? value[pickerKind] : undefined);
     if (!resourceId) {
       if (!agentResourceKindMayRemainUnbound(resourceKind)) missingKinds.push(resourceKind);
       continue;

@@ -4,21 +4,16 @@
 //! with the future per-OS UI-Automation submodule; it is renamed to make clear
 //! it is the generic xcap/enigo fallback used on every platform.
 //!
-//! xcap 0.9 has no focus/activate API on any platform, so `focus_window`
-//! falls back to clicking the window's center (which raises and focuses it
-//! on macOS and most Linux WMs). Window x/y/width/height from xcap are in
-//! the same logical coordinate space enigo uses on macOS.
-//!
-//! Real window activation (macOS NSRunningApplication / Windows UIA SetFocus /
-//! Linux per-WM) is designed in the cross-platform computer-use spec and will
-//! replace the click-to-raise fallback as the a11y engine lands.
+//! xcap 0.9 has no focus/activate API. Windows therefore uses Win32 and macOS
+//! uses the Accessibility actor to identify and activate the selected window.
+//! Linux retains the explicitly reported click-to-raise fallback. Window
+//! x/y/width/height from xcap are global logical points on macOS.
 
 use xcap::Window;
 
 // The click-to-raise focus fallback (and only that) uses synthetic input; on
-// Windows we activate the real window via Win32 instead, so the input crate is
-// not referenced there.
-#[cfg(not(target_os = "windows"))]
+// Windows and macOS activate the real window through native APIs.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use crate::input;
 
 /// A snapshot of one window's metadata.
@@ -96,9 +91,10 @@ pub fn find_window(window_id: u32) -> Result<WindowInfo, String> {
 /// On Windows this uses the real activation API (`SetForegroundWindow` on the
 /// exact target HWND, restoring it if minimized, with a foreground-lock
 /// workaround) so subsequent `type`/`key` input lands in the intended window.
-/// On macOS / Linux, where xcap exposes no activate API and a center click
-/// reliably raises and focuses the window, it falls back to click-to-raise.
+/// On macOS, match the window's current owner, title and bounds in the
+/// Accessibility tree and verify native focus. Linux uses click-to-raise.
 pub async fn focus_window(window_id: u32) -> Result<String, String> {
+    #[cfg(not(target_os = "macos"))]
     let info = tokio::task::spawn_blocking(move || find_window(window_id))
         .await
         .map_err(|e| format!("Window lookup task failed: {e}"))??;
@@ -115,7 +111,14 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
         ))
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(move || focus_window_macos(window_id))
+            .await
+            .map_err(|e| format!("Focus task failed: {e}"))?
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         if info.width == 0 || info.height == 0 {
             return Err(format!(
@@ -136,6 +139,42 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
             info.app_name, info.title
         ))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn focus_window_macos(window_id: u32) -> Result<String, String> {
+    if crate::permissions::accessibility_granted() == Some(false) {
+        return Err(format!(
+            "Accessibility permission is not granted, so the window cannot be activated. {}",
+            crate::permissions::accessibility_hint_detailed(),
+        ));
+    }
+    // Re-read metadata for this exact current CGWindowID. Invented origins or
+    // dimensions could resolve a different window in the AX tree, so none of
+    // the generic display-list fallbacks are appropriate here.
+    let (pid, bounds, title) = crate::macos_main::run_blocking(move || {
+        let windows = Window::all().map_err(|e| format!("Failed to enumerate windows: {e}"))?;
+        let window = windows.iter().find(|window| window.id().ok() == Some(window_id))
+            .ok_or_else(|| format!("Window {window_id} no longer exists; run list_windows again."))?;
+        let metadata_error = |e| format!("Cannot identify macOS window {window_id} safely: {e}");
+        let pid = i32::try_from(window.pid().map_err(metadata_error)?)
+            .ok().filter(|pid| *pid > 0)
+            .ok_or_else(|| format!("Window {window_id} has no valid owner process"))?;
+        let bounds = nomi_a11y::Rect {
+            x: f64::from(window.x().map_err(metadata_error)?),
+            y: f64::from(window.y().map_err(metadata_error)?),
+            w: f64::from(window.width().map_err(metadata_error)?),
+            h: f64::from(window.height().map_err(metadata_error)?),
+        };
+        if bounds.w <= 0.0 || bounds.h <= 0.0 {
+            return Err(format!("Window {window_id} has no readable non-zero bounds"));
+        }
+        let title = window.title().ok().filter(|title| !title.is_empty());
+        Ok((pid, bounds, title))
+    })?;
+    let effect = nomi_a11y::focus_named_window(pid, bounds, title)
+        .map_err(|e| format!("Could not activate macOS window {window_id}: {e}"))?;
+    Ok(format!("Activated window {window_id} via macOS Accessibility. {}", effect.message))
 }
 
 /// Windows: activate the exact target window (xcap window ids are HWNDs).

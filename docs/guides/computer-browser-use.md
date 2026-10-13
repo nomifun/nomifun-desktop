@@ -12,26 +12,37 @@ For a frontend project, start its development server, then ask the Agent to navi
 
 Windows native input has real smoke coverage. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) for the current limits.
 
-## Optional Attached Chrome (Windows, implementation in progress)
+## Optional Attached Chrome (macOS and Windows)
 
 An Agent session's `browser` capability can be served by an attached,
 already-running Chrome instead of the embedded Browser Workspace. The provider
-is installation-level: connect once with
-`POST /api/browser-providers/attached-chrome` after enabling Chrome remote
-debugging (`chrome://inspect/#remote-debugging`), approve Chrome's prompt, then
-bind the session to the `attached-chrome` provider resource. `GET`/`DELETE` on
-the same route read and release the attachment.
+is installation-level. Before starting a conversation with Browser actions,
+use its resource picker: open Chrome 144 or later on the computer running
+NomiFun, enable remote debugging (`chrome://inspect/#remote-debugging`), approve
+Chrome's prompt, and click **Connect Chrome**. Then explicitly choose **Existing
+Chrome** as the Browser resource. Connecting does not change the default
+NomiFun browser selection. **Refresh** reads the current connection;
+**Disconnect** releases the exact observed attachment. These controls call
+`GET`/`POST`/`DELETE /api/browser-providers/attached-chrome`.
 
 No Chrome restart, replacement profile, or import of cookies, passwords or
 history is required. Disconnect releases automation and its connection, not
 your browser or tabs. Mutable browser operations fail closed while the Agent
 owns the run.
 
-The frontend wiring and the full iframe/file/dialog acceptance matrix remain
-in progress; the provider and its REST surface are implemented in
-`nomifun-app` (`browser_workspace_provider/attached_provider.rs`). Edge, macOS
-and Linux support is not yet claimed. This capability grants neither
-embedded-browser control nor local or provider-native web search.
+If an explicitly selected Chrome connection is lost, the picker preserves that
+choice and requires reconnecting or explicitly choosing the NomiFun browser
+before starting. The session freezes only the `browser`/`attached-chrome`
+kind/id; ownership, permitted actions and connection identity are derived by
+the server. Quick Start accepts the same typed resource choices and defaults
+to the NomiFun browser.
+
+The provider supports observing, navigating and interacting with existing
+tabs. New tabs, uploads, downloads and arbitrary evaluation are unsupported.
+macOS and Windows discovery and the frontend connection flow are implemented;
+real personal-Chrome and full iframe/dialog product acceptance still require
+native verification. Edge and Linux are unsupported. This capability grants
+neither embedded-browser control nor local or provider-native web search.
 
 ## Optional Web Research
 
@@ -40,9 +51,12 @@ of the model provider's native search. Queries run through an isolated
 background browser runtime and do not use session login state; enabling it does
 not grant Browser automation.
 
-Windows desktop detects installed Chrome 120+; without a suitable installation
-this capability cannot be enabled. Discovery does not launch a browser. A query
-starts an isolated runtime and verifies its live version.
+Windows and macOS desktop detect installed Chrome 120+. On macOS, discovery
+checks `/Applications/Google Chrome.app` and `~/Applications/Google Chrome.app`.
+Without a suitable installation this capability cannot be enabled. Discovery
+does not launch a browser. A query starts an isolated runtime with a separate
+temporary profile and verifies its live version, without reading your personal
+Chrome profile.
 Queries go to Bing and engine domains are resolved through Google Public DNS
 over HTTPS, without session login state. Restart the app if a Chrome update
 invalidates the pinned release.

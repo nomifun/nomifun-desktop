@@ -34,6 +34,13 @@ Apple 芯片 Mac 上,被隔离 + 未正规签名公证的 App,Gatekeeper 直接�
 支持分别构建 Apple Silicon arm64 和 Intel x86_64；浏览器使用系统 WKWebView，
 不下载或打包浏览器 framework、helper 或系统 WebKit.framework。
 
+`apps/desktop/entitlements.plist` 只声明既有语音输入和浏览器媒体捕获需要的
+`com.apple.security.device.audio-input` 与 `com.apple.security.device.camera`。
+Tauri 配置、最终 App 签名以及开发包增量重新封装使用同一份文件，随附 ONNX 库不携带
+这两项 App 资源声明。修改该文件会使已完成的开发包缓存重新签名。
+Apple 的 [Hardened Runtime 资源访问说明](https://developer.apple.com/documentation/xcode/configuring-the-hardened-runtime)
+要求这些声明；`Info.plist` 的用途说明、系统用户授权和浏览器站点授权仍分别适用。
+
 ---
 
 ## 一次性准备(在 Apple 侧)
@@ -111,6 +118,7 @@ DMG="dist/desktop/NomiFun_${NOMIFUN_VERSION}_aarch64.dmg"
 
 codesign -dvv "$APP"                       # 期望: Authority=Developer ID Application: ...
 codesign --verify --deep --strict -v "$APP"  # 期望: valid on disk / satisfies Designated Requirement
+codesign --display --entitlements - --xml "$APP"  # 核对 audio-input / camera 均为 true
 xcrun stapler validate "$APP"              # 期望: The validate action worked!
 spctl -a -vvv "$APP"                       # 期望: source=Notarized Developer ID  → accepted
 
@@ -134,6 +142,6 @@ spctl -a -vvv -t open --context context:primary-signature "$DMG"  # 期望: acce
 - **公证被拒 / `Invalid` 状态**:多为「未启用 hardened runtime」或缺 entitlements。
   最终 App 签名启用 hardened runtime。WKWebView 使用系统 WebContent 进程，
   本应用无需浏览器 `allow-jit` entitlement。
-  额外 App entitlement 需要与最终装配签名流程一起核对。
+  App 的 audio-input / camera 声明由最终装配签名显式传入，不依赖中间包保留旧签名。
   查看具体原因:`xcrun notarytool log <submission-id> --key ... --key-id ... --issuer ...`。
 - **只签名没公证**:别人会看到「无法验证开发者」(不是「已损坏」)。补上公证变量即可。
