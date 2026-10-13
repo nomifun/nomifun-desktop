@@ -17,6 +17,197 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
     nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(),principal_id:journal.0.user.clone() }
 }
 
+fn rejected_arguments(step: u16) -> AgentEngineEvent {
+    use nomifun_agent_runtime::{AgentModelResponseRejection, AgentRejectedToolProposal};
+    use nomifun_chat_model_broker::{ToolArgumentDiagnostic, ToolArgumentDiagnosticCategory};
+    AgentEngineEvent::ModelResponseRejected {
+        step,
+        discarded_tool_call_ids: vec!["invalid-patch".into()],
+        continuation: true,
+        tool_hint: Some("apply_patch".into()),
+        rejection: Some(AgentModelResponseRejection::ToolArguments {
+            diagnostics: vec![AgentRejectedToolProposal {
+                call_id: "invalid-patch".into(),
+                name: "apply_patch".into(),
+                diagnostic: ToolArgumentDiagnostic {
+                    category: ToolArgumentDiagnosticCategory::Syntax,
+                    line: Some(1), column: Some(12), byte_len: 12,
+                    digest: digest_bytes(b"{\"files\":]}}"),
+                },
+            }],
+        }),
+        feedback: Some("The completed tool proposal has invalid JSON arguments at line 1 column 12. No tool in this batch was admitted. Generate a new native proposal.".into()),
+    }
+}
+
+fn enable_fixture_route(journal: &mut EngineTurnJournal) -> ChatRouteIdentity {
+    let route = ChatRouteIdentity::new("preset@1", "agent_chat", "fixture-route".into(), 1);
+    Arc::get_mut(&mut journal.0).expect("fixture journal is not shared yet").route = Some(route.clone());
+    route
+}
+
+fn model_causality(journal: &EngineTurnJournal, route: ChatRouteIdentity, step: u16) -> ChatCausality {
+    ChatCausality {
+        agent_session_id: journal.0.session.clone(),
+        turn_operation_id: journal.0.operation.clone(),
+        causation_event_id: journal.0.root.clone(),
+        resolved_snapshot_ref: journal.0.snapshot.clone(),
+        route_identity: route,
+        operation_id: format!("{}:model:{step}", journal.0.operation.as_ref()).into(),
+    }
+}
+
+#[tokio::test]
+async fn rejected_proposal_and_correction_preserve_canonical_facts_and_accepted_root_authority() {
+    let (mut journal, pool) = test_fixture().await;
+    let route = enable_fixture_route(&mut journal);
+    let rejection = rejected_arguments(1);
+    let events = [
+        AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into(), correction_source: None },
+        AgentEngineEvent::ToolCallDelta { step: 1, call_id: "invalid-patch".into(), name: "apply_patch".into(), arguments_delta: "PRIVATE_MALFORMED_ARGUMENTS".into() },
+        rejection.clone(),
+        AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "turn:model:2".into(), correction_source: Some(1) },
+        AgentEngineEvent::ModelResponseValidated { step: 2 },
+    ];
+    let mut buffer = super::super::runtime_event_buffer::AgentEventBuffer::default();
+    for event in &events {
+        for record in buffer.project(event) {
+            journal.append(serde_json::to_string(&record).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+        }
+    }
+    let before = journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    let facts = journal.0.store.native_recovery_facts(&journal.0.session, &journal.0.operation).await.unwrap();
+    let progress = facts.events.iter().filter(|event| event.kind.0 == "runtime/progress-recorded").collect::<Vec<_>>();
+    assert_eq!(progress.len(), events.len());
+    assert!(progress.iter().all(|event| event.causation_event_id.as_ref() == Some(&journal.0.root)));
+    let decoded = progress.iter().map(|event| {
+        serde_json::from_value::<AgentEngineEvent>(facts.event_payloads[event.event_id.as_ref()]["event"].clone()).unwrap()
+    }).collect::<Vec<_>>();
+    assert_eq!(decoded[2], rejection, "reason and exact engine feedback must survive hydration");
+    assert_eq!(decoded[3], events[3]);
+    assert_eq!(decoded[4], events[4]);
+    assert!(matches!(&decoded[1], AgentEngineEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta.is_empty()));
+    assert!(!serde_json::to_string(&facts.event_payloads).unwrap().contains("PRIVATE_MALFORMED_ARGUMENTS"));
+
+    // An exact canonical receipt retry remains one immutable fact. Reading a
+    // fresh fact window does not invent a second rejection or a new budget.
+    let saved = progress[2];
+    let retry = SessionEventAppend {
+        agent_session_id: saved.agent_session_id.clone(), event_id: saved.event_id.clone(),
+        producer_id: saved.producer_id.clone(), idempotency_key: saved.idempotency_key.clone(),
+        semantic_event: SemanticSessionEventDraft {
+            kind: saved.kind.clone(), kind_version: saved.kind_version,
+            correlation_id: saved.correlation_id.clone(), causation_event_id: saved.causation_event_id.clone(),
+            payload: saved.payload.clone(),
+        },
+    };
+    journal.0.store.append_native_event(&journal.0.lease, &retry, None).await.unwrap();
+    let refreshed = journal.0.store.native_recovery_facts(&journal.0.session, &journal.0.operation).await.unwrap();
+    assert_eq!(refreshed.event_payloads, facts.event_payloads);
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
+    let effects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects WHERE session_id=?")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    let admitted_tools: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind IN ('tool/call-started','tool/result-recorded')")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!((effects, admitted_tools), (0, 0), "proposal observations cannot fabricate invocations or effects");
+
+    let valid = model_causality(&journal, route, 2);
+    let mut wrong_authority = valid.clone();
+    wrong_authority.causation_event_id = saved.event_id.clone();
+    assert!(journal.authorize(&wrong_authority).await.is_err(), "correction provenance is not user authority");
+    journal.authorize(&valid).await.unwrap();
+    journal.authorize(&valid).await.unwrap();
+    let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(claims, 1, "an exact model-admission retry preserves the original claim");
+}
+
+#[tokio::test]
+async fn rejected_proposal_commit_failure_fences_the_successor_model_operation() {
+    let (mut journal, pool) = test_fixture().await;
+    let route = enable_fixture_route(&mut journal);
+    sqlx::query("CREATE TRIGGER reject_proposal_rejection BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='model_response_rejected' BEGIN SELECT RAISE(FAIL,'fixture proposal rejection commit failure'); END")
+        .execute(&pool).await.unwrap();
+    let before = journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    assert!(journal.append(serde_json::to_string(&rejected_arguments(1)).unwrap(), None, EngineJournalWrite::Progress).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
+    assert!(journal.0.cursor.lock().await.uncertain);
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted {
+        step: 2, operation_id: "turn:model:2".into(), correction_source: Some(1),
+    }).unwrap(), None, EngineJournalWrite::Progress).await.is_err());
+    assert!(journal.authorize(&model_causality(&journal, route, 2)).await.is_err());
+    let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(claims, 0);
+    assert_eq!(journal.sequence(), 0);
+}
+
+#[tokio::test]
+async fn validation_observation_after_cancellation_cannot_open_a_model_or_cross_a_superseded_lease() {
+    let (mut journal, pool) = test_fixture().await;
+    let route = enable_fixture_route(&mut journal);
+    journal.0.cancellation.cancel();
+    journal.append(serde_json::to_string(&AgentEngineEvent::ModelResponseValidated { step: 1 }).unwrap(), None,
+        EngineJournalWrite::Settlement).await.unwrap();
+    assert!(journal.authorize(&model_causality(&journal, route, 2)).await.is_err());
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted {
+        step: 2, operation_id: "turn:model:2".into(), correction_source: Some(1),
+    }).unwrap(), None, EngineJournalWrite::Progress).await.is_err());
+    let before = journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    sqlx::query("UPDATE agent_turns SET execution_fence=execution_fence+1 WHERE session_id=? AND operation_id=?")
+        .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).execute(&pool).await.unwrap();
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelResponseValidated { step: 2 }).unwrap(), None,
+        EngineJournalWrite::Settlement).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn correction_observations_do_not_settle_an_unknown_effect_or_admit_a_successor_model() {
+    use nomifun_agent_session::{EffectEventRequest, EffectStrategy, EffectTerminalState};
+    let (mut journal, pool) = test_fixture().await;
+    let route = enable_fixture_route(&mut journal);
+    let tool_event_id = EventId::from("admitted-write");
+    let tool_operation = OperationId::from("turn:tool:write");
+    journal.0.store.append_native_event(&journal.0.lease, &SessionEventAppend {
+        agent_session_id: journal.0.session.clone(), event_id: tool_event_id.clone(),
+        producer_id: "runtime_supervisor".into(), idempotency_key: "admitted-write".into(),
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("tool/call-started".into()), kind_version: 1, correlation_id: "write-call".into(),
+            causation_event_id: Some(journal.0.turn_started.clone()),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "operation_id": tool_operation, "capability_id": "workspace.files", "action_id": "workspace.files/write"
+            }))),
+        },
+    }, None).await.unwrap();
+    let effect = EffectEventRequest {
+        agent_session_id: journal.0.session.clone(), effect_id: "unknown-write".into(),
+        turn_id: journal.0.operation.clone(), operation_id: tool_operation,
+        owner_domain: "workspace".into(), capability_module: "workspace.files".into(), action_id: "workspace.files/write".into(),
+        resource_binding_id: None, resource_key: Some("workspace:fixture".into()),
+        input_digest: digest_bytes(b"write-input"), recorded_at: 1_788_000_000_010,
+        event_id: "effect-write-started".into(), producer_id: "capability-host".into(), idempotency_key: "effect-write-started".into(),
+        correlation_id: "unknown-write".into(), strategy: EffectStrategy::ExternalUncertainEffect,
+        causation_event_id: Some(tool_event_id), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let started = journal.0.store.record_effect_started(effect.clone()).await.unwrap().ack.unwrap();
+    journal.0.store.record_effect_terminal(EffectEventRequest {
+        event_id: "effect-write-unknown".into(), producer_id: "workspace-owner".into(),
+        causation_event_id: Some(started.event_id), ..effect
+    }, EffectTerminalState::Uncertain).await.unwrap();
+    // Unknown effects move the Session out of running admission. Late model
+    // observations can still close, using the settlement-only write path.
+    for event in [rejected_arguments(2), AgentEngineEvent::ModelResponseValidated { step: 3 }] {
+        journal.append(serde_json::to_string(&event).unwrap(), None, EngineJournalWrite::Settlement).await.unwrap();
+    }
+    assert!(journal.authorize(&model_causality(&journal, route, 4)).await.is_err());
+    let retained: (String, String) = sqlx::query_as("SELECT state,terminal_event_id FROM agent_effects WHERE effect_id='unknown-write'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(retained, ("unknown".into(), "effect-write-unknown".into()));
+    let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(claims, 0);
+}
+
 #[tokio::test]
 async fn cleanup_retry_preserves_completed_previous_assistant_step() {
     let (journal, pool) = if let Some(root) = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR") {
@@ -69,7 +260,7 @@ async fn failed_cleanup_write_allows_only_its_exact_receipt_retry() {
     assert!(journal.append(json!({"event":"host_cleanup_proven","source":"other-owner"}).to_string(),None,
         EngineJournalWrite::Cleanup).await.is_err());
     assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted {
-        step:1,operation_id:"must-not-run".into()}).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
+        step:1,operation_id:"must-not-run".into(),correction_source:None}).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
     assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before);
     sqlx::query("DROP TRIGGER reject_cleanup_journal").execute(&pool).await.unwrap();
     journal.append(cleanup,None,EngineJournalWrite::Cleanup).await.unwrap();
@@ -108,7 +299,7 @@ async fn partially_committed_terminal_retries_without_a_new_journal_record() {
 async fn journal_window_renews_only_after_checkpoint_ack_and_keeps_cumulative_usage() {
     let (journal,_) = test_fixture().await;
     journal.save_execution_checkpoint(checkpoint(&journal,false),owner(&journal)).await.unwrap().unwrap();
-    journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted { step:1,operation_id:"model:1".into() }).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+    journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted { step:1,operation_id:"model:1".into(),correction_source:None }).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
     let (before_sequence,before_total) = { let cursor=journal.0.cursor.lock().await; assert!(cursor.bytes>0); (cursor.sequence,cursor.total_bytes) };
     let receipt=journal.save_execution_checkpoint(checkpoint(&journal,true),owner(&journal)).await.unwrap().unwrap();
     let cursor=journal.0.cursor.lock().await;
@@ -139,7 +330,7 @@ async fn lost_checkpoint_commit_never_buys_a_new_window_or_erases_usage() {
     assert_eq!((cursor.sequence,cursor.total_bytes,cursor.bytes,cursor.window_start_sequence),before);
     assert_eq!(cursor.segment,1); assert!(cursor.uncertain);
     drop(cursor);
-    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted { step:1,operation_id:"must-not-start".into() }).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted { step:1,operation_id:"must-not-start".into(),correction_source:None }).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
     let saved=journal.0.store.load_native_checkpoint(&owner(&journal),&journal.0.session,&journal.0.operation).await.unwrap().unwrap();
     assert_eq!(saved.revision,1);
     assert_eq!(saved.state.0["segments"]["segment"],1);

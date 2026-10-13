@@ -119,6 +119,14 @@ fn validate_expected_events(events: &[ChatModelEvent]) -> Result<(), RecordedFix
                 }
                 tool_names.insert(call.call_id.clone(), call.name.clone());
             }
+            ChatModelEvent::ToolCallRejected { call_id, name, diagnostic } => {
+                if call_id.as_ref().trim().is_empty() || name.trim().is_empty()
+                    || tool_names.get(call_id).is_some_and(|existing| existing != name)
+                    || diagnostic.validate().is_err() {
+                    return Err(RecordedFixtureError::ToolCorrelation);
+                }
+                tool_names.insert(call_id.clone(), name.clone());
+            }
             ChatModelEvent::Usage { .. } => {
                 usage_count += 1;
                 if usage_count > 1 {

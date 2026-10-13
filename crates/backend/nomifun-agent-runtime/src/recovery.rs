@@ -29,6 +29,7 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         | AgentEngineEvent::CompactionSummaryRejected { .. }
         | AgentEngineEvent::ContextCompacted { .. } | AgentEngineEvent::ContextLimitRecoveryStarted { .. }
         | AgentEngineEvent::ModelOutputTruncated { .. } | AgentEngineEvent::ModelResponseRejected { .. }
+        | AgentEngineEvent::ModelResponseValidated { .. }
         | AgentEngineEvent::VoiceModelStepSuperseded { .. }
         | AgentEngineEvent::ExecutionResumed { .. } | AgentEngineEvent::ExecutionBudgetPrepared { .. }
         | AgentEngineEvent::ExecutionSegmentRenewed { .. } | AgentEngineEvent::ContextPrepared { .. }
@@ -56,6 +57,8 @@ impl AgentTurnRecovery {
         }
         crate::stream_limits::serialized_size(&prefix, nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_BYTES as usize)?;
         crate::stream_limits::serialized_size(&tail, 8 * 1024 * 1024)?;
+        let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
+        protocol_recovery.restore(prefix.iter().chain(&tail))?;
         let mut reserved = BTreeSet::new();
         let mut recorded_inputs = Vec::new();
         for event in &prefix {
@@ -86,6 +89,10 @@ impl AgentTurnRecovery {
             applied_inputs.push(message);
         }
         let mut discarded = BTreeSet::new();
+        let mut batch_proposals = BTreeSet::new();
+        let mut batch_completed = BTreeSet::new();
+        let mut batch_discarded = false;
+        let mut batch_validated = false;
         let mut last_model_step = checkpoint.model_steps;
         let mut last_recovery_fence = 0;
         for event in &tail {
@@ -94,7 +101,8 @@ impl AgentTurnRecovery {
                 AgentEngineEvent::OutputTextDelta { step, .. } | AgentEngineEvent::ReasoningDelta { step, .. }
                 | AgentEngineEvent::ToolCallDelta { step, .. } | AgentEngineEvent::ToolCallCompleted { step, .. }
                 | AgentEngineEvent::Usage { step, .. } | AgentEngineEvent::ModelOutputTruncated { step, .. }
-                | AgentEngineEvent::ModelResponseRejected { step, .. } | AgentEngineEvent::VoiceModelStepSuperseded {step,..} => Some(*step), _ => None,
+                | AgentEngineEvent::ModelResponseRejected { step, .. } | AgentEngineEvent::ModelResponseValidated { step }
+                | AgentEngineEvent::VoiceModelStepSuperseded {step,..} => Some(*step), _ => None,
             };
             if event_step.is_some_and(|step| step != last_model_step || step <= checkpoint.model_steps) { return Err(fail()); }
             match event {
@@ -116,9 +124,30 @@ impl AgentTurnRecovery {
                 AgentEngineEvent::ModelStepStarted { step, .. } => {
                     if last_model_step.checked_add(1) != Some(*step) { return Err(fail()); }
                     last_model_step = *step;
+                    batch_proposals.clear(); batch_completed.clear(); batch_discarded = false; batch_validated = false;
                 }
-                AgentEngineEvent::ToolCallDelta { call_id, .. } => { discarded.insert(call_id.clone()); }
-                AgentEngineEvent::ToolCallCompleted { step, call } if *step > 0 => { discarded.insert(call.call_id.clone()); }
+                AgentEngineEvent::ToolCallDelta { call_id, .. } => {
+                    if batch_discarded || batch_validated { return Err(fail()); }
+                    batch_proposals.insert(call_id.clone()); discarded.insert(call_id.clone());
+                }
+                AgentEngineEvent::ToolCallCompleted { step, call } if *step > 0 => {
+                    if batch_discarded || batch_validated || !batch_completed.insert(call.call_id.clone()) { return Err(fail()); }
+                    batch_proposals.insert(call.call_id.clone()); discarded.insert(call.call_id.clone());
+                }
+                AgentEngineEvent::ModelResponseValidated { .. } => {
+                    if batch_discarded || batch_proposals != batch_completed { return Err(fail()); }
+                    batch_validated = true;
+                }
+                AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. }
+                | AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
+                | AgentEngineEvent::VoiceModelStepSuperseded { discarded_tool_call_ids, .. } => {
+                    if batch_discarded || batch_proposals != discarded_tool_call_ids.iter().cloned().collect() {
+                        return Err(fail());
+                    }
+                    batch_discarded = true;
+                }
+                AgentEngineEvent::OutputTextDelta { .. } | AgentEngineEvent::ReasoningDelta { .. }
+                | AgentEngineEvent::Usage { .. } if batch_validated || batch_discarded => return Err(fail()),
                 _ => {}
             }
         }
@@ -168,11 +197,11 @@ mod tests {
         let prefix = vec![AgentEngineEvent::TurnStarted { binding: checkpoint.binding.clone(), turn_operation_id: "turn".into() },
             AgentEngineEvent::ExecutionCheckpointSaved { step: 0, revision: 1, digest: "c".repeat(64).into() }];
         let tail = vec![
-            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into() },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "abandoned-one".into() },
             AgentEngineEvent::ExecutionResumed { checkpoint_revision: 1, checkpoint_step: 0, model_steps: 1, execution_fence: 1, discarded_tool_call_ids: vec![] },
             AgentEngineEvent::ExecutionBudgetPrepared { context_window_tokens: 32768, max_output_tokens: 4096, max_model_steps: 32 },
-            AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "turn:model:2".into() },
+            AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "turn:model:2".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 2, text: "abandoned-two".into() },
         ];
         let recovery = AgentTurnRecovery::new(checkpoint.clone(), 1, 2, prefix.clone(), tail.clone(), vec![]).unwrap();
@@ -180,7 +209,7 @@ mod tests {
         let mut history_events = prefix.clone(); history_events.extend(tail.clone());
         history_events.extend([
             AgentEngineEvent::ExecutionResumed { checkpoint_revision: 1, checkpoint_step: 0, model_steps: 2, execution_fence: 2, discarded_tool_call_ids: vec![] },
-            AgentEngineEvent::ModelStepStarted { step: 3, operation_id: "turn:model:3".into() },
+            AgentEngineEvent::ModelStepStarted { step: 3, operation_id: "turn:model:3".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 3, text: "new-result".into() },
             AgentEngineEvent::TurnCompleted { model_steps: 3, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed },
         ]);

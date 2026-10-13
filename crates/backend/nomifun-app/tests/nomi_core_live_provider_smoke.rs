@@ -2393,6 +2393,13 @@ async fn run_live_workspace_file_chain_observed(
         ).await?;
         let observed = envelope_data("file.session", observed)?;
         if observed.pointer("/head/status").and_then(Value::as_str) == Some("ready") {
+            // The terminal may commit between the preceding messages read
+            // and the head read. Verify the post-terminal snapshot rather
+            // than rejecting a stale pre-terminal message window.
+            let (messages, _) = session_messages_after(router, "file.messages", &session_id, cursor).await?;
+            if let Some(code) = first_durable_error_code(&messages) {
+                return Err(SmokeFailure::new("file.messages", code, 422));
+            }
             let file = work_dir.join(file_name);
             emit_live_coding_trace(if snake_game { "snake_game" } else if official_coding { "coding" } else { "file" }, &messages, &file);
             let content = std::fs::read_to_string(&file).ok();

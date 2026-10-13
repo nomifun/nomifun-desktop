@@ -260,7 +260,7 @@ fn voice_superseded_message_ids(facts:&ChatCausalityFacts)->Result<BTreeSet<Stri
         if !matches!(value.get("event").and_then(Value::as_str),Some("model_step_started"|"voice_model_step_superseded")){continue;}
         if event.kind_version!=1{return Err(work_error("unsupported voice model source event"));}
         match serde_json::from_value::<AgentEngineEvent>(value.clone()).map_err(work_error)? {
-            AgentEngineEvent::ModelStepStarted{step,operation_id}=>{steps.insert((event.correlation_id.as_ref().into(),step),(operation_id,event.seq));},
+            AgentEngineEvent::ModelStepStarted{step,operation_id,..}=>{steps.insert((event.correlation_id.as_ref().into(),step),(operation_id,event.seq));},
             AgentEngineEvent::VoiceModelStepSuperseded{step,model_operation_id,steering_receipt_ids,cleanup,..}=>{
                 let start=steps.get(&(event.correlation_id.as_ref().into(),step)).ok_or_else(||work_error("voice withdrawal has no exact model start"))?;
                 if start.0!=model_operation_id||start.1>=event.seq||cleanup.operation_id!=model_operation_id||cleanup.task_id.is_empty()||steering_receipt_ids.is_empty(){return Err(work_error("voice withdrawal lacks its exact owned model closure"));}
@@ -664,7 +664,7 @@ mod tests {
         let mut data=facts();let root="019b0000-0000-7000-8000-000000000020";
         event(&mut data,"message/user-accepted",root,root,json!({"content":"Explicit voice work"}));
         event(&mut data,"turn/started","turn-start","voice-turn",json!({"source_message_id":root}));
-        event(&mut data,"runtime/progress-recorded","step-start","voice-turn",json!({"event":AgentEngineEvent::ModelStepStarted{step:1,operation_id:"voice-turn:model:1".into()}}));
+        event(&mut data,"runtime/progress-recorded","step-start","voice-turn",json!({"event":AgentEngineEvent::ModelStepStarted{step:1,operation_id:"voice-turn:model:1".into(),correction_source:None}}));
         let withdrawn=super::super::engine_journal::canonical_assistant_step_message_id(root,1).unwrap();
         let kept=super::super::engine_journal::canonical_assistant_step_message_id(root,2).unwrap();
         event(&mut data,"message/assistant-projected","first-output",&withdrawn,json!({"content":"SUPERSEDED_WORDING"}));
@@ -686,7 +686,7 @@ mod tests {
         event(&mut data,"runtime/progress-recorded","taken","turn",json!({"event":AgentEngineEvent::SteeringInputs {inputs:vec![input]}}));
         assert_eq!(steering_status(&data,&"turn".into(),"receipt",false).unwrap(),VoiceWorkStatus::PendingBoundary);
         assert_eq!(steering_status(&data,&"turn".into(),"receipt",true).unwrap(),VoiceWorkStatus::Deferred);
-        event(&mut data,"runtime/progress-recorded","next-model","turn",json!({"event":AgentEngineEvent::ModelStepStarted {step:1,operation_id:"next".into()}}));
+        event(&mut data,"runtime/progress-recorded","next-model","turn",json!({"event":AgentEngineEvent::ModelStepStarted {step:1,operation_id:"next".into(),correction_source:None}}));
         assert_eq!(steering_status(&data,&"turn".into(),"receipt",false).unwrap(),VoiceWorkStatus::Applied);
     }
 }

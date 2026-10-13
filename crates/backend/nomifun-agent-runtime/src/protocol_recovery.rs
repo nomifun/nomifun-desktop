@@ -1,197 +1,223 @@
-//! Correct model formatting without executing text, replaying effects, or
-//! treating malformed output as completion. Every retry is a new model step.
-use nomifun_chat_model_broker::{ChatMessage, ChatRole, ChatToolChoice, ChatToolDefinition};
+//! One bounded model-response coordinator, reduced from committed facts only.
+use nomifun_chat_model_broker::{ChatMessage, ChatRole, ChatToolChoice, ChatToolDefinition, ToolCallId};
+use crate::{AgentEngineError, AgentEngineEvent, AgentModelResponseRejection};
 
-#[derive(Default)]
+const MAX_FEEDBACK_BYTES: usize = 24 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ProtocolRecovery {
     consecutive: u8,
     total: u8,
-    native_correction_pending: bool,
+    pending: Option<AgentEngineEvent>,
     tool_hint: Option<String>,
+    current_step: Option<u16>,
+    last_verdict: Option<u16>,
+}
+
+/// Strategies can refuse correction, never enlarge budgets, repair arguments,
+/// invoke models or grant tool authority.
+pub(crate) trait ProtocolCorrectionStrategy {
+    fn allow(&self, rejection: &AgentModelResponseRejection) -> bool;
+}
+struct NativeProtocolCorrection;
+impl ProtocolCorrectionStrategy for NativeProtocolCorrection {
+    fn allow(&self, reason: &AgentModelResponseRejection) -> bool {
+        !matches!(reason, AgentModelResponseRejection::Unclassified)
+    }
+}
+
+pub(crate) struct PreparedProtocolRejection {
+    event: AgentEngineEvent,
+    expected_state: ProtocolRecovery,
+}
+impl PreparedProtocolRejection {
+    pub(crate) fn event(&self) -> &AgentEngineEvent { &self.event }
+    pub(crate) fn continuation(&self) -> bool {
+        matches!(self.event, AgentEngineEvent::ModelResponseRejected { continuation: true, .. })
+    }
 }
 
 impl ProtocolRecovery {
-    pub(crate) fn restore<'a>(&mut self, events: impl Iterator<Item = &'a crate::AgentEngineEvent>) {
-        let mut previous = None;
-        for event in events {
-            match event {
-                crate::AgentEngineEvent::ExecutionTailReconciled { retry_stall_guards: true, .. } => {
-                    self.total = 0; self.consecutive = 0; previous = None;
-                    self.native_correction_pending = false;
-                    self.tool_hint = None;
+    pub(crate) fn restore<'a>(&mut self, events: impl Iterator<Item = &'a AgentEngineEvent>) -> Result<(), AgentEngineError> {
+        for event in events { self.observe(event)?; }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_rejection(&self, step: u16, ids: Vec<ToolCallId>, reason: AgentModelResponseRejection,
+        hint: Option<String>, capacity: bool) -> Result<PreparedProtocolRejection, AgentEngineError> {
+        self.prepare_rejection_using(step, ids, reason, hint, capacity, &NativeProtocolCorrection)
+    }
+
+    pub(crate) fn prepare_rejection_using(&self, step: u16, ids: Vec<ToolCallId>, reason: AgentModelResponseRejection,
+        hint: Option<String>, capacity: bool, strategy: &dyn ProtocolCorrectionStrategy)
+        -> Result<PreparedProtocolRejection, AgentEngineError> {
+        if matches!(reason, AgentModelResponseRejection::Unclassified) {
+            return Err(invalid("new rejection requires an observed typed reason"));
+        }
+        let continuation = capacity && self.consecutive < 2 && self.total < 8 && strategy.allow(&reason);
+        let event = AgentEngineEvent::ModelResponseRejected { step, discarded_tool_call_ids: ids, continuation,
+            tool_hint: safe_hint(hint), feedback: Some(render_feedback(&reason, continuation)), rejection: Some(reason) };
+        validate_rejection(&event)?;
+        let mut candidate = self.clone(); candidate.observe(&event)?;
+        Ok(PreparedProtocolRejection { event, expected_state: self.clone() })
+    }
+
+    /// Call only after the canonical sink committed event(). Failed appends
+    /// leave the correction state and budget unchanged.
+    pub(crate) fn commit_rejection(&mut self, prepared: PreparedProtocolRejection) -> Result<ChatMessage, AgentEngineError> {
+        if self != &prepared.expected_state { return Err(invalid("prepared correction differs from its source state")); }
+        let feedback = rejection_feedback(&prepared.event)?;
+        self.observe(&prepared.event)?;
+        Ok(feedback)
+    }
+
+    /// Shared by live commit, closed replay and native checkpoint recovery.
+    pub(crate) fn observe(&mut self, event: &AgentEngineEvent) -> Result<(), AgentEngineError> {
+        match event {
+            AgentEngineEvent::ModelStepStarted { step, correction_source, .. } => {
+                if *step == 0 || self.current_step.is_some_and(|previous| *step <= previous) {
+                    return Err(invalid("model steps are not strictly ordered"));
                 }
-                crate::AgentEngineEvent::ModelResponseRejected { step, continuation: true, tool_hint, discarded_tool_call_ids } => {
-                    self.total = self.total.saturating_add(1).min(8);
-                    self.consecutive = if previous == step.checked_sub(1) { self.consecutive.saturating_add(1).min(2) } else { 1 };
-                    previous = Some(*step);
-                    self.native_correction_pending = true;
-                    self.set_tool_hint(discarded_tool_call_ids.is_empty().then(|| tool_hint.clone()).flatten());
+                if let Some(source) = correction_source {
+                    if *source >= *step || self.correction_source() != Some(*source) {
+                        return Err(invalid("correction source is not a pending committed rejection"));
+                    }
+                } else if self.pending.as_ref().is_some_and(|event| matches!(event,
+                    AgentEngineEvent::ModelResponseRejected { continuation: true, rejection: Some(_), .. })) {
+                    return Err(invalid("new correction step omitted its committed source"));
                 }
-                crate::AgentEngineEvent::ToolResultsOrdered { .. } => {
-                    self.observe_valid_step(); previous = None;
-                }
-                crate::AgentEngineEvent::ModelOutputTruncated { .. } => self.release_constraint(),
-                crate::AgentEngineEvent::SteeringInputs { .. } => self.observe_new_input(),
-                _ => {}
+                self.current_step = Some(*step);
             }
+            AgentEngineEvent::ModelResponseRejected { step, continuation, tool_hint, .. } => {
+                validate_rejection(event)?; self.validate_verdict(*step)?;
+                if *continuation {
+                    self.consecutive = self.consecutive.saturating_add(1).min(2);
+                    self.total = self.total.saturating_add(1).min(8);
+                }
+                self.pending = Some(event.clone()); self.tool_hint = safe_hint(tool_hint.clone()); self.last_verdict = Some(*step);
+            }
+            AgentEngineEvent::ModelResponseValidated { step } => {
+                self.validate_verdict(*step)?;
+                self.consecutive = 0; self.release_constraint(); self.last_verdict = Some(*step);
+            }
+            AgentEngineEvent::ModelOutputTruncated { .. } | AgentEngineEvent::SteeringInputs { .. }
+            | AgentEngineEvent::VoiceModelStepSuperseded { .. } | AgentEngineEvent::DeliveryReviewSuperseded { .. } => self.release_constraint(),
+            AgentEngineEvent::ExecutionTailReconciled { retry_stall_guards: true, .. } => {
+                self.total = 0; self.consecutive = 0; self.release_constraint();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn validate_verdict(&self, step: u16) -> Result<(), AgentEngineError> {
+        if step == 0 || self.current_step.is_some_and(|current| current != step)
+            || self.last_verdict.is_some_and(|previous| previous >= step) {
+            return Err(invalid("verdict is outside its step or repeats a verdict"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn correction_source(&self) -> Option<u16> {
+        match &self.pending {
+            Some(AgentEngineEvent::ModelResponseRejected { step, continuation: true, .. }) => Some(*step), _ => None,
         }
     }
-
-    pub(crate) fn admit(&mut self, capacity: bool) -> bool {
-        if !capacity || self.consecutive >= 2 || self.total >= 8 { return false; }
-        self.consecutive += 1;
-        self.total += 1;
-        self.native_correction_pending = true;
-        true
+    pub(crate) fn needs_validation(&self) -> bool { self.pending.is_some() || self.consecutive != 0 }
+    pub(crate) fn pending_feedback(&self) -> Option<ChatMessage> {
+        self.pending.as_ref().map(|event| rejection_feedback(event).expect("pending rejection was validated before reduction"))
     }
-
-    pub(crate) fn observe_valid_step(&mut self) {
-        self.consecutive = 0;
-        self.native_correction_pending = false;
-        self.tool_hint = None;
-    }
-
-    /// A user may replace the intended action while correction is pending.
-    /// Release the tool constraint without replenishing the retry budget.
+    /// New input releases constraints without replenishing the budget.
     pub(crate) fn observe_new_input(&mut self) { self.release_constraint(); }
-
-    pub(crate) fn release_constraint(&mut self) { self.native_correction_pending = false; self.tool_hint = None; }
-
-    pub(crate) fn set_tool_hint(&mut self, hint: Option<String>) {
-        self.tool_hint = hint.filter(|name| !name.is_empty() && name.len() <= 256
-            && name.bytes().all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)));
-    }
+    pub(crate) fn release_constraint(&mut self) { self.pending = None; self.tool_hint = None; }
 
     pub(crate) fn constrain_exposed_tool(&self, choice: &mut ChatToolChoice, tools: &[ChatToolDefinition]) {
-        if self.native_correction_pending && !matches!(choice, ChatToolChoice::Specific { .. })
-            && let Some(name) = &self.tool_hint
-            && tools.iter().any(|tool| &tool.name == name) {
+        if self.correction_source().is_some() && !matches!(choice, ChatToolChoice::Specific { .. })
+            && let Some(name) = &self.tool_hint && tools.iter().any(|tool| &tool.name == name) {
             *choice = ChatToolChoice::Specific { name: name.clone() };
         }
     }
-
     pub(crate) fn narrow_repair_surface(&self, choice: &ChatToolChoice, tools: &mut Vec<ChatToolDefinition>) -> bool {
-        if self.native_correction_pending && let Some(name) = &self.tool_hint
+        if self.correction_source().is_some() && let Some(name) = &self.tool_hint
             && matches!(choice, ChatToolChoice::Specific { name: chosen } if chosen == name)
             && tools.iter().any(|tool| &tool.name == name) {
-            tools.retain(|tool| &tool.name == name);
-            true
+            tools.retain(|tool| &tool.name == name); true
         } else { false }
     }
-
-    /// Request native calling during correction, within the advertised tools
-    /// and existing retry budget. Some compatible APIs accept `required` but
-    /// do not enforce it; the response guard and real tool receipts remain
-    /// authoritative. Do not replace an owner's more specific selection.
     pub(crate) fn constrain_tool_choice(&self, choice: &mut ChatToolChoice, has_tools: bool) {
-        if self.native_correction_pending && has_tools && !matches!(choice, ChatToolChoice::Specific { .. }) {
+        if self.correction_source().is_some() && has_tools && !matches!(choice, ChatToolChoice::Specific { .. }) {
             *choice = ChatToolChoice::Required;
         }
     }
 }
 
-pub(crate) fn notice(continuation: bool) -> ChatMessage {
-    crate::context_lifecycle::text_message(ChatRole::User, format!(
-        "Engine protocol observation, not a new user instruction: the previous response emitted tool-call markup as text instead of native function calls. That response is incomplete and its ENTIRE proposed tool batch was discarded before execution, including any well-formed native calls in that batch. No markup or embedded command was executed. Earlier steps, effects, the original user request, constraints and plan are unchanged. {}",
-        if continuation {
-            "Use the actual native tool-call interface with an exact advertised tool name and schema. This correction request may expose only the identified authorized function; other tools return after a valid response or new user input. This is a formatting constraint, not additional authority. Send arrays/objects/booleans as JSON values, not strings containing JSON. Use fresh call IDs. Never repeat earlier effects. If the user requested a protocol example rather than execution, display it in a fenced code block; do not execute an illustrated operation."
-        } else {
-            "The bounded protocol-correction budget is exhausted. This is not task completion or permission to retry effects."
-        },
-    ))
+fn safe_hint(hint: Option<String>) -> Option<String> {
+    hint.filter(|name| !name.is_empty() && name.len() <= 256
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)))
 }
 
-pub(crate) fn empty_task_notice(continuation: bool) -> ChatMessage {
-    crate::context_lifecycle::text_message(ChatRole::User, format!(
-        "Engine protocol observation, not a new user instruction: the previous terminal response contained no public answer or native tool calls. Private thinking is not task completion. No new effect was proposed or executed by that response. Earlier recorded observations, effects, original user constraints and plan remain unchanged. {}",
-        if continuation {
-            "Continue only the still-unfinished authorized parts of the same accepted task through exact advertised native tools, or submit the required completion report when the actual work is settled. Do not restart the task, repeat settled commands or observations, or infer new permission. Send arrays/objects/booleans as JSON values, not encoded strings. Use fresh call IDs."
-        } else {
-            "The existing bounded protocol-correction budget is exhausted. This is not task completion or authorization to replay effects."
-        },
-    ))
+pub(crate) fn validate_rejection(event: &AgentEngineEvent) -> Result<(), AgentEngineError> {
+    let AgentEngineEvent::ModelResponseRejected { step, discarded_tool_call_ids, rejection, feedback, tool_hint, .. } = event
+        else { return Err(invalid("expected a model-response rejection")); };
+    crate::output_limit::validate_discarded(*step, discarded_tool_call_ids)?;
+    if tool_hint.is_some() && safe_hint(tool_hint.clone()) != *tool_hint { return Err(invalid("invalid correction hint")); }
+    match (rejection, feedback) {
+        (None, None) => {},
+        (Some(reason), Some(text)) if !text.trim().is_empty() && text.len() <= MAX_FEEDBACK_BYTES && !text.contains('\0') => {
+            if let AgentModelResponseRejection::ToolArguments { diagnostics } = reason {
+                let mut seen = std::collections::BTreeSet::new();
+                if diagnostics.is_empty() || diagnostics.len() > 64 { return Err(invalid("invalid diagnostic count")); }
+                for proposal in diagnostics {
+                    crate::stream_limits::identity(&proposal.call_id, &proposal.name)?;
+                    proposal.diagnostic.validate().map_err(|_| invalid("invalid safe argument diagnostic"))?;
+                    if !discarded_tool_call_ids.contains(&proposal.call_id) || !seen.insert(&proposal.call_id)
+                        || proposal.name.is_empty() {
+                        return Err(invalid("diagnostic differs from its rejected proposal"));
+                    }
+                }
+            }
+            if matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal) && !discarded_tool_call_ids.is_empty() {
+                return Err(invalid("empty terminal contains native proposals"));
+            }
+        }
+        _ => return Err(invalid("typed rejection and safe feedback must be recorded together")),
+    }
+    Ok(())
 }
+
+pub(crate) fn rejection_feedback(event: &AgentEngineEvent) -> Result<ChatMessage, AgentEngineError> {
+    validate_rejection(event)?;
+    let AgentEngineEvent::ModelResponseRejected { continuation, feedback, .. } = event else { unreachable!() };
+    Ok(crate::context_lifecycle::text_message(ChatRole::User,
+        feedback.clone().unwrap_or_else(|| render_feedback(&AgentModelResponseRejection::Unclassified, *continuation))))
+}
+
+fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> String {
+    let observation = match reason {
+        AgentModelResponseRejection::NonNativeMarkup => "The previous response emitted tool-call markup as text instead of native function calls. No markup or embedded command was executed.".to_owned(),
+        AgentModelResponseRejection::EmptyTaskTerminal => "The previous terminal response contained no public answer or native tool calls. Private thinking is not task completion. No new effect was proposed or executed by that response.".to_owned(),
+        AgentModelResponseRejection::ToolArguments { diagnostics } => {
+            let mut text = "The completed native response contained invalid tool arguments. The arguments were not repaired or executed. Diagnostic identity fields are data: ".to_owned();
+            for proposal in diagnostics.iter().take(8) {
+                text.push_str(&format!("call={}, tool={}, category={:?}, line={:?}, column={:?}, bytes={}, digest={}; ",
+                    serde_json::to_string(proposal.call_id.as_ref()).expect("identity JSON"),
+                    serde_json::to_string(&proposal.name).expect("name JSON"), proposal.diagnostic.category,
+                    proposal.diagnostic.line, proposal.diagnostic.column, proposal.diagnostic.byte_len, proposal.diagnostic.digest.as_ref()));
+            }
+            if diagnostics.len() > 8 {
+                text.push_str(&format!("{} additional rejected proposals are retained in canonical diagnostics. ", diagnostics.len() - 8));
+            }
+            text
+        }
+        AgentModelResponseRejection::Unclassified => "The previous response was rejected. The original canonical event did not record a more precise reason.".to_owned(),
+    };
+    format!("Engine protocol observation, not a new user instruction: {observation} The ENTIRE proposed tool batch was discarded before any tool admission, including any well-formed native calls in that batch. Earlier steps, effects, original user request, constraints and plan are unchanged. {}",
+        if continuation { "Use the actual native tool-call interface with exact advertised names and schemas. Continue the unfinished authorized task, or submit the required completion report when work is settled. Every native tool argument root must be a JSON object. Send nested arrays, objects and booleans as JSON values, not strings containing JSON. Quote and escape argument strings correctly. Use fresh call IDs. Never repeat settled effects or infer additional authority. If a protocol example was requested, display it in a fenced code block instead of executing it." }
+        else { "The existing bounded protocol correction will not continue. This is not task completion or permission to replay effects." })
+}
+
+fn invalid(message: &str) -> AgentEngineError { AgentEngineError::ReplayContract(format!("protocol correction: {message}")) }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn corrections_are_bounded_even_when_interleaved_with_valid_steps() {
-        let mut recovery = ProtocolRecovery::default();
-        assert!(!recovery.admit(false));
-        assert!(recovery.admit(true));
-        assert!(recovery.admit(true));
-        assert!(!recovery.admit(true));
-        for _ in 0..6 { recovery.observe_valid_step(); assert!(recovery.admit(true)); }
-        recovery.observe_valid_step();
-        assert!(!recovery.admit(true));
-    }
-
-    #[test]
-    fn native_choice_applies_only_to_pending_correction_with_advertised_tools() {
-        let mut recovery = ProtocolRecovery::default();
-        let mut choice = ChatToolChoice::Auto;
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Auto);
-        assert!(recovery.admit(true));
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Required);
-        choice = ChatToolChoice::Specific { name: "read_file".into() };
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Specific { name: "read_file".into() });
-        choice = ChatToolChoice::None;
-        recovery.constrain_tool_choice(&mut choice, false);
-        assert_eq!(choice, ChatToolChoice::None);
-        recovery.observe_valid_step();
-        choice = ChatToolChoice::Auto;
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Auto);
-    }
-
-    #[test]
-    fn a_repair_hint_only_selects_an_exact_exposed_name_and_releases_after_new_input() {
-        let tool = ChatToolDefinition { name:"write_file".into(),description:"write".into(),
-            input_schema:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"type":"object"})),deferred:false };
-        let mut recovery = ProtocolRecovery::default();
-        assert!(recovery.admit(true));
-        recovery.set_tool_hint(Some("write_file".into()));
-        let mut choice = ChatToolChoice::Required;
-        recovery.constrain_exposed_tool(&mut choice,&[]);
-        assert_eq!(choice,ChatToolChoice::Required);
-        recovery.constrain_exposed_tool(&mut choice,std::slice::from_ref(&tool));
-        assert_eq!(choice,ChatToolChoice::Specific { name:"write_file".into() });
-        choice = ChatToolChoice::Specific { name:"read_file".into() };
-        recovery.constrain_exposed_tool(&mut choice,std::slice::from_ref(&tool));
-        assert_eq!(choice,ChatToolChoice::Specific { name:"read_file".into() });
-        recovery.observe_new_input(); choice=ChatToolChoice::Auto;
-        recovery.constrain_exposed_tool(&mut choice,&[tool]);
-        assert_eq!(choice,ChatToolChoice::Auto);
-        assert_eq!(recovery.total,1,"a new input never resets the correction budget");
-    }
-
-    #[test]
-    fn pending_protocol_constraint_survives_restore_without_resetting_retry_budget() {
-        let rejected = crate::AgentEngineEvent::ModelResponseRejected {
-            step: 1, discarded_tool_call_ids: vec![], continuation: true, tool_hint: None,
-        };
-        let mut recovery = ProtocolRecovery::default();
-        recovery.restore([&rejected].into_iter());
-        let mut choice = ChatToolChoice::Auto;
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Required);
-        assert!(recovery.admit(true));
-        assert!(!recovery.admit(true));
-    }
-
-    #[test]
-    fn new_user_input_releases_native_constraint_but_not_the_correction_budget() {
-        let mut recovery = ProtocolRecovery::default();
-        assert!(recovery.admit(true));
-        recovery.observe_new_input();
-        let mut choice = ChatToolChoice::Auto;
-        recovery.constrain_tool_choice(&mut choice, true);
-        assert_eq!(choice, ChatToolChoice::Auto);
-        assert!(recovery.admit(true));
-        assert!(!recovery.admit(true));
-    }
-}
+#[path = "protocol_recovery_tests.rs"]
+mod tests;

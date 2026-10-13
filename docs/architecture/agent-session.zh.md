@@ -80,6 +80,34 @@ flowchart LR
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 
+### 模型提案验证与有界纠正
+
+模型参数尚未形成合法 JSON 对象时，记录的是未准入提案，不是工具执行失败。各协议 Adapter
+复用可替换的纯参数解析器，输出 `ToolCallRejected` 与有界 typed 诊断；诊断只保存类别、位置、
+字节数和摘要，不保存非法参数原文或任意响应正文。外层协议、调用身份和流完整性仍由 Broker
+校验；断流与合同矛盾保持原失败路径，显式输出截断使用原 `ModelOutputTruncated` 机制。
+
+Runtime 收齐完整正常终态后，把参数语法或根对象错误交给唯一的 `ProtocolRecovery`。
+任一提案被拒绝时整批不准入，包括其中已经形成合法参数的提案；不补括号、不替换字段，
+不创建 `ToolStarted`、工具结果或 Effect。模型请求及真实 Usage 仍保留。既有非原生工具正文
+与空任务终态使用同一响应纠正入口；合法 JSON 的工具 Schema 前置拒绝继续沿用明确的
+`not_executed` 工具反馈和现有完成统计，不把语法拒绝混入工具执行结果。
+
+纠正决策先作为 typed `ModelResponseRejected` 写入既有 `runtime/progress-recorded`
+Event/Payload，包含精确拒绝类别、整批提案身份、有界诊断、是否继续、工具约束和实际安全反馈。
+只有提交确认后才更新纠正状态并开启后继模型步骤；提交失败、取消或原执行围栏失效不授权继续。
+纠正沿用同一 Turn、原连续及累计预算和总模型步骤预算，使用新的模型 Operation 与调用 ID。
+`ModelStepStarted.correction_source` 只引用同 Turn 的确切已提交拒绝步骤，不能替换 accepted root
+或改变路由、Snapshot、资源权限与原生准入。已准入或未知效果继续由原 owner 结算、对账，
+不通过格式纠正重放。先前已关闭失败的 Turn 不会被重开或改写为成功。
+
+`ModelResponseValidated` 仅在需要结算纠正状态时记录本步骤的响应格式及参数语法通过，
+不表示工具 Schema 通过、准入、效果或任务完成。live、历史及 native 恢复共用 canonical
+事件 reducer 重建预算、约束和反馈；checkpoint 后已提交的拒绝反馈保留，未准入生成 carrier
+可以丢弃。已有当前代拒绝事实未记录精确类别时只表达未分类的已知拒绝，不从正文、投影或
+当前策略猜测原原因，不回填旧事件，也不扩大精确 native checkpoint 的恢复权限。
+此机制不新增纠正表、第二套日志或 checkpoint，实际效果仍沿原 Session/Turn/Event/Payload/Effect 链。
+
 可选 Mobile voice 的即时纠正只由明确设置 `SupersedeModelStep` 的 voice-started Turn 启用。普通文字请求的 `voice_immediate` 为 `None`，沿用原模型流、纠正边界和工具结算。voice 调用原 canonical writer 验证 Session、binding、context floor、精确 Operation 与 execution generation，不形成第二个工作引擎或权限账本。
 
 中途替换模型步骤需要真实自有模型操作的取消及 JoinHandle 退出证明；关闭等待失败不授权启动后继模型步骤。`VoiceModelStepSuperseded` 记录精确 step、model Operation、已提交纠正 receipt IDs、未准入工具调用及清理证明。typed history 只排除该步骤已失效且未准入的生成内容，原审计事件与历史身份仍保留；其他步骤和已结算效果不受影响。工具的实际准入与纠正检查共享原 writer 的原子边界，已有准入工具先结算，不伪造 ToolResult 或重放未知效果。

@@ -52,14 +52,30 @@ pub fn reconcile_execution_tail(
     let mut new_results = 0u32;
     let mut inputs: BTreeSet<_> = checkpoint.applied_steering_receipts.iter().cloned().collect();
     let plan_changed = tail.iter().any(|event| matches!(event, AgentEngineEvent::PlanUpdated { plan } if plan.revision != checkpoint.plan.revision));
+    let mut protocol_verdicts = BTreeSet::new();
+    let mut correction_sources = BTreeSet::new();
     for event in tail {
         match event {
-            AgentEngineEvent::ModelStepStarted { step: current, .. } => {
+            AgentEngineEvent::ModelStepStarted { step: current, correction_source, .. } => {
                 if *current != step.checked_add(1).ok_or_else(|| invalid("model counter exhausted"))?
                     || (!discarded && !proposed.is_empty() && proposed != current_results) {
                     return Err(invalid("a model step crossed an unresolved previous batch"));
                 }
+                // References before this checkpoint require its canonical
+                // prefix, validated by AgentTurnRecovery rather than guessed.
+                if correction_source.is_some_and(|source| source >= *current
+                    || (source > checkpoint.model_steps && !correction_sources.contains(&source))) {
+                    return Err(invalid("correction source has no committed continuing rejection"));
+                }
                 step = *current; proposed.clear(); order.clear(); current_results.clear(); discarded = false;
+            }
+            AgentEngineEvent::ModelResponseValidated { step: current } => {
+                if *current != step || discarded || !current_results.is_empty()
+                    || proposed.iter().any(|id| admitted.contains(id) || !calls.contains_key(id))
+                    || !protocol_verdicts.insert(*current) {
+                    return Err(invalid("response validation contradicts its unadmitted proposals"));
+                }
+                correction_sources.clear();
             }
             AgentEngineEvent::ToolCallDelta { step: current, call_id, .. } if *current > 0 => {
                 if *current != step || discarded { return Err(invalid("proposal is outside its model batch")); }
@@ -94,12 +110,21 @@ pub fn reconcile_execution_tail(
                 if *current != step || !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id))
                     || proposed != discarded_tool_call_ids.iter().cloned().collect() { return Err(invalid("discard would hide an admitted effect")); }
                 discarded = true;
+                if let AgentEngineEvent::ModelResponseRejected { continuation, .. } = event {
+                    crate::protocol_recovery::validate_rejection(event)?;
+                    if !protocol_verdicts.insert(*current) { return Err(invalid("duplicate response verdict")); }
+                    correction_sources.clear();
+                    if *continuation { correction_sources.insert(*current); }
+                } else { correction_sources.clear(); }
             }
-            AgentEngineEvent::SteeringInputs { inputs: applied } => for input in applied {
-                input.validate()?;
-                let id = nomifun_agent_contracts::OperationId::from(input.receipt_operation_id.clone());
-                if !inputs.insert(id.clone()) { return Err(invalid("accepted input was applied twice")); }
-                next.applied_steering_receipts.push(id);
+            AgentEngineEvent::SteeringInputs { inputs: applied } => {
+                correction_sources.clear();
+                for input in applied {
+                    input.validate()?;
+                    let id = nomifun_agent_contracts::OperationId::from(input.receipt_operation_id.clone());
+                    if !inputs.insert(id.clone()) { return Err(invalid("accepted input was applied twice")); }
+                    next.applied_steering_receipts.push(id);
+                }
             },
             AgentEngineEvent::PlanUpdated { plan } => next.plan = plan.clone(),
             AgentEngineEvent::WorkStatus { status } => next.work = status.clone(),

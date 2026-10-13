@@ -2,17 +2,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use nomifun_agent_contracts::{AgentSessionId, OperationId, PrincipalRef};
+use nomifun_agent_contracts::{AgentSessionId, OperationId, PrincipalRef, digest_bytes};
 use nomifun_chat_model_broker::{
     ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelErrorCode, ChatModelEvent,
     ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice, ProviderRoundId, ToolCallId,
+    ToolArgumentDiagnostic,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::EngineBinding;
 use crate::context::{AgentContextAssembler, AgentContextBudget};
 use crate::error::AgentEngineError;
-use crate::events::{AgentEngineEvent, AgentEventSink};
+use crate::events::{
+    AgentEngineEvent, AgentEventSink, AgentModelResponseRejection, AgentRejectedToolProposal,
+};
 use crate::model::AgentModelPort;
 use crate::AgentExecutionPhase;
 use crate::tool::{
@@ -572,7 +575,16 @@ pub(crate) async fn run_turn(
     let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
     if let Some(recovery) = &recovery {
         output_limit_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
-        protocol_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
+        protocol_recovery.restore(recovery.prefix.iter().chain(&recovery.tail))?;
+        // Prefix feedback is already replayed by typed history. A rejection
+        // after the checkpoint survives even when its generated carrier is
+        // discarded; rebuild its exact committed feedback once from the tail.
+        if protocol_recovery.correction_source().is_some_and(|source|
+            recovery.tail.iter().any(|event| matches!(event,
+                AgentEngineEvent::ModelResponseRejected { step, .. } if *step == source)))
+            && let Some(feedback) = protocol_recovery.pending_feedback() {
+            model_request.input.messages.push(feedback);
+        }
     }
 
     if cancellation.is_cancelled() {
@@ -851,12 +863,13 @@ pub(crate) async fn run_turn(
         let model_operation_id =
             OperationId::from(format!("{}:model:{}", turn_operation_id.as_ref(), model_steps));
         model_request.causality.operation_id = model_operation_id.clone();
-        event_sink
-            .emit(AgentEngineEvent::ModelStepStarted {
-                step: model_steps,
-                operation_id: model_operation_id.clone(),
-            })
-            .await?;
+        let model_started = AgentEngineEvent::ModelStepStarted {
+            step: model_steps,
+            operation_id: model_operation_id.clone(),
+            correction_source: protocol_recovery.correction_source(),
+        };
+        event_sink.emit(model_started.clone()).await?;
+        protocol_recovery.observe(&model_started)?;
 
         let output_before_step = output_text.len();
         let reasoning_before_step = reasoning_text.len();
@@ -1160,6 +1173,23 @@ pub(crate) async fn run_turn(
                         })
                         .await?;
                 }
+                ChatModelEvent::ToolCallRejected { call_id, name, diagnostic } => {
+                    if call_id.as_ref().starts_with("agent-instructions:")
+                        || !admitted_call_ids.insert(call_id.clone()) {
+                        return fail_turn(&event_sink, model_steps,
+                            "model reused a rejected tool-call identity within this turn").await;
+                    }
+                    let new_proposal = !step.calls.contains_key(&call_id);
+                    step.record_tool_rejected(&call_id, &name, diagnostic)?;
+                    if new_proposal {
+                        // Rejected native arguments never become a parsed call
+                        // or tool result. Preserve the proposal identity so the
+                        // canonical rejection can close the entire exact batch.
+                        event_sink.emit(AgentEngineEvent::ToolCallDelta {
+                            step: model_steps, call_id, name, arguments_delta: String::new(),
+                        }).await?;
+                    }
+                }
                 ChatModelEvent::ProviderRoundId { round_id } => {
                     provider_round_id = Some(round_id.clone());
                     step.provider_round_id = Some(round_id);
@@ -1260,12 +1290,16 @@ pub(crate) async fn run_turn(
                 continue 'model_steps;
             }
         }
-        if protocol_violation && step.finish_reason != Some(ChatFinishReason::MaxOutputTokens) {
+        let native_arguments_rejected = saw_terminal && !step.rejected_proposals.is_empty()
+            && matches!(step.finish_reason, Some(ChatFinishReason::Completed | ChatFinishReason::ToolCalls));
+        // The native-argument path requires a complete normal response. Keep
+        // the established non-native markup guard for custom model ports;
+        // production Broker EOF/transport errors still fail above.
+        let non_native_rejected = protocol_violation && step.rejected_proposals.is_empty();
+        if (non_native_rejected || native_arguments_rejected)
+            && step.finish_reason != Some(ChatFinishReason::MaxOutputTokens)
+            && step.finish_reason != Some(ChatFinishReason::Cancelled) {
             drop(stream);
-            if delivery_review_step {
-                return fail_turn(&event_sink, model_steps,
-                    "the single delivery review returned non-native tool markup; the candidate was not delivered").await;
-            }
             if cancellation.is_cancelled() {
                 return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
                     model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
@@ -1276,19 +1310,43 @@ pub(crate) async fn run_turn(
             // prefix. Recheck the name against this exact advertised surface.
             let tool_hint = if discarded_tool_call_ids.is_empty() {
                 protocol_tool_hint.filter(|name| model_request.input.tools.iter().any(|tool| &tool.name == name))
+            } else if discarded_tool_call_ids.len() == 1 && !protocol_violation {
+                step.rejected_proposals.values().next().map(|proposal| proposal.name.clone())
+                    .filter(|name| model_request.input.tools.iter().any(|tool| &tool.name == name))
             } else { None };
-            let continuation = protocol_recovery.admit(model_steps < total_model_limit);
-            protocol_recovery.set_tool_hint(tool_hint.clone());
-            event_sink.emit(AgentEngineEvent::ModelResponseRejected {
-                step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation, tool_hint,
-            }).await?;
+            let rejection = if !native_arguments_rejected {
+                AgentModelResponseRejection::NonNativeMarkup
+            } else {
+                AgentModelResponseRejection::ToolArguments {
+                    diagnostics: step.call_order.iter()
+                        .filter_map(|id| step.rejected_proposals.get(id).cloned()).collect(),
+                }
+            };
+            let prepared = protocol_recovery.prepare_rejection(
+                model_steps, discarded_tool_call_ids.clone(), rejection, tool_hint,
+                model_steps < total_model_limit && !delivery_review_step,
+            )?;
+            let continuation = prepared.continuation();
+            // The decision and exact feedback are canonical facts before a
+            // new model operation may be opened. Failed writes never retry.
+            event_sink.emit(prepared.event().clone()).await?;
+            let feedback = protocol_recovery.commit_rejection(prepared)?;
             admitted_call_ids.extend(discarded_tool_call_ids);
             crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
-            model_request.input.messages.push(crate::protocol_recovery::notice(continuation));
+            model_request.input.messages.push(feedback);
             provider_round_id = None;
+            model_request.input.provider_round_parent = None;
             if !continuation {
                 return fail_turn(&event_sink, model_steps,
-                    "model emitted tool-call markup as text after the bounded protocol-correction budget; no tool from the rejected responses was executed").await;
+                    if delivery_review_step && native_arguments_rejected {
+                        "the single delivery review returned invalid native tool arguments; the candidate was not delivered"
+                    } else if delivery_review_step {
+                        "the single delivery review returned non-native tool markup; the candidate was not delivered"
+                    } else if native_arguments_rejected {
+                        "model returned invalid tool arguments after the bounded protocol-correction budget; no tool from the rejected responses was executed"
+                    } else {
+                        "model emitted tool-call markup as text after the bounded protocol-correction budget; no tool from the rejected responses was executed"
+                    }).await;
             }
             continue 'model_steps;
         }
@@ -1396,9 +1454,6 @@ pub(crate) async fn run_turn(
             return fail_turn(&event_sink, model_steps,
                 "the single delivery review did not submit its final report; the candidate was not delivered").await;
         }
-        if !empty_task_response {
-            protocol_recovery.observe_valid_step();
-        }
         if !step.has_tool_calls() && matches!(finish_reason, ChatFinishReason::ToolCalls) {
             return fail_turn(
                 &event_sink,
@@ -1406,6 +1461,12 @@ pub(crate) async fn run_turn(
                 "model returned a tool-call terminal reason without Tool Calls",
             )
             .await;
+        }
+        if !empty_task_response && protocol_recovery.needs_validation()
+            && matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
+            let validated = AgentEngineEvent::ModelResponseValidated { step: model_steps };
+            event_sink.emit(validated.clone()).await?;
+            protocol_recovery.observe(&validated)?;
         }
         // A correction accepted while the model was streaming invalidates its
         // proposed batch. Close every call/result pair without executing it.
@@ -1979,15 +2040,13 @@ pub(crate) async fn run_turn(
             // Private reasoning (or no content) is not a public closing answer.
             // Keep the already-advertised action surface for unfinished work;
             // correction is bounded by the existing protocol and turn budgets.
-            let continuation = protocol_recovery.admit(model_steps < total_model_limit);
-            // Private thinking is not a selected tool or task-completion
-            // decision. Correct native formatting without narrowing the
-            // existing frozen surface from an unexecuted private example.
-            protocol_recovery.set_tool_hint(None);
-            event_sink.emit(AgentEngineEvent::ModelResponseRejected {
-                step: model_steps, discarded_tool_call_ids: vec![], continuation, tool_hint: None,
-            }).await?;
-            model_request.input.messages.push(crate::protocol_recovery::empty_task_notice(continuation));
+            let prepared = protocol_recovery.prepare_rejection(
+                model_steps, vec![], AgentModelResponseRejection::EmptyTaskTerminal,
+                None, model_steps < total_model_limit,
+            )?;
+            let continuation = prepared.continuation();
+            event_sink.emit(prepared.event().clone()).await?;
+            model_request.input.messages.push(protocol_recovery.commit_rejection(prepared)?);
             model_request.input.provider_round_parent = None;
             provider_round_id = None;
             if !continuation {
@@ -3458,6 +3517,7 @@ struct StepState {
     assistant_content: Vec<ChatContentPart>,
     calls: BTreeMap<ToolCallId, PendingToolCall>,
     call_order: Vec<ToolCallId>,
+    rejected_proposals: BTreeMap<ToolCallId, AgentRejectedToolProposal>,
     finish_reason: Option<ChatFinishReason>,
     provider_round_id: Option<ProviderRoundId>,
     pending_reasoning_signature: Option<String>,
@@ -3526,6 +3586,10 @@ impl StepState {
         arguments_delta: &str,
     ) -> Result<(), AgentEngineError> {
         crate::stream_limits::identity(call_id, name)?;
+        if self.rejected_proposals.contains_key(call_id) {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "rejected tool proposal emitted further argument deltas".into()));
+        }
         if !self.calls.contains_key(call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
             return Err(AgentEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
         }
@@ -3563,6 +3627,10 @@ impl StepState {
 
     fn record_tool_completed(&mut self, call: &ChatToolCall) -> Result<(), AgentEngineError> {
         crate::stream_limits::completed(call)?;
+        if self.rejected_proposals.contains_key(&call.call_id) {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "rejected tool proposal subsequently completed".into()));
+        }
         if !self.calls.contains_key(&call.call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
             return Err(AgentEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
         }
@@ -3617,6 +3685,40 @@ impl StepState {
             name: call.name.clone(),
             arguments: call.arguments.clone(),
             provider_metadata: call.provider_metadata.clone(),
+        });
+        Ok(())
+    }
+
+    fn record_tool_rejected(
+        &mut self, call_id: &ToolCallId, name: &str, diagnostic: ToolArgumentDiagnostic,
+    ) -> Result<(), AgentEngineError> {
+        crate::stream_limits::identity(call_id, name)?;
+        diagnostic.validate().map_err(|error| AgentEngineError::InvalidModelEvent(error.to_string()))?;
+        if name.is_empty() || self.rejected_proposals.contains_key(call_id) {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "invalid or duplicate rejected tool proposal".into()));
+        }
+        if !self.calls.contains_key(call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "model exceeded the per-step tool-call limit".into()));
+        }
+        let entry = self.calls.entry(call_id.clone()).or_insert_with(|| {
+            self.call_order.push(call_id.clone());
+            PendingToolCall { name: name.into(), arguments: String::new(), completed: None }
+        });
+        if entry.completed.is_some() || (!entry.name.is_empty() && entry.name != name) {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "rejected tool proposal contradicts its completed identity".into()));
+        }
+        if !entry.arguments.is_empty()
+            && (entry.arguments.len() != diagnostic.byte_len as usize
+                || digest_bytes(entry.arguments.as_bytes()) != diagnostic.digest) {
+            return Err(AgentEngineError::InvalidModelEvent(
+                "rejected tool arguments differ from their assembled deltas".into()));
+        }
+        entry.name = name.into();
+        self.rejected_proposals.insert(call_id.clone(), AgentRejectedToolProposal {
+            call_id: call_id.clone(), name: name.into(), diagnostic,
         });
         Ok(())
     }
@@ -4064,7 +4166,7 @@ mod tests {
                     requirement:crate::context_lifecycle::text_message(ChatRole::User,"original file task".into()),
                     events:vec![
                         AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn:user:msg:session:old".into()},
-                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(),correction_source:None},
                         AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
                         AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
@@ -4110,7 +4212,7 @@ mod tests {
                     operation_id:SOURCE.into(),receipt_status:"failed".into(),
                     requirement:crate::context_lifecycle::text_message(ChatRole::User,"old requested read".into()),events:vec![
                         AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:SOURCE.into()},
-                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(),correction_source:None},
                         AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
                         AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
@@ -9873,7 +9975,7 @@ mod tests {
         drop(requests);
         let events = sink.0.lock().unwrap().clone();
         assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ModelResponseRejected {
-            step: 1, discarded_tool_call_ids, continuation: true, tool_hint: None,
+            step: 1, discarded_tool_call_ids, continuation: true, tool_hint: None, ..
         } if discarded_tool_call_ids == &[ToolCallId::from("must-not-execute")])));
         assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "must-not-execute")));
         let mut replayed = Vec::new();
@@ -10242,4 +10344,5 @@ mod tests {
     }
 
     include!("turn_voice_tests.rs");
+    include!("turn_proposal_recovery_tests.rs");
 }

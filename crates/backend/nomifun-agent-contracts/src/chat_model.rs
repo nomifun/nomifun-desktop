@@ -763,6 +763,45 @@ pub struct ChatToolCall {
     pub provider_metadata: Option<StrictJsonValue>,
 }
 
+/// A parameter-shape observation, not a tool result or a provider failure.
+/// The digest and byte count corroborate the rejected proposal without
+/// retaining its potentially private argument text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolArgumentDiagnostic {
+    pub category: ToolArgumentDiagnosticCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+    pub byte_len: u32,
+    pub digest: DigestHex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolArgumentDiagnosticCategory {
+    Syntax,
+    IncompleteJson,
+    RootType,
+}
+
+impl ToolArgumentDiagnostic {
+    pub fn validate(&self) -> Result<(), ChatContractError> {
+        validate_digest("tool argument diagnostic", &self.digest)?;
+        let coordinates_valid = match self.category {
+            ToolArgumentDiagnosticCategory::RootType => self.line.is_none() && self.column.is_none(),
+            ToolArgumentDiagnosticCategory::Syntax | ToolArgumentDiagnosticCategory::IncompleteJson => {
+                self.line.is_some_and(|line| line > 0) && self.column.is_some()
+            }
+        };
+        if !coordinates_valid {
+            return Err(ChatContractError::InvalidToolArgumentDiagnostic);
+        }
+        Ok(())
+    }
+}
+
 impl ChatToolCall {
     pub fn validate(&self) -> Result<(), ChatContractError> {
         validate_natural_key("tool call id", self.call_id.as_ref())?;
@@ -847,6 +886,14 @@ pub enum ChatModelEvent {
     },
     ToolCallCompleted {
         call: ChatToolCall,
+    },
+    /// Complete native parameter text failed JSON/object parsing. The Runtime
+    /// must await the response terminal before deciding whether to reject the
+    /// proposed batch; a length terminal still has precedence.
+    ToolCallRejected {
+        call_id: ToolCallId,
+        name: String,
+        diagnostic: ToolArgumentDiagnostic,
     },
     ProviderRoundId {
         round_id: ProviderRoundId,
@@ -1122,6 +1169,8 @@ impl ChatModelError {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChatContractError {
+    #[error("invalid tool argument diagnostic")]
+    InvalidToolArgumentDiagnostic,
     #[error("unsupported chat model contract version")]
     UnsupportedContractVersion,
     #[error("model route revision must be greater than zero")]

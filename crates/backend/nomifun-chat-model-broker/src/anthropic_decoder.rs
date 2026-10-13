@@ -3,18 +3,18 @@
 use crate::adapter::{ProviderWireFrame, parse_usage};
 use crate::{
     ChatFinishReason, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatProtocol,
-    ChatRetryDirective, ChatToolCall, ProviderResponseId, ToolCallId,
+    ChatRetryDirective, ProviderResponseId, ToolCallId,
 };
-use nomifun_agent_contracts::StrictJsonValue;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use crate::tool_arguments::{JsonToolArgumentParser, ToolArgumentInput, ToolArgumentParser, proposal_event};
 
 const MAX_ARGUMENTS: usize = 256 * 1024;
 use crate::ChatProviderReasoning;
 use crate::provider_reasoning::{MAX_THINKING_OPAQUE_BYTES, MAX_THINKING_TEXT_BYTES};
 const MAX_SIGNATURE: usize = MAX_THINKING_OPAQUE_BYTES;
 
-#[derive(Default)]
 pub(crate) struct AnthropicDecoder {
     native: Option<bool>,
     started: bool,
@@ -27,6 +27,7 @@ pub(crate) struct AnthropicDecoder {
     finish: Option<ChatFinishReason>,
     usage: Map<String, Value>,
     budget: crate::wire_budget::WireBudget,
+    argument_parser: Arc<dyn ToolArgumentParser>,
 }
 
 enum Block {
@@ -46,7 +47,17 @@ enum Block {
     },
 }
 
+impl Default for AnthropicDecoder {
+    fn default() -> Self { Self::with_argument_parser(Arc::new(JsonToolArgumentParser)) }
+}
+
 impl AnthropicDecoder {
+    pub(crate) fn with_argument_parser(argument_parser: Arc<dyn ToolArgumentParser>) -> Self {
+        Self { native: None, started: false, terminal: false, output_closed: false,
+            incomplete_block: false, next_index: 0, active: None, call_ids: BTreeSet::new(),
+            finish: None, usage: Map::new(), budget: crate::wire_budget::WireBudget::default(), argument_parser }
+    }
+
     pub(crate) fn decode(
         &mut self,
         frame: &ProviderWireFrame,
@@ -344,9 +355,6 @@ impl AnthropicDecoder {
                     return Err(invalid("Duplicate or excessive Anthropic tool call"));
                 }
                 let initial = field(block, "input")?;
-                if !initial.is_object() {
-                    return Err(invalid("Anthropic initial tool input is not an object"));
-                }
                 // WireBudget has already bounded the complete frame. Bound
                 // the argument object as well before retaining another copy.
                 crate::wire_budget::encoded_size(initial, MAX_ARGUMENTS)?;
@@ -482,31 +490,10 @@ impl AnthropicDecoder {
                 initial,
                 json,
             } => {
-                let arguments = if json.is_empty() {
-                    initial
-                } else {
-                    match serde_json::from_str(&json) {
-                        Ok(value) => value,
-                        Err(error) if error.is_eof() => {
-                            self.incomplete_block = true;
-                            return Ok(Vec::new());
-                        }
-                        Err(_) => {
-                            return Err(invalid("Anthropic tool block ended with invalid JSON"));
-                        }
-                    }
-                };
-                if !arguments.is_object() {
-                    return Err(invalid("Anthropic tool arguments must be an object"));
-                }
-                vec![ChatModelEvent::ToolCallCompleted {
-                    call: ChatToolCall {
-                        call_id: ToolCallId(id),
-                        name,
-                        arguments: StrictJsonValue(arguments),
-                        provider_metadata: None,
-                    },
-                }]
+                let input = if json.is_empty() { ToolArgumentInput::JsonValue(&initial) }
+                    else { ToolArgumentInput::JsonText(&json) };
+                vec![proposal_event(self.argument_parser.as_ref(), ToolCallId(id), name, input, None)]
+
             }
         })
     }

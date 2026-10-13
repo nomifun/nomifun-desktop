@@ -17366,7 +17366,7 @@ mod failure_pause_settlement_tests {
         let native_events = [
             serde_json::to_value(AgentEngineEvent::TurnStarted { binding:engine, turn_operation_id:operation.clone() }).unwrap(),
             serde_json::to_value(AgentEngineEvent::TurnInputScope { wire_turn_id:source.into() }).unwrap(),
-            serde_json::to_value(AgentEngineEvent::ModelStepStarted { step:1, operation_id:model_operation }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::ModelStepStarted { step:1, operation_id:model_operation, correction_source:None }).unwrap(),
             serde_json::to_value(AgentEngineEvent::ToolCallCompleted { step:1, call:nomifun_chat_model_broker::ChatToolCall {
                 call_id:"read-before-failure".into(), name:"read_file".into(), arguments:StrictJsonValue(json!({"path":"result.txt"})),
                 provider_metadata:None,

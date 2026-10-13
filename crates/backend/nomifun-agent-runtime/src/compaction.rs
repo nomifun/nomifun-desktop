@@ -273,7 +273,8 @@ pub(crate) async fn run_compaction_recorded(
             | ChatModelEvent::ReasoningBlock { .. }
             | ChatModelEvent::ProviderReasoningBlock { .. }
             | ChatModelEvent::ProviderRoundId { .. } => {}
-            ChatModelEvent::ToolCallDelta { .. } | ChatModelEvent::ToolCallCompleted { .. } => {
+            ChatModelEvent::ToolCallDelta { .. } | ChatModelEvent::ToolCallCompleted { .. }
+            | ChatModelEvent::ToolCallRejected { .. } => {
                 if let Some(sink) = sink {
                     sink.emit(crate::AgentEngineEvent::CompactionSummaryRejected {
                         operation_id: operation_id.clone(),

@@ -178,6 +178,7 @@ fn replay_into(
         }
     }
     let mut process_records = RecordedProcessResults::default();
+    let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
     let rewind_revisions = events.iter().filter_map(|event| match event {
         AgentEngineEvent::ExecutionResumed { checkpoint_revision, .. } => Some(*checkpoint_revision), _ => None,
     }).collect::<std::collections::BTreeSet<_>>();
@@ -196,6 +197,7 @@ fn replay_into(
         if last_reconciled.is_some_and(|boundary| index < boundary)
             && matches!(event,AgentEngineEvent::TurnCompleted{..}|AgentEngineEvent::TurnCancelled{..}|AgentEngineEvent::TurnFailed{..}) { continue; }
         batch.validate_event_step(event)?;
+        protocol_recovery.observe(event)?;
         if last_checkpoint.is_some() && !matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. } | AgentEngineEvent::ExecutionResumed { .. }) {
             recovery_tail_safe &= crate::recovery::discardable_model_event(event);
             match event {
@@ -314,7 +316,7 @@ fn replay_into(
                         format!("Delivery observation (not a new instruction): the preceding queued inputs did not reach a model boundary before this turn ended: {reason}")));
                 }
             }
-            AgentEngineEvent::ModelStepStarted { step, operation_id } => {
+            AgentEngineEvent::ModelStepStarted { step, operation_id, .. } => {
                 if model_steps.checked_add(1) != Some(*step) {
                     return Err(invalid("non-contiguous model steps in history"));
                 }
@@ -322,6 +324,13 @@ fn replay_into(
                 model_steps = *step;
                 batch.step = Some(*step);
                 batch.model_operation_id = Some(operation_id.clone());
+            }
+            AgentEngineEvent::ModelResponseValidated { step } => {
+                if batch.step != Some(*step) || batch.discarded || !batch.started.is_empty()
+                    || !batch.results.is_empty() || batch.proposed.len() != batch.calls.len() {
+                    return Err(invalid("response validation contradicts its unadmitted proposal batch"));
+                }
+                batch.format_validated = true;
             }
             AgentEngineEvent::ToolStarted {
                 step,
@@ -427,7 +436,7 @@ fn replay_into(
                         crate::context_lifecycle::text_message(ChatRole::User,
                             "The candidate delivery review was superseded by a new accepted user input. Its proposed calls were discarded without execution; no candidate was delivered. Reconsider the complete accepted scope.".into())
                     } else if matches!(event, AgentEngineEvent::ModelResponseRejected { .. }) {
-                        crate::protocol_recovery::notice(*continuation)
+                        crate::protocol_recovery::rejection_feedback(event)?
                     } else { crate::output_limit::notice(*continuation) });
             }
             AgentEngineEvent::OutputTextDelta { text, .. } => {
@@ -647,6 +656,10 @@ fn replay_into(
     Ok(None)
 }
 
+#[cfg(test)]
+#[path = "protocol_history_tests.rs"]
+mod protocol_tests;
+
 #[derive(Default)]
 // Keep small canonical receipts that compaction removed from the tool suffix.
 // Whole selected fields or an explicit omission, within the existing history
@@ -737,6 +750,7 @@ struct ReplayBatch {
     model_operation_id: Option<nomifun_agent_contracts::OperationId>,
     started: std::collections::BTreeSet<ToolCallId>,
     discarded: bool,
+    format_validated: bool,
     notices: Vec<ChatMessage>,
     content: Vec<ChatContentPart>,
     calls: BTreeMap<ToolCallId, ChatToolCall>,
@@ -800,6 +814,11 @@ impl ReplayBatch {
             return Err(invalid(
                 "model stream event follows tool admission or results in the same step",
             ));
+        }
+        if self.format_validated && matches!(event, AgentEngineEvent::ToolCallDelta { .. }
+            | AgentEngineEvent::ToolCallCompleted { .. } | AgentEngineEvent::OutputTextDelta { .. }
+            | AgentEngineEvent::ReasoningDelta { .. } | AgentEngineEvent::Usage { .. }) {
+            return Err(invalid("model stream event follows its completed response validation"));
         }
         Ok(())
     }
@@ -890,6 +909,7 @@ impl ReplayBatch {
         self.model_operation_id = None;
         self.started.clear();
         self.discarded = false;
+        self.format_validated = false;
         self.completion_report = None;
         Ok(())
     }
@@ -959,10 +979,10 @@ mod tests {
             stage:nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,outcome:nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined};
         let input=crate::AgentSteeringInput {receipt_operation_id:"voice-receipt".into(),message_id:"voice-receipt".into(),text:"corrected complete task".into(),files:vec![],inject_skills:vec![],image_count:0,prepared_images:vec![],prepared_skill_instructions:vec![]};
         let events=vec![AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn".into()},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into()},AgentEngineEvent::OutputTextDelta {step:1,text:"OBSOLETE_PUBLIC_DRAFT".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into(), correction_source: None },AgentEngineEvent::OutputTextDelta {step:1,text:"OBSOLETE_PUBLIC_DRAFT".into()},
             AgentEngineEvent::ToolCallDelta {step:1,call_id:"old-proposal".into(),name:"read_file".into(),arguments_delta:String::new()},
             AgentEngineEvent::VoiceModelStepSuperseded {step:1,model_operation_id:"turn:model:1".into(),steering_receipt_ids:vec!["voice-receipt".into()],discarded_tool_call_ids:vec!["old-proposal".into()],cleanup},
-            AgentEngineEvent::SteeringInputs {inputs:vec![input]},AgentEngineEvent::ModelStepStarted {step:2,operation_id:"turn:model:2".into()},
+            AgentEngineEvent::SteeringInputs {inputs:vec![input]},AgentEngineEvent::ModelStepStarted {step:2,operation_id:"turn:model:2".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta {step:2,text:"current public answer".into()},AgentEngineEvent::TurnCompleted {model_steps:2,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}];
         let mut history=vec![];replay_closed_turn(&mut history,requirement(),&events).unwrap();let encoded=serde_json::to_string(&history).unwrap();
         assert!(!encoded.contains("OBSOLETE_PUBLIC_DRAFT"));assert!(!encoded.contains("old-proposal"));assert!(encoded.contains("corrected complete task"));assert!(encoded.contains("current public answer"));
@@ -979,7 +999,7 @@ mod tests {
         let result=AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false);
         let events=vec![
             AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"old-turn".into()},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta {step:1,text:old.into()},
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                 arguments:StrictJsonValue(serde_json::json!({"path":"result.txt"})),provider_metadata:None}},
@@ -1047,7 +1067,7 @@ mod tests {
             let source = format!("ordinary-{index}");
             (crate::context_lifecycle::text_message(ChatRole::User, format!("question-{index}")), vec![
                 AgentEngineEvent::TurnStarted { binding: binding(), turn_operation_id: source.clone().into() },
-                AgentEngineEvent::ModelStepStarted { step: 1, operation_id: format!("{source}:model:1").into() },
+                AgentEngineEvent::ModelStepStarted { step: 1, operation_id: format!("{source}:model:1").into(), correction_source: None },
                 AgentEngineEvent::OutputTextDelta { step: 1, text: (*answer).into() },
                 AgentEngineEvent::TurnCompleted { model_steps: 1, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed },
             ], vec![])
@@ -1080,7 +1100,7 @@ mod tests {
         let second_result = AgentToolResult::text(second.call_id.clone(), "second\n", true);
         let events = vec![
             AgentEngineEvent::TurnStarted { binding: binding(), turn_operation_id: "mixed".into() },
-            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "mixed:model:1".into() },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "mixed:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "先查第一份。\n".into() },
             AgentEngineEvent::ToolCallCompleted { step: 1, call: first.clone() },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "再查第二份。\n".into() },
@@ -1088,7 +1108,7 @@ mod tests {
             AgentEngineEvent::ToolCompleted { step: 1, result: second_result.clone() },
             AgentEngineEvent::ToolCompleted { step: 1, result: first_result.clone() },
             AgentEngineEvent::ToolResultsOrdered { step: 1, call_ids: vec![first.call_id.clone(), second.call_id.clone()] },
-            AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "mixed:model:2".into() },
+            AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "mixed:model:2".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 2, text: "## 结果\n\n- 第一份\n- 第二份\n".into() },
             AgentEngineEvent::TurnCompleted { model_steps: 2, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed },
         ];
@@ -1139,7 +1159,7 @@ mod tests {
             AgentEngineEvent::TurnStarted { binding: binding(), turn_operation_id: "containing-turn".into() },
             AgentEngineEvent::ContextCompacted { input_bytes_before: 1000, input_bytes_after: 500,
                 summary: "历史摘要仍是数据。".into(), retained_tool_call_ids: ids.clone(), retained_context: Some(saved) },
-            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "containing-turn:model:1".into() },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "containing-turn:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "当前回合正文。\n".into() },
             AgentEngineEvent::TurnCompleted { model_steps: 1, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed },
         ];
@@ -1180,7 +1200,7 @@ mod tests {
         let text = "## 当前执行正文\n\n```java\nboolean ready = true;\n```\n";
         let prefix = vec![
             AgentEngineEvent::TurnStarted { binding: binding(), turn_operation_id: "turn".into() },
-            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into() },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 1, text: text.into() },
             AgentEngineEvent::ExecutionCheckpointSaved { step: 1, revision: 1, digest: "c".repeat(64).into() },
         ];
@@ -1213,7 +1233,7 @@ mod tests {
         for name in [crate::tool_archive::LOAD, crate::tool_archive::SEARCH, crate::tool_archive::READ, "read_file"] {
             let events = vec![
                 AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"old-turn".into()},
-                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into()},
+                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into(), correction_source: None },
                 AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"old-control".into(),name:name.into(),
                     arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:None}},
                 AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("old-control".into(),original,true)},
@@ -1256,7 +1276,7 @@ mod tests {
             requirements:vec![], delivery_items:vec![], public_format:None,historical_results:vec![] };
         let events = |delivery: String| vec![
             AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
-            AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1") },
+            AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1"), correction_source: None },
             AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall { call_id:"completion".into(),
                 name:crate::completion::TOOL_NAME.into(), arguments:StrictJsonValue(serde_json::json!({})), provider_metadata:None } },
             AgentEngineEvent::CompletionReported { report:report.clone() },
@@ -1322,6 +1342,7 @@ mod tests {
             AgentEngineEvent::ModelStepStarted {
                 step: 1,
                 operation_id: OperationId::from("turn:model:1"),
+                correction_source: None,
             },
             AgentEngineEvent::ToolCallCompleted {
                 step: 1,
@@ -1370,7 +1391,7 @@ mod tests {
         let eof = "{\"kind\":\"STDIN_EOF\",\"bytes\":0,\"hex\":\"\"}\n";
         let events_for = |capability: &str, requested: &str, text: &str| vec![
             AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn".into()},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into(), correction_source: None },
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"closed-input".into(),name:"close_process_stdin".into(),
                 arguments:StrictJsonValue(serde_json::json!({"process_id":requested})),provider_metadata:None}},
             AgentEngineEvent::ToolStarted {step:1,call_id:"closed-input".into(),capability_id:capability.into(),action_id:"workspace.process/close_stdin".into()},
@@ -1445,7 +1466,7 @@ mod tests {
         let eof = "{\"kind\":\"STDIN_EOF\",\"bytes\":0}\n";
         let first = vec![
             AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"first".into()},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"first:model:1".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"first:model:1".into(), correction_source: None },
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"eof".into(),name:"close_process_stdin".into(),
                 arguments:StrictJsonValue(serde_json::json!({"process_id":"process"})),provider_metadata:None}},
             AgentEngineEvent::ToolStarted {step:1,call_id:"eof".into(),capability_id:"workspace.process".into(),action_id:"workspace.process/close_stdin".into()},
@@ -1457,7 +1478,7 @@ mod tests {
         let second = vec![
             AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"second".into()},
             AgentEngineEvent::ContextCompacted {input_bytes_before:1000,input_bytes_after:100,summary:"Old answer said EOF was 18 bytes.".into(),retained_tool_call_ids:vec![],retained_context:None},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"second:model:1".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"second:model:1".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta {step:1,text:"Old model answer still said 18 bytes.".into()},
             AgentEngineEvent::TurnCompleted {model_steps:1,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed},
         ];

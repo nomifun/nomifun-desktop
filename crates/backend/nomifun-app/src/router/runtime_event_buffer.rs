@@ -281,7 +281,7 @@ mod thinking_lifecycle_tests {
         assert_eq!(buffer.project(&resumed), vec![resumed]);
         let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the result.".into() };
         assert!(buffer.project(&suffix).is_empty());
-        let next = AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into() };
+        let next = AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into(), correction_source: None };
         assert_eq!(buffer.project(&next), vec![suffix, next]);
         let reasoning = AgentEngineEvent::ReasoningDelta { step: 2, text: "Next step.".into() };
         assert_eq!(buffer.project(&reasoning), vec![reasoning]);

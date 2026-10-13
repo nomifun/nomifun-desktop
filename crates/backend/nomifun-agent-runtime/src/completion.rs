@@ -1617,7 +1617,7 @@ mod tests {
         let causality=ChatCausality {agent_session_id:"session".into(),turn_operation_id:"current".into(),causation_event_id:"input".into(),
             resolved_snapshot_ref:binding.resolved_snapshot_ref().clone(),route_identity:ChatRouteIdentity::new("preset@1","agent_chat","route".into(),1),operation_id:"model".into()};
         let events=vec![AgentEngineEvent::TurnStarted {binding:binding.clone(),turn_operation_id:SOURCE.into()},
-            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(), correction_source: None },
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":path})),provider_metadata:None}},
             AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行\n第二行\n",false)},
             AgentEngineEvent::WorkStatus {status:AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
