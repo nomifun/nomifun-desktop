@@ -721,6 +721,14 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 };
                 let effect_owner = self.host_for(&request.context)?;
                 let operation_id = request.context.operation_id.as_ref().to_owned();
+                if input.0.get("component").is_some() {
+                    let prepare_scope = scope.clone();
+                    return effect_owner.invoke_prepared_managed_effect(
+                        &request.context, binding, input,
+                        move || async move { prepare_scope.prepare_component(owner_input).await },
+                        move |prepared| async move { scope.invoke_prepared(prepared, &operation_id).await },
+                    ).await;
+                }
                 return effect_owner
                     .invoke_managed_effect(&request.context, binding, input, move || async move {
                         scope.invoke(owner_input, &operation_id).await

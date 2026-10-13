@@ -67,11 +67,14 @@ Debug 构建允许显式绝对路径覆盖：`NOMIFUN_BUN_PATH`、`NOMIFUN_NODE_
 应用托管仍保留各自的系统／自定义路径选择。
 开发覆盖属于单次启动环境，不能用来替换正式产品的供应策略。
 
-对于声明的 OfficeCLI 家族 Skill，`engine_skills::compile` 解析一次组件，
-附加独立、不可变的 Host context resource，包含状态、绝对可执行路径、版本、
-摘要、来源和包身份。编译后的正文给出确切 `read_context_resource` ID。
-被冻结的源正文、源摘要与 capability 要求不变；工具元数据不授予额外的进程／
-文件权限。Skill 读取该资源，不猜测缓存路径、不全局安装替代工具。
+Agent 的 `workspace.process/exec` 与 `start` 使用显式 `component` 目标调用批准组件，
+与普通 `command`、Shell `cmd` 三选一。例如 `component=officecli` 与 literal `args`；
+宿主在本次调用中解析、验证程序并固定 `OFFICECLI_NO_AUTO_RESIDENT=1`，拒绝冲突的环境值。
+普通程序、Shell 与 Bun 命令发现保持原语义，不把同名全局工具静默改路由。
+Skill 编译不再探测组件、保存 ready 状态或让模型搬运可执行路径；已授权工具的短 Host
+说明直接展示组件入口。源正文和摘要仍由原 Snapshot 冻结，说明不增加进程或文件权限。
+组件缺失、验证失败与准备取消沿原未启动回执准确报告；只有新调用才准备组件，已有 Effect
+回执不被当前环境覆盖，未知效果不重放。每次实际启动之前再次核对已准备文件的身份。
 
 ## 诊断
 

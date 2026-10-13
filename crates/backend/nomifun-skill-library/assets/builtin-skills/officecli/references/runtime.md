@@ -7,24 +7,25 @@ examples, including help, create, render, edit, and close commands.
 
 ## Inside NomiFun
 
-First read the **Host-owned Office execution component** context resource.
-The compiled Skill body gives its exact `read_context_resource` ID. This is a
-separate immutable runtime resource derived from
-`nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::OfficeCli)`, not a field
-invented by the Skill or permission to access arbitrary files.
+Use an already-authorized `workspace.process/exec` or `workspace.process/start`
+tool with `component=officecli` and literal `args`. The current tool catalogue
+provides its exact callable name. Choose exactly one of `component`, `command`
+or `cmd`; an Office component call uses neither `command` nor `cmd`.
 
-Require `component=officecli` and `status=ready`. Read its `executable_path`,
-`version`, `digest`, `source=https://github.com/iOfficeAI/OfficeCLI`, and
-`package=@officecli/officecli`. Bind every command to that exact verified
-absolute executable. Require `execution_mode=one_shot` and apply the declared
-`environment` (`OFFICECLI_NO_AUTO_RESIDENT=1`) to every child command. Inside
-NomiFun do not start `open` / `watch` resident sessions; this execution contract
-takes precedence over standalone resident recipes elsewhere in these skills.
-Each supervised command must flush its edits before exiting. The Host admits the component even when the managed cache
-has not been extracted yet. Do not guess cache paths or look up a same-named
-PATH command. If status is `unavailable`, report the real dependency failure
-and use application component diagnostics; do not install a replacement global
-package. Existing process and file permissions still apply.
+The Host resolves and verifies the approved executable at launch and sets the
+fixed environment `OFFICECLI_NO_AUTO_RESIDENT=1` for every component command.
+Do not request or copy physical executable paths or environment values from
+Skill context resources, bind a shell function, or invoke an ambient PATH tool.
+Component invocation does not require reading every Skill page first.
+
+Office component commands are one-shot file operations: do not start `open` /
+`watch` resident sessions. This Host execution contract takes precedence over
+standalone shell and resident recipes elsewhere in these skills. Each command
+must flush its edits before exiting. If the component is unavailable, report
+the actual dependency failure and use application component diagnostics; do not
+install a replacement package or substitute a same-named ambient program.
+Existing process and file permissions still apply; selecting this Skill grants
+no tools or permissions.
 
 For operator/developer diagnostics where the **nomicore** binary is available,
 run `nomicore --data-dir <actual-absolute-data-dir> tool-doctor --verify` and
@@ -38,41 +39,30 @@ Development-only `NOMIFUN_OFFICECLI_PATH` is an explicit absolute path for debug
 builds. It still passes identity, version-range, and DOCX-to-HTML capability
 checks. Release builds ignore this override.
 
-## Bind examples to that exact executable
+## Run examples through the component target
 
-Every bare `officecli` in these skills is shorthand for the verified path.
-Before executing example commands, bind a task-local function, replacing the
-placeholder with the actual ready Host resource:
+Inside NomiFun, every bare `officecli` example represents an argument list for
+`component=officecli`. Pass the tokens after `officecli` as separate literal
+`args` to the authorized `workspace.process/exec` tool:
 
-```bash
-OFFICECLI_EXE='/actual/verified/absolute/path/officecli'
-officecli() { OFFICECLI_NO_AUTO_RESIDENT=1 "$OFFICECLI_EXE" "$@"; }
-officecli --version
+```json
+{"component":"officecli","args":["help","docx","paragraph"]}
 ```
 
-```powershell
-$OfficeCliExe = 'C:\actual\verified\absolute\path\officecli.exe'
-function officecli {
-  $previous = $env:OFFICECLI_NO_AUTO_RESIDENT
-  try {
-    $env:OFFICECLI_NO_AUTO_RESIDENT = '1'
-    & $OfficeCliExe @args
-  } finally {
-    if ($null -eq $previous) {
-      Remove-Item Env:OFFICECLI_NO_AUTO_RESIDENT -ErrorAction SilentlyContinue
-    } else {
-      $env:OFFICECLI_NO_AUTO_RESIDENT = $previous
-    }
-  }
-}
-officecli --version
+For a supervised command, use the authorized `workspace.process/start` tool:
+
+```json
+{"component":"officecli","args":["view","report.docx","html"],"wait_ms":1000,"timeout_ms":60000}
 ```
 
-Preserve the same executable for the whole task. Do not update it midway.
-Version output alone is not proof of capability; product admission also creates
-a private DOCX and validates generated HTML. Run each editing operation and
-check its exit status before proceeding. Preview failures must retain their
-actual reason rather than becoming an empty result.
+Use the actual task filename in place of `report.docx` or shell variables such
+as `$FILE`. Do not include shell quoting characters around argument values:
+`/body/p[1]`, `text=$50M` and spaces are already literal JSON strings. For batch
+input, send the JSON text through the existing authorized process input and
+close-stdin tools rather than turning a heredoc into a shell command. Poll the
+returned process ID when needed and check the terminal exit status before
+proceeding; an initial running observation is not completion. Preview failures
+must retain their actual reason rather than becoming an empty result.
 
 ## Standalone use outside NomiFun
 

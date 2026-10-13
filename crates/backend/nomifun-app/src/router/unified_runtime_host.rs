@@ -952,6 +952,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             turn_plan,
         );
         let turn_plan = collaboration.tool_plan;
+        instructions.extend(super::engine_skills::component_launch_instruction(&turn_plan));
         let tool_choice = collaboration.tool_choice;
         instructions.extend(collaboration.instructions);
         // Media intent is a presentation hint. Keep the full authorized

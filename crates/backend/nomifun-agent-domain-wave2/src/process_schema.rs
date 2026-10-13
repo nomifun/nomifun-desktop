@@ -14,11 +14,13 @@ fn object(properties: serde_json::Value, required: &[&str]) -> StrictJsonValue {
 fn launch(include_wait: bool) -> StrictJsonValue {
     let mut properties = json!({
         "cmd":{"type":"string","minLength":1,"maxLength":32768,
-            "description":"Explicit shell command/script. Alternative to command plus args; never inferred from their contents."},
+            "description":"Explicit shell command/script. Choose exactly one of cmd, command or component; never inferred from their contents."},
         "command":{"type":"string","minLength":1,"maxLength":32768,
-            "description":"Executable name or path only, such as bun or git. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
+            "description":"User executable name or path only, such as git. Choose exactly one of command, cmd or component. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
+        "component":{"type":"string","enum":["officecli","bun","node"],
+            "description":"Approved host component ID: officecli, bun or node. The host resolves its verified executable and required environment. Choose exactly one of component, command or cmd; pass each literal argument in args, without shell quoting or expansion."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},
-            "description":"Separate argument tokens, for example [\"test\",\"tests/unit.test.js\"]. Omit when empty; never send null."},
+            "description":"Separate literal argument tokens, for example [\"test\",\"tests/unit.test.js\"]. No shell quoting or expansion. Omit when empty; never send null."},
         "cwd":{"type":"string","maxLength":4096,
             "description":"Optional workspace-relative directory; omit to use the bound workspace root."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536},
@@ -32,8 +34,9 @@ fn launch(include_wait: bool) -> StrictJsonValue {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
     }
     StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":properties,
-        "oneOf":[{"required":["cmd"],"not":{"required":["command"]},"properties":{"args":{"maxItems":0}}},
-                 {"required":["command"],"not":{"required":["cmd"]}}]}))
+        "oneOf":[{"required":["cmd"],"not":{"anyOf":[{"required":["command"]},{"required":["component"]}]},"properties":{"args":{"maxItems":0}}},
+                 {"required":["command"],"not":{"anyOf":[{"required":["cmd"]},{"required":["component"]}]}},
+                 {"required":["component"],"not":{"anyOf":[{"required":["cmd"]},{"required":["command"]}]}}]}))
 }
 
 /// Exact schema for one `workspace.process` Action. The Action ID, rather
@@ -130,6 +133,49 @@ mod tests {
             json!({"command":"program with spaces","args":["literal"]})] { assert!(validator.is_valid(&valid),"{valid}"); }
         for invalid in [json!({"cmd":"ls","command":"ls"}),json!({"cmd":"ls","args":["-la"]}),json!({})] {
             assert!(!validator.is_valid(&invalid),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn launch_targets_are_exclusive_and_component_arguments_remain_literal() {
+        for action in ["workspace.process/exec", "workspace.process/start"] {
+            let schema = process_action_input_schema(action).unwrap();
+            let validator = jsonschema::validator_for(&schema.0).unwrap();
+            for component in ["officecli", "bun", "node"] {
+                let valid = json!({"component":component,"args":["a path with spaces","$HOME","$(command)","'quoted'","*.xlsx","line\nbreak"]});
+                assert!(validator.is_valid(&valid), "valid {action}: {valid}");
+            }
+            for invalid in [
+                json!({"component":"officecli","command":"officecli"}),
+                json!({"component":"officecli","cmd":"officecli help"}),
+                json!({"component":"officecli","command":"officecli","cmd":"officecli help"}),
+                json!({"component":"unknown"}),
+                json!({"component":"/usr/local/bin/officecli"}),
+                json!({"component":null}),
+                json!({"component":"officecli","args":null}),
+                json!({"component":"officecli","executable_path":"/user/tool"}),
+                json!({"component":"officecli","operation":"start"}),
+                json!({"component":"officecli","unexpected":true}),
+            ] {
+                assert!(!validator.is_valid(&invalid), "invalid {action}: {invalid}");
+            }
+        }
+    }
+
+    #[test]
+    fn process_controls_reject_component_launch_fields() {
+        for (action, mut input) in [
+            ("workspace.process/poll", json!({"process_id":"p"})),
+            ("workspace.process/input", json!({"process_id":"p","input":"text"})),
+            ("workspace.process/close_stdin", json!({"process_id":"p"})),
+            ("workspace.process/resize", json!({"process_id":"p","cols":120,"rows":40})),
+            ("workspace.process/cancel", json!({"process_id":"p"})),
+        ] {
+            let schema = process_action_input_schema(action).unwrap();
+            let validator = jsonschema::validator_for(&schema.0).unwrap();
+            assert!(validator.is_valid(&input), "valid {action}: {input}");
+            input["component"] = json!("officecli");
+            assert!(!validator.is_valid(&input), "invalid {action}: {input}");
         }
     }
 

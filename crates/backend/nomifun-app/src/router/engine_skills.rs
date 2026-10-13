@@ -7,7 +7,7 @@ use nomifun_agent_contracts::{CapabilityId, ContributionSourceKind, FrozenSkillC
     PluginSourceKind, ResolvedPackageSkillLock, ResolvedSkillLock, digest_bytes};
 use nomifun_agent_kernel::{CompiledSnapshot, MaterializedRegistry, MaterializedSkill};
 use nomifun_common::AppError;
-use nomifun_engine_core::{EngineContextContent, EngineContextResource};
+use nomifun_engine_core::{EngineContextContent, EngineContextResource, EngineToolPlan};
 use serde_json::Value;
 
 #[derive(Default)]
@@ -71,7 +71,6 @@ pub(super) async fn compile(snapshot: &CompiledSnapshot, registry: &Materialized
     let mut selected = SelectedSkills::default();
     let mut resources = BTreeMap::new();
     let mut index = Vec::new();
-    let mut office_dependency: Option<(String, EngineContextResource)> = None;
     for resolved in &snapshot.content().skill_locks {
         let (name, description, body, dependency, provenance, supplemental) = match resolved {
             ResolvedSkillLock::Library { skill, selected: is_selected, .. } => {
@@ -92,17 +91,6 @@ pub(super) async fn compile(snapshot: &CompiledSnapshot, registry: &Materialized
         if !selected.ids.insert(name.clone()) { return Err(error("duplicate public Skill selection name")); }
         let body_key = resource_key(&provenance, "SKILL.md");
         let mut body = body;
-        // The frozen Skill text stays exact. Its host-owned execution dependency
-        // is separate reference data, supplied once for the immutable runtime.
-        // This conveys an executable identity, never an additional permission.
-        if uses_managed_office(&name) {
-            if office_dependency.is_none() {
-                office_dependency = Some(managed_office_resource().await);
-            }
-            let (key, resource) = office_dependency.as_ref().unwrap();
-            resources.insert(key.clone(), resource.clone());
-            body.push_str(&format!("\n\nHost-owned Office execution component: read_context_resource id={key}. Use only its verified absolute executable and declared environment when status=ready, with your existing process permissions. Commands are one-shot direct file operations; do not open a resident session. An unavailable component is a real dependency failure; do not install or invoke a same-named ambient tool."));
-        }
         if let Some(supplemental) = supplemental {
             let mut resource_index = Vec::new();
             for (path, resource) in supplemental {
@@ -132,26 +120,19 @@ pub(super) async fn compile(snapshot: &CompiledSnapshot, registry: &Materialized
     Ok(selected)
 }
 
-fn uses_managed_office(name: &str) -> bool {
-    matches!(name, "officecli" | "officecli-docx" | "officecli-pptx" | "officecli-xlsx"
-        | "officecli-word-form" | "officecli-data-dashboard" | "officecli-financial-model"
-        | "officecli-academic-paper" | "officecli-pitch-deck")
-}
-
-async fn managed_office_resource() -> (String, EngineContextResource) {
-    let value = match nomifun_runtime::resolve_tool(nomifun_runtime::ToolId::OfficeCli).await {
-        Ok(tool) => serde_json::json!({"component":"officecli","status":"ready",
-            "source":"https://github.com/iOfficeAI/OfficeCLI","package":"@officecli/officecli",
-            "executable_path":tool.executable_path,"version":tool.version,"digest":tool.digest,
-            "execution_mode":"one_shot","environment":{"OFFICECLI_NO_AUTO_RESIDENT":"1"}}),
-        Err(_) => serde_json::json!({"component":"officecli","status":"unavailable",
-            "code":"MANAGED_COMPONENT_UNAVAILABLE","message":"The approved Office component could not be admitted; report the dependency failure and use the application component diagnostics."}),
-    };
-    let text = value.to_string();
-    let provenance = format!("host-component:{}", digest_bytes(text.as_bytes()).as_ref());
-    let key = resource_key(&provenance, "officecli");
-    (key, EngineContextResource { indexed: false, label:"Managed Office executable".into(), provenance,
-        content: EngineContextContent::Text { text } })
+/// A presentation hint from the final authorized tool plan, independent of any
+/// Skill name or body. Component readiness and executable identity belong to
+/// the process host at launch, never to immutable reference resources.
+pub(super) fn component_launch_instruction(plan: &EngineToolPlan) -> Option<String> {
+    let tools = ["workspace.process/exec", "workspace.process/start"].into_iter()
+        .filter_map(|action| {
+            let name = plan.model_name_for_action("workspace.process", action)?;
+            let binding = plan.binding(name)?;
+            binding.definition.input_schema.0["properties"].get("component")?;
+            Some(format!("{name} ({action})"))
+        }).collect::<Vec<_>>();
+    if tools.is_empty() { return None; }
+    Some(format!("Host process launch contract for the current authorized tools: {}. Approved component IDs are officecli, bun and node. Use component=officecli with literal args for managed Office file operations; use component=bun or component=node for their host components. Choose exactly one of component, command or cmd. The host resolves the verified executable and required environment; do not copy paths or environment from Skill resources. This host launch contract takes precedence over Skill reference text describing component-path lookup or ambient command invocation. Office operations are one-shot: do not open a resident session or start watch. If a component is unavailable, report its actual failure; do not install it or substitute a same-named ambient program. This guidance grants no tools or permissions.", tools.join(", ")))
 }
 
 fn resource_key(provenance: &str, path: &str) -> String {
@@ -183,6 +164,10 @@ mod tests {
     }
 
     async fn named_library_snapshot(default_selected: bool, name: &str) -> SelectedSkills {
+        named_library_snapshot_with_body(default_selected, name, "FROZEN_DEFAULT_BODY").await
+    }
+
+    async fn named_library_snapshot_with_body(default_selected: bool, name: &str, body: &str) -> SelectedSkills {
         use nomifun_agent_contracts::{FrozenLibrarySkill, LibrarySkillSource, PrincipalRef, ResolvedSnapshotContent,
             ResolvedSnapshotEnvelope, ResolvedSnapshotRef, RuntimeProfileKind, digest_payload};
         let registry = MaterializedRegistry::empty();
@@ -193,7 +178,7 @@ mod tests {
             required_runtime_protocol_version:"1.0.0".into(), required_runtime_profile:RuntimeProfileKind::ManagedMinimal,
             runtime_feature_inventory_digest:"b".repeat(64).into(),required_runtime_features:BTreeSet::new(),compiled_runtime_profile_digest:"c".repeat(64).into(),
             model_route_refs:BTreeMap::new(),chat_route_identity:None,enabled_capabilities:vec![],required_resource_kinds:BTreeSet::new(),capability_allowlist:BTreeSet::new(),
-            skill_locks:vec![ResolvedSkillLock::library_selected(frozen(name,"FROZEN_DEFAULT_BODY"),default_selected),
+            skill_locks:vec![ResolvedSkillLock::library_selected(frozen(name,body),default_selected),
                 ResolvedSkillLock::library(frozen("manual","EXPLICIT_MANUAL_BODY"))],mcp_tool_locks:vec![],resolved_role_providers:BTreeMap::new(),
             canonical_schema_manifest_digest:"d".repeat(64).into(),target_contribution_manifest_digest:"e".repeat(64).into() };
         let envelope = ResolvedSnapshotEnvelope { snapshot_ref:ResolvedSnapshotRef { snapshot_id:"test-snapshot".into(),snapshot_digest:digest_payload(&content).unwrap() },
@@ -205,55 +190,88 @@ mod tests {
     }
 
 
+    #[tokio::test]
+    async fn custom_office_skill_name_does_not_bind_or_prepare_a_host_component() {
+        let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::OfficeCli);
+        let selected = named_library_snapshot(true, "officecli-docx").await;
+        let after = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::OfficeCli);
+        assert_eq!(before, after, "Skill projection must not prepare or probe Office");
+        assert!(selected.validate_active(&["officecli-docx".into()], &BTreeSet::new()).is_ok(),
+            "reference Skills must not add process, file, or capability permissions");
+        assert!(selected.required_capabilities["officecli-docx"].is_empty());
+        assert_eq!(selected.resources.len(), 2);
+        assert!(selected.resources.values().all(|resource| resource.provenance.starts_with("library:")));
+        let body = &selected.bodies["officecli-docx"];
+        assert_eq!(body, "FROZEN_DEFAULT_BODY");
+        let resource = &selected.resources[&selected.body_resources["officecli-docx"]];
+        let EngineContextContent::Text { text } = &resource.content else { panic!("frozen Skill body must be text"); };
+        assert_eq!(text, body);
+        assert_eq!(digest_bytes(text.as_bytes()), digest_bytes(b"FROZEN_DEFAULT_BODY"));
+    }
+
+    fn canonical_process_schema(action_id: &str) -> nomifun_agent_contracts::StrictJsonValue {
+        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+        let capability = registration.metadata.manifest.payload.contributions.capabilities.into_iter()
+            .find(|capability| capability.id.as_ref() == "workspace.process").unwrap();
+        let reference = &capability.contributions.actions.iter()
+            .find(|action| action.action_id.as_ref() == action_id).unwrap().input_schema;
+        nomifun_agent_domain_wave2::resolve_action_schema("workspace.process", reference).unwrap()
+    }
+
+    fn process_plan(action: &str, name: &str, component_schema: bool) -> EngineToolPlan {
+        use nomifun_agent_contracts::StrictJsonValue;
+        use nomifun_chat_model_broker::ChatToolDefinition;
+        use nomifun_engine_core::{EngineEffectClass, EngineToolBinding, input_schema_digest};
+        let mut input_schema = canonical_process_schema(action);
+        if !component_schema {
+            input_schema.0["properties"].as_object_mut().unwrap().remove("component");
+        }
+        EngineToolPlan::new([EngineToolBinding {
+            model_name:name.into(), definition:ChatToolDefinition {name:name.into(),description:"Authorized process action".into(),input_schema:StrictJsonValue(input_schema.0.clone()),deferred:true},
+            schema_digest:input_schema_digest(&input_schema).unwrap(),canonical_input_schema_ref:"schema://test/process".into(),
+            capability_contract_digest:"b".repeat(64).into(),capability_id:"workspace.process".into(),action_id:action.into(),
+            resource_binding_ids:BTreeSet::new(),effect_class:EngineEffectClass::ManagedEffect,parallel_safe:false,
+        }]).unwrap()
+    }
+
     #[test]
-    fn managed_office_dependency_requires_an_exact_declared_skill_name() {
-        for name in ["officecli", "officecli-docx", "officecli-pptx", "officecli-xlsx",
-            "officecli-word-form", "officecli-data-dashboard", "officecli-financial-model",
-            "officecli-academic-paper", "officecli-pitch-deck"] {
-            assert!(uses_managed_office(name), "declared Office Skill {name}");
-        }
-        for name in ["officecli-unknown", "officecli-docx-extra", "my-officecli", "OfficeCLI", "manual", ""] {
-            assert!(!uses_managed_office(name), "undeclared name {name} must not trigger a tool probe");
-        }
+    fn component_launch_guidance_uses_only_current_authorized_launch_schemas() {
+        assert!(component_launch_instruction(&EngineToolPlan::default()).is_none());
+        assert!(component_launch_instruction(&process_plan("workspace.process/poll", "read_process", true)).is_none());
+        assert!(component_launch_instruction(&process_plan("workspace.process/exec", "old_exec", false)).is_none());
+        let plan = process_plan("workspace.process/start", "current_launch", true);
+        let instruction = component_launch_instruction(&plan).unwrap();
+        assert!(instruction.contains("current_launch (workspace.process/start)"));
+        assert!(instruction.contains("component=officecli"));
+        assert!(instruction.contains("takes precedence over Skill reference text"));
+        assert!(!instruction.contains("old_exec"));
+        assert!(instruction.contains("grants no tools or permissions"));
+    }
+
+    #[test]
+    fn process_component_schema_matches_the_approved_supplier_catalog() {
+        let schema = canonical_process_schema("workspace.process/exec");
+        let approved = schema.0["properties"]["component"]["enum"].as_array().unwrap().iter()
+            .map(|value| value.as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+        let inventory = nomifun_runtime::component_inventory();
+        let supplied = inventory["components"].as_array().unwrap().iter()
+            .map(|value| value["id"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+        assert_eq!(approved, supplied, "process Schema must track approved component IDs without linking the pure domain to the supplier");
     }
 
     #[tokio::test]
-    async fn office_skill_receives_typed_host_identity_without_extra_permissions() {
-        let selected = named_library_snapshot(true, "officecli-docx").await;
-        assert!(selected.validate_active(&["officecli-docx".into()], &BTreeSet::new()).is_ok(),
-            "the dependency resource must not add process, file, or capability permissions");
-        assert!(selected.required_capabilities["officecli-docx"].is_empty());
-        let dependencies = selected.resources.iter().filter(|(_, resource)| resource.provenance.starts_with("host-component:")).collect::<Vec<_>>();
-        assert_eq!(dependencies.len(), 1);
-        let (key, resource) = dependencies[0];
-        assert!(!resource.indexed, "the host identity is a separate supporting resource");
-        let EngineContextContent::Text { text } = &resource.content else { panic!("component identity must be structured text"); };
-        let value: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(value["component"], "officecli");
-        match value["status"].as_str() {
-            Some("ready") => {
-                assert_eq!(value["source"], "https://github.com/iOfficeAI/OfficeCLI");
-                assert_eq!(value["package"], "@officecli/officecli");
-                assert_eq!(value["execution_mode"], "one_shot");
-                assert_eq!(value["environment"]["OFFICECLI_NO_AUTO_RESIDENT"], "1");
-                assert!(std::path::Path::new(value["executable_path"].as_str().unwrap()).is_absolute());
-                assert!(!value["version"].as_str().unwrap().is_empty());
-                let digest = value["digest"].as_str().unwrap();
-                assert_eq!(digest.len(), 64);
-                assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-            },
-            Some("unavailable") => {
-                assert_eq!(value["code"], "MANAGED_COMPONENT_UNAVAILABLE");
-                assert!(value.get("executable_path").is_none(), "failure must not invent a usable path");
-            },
-            state => panic!("invalid managed dependency state {state:?}"),
-        }
-        let body = &selected.bodies["officecli-docx"];
-        assert!(body.starts_with("FROZEN_DEFAULT_BODY"));
-        assert!(body.contains(&format!("read_context_resource id={key}")));
-        assert!(selected.turn_instructions(&[]).unwrap()[0].contains(key));
-        assert!(selected.bodies["manual"].find("Host-owned Office execution component").is_none(),
-            "unrelated Skills must not inherit the dependency metadata");
+    async fn component_entry_is_visible_without_reading_a_large_skill_body() {
+        let body = format!("{}\nLAST_PAGE_REFERENCE", "Long frozen reference text.\n".repeat(1800));
+        let skills = named_library_snapshot_with_body(true, "officecli-docx", &body).await;
+        let selected = skills.turn_instructions(&[]).unwrap();
+        assert!(selected[0].contains("read_context_resource"));
+        assert!(!selected[0].contains("LAST_PAGE_REFERENCE"));
+        assert_eq!(skills.bodies["officecli-docx"], body);
+        let plan = process_plan("workspace.process/exec", "managed_exec", true);
+        let instruction = component_launch_instruction(&plan).unwrap();
+        assert!(instruction.contains("managed_exec"));
+        assert!(instruction.contains("component=officecli"));
+        assert!(!instruction.contains(&skills.body_resources["officecli-docx"]));
     }
 
     #[tokio::test]

@@ -13,8 +13,9 @@ mod shell_env;
 
 pub use cache::{init, runtime_root};
 pub use managed::{
-    ToolError, ToolId, ToolSource, VerifiedTool, begin_tool_preparation, cancel_tool_preparation,
-    component_inventory, prepare_tool, resolve_existing_tool, resolve_tool, subscribe_tool_preparation,
+    PreparedComponentLaunch, ToolError, ToolId, ToolSource, VerifiedTool,
+    begin_tool_preparation, cancel_tool_preparation, component_inventory,
+    prepare_component_launch, prepare_tool, resolve_existing_tool, resolve_tool, subscribe_tool_preparation,
     tool_preparation_snapshot,
 };
 pub use progress::{ToolPreparationFailure, ToolPreparationPhase, ToolPreparationSnapshot};

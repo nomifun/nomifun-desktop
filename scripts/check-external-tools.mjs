@@ -65,6 +65,27 @@ export function validateExecutionOwners({ managed, hosting, environment }) {
   }
 }
 
+export function validateOfficeSkillGuidance({ instructions, body, component }) {
+  const setup = body.match(/## Managed component setup\n([\s\S]*?)(?:\n## |$)/)?.[1] ?? '';
+  if (![component.version, component.source, component.package, 'component=officecli',
+    'workspace.process/exec', 'workspace.process/start', 'literal', 'OFFICECLI_NO_AUTO_RESIDENT=1']
+    .every(value => instructions.includes(value))
+      || !['component=officecli', 'literal `args`', 'references/runtime.md']
+        .every(value => setup.includes(value))) {
+    throw new Error('Office Skill guidance must use the approved host component target and literal arguments');
+  }
+  const retired = /Host-owned Office (?:execution )?component|ID appended to the compiled Skill body|nomifun_runtime::resolve_tool|OFFICECLI_EXE|OfficeCliExe|executable_path/;
+  if (retired.test(instructions) || retired.test(setup)) {
+    throw new Error('Office Skill guidance must not restore hidden component resources or copied executable paths');
+  }
+  const examples = [...instructions.matchAll(/```json\n([\s\S]*?)\n```/g)].map(match => JSON.parse(match[1]));
+  if (examples.length < 2 || examples.some(example => example.component !== component.id
+      || !Array.isArray(example.args) || example.args.some(value => typeof value !== 'string')
+      || Object.hasOwn(example, 'command') || Object.hasOwn(example, 'cmd') || Object.hasOwn(example, 'env'))) {
+    throw new Error('Office Skill examples must select only component=officecli with literal args and host-owned environment');
+  }
+}
+
 export function checkExternalTools(root = ROOT) {
   const read = path => readFileSync(resolve(root, path), 'utf8');
   const manifest = JSON.parse(read(MANIFEST));
@@ -102,8 +123,7 @@ export function checkExternalTools(root = ROOT) {
   let runtimeInstructions;
   for (const name of ['officecli', 'officecli-docx', 'officecli-pptx', 'officecli-xlsx', 'officecli-word-form', 'officecli-data-dashboard', 'officecli-financial-model', 'officecli-academic-paper', 'officecli-pitch-deck']) {
     const instructions = read(`${skillRoot}/${name}/references/runtime.md`);
-    if (!instructions.includes(officeComponent.version) || !instructions.includes(officeComponent.source) || !instructions.includes(officeComponent.package)
-        || !instructions.includes('Host-owned Office execution component') || !instructions.includes('OFFICECLI_NO_AUTO_RESIDENT')) throw new Error(`Office Skill dependency guidance diverges: ${name}`);
+    validateOfficeSkillGuidance({ instructions, body: read(`${skillRoot}/${name}/SKILL.md`), component: officeComponent });
     if (runtimeInstructions !== undefined && runtimeInstructions !== instructions) throw new Error('Office Skill runtime instructions must share the same contract');
     runtimeInstructions = instructions;
   }

@@ -69,6 +69,13 @@ pub(crate) enum Wave2EffectAdmission {
     Reserved(Wave2EffectReservation),
 }
 
+/// One invocation's prepared input or an observation returned before Effect
+/// admission. This carries no durable state or authority to replay an effect.
+pub(crate) enum PreparedWave2Invocation<T> {
+    Invoke(T),
+    Return(StrictJsonValue),
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Wave2EffectCompletion<'a> {
     Succeeded(&'a StrictJsonValue),
@@ -220,6 +227,68 @@ impl Wave2ApplicationHost {
                 }
             },
         }
+    }
+
+    /// Observe an existing canonical receipt before preparing a component.
+    /// Preparation must be bounded and cancellable, and must not start the
+    /// requested user operation. It runs without the workspace mutation lock
+    /// or an Agent Effect reservation. The original admission path rechecks
+    /// races after preparation and owns every physical invocation/settlement.
+    pub(crate) async fn invoke_prepared_managed_effect<T, P, PF, F, FF>(
+        &self,
+        context: &Wave2HostContext,
+        binding: &TypedResourceBinding,
+        input: &StrictJsonValue,
+        prepare: P,
+        invoke_owner: F,
+    ) -> Result<StrictJsonValue, Wave2HostPortError>
+    where
+        P: FnOnce() -> PF,
+        PF: Future<Output = Result<PreparedWave2Invocation<T>, Wave2HostPortError>>,
+        F: FnOnce(T) -> FF,
+        FF: Future<Output = Result<StrictJsonValue, Wave2HostPortError>>,
+    {
+        if let Some(output) = self.read_managed_effect_result(context, binding, input).await? {
+            return Ok(output);
+        }
+        match prepare().await {
+            Ok(PreparedWave2Invocation::Return(output)) => {
+                // A competing caller may have executed while preparation was
+                // waiting. Its receipt takes precedence over a local rejection.
+                Ok(self.read_managed_effect_result(context, binding, input).await?.unwrap_or(output))
+            }
+            Ok(PreparedWave2Invocation::Invoke(prepared)) => {
+                self.invoke_managed_effect(context, binding, input, || invoke_owner(prepared)).await
+            }
+            Err(error) => match self.read_managed_effect_result(context, binding, input).await? {
+                Some(output) => Ok(output),
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn read_managed_effect_result(
+        &self,
+        context: &Wave2HostContext,
+        binding: &TypedResourceBinding,
+        input: &StrictJsonValue,
+    ) -> Result<Option<StrictJsonValue>, Wave2HostPortError> {
+        let store = self.effect_store()?;
+        let effect_id = wave2_effect_id(context)?;
+        let owner_domain = wave2_effect_owner_domain(context)?;
+        let input_digest = wave2_effect_request_digest(context, binding, input)?;
+        let resource_key = wave2_effect_resource_key(context, binding)?;
+        let recorded = store.read_effect(&context.agent_session_id, &effect_id)
+            .await.map_err(|error| Wave2HostPortError::unavailable(format!(
+                "canonical Agent Effect ledger could not be read: {error}"
+            )))?;
+        if let Some(recorded) = recorded {
+            return observe_wave2_effect(
+                recorded, context, binding, owner_domain, &input_digest,
+                nomifun_agent_session::EffectStrategy::ManagedEffect, &resource_key,
+            ).map(Some);
+        }
+        Ok(None)
     }
 
     #[cfg(test)]
@@ -457,7 +526,7 @@ fn observe_wave2_effect(
     input_digest: &DigestHex,
     strategy: nomifun_agent_session::EffectStrategy,
     resource_key: &str,
-) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+) -> Result<StrictJsonValue, Wave2HostPortError> {
     if !effect_record_matches(
         &record,
         context,
@@ -484,7 +553,7 @@ fn observe_wave2_effect(
                         "Wave 2 effect already returned, but its bounded durable observation cannot reproduce the exact result; automatic execution remains disabled",
                     )
                 })?;
-            Ok(Wave2EffectAdmission::Replay(StrictJsonValue(result)))
+            Ok(StrictJsonValue(result))
         }
         nomifun_agent_session::AgentEffectState::Rejected => {
             let error = record
@@ -624,7 +693,7 @@ async fn begin_wave2_effect_with_strategy(
             &input_digest,
             strategy,
             &resource_key,
-        );
+        ).map(Wave2EffectAdmission::Replay);
     }
 
     let causation_event_id = store
@@ -670,7 +739,7 @@ async fn begin_wave2_effect_with_strategy(
                     &input_digest,
                     strategy,
                     &resource_key,
-                );
+                ).map(Wave2EffectAdmission::Replay);
             }
             Err(Wave2HostPortError::unavailable(format!(
                 "canonical Agent Effect admission failed or another Wave 2 effect is unsettled: {error}"
@@ -6020,6 +6089,231 @@ mod tests {
         let effect_id = wave2_effect_id(&call).unwrap();
         assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Returned);
+    }
+
+    fn prepared_process_context(root: &Path) -> Wave2HostContext {
+        let mut call = context(root);
+        call.capability_id = CapabilityId::from("workspace.process");
+        call.action_id = ActionId::from("workspace.process/start");
+        call
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_replays_returned_and_rejected_without_preparation() {
+        for succeeded in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = test_effect_store().await;
+            let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+                .with_effect_store(store.clone());
+            let call = prepared_process_context(directory.path());
+            ensure_test_effect_context(&store, &call).await;
+            let binding = workspace_typed_binding(&call).unwrap();
+            let input = StrictJsonValue(json!({"component":"officecli","args":["--version"]}));
+            let first = host.invoke_managed_effect(&call, binding, &input, || async {
+                if succeeded {
+                    Ok(StrictJsonValue(json!({"state":"exited","success":true})))
+                } else {
+                    Err(Wave2HostPortError::new("FIXTURE_REJECTED", "retained owner error"))
+                }
+            }).await;
+            let replay = host.invoke_prepared_managed_effect(
+                &call, binding, &input,
+                || async { panic!("a terminal receipt must not prepare the current component") },
+                |_: ()| async { panic!("a terminal receipt must not execute again") },
+            ).await;
+            match (first, replay) {
+                (Ok(first), Ok(replay)) => assert_eq!(first, replay),
+                (Err(first), Err(replay)) => {
+                    assert_eq!(first.code, replay.code);
+                    assert_eq!(first.message, replay.message);
+                }
+                _ => panic!("existing terminal semantics must be preserved"),
+            }
+            assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_pending_and_restart_unknown_never_prepare() {
+        for unknown in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = test_effect_store().await;
+            let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+                .with_effect_store(store.clone());
+            let call = prepared_process_context(directory.path());
+            ensure_test_effect_context(&store, &call).await;
+            let binding = workspace_typed_binding(&call).unwrap();
+            let input = StrictJsonValue(json!({"component":"officecli"}));
+            let Wave2EffectAdmission::Reserved(_) =
+                begin_wave2_effect(&store, &call, binding, &input).await.unwrap()
+            else { panic!("fresh effect must reserve") };
+            if unknown {
+                // This fixture has no native execution owner/lease. Use the
+                // original startup-recovery path to quarantine its orphaned
+                // pending receipt; an ordinary managed owner cannot declare
+                // itself Unknown without this canonical restart proof.
+                assert!(store.quarantine_native_recovery(
+                    &call.principal, &call.agent_session_id, &call.turn_id, 0,
+                ).await.unwrap());
+                assert_eq!(store.read_effect(&call.agent_session_id, &wave2_effect_id(&call).unwrap())
+                    .await.unwrap().unwrap().state, nomifun_agent_session::AgentEffectState::Unknown);
+            }
+            let error = host.invoke_prepared_managed_effect(
+                &call, binding, &input,
+                || async { panic!("an unsettled receipt cannot prepare a replacement") },
+                |_: ()| async { panic!("an unsettled receipt cannot execute again") },
+            ).await.unwrap_err();
+            assert!(error.message.contains(if unknown { "durable unknown" } else { "durable pending" }));
+            assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_rejects_owner_or_input_drift_before_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let call = prepared_process_context(directory.path());
+        ensure_test_effect_context(&store, &call).await;
+        let input = StrictJsonValue(json!({"component":"officecli","args":["--version"]}));
+        host.invoke_managed_effect(&call, workspace_typed_binding(&call).unwrap(), &input,
+            || async { Ok(StrictJsonValue(json!({"state":"exited"}))) }).await.unwrap();
+        for foreign_owner in [false, true] {
+            let mut changed = call.clone();
+            let mut changed_input = input.clone();
+            if foreign_owner {
+                changed.principal.principal_id = "another-owner".into();
+            } else {
+                changed_input.0["args"] = json!(["create", "different.docx"]);
+            }
+            let error = host.invoke_prepared_managed_effect(
+                &changed, workspace_typed_binding(&changed).unwrap(), &changed_input,
+                || async { panic!("unproven authority/input must not prepare") },
+                |_: ()| async { panic!("unproven authority/input must not execute") },
+            ).await.unwrap_err();
+            assert_eq!(error.code, if foreign_owner { "INVALID_PAYLOAD" } else { "IDEMPOTENCY_CONFLICT" });
+        }
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_preflight_observation_and_error_reserve_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let call = prepared_process_context(directory.path());
+        ensure_test_effect_context(&store, &call).await;
+        let binding = workspace_typed_binding(&call).unwrap();
+        let input = StrictJsonValue(json!({"component":"officecli"}));
+        let observation = StrictJsonValue(json!({
+            "schema":"nomifun.process-start-observation.v1", "state":"not_started",
+            "user_code_started":false, "success":false, "code":"COMPONENT_UNAVAILABLE"
+        }));
+        let returned = host.invoke_prepared_managed_effect(
+            &call, binding, &input,
+            || async { Ok(PreparedWave2Invocation::Return(observation.clone())) },
+            |_: ()| async { panic!("preflight rejection must not reach the process owner") },
+        ).await.unwrap();
+        assert_eq!(returned, observation);
+        let error = host.invoke_prepared_managed_effect(
+            &call, binding, &input,
+            || async { Err(Wave2HostPortError::new("CANCELLED", "preparation waiter cancelled")) },
+            |_: ()| async { panic!("cancelled preparation must not reach the process owner") },
+        ).await.unwrap_err();
+        assert_eq!(error.code, "CANCELLED");
+        assert!(store.list_effects(&call.agent_session_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn prepared_managed_effect_readmits_after_a_concurrent_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone()));
+        let call = prepared_process_context(directory.path());
+        ensure_test_effect_context(&store, &call).await;
+        let input = StrictJsonValue(json!({"component":"officecli"}));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let invocation_host = Arc::clone(&host);
+        let preparation_host = Arc::clone(&host);
+        let invocation_call = call.clone();
+        let invocation_input = input.clone();
+        let prepare_entered = Arc::clone(&entered);
+        let prepare_release = Arc::clone(&release);
+        let invocation = tokio::spawn(async move {
+            invocation_host.invoke_prepared_managed_effect(
+                &invocation_call, workspace_typed_binding(&invocation_call).unwrap(), &invocation_input,
+                || async move {
+                    // Preparation cannot hold the shared physical workspace lock.
+                    drop(preparation_host.try_guard_workspace_mutation().unwrap());
+                    prepare_entered.notify_one();
+                    prepare_release.notified().await;
+                    Ok(PreparedWave2Invocation::Invoke(()))
+                },
+                |_| async { panic!("the admission recheck must return the competing receipt") },
+            ).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+        assert!(store.list_effects(&call.agent_session_id).await.unwrap().is_empty());
+        let winner = host.invoke_managed_effect(&call, workspace_typed_binding(&call).unwrap(), &input,
+            || async { Ok(StrictJsonValue(json!({"state":"exited","identity":"original"}))) })
+            .await.unwrap();
+        release.notify_one();
+        let replay = tokio::time::timeout(Duration::from_secs(5), invocation).await.unwrap()
+            .unwrap().unwrap();
+        assert_eq!(replay, winner);
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_preflight_rejection_cannot_hide_a_concurrent_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let call = prepared_process_context(directory.path());
+        ensure_test_effect_context(&store, &call).await;
+        let binding = workspace_typed_binding(&call).unwrap();
+        let input = StrictJsonValue(json!({"component":"officecli"}));
+        let winner = StrictJsonValue(json!({"state":"exited","success":true}));
+        let result = host.invoke_prepared_managed_effect(&call, binding, &input,
+            || async {
+                host.invoke_managed_effect(&call, binding, &input,
+                    || async { Ok(winner.clone()) }).await.unwrap();
+                Ok(PreparedWave2Invocation::Return(StrictJsonValue(json!({
+                    "schema":"nomifun.process-start-observation.v1", "state":"not_started",
+                    "user_code_started":false, "success":false
+                }))))
+            },
+            |_: ()| async { panic!("preflight rejection must not execute another owner") },
+        ).await.unwrap();
+        assert_eq!(result, winner);
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_managed_effect_readmits_against_a_concurrent_pending_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let call = prepared_process_context(directory.path());
+        ensure_test_effect_context(&store, &call).await;
+        let binding = workspace_typed_binding(&call).unwrap();
+        let input = StrictJsonValue(json!({"component":"officecli"}));
+        let error = host.invoke_prepared_managed_effect(&call, binding, &input,
+            || async {
+                assert!(matches!(begin_wave2_effect(&store, &call, binding, &input).await.unwrap(),
+                    Wave2EffectAdmission::Reserved(_)));
+                Ok(PreparedWave2Invocation::Invoke(()))
+            },
+            |_| async { panic!("the competing pending receipt must fence owner dispatch") },
+        ).await.unwrap_err();
+        assert!(error.message.contains("durable pending"));
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
