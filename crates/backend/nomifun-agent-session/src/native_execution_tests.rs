@@ -13,6 +13,22 @@ mod tool_call_causation_tests;
 
 struct Fixture { session: AgentSessionLiveRecord, root: EventId, started: EventId }
 
+#[tokio::test]
+async fn deleting_session_inspection_retains_live_native_producer_proof() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let f = fixture(&store, "deleting-native-producer").await;
+    let _lease = store.claim_native_execution(claim(&f, "deleting-holder", 0, None)).await.unwrap();
+    let command = DeleteAgentSessionCommand { operation_id: "delete-native-fixture".into(),
+        agent_session_id: f.session.agent_session_id.clone(), owner_ref: owner(), requested_at: 1_788_000_000_100 };
+    store.fence_delete(&command).await.unwrap();
+    assert!(store.inspect_latest_native_execution(&owner(), &f.session.agent_session_id).await.is_err());
+    let inspection = store.inspect_latest_native_execution_for_delete(&owner(), &f.session.agent_session_id).await.unwrap().unwrap();
+    assert!(inspection.producer_lease_live);
+    assert!(!inspection.automatic_replay_authorized);
+    let foreign = PrincipalRef { principal_kind: "user".into(), principal_id: "foreign".into() };
+    assert!(store.inspect_latest_native_execution_for_delete(&foreign, &f.session.agent_session_id).await.is_err());
+}
+
 fn route() -> ChatRouteIdentity { ChatRouteIdentity::new("coding.codex@1", nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT, "chat-route".into(), 4) }
 
 async fn fixture(store: &AgentSessionStore, key: &str) -> Fixture {
@@ -135,6 +151,37 @@ async fn rejected_compaction_draft_is_observation_only_and_fenced_on_takeover() 
     assert!(store.append_native_observation(&fresh,&cancelled_rejection,None).await.is_ok());
     let new_tool=progress(&f,"new-tool-after-cancel",json!({"event":"tool_started"}));
     assert!(store.append_native_observation(&fresh,&new_tool,None).await.is_err());
+}
+
+#[tokio::test]
+async fn model_response_validation_is_a_fenced_observation_without_new_admission() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let f = fixture(&store, "response-validation").await;
+    let old = store.claim_native_execution(claim(&f, "old", 0, None)).await.unwrap();
+    let cp = checkpoint(&store, &f, &old).await;
+    expire(&store, &f).await;
+    let fresh = store.claim_native_execution(claim(&f, "fresh", 0, Some(&cp))).await.unwrap();
+    let stale = progress(&f, "stale-response-validation", json!({"event":"model_response_validated","step":1}));
+    let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
+    assert!(matches!(store.append_native_observation(&old, &stale, None).await, Err(SessionStoreError::ExecutionFenced)));
+    assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
+
+    store.cancel_active_turn(&f.session.agent_session_id, "cancel-validation".into(), "session-api".into()).await.unwrap();
+    let completed = progress(&f, "completed-response-validation", json!({"event":"model_response_validated","step":1}));
+    assert!(store.append_native_event(&fresh, &completed, None).await.is_err());
+    let first = store.append_native_observation(&fresh, &completed, None).await.unwrap();
+    let retry = store.append_native_observation(&fresh, &completed, None).await.unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.cursor, first.cursor);
+    assert!(store.claim_native_chat_operation(&fresh, model(&f, "model-after-validation")).await.is_err());
+    let successor = progress(&f, "model-start-after-validation", json!({"event":"model_step_started","step":2,
+        "operation_id":"model-after-validation","correction_source":1}));
+    assert!(store.append_native_observation(&fresh, &successor, None).await.is_err());
+    let effects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects WHERE session_id=?")
+        .bind(f.session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    let admitted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind IN ('tool/call-started','tool/result-recorded','context/model-visible-applied')")
+        .bind(f.session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!((effects, admitted), (0, 0));
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]

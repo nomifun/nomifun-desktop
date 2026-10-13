@@ -55,6 +55,8 @@ type TConversationRuntimeSummary = {
 interface IChatConversation<T, Extra> {
   /** Canonical opening purpose determines the owning product surface. */
   session_purpose?: 'conversation' | 'plugin_authoring';
+  /** Host-resolved application project ownership; never inferred from Agent or workspace. */
+  app_project_id?: string;
   created_at: number;
   modified_at: number;
   name: string;

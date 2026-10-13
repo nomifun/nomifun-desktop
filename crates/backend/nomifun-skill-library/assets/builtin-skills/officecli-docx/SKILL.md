@@ -7,11 +7,12 @@ description: "Use this skill any time a .docx file is involved -- as input, outp
 
 ## Managed component setup
 
-Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** component and the exact
-verified executable. Follow [the shared runtime instructions](references/runtime.md) before
-running any example. Read the Host-owned Office component context resource at
-the exact `read_context_resource` ID appended to the compiled Skill body.
-Every `officecli` example means that bound executable, never an ambient PATH tool.
+Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** through an already-authorized
+`workspace.process/exec` or `workspace.process/start` tool with `component=officecli`
+and literal `args`. The Host verifies the executable and sets its required
+environment. Follow [the shared runtime instructions](references/runtime.md) before
+running any example. Every `officecli` example means this component target;
+do not copy executable paths from Skill resources or use an ambient PATH tool.
 
 Standalone use outside NomiFun uses the exact official scoped package
 `@officecli/officecli@1.0.156`; the shared instructions cover verification.

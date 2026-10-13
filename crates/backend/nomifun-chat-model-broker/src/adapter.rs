@@ -13,10 +13,11 @@ use serde_json::{Map, Value, json};
 use crate::contracts::{
     ChatContentPart, ChatFinishReason, ChatMessage, ChatModelError, ChatModelErrorCode,
     ChatModelEvent, ChatModelFeature, ChatModelRequest, ChatProtocol, ChatResponseFormat, ChatRole,
-    ChatToolCall, ChatToolChoice, ChatToolResultPart, ChatUsage, ProviderCredentialRef,
+    ChatToolChoice, ChatToolResultPart, ChatUsage, ProviderCredentialRef,
     ProviderIdRef, ProviderResponseId, ProviderRoundId, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::CredentialLease;
+use crate::tool_arguments::{JsonToolArgumentParser, ToolArgumentInput, ToolArgumentParser, proposal_event};
 use crate::provider_reasoning::{ProviderReasoningRoute, gemini_tool_matches_route,
     gemini_tool_signature, validate_reasoning_signature_origins};
 
@@ -206,6 +207,7 @@ struct AdapterCore {
     name: &'static str,
     transport: Arc<dyn ProviderTransport>,
     raw_decode_state: Arc<Mutex<RawDecodeState>>,
+    argument_parser: Arc<dyn ToolArgumentParser>,
 }
 
 impl AdapterCore {
@@ -213,12 +215,14 @@ impl AdapterCore {
         protocol: ChatProtocol,
         name: &'static str,
         transport: Arc<dyn ProviderTransport>,
+        argument_parser: Arc<dyn ToolArgumentParser>,
     ) -> Self {
         Self {
             protocol,
             name,
             transport,
             raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+            argument_parser,
         }
     }
 
@@ -324,9 +328,11 @@ macro_rules! define_adapter {
 
         impl $name {
             pub fn new(transport: Arc<dyn ProviderTransport>) -> Self {
-                Self {
-                    core: AdapterCore::new($protocol, $label, transport),
-                }
+                Self::with_argument_parser(transport, Arc::new(JsonToolArgumentParser))
+            }
+
+            pub fn with_argument_parser(transport: Arc<dyn ProviderTransport>, argument_parser: Arc<dyn ToolArgumentParser>) -> Self {
+                Self { core: AdapterCore::new($protocol, $label, transport, argument_parser) }
             }
         }
 
@@ -344,8 +350,9 @@ macro_rules! define_adapter {
                 Some(Box::new(AttemptFrameDecoder {
                     protocol: self.core.protocol,
                     raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
-                    responses: crate::responses_decoder::ResponsesDecoder::new(false),
-                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                    responses: crate::responses_decoder::ResponsesDecoder::with_argument_parser(false, self.core.argument_parser.clone()),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(self.core.argument_parser.clone()),
+                    argument_parser: self.core.argument_parser.clone(),
                 }))
             }
 
@@ -353,8 +360,9 @@ macro_rules! define_adapter {
                 Some(Box::new(AttemptFrameDecoder {
                     protocol: self.core.protocol,
                     raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
-                    responses: crate::responses_decoder::ResponsesDecoder::new(request.input.preserve_native_responses_items),
-                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                    responses: crate::responses_decoder::ResponsesDecoder::with_argument_parser(request.input.preserve_native_responses_items, self.core.argument_parser.clone()),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::with_argument_parser(self.core.argument_parser.clone()),
+                    argument_parser: self.core.argument_parser.clone(),
                 }))
             }
 
@@ -384,6 +392,7 @@ macro_rules! define_adapter {
                     self.core.protocol,
                     frame,
                     &self.core.raw_decode_state,
+                    self.core.argument_parser.as_ref(),
                 )
             }
         }
@@ -1297,6 +1306,7 @@ struct AttemptFrameDecoder {
     raw_decode_state: Arc<Mutex<RawDecodeState>>,
     responses: crate::responses_decoder::ResponsesDecoder,
     anthropic: crate::anthropic_decoder::AnthropicDecoder,
+    argument_parser: Arc<dyn ToolArgumentParser>,
 }
 
 impl ChatFrameDecoder for AttemptFrameDecoder {
@@ -1322,7 +1332,7 @@ impl ChatFrameDecoder for AttemptFrameDecoder {
                 return events;
             }
         }
-        decode_frame_for_protocol(self.protocol, frame, &self.raw_decode_state)
+        decode_frame_for_protocol(self.protocol, frame, &self.raw_decode_state, self.argument_parser.as_ref())
     }
 }
 
@@ -1330,6 +1340,7 @@ fn decode_frame_for_protocol(
     protocol: ChatProtocol,
     frame: ProviderWireFrame,
     raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+    argument_parser: &dyn ToolArgumentParser,
 ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
     let event_name = frame.event.trim().to_ascii_lowercase();
     if event_name.is_empty() {
@@ -1360,7 +1371,7 @@ fn decode_frame_for_protocol(
                     .values()
                     .any(|state| state.response_started)))
     {
-        return decode_openai_chat_raw_frame(frame, raw_decode_state);
+        return decode_openai_chat_raw_frame(frame, raw_decode_state, argument_parser);
     }
     if protocol == ChatProtocol::OpenaiChat
         && event_name == "done"
@@ -1392,7 +1403,7 @@ fn decode_frame_for_protocol(
                     .values()
                     .any(|state| state.response_started)))
     {
-        return decode_gemini_raw_frame(frame, raw_decode_state);
+        return decode_gemini_raw_frame(frame, raw_decode_state, argument_parser);
     }
     if protocol == ChatProtocol::Gemini
         && event_name == "done"
@@ -1494,9 +1505,7 @@ fn decode_frame_for_protocol(
         | "function_call.completed"
         | "response.function_call.done"
         | "content_block_tool_done" => {
-            events.push(ChatModelEvent::ToolCallCompleted {
-                call: parse_tool_call(&frame.data)?,
-            });
+            events.push(parse_tool_call(&frame.data, argument_parser)?);
         }
         "response.output_item.added" | "output_item.added" | "native.item" => {
             let item_type = string_at(&frame.data, &["item.type", "type", "output.type"])
@@ -1573,7 +1582,13 @@ struct GeminiRawStreamState {
     response_started: bool,
     has_tool_calls: bool,
     pending_usage: Option<ChatUsage>,
-    tools: BTreeMap<ToolCallId, ChatToolCall>,
+    tools: BTreeMap<ToolCallId, RawGeminiToolCall>,
+}
+
+struct RawGeminiToolCall {
+    name: String,
+    arguments: Value,
+    provider_metadata: Option<StrictJsonValue>,
 }
 
 #[derive(Default)]
@@ -1587,6 +1602,7 @@ struct RawToolCallState {
 fn decode_openai_chat_raw_frame(
     frame: ProviderWireFrame,
     raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+    argument_parser: &dyn ToolArgumentParser,
 ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
     let mut state = raw_decode_state
         .lock()
@@ -1778,7 +1794,7 @@ fn decode_openai_chat_raw_frame(
         // A length/refusal terminal cannot complete a partially generated
         // function. Engines may discard the proposed batch, never execute it.
         if matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
-            append_openai_raw_tool_completions(stream, &mut events)?;
+            append_openai_raw_tool_completions(stream, &mut events, argument_parser);
         }
         if let Some(usage) = stream.pending_usage.take()
             && !stream.usage_seen
@@ -1795,29 +1811,18 @@ fn decode_openai_chat_raw_frame(
 fn append_openai_raw_tool_completions(
     stream: &mut OpenAiRawStreamState,
     events: &mut Vec<ChatModelEvent>,
-) -> Result<(), ChatModelError> {
+    argument_parser: &dyn ToolArgumentParser,
+) {
     for tool in stream.tools.values() {
-        let arguments: Value = serde_json::from_str(&tool.arguments).map_err(|_| ChatModelError::protocol_violation(
-                "OpenAI Chat completed a tool call with invalid JSON arguments",
-            ))?;
-        if !arguments.is_object() {
-            return Err(ChatModelError::protocol_violation("OpenAI Chat tool arguments must be an object"));
-        }
-        events.push(ChatModelEvent::ToolCallCompleted {
-            call: ChatToolCall {
-                call_id: ToolCallId(tool.call_id.clone()),
-                name: tool.name.clone(),
-                arguments: StrictJsonValue(arguments),
-                provider_metadata: None,
-            },
-        });
+        events.push(proposal_event(argument_parser, ToolCallId(tool.call_id.clone()), tool.name.clone(),
+            ToolArgumentInput::JsonText(&tool.arguments), None));
     }
-    Ok(())
 }
 
 fn decode_gemini_raw_frame(
     frame: ProviderWireFrame,
     raw_decode_state: &Arc<Mutex<RawDecodeState>>,
+    argument_parser: &dyn ToolArgumentParser,
 ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
     let mut state = raw_decode_state
         .lock()
@@ -1966,33 +1971,20 @@ fn decode_gemini_raw_frame(
                         };
                         let arguments = match function_call.get("args") {
                             None | Some(Value::Null) => json!({}),
-                            Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
-                            Some(_) => {
-                                return Err(ChatModelError::protocol_violation(
-                                    "Gemini functionCall args is not an object or null",
-                                ));
-                            }
+                            Some(value) => value.clone(),
                         };
                         let tool_id = ToolCallId(call_id.clone());
                         if let Some(existing) = stream.tools.get(&tool_id)
-                            && existing.name != name
-                        {
+                            && existing.name != name {
                             return Err(ChatModelError::protocol_violation(
                                 "Gemini functionCall name changed for one call id",
                             ));
                         }
-                        stream.tools.insert(
-                            tool_id.clone(),
-                            ChatToolCall {
-                                call_id: tool_id,
-                                name: name.to_owned(),
-                                arguments: StrictJsonValue(arguments),
-                                provider_metadata: signature
-                                    .map(|signature| {
-                                        StrictJsonValue(json!({"thoughtSignature": signature}))
-                                    }),
-                            },
-                        );
+                        stream.tools.insert(tool_id, RawGeminiToolCall {
+                            name: name.to_owned(), arguments,
+                            provider_metadata: signature.map(|signature|
+                                StrictJsonValue(json!({"thoughtSignature": signature}))),
+                        });
                     }
                 }
             }
@@ -2065,13 +2057,16 @@ fn decode_gemini_raw_frame(
         if has_tool_calls && finish_reason == ChatFinishReason::Completed {
             finish_reason = ChatFinishReason::ToolCalls;
         }
-        events.extend(
-            stream
-                .tools
-                .values()
-                .cloned()
-                .map(|call| ChatModelEvent::ToolCallCompleted { call }),
-        );
+        if matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
+            events.extend(stream.tools.iter().map(|(id, tool)| proposal_event(argument_parser,
+                id.clone(), tool.name.clone(), ToolArgumentInput::JsonValue(&tool.arguments), tool.provider_metadata.clone())));
+        } else if finish_reason == ChatFinishReason::MaxOutputTokens {
+            // Preserve unadmitted proposal identities for exact truncation
+            // discard without claiming that their parameters completed.
+            events.extend(stream.tools.iter().map(|(id, tool)| ChatModelEvent::ToolCallDelta {
+                call_id: id.clone(), name: tool.name.clone(), arguments_delta: String::new(),
+            }));
+        }
         if let Some(usage) = stream.pending_usage.take() {
             events.push(ChatModelEvent::Usage { usage });
         }
@@ -2082,13 +2077,10 @@ fn decode_gemini_raw_frame(
         } else {
             ChatFinishReason::Completed
         };
-        events.extend(
-            stream
-                .tools
-                .values()
-                .cloned()
-                .map(|call| ChatModelEvent::ToolCallCompleted { call }),
-        );
+        if matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
+            events.extend(stream.tools.iter().map(|(id, tool)| proposal_event(argument_parser,
+                id.clone(), tool.name.clone(), ToolArgumentInput::JsonValue(&tool.arguments), tool.provider_metadata.clone())));
+        }
         if let Some(usage) = stream.pending_usage.take() {
             events.push(ChatModelEvent::Usage { usage });
         }
@@ -2195,31 +2187,19 @@ fn reasoning_delta(value: &Value) -> Option<String> {
     )
 }
 
-fn parse_tool_call(value: &Value) -> Result<ChatToolCall, ChatModelError> {
+fn parse_tool_call(value: &Value, argument_parser: &dyn ToolArgumentParser) -> Result<ChatModelEvent, ChatModelError> {
     let call_id = string_at(value, &["call_id", "id", "tool_call_id", "tool.id"])
         .ok_or_else(|| ChatModelError::protocol_violation("completed tool call is missing id"))?;
     let name = string_at(value, &["name", "function.name", "tool.name"])
         .ok_or_else(|| ChatModelError::protocol_violation("completed tool call is missing name"))?;
-    let arguments = value
-        .get("arguments")
-        .or_else(|| value.get("input"))
+    let arguments = value.get("arguments").or_else(|| value.get("input"))
         .or_else(|| value.get("function").and_then(|f| f.get("arguments")))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let arguments = if let Value::String(arguments) = arguments {
-        serde_json::from_str(&arguments).unwrap_or_else(|_| json!({"raw": arguments}))
-    } else {
-        arguments
-    };
-    Ok(ChatToolCall {
-        call_id: ToolCallId(call_id),
-        name,
-        arguments: StrictJsonValue(arguments),
-        provider_metadata: value
-            .get("provider_metadata")
-            .cloned()
-            .map(StrictJsonValue),
-    })
+        .cloned().unwrap_or_else(|| json!({}));
+    let input = if let Value::String(text) = &arguments {
+        ToolArgumentInput::JsonText(text)
+    } else { ToolArgumentInput::JsonValue(&arguments) };
+    Ok(proposal_event(argument_parser, ToolCallId(call_id), name, input,
+        value.get("provider_metadata").cloned().map(StrictJsonValue)))
 }
 
 pub(crate) fn parse_usage(value: &Value) -> ChatUsage {

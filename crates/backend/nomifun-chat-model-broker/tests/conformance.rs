@@ -2848,3 +2848,51 @@ fn responses_request(route: &ResolvedChatRoute) -> ResponsesBridgeRequest {
         store: false,
     }
 }
+
+#[tokio::test]
+async fn argument_rejection_is_semantic_output_and_never_authorizes_broker_retry() {
+    for terminal in [true, false] {
+        let primary = route(ChatProtocol::OpenaiChat, "argument-rejection", 1);
+        let mut frames = vec![frame("tool_call.completed", serde_json::json!({
+            "call_id":"bad","name":"write_file","arguments":"{\"PRIVATE\":1}}"
+        }))];
+        if terminal { frames.push(frame("finish", serde_json::json!({"finish_reason":"tool_calls"}))); }
+        let transport = ScriptedTransport::new([TransportScript::Frames(frames)]);
+        let transports = transport_map([(ChatProtocol::OpenaiChat, provider_transport(&transport))]);
+        let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet {
+            primary: primary.clone(), failovers: Vec::new(),
+        }, Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+        let events = broker.open_stream(basic_request(&primary)).await.unwrap().collect::<Vec<_>>().await;
+        assert!(events.iter().any(|event| matches!(event,
+            Ok(envelope) if matches!(&envelope.event, ChatModelEvent::ToolCallRejected { call_id, .. } if call_id.as_ref()=="bad"))));
+        assert_eq!(transport.calls(), 1);
+        if terminal {
+            assert!(events.iter().all(Result::is_ok));
+            assert!(matches!(events.last(), Some(Ok(envelope)) if matches!(envelope.event,
+                ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })));
+        } else {
+            assert!(matches!(events.last(), Some(Err(error))
+                if error.code==ChatModelErrorCode::StreamInterrupted && error.semantic_output_committed));
+        }
+    }
+}
+
+#[tokio::test]
+async fn bridge_keeps_argument_rejection_separate_from_provider_failure() {
+    let primary = route(ChatProtocol::OpenaiResponses, "bridge-rejected-call", 1);
+    let transport = ScriptedTransport::new([TransportScript::Frames(vec![
+        frame("tool_call.completed", serde_json::json!({"call_id":"bad","name":"write_file","arguments":"[]"})),
+        frame("finish", serde_json::json!({"finish_reason":"tool_calls"})),
+    ])]);
+    let transports = transport_map([(ChatProtocol::OpenaiResponses, provider_transport(&transport))]);
+    let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet {
+        primary: primary.clone(), failovers: Vec::new(),
+    }, Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+    let bridge = ResponsesBridge::new(broker);
+    let events = bridge.open_stream(responses_request(&primary)).await.unwrap().collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(event, ResponsesBridgeEvent::FunctionCallRejected {
+        call_id, name, diagnostic, ..
+    } if call_id.as_ref()=="bad" && name=="write_file" && diagnostic.category==nomifun_chat_model_broker::ToolArgumentDiagnosticCategory::RootType)));
+    assert!(!events.iter().any(|event| matches!(event, ResponsesBridgeEvent::Failed { .. })));
+    assert!(matches!(events.last(), Some(ResponsesBridgeEvent::Completed { finish_reason: ChatFinishReason::ToolCalls, .. })));
+}

@@ -8,11 +8,14 @@ AgentSession 是 NomiFun 会话、回合、内容、效果和取消的唯一事�
 
 应用开发使用普通 Conversation 与通用 coding 能力，不创建专属创作流水线。不可变 SessionPurpose 保存在已有 `session/opening.metadata`；退役的 PluginAuthoring 仅保留 typed 只读识别，禁止新建、执行、恢复或 fork，允许原 owner 取消及删除。读取与分页只从 typed opening 事实派生用途，合法当前代旧 opening 缺省为 Conversation，缺失或非法事实拒绝读取。普通 metadata 更新不能改变用途，产品 projection 不授予工具权限。
 
-应用页工作区固定官方 `app.developer`（内置应用），模型及推理强度仍由用户选择，使用现役普通 Session 创建和切换合同。当前应用目录就是明确冻结的 workspace_root。AppRecord 中的 `development_session_id` 只提供可验证的导航引用；重开校验 owner、普通用途、固定模板与确切工作区，不从这个引用获得新权限或独占所有权。删除应用保留普通开发 Session、事件、payload 和合法历史；目录已删除时不能凭历史继续执行或补造工作区。
+应用页工作区固定官方 `app.developer`（内置应用），模型及推理强度仍由用户选择，复用现役 Session 与 Runtime。当前应用目录就是明确冻结的 workspace_root。应用入口创建时在 typed `session/opening.metadata.app_project_id` 建立不可变生命周期归属；Agent、模型切换和目录迁移不改变它，新 fork 继承它。普通创建接口不接受应用归属或应用保留命令身份。AppRecord 中的 `development_session_id` 只提供可验证的导航引用；重开校验 owner、应用归属、普通用途、固定模板与确切工作区，不从这个引用获得权限或删除权。
 
-一个应用对应一个独立项目，项目可以包含多个普通 Session；不同应用不共享项目根目录。
-项目历史仅查询确切 owner、普通用途和当前显式 typed workspace binding，
-不把默认工作区安装级占位参数当作项目目录。旧资源定义、最近导航和显示路径偏好均不构成归属或权限。归档状态来自 canonical metadata。
+一个应用对应一个独立项目，项目可以包含多个专属 Session；不同应用不共享项目根目录。
+项目历史只查询确切 owner 与 canonical 应用归属，归档状态来自 canonical metadata。
+当前代已有应用入口会话只从精确 canonical opening 命令、producer、owner、因果及原始显式应用根识别，
+不写回 opening 或导入退役数据。普通会话不因目录或 Agent 相同而被收编，旧同目录普通 fork 保持原归属。
+最近导航、显示路径偏好及 Message 投影均不构成归属或权限。应用会话只在所属应用管理，
+普通侧栏及批量操作排除它们；搜索与旧深链依据 canonical 归属返回应用工作区。
 不同 Session 的内容独立保存，项目目录中不复制 transcript，不为新会话拼接全部历史。
 新建明确工作目录的 Session 优先复用当前同 owner、同 canonical root 的既有 scoped `project_memory`
 resource 身份；首次建立该命名空间时使用 owner 与 canonical root 的摘要。同项目的新会话复用现役记忆状态，
@@ -39,7 +42,12 @@ Host 只从该 canonical 输入及对应启动事实解析操作 ID，复核成�
 结算后才处理同一应用。消息 UUID、输入幂等键和操作 ID 不互换，不从消息投影、当前最新回合
 或模型文字补造关联。配置识别不启动程序，也不作者或重写 Session 内容。
 
-删除应用时，围栏内核验 canonical opening 来源，等待经当前应用入口创建的多个普通 Session 的正常 Runtime 资源 teardown，然后释放闲置的确切工作区 File/Artifact/VCS owner 缓存与原生目录句柄。保留 Session、Turn、Event、Payload、Effect 和资源定义原值；无关同目录 fork、其他 Session 的活动资源、仍被调用持有的 owner 或未确认的 Git 效果拒绝释放，不为物理删除关闭无关 Session 或进程。
+通用删除入口拒绝应用专属 Session。用户从应用入口明确删除应用后，目录与 Session 围栏内核验归属，
+通过现役 canonical 删除流程清理全部专属 Session 的 Runtime、内容及相关资源，再删除应用文件和登记。
+已进入 deleting 的专属 Session 复用原收据继续清理；部分失败保留登记与项目文件供重试，不建立另一份批删除账本。
+活动 Turn、pending/unknown Effect、未结束原生 producer 或未确认清理仍拒绝破坏性操作。
+同目录普通会话和其他应用会话保留，不能为物理删除关闭它们；其活动资源和未知效果仍保护真实目录。
+普通会话的创建、上下文、工作区、切换及删除合同保持原样。
 
 | 数据 | 所有者与用途 |
 | --- | --- |
@@ -71,6 +79,52 @@ flowchart LR
 应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
+
+### 受管组件调用
+
+`workspace.process/exec` 与 `start` 的启动目标由 `component`、`command`、`cmd` 三选一。
+`component` 只选择批准的 OfficeCLI、Bun 或 Node，宿主复用现有组件供应器取得已验证程序并落实固定环境。
+普通程序和 Shell 保留原命令解析、工作目录与环境语义，不根据技能名或脚本文字自动改成受管调用。
+现役工具目录中的短 Host 说明直接给出可调用的组件入口；Skill 编译只投影冻结内容，不准备 Office
+或缓存 ready、物理路径和环境快照。技能说明、组件目录与入口展示均不授予新的 Action 或资源权限。
+
+明确的组件调用先用原 Effect 身份与读者检查既有回执；已完成结果直接返回，pending/unknown
+仍禁止重放。只有没有回执的新调用才有界、可取消地准备组件，再由原 Effect 准入事务复核并进入
+原进程 owner。准备失败或等待取消返回原 `process-start-observation.v1` 的 `not_started` 事实，
+不预留用户工作区 Effect、不虚构进程身份或清理证明。组件自身探测的未确认清理仍由原供应器围栏保护。
+准备期间的并发回执优先于本地准备失败；实际 spawn 后的不确定结果继续保留原 Effect 与进程清理围栏。
+
+启动前复核准备对象的文件身份。实际组件身份随原工具结果记录；缺失或未提交的历史身份不从当前
+组件补造。取消单个会话的准备等待不取消其他会话共享的供应任务。此接缝不新增会话表、事件类型、
+绑定账本或 checkpoint；输入 schema 的发布使用现有空闲契约演进，旧 Snapshot、历史和 Skill 锁不改写。
+
+### 模型提案验证与有界纠正
+
+模型参数尚未形成合法 JSON 对象时，记录的是未准入提案，不是工具执行失败。各协议 Adapter
+复用可替换的纯参数解析器，输出 `ToolCallRejected` 与有界 typed 诊断；诊断只保存类别、位置、
+字节数和摘要，不保存非法参数原文或任意响应正文。外层协议、调用身份和流完整性仍由 Broker
+校验；断流与合同矛盾保持原失败路径，显式输出截断使用原 `ModelOutputTruncated` 机制。
+
+Runtime 收齐完整正常终态后，把参数语法或根对象错误交给唯一的 `ProtocolRecovery`。
+任一提案被拒绝时整批不准入，包括其中已经形成合法参数的提案；不补括号、不替换字段，
+不创建 `ToolStarted`、工具结果或 Effect。模型请求及真实 Usage 仍保留。既有非原生工具正文
+与空任务终态使用同一响应纠正入口；合法 JSON 的工具 Schema 前置拒绝继续沿用明确的
+`not_executed` 工具反馈和现有完成统计，不把语法拒绝混入工具执行结果。
+
+纠正决策先作为 typed `ModelResponseRejected` 写入既有 `runtime/progress-recorded`
+Event/Payload，包含精确拒绝类别、整批提案身份、有界诊断、是否继续、工具约束和实际安全反馈。
+只有提交确认后才更新纠正状态并开启后继模型步骤；提交失败、取消或原执行围栏失效不授权继续。
+纠正沿用同一 Turn、原连续及累计预算和总模型步骤预算，使用新的模型 Operation 与调用 ID。
+`ModelStepStarted.correction_source` 只引用同 Turn 的确切已提交拒绝步骤，不能替换 accepted root
+或改变路由、Snapshot、资源权限与原生准入。已准入或未知效果继续由原 owner 结算、对账，
+不通过格式纠正重放。先前已关闭失败的 Turn 不会被重开或改写为成功。
+
+`ModelResponseValidated` 仅在需要结算纠正状态时记录本步骤的响应格式及参数语法通过，
+不表示工具 Schema 通过、准入、效果或任务完成。live、历史及 native 恢复共用 canonical
+事件 reducer 重建预算、约束和反馈；checkpoint 后已提交的拒绝反馈保留，未准入生成 carrier
+可以丢弃。已有当前代拒绝事实未记录精确类别时只表达未分类的已知拒绝，不从正文、投影或
+当前策略猜测原原因，不回填旧事件，也不扩大精确 native checkpoint 的恢复权限。
+此机制不新增纠正表、第二套日志或 checkpoint，实际效果仍沿原 Session/Turn/Event/Payload/Effect 链。
 
 可选 Mobile voice 的即时纠正只由明确设置 `SupersedeModelStep` 的 voice-started Turn 启用。普通文字请求的 `voice_immediate` 为 `None`，沿用原模型流、纠正边界和工具结算。voice 调用原 canonical writer 验证 Session、binding、context floor、精确 Operation 与 execution generation，不形成第二个工作引擎或权限账本。
 

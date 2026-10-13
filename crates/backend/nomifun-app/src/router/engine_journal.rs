@@ -46,6 +46,7 @@ pub enum EngineJournalWrite {
 
 #[derive(Default)]
 struct Cursor {
+    knowledge_writeback_notice: Option<nomifun_agent_contracts::KnowledgeWritebackNotice>,
     sequence: u64,
     window_start_sequence: u64,
     segment: u16,
@@ -206,6 +207,17 @@ fn canonical_event_payload(
 }
 
 impl EngineTurnJournal {
+    /// Attach display metadata to this exact Turn's existing terminal receipt.
+    pub(super) async fn note_knowledge_writeback(
+        &self,
+        notice: nomifun_agent_contracts::KnowledgeWritebackNotice,
+    ) -> Result<(), AppError> {
+        notice.validate().map_err(failure)?;
+        let mut cursor = self.0.cursor.lock().await;
+        if cursor.terminal { return Err(failure("Knowledge notice arrived after the Turn terminal")); }
+        cursor.knowledge_writeback_notice = Some(notice);
+        Ok(())
+    }
     /// Persist a presentation observation without extending the native journal.
     pub(super) async fn observe_workspace_files(
         &self,
@@ -1021,7 +1033,7 @@ impl EngineTurnJournal {
                     cursor.assistant_step.as_ref().unwrap_or(&empty_step),
                 );
                 let message_event_id = message.event_id.clone();
-                let (kind, payload) = match event {
+                let (kind, mut payload) = match event {
                     AgentEngineEvent::TurnCompleted { model_steps, finish_reason } => (
                         "turn/completed",
                         json!({
@@ -1048,6 +1060,9 @@ impl EngineTurnJournal {
                     }
                     _ => unreachable!(),
                 };
+                if kind == "turn/completed" && let Some(notice) = &cursor.knowledge_writeback_notice {
+                    payload["knowledge_writeback"] = serde_json::to_value(notice).map_err(failure)?;
+                }
                 let turn_identity = format!(
                     "turn-terminal:{}:{}",
                     journal.session.as_ref(),
@@ -1286,6 +1301,7 @@ async fn test_fixture_from_pool(
                 owner_ref: owner.clone(),
                 metadata: AgentSessionMetadata {
             purpose: Default::default(),
+                    app_project_id: None,
                     title: Some("fixture".into()),
                     archived: false,
                     pinned: false,
@@ -1377,6 +1393,37 @@ mod reliability_tests;
 mod history_display_tests {
     use super::*;
     use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn knowledge_writeback_notice_rehydrates_from_the_same_terminal_without_model_history() {
+        let (journal, pool) = test_fixture().await;
+        let notice = nomifun_agent_contracts::KnowledgeWritebackNotice {
+            status: nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Written,
+            written: vec![nomifun_agent_contracts::KnowledgeWritebackNoticeFile {
+                kb_id: "0190f5fe-7c00-7a00-8000-000000000001".into(), rel_path: "notes/loops.md".into(),
+            }],
+        };
+        journal.append(serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
+            step: 1, text: "The normal assistant answer.".into(),
+        }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+        journal.note_knowledge_writeback(notice.clone()).await.unwrap();
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::TurnCompleted {
+            model_steps: 1, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+        }).unwrap(), None, EngineJournalWrite::Terminal).await.unwrap();
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let (history, _, _) = store.message_history_before(&journal.0.session, None, 50).await.unwrap();
+        let summary = history.iter().find(|row| row.presentation_intent == "turn_summary").unwrap();
+        assert_eq!(summary.projection["knowledge_writeback"], serde_json::to_value(&notice).unwrap());
+        assert_eq!(summary.projection["state"], "completed");
+        let terminal: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='turn/completed'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&terminal).unwrap()["knowledge_writeback"], summary.projection["knowledge_writeback"]);
+        let runtime: Vec<(String,)> = sqlx::query_as("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded'")
+            .fetch_all(&pool).await.unwrap();
+        assert!(runtime.iter().all(|(value,)| !value.contains("knowledge_writeback")));
+        assert!(journal.note_knowledge_writeback(notice).await.is_err(), "late display data must not change a closed Turn");
+    }
 
     #[tokio::test]
     async fn voice_owned_journal_keeps_withdrawn_parts_as_audit_without_completing_the_obsolete_source() {

@@ -9,6 +9,7 @@ import useSWR from 'swr';
 import GuidPage, { type GuidProductEntry } from '@/renderer/pages/guid/GuidPage';
 import { GuidDraftScopeContext } from '@/renderer/pages/guid/hooks/useGuidDraftState';
 import ChatConversation from '@/renderer/pages/conversation/components/ChatConversation';
+import ReadOnlyConversationView from '@/renderer/pages/conversation/execution/ReadOnlyConversationView';
 import { officialConversationTemplateKey } from '@/renderer/pages/conversation/components/conversationAgentIdentity';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { parseConversationId } from '@/common/types/ids';
@@ -29,13 +30,18 @@ type Props = {
   onSessionCreated?: (id: string) => void;
 };
 
-export function matchesAppDevelopmentConversation(app: HostedApp, conversation: TChatConversation, sessionId: string | null | undefined = app.development_session_id): boolean {
+export function matchesAppProjectConversation(app: HostedApp, conversation: TChatConversation, sessionId: string | null | undefined = app.development_session_id): boolean {
   const path = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '');
   return conversation.type === 'nomi'
     && String(conversation.id) === sessionId
+    && conversation.app_project_id === app.id
     && conversation.session_purpose !== 'plugin_authoring'
-    && officialConversationTemplateKey(conversation.extra) === 'app.developer'
     && path(conversation.extra.workspace) === path(app.directory);
+}
+
+export function matchesAppDevelopmentConversation(app: HostedApp, conversation: TChatConversation, sessionId: string | null | undefined = app.development_session_id): boolean {
+  return matchesAppProjectConversation(app, conversation, sessionId)
+    && officialConversationTemplateKey(conversation.extra) === 'app.developer';
 }
 
 /** The Apps surface hosts the existing conversation and composer, not a new transcript. */
@@ -68,9 +74,10 @@ function AppDevelopmentConversationBody({ app, mode, onAppChanged, onConversatio
     return () => dispose.forEach(stop => stop());
   }, [sessionId, mutate]);
   const matching = app && conversation ? matchesAppDevelopmentConversation(app, conversation, sessionId) : false;
+  const owned = app && conversation ? matchesAppProjectConversation(app, conversation, sessionId) : false;
   useEffect(() => {
-    onConversationLoaded?.(matching ? conversation ?? undefined : undefined);
-  }, [matching, conversation, onConversationLoaded]);
+    onConversationLoaded?.(owned ? conversation ?? undefined : undefined);
+  }, [owned, conversation, onConversationLoaded]);
   const createConversation: GuidProductEntry['createConversation'] = useCallback(async request => {
     const current = app ?? pendingApp.current ?? await appHosting.create.invoke({});
     pendingApp.current = current;
@@ -107,7 +114,14 @@ function AppDevelopmentConversationBody({ app, mode, onAppChanged, onConversatio
   if (error && !conversation) return <Alert type='error' content={appErrorMessage(error)} />;
   if (sessionId && isLoading) return <Spin />;
   if (sessionId && conversation === null) return <Alert type='error' content={t('appHosting.workspace.sessionMismatch')} />;
-  if (conversation && !matching) return <Alert type='error' content={t('appHosting.workspace.sessionMismatch')} />;
+  if (conversation && !owned) return <Alert type='error' content={t('appHosting.workspace.sessionMismatch')} />;
+  if (owned && !matching && conversation) return <div className='h-full min-h-0 flex flex-col'>
+    {error && <Alert type='warning' content={appErrorMessage(error)} />}
+    <Alert type='info' content={t('appHosting.project.readOnlyHint')} />
+    <p className='px-14px m-0 text-12px text-t-secondary'>{conversation.agent_snapshot?.preset_name || t('appHosting.project.retainedAgent')}</p>
+    <ReadOnlyConversationView key={conversation.id} conversation={conversation}
+      agent_name={conversation.agent_snapshot?.preset_name || t('appHosting.project.retainedAgent')} />
+  </div>;
   if (matching && conversation) return <>
     {error && <Alert type='warning' content={appErrorMessage(error)} />}
     <ChatConversation key={conversation.id} conversation={conversation} embedded fixedAgentLabel={t('appHosting.workspace.fixedAgent')} submissionDisabled={submissionDisabled} onBeforeSubmit={prepareSubmission} />

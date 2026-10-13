@@ -61,10 +61,12 @@ export interface AppProjectSession {
   editable_in_app: boolean;
   archived: boolean;
 }
-/** A directory-scoped query over ordinary canonical Sessions, not another history store. */
+/** A Host query over application-owned canonical Sessions, not another history store. */
 export interface AppProjectSessionPage {
   items: AppProjectSession[];
   total: number;
+  /** All owned Sessions, including archived Sessions and pending deletion cleanup. */
+  owned_session_count: number;
   has_more: boolean;
   next_cursor: string | null;
   project_directory: string;

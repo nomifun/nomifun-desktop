@@ -377,3 +377,8 @@ path = "tests/app_workspace_api.rs"
 [[test]]
 name = "app_project_sessions"
 path = "tests/app_project_sessions.rs"
+
+[[test]]
+name = "app_project_scope_ui_fixture"
+path = "tests/app_project_scope_ui_fixture.rs"
+required-features = ["browser-use"]

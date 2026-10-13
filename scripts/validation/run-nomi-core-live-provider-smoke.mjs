@@ -18,6 +18,9 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --component-smoke --report .tmp-component-smoke.json
+ * The component smoke defaults to step-5-preview and checks a real managed
+ * OfficeCLI launch followed by an ordinary turn in the same Session.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --reasoning-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --reasoning-smoke --reasoning-navigation
  * Navigation also requires NOMIFUN_LIVE_PLAYWRIGHT_MODULE pointing at an existing
@@ -77,6 +80,8 @@ const DEFAULT_MODEL = 'step-3.7-flash';
 const ALLOWED_MODELS = new Set([DEFAULT_MODEL, 'step-5-preview']);
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
+const COMPONENT_TEST_NAME = 'nomi_core_managed_component_reaches_live_stepfun';
+const COMPONENT_EVIDENCE = 'NOMIFUN_LIVE_COMPONENT_EVIDENCE ';
 const REASONING_TEST_NAME = 'nomi_core_reasoning_lifecycle_reaches_live_stepfun';
 const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
 const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
@@ -104,6 +109,7 @@ const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
+const componentSmoke = process.argv.includes('--component-smoke');
 const reasoningSmoke = process.argv.includes('--reasoning-smoke');
 const reasoningNavigation = process.argv.includes('--reasoning-navigation');
 const codingSmoke = process.argv.includes('--coding-smoke');
@@ -121,8 +127,8 @@ const artifactIndex = process.argv.indexOf('--artifact-dir');
 const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
@@ -576,11 +582,31 @@ async function resolveToolchainEnvironment() {
   }
 }
 
+function managedComponentEvidence(stderr) {
+  const lines = stderr.split(/\r?\n/).filter(line => line.startsWith(COMPONENT_EVIDENCE));
+  if (lines.length !== 1) throw new Error('component evidence missing or duplicated');
+  const value = JSON.parse(lines[0].slice(COMPONENT_EVIDENCE.length));
+  if (value.schema_version !== 1 || value.provider !== 'stepfun-plan' || value.model !== 'step-5-preview' ||
+      value.component !== 'officecli' || value.action_id !== 'workspace.process/exec' || value.source !== 'managed' ||
+      typeof value.version !== 'string' || value.version.length > 64 || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.+-]+)?$/.test(value.version) ||
+      !/^[a-f0-9]{64}$/.test(value.digest) || value.canonical_component_argument !== true || value.exit_code !== 0 ||
+      value.cleanup_reaped !== true || value.completed_turns !== 2 || value.ordinary_continuation_no_tools !== true ||
+      value.same_session_binding !== true || !Number.isSafeInteger(value.call_started_seq) || value.call_started_seq <= 0 ||
+      !Number.isSafeInteger(value.result_seq) || value.result_seq <= value.call_started_seq) {
+    throw new Error('component evidence invalid');
+  }
+  return {schema_version:1,provider:'stepfun-plan',model:'step-5-preview',component:'officecli',
+    action_id:'workspace.process/exec',version:value.version,digest:value.digest,source:'managed',
+    canonical_component_argument:true,exit_code:0,cleanup_reaped:true,completed_turns:2,
+    ordinary_continuation_no_tools:true,same_session_binding:true,
+    call_started_seq:value.call_started_seq,result_seq:value.result_seq};
+}
+
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--component-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
-    if (arg === '--report') return (!idmmSmoke && !appHostingSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
+    if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
     if (arg === '--artifact-dir') return !appHostingSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--') || !isAbsolute(userArgs[index + 1]);
     if (index > 0 && userArgs[index - 1] === '--artifact-dir') return false;
@@ -594,7 +620,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, componentSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -608,10 +634,10 @@ async function main() {
       return;
     }
   }
-  const model = process.env[MODEL_ENVIRONMENT_NAME] ?? DEFAULT_MODEL;
+  const model = process.env[MODEL_ENVIRONMENT_NAME] ?? (componentSmoke ? 'step-5-preview' : DEFAULT_MODEL);
   // The separate native-browser fixture still pins its own provider model.
   // Never label that existing acceptance path as a different selected model.
-  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL)) {
+  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || (componentSmoke && model !== 'step-5-preview')) {
     emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -922,6 +948,19 @@ async function main() {
       process.exitCode = 2;
       return;
     }
+    if (componentSmoke) {
+      try {
+        const evidence = managedComponentEvidence(test.stderr);
+        console.log('live_smoke_component_evidence=' + JSON.stringify(evidence));
+        if (reportPath) {
+          writeFileSync(reportPath, JSON.stringify({...evidence,status:'pass',completed_at:new Date().toISOString()},null,2)+'\n',{mode:0o600});
+          console.log('live_smoke_component_report=' + JSON.stringify(reportPath));
+        }
+      } catch {
+        emitFailure('live_smoke_status=fail', 'COMPONENT_EVIDENCE_OR_REPORT_INVALID', 503);
+        process.exitCode = 2; return;
+      }
+    }
     if (idmmSmoke) {
       try {
         const evidence = parseIdmmDemoEvidence(test.stderr);
@@ -982,6 +1021,12 @@ async function main() {
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (componentSmoke && reportPath) {
+    try { writeFileSync(reportPath, JSON.stringify({schema_version:1,provider:'stepfun-plan',model,
+      component:'officecli',status:'fail',completed_at:new Date().toISOString(),
+      failure:typed ?? {code:'TEST_EXECUTION_FAILED'}},null,2)+'\n',{mode:0o600}); }
+    catch { /* Failure remains authoritative if report writing fails. */ }
+  }
   if (appHostingSmoke && reportPath) {
     try { writeFileSync(reportPath, JSON.stringify({schema_version:3,provider:'stepfun-plan',model,template:'app.developer',fixed_app_agent:true,status:'fail',
       completed_at:new Date().toISOString(),failure:typed ?? {code:'TEST_EXECUTION_FAILED'},artifact_directory:artifactDir},null,2)+'\n',{mode:0o600}); }
@@ -1040,6 +1085,18 @@ function navigationFixtureReady(line) {
 }
 
 function runSelfTest() {
+  const component = {schema_version:1,provider:'stepfun-plan',model:'step-5-preview',component:'officecli',
+    action_id:'workspace.process/exec',source:'managed',version:'1.0.156',digest:'a'.repeat(64),
+    canonical_component_argument:true,exit_code:0,cleanup_reaped:true,completed_turns:2,
+    ordinary_continuation_no_tools:true,same_session_binding:true,call_started_seq:5,result_seq:9,secret:'DO_NOT_EMIT'};
+  if (JSON.stringify(managedComponentEvidence(COMPONENT_EVIDENCE+JSON.stringify(component))).includes('DO_NOT_EMIT')) {
+    throw new Error('component evidence projection exposed arbitrary data');
+  }
+  for (const invalid of [{...component,exit_code:1},{...component,canonical_component_argument:false},
+      {...component,ordinary_continuation_no_tools:false},{...component,result_seq:5}]) {
+    let rejected = false; try { managedComponentEvidence(COMPONENT_EVIDENCE+JSON.stringify(invalid)); } catch { rejected = true; }
+    if (!rejected) throw new Error('incomplete component evidence accepted');
+  }
   const hostingId = '0190f5fe-7c00-7a00-8abc-012345678911';
   const fixtureReady = APP_WORKSPACE_UI_READY + JSON.stringify({host_url:'http://127.0.0.1:43124',
     finish_url:'http://127.0.0.1:43124/__app-workspace-fixture/finish',web_test_username:'app-workspace-smoke',

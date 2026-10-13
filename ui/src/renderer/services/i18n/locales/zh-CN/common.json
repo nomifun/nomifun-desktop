@@ -141,11 +141,5 @@
     "downloadTitle": "需要 {{tool}} 运行环境",
     "downloadHint": "未在此主机找到可用的 {{tool}}。你可以自行安装后重试，或选择由 NomiFun 下载并继续。下载只会在你点击后开始。",
     "downloadAction": "下载 {{tool}}"
-  },
-  "startup": {
-    "starting": "正在启动 NomiFun…",
-    "quitting": "正在退出 NomiFun…",
-    "connectionFailed": "无法读取启动状态，请退出应用后重试。",
-    "quit": "退出"
   }
 }

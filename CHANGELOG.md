@@ -5,6 +5,29 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.6 - 2026-10-13
+
+- Replace the legacy plugin system with application hosting and project
+  sessions.
+- Add responsive quick settings to the companion sidebar.
+- Download runtime components on demand: desktop startup no longer
+  provisions Node and prefers user-installed tools or verified caches;
+  Terminal, MCP, and Relay download components only after an explicit user
+  choice, while the DIY cutout model prepares silently after authenticated
+  startup.
+- Preserve gateway routes and validate native task responses; scope chat
+  fingerprints to referenced connections and guard embedding batches with
+  the selected task configuration.
+- Derive agent resource controls from granted actions.
+- Unify collaboration controls across sessions: new and active
+  conversations share collaboration drafts and execution admission, the
+  composer tool entry is preserved, and the model, policy, and template
+  panel is compacted.
+- Refine the app workspace and search controls, compact the project
+  session selector, fit home companion controls to their content, simplify
+  code preview with line numbers, and unify the attachment preview and
+  browser sidebar layout.
+
 ## v0.8.5 - 2026-10-12
 
 - Complete and edit official Agent presets: the six presets gain native

@@ -92,6 +92,8 @@ async fn development_session(State(state): State<AppHostingRouterState>, Path(id
             }
         }
         let current = state.owner.get(&id).await.map_err(failure)?;
+        let _app_project_scope = super::nomi_core_session::guard_app_project_scope_read(
+            &state.agent, &state.owner_id, &id).map_err(|error| AppError::Conflict(error.message))?;
         // The shared project admission fence precedes the application gate,
         // so physical file commands cannot race a new Session's registration.
         let _project_fence = super::nomi_core_session::guard_app_project_directory_read(
@@ -363,7 +365,7 @@ async fn delete(State(state): State<AppHostingRouterState>, Path(id): Path<Strin
 async fn delete_owned(state: AppHostingRouterState, id: String) -> Result<Json<ApiResponse<bool>>, AppError> {
     let current = state.owner.get(&id).await.map_err(failure)?;
     let development_session_id = current.development_session_id.clone();
-    let _development_fence = super::nomi_core_session::guard_app_development_workspace_change(&state.agent, &state.owner_id, &current).await
+    let development_fence = super::nomi_core_session::guard_app_project_deletion(&state.agent, &state.owner_id, &current).await
         .map_err(|error| AppError::Conflict(error.message))?;
     let agent = state.agent.clone();
     let owner_id = state.owner_id.clone();
@@ -375,7 +377,7 @@ async fn delete_owned(state: AppHostingRouterState, id: String) -> Result<Json<A
         if app.development_session_id != development_session_id {
             return Err(nomifun_app_hosting::AppError::Invalid("Application development Session changed; retry deletion".into()));
         }
-        if let Err(error) = super::nomi_core_session::release_app_development_workspace_runtime(&agent, &app).await {
+        if let Err(error) = super::nomi_core_session::delete_app_project_sessions(&agent, &owner_id, &app, &development_fence).await {
             *captured_cleanup_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.message.clone());
             return Err(nomifun_app_hosting::AppError::Command(error.message));
         }

@@ -429,3 +429,17 @@ MAC45独立组件修后build4.37s PASS（logs/mac45-fixture-build-fixed.log）�
 实际发送被系统接受和公共投递记录是不同分面。旧NotificationCenter binding已退休，读取timedout；ControlCenter无窗口binding也timedout；Apple官方Fn+N快捷键在CUA返回keyNotFound(fn)，未执行。没有再次发送来追横幅，也未改全局Focus/共享屏幕通知偏好。故visible_banner_verified=false，不能写用户已看到；真实OS NSError submission拒绝未自然触发，纯callback/生命周期检查不冒称该native分面。
 
 可信Clear仅移除上述实际delivered request ID，pending_before=[]，随后 delivered_after/pending_after/final_delivered_after全=[]，current_inventory_clear=true、notification_cleanup_verified=true，不以void移除当ACK，不删其它通知。可信Finish正常app.exit0/run_return0，final NSBundle/PID/path与初始一致，7操作均settled且pendingnull；component_cleanup_verified=true。controller receipt code0/cleanuptrue、exact kernel exit0、final_verified=true，exec69711 exit0，actual42424已退出。报告scope始终standalone_component_notification_fixture，formal_dev_sender_verified=false、native_system_quit_verified=false；生产正式Dev CmdQ另有前两轮真双证明。component-attempt2-report/before-finish-report/summary/package/controller-result及App stdout/stderr均保存persistent notifications目录。旧attempt1仍是正常abort1/cleanupfalse/finalfalse，不会被新PASS覆盖或当共享cleanup成功。
+
+
+## Git交付前远端合并与验证
+
+用户明确commit+push后，本轮161路径以0392c95e8提交（Git将shell_env_linux→shell_env_unix识别为rename，显示160files）。交付fetch发现origin/main新增11提交至dd1c2d485，使用正常merge保留远端v0.8.6版本与三架构updater发布信息、应用Session归属/协议恢复/知识写回/启动窗口退休等改动，没有force或改写共享历史。
+
+源码合并保留全部macOS模块及LS/PATH/storage/mainloop/退出接线，删除新增shutdown函数里已退休的desktop_startup引用；普通Computer测试metadata显式app_project_id=None。远端已退役Skills里的旧Office资源，MAC33防刷新改迁到真正component_environment入口，同时强制NO_AUTO_RESIDENT=1和SKIP_UPDATE=1、提前拒冲突、不披露值、保Windows大小写/Unix精确键语义；真实probe及私有HOME测试保留，不恢复旧资源、不放宽128项预算。独立只读接线复核通过。
+
+合并后bun run check完整链exit0。runtime全lib首轮并行54PASS/3FAIL（6.13s），三项shell成功用例实际得到None，first日志delivery-merged-runtime-lib.log保留；无分支诊断，不能精确归因于锁排队、机器负载或cleanup，也不是已证实的旧helper/version问题。原预算和guard未改，单线程定向shell_env20PASS/0FAIL（1.71s，delivery-merged-shell-target.log）；整库串行及后续desktop/Session/app消费者检查结果另记。合并前的真实原生证据保持原binary/source范围，不能冒称新合并HEAD已重跑全部设备或发行验收。
+
+
+整库串行第二轮55PASS/2FAIL（14.62s，delivery-merged-runtime-serial.log）：inheritedstdout已拿到正确PATH但全程2.154646s超过旧1s断言，large成功case仍None；不能归并行-only。增加仅cfg(test)的单条sanitized聚合诊断，记录runtime/spawn/read/parse/shutdown/Drop各阶段及数值计数，不记录PATH/env/argv/完整error，不改生产行为、预算或断言。带诊断整库串行实际57PASS/0FAIL（7.59s，delivery-merged-runtime-diagnostic.log）；当轮spawn约12–15ms、首字节约374–479ms、解析后cleanup约5–28ms、Drop第二shutdown微秒级，末尾所有lifecycle/relay pending/retained/quarantine均0。成功轮数据不能倒推前两轮失败原因，也不把仅增加诊断称为已修复产品时序bug；保留诊断以便失败时提供确切分支，不改保护来制造PASS。
+
+合并后desktop bin全测168PASS/0FAIL/3native ignored（2.60s），Agent Session全lib165PASS（15.12s），Computer role/Skills/Agent切换/managedEffect定向56PASS（11.57s），组件process父模块20PASS/1realOffice默认ignored（5.78s），真实独立startup入口1PASS（3.22s）均通过，日志delivery-merged-*另存Git外私有目录。startup实物覆盖缺SHELL/privateHOME真实账户profile与长寿命stdout后代有界清理；不是Finder冷启动或新mergeHEAD全部GUI/设备/发行验收。标准Bun完整链和cached/worktree diffcheck均PASS，私有报告/env/数据/App未进入Git，工作区外OfficeCLI三文件也未进入本仓库提交。

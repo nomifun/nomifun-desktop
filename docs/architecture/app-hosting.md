@@ -14,8 +14,9 @@ output and preview on the right. Manual import/configuration needs no Agent or m
 The workspace fixes the official `app.developer` Agent; model and reasoning choices
 use ordinary Session contracts. Creation makes a current Source record whose owned
 directory is its canonical Session workspace. `development_session_id` is a verified
-navigation reference, not tool authority, exclusive ownership or a second binding
-ledger. Reopening verifies the owner, ordinary Conversation purpose, fixed template
+navigation reference, not tool authority or a second binding ledger. Canonical opening
+`app_project_id` supplies application lifecycle ownership. Reopening verifies the owner,
+application identity, ordinary Conversation purpose, fixed template
 and exact workspace. Existing Sessions are reused; missing ones are opened through
 the existing owner without copying transcripts or restoring retired data.
 
@@ -146,32 +147,45 @@ unconfirmed cleanup retains the failed registration and connection reference.
 Host shutdown cancels preparation and stops managed trees before awaiting HTTP
 drain, so an install request cannot block its own cleanup.
 
-## Project directories and multiple ordinary Sessions
+## Application projects and owned Sessions
 
 Each application corresponds to one independent project whose root is the managed
 directory owned by that application ID. Different applications do not share project
 roots, even when imported from the same external source: each gets its own copy.
 A command's relative subdirectory does not change that project identity.
-The managed directory reuses the ordinary canonical workspace identity; there is
-no project database or second session-membership ledger.
-`GET /api/apps/{id}/development-sessions` pages ordinary Sessions by exact owner,
-Session purpose and the **current** typed workspace. It includes archived state and
-accepts only current explicit workspace-resource identity. The installation-level
-placeholder for the default workspace does not represent a project directory.
-Membership does not use historical resource indexes, titles or the latest navigation reference
-to infer membership. `development_session_id` records the most recently opened
+Projects reuse the existing canonical Session, Workspace and Runtime without a
+project database or copied chat log. The application's internal creation command
+records its exact ID in `session/opening.metadata.app_project_id`. The ordinary
+creation API cannot supply application ownership or use the application's reserved
+creation namespace. `GET /api/apps/{id}/development-sessions` pages by exact owner
+and canonical application identity, including archived Sessions. Agent/model changes
+and directory relocation retain that identity; new forks inherit it. An ordinary
+Session using the same directory, Agent or title remains ordinary and is outside
+application history and cascade deletion. Existing current-generation application
+Sessions are recognized only from their complete exact canonical opening command
+identity and original typed workspace, without rewriting facts, using a navigation
+reference as ownership, or importing retired data.
+`development_session_id` records the most recently opened
 session. The editor keeps its selected Session in the URL, so polling or another
-window changing that reference does not switch the mounted conversation. Sessions
-using another Agent open through ordinary Conversations; the App editor only admits
-Host-verified `app.developer` bindings.
+window changing that reference does not switch the mounted conversation. The App
+editor only admits Host-verified `app.developer` bindings; application-owned Sessions
+switched to another Agent remain readable inside the application without silently
+changing their frozen configuration. Cards and the application's **Project sessions**
+are the management entry. The ordinary sidebar, ordinary project choices and batch
+operations exclude owned Sessions; search and old deep links open their owning App.
+If application details are unavailable, an explicit valid Session link can still
+show canonical history read-only after verifying the exact Session and App ID.
+It uses the existing read-only viewer, does not require the directory to exist,
+and creates no registration or archive entry. Network failure does not imply deletion.
 
 New sessions reuse ordinary Session opening and explicit model selection. A stable
 creation key is reused after an unknown result. Exact canonical opening recovers an
 already created Session even after the application is renamed; conflicting request
 parameters are rejected. Explicit full Session deletion removes opening and content
 through the existing privacy contract, with no separate creation-key ledger retained.
-Source, commands, preview and settings belong to the application; chat belongs to each
-ordinary Session. Switching only remounts the conversation area. Completion sync
+The application owns the lifecycle of source, commands, preview, settings and its
+dedicated Sessions. Chat content stays independent in each canonical Session.
+Switching only remounts the conversation area. Completion sync
 checks the exact project Session and completed Turn rather than the latest navigation
 reference.
 
@@ -184,8 +198,9 @@ lifetime; this change does not introduce cross-restart memory persistence. Sourc
 files and canonical Session history retain their existing durable storage.
 Existing frozen default memory bindings are unchanged. Runtime
 reads only each Session's valid canonical content and authorized memory; it does not
-concatenate other sessions' message projections. The ordinary session list retains
-workspace grouping; the App entry only registers an existing display-path preference.
+concatenate other sessions' message projections. Ordinary conversations retain
+their workspace grouping contract. The App entry does not register an ordinary
+display-path preference; confirmed former App preferences are removed.
 
 Relocating the same current dataset validates registered application UUIDs, the real
 installation owner and exact owned roots offline. It rebases only copied registry
@@ -218,22 +233,24 @@ race the copy. A denial settles as a pre-execution rejection through the origina
 Effect contract. Import calls the same application owner without reentering the
 manual HTTP fence. Reads, metadata/settings saves and application stop remain available.
 
-Deletion stops the tree, clears runtime Agent connections through their existing
-owner, then removes owned files and registration. Partial failures retain the record.
-Original sources, external data and ordinary development Sessions are preserved.
-The development reference does not authorize Session deletion or changes to canonical
-events/payloads. Under that same fence, deletion verifies the canonical opening
-provenance of the multiple ordinary Sessions created through this App entry, waits
-for their normal Runtime teardown with no kill reason, then releases the idle
-exact-root File/Artifact/VCS owner cache and its native directory handles. Valid older
-navigation references retain the existing release behavior; unrelated shared-directory
-forks are not automatically terminated.
-Another Session's active resources, retained invocations or an unresolved Git
-outcome keep deletion fenced; cache eviction cannot bypass settlement or stop
-unrelated processes. This resource release does not write or delete Session,
-Turn, Event, Payload, Effect or resource-definition facts.
-The deleted workspace path cannot be executed; retained history
-does not reconstruct it or grant recovery authority. Shared Host credentials remain.
+The confirmation names source, local data and owned Session history and displays
+the owned Session count. The history `total` counts live Sessions; confirmation uses
+`owned_session_count` to include archived and still-deleting owned Sessions.
+Generic Session deletion rejects application-owned Sessions and directs management
+to the application; ordinary deletion keeps its contract.
+Under directory and Session fences, application deletion rejects active Turns,
+unknown effects and unconfirmed cleanup, stops the managed tree, purges only owned
+Sessions through the existing canonical deletion flow, then removes owned files
+and registration. Canonical application identity supplies this scope; the latest
+navigation reference never grants whole-Session deletion authority.
+An owned Session already in `deleting` resumes its original receipt and cleanup.
+The flow avoids acquiring the same Session write lock twice and does not inherit
+the ordinary file-change rejection of every deleting Session. Partial failures
+retain registration and project files for retry without another deletion ledger.
+Original sources, external data, ordinary Sessions and other applications remain.
+Ordinary Sessions bound to the same directory are neither terminated nor purged;
+their active resources, retained invocations or unresolved Git outcomes can still
+block physical directory removal. Shared Host credentials remain.
 
 The unused `exclusive_session_ids` field and whole-Session deletion branch are
 retired. Only the exact empty array in an existing current registry can be read

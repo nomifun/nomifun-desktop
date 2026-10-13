@@ -426,7 +426,7 @@ mod tests {
         vec![
             AgentEngineEvent::TurnStarted { binding, turn_operation_id: "previous-turn".into() },
             AgentEngineEvent::PlanUpdated { plan },
-            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "previous-model-step".into() },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "previous-model-step".into(), correction_source: None },
             AgentEngineEvent::OutputTextDelta { step: 1, text: "The draft still needs repair.".into() },
             AgentEngineEvent::TurnFailed { model_steps: 1, message: "Verification failed".into(), failure: None },
         ]

@@ -199,7 +199,7 @@ mod tests {
                     requirement:crate::context_lifecycle::text_message(ChatRole::User,"original file task".into()),
                     events:vec![
                         crate::AgentEngineEvent::TurnStarted {binding:self.binding.clone(),turn_operation_id:target.into()},
-                        crate::AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        crate::AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into(), correction_source: None },
                         crate::AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {
                             call_id:"original-read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},

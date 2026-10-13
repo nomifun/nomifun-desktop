@@ -4,6 +4,7 @@ import { parseMessageId } from '@/common/types/ids';
 
 import {
   getExactSidebarActiveTurnId,
+  isSameConversationList,
   isGeneratingStreamMessage,
   shouldAcceptSidebarTurnCompletion,
   shouldAcceptSidebarTurnStart,
@@ -12,6 +13,12 @@ import {
 
 const oldTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000091');
 const currentTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000092');
+
+test('a Host-refreshed App project scope is visible even when the Session activity time is unchanged', () => {
+  const ordinary = { id: '0190f5fe-7c00-7a00-8000-000000000001', modified_at: 1, extra: {} } as TChatConversation;
+  expect(isSameConversationList([ordinary], [{ ...ordinary, app_project_id: 'owned-app' }])).toBe(false);
+  expect(isSameConversationList([{ ...ordinary, app_project_id: 'owned-app' }], [{ ...ordinary, app_project_id: 'other-app' }])).toBe(false);
+});
 const runningConversation = {
   status: 'running',
   runtime: {

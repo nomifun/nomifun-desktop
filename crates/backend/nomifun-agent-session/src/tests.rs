@@ -40,6 +40,8 @@ mod native_mutation_fence_tests;
 mod idmm_tests;
 #[path = "storage_relocation_tests.rs"]
 mod storage_relocation_tests;
+#[path = "app_project_tests.rs"]
+mod app_project_tests;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())
@@ -152,6 +154,7 @@ fn live_session(id: AgentSessionId) -> AgentSessionLiveRecord {
         owner_ref: owner(),
         metadata: AgentSessionMetadata {
             purpose: Default::default(),
+            app_project_id: None,
             title: Some("Session fixture".to_owned()),
             archived: false,
             pinned: false,
@@ -3601,6 +3604,7 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         child_owner_ref: owner(),
         child_metadata: AgentSessionMetadata {
             purpose: Default::default(),
+            app_project_id: None,
             title: Some("Fork child".to_owned()),
             archived: false,
             pinned: false,
@@ -3626,6 +3630,10 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     other_purpose.child_metadata.purpose = nomifun_agent_contracts::SessionPurpose::PluginAuthoring;
     assert!(matches!(store.fork_session(&parent.agent_session_id, other_purpose.clone()).await,
         Err(SessionStoreError::Conflict(_))), "a fork cannot choose another product's ownership");
+    let mut other_app = request.clone();
+    other_app.child_metadata.app_project_id = Some(Uuid::now_v7().to_string());
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_app.clone()).await,
+        Err(SessionStoreError::Conflict(_))), "a fork cannot invent application affiliation");
     let forked = store
         .fork_session(&parent.agent_session_id, request.clone())
         .await
@@ -3648,6 +3656,8 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     assert_eq!(replay.fork_ack, forked.fork_ack);
     assert!(matches!(store.fork_session(&parent.agent_session_id, other_purpose).await,
         Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's purpose");
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_app).await,
+        Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's app affiliation");
     // Current-generation fork openings originally omitted metadata entirely.
     // Its exact parent/base/title facts still identify a default Conversation.
     sqlx::query("UPDATE agent_events SET inline_json=json_remove(inline_json,'$.metadata') WHERE session_id=? AND seq=1")

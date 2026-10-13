@@ -21,7 +21,7 @@ fn admitted(id: &str) -> AgentEngineEvent {
     AgentEngineEvent::ToolStarted { step: 1, call_id: id.into(), capability_id: "workspace.files".into(), action_id: "workspace.files/write".into() }
 }
 
-fn started() -> AgentEngineEvent { AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into() } }
+fn started() -> AgentEngineEvent { AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "turn:model:1".into(), correction_source: None } }
 
 fn outcome(id: &str) -> AgentReconciledOutcome {
     AgentReconciledOutcome { result: AgentToolResult::text(id.into(), "owner-confirmed-write", false),

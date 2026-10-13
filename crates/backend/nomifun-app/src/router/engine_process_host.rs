@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::engine_journal::{EngineJournalWrite, EngineTurnJournal};
 use super::engine_process_recovery::ProcessWitness;
+use super::agent_wave2_host::PreparedWave2Invocation;
 use futures_util::FutureExt;
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave2::Wave2HostPortError;
@@ -20,6 +21,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const MAX_STDIN_WRITE_BYTES: usize = 1024 * 1024;
+const COMPONENT_PREPARATION_WAIT: Duration = Duration::from_secs(60);
 
 fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
@@ -27,6 +29,54 @@ fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
 
 fn outcome_unknown(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("EFFECT_OUTCOME_UNKNOWN", value.to_string())
+}
+
+fn bounded_component_detail(value: &str, limit: usize) -> &str {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) { end -= 1; }
+    &value[..end]
+}
+
+fn component_not_started(component: &str, code: &str, message: &str) -> StrictJsonValue {
+    StrictJsonValue(serde_json::json!({
+        "schema":"nomifun.process-start-observation.v1", "state":"not_started",
+        "success":false, "user_code_started":false,
+        "component":bounded_component_detail(component,128),
+        "code":bounded_component_detail(code,96),
+        "message":bounded_component_detail(message,1024),
+    }))
+}
+
+fn component_resolution_error(id: nomifun_runtime::ToolId, cause: &nomifun_runtime::ToolError) -> Wave2HostPortError {
+    use nomifun_runtime::ToolError;
+    let code = match cause {
+        ToolError::Shared(cause) => return component_resolution_error(id, cause),
+        ToolError::NotPrepared => "COMPONENT_PREPARATION_REQUIRED",
+        ToolError::Unavailable { .. } => "COMPONENT_UNAVAILABLE",
+        ToolError::EnvironmentConflict { .. } => "COMPONENT_ENVIRONMENT_CONFLICT",
+        ToolError::Verification { .. } => "COMPONENT_VERIFICATION_FAILED",
+        ToolError::InvalidOverride { .. } => "COMPONENT_OVERRIDE_INVALID",
+        ToolError::Changed { .. } => "COMPONENT_CHANGED",
+        ToolError::Cancelled => "CANCELLED",
+        ToolError::Cleanup(_) => "COMPONENT_CLEANUP_UNPROVEN",
+        ToolError::Download(_) => "COMPONENT_DOWNLOAD_FAILED",
+        ToolError::TooLarge => "COMPONENT_SIZE_LIMIT",
+        ToolError::InvalidAsset(_) => "COMPONENT_ASSET_INVALID",
+        ToolError::Extract(_) | ToolError::Io(_) => "COMPONENT_CACHE_FAILED",
+        ToolError::Worker(_) => "COMPONENT_PREPARATION_FAILED",
+    };
+    let reason = nomi_redact::redact_secrets_owned(cause.to_string());
+    Wave2HostPortError::new(code, format!("{}: {}", id.as_str(), bounded_component_detail(&reason,768)))
+}
+
+fn with_component_identity(
+    result: Result<StrictJsonValue, Wave2HostPortError>,
+    identity: Option<&StrictJsonValue>,
+) -> Result<StrictJsonValue, Wave2HostPortError> {
+    result.map(|mut output| {
+        if let Some(identity) = identity { output.0["component_identity"] = identity.0.clone(); }
+        output
+    })
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -49,6 +99,7 @@ struct Params {
     operation: Operation,
     command: Option<String>,
     cmd: Option<String>,
+    component: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     cwd: Option<String>,
@@ -132,6 +183,14 @@ impl ProcessState {
 struct ProcessEntry {
     session: EngineProcessSession,
     terminal: Option<EngineProcessPoll>,
+    component_identity: Option<StrictJsonValue>,
+}
+
+/// A single invocation's local preparation, never a Session binding or checkpoint.
+pub(crate) struct PreparedProcessInvocation {
+    params: Params,
+    component: nomifun_runtime::ToolId,
+    prepared: nomifun_runtime::PreparedComponentLaunch,
 }
 
 fn cleanup_is_proven(poll: &EngineProcessPoll) -> bool {
@@ -165,6 +224,120 @@ impl EngineProcessScope {
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let params: Params = serde_json::from_value(input.0)
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
+        if params.component.is_some() {
+            return match self.prepare_component_params(params).await? {
+                PreparedWave2Invocation::Invoke(prepared) => self.invoke_prepared(prepared, operation_id).await,
+                PreparedWave2Invocation::Return(observation) => Ok(observation),
+            };
+        }
+        self.invoke_params(params, None, operation_id).await
+    }
+
+    /// Run only after the original Effect reader has ruled out replay/unknown results.
+    /// No process intent or workspace Effect is reserved while the supplier works.
+    pub(crate) async fn prepare_component(
+        &self,
+        input: StrictJsonValue,
+    ) -> Result<PreparedWave2Invocation<PreparedProcessInvocation>, Wave2HostPortError> {
+        let params = serde_json::from_value(input.0)
+            .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
+        self.prepare_component_params(params).await
+    }
+
+    async fn prepare_component_params(
+        &self,
+        params: Params,
+    ) -> Result<PreparedWave2Invocation<PreparedProcessInvocation>, Wave2HostPortError> {
+        if !matches!(params.operation, Operation::Exec | Operation::Start)
+            || params.command.is_some() || params.cmd.is_some()
+            || params.process_id.is_some() || params.input.is_some()
+            || params.cursor.is_some() || params.append_newline.is_some()
+        {
+            return Err(Wave2HostPortError::new("INVALID_PAYLOAD", "component is an exclusive launch target"));
+        }
+        let name = params.component.as_deref().ok_or_else(||
+            Wave2HostPortError::new("INVALID_PAYLOAD", "component launch requires an exact approved component id"))?;
+        let Some(component) = nomifun_runtime::ToolId::parse(name) else {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "COMPONENT_NOT_DECLARED", "Choose an exact approved component id: officecli, bun or node.",
+            )));
+        };
+        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "CANCELLED", "Component preparation cancelled before the requested program started.",
+            )));
+        }
+        let mut request = nomifun_engine_core::EngineProcessRequest::pipe(name);
+        request.args = params.args.clone();
+        request.cwd = params.cwd.clone();
+        request.env = params.env.clone();
+        request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
+        request.transport = if params.tty {
+            EngineProcessTransport::Pty { cols: params.cols.unwrap_or(120), rows: params.rows.unwrap_or(40) }
+        } else { EngineProcessTransport::Pipe };
+        if let Err(cause) = request.validate() {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "INVALID_PAYLOAD", &cause.to_string(),
+            )));
+        }
+        if params.wait_ms.is_some_and(|wait| wait > 30_000) || pty_dimension_out_of_range(&params) {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "INVALID_PAYLOAD", "Process wait/PTY dimension budget exceeded.",
+            )));
+        }
+        let environment = params.env.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+        let preparation = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "CANCELLED", "Component preparation cancelled before the requested program started.",
+            ))),
+            result = tokio::time::timeout(COMPONENT_PREPARATION_WAIT,
+                nomifun_runtime::prepare_component_launch(component, &environment)) => result,
+        };
+        let prepared = match preparation {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(cause)) => {
+                let failure = component_resolution_error(component, &cause);
+                return Ok(PreparedWave2Invocation::Return(component_not_started(name, &failure.code, &failure.message)));
+            }
+            Err(_) => return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "COMPONENT_PREPARATION_TIMEOUT", "The component preparation wait expired; the requested program did not start.",
+            ))),
+        };
+        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "CANCELLED", "Component preparation cancelled before the requested program started.",
+            )));
+        }
+        let Some(path) = prepared.tool.executable_path.to_str() else {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "COMPONENT_PATH_INVALID", "The verified executable path cannot be represented by the process protocol.",
+            )));
+        };
+        request.command = path.to_owned();
+        request.env = prepared.environment.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+        if let Err(cause) = request.validate() {
+            return Ok(PreparedWave2Invocation::Return(component_not_started(
+                name, "INVALID_PAYLOAD", &cause.to_string(),
+            )));
+        }
+        Ok(PreparedWave2Invocation::Invoke(PreparedProcessInvocation { params, component, prepared }))
+    }
+
+    pub(crate) async fn invoke_prepared(
+        &self,
+        invocation: PreparedProcessInvocation,
+        operation_id: &str,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        self.invoke_params(invocation.params, Some((invocation.component, invocation.prepared)), operation_id).await
+    }
+
+    async fn invoke_params(
+        &self,
+        params: Params,
+        component: Option<(nomifun_runtime::ToolId, nomifun_runtime::PreparedComponentLaunch)>,
+        operation_id: &str,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
         if params.wait_ms.is_some_and(|wait| wait > 30_000)
             || stdin_input_exceeds_budget(&params)
             || pty_dimension_out_of_range(&params)
@@ -174,6 +347,11 @@ impl EngineProcessScope {
         let mut state = self.state.lock().await;
         if self.closed.load(Ordering::Acquire) || state.unregistered_start || state.cleanup_panicked
         {
+            if let Some((id, _)) = &component {
+                if !state.unregistered_start && !state.cleanup_panicked {
+                    return Ok(component_not_started(id.as_str(), "CANCELLED", "The requested program did not start; the process turn is closed."));
+                }
+            }
             return Err(error("process turn is closed"));
         }
         if operation_id.is_empty()
@@ -200,7 +378,7 @@ impl EngineProcessScope {
             self.close_admission();
             return Err(error(cause));
         }
-        let result = self.invoke_owned(params, &mut state).await;
+        let result = self.invoke_owned(params, component, &mut state).await;
         if state.is_quiescent() {
             let witness = serde_json::to_string(&ProcessWitness::Quiescent {
                 operation_id: operation_id.to_owned(),
@@ -223,6 +401,7 @@ impl EngineProcessScope {
     async fn invoke_owned(
         &self,
         params: Params,
+        component: Option<(nomifun_runtime::ToolId, nomifun_runtime::PreparedComponentLaunch)>,
         state: &mut ProcessState,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let poll_delay = poll_wait(&params);
@@ -243,7 +422,26 @@ impl EngineProcessScope {
                     "launch cannot address an existing process or write stdin",
                 ));
             }
-            let mut request = match (params.cmd, params.command) {
+            let identity = component.as_ref().map(|(id, prepared)| StrictJsonValue(serde_json::json!({
+                "component":id.as_str(), "version":prepared.tool.version,
+                "digest":prepared.tool.digest, "source":prepared.tool.source,
+            })));
+            let mut request = if let Some((id, prepared)) = &component {
+                if self.cancellation.is_cancelled() {
+                    return Ok(component_not_started(id.as_str(), "CANCELLED", "The requested program did not start."));
+                }
+                if let Err(cause) = prepared.validate_for_start() {
+                    let failure = component_resolution_error(*id, &cause);
+                    return Ok(component_not_started(id.as_str(), &failure.code, &failure.message));
+                }
+                let Some(path) = prepared.tool.executable_path.to_str() else {
+                    return Ok(component_not_started(id.as_str(), "COMPONENT_PATH_INVALID", "The verified executable path cannot be represented by the process protocol."));
+                };
+                let mut request = EngineProcessRequest::pipe(path);
+                request.args = params.args;
+                request.env = prepared.environment.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+                request
+            } else { match (params.cmd, params.command) {
                 (Some(script), None) if params.args.is_empty() => {
                     EngineProcessRequest::shell(script)
                 },
@@ -253,9 +451,9 @@ impl EngineProcessScope {
                     request
                 },
                 _ => return Err(error("launch requires cmd OR command plus args; do not mix them")),
-            };
+            }};
             request.cwd = params.cwd;
-            request.env = params.env;
+            if component.is_none() { request.env = params.env; }
             request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
             request.output_limit_bytes = 256 * 1024;
             request.transport = if params.tty {
@@ -269,7 +467,9 @@ impl EngineProcessScope {
             // Obvious input errors are rejected before the uncertain spawn
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
-            resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
+            if component.is_none() {
+                resolve_managed_program(&mut request, &self.cancellation, self.workspace_root()).await?;
+            }
             state.unregistered_start = true;
             let session = match self
                 .owner
@@ -301,12 +501,13 @@ impl EngineProcessScope {
                 ProcessEntry {
                     session,
                     terminal: None,
+                    component_identity: identity,
                 },
             );
             state.unregistered_start = false;
             id
         } else {
-            if params.command.is_some() || params.cmd.is_some()
+            if params.command.is_some() || params.cmd.is_some() || params.component.is_some()
                 || !params.args.is_empty()
                 || params.cwd.is_some()
                 || !params.env.is_empty()
@@ -338,18 +539,18 @@ impl EngineProcessScope {
             if let Some(poll) = self.owner.terminal_if_ready(&mut entry.session).map_err(outcome_unknown)? {
                 if !cleanup_is_proven(&poll) { return Err(outcome_unknown("the original owner terminal has no proven cleanup receipt")); }
                 entry.terminal = Some(poll.clone());
-                return rejected_terminal_control(&id, &poll, params.operation);
+                return with_component_identity(rejected_terminal_control(&id, &poll, params.operation), entry.component_identity.as_ref());
             }
         }
         if let Some(poll) = &entry.terminal {
             if params.operation == Operation::Cancel {
-                return process_output(&id, poll, params.operation);
+                return with_component_identity(process_output(&id, poll, params.operation), entry.component_identity.as_ref());
             }
             if params.operation == Operation::Poll {
                 // Re-poll the retained terminal session so the caller's output
                 // cursor is honored even when another interaction observed exit.
             } else {
-                return rejected_terminal_control(&id, poll, params.operation);
+                return with_component_identity(rejected_terminal_control(&id, poll, params.operation), entry.component_identity.as_ref());
             }
         }
         let session = &mut entry.session;
@@ -413,7 +614,7 @@ impl EngineProcessScope {
         if cleanup_is_proven(&poll) {
             entry.terminal = Some(poll.clone());
         }
-        process_output(&id, &poll, params.operation)
+        with_component_identity(process_output(&id, &poll, params.operation), entry.component_identity.as_ref())
     }
 
     /// Close admission before waiting for any running launch/poll. The token
@@ -506,6 +707,7 @@ async fn resolve_managed_program(
 }
 
 fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> Wave2HostPortError {
+    // Ordinary command discovery keeps its existing response contract.
     match cause {
         nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
         nomifun_runtime::ToolError::NotPrepared | nomifun_runtime::ToolError::Unavailable { .. } => {
@@ -560,6 +762,7 @@ fn process_output(
 mod tests {
     use super::*;
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
+    include!("engine_process_component_tests.rs");
 
     #[tokio::test]
     async fn managed_program_preserves_shell_text_and_explicit_user_executables() {
@@ -1057,6 +1260,7 @@ mod tests {
             operation: Operation::Stdin,
             command: None,
             cmd: None,
+            component: None,
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),

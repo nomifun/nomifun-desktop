@@ -33,10 +33,10 @@ import {
 import { getRenderedExpansionState } from './utils/workpathExpansion';
 import {
   DEFAULT_SIDEBAR_DISPLAY_PREFERENCES,
+  formatWorkpathDisplay,
   type SidebarDisplayPreferences,
 } from './utils/sidebarDisplayPreferences';
 import type { SessionEntry, SessionKind, WorkpathNode } from './utils/workpathTree';
-import { formatProjectWorkpathDisplay } from './utils/appProjectWorkpaths';
 
 export interface WorkpathDrawerProps {
   node: WorkpathNode;
@@ -93,7 +93,7 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
 
   const isDefault = node.key === DEFAULT_WORKPATH_KEY;
   const displayName = isDefault ? t('sessionList.defaultWorkpath') : node.displayName;
-  const workpathDisplay = isDefault ? null : formatProjectWorkpathDisplay(node, displayPreferences.workpathNameMode);
+  const workpathDisplay = isDefault ? null : formatWorkpathDisplay(node.key, node.displayName, displayPreferences.workpathNameMode);
   const twoLineWorkpath = workpathDisplay?.kind === 'twoLine';
   const sessionCount = node.interactive.length + node.terminal.length;
 

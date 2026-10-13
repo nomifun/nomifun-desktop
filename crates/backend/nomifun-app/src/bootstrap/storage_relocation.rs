@@ -379,7 +379,7 @@ mod tests {
         let store = AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
         let created = store.create_session(CreateSessionRequest::new(AgentSessionLiveRecord {
             agent_session_id: SESSION.into(), owner_ref: owner.clone(),
-            metadata: AgentSessionMetadata { purpose: Default::default(), title: None,
+            metadata: AgentSessionMetadata { purpose: Default::default(), app_project_id: None, title: None,
                 pinned: false, archived: false, reasoning_effort: None },
             agent_binding: binding.clone(), remote_binding_provenance: None,
             parent_session_id: None, fork_base_payload_id: None, next_seq: 1,

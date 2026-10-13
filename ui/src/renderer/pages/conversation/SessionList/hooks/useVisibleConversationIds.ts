@@ -28,7 +28,7 @@ export const useVisibleConversationIds = (): ConversationId[] => {
   const { pinnedKeys } = useWorkpathUiState();
 
   return useMemo(() => {
-    return buildWorkpathTree(conversations, terminals, pinnedKeys).flatMap((node) =>
+    return buildWorkpathTree(conversations.filter(conversation => !conversation.app_project_id), terminals, pinnedKeys).flatMap((node) =>
       node.interactive.map((entry) => entry.id)
     );
   }, [conversations, terminals, pinnedKeys]);

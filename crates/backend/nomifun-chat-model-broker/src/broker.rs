@@ -699,6 +699,7 @@ struct EventSequence {
     usage_seen: bool,
     terminal_seen: bool,
     tool_names: BTreeMap<ToolCallId, String>,
+    closed_tool_ids: std::collections::BTreeSet<ToolCallId>,
 }
 
 impl EventSequence {
@@ -722,10 +723,26 @@ impl EventSequence {
                 name,
                 arguments_delta: _,
             } => {
+                if self.closed_tool_ids.contains(call_id) {
+                    return Err(ChatModelError::protocol_violation("tool delta follows a closed proposal"));
+                }
                 validate_tool_identity(call_id, name, &mut self.tool_names)?;
             }
             ChatModelEvent::ToolCallCompleted { call } => {
                 validate_completed_tool(call, &mut self.tool_names)?;
+                if !self.closed_tool_ids.insert(call.call_id.clone()) {
+                    return Err(ChatModelError::protocol_violation("tool proposal closed more than once"));
+                }
+            }
+            ChatModelEvent::ToolCallRejected { call_id, name, diagnostic } => {
+                if name.is_empty() || name.trim() != name || call_id.as_ref().trim() != call_id.as_ref() {
+                    return Err(ChatModelError::protocol_violation("rejected tool proposal has an invalid identity"));
+                }
+                validate_tool_identity(call_id, name, &mut self.tool_names)?;
+                diagnostic.validate().map_err(|_| ChatModelError::protocol_violation("invalid tool argument diagnostic"))?;
+                if !self.closed_tool_ids.insert(call_id.clone()) {
+                    return Err(ChatModelError::protocol_violation("tool proposal closed more than once"));
+                }
             }
             ChatModelEvent::Usage { .. } => {
                 if self.usage_seen {

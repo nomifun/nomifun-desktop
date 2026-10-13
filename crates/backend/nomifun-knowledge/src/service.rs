@@ -272,6 +272,14 @@ pub struct KbFileContent {
     pub source: Option<KnowledgeEntrySourceInfo>,
 }
 
+/// Filesystem content, independent of the directory identity projection.
+struct KnowledgeFileBody {
+    rel_path: String,
+    content: String,
+    size: u64,
+    modified_at: Option<TimestampMs>,
+}
+
 /// Result of one editor CAS update. A stable identity may resolve to a newer
 /// locator than the path the editor last rendered; returning it lets the UI
 /// rebind the document session without guessing.
@@ -4675,40 +4683,7 @@ impl KnowledgeService {
             );
         }
         let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
-        let root = PathBuf::from(&row.root_path);
-        let path = safe_md_path_bounded(
-            root.clone(),
-            rel_path.to_owned(),
-        )
-        .await?;
-        let meta = tokio::time::timeout(
-            KNOWLEDGE_PATH_INSPECTION_TIMEOUT,
-            tokio::fs::metadata(&path),
-        )
-            .await
-            .map_err(|_| AppError::Timeout(format!("file inspection timed out: {rel_path}")))?
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AppError::NotFound(format!("file not found: {rel_path}"))
-                } else {
-                    AppError::Internal(format!(
-                        "failed to inspect knowledge file {rel_path}: {error}"
-                    ))
-                }
-            })?;
-        if !meta.is_file() {
-            return Err(AppError::BadRequest(format!(
-                "knowledge document is not a regular file: {rel_path}"
-            )));
-        }
-        let content = tokio::time::timeout(
-            KNOWLEDGE_FILE_IO_TIMEOUT,
-            tokio::fs::read_to_string(&path),
-        )
-            .await
-            .map_err(|_| AppError::Timeout(format!("file read timed out: {rel_path}")))?
-            .map_err(|e| AppError::Internal(format!("failed to read file: {e}")))?;
-        let actual_rel_path = tree_relative_path(&root, &path)?;
+        let body = self.read_file_body_under_tree_lock(&row, rel_path).await?;
         let projected = if let Some(repository) = self.entry_repository() {
             let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
                 |error| {
@@ -4721,7 +4696,7 @@ impl KnowledgeService {
             match repository
                 .get_entry_by_path(
                     &knowledge_base_id,
-                    &portable_writeback_path_identity(&actual_rel_path),
+                    &portable_writeback_path_identity(&body.rel_path),
                 )
                 .await
             {
@@ -4729,7 +4704,7 @@ impl KnowledgeService {
                 Err(error) => {
                     tracing::warn!(
                         kb_id = %row.knowledge_base_id,
-                        path = %actual_rel_path,
+                        path = %body.rel_path,
                         %error,
                         "knowledge file read could not attach stable identity metadata"
                     );
@@ -4757,10 +4732,10 @@ impl KnowledgeService {
             },
         );
         Ok(KbFileContent {
-            rel_path: actual_rel_path,
-            content,
-            size: meta.len(),
-            modified_at: modified_ms(&meta),
+            rel_path: body.rel_path,
+            content: body.content,
+            size: body.size,
+            modified_at: body.modified_at,
             entry_id: projected
                 .as_ref()
                 .map(|entry| entry.knowledge_entry_id.clone()),
@@ -4768,6 +4743,50 @@ impl KnowledgeService {
             origin: projected.as_ref().map(|entry| entry.origin.clone()),
             capabilities,
             source,
+        })
+    }
+
+    /// Caller holds the document tree lock. Body reads neither reacquire it
+    /// nor reconcile the identity projection, which requires its write lock.
+    async fn read_file_body_under_tree_lock(
+        &self,
+        row: &KnowledgeBaseRow,
+        rel_path: &str,
+    ) -> Result<KnowledgeFileBody, AppError> {
+        let root = PathBuf::from(&row.root_path);
+        let path = safe_md_path_bounded(root.clone(), rel_path.to_owned()).await?;
+        let meta = tokio::time::timeout(
+            KNOWLEDGE_PATH_INSPECTION_TIMEOUT,
+            tokio::fs::metadata(&path),
+        )
+        .await
+        .map_err(|_| AppError::Timeout(format!("file inspection timed out: {rel_path}")))?
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::NotFound(format!("file not found: {rel_path}"))
+            } else {
+                AppError::Internal(format!(
+                    "failed to inspect knowledge file {rel_path}: {error}"
+                ))
+            }
+        })?;
+        if !meta.is_file() {
+            return Err(AppError::BadRequest(format!(
+                "knowledge document is not a regular file: {rel_path}"
+            )));
+        }
+        let content = tokio::time::timeout(
+            KNOWLEDGE_FILE_IO_TIMEOUT,
+            tokio::fs::read_to_string(&path),
+        )
+        .await
+        .map_err(|_| AppError::Timeout(format!("file read timed out: {rel_path}")))?
+        .map_err(|e| AppError::Internal(format!("failed to read file: {e}")))?;
+        Ok(KnowledgeFileBody {
+            rel_path: tree_relative_path(&root, &path)?,
+            content,
+            size: meta.len(),
+            modified_at: modified_ms(&meta),
         })
     }
 
@@ -5424,7 +5443,10 @@ impl KnowledgeService {
             // compare-and-swap. Never an unconditional overwrite — the model
             // cannot see the whole document, so a full rewrite can silently
             // destroy content the user curated by hand.
-            let existing = self.read_file(res.kb_id.as_str(), &final_rel_path).await?.content;
+            let existing = self
+                .read_file_body_under_tree_lock(&current, &final_rel_path)
+                .await?
+                .content;
             let merged = merge_direct_turn_writeback(&existing, &req.content);
             if markdown_identity(&existing) == markdown_identity(&merged) {
                 // The material is already in the document: idempotent no-op,
@@ -5620,6 +5642,7 @@ impl KnowledgeService {
                     continue;
                 }
             };
+            let mut content = nomi_redact::redact_secrets_owned(content.to_owned());
             let _tree_guard = match self.acquire_document_tree_read_lock(&row).await {
                 Ok(guard) => guard,
                 Err(error) => {
@@ -5631,7 +5654,6 @@ impl KnowledgeService {
                     continue;
                 }
             };
-            let mut content = nomi_redact::redact_secrets_owned(content.to_owned());
             let spec = WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel_path.clone() };
             let resolution = match self.resolve_write_target(&bound_kb_ids, &spec).await {
                 Ok(resolution) => resolution,
@@ -5676,7 +5698,10 @@ impl KnowledgeService {
             if matches!(policy.mode, WriteMode::Direct) {
                 let mut expected_existing = None;
                 if resolution.op == WriteOp::Update {
-                    let existing = match self.read_file(kb_id.as_str(), &resolution.canonical_rel_path).await {
+                    let existing = match self
+                        .read_file_body_under_tree_lock(&row, &resolution.canonical_rel_path)
+                        .await
+                    {
                         Ok(file) => file.content,
                         Err(e) => {
                             failures.push(TurnWritebackFailure {
@@ -21798,6 +21823,228 @@ mod tests {
             1,
             "{second}"
         );
+    }
+
+    /// Production wires the SQLite entry/source projection into this service.
+    /// Do not read or list between these writes: that would reconcile the
+    /// projection and hide the create-then-update deadlock.
+    #[tokio::test]
+    async fn sqlite_writeback_create_then_readme_update_preserves_body_and_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (svc, _, _) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let base = svc.create_base("writeback", "", None, None).await.unwrap();
+        let kb_id = base.knowledge_base_id;
+        let root = PathBuf::from(base.root_path);
+        let existing = "# Knowledge index\n\nKeep this curated description.\n\nTAIL-SENTINEL\n";
+        svc.write_file(kb_id.as_str(), "README.md", existing).await.unwrap();
+        let readme_id = svc.read_file(kb_id.as_str(), "README.md")
+            .await.unwrap().entry_id.expect("SQLite read must expose a stable entry ID");
+        let request = |rel_path: &str, content: &str| WriteRequest {
+            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel_path.into() },
+            content: content.into(),
+            policy: WritePolicy {
+                mode: WriteMode::Direct,
+                allow_create: true,
+                surface: WriteSurface::RegularChat,
+            },
+            bound_kb_ids: vec![kb_id.clone()],
+        };
+
+        let outcomes = tokio::time::timeout(Duration::from_secs(10), async {
+            let first = svc.write_document(request("notes/first.md", "# First durable note")).await.unwrap();
+            let second = svc.write_document(request("notes/second.md", "# Second durable note")).await.unwrap();
+            let updated = svc.write_document(request("README.md", "Added index entries for both notes.")).await.unwrap();
+            (first, second, updated)
+        }).await.expect("create-then-update must not wait on its own tree reader");
+
+        assert_eq!(outcomes.0.op, WriteOp::Create);
+        assert_eq!(outcomes.1.op, WriteOp::Create);
+        assert_eq!(outcomes.2.op, WriteOp::Update);
+        assert_eq!(std::fs::read_to_string(root.join("notes/first.md")).unwrap(), "# First durable note");
+        assert_eq!(std::fs::read_to_string(root.join("notes/second.md")).unwrap(), "# Second durable note");
+        let body = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(body.starts_with(existing), "curated README bytes were changed: {body}");
+        assert!(body.contains("Added index entries for both notes."), "{body}");
+        let row = svc.require_base(kb_id.as_str()).await.unwrap();
+        assert!(!svc.projection_is_reconciled(&row), "content writes must leave projection recovery to independent readers");
+
+        let readme = svc.read_file(kb_id.as_str(), "README.md").await.unwrap();
+        assert_eq!(readme.content, body);
+        assert_eq!(readme.entry_id.as_ref(), Some(&readme_id));
+        assert!(svc.projection_is_reconciled(&row));
+        assert!(svc.read_file(kb_id.as_str(), "notes/first.md").await.unwrap().entry_id.is_some());
+        assert!(svc.read_file(kb_id.as_str(), "notes/second.md").await.unwrap().entry_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn sqlite_writeback_finalizer_create_then_update_preserves_body_and_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (svc, _, _) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let base = svc.create_base("writeback", "", None, None).await.unwrap();
+        let kb_id = base.knowledge_base_id;
+        let root = PathBuf::from(base.root_path);
+        let existing = "# Existing index\n\nKeep this hand-written section.\n";
+        svc.write_file(kb_id.as_str(), "README.md", existing).await.unwrap();
+        let readme_id = svc.read_file(kb_id.as_str(), "README.md")
+            .await.unwrap().entry_id.expect("SQLite read must expose a stable entry ID");
+        let reply = serde_json::json!({
+            "candidates": [
+                { "kb_id": kb_id.as_str(), "rel_path": "notes/finalizer.md", "content": "# A durable finalizer note" },
+                { "kb_id": kb_id.as_str(), "rel_path": "README.md", "content": "Index the newly created finalizer note." }
+            ]
+        }).to_string();
+        svc.set_completer(ScriptedCompleter::new(&[reply.as_str()]));
+
+        let report = tokio::time::timeout(Duration::from_secs(10), svc.finalize_turn_writeback(TurnWritebackRequest {
+            mounts: vec![KnowledgeMountInfo {
+                knowledge_base_id: kb_id.clone(),
+                name: "writeback".into(),
+                description: String::new(),
+                rel_path: ".nomi/knowledge/writeback".into(),
+                toc: vec!["README.md — Existing index".into()],
+                summary: None,
+                live_sources: Vec::new(),
+            }],
+            binding: KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_eagerness: "auto".into(),
+                kb_ids: vec![kb_id.clone()],
+                ..Default::default()
+            },
+            surface: WriteSurface::RegularChat,
+            user_text: "Remember this durable lesson.".into(),
+            assistant_text: "Preserve the index and add the new note.".into(),
+            model: None,
+            excluded_targets: None,
+            cancellation: None,
+        })).await.expect("a prior candidate must not make the next update refresh under a tree reader");
+
+        assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
+        assert_eq!(report.written.len(), 2, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert_eq!(report.written[0].op, WriteOp::Create);
+        assert_eq!(report.written[1].op, WriteOp::Update);
+        assert_eq!(std::fs::read_to_string(root.join("notes/finalizer.md")).unwrap(), "# A durable finalizer note");
+        let body = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(body.starts_with(existing), "curated README bytes were changed: {body}");
+        assert!(body.contains("Index the newly created finalizer note."), "{body}");
+        let row = svc.require_base(kb_id.as_str()).await.unwrap();
+        assert!(!svc.projection_is_reconciled(&row));
+        assert_eq!(svc.read_file(kb_id.as_str(), "README.md").await.unwrap().entry_id.as_ref(), Some(&readme_id));
+        assert!(svc.read_file(kb_id.as_str(), "notes/finalizer.md").await.unwrap().entry_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn sqlite_writeback_concurrent_appends_preserve_both_and_are_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (svc, _, _) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let base = svc.create_base("writeback", "", None, None).await.unwrap();
+        let kb_id = base.knowledge_base_id;
+        let root = PathBuf::from(base.root_path);
+        let existing = "# Shared note\n\nKeep the original body.\n";
+        svc.write_file(kb_id.as_str(), "shared.md", existing).await.unwrap();
+        let request = |content: &str| WriteRequest {
+            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: "shared.md".into() },
+            content: content.into(),
+            policy: WritePolicy {
+                mode: WriteMode::Direct,
+                allow_create: true,
+                surface: WriteSurface::RegularChat,
+            },
+            bound_kb_ids: vec![kb_id.clone()],
+        };
+
+        let (alpha, beta) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                svc.write_document(request("Alpha durable note.")),
+                svc.write_document(request("Beta durable note.")),
+            )
+        }).await.expect("same-document writers must serialize without a projection refresh deadlock");
+        assert_eq!(alpha.unwrap().op, WriteOp::Update);
+        assert_eq!(beta.unwrap().op, WriteOp::Update);
+        let body = std::fs::read_to_string(root.join("shared.md")).unwrap();
+        assert!(body.starts_with(existing), "original bytes were changed: {body}");
+        assert_eq!(body.matches("Alpha durable note.").count(), 1, "{body}");
+        assert_eq!(body.matches("Beta durable note.").count(), 1, "{body}");
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            svc.write_document(request("Alpha durable note.")).await.unwrap();
+            svc.write_document(request("Beta durable note.")).await.unwrap();
+        }).await.expect("idempotent retries must not refresh a dirty projection under the writer's reader");
+        assert_eq!(std::fs::read_to_string(root.join("shared.md")).unwrap(), body);
+        let row = svc.require_base(kb_id.as_str()).await.unwrap();
+        assert!(!svc.projection_is_reconciled(&row));
+        let file = svc.read_file(kb_id.as_str(), "shared.md").await.unwrap();
+        assert_eq!(file.content, body);
+        assert!(file.entry_id.is_some());
+    }
+
+    /// Even a clean projection cannot make nested read-lock acquisition safe:
+    /// Tokio queues a new reader behind an already-waiting writer.
+    #[tokio::test]
+    async fn sqlite_writeback_update_with_queued_tree_writer_does_not_reenter_reader() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (svc, _, _) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let base = svc.create_base("writeback", "", None, None).await.unwrap();
+        let kb_id = base.knowledge_base_id;
+        let root = PathBuf::from(base.root_path);
+        let existing = "# Original\n\nKeep this body.\n";
+        svc.write_file(kb_id.as_str(), "README.md", existing).await.unwrap();
+        svc.read_file(kb_id.as_str(), "README.md").await.unwrap();
+        let row = svc.require_base(kb_id.as_str()).await.unwrap();
+        assert!(svc.projection_is_reconciled(&row));
+        let request = WriteRequest {
+            spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: "README.md".into() },
+            content: "Append while a tree writer is waiting.".into(),
+            policy: WritePolicy {
+                mode: WriteMode::Direct,
+                allow_create: true,
+                surface: WriteSurface::RegularChat,
+            },
+            bound_kb_ids: vec![kb_id.clone()],
+        };
+        let tree_guard = svc.acquire_document_tree_read_lock(&row).await.unwrap();
+        let resolution = svc.resolve_write_target(&request.bound_kb_ids, &request.spec).await.unwrap();
+        let lock_path = portable_turn_writeback_lock_path(&resolution.canonical_rel_path);
+        let target_guard = svc.acquire_turn_writeback_target_lock(&kb_id, &lock_path).await.unwrap();
+        let mut waiting_writer = Box::pin(svc.acquire_document_tree_write_lock(&row));
+        assert!(futures_util::poll!(waiting_writer.as_mut()).is_pending(), "outer reader must block and enqueue the writer");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            svc.write_resolved_document_under_target_lock(request, resolution),
+        ).await.expect("an update with an existing reader must not queue a second reader behind the writer").unwrap();
+        assert_eq!(outcome.op, WriteOp::Update);
+        assert!(futures_util::poll!(waiting_writer.as_mut()).is_pending(), "the outer reader must remain held through publication");
+        let body = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(body.starts_with(existing), "original bytes were changed: {body}");
+        assert!(body.contains("Append while a tree writer is waiting."), "{body}");
+        drop(target_guard);
+        drop(tree_guard);
+        let writer_guard = tokio::time::timeout(Duration::from_secs(10), waiting_writer.as_mut())
+            .await.expect("the queued writer must acquire after publication releases the outer reader").unwrap();
+        drop(writer_guard);
     }
 
     #[tokio::test]

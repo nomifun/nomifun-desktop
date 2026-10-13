@@ -190,6 +190,14 @@ export function fromApiConversation(raw: unknown): TChatConversation {
   if (r.linked_execution_id != null) next.linked_execution_id = parseExecutionId(r.linked_execution_id);
   if (r.execution_step_id != null) next.execution_step_id = parseExecutionStepId(r.execution_step_id);
   if (r.execution_attempt_id != null) next.execution_attempt_id = parseExecutionAttemptId(r.execution_attempt_id);
+  if (r.app_project_id != null) {
+    if (typeof r.app_project_id !== 'string' || !r.app_project_id.trim()) {
+      throw new TypeError('conversation app_project_id must be a non-empty application id');
+    }
+    next.app_project_id = r.app_project_id;
+  } else {
+    delete next.app_project_id;
+  }
 
   let extra = r.extra && typeof r.extra === 'object' ? r.extra : null;
 

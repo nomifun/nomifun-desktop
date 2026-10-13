@@ -10,6 +10,12 @@ import { parseExecutionStepId } from '@/common/types/ids';
 import { isOrdinaryWorkConversation } from './conversationListFilter';
 
 describe('ordinary conversation list ownership', () => {
+  test('App project membership excludes only the confirmed application Session', () => {
+    const ordinary = { extra: { workspace: 'C:/apps/project', official_template_key: 'app.developer' } };
+    expect(isOrdinaryWorkConversation({ ...ordinary, app_project_id: 'owned-app' } as never)).toBe(false);
+    expect(isOrdinaryWorkConversation(ordinary as never)).toBe(true);
+    expect(isOrdinaryWorkConversation({ extra: { ...ordinary.extra, app_project_id: 'owned-app' } } as never)).toBe(true);
+  });
   test('retained execution attempt transcripts stay out of the ordinary list', () => {
     const transcript = {
       execution_step_id: parseExecutionStepId('0190f5fe-7c00-7a00-8000-000000000001'),

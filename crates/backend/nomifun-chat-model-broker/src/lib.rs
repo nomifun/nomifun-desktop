@@ -19,6 +19,7 @@ mod provider_reasoning;
 mod responses_decoder;
 mod retry;
 mod wire_budget;
+pub mod tool_arguments;
 pub mod recorded;
 pub mod responses_bridge;
 
@@ -31,3 +32,4 @@ pub use provider_reasoning::ChatProviderReasoning;
 pub use production::*;
 pub use recorded::*;
 pub use responses_bridge::*;
+pub use tool_arguments::*;

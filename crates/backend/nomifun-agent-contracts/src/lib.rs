@@ -13,6 +13,8 @@ pub mod digest;
 pub mod event;
 pub mod turn_files;
 pub use turn_files::*;
+pub mod knowledge_writeback_notice;
+pub use knowledge_writeback_notice::*;
 pub mod engine_features;
 pub mod impact;
 pub mod idmm;

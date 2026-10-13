@@ -28,6 +28,7 @@ export interface ApiMessageSearchItem {
     channel_chat_id?: string | null;
     /** First-class Conversation field; never sourced from `extra`. */
     execution_template_id?: string | null;
+    app_project_id?: string | null;
     created_at: number;
     modified_at: number;
     extra: Record<string, unknown>;

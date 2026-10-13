@@ -2,13 +2,15 @@
 //! not tool-call identity. Completed snapshots corroborate streamed data; they
 //! never authorize execution of an incomplete or differently named call.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use crate::tool_arguments::{ToolArgumentInput, ToolArgumentParser, proposal_event};
 
 use nomifun_agent_contracts::StrictJsonValue;
 use serde_json::Value;
 
 use crate::adapter::{ProviderWireFrame, parse_usage};
 use crate::contracts::{
-    ChatFinishReason, ChatModelError, ChatModelEvent, ChatProtocol, ChatToolCall,
+    ChatFinishReason, ChatModelError, ChatModelEvent, ChatProtocol,
     ProviderResponseId, ToolCallId,
 };
 
@@ -27,6 +29,7 @@ pub(crate) struct ResponsesDecoder {
     terminal: bool,
     refusal: bool,
     incomplete_item: bool,
+    argument_parser: Arc<dyn ToolArgumentParser>,
 }
 
 struct Item {
@@ -44,7 +47,7 @@ struct Item {
 }
 
 impl ResponsesDecoder {
-    pub(crate) fn new(preserve: bool) -> Self {
+    pub(crate) fn with_argument_parser(preserve: bool, argument_parser: Arc<dyn ToolArgumentParser>) -> Self {
         Self {
             native: None,
             preserve,
@@ -56,6 +59,7 @@ impl ResponsesDecoder {
             terminal: false,
             refusal: false,
             incomplete_item: false,
+            argument_parser,
         }
     }
 
@@ -515,26 +519,10 @@ impl ResponsesDecoder {
                     // but never manufacture a completed call from its JSON.
                     self.incomplete_item = true;
                 } else {
-                    let arguments: Value = serde_json::from_str(final_args)
-                        .map_err(|_| invalid("Function arguments are not JSON"))?;
-                    if !arguments.is_object() {
-                        return Err(invalid("Function arguments must be an object"));
-                    }
-                    events.push(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: ToolCallId(
-                                item.call_id
-                                    .clone()
-                                    .ok_or_else(|| invalid("Missing call identity"))?,
-                            ),
-                            name: item
-                                .name
-                                .clone()
-                                .ok_or_else(|| invalid("Missing function name"))?,
-                            arguments: StrictJsonValue(arguments),
-                            provider_metadata: None,
-                        },
-                    });
+                    events.push(proposal_event(self.argument_parser.as_ref(),
+                        ToolCallId(item.call_id.clone().ok_or_else(|| invalid("Missing call identity"))?),
+                        item.name.clone().ok_or_else(|| invalid("Missing function name"))?,
+                        ToolArgumentInput::JsonText(final_args), None));
                 }
             }
             "message" | "reasoning" => {
@@ -747,7 +735,7 @@ mod tests {
 
     #[test]
     fn complete_json_response_is_projected_through_the_native_lifecycle() {
-        let mut decoder = ResponsesDecoder::new(false);
+        let mut decoder = ResponsesDecoder::with_argument_parser(false, Arc::new(crate::JsonToolArgumentParser));
         let events = decoder
             .decode(&ProviderWireFrame {
                 diagnostic: None,

@@ -206,6 +206,7 @@ impl Host {
                 // Product/Attempt consumers keep their dedicated ingress. A
                 // generic management message cannot masquerade as human speech.
                 if target_projection.session_purpose != SessionPurpose::Conversation
+                    || target_projection.app_project_id.is_some()
                     || target_projection.source.as_ref().is_some_and(|source| {
                         *source != nomifun_common::ConversationSource::Nomifun
                     })

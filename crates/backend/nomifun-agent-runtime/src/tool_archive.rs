@@ -859,7 +859,7 @@ mod tests {
             requirement:crate::context_lifecycle::text_message(ChatRole::User,"Inspect only".into()),
             events:vec![
                 AgentEngineEvent::TurnStarted {binding:source,turn_operation_id:"old-turn".into()},
-                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into()},
+                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into(), correction_source: None },
                 AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                     arguments:StrictJsonValue(json!({"path":"file.txt"})),provider_metadata:None}},
                 AgentEngineEvent::ToolStarted {step:1,call_id:"read".into(),capability_id:"workspace.files".into(),action_id:"workspace.files/read".into()},

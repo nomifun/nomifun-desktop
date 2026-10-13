@@ -16,7 +16,7 @@ use crate::contracts::{
     ChatModality, ChatReasoningRequest, ChatResponseFormat, ChatRetryDirective, ChatRole,
     ChatToolCall, ChatToolChoice, ChatToolDefinition,
     ChatToolResultPart, ChatUsage, PromptCachePolicy, ProviderResponseId, ProviderRoundId,
-    ToolCallId,
+    ToolCallId, ToolArgumentDiagnostic,
 };
 
 const RESPONSES_BRIDGE_STREAM_CAPACITY: usize = 64;
@@ -297,6 +297,13 @@ pub enum ResponsesBridgeEvent {
         response_id: ProviderResponseId,
         call: ChatToolCall,
     },
+    #[serde(rename = "response.function_call.rejected")]
+    FunctionCallRejected {
+        response_id: ProviderResponseId,
+        call_id: ToolCallId,
+        name: String,
+        diagnostic: ToolArgumentDiagnostic,
+    },
     #[serde(rename = "response.output_item.added")]
     NativeItem {
         response_id: ProviderResponseId,
@@ -464,6 +471,9 @@ fn map_broker_event(
         }),
         ChatModelEvent::ToolCallCompleted { call } => {
             Some(ResponsesBridgeEvent::FunctionCallDone { response_id, call })
+        }
+        ChatModelEvent::ToolCallRejected { call_id, name, diagnostic } => {
+            Some(ResponsesBridgeEvent::FunctionCallRejected { response_id, call_id, name, diagnostic })
         }
         ChatModelEvent::ProviderRoundId { round_id } => {
             Some(ResponsesBridgeEvent::ProviderRound {

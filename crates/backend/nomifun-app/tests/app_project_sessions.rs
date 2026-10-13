@@ -1,4 +1,4 @@
-//! Application projects reuse ordinary canonical Sessions. These tests make
+//! Application project Sessions use canonical app ownership. These tests make
 //! no provider requests and operate only on isolated installation data.
 use std::{collections::BTreeMap, sync::Arc};
 use axum::{Router, body::Body, http::{Request, StatusCode}};
@@ -84,6 +84,7 @@ async fn project_sessions_are_independent_paginated_history_and_navigation_never
     let endpoint = format!("/api/apps/{id}/development-session");
     let first = data(&router, "POST", &endpoint, json!({"model":model})).await;
     let first_id = first["conversation"]["conversation_id"].as_str().unwrap();
+    assert_eq!(first["conversation"]["app_project_id"], id);
     record_cancelled_input(&services, first_id, "FIRST_PROJECT_SESSION_HISTORY").await;
     let source = std::path::Path::new(app["directory"].as_str().unwrap()).join("README.md");
     std::fs::write(&source, "PROJECT_SOURCE_PRESERVED").unwrap();
@@ -138,13 +139,19 @@ async fn project_sessions_are_independent_paginated_history_and_navigation_never
     let history = data(&router, "GET", &format!("/api/apps/{id}/development-sessions"), Value::Null).await;
     assert_eq!(history["total"], 2, "replay must not create duplicate Sessions");
     data(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
-    assert_eq!(canonical_bytes(&services, first_id).await, first_bytes);
-    assert_eq!(canonical_bytes(&services, second_id).await, second_bytes);
+    for session in [first_id, second_id] {
+        let facts = canonical_bytes(&services, session).await;
+        assert!(facts.iter().filter(|(table, _)| table.as_str() != "agent_sessions").all(|(_, rows)| rows.is_empty()),
+            "application deletion purges its own private canonical content");
+        let state: String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+            .bind(session).fetch_one(services.database.pool()).await.unwrap();
+        assert_eq!(state, "deleted");
+    }
     services.cleanup_after_startup_failure(anyhow::anyhow!("project Session fixture finished")).await;
 }
 
 #[tokio::test]
-async fn project_history_includes_ordinary_foreign_agents_but_app_selection_stays_exact() {
+async fn project_history_excludes_ordinary_same_root_sessions_and_app_selection_stays_exact() {
     let temporary = tempfile::tempdir().unwrap();
     let (services, router, model) = fixture(temporary.path()).await;
     let app = data(&router, "POST", "/api/apps", json!({"name":"工程"})).await;
@@ -157,13 +164,24 @@ async fn project_history_includes_ordinary_foreign_agents_but_app_selection_stay
     let foreign_id = foreign["agent_session_id"].as_str().unwrap();
     let before = canonical_bytes(&services, foreign_id).await;
     let history = data(&router, "GET", &format!("/api/apps/{id}/development-sessions"), Value::Null).await;
-    assert_eq!(history["total"], 2);
-    let item = history["items"].as_array().unwrap().iter().find(|item| item["conversation"]["conversation_id"] == foreign_id).unwrap();
-    assert_eq!(item["editable_in_app"], false);
+    assert_eq!(history["total"], 1);
+    assert_eq!(history["items"][0]["conversation"]["conversation_id"], own_id);
+    let ordinary_projection = data(&router, "GET", &format!("/api/agent-sessions/{foreign_id}/projection"), Value::Null).await;
+    assert!(ordinary_projection["app_project_id"].is_null());
+    let ordinary = data(&router, "GET", "/api/agent-sessions?limit=1", Value::Null).await;
+    assert_eq!(ordinary["total"], 1);
+    assert_eq!(ordinary["items"][0]["conversation_id"], foreign_id);
     let (status, _) = request(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"session_id":foreign_id})).await;
     assert!(!status.is_success(), "history visibility cannot replace the frozen Agent");
     assert_eq!(data(&router, "GET", &format!("/api/apps/{id}"), Value::Null).await["development_session_id"], own_id);
     assert_eq!(canonical_bytes(&services, foreign_id).await, before);
+    let (status, rejected) = request(&router, "DELETE", &format!("/api/agent-sessions/{own_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(rejected.to_string().contains("APP_PROJECT_SESSION_MANAGED_BY_APP"));
+    assert!(std::path::Path::new(app["directory"].as_str().unwrap()).exists());
+    data(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
+    assert_eq!(canonical_bytes(&services, foreign_id).await, before,
+        "ordinary Session ownership and every byte remain independent of app deletion");
     services.cleanup_after_startup_failure(anyhow::anyhow!("foreign project Session fixture finished")).await;
 }
 
@@ -196,6 +214,66 @@ async fn project_selection_and_new_session_requests_cannot_invent_or_cross_proje
         assert!(!status.is_success());
     }
     services.cleanup_after_startup_failure(anyhow::anyhow!("project Session boundary fixture finished")).await;
+}
+
+#[tokio::test]
+async fn application_deletion_resumes_a_fenced_scoped_session_and_purges_its_scoped_fork() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (services, router, model) = fixture(temporary.path()).await;
+    let app = data(&router, "POST", "/api/apps", json!({"name":"Retry owned project deletion"})).await;
+    let id = app["id"].as_str().unwrap();
+    let opened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"model":model})).await;
+    let session = opened["conversation"]["conversation_id"].as_str().unwrap();
+    let parent = data(&router, "GET", &format!("/api/agent-sessions/{session}"), Value::Null).await;
+    let fork = data(&router, "POST", &format!("/api/agent-sessions/{session}/forks"), json!({
+        "target_agent_binding":parent["session"]["agent_binding"],"parent_through_seq":0,"title":"Owned project fork"})).await;
+    let fork_id = fork["child_agent_session_id"].as_str().unwrap();
+    let fork_projection = data(&router, "GET", &format!("/api/agent-sessions/{fork_id}/projection"), Value::Null).await;
+    assert_eq!(fork_projection["app_project_id"], id);
+    let principal = nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(), principal_id:services.authoritative_user_id.as_ref().into() };
+    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
+    canonical.fence_delete(&principal, &session.into(), "interrupted-application-deletion", 1000).await.unwrap();
+    let root = std::path::Path::new(app["directory"].as_str().unwrap());
+    std::fs::write(root.join("user-source.txt"), "DELETE_ONLY_SCOPED_PROJECT").unwrap();
+    let history = data(&router, "GET", &format!("/api/apps/{id}/development-sessions"), Value::Null).await;
+    assert_eq!(history["total"], 1);
+    assert_eq!(history["owned_session_count"], 2, "deletion count includes its fenced cleanup member");
+    data(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
+    assert!(!root.exists());
+    for removed in [session, fork_id] {
+        let state: String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+            .bind(removed).fetch_one(services.database.pool()).await.unwrap();
+        assert_eq!(state, "deleted");
+        assert!(canonical_bytes(&services, removed).await.iter().filter(|(table, _)| table.as_str() != "agent_sessions")
+            .all(|(_, rows)| rows.is_empty()));
+    }
+    services.cleanup_after_startup_failure(anyhow::anyhow!("scoped project deletion retry fixture finished")).await;
+}
+
+#[tokio::test]
+async fn deleting_app_project_with_an_unknown_effect_preserves_source_registration_and_every_fact() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (services, router, model) = fixture(temporary.path()).await;
+    let app = data(&router, "POST", "/api/apps", json!({"name":"Unsettled project deletion"})).await;
+    let id = app["id"].as_str().unwrap();
+    let opened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"model":model})).await;
+    let session = opened["conversation"]["conversation_id"].as_str().unwrap();
+    start_protected_target_turn(&services, session, true).await;
+    let principal = nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(), principal_id:services.authoritative_user_id.as_ref().into() };
+    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
+    canonical.fence_delete(&principal, &session.into(), "interrupted-unknown-application-deletion", 1000).await.unwrap();
+    let root = std::path::Path::new(app["directory"].as_str().unwrap());
+    std::fs::write(root.join("user-source.txt"), "PRESERVE_UNSETTLED_PROJECT").unwrap();
+    let before = canonical_bytes(&services, session).await;
+    let history = data(&router, "GET", &format!("/api/apps/{id}/development-sessions"), Value::Null).await;
+    assert_eq!(history["total"], 0);
+    assert_eq!(history["owned_session_count"], 1);
+    let (status, _) = request(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(canonical_bytes(&services, session).await, before);
+    assert_eq!(std::fs::read_to_string(root.join("user-source.txt")).unwrap(), "PRESERVE_UNSETTLED_PROJECT");
+    assert_eq!(data(&router, "GET", &format!("/api/apps/{id}"), Value::Null).await["id"], id);
+    services.cleanup_after_startup_failure(anyhow::anyhow!("unsettled scoped project deletion fixture finished")).await;
 }
 
 #[tokio::test]

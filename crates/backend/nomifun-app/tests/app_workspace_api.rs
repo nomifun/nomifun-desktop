@@ -176,7 +176,7 @@ async fn manual_import_and_metadata_edit_do_not_require_an_agent_or_model() {
 }
 
 #[tokio::test]
-async fn fixed_application_agent_uses_one_ordinary_session_and_deletion_preserves_its_facts() {
+async fn fixed_application_agent_uses_one_scoped_session_and_deletion_purges_its_facts() {
     let temporary = tempfile::tempdir().unwrap();
     let (services, router) = fixture(temporary.path()).await;
     let model = seed_model(&services).await;
@@ -185,6 +185,7 @@ async fn fixed_application_agent_uses_one_ordinary_session_and_deletion_preserve
     let opened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"model":model,"reasoning_effort":"high"})).await;
     let session: ConversationResponse = serde_json::from_value(opened["conversation"].clone()).unwrap();
     assert_eq!(session.session_purpose, nomifun_agent_contracts::SessionPurpose::Conversation);
+    assert_eq!(session.app_project_id.as_deref(), Some(id));
     assert_eq!(session.reasoning_effort, Some(nomifun_api_types::SessionReasoningEffortDto::High));
     assert_eq!(session.extra["official_template_key"], "app.developer");
     assert_eq!(std::path::Path::new(session.extra["workspace"].as_str().unwrap()), std::path::Path::new(app["directory"].as_str().unwrap()));
@@ -192,14 +193,48 @@ async fn fixed_application_agent_uses_one_ordinary_session_and_deletion_preserve
     assert!(opened["app"]["settings"].get("exclusive_session_ids").is_none());
     let reopened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({})).await;
     assert_eq!(reopened["conversation"]["conversation_id"], session.conversation_id);
-    let before = data(&router, "GET", &format!("/api/agent-sessions/{}/events", session.conversation_id), Value::Null).await;
     data(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
     assert!(!std::path::Path::new(app["directory"].as_str().unwrap()).exists());
-    let after = data(&router, "GET", &format!("/api/agent-sessions/{}/events", session.conversation_id), Value::Null).await;
-    assert_eq!(before, after, "application deletion must not modify or remove canonical Session events");
-    let preserved = data(&router, "GET", &format!("/api/agent-sessions/{}/projection", session.conversation_id), Value::Null).await;
-    assert_eq!(preserved["conversation_id"], session.conversation_id);
+    let (status, _) = request(&router, "GET", &format!("/api/agent-sessions/{}/events", session.conversation_id), Value::Null).await;
+    assert!(!status.is_success());
+    assert!(canonical_fact_bytes(&services, &session.conversation_id).await.iter()
+        .filter(|(table, _)| table.as_str() != "agent_sessions").all(|(_, rows)| rows.is_empty()));
     services.cleanup_after_startup_failure(anyhow::anyhow!("workspace fixture completed")).await;
+}
+
+#[tokio::test]
+async fn unavailable_application_history_remains_readable_without_recreating_its_deleted_project() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (services, router) = fixture(temporary.path()).await;
+    let model = seed_model(&services).await;
+    let app = data(&router, "POST", "/api/apps", json!({"name":"Historical application removed before scoped cleanup"})).await;
+    let id = app["id"].as_str().unwrap();
+    let opened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"model":model})).await;
+    let session = opened["conversation"]["conversation_id"].as_str().unwrap();
+    let principal = nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(), principal_id:services.authoritative_user_id.as_ref().into() };
+    let canonical = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
+    let session_id: nomifun_agent_contracts::AgentSessionId = session.into();
+    canonical.start_turn(&principal, &session_id, "preserved-unavailable-application-input", json!({
+        "content":"Retained canonical application history from an unavailable project"})).await.unwrap();
+    canonical.cancel(&principal, &session_id, "preserved-unavailable-application-cancel").await.unwrap();
+    let projection = data(&router, "GET", &format!("/api/agent-sessions/{session}/projection"), Value::Null).await;
+    let events = data(&router, "GET", &format!("/api/agent-sessions/{session}/events"), Value::Null).await;
+    let before = canonical_fact_bytes(&services, session).await;
+    let directory = std::path::Path::new(app["directory"].as_str().unwrap());
+    // This direct existing hosting owner simulates the former application-only
+    // deletion contract. The current HTTP App delete always cascades its scope.
+    services.app_hosting.delete_with(id, |_| async { Ok(()) }).await.unwrap();
+    assert!(!directory.exists());
+    assert!(matches!(services.app_hosting.get(id).await, Err(nomifun_app_hosting::AppError::NotFound(_))));
+    let (status, _) = request(&router, "GET", &format!("/api/apps/{id}"), Value::Null).await;
+    assert!(!status.is_success());
+    let after_projection = data(&router, "GET", &format!("/api/agent-sessions/{session}/projection"), Value::Null).await;
+    assert_eq!(after_projection, projection);
+    assert_eq!(after_projection["app_project_id"], id);
+    assert_eq!(data(&router, "GET", &format!("/api/agent-sessions/{session}/events"), Value::Null).await, events);
+    assert_eq!(canonical_fact_bytes(&services, session).await, before);
+    assert!(!directory.exists(), "read-only unavailable history must never materialize a deleted application directory");
+    services.cleanup_after_startup_failure(anyhow::anyhow!("unavailable application history fixture completed")).await;
 }
 
 #[cfg(windows)]
@@ -248,19 +283,14 @@ async fn warmed_development_runtime_releases_its_owned_directory_before_applicat
     }).await.unwrap();
     assert!(requests.load(Ordering::SeqCst) >= 2);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let before = data(&router, "GET", &format!("/api/agent-sessions/{session}/events"), Value::Null).await;
-    let stored_before = canonical_fact_bytes(&services, session).await;
     let (status, result) = request(&router, "DELETE", &format!("/api/apps/{id}"), Value::Null).await;
-    assert_eq!(status, StatusCode::OK, "the owned coding directory handle must be released without deleting its Session: {result}");
+    assert_eq!(status, StatusCode::OK, "the scoped Session must be cleaned before physical project deletion: {result}");
     assert!(!std::path::Path::new(app["directory"].as_str().unwrap()).exists());
     assert_eq!(std::fs::read_to_string(original.join("index.html")).unwrap(), "USER_ORIGINAL");
-    let after = data(&router, "GET", &format!("/api/agent-sessions/{session}/events"), Value::Null).await;
-    assert_eq!(before, after, "resource teardown must not alter ordinary canonical history");
-    assert_eq!(stored_before, canonical_fact_bytes(&services, session).await,
-        "physical application deletion must preserve every ordinary Session/Turn/Event/Payload/Effect/resource byte");
-    let projection = data(&router, "GET", &format!("/api/agent-sessions/{session}/projection"), Value::Null).await;
-    assert_eq!(projection["conversation_id"], session);
-    assert_eq!(projection["agent_snapshot"], opened["conversation"]["agent_snapshot"]);
+    let (status, _) = request(&router, "GET", &format!("/api/agent-sessions/{session}/events"), Value::Null).await;
+    assert!(!status.is_success());
+    assert!(canonical_fact_bytes(&services, session).await.iter()
+        .filter(|(table, _)| table.as_str() != "agent_sessions").all(|(_, rows)| rows.is_empty()));
     services.cleanup_after_startup_failure(anyhow::anyhow!("warmed application deletion fixture completed")).await;
 }
 
@@ -305,15 +335,14 @@ async fn deletion_does_not_close_another_session_retaining_the_same_workspace() 
     let id = app["id"].as_str().unwrap();
     let opened = data(&router, "POST", &format!("/api/apps/{id}/development-session"), json!({"model":model})).await;
     let session = opened["conversation"]["conversation_id"].as_str().unwrap();
-    let observation = data(&router, "GET", &format!("/api/agent-sessions/{session}"), Value::Null).await;
-    let binding = &observation["session"]["agent_binding"];
-    assert!(binding.is_object(), "canonical binding must come from the ordinary Session owner: {observation}");
-    let fork = data(&router, "POST", &format!("/api/agent-sessions/{session}/forks"), json!({
-        "target_agent_binding":binding, "parent_through_seq":0, "title":"Explicitly shared custom workspace"
+    let other_created = data(&router, "POST", "/api/agent-sessions", json!({
+        "preset_id":opened["conversation"]["preset_id"], "model":model,
+        "workspace":app["directory"], "title":"Independent ordinary same-root Session"
     })).await;
-    let other = fork["child_agent_session_id"].as_str().unwrap();
+    let other = other_created["agent_session_id"].as_str().unwrap();
     let other_projection = data(&router, "GET", &format!("/api/agent-sessions/{other}/projection"), Value::Null).await;
     assert_eq!(other_projection["extra"]["workspace"], opened["conversation"]["extra"]["workspace"]);
+    assert!(other_projection["app_project_id"].is_null());
     data(&router, "POST", &format!("/api/agent-sessions/{other}/warmup"), json!({})).await;
     assert!(services.agent_runtime_sessions.has_owned_runtime(other));
     let before = canonical_fact_bytes(&services, session).await;

@@ -4,7 +4,7 @@ import type { AppProjectSessionPage } from '@/common/types/appHosting';
 import { useEffect, useMemo } from 'react';
 import useSWRInfinite from 'swr/infinite';
 
-/** Project grouping is a Host query over ordinary Sessions with the same current workspace. */
+/** Project history is a Host query over the application's canonical Sessions. */
 export function useAppProjectSessions(appId: string | undefined) {
   const { data, error, isLoading, isValidating, mutate, size, setSize } = useSWRInfinite(
     (index, previous: AppProjectSessionPage | null) => {
@@ -27,7 +27,8 @@ export function useAppProjectSessions(appId: string | undefined) {
       ipcBridge.conversation.reconnected.on(refresh)];
     return () => dispose.forEach(stop => stop());
   }, [appId, mutate]);
-  return { items, total: data?.[0]?.total ?? 0, error, isLoading, isValidating,
+  return { items, total: data?.[0]?.total ?? 0, ownedSessionCount: data?.[0]?.owned_session_count ?? 0,
+    loaded: Boolean(data?.[0]), error, isLoading, isValidating,
     hasMore: data?.[data.length - 1]?.has_more === true,
     loadMore: () => { void setSize(size + 1); }, refresh: () => mutate() };
 }

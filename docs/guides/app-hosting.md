@@ -7,7 +7,7 @@ card to return to that application's workspace.
 
 ## Create, develop and edit
 
-1. Choose **Create**. The left pane contains an ordinary conversation; the right
+1. Choose **Create**. The left pane contains this application's project conversation; the right
    pane contains the current application, settings, operations and preview.
 2. The composer uses the fixed **Built-in application** Agent. Select a usable
    model and describe the application. Its owned directory is already the
@@ -35,9 +35,12 @@ the current Host runtime, project memory written by the Agent can be read by new
 sessions in the same project. This memory is not persisted across Host restarts. New
 sessions in different projects use separate memory scopes. Existing sessions retain
 their frozen configuration and prior memory scope; a new session does not load all
-project messages automatically. Ordinary conversations using the same directory
-also appear in the project history. Continue sessions using another Agent through
-the ordinary Conversations page.
+project messages automatically. Manage application Sessions through **Apps → the
+application → Project sessions**. They do not appear in the ordinary conversation
+sidebar, ordinary projects or ordinary batch actions. Search and old conversation
+links open the owning application. An ordinary conversation using the same directory
+or Agent stays ordinary. An application Session switched to another Agent remains
+readable inside the application without replacing its configuration.
 
 For example:
 
@@ -102,11 +105,12 @@ unknown. Stop development and resolve the
 original outcome before retrying. Reads, metadata/settings saves and application
 stop remain available. An unconfirmed operation does not authorize automatic replay.
 
-Delete stops the tree and removes owned source, artifacts, local data and registration.
-Original imports and external data remain. Ordinary development Sessions and
-valid canonical history remain: its navigation reference is not exclusive deletion
-authority. Its former workspace path becomes unavailable after deletion; retained
-history does not permit execution there.
+The delete confirmation displays the number of owned project Sessions. Confirmation
+stops the tree, removes owned source, artifacts, local data, dedicated Sessions and
+their history, then removes the registration. Original imports, external data,
+ordinary conversations and other applications remain. Ordinary conversation deletion
+cannot remove an application Session. Unconfirmed cleanup retains the registration
+and files so deletion can be retried after resolution.
 
 There is no application version, deployment, publishing, business database migration,
 rollback or special authoring acceptance workflow.

@@ -1727,6 +1727,7 @@ mod tests {
                 owner_ref: context.principal.clone(),
                 metadata: AgentSessionMetadata {
                     purpose: Default::default(),
+                    app_project_id: None,
                     title: None,
                     archived: false,
                     pinned: false,

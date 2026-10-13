@@ -108,7 +108,7 @@ test('project-session pagination and idempotent creation use the same owner API 
     const chunks: Uint8Array[] = []; for await (const chunk of request) chunks.push(chunk as Uint8Array);
     requests.push({ path: request.url!, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined, trust: String(request.headers['x-nomi-local-trust']) });
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ success: true, data: request.method === 'GET' ? { items: [{ conversation, editable_in_app: false, archived: true }], total: 4, has_more: true,
+    response.end(JSON.stringify({ success: true, data: request.method === 'GET' ? { items: [{ conversation, editable_in_app: false, archived: true }], total: 4, owned_session_count: 5, has_more: true,
       next_cursor: 'next:cursor', project_directory: 'C:/apps/project', current_session_id: session } : { app: { id: 'project' }, conversation } }));
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -118,6 +118,7 @@ test('project-session pagination and idempotent creation use the same owner API 
     const page = await appHosting.developmentSessions.invoke({ id: 'project', cursor: 'older:session/2', limit: 30 });
     expect(page.items[0].conversation.id).toBe(session); expect(page.items[0].archived).toBe(true); expect(page.items[0].conversation).not.toHaveProperty('archived');
     expect(page.items[0].editable_in_app).toBe(false); expect(page.next_cursor).toBe('next:cursor');
+    expect(page.total).toBe(4); expect(page.owned_session_count).toBe(5);
     const creation_key = '0190f5fe-7c00-7a00-8000-000000000304';
     await appHosting.developmentSession.invoke({ id: 'project', new_session: true, creation_key, model: { provider_id: 'provider', model: 'model' } });
     await appHosting.developmentSession.invoke({ id: 'project', session_id: session, refresh_workflow: true });

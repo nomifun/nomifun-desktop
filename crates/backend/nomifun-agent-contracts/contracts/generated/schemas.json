@@ -2472,6 +2472,13 @@
       "AgentSessionMetadata": {
         "additionalProperties": false,
         "properties": {
+          "app_project_id": {
+            "description": "Immutable application project affiliation from this canonical opening.\nIt does not grant resource access or change the ordinary Runtime contract.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "archived": {
             "type": "boolean"
           },

@@ -51,6 +51,14 @@ const thrownMessage = (run: () => unknown): string => {
 };
 
 describe('fromApiConversation first-class fields', () => {
+  test('maps application project ownership only from the explicit top-level field', () => {
+    expect(fromApiConversation(apiConv({ app_project_id: 'owned-app', extra: { app_project_id: 'other-app' } })).app_project_id).toBe('owned-app');
+    expect(fromApiConversation(apiConv({ app_project_id: null, extra: { app_project_id: 'owned-app' } })).app_project_id).toBeUndefined();
+    expect(fromApiConversation(apiConv({ extra: { app_project_id: 'owned-app' } })).app_project_id).toBeUndefined();
+    for (const app_project_id of ['', ' ', 42, {}]) {
+      expect(() => fromApiConversation(apiConv({ app_project_id, extra: {} }))).toThrow('app_project_id');
+    }
+  });
   test('retains canonical opening purpose without borrowing a purpose from extra', () => {
     expect(fromApiConversation(apiConv({ session_purpose: 'plugin_authoring', extra: {} })).session_purpose).toBe('plugin_authoring');
     expect(fromApiConversation(apiConv({ extra: { session_purpose: 'plugin_authoring' } })).session_purpose).toBeUndefined();

@@ -76,6 +76,128 @@ async fn second_session_attempt(fixture: &Fixture) -> Result<ConversationRespons
 }
 
 #[tokio::test]
+async fn deleting_app_session_with_an_unconfirmed_native_producer_blocks_project_deletion() {
+    let fixture = Fixture::new().await;
+    let (_, operation, _) = fixture.turn("native-delete-proof", false).await;
+    let store = fixture.state.session_owner.canonical().store();
+    let session = store.get_live_session(&fixture.session).await.unwrap();
+    let head = store.head(&fixture.session).await.unwrap();
+    let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+        owner: fixture.principal.clone(), agent_session_id: fixture.session.clone(), operation_id: operation,
+        snapshot: session.agent_binding.resolved_snapshot_ref, active_set_generation: head.active_set_generation,
+        holder: "unconfirmed-project-native-owner".into(), expected_fence: 0, checkpoint: None,
+    }).await.unwrap();
+    assert!(!fixture.services.agent_runtime_sessions.has_owned_runtime(fixture.session.as_ref()),
+        "the canonical producer proof must remain effective with an empty Runtime cache");
+    fixture.state.session_owner.canonical().fence_delete(&fixture.principal, &fixture.session,
+        "interrupted-app-native-delete", now_ms()).await.unwrap();
+    std::fs::write(fixture.app.directory.join("user-source.txt"), "NATIVE_PRODUCER_SOURCE").unwrap();
+    let before = canonical_fact_bytes(&fixture, &fixture.session).await;
+    let error = guard_app_project_deletion(&fixture.state, &fixture.principal.principal_id, &fixture.app).await.unwrap_err();
+    assert_eq!(error.code, "APP_DEVELOPMENT_BUSY");
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, before);
+    assert_eq!(std::fs::read_to_string(fixture.app.directory.join("user-source.txt")).unwrap(), "NATIVE_PRODUCER_SOURCE");
+    assert_eq!(fixture.services.app_hosting.get(&fixture.app.id).await.unwrap().id, fixture.app.id);
+    // The lease is retained as an actual canonical fixture identity, never
+    // treated as proof that the producer or its effects have settled.
+    drop(lease);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn current_generation_initial_receipt_reopens_after_navigation_was_not_committed() {
+    let fixture = Fixture::new().await;
+    let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+    let app = fixture.services.app_hosting.create("Interrupted project navigation".into(), Default::default()).await.unwrap();
+    let current = fixture.state.session_owner.canonical().store().get_live_session(&fixture.session).await.unwrap();
+    let mut binding = agent_binding_dto(&current.agent_binding).unwrap();
+    freeze_selected_workspace(&mut binding, owner.as_ref(), app.directory.to_str().unwrap(), WorkspaceDirectoryCheck::Create).unwrap();
+    let active = fixture.state.session_owner.canonical().store().active_capability_ids(&fixture.session).await.unwrap();
+    // Use the original current-generation canonical writer to seed a genuine
+    // opening without the newly added optional app metadata. No fact is edited.
+    let opened = fixture.state.session_owner.canonical().open(fixture.principal.clone(),
+        serde_json::from_value(serde_json::to_value(binding).unwrap()).unwrap(), Some(app.name.clone()), active,
+        &format!("app-development:{}:initial", app.id), now_ms()).await.unwrap();
+    let session = opened.session.agent_session_id;
+    let before = canonical_fact_bytes(&fixture, &session).await;
+    assert!(app.development_session_id.is_none());
+    let selected = resolve_app_development_session_selection(&fixture.state, owner.as_ref(), &app,
+        None, None, None, None).await.unwrap();
+    assert_eq!(selected.conversation_id, session.as_ref());
+    assert_eq!(selected.app_project_id.as_deref(), Some(app.id.as_str()));
+    assert_eq!(canonical_fact_bytes(&fixture, &session).await, before,
+        "restoring a navigation receipt cannot rewrite the opening or import history");
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn generic_gateway_delete_and_management_input_cannot_modify_an_app_project_session() {
+    let fixture = Fixture::new().await;
+    let port = GatewayAgentSessionCapabilityPort::new(fixture.state.clone());
+    let store = fixture.state.session_owner.canonical().store();
+    let current = store.get_live_session(&fixture.session).await.unwrap();
+    let before = canonical_fact_bytes(&fixture, &fixture.session).await;
+    let rejected = nomifun_gateway::ConversationCapabilityPort::delete(&port,
+        &fixture.principal.principal_id, fixture.session.as_ref()).await.unwrap_err();
+    assert!(rejected.to_string().contains("belongs to an application project"));
+    let input = fixture.state.session_owner.management_send_input_idempotent(
+        &fixture.principal.principal_id, &fixture.session, "must-not-send-generic-input",
+        serde_json::from_value(json!({"content":"Unrelated ordinary ingress"})).unwrap(),
+        current.agent_binding.binding_version, 0).await.unwrap_err();
+    assert!(input.to_string().contains("ordinary local conversation"));
+    assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, before);
+    assert!(fixture.app.directory.exists());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn app_scope_deletion_fence_blocks_forks_even_when_a_scoped_sessions_old_root_changed() {
+    for outside_root in [false, true] {
+        let fixture = Fixture::new().await;
+        let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
+        let store = fixture.state.session_owner.canonical().store();
+        if outside_root {
+            let current = store.get_live_session(&fixture.session).await.unwrap();
+            let changed_root = fixture.services.work_dir.join("historical-selected-project");
+            std::fs::create_dir_all(&changed_root).unwrap();
+            let mut binding = agent_binding_dto(&current.agent_binding).unwrap();
+            let personal = fixture.state.control_plane.create_from_template(&owner.0, "app.developer",
+                CreateAgentPresetFromTemplateRequest { model: None, reuse_existing: false, display_name: "Historical personal application developer".into(),
+                    description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await.unwrap();
+            let personal_binding = fixture.state.control_plane.resolve_agent_session_binding_with_model(
+                &owner.0, &personal.preset.preset_id, None).await.unwrap();
+            binding.preset_revision_ref = personal_binding.preset_revision_ref;
+            binding.resolved_snapshot_ref = personal_binding.resolved_snapshot_ref;
+            freeze_selected_workspace(&mut binding, owner.as_ref(), changed_root.to_str().unwrap(), WorkspaceDirectoryCheck::Create).unwrap();
+            binding.binding_version += 1;
+            let replacement: AgentBindingValue = serde_json::from_value(serde_json::to_value(binding).unwrap()).unwrap();
+            let transition = Uuid::now_v7().to_string();
+            let active = store.active_capability_ids(&fixture.session).await.unwrap();
+            store.replace_session_agent_binding(&fixture.principal, &fixture.session,
+                nomifun_agent_session::ReplaceSessionAgentBinding {
+                    expected: current.agent_binding, request_digest: digest_payload(&replacement).unwrap(), replacement,
+                    previous_agent_label: "app.developer".into(), next_agent_label: "Historical personal application developer".into(),
+                    transition_id: transition.clone().into(), idempotency_key: transition.into(),
+                    handoff_mode: AgentHandoffMode::ContextOnly, handoff: None, initial_active_capability_ids: active,
+                }).await.unwrap();
+        }
+        let current = store.get_live_session(&fixture.session).await.unwrap();
+        assert_eq!(current.metadata.app_project_id.as_deref(), Some(fixture.app.id.as_str()));
+        let held = guard_app_project_deletion(&fixture.state, &fixture.principal.principal_id, &fixture.app).await.unwrap();
+        let rejected = fork_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner),
+            Path(fixture.session.as_ref().to_owned()), HeaderMap::new(), Json(ForkAgentSessionRequestDto {
+                target_agent_binding: agent_binding_dto(&current.agent_binding).unwrap(), parent_through_seq: 0,
+                title: Some("Fork cannot escape the app deletion scope".into()),
+            })).await.unwrap_err();
+        assert_eq!(rejected.code, "APP_DEVELOPMENT_BUSY");
+        assert_eq!(store.list_app_project_session_members(&fixture.principal, &fixture.app.id).await.unwrap(), vec![fixture.session.clone()]);
+        assert!(fixture.app.directory.exists());
+        drop(held);
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn noncurrent_project_session_turn_blocks_changes_and_exact_completed_turn_is_not_navigation_bound() {
     let fixture = Fixture::new().await;
     let second = second_session(&fixture).await;
@@ -191,11 +313,11 @@ async fn personal_app_developer_project_opening_releases_idle_cache_without_beco
     let mut headers = HeaderMap::new();
     let creation_key = format!("app-development:{}:new:{}", fixture.app.id, Uuid::now_v7());
     headers.insert("Idempotency-Key", creation_key.parse().unwrap());
-    let Json(opened) = create_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()), headers,
-        Json(CreateAgentSessionRequestDto { preset_id: preset_id.clone(), title: Some("Personal application developer".into()),
+    let Json(opened) = create_nomi_core_agent_session_owned(fixture.state.clone(), owner.clone(), headers,
+        CreateAgentSessionRequestDto { preset_id: preset_id.clone(), title: Some("Personal application developer".into()),
             model: None, reasoning_effort: None, resource_selections: Vec::new(), knowledge_policy: None,
             workspace: Some(fixture.app.directory.to_str().unwrap().to_owned()), session_capabilities: Some(Default::default()),
-            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) })).await.unwrap();
+            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&fixture.app.id)).await.unwrap();
     let opened = opened.data.unwrap();
     let session = parse_agent_session_id(&opened.agent_session_id).unwrap();
     let (_, template) = fixture.state.control_plane.saved_binding_presentation(&owner.0, &opened.agent_binding).await.unwrap();
@@ -230,7 +352,7 @@ async fn personal_app_developer_project_opening_releases_idle_cache_without_beco
 }
 
 #[tokio::test]
-async fn same_root_fork_navigation_is_not_swept_and_its_holder_refuses_physical_cleanup() {
+async fn app_project_fork_inherits_scope_and_releases_its_own_idle_resources() {
     let fixture = Fixture::new().await;
     let owner = AuthenticatedOwner(UserId::from(fixture.principal.principal_id.clone()));
     let store = fixture.state.session_owner.canonical().store();
@@ -238,12 +360,13 @@ async fn same_root_fork_navigation_is_not_swept_and_its_holder_refuses_physical_
     let Json(fork) = fork_nomi_core_agent_session(State(fixture.state.clone()), Extension(owner.clone()),
         Path(fixture.session.as_ref().to_owned()), HeaderMap::new(), Json(ForkAgentSessionRequestDto {
             target_agent_binding: agent_binding_dto(&binding).unwrap(), parent_through_seq: 0,
-            title: Some("Independent same-root fork".into()),
+            title: Some("Application project fork".into()),
         })).await.unwrap();
     let fork = parse_agent_session_id(&fork.data.unwrap().child_agent_session_id).unwrap();
     let exact = store.get_live_session(&fork).await.unwrap();
     assert_eq!(exact.parent_session_id.as_ref(), Some(&fixture.session));
     assert!(exact.fork_base_payload_id.is_some());
+    assert_eq!(exact.metadata.app_project_id.as_deref(), Some(fixture.app.id.as_str()));
     let reference = fork.as_ref().to_owned();
     let app = fixture.services.app_hosting.development_session_with(&fixture.app.id, |_| async move { Ok(reference) }).await.unwrap();
     assert_eq!(app.development_session_id.as_deref(), Some(fork.as_ref()));
@@ -255,18 +378,13 @@ async fn same_root_fork_navigation_is_not_swept_and_its_holder_refuses_physical_
     let original = canonical_fact_bytes(&fixture, &fixture.session).await;
     let fork_facts = canonical_fact_bytes(&fixture, &fork).await;
     let held = guard_app_development_workspace_change(&fixture.state, &fixture.principal.principal_id, &app).await.unwrap();
-    let rejected = release_app_development_workspace_runtime(&fixture.state, &app).await.unwrap_err();
-    assert_eq!(rejected.code, "APP_DEVELOPMENT_RESOURCE_CLEANUP_FAILED");
+    release_app_development_workspace_runtime(&fixture.state, &app).await.unwrap();
     assert!(!fixture.services.agent_runtime_sessions.has_owned_runtime(fixture.session.as_ref()));
-    assert!(fixture.services.agent_runtime_sessions.has_owned_runtime(fork.as_ref()),
-        "an application navigation pointer cannot make an unrelated fork eligible for teardown");
+    assert!(!fixture.services.agent_runtime_sessions.has_owned_runtime(fork.as_ref()));
     assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, original);
     assert_eq!(canonical_fact_bytes(&fixture, &fork).await, fork_facts);
     assert_eq!(std::fs::read_to_string(app.directory.join("user-work.txt")).unwrap(), "PRESERVE_FORK_PROJECT_SOURCE");
     drop(held);
-    // The application command cannot perform this unrelated owner's close.
-    // Its explicit normal teardown is the proof needed for a subsequent retry.
-    fixture.services.agent_runtime_sessions.terminate_and_wait_result(fork.as_ref(), None).await.unwrap();
     let held = guard_app_development_workspace_change(&fixture.state, &fixture.principal.principal_id, &app).await.unwrap();
     release_app_development_workspace_runtime(&fixture.state, &app).await.unwrap();
     assert_eq!(canonical_fact_bytes(&fixture, &fixture.session).await, original);

@@ -1,5 +1,6 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
+import { Modal } from '@arco-design/web-react';
 import { act, cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance, type TFunction } from 'i18next';
@@ -12,6 +13,7 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate, type NavigateFun
 import { SWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import type { HostedApp } from '@/common/types/appHosting';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
@@ -20,6 +22,7 @@ import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/b
 import { uuidv7 } from '@/common/utils';
 import * as GuidModule from '@/renderer/pages/guid/GuidPage';
 import * as ChatModule from '@/renderer/pages/conversation/components/ChatConversation';
+import * as ReadOnlyModule from '@/renderer/pages/conversation/execution/ReadOnlyConversationView';
 import * as FilePanelModule from './AppWorkspaceFiles';
 import { useGuidDraftState } from '@/renderer/pages/guid/hooks/useGuidDraftState';
 import { useGuidSend, type GuidSendDeps, type GuidSendResult } from '@/renderer/pages/guid/hooks/useGuidSend';
@@ -41,16 +44,17 @@ const model: TProviderWithModel = { id: PROVIDER, name: 'Configured provider', p
 const app: HostedApp = { id: 'owned-app', name: 'Reminder', description: '', tags: [], development_session_id: SESSION,
   directory: 'C:/NomiFun/apps/owned-app', import_kind: 'source', settings: { project_directory: '.', environment: {} },
   state: 'stopped', operation: null, last_error: null, output: '', pid: null, preview: false, prepared: false };
-const conversation: TChatConversation = { id: SESSION, name: 'A normal development conversation', type: 'nomi', session_purpose: 'conversation', created_at: 1, modified_at: 1, model,
+const conversation: TChatConversation = { id: SESSION, name: 'A normal development conversation', type: 'nomi', session_purpose: 'conversation', app_project_id: app.id, created_at: 1, modified_at: 1, model,
   extra: { workspace: app.directory, official_template_key: 'app.developer' } as TChatConversation['extra'] };
 let entry: GuidModule.GuidProductEntry | undefined;
 let renderedChat: ComponentProps<typeof ChatModule.default> | undefined;
+let renderedReadOnly: ComponentProps<typeof ReadOnlyModule.default> | undefined;
 let setScopedDraft: Dispatch<SetStateAction<string>>;
 let scopedSend: GuidSendResult;
 const wrapper = ({ children }: { children: React.ReactNode }) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0, shouldRetryOnError: false }}>{children}</SWRConfig></I18nextProvider></MemoryRouter>;
 
 beforeEach(() => {
-  entry = undefined; renderedChat = undefined;
+  entry = undefined; renderedChat = undefined; renderedReadOnly = undefined;
   setBrowserStorageGeneration(uuidv7()); sessionStorage.clear();
   // These component spies only capture the existing composition interface.
   // Session admission and its initial-message queue use the real hook below.
@@ -70,20 +74,146 @@ beforeEach(() => {
   spyOn(ChatModule, 'default').mockImplementation((props) => {
     renderedChat = props; return <div data-testid='ordinary-conversation'>{props.conversation?.id}</div>;
   });
+  spyOn(ReadOnlyModule, 'default').mockImplementation((props) => {
+    renderedReadOnly = props; return <div data-testid='readonly-app-session'>{props.conversation.id}</div>;
+  });
   spyOn(ipcBridge.conversation.listChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.turnStarted, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.turnPaused, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
-  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation, editable_in_app: true, archived: false }], total: 1, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
+  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation, editable_in_app: true, archived: false }], total: 1, owned_session_count: 1, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
   spyOn(ipcBridge.database.getUserConversations, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   spyOn(ipcBridge.agentPlatform.library, 'invoke').mockResolvedValue({ user_presets: [], official_presets: {}, official_templates: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, user_preset_count: 0, official_template_count: 0 } });
 });
 afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); });
 
+function unavailableAppSessionRoute(sessionId = SESSION) {
+  const targetMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000305');
+  const Location = () => {
+    const location = useLocation();
+    return <output data-testid='unavailable-app-location'>{JSON.stringify({ pathname: location.pathname, search: location.search, state: location.state })}</output>;
+  };
+  const view = render(<MemoryRouter initialEntries={[{ pathname: `/apps/${app.id}`, search: `?session=${sessionId}`,
+    state: { targetMessageId, fromConversationSearch: true } }]}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
+    <Location /><Routes><Route path='/apps/:id' element={<AppWorkspaceRoute />} /><Route path='/apps' element={<p>Applications home</p>} /></Routes>
+  </SWRConfig></I18nextProvider></MemoryRouter>);
+  return { view, targetMessageId };
+}
+
+test.each([
+  new Error('Application connection unavailable'),
+  new BackendHttpError({ method: 'GET', path: `/api/apps/${app.id}`, status: 404, body: { error: 'Application unavailable', code: 'NOT_FOUND' } }),
+])('an unavailable App keeps its explicit canonical Session link read-only without creating anything (%s)', async failure => {
+  spyOn(appHosting.get, 'invoke').mockRejectedValue(failure);
+  const read = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
+  const createApp = spyOn(appHosting.create, 'invoke');
+  const createSession = spyOn(ipcBridge.agentPlatform.sessions.create, 'invoke');
+  const admit = spyOn(appHosting.developmentSession, 'invoke');
+  const operate = spyOn(appHosting.operate, 'invoke');
+  const { view, targetMessageId } = unavailableAppSessionRoute();
+  await view.findByTestId('readonly-app-session');
+  expect(view.getByText(locale.project.unavailableHint)).toBeTruthy();
+  expect(renderedReadOnly?.conversation).toBe(conversation);
+  expect(renderedChat).toBeUndefined();
+  expect(read).toHaveBeenCalledWith({ conversation_id: SESSION });
+  expect(JSON.parse(view.getByTestId('unavailable-app-location').textContent!)).toEqual({ pathname: `/apps/${app.id}`, search: `?session=${SESSION}`,
+    state: { targetMessageId, fromConversationSearch: true } });
+  expect(view.queryByRole('textbox')).toBeNull();
+  expect(view.queryByRole('button', { name: locale.actions.start })).toBeNull();
+  expect(view.queryByRole('button', { name: locale.actions.delete })).toBeNull();
+  expect(view.queryByRole('button', { name: locale.project.newSession })).toBeNull();
+  expect(createApp).not.toHaveBeenCalled(); expect(createSession).not.toHaveBeenCalled();
+  expect(admit).not.toHaveBeenCalled(); expect(operate).not.toHaveBeenCalled();
+  fireEvent.click(view.getByRole('button', { name: locale.workspace.back }));
+  await view.findByText('Applications home');
+});
+
+test.each(['other-app', undefined])('an unavailable App link rejects a Session without exact App scope (%s)', async app_project_id => {
+  spyOn(appHosting.get, 'invoke').mockRejectedValue(new Error('App details unavailable'));
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...conversation, app_project_id });
+  const admit = spyOn(appHosting.developmentSession, 'invoke');
+  const { view } = unavailableAppSessionRoute();
+  await view.findByText(locale.workspace.sessionMismatch);
+  expect(view.queryByTestId('readonly-app-session')).toBeNull();
+  expect(renderedChat).toBeUndefined(); expect(renderedReadOnly).toBeUndefined();
+  expect(admit).not.toHaveBeenCalled();
+});
+
+test('retrying unavailable App details restores the existing App surface without changing the canonical Session', async () => {
+  spyOn(FilePanelModule, 'default').mockReturnValue(<div />);
+  const owner = spyOn(appHosting.get, 'invoke').mockRejectedValue(new Error('App details unavailable'));
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
+  const createApp = spyOn(appHosting.create, 'invoke'), admit = spyOn(appHosting.developmentSession, 'invoke');
+  const { view } = unavailableAppSessionRoute();
+  await view.findByTestId('readonly-app-session');
+  owner.mockResolvedValue(app);
+  fireEvent.click(view.getByRole('button', { name: locale.project.retryApp }));
+  await view.findByTestId('ordinary-conversation');
+  expect(renderedChat?.conversation?.id).toBe(SESSION);
+  expect(view.queryByText(locale.project.unavailableHint)).toBeNull();
+  expect(createApp).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+});
+
+test('App deletion uses the complete owned count while project history lists only the live Session count', async () => {
+  spyOn(FilePanelModule, 'default').mockReturnValue(<div />);
+  spyOn(appHosting.get, 'invoke').mockResolvedValue(app);
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
+  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation, editable_in_app: true, archived: false }],
+    total: 1, owned_session_count: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
+  const confirmation = spyOn(Modal, 'confirm').mockReturnValue({ close: mock(() => {}), update: mock(() => {}) });
+  const view = render(<MemoryRouter initialEntries={[`/apps/${app.id}`]}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
+    <Routes><Route path='/apps/:id' element={<AppWorkspaceRoute />} /></Routes>
+  </SWRConfig></I18nextProvider></MemoryRouter>);
+  await view.findByRole('button', { name: /A normal development conversation/ });
+  expect(view.container.querySelector('summary[aria-label] small')?.textContent).toBe('1');
+  fireEvent.click(view.getByRole('button', { name: locale.actions.delete }));
+  expect(confirmation.mock.calls[0][0].content).toBe(locale.delete.hintWithSessions.replace('{{count}}', '2'));
+});
+
+test('an owned Session using another Agent stays in the application as a viewer without refreshing its binding', async () => {
+  const retained = { ...conversation, extra: { workspace: app.directory, official_template_key: 'coding.codex' } as TChatConversation['extra'],
+    agent_snapshot: { preset_name: 'My coding Agent' } as TChatConversation['agent_snapshot'] };
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(retained);
+  const admit = spyOn(appHosting.developmentSession, 'invoke');
+  const ownerChanged = mock(() => {});
+  const view = render(<AppDevelopmentConversation app={app} mode='edit' selectedSessionId={SESSION} onAppChanged={ownerChanged} />, { wrapper });
+  await view.findByTestId('readonly-app-session');
+  expect(view.getByText(locale.project.readOnlyHint)).toBeTruthy();
+  expect(renderedReadOnly?.conversation).toBe(retained);
+  expect(renderedReadOnly?.agent_name).toBe('My coding Agent');
+  expect(view.getByText('My coding Agent')).toBeTruthy();
+  expect(renderedChat).toBeUndefined();
+  expect(admit).not.toHaveBeenCalled(); expect(ownerChanged).not.toHaveBeenCalled();
+});
+
+test('selecting an owned Session using another Agent stays on the App route and keeps the navigation reference', async () => {
+  spyOn(FilePanelModule, 'default').mockReturnValue(<div />);
+  const retained = { ...conversation, id: OTHER_SESSION, name: 'Retained custom Agent history',
+    extra: { workspace: app.directory, official_template_key: 'coding.codex' } as TChatConversation['extra'] };
+  spyOn(appHosting.get, 'invoke').mockResolvedValue(app);
+  spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation, editable_in_app: true, archived: false },
+    { conversation: retained, editable_in_app: false, archived: true }], total: 2, owned_session_count: 2, has_more: false, next_cursor: null,
+    project_directory: app.directory, current_session_id: SESSION });
+  spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => conversation_id === OTHER_SESSION ? retained : conversation);
+  const admit = spyOn(appHosting.developmentSession, 'invoke');
+  const Location = () => <output data-testid='owned-viewer-route'>{useLocation().pathname}{useLocation().search}</output>;
+  const view = render(<MemoryRouter initialEntries={[`/apps/${app.id}`]}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
+    <Location /><Routes><Route path='/apps/:id' element={<AppWorkspaceRoute />} /></Routes>
+  </SWRConfig></I18nextProvider></MemoryRouter>);
+  await view.findByRole('button', { name: /Retained custom Agent history/ });
+  fireEvent.click(view.getByRole('button', { name: /Retained custom Agent history/ }));
+  await waitFor(() => expect(view.getByTestId('owned-viewer-route').textContent).toBe(`/apps/${app.id}?session=${OTHER_SESSION}`));
+  await view.findByText(locale.project.readOnlyHint);
+  expect(renderedReadOnly?.conversation.id).toBe(OTHER_SESSION);
+  expect(admit).not.toHaveBeenCalled();
+});
+
 test('development identity requires the exact owner Session, host-verified template and workspace', () => {
   expect(matchesAppDevelopmentConversation(app, conversation)).toBe(true);
+  expect(matchesAppDevelopmentConversation(app, { ...conversation, app_project_id: undefined })).toBe(false);
+  expect(matchesAppDevelopmentConversation(app, { ...conversation, app_project_id: 'other-app' })).toBe(false);
   expect(matchesAppDevelopmentConversation(app, { ...conversation, id: OTHER_SESSION })).toBe(false);
   expect(matchesAppDevelopmentConversation(app, { ...conversation, extra: { workspace: 'C:/another-app', official_template_key: 'app.developer' } as TChatConversation['extra'] })).toBe(false);
   expect(matchesAppDevelopmentConversation(app, { ...conversation, name: 'Built-in app', extra: { workspace: app.directory } })).toBe(false);
@@ -348,7 +478,7 @@ test('project history switches ordinary Sessions while retaining settings and th
     settings: { ...app.settings, start_command: 'node server.cjs', web_url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` } };
   const owner = spyOn(appHosting.get, 'invoke').mockResolvedValue(running);
   spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation: second, editable_in_app: true, archived: false }, { conversation, editable_in_app: true, archived: false }],
-    total: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: OTHER_SESSION });
+    total: 2, owned_session_count: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: OTHER_SESSION });
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => conversation_id === SESSION ? conversation : second);
   const select = spyOn(appHosting.developmentSession, 'invoke').mockResolvedValue({ app: { ...running, development_session_id: OTHER_SESSION }, conversation: second });
   const Location = () => <output data-testid='app-project-location'>{useLocation().search}</output>;
@@ -390,7 +520,7 @@ function projectSelectionRace(initialEntries?: string[]) {
   spyOn(FilePanelModule, 'default').mockImplementation(() => <div />);
   spyOn(appHosting.get, 'invoke').mockResolvedValue({ ...app, development_session_id: thirdId });
   spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: sessions.map(item => ({ conversation: item, editable_in_app: true, archived: false })),
-    total: sessions.length, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: thirdId });
+    total: sessions.length, owned_session_count: sessions.length, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: thirdId });
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => sessions.find(item => item.id === conversation_id)!);
   const pending = new Map<string, { resolve: (value: { app: HostedApp; conversation: TChatConversation }) => void; reject: (error: Error) => void }>();
   const select = spyOn(appHosting.developmentSession, 'invoke').mockImplementation(({ session_id }) => new Promise((resolve, reject) => pending.set(session_id!, { resolve, reject })));
@@ -465,7 +595,7 @@ test.each([true, false])('an active sibling project Session blocks manual files 
     extra: { ...conversation.extra, ...(processing ? {} : { execution_phase: 'paused' }) },
     runtime: { state: processing ? 'running' as const : 'idle' as const, is_processing: processing, can_send_message: false, has_runtime: true, active_turn_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000305') } };
   spyOn(appHosting.developmentSessions, 'invoke').mockResolvedValue({ items: [{ conversation: sibling, editable_in_app: true, archived: false }, { conversation, editable_in_app: true, archived: false }],
-    total: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
+    total: 2, owned_session_count: 2, has_more: false, next_cursor: null, project_directory: app.directory, current_session_id: SESSION });
   const view = render(<MemoryRouter initialEntries={[`/apps/owned-app?session=${SESSION}`]}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}><Routes>
     <Route path='/apps/:id' element={<AppWorkspaceRoute />} />
   </Routes></SWRConfig></I18nextProvider></MemoryRouter>);

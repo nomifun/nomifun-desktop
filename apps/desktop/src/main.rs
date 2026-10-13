@@ -33,7 +33,6 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 mod browser_surface;
-mod desktop_startup;
 #[cfg(target_os = "macos")]
 mod macos_development_launch;
 #[cfg(target_os = "macos")]
@@ -2726,12 +2725,6 @@ fn complete_main_thread_setup(
             .title("NomiFun")
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
-            .visible(app.get_webview_window("startup").is_none())
-            .on_page_load(|window, payload| {
-                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                    desktop_startup::main_loaded(window.app_handle());
-                }
-            })
             .initialization_script(&init_script);
     #[cfg(target_os = "macos")]
     let win_builder = match app.state::<MacosWebviewDataStore>().0 {
@@ -3002,9 +2995,6 @@ fn request_macos_appkit_shutdown(app: &tauri::AppHandle, coordinator: &Arc<ExitC
         complete_normal_exit(app, coordinator, coordinator.final_exit_code());
         return;
     }
-    if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
-        if startup.starting() { desktop_startup::begin_quit(app); }
-    }
     request_normal_shutdown(app, coordinator.clone(), Some(0));
 }
 
@@ -3018,11 +3008,6 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 return;
             };
 
-            if let Some(startup) = app.try_state::<Arc<desktop_startup::StartupState>>() {
-                if startup.starting() {
-                    desktop_startup::begin_quit(app);
-                }
-            }
             if code == Some(tauri::RESTART_EXIT_CODE) {
                 #[cfg(target_os = "macos")]
                 {
@@ -3424,10 +3409,6 @@ fn main() -> std::process::ExitCode {
                 install_macos_exit_observers(&app_handle)?;
             }
 
-            #[cfg(target_os = "macos")]
-            prepare_macos_webview_store(&app_handle, &data_dir)?;
-            desktop_startup::install_window(&app_handle)?;
-
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
             // In production, the embedded assets below are canonical.
@@ -3625,8 +3606,6 @@ fn main() -> std::process::ExitCode {
                                                 "NomiFun could not initialize its desktop window: {error:#}"
                                             ),
                                         );
-                                    } else {
-                                        desktop_startup::backend_ready(&setup_app);
                                     }
                                 }) {
                                     shutdown_then_show_fatal(
@@ -3762,10 +3741,7 @@ fn main() -> std::process::ExitCode {
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
-        .manage(Arc::new(desktop_startup::StartupState::new()))
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
-            desktop_startup::desktop_startup_status,
-            desktop_startup::desktop_startup_quit,
             browser_surface::commands::browser_surface_attach,
             browser_surface::commands::browser_surface_update,
             browser_surface::commands::browser_surface_detach,
@@ -3796,19 +3772,6 @@ fn main() -> std::process::ExitCode {
         // the exit coordinator; window destruction cannot overwrite a restart
         // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
-            if window.label() == "startup" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    let state = window
-                        .app_handle()
-                        .state::<Arc<desktop_startup::StartupState>>();
-                    if state.snapshot().stage != desktop_startup::StartupStage::Ready {
-                        api.prevent_close();
-                        desktop_startup::begin_quit(window.app_handle());
-                        window.app_handle().exit(0);
-                    }
-                }
-                return;
-            }
             if window.label() != "main" {
                 return;
             }

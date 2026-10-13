@@ -22,6 +22,27 @@ pub enum AgentTurnFailure {
     InvalidModelEvent,
 }
 
+/// An identity-valid native proposal whose completed arguments were rejected.
+/// Diagnostics contain no argument values and never authorize an invocation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRejectedToolProposal {
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub diagnostic: nomifun_chat_model_broker::ToolArgumentDiagnostic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentModelResponseRejection {
+    NonNativeMarkup,
+    EmptyTaskTerminal,
+    ToolArguments { diagnostics: Vec<AgentRejectedToolProposal> },
+    /// Existing current-generation facts did not record their precise reason.
+    /// Reading them preserves that uncertainty instead of inspecting prose.
+    Unclassified,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentEngineEvent {
@@ -49,6 +70,10 @@ pub enum AgentEngineEvent {
     ModelStepStarted {
         step: u16,
         operation_id: OperationId,
+        /// Exact earlier rejected model step in this same Turn. This is a
+        /// context source, not a replacement for the accepted-input authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correction_source: Option<u16>,
     },
     /// Metadata for the Store's atomic snapshot commit. The snapshot itself
     /// is latest-state data on the Turn, not another transcript copy.
@@ -100,8 +125,9 @@ pub enum AgentEngineEvent {
         discarded_tool_call_ids: Vec<ToolCallId>,
         continuation: bool,
     },
-    /// Non-native tool markup, or an active-task terminal without public
-    /// text/calls, was rejected before any tool admission. This closes any
+    /// Non-native markup, invalid completed native arguments, or an active
+    /// task terminal without public text/calls was rejected before admission.
+    /// This closes any
     /// proposed batch for replay; it is not a transport retry,
     /// an executed call/result, an output-limit claim or a success event.
     ModelResponseRejected {
@@ -112,7 +138,18 @@ pub enum AgentEngineEvent {
         /// It never represents a parsed or executed text tool call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_hint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rejection: Option<AgentModelResponseRejection>,
+        /// Exact safe engine-authored feedback, shared by live and replay.
+        /// Existing current-generation facts may lack this field. Their
+        /// feedback remains unclassified and grants no new recovery authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
     },
+    /// The completed response passed model formatting and native argument
+    /// syntax checks. This clears a pending protocol correction only; it is
+    /// not Schema validation, tool admission, an effect or task completion.
+    ModelResponseValidated { step: u16 },
     /// Only an explicitly voice-started Immediate-policy Turn can emit this.
     /// The exact unadmitted proposal is withdrawn after owned abort/join;
     /// no Turn cancellation, tool result, applied input or success is claimed.

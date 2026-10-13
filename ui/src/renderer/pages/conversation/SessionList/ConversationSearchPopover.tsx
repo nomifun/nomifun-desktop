@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IMessageSearchItem } from '@/common/types/conversationSearch';
-import type { ConversationId, MessageId } from '@/common/types/ids';
+import type { MessageId } from '@/common/types/ids';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { getBackendKeyFromConversation } from './utils/exportHelpers';
 import './ConversationSearchPopover.css';
+import { conversationDestination } from '@/renderer/utils/routes/conversationDestination';
 
 const PAGE_SIZE = 20;
 const MAX_RECENT_SEARCHES = 8;
@@ -270,7 +271,7 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
   // 统一的"跳转到会话"流程（关闭弹层 → 通知回调 → 路由跳转）。
   // targetMessageId 仅在全文检索命中时存在；按编号命中只跳会话本身，无消息可定位。
   const handleConversationNavigate = useCallback(
-    async (conversationId: ConversationId, targetMessageId?: MessageId) => {
+    async (conversation: IMessageSearchItem['conversation'], targetMessageId?: MessageId) => {
       blurActiveElement();
 
       flushSync(() => {
@@ -281,7 +282,7 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
 
       await Promise.resolve(
         navigate(
-          `/conversation/${conversationId}`,
+          conversationDestination(conversation),
           targetMessageId != null
             ? {
                 state: {
@@ -403,7 +404,7 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
                   'focus:outline-none'
                 )}
                 onClick={() => {
-                  void handleConversationNavigate(item.conversation.id, item.message_id);
+                  void handleConversationNavigate(item.conversation, item.message_id);
                 }}
               >
                 <div className='flex items-start justify-between gap-8px mb-6px'>
@@ -413,6 +414,7 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
                       <div className='conversation-search-modal__result-title text-15px font-600 text-t-primary truncate'>
                         {item.conversation.name || t('conversation.historySearch.untitled')}
                       </div>
+                      {item.conversation.app_project_id && <span className='shrink-0 text-11px text-t-secondary'>{t('appHosting.project.searchLabel')}</span>}
                     </div>
                   </div>
                   <span className='shrink-0 text-11px text-t-secondary'>{formatTime(item.message_created_at)}</span>

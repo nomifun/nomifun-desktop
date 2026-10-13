@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(links.get(&current),Some(&previous));
         assert!(links_for_turn(root,&[AgentEngineEvent::ModelOutputTruncated {step:1,continuation:false,discarded_tool_call_ids:vec![]}]).is_empty());
         assert!(links_for_turn(root,&[AgentEngineEvent::ModelOutputTruncated {step:1,continuation:true,discarded_tool_call_ids:vec!["discarded".into()]}]).is_empty());
-        assert!(links_for_turn(root,&[event,AgentEngineEvent::ModelResponseRejected {step:2,discarded_tool_call_ids:vec![],continuation:true,tool_hint:None}]).is_empty());
+        assert!(links_for_turn(root,&[event,AgentEngineEvent::ModelResponseRejected {step:2,discarded_tool_call_ids:vec![],continuation:true,tool_hint:None,rejection:Some(nomifun_agent_runtime::AgentModelResponseRejection::NonNativeMarkup),feedback:Some("Use the native tool protocol.".into())}]).is_empty());
     }
 
     #[test]

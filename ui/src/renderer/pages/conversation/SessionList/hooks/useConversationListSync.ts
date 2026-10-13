@@ -134,6 +134,7 @@ export const isSameConversationList = (previous: TChatConversation[], next: TCha
   previous.every((item, index) =>
     item.id === next[index].id &&
     item.modified_at === next[index].modified_at &&
+    item.app_project_id === next[index].app_project_id &&
     item.agent_snapshot?.canonical_binding?.binding_version ===
       next[index].agent_snapshot?.canonical_binding?.binding_version &&
     conversationSshHostId(item) === conversationSshHostId(next[index]),

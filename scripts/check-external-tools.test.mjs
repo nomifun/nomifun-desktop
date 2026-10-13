@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { checkExternalTools, validateComponents, validateExecutionOwners } from './check-external-tools.mjs';
+import { checkExternalTools, validateComponents, validateExecutionOwners, validateOfficeSkillGuidance } from './check-external-tools.mjs';
 const manifest = () => JSON.parse(readFileSync(new URL('../crates/backend/nomifun-runtime/components.json', import.meta.url), 'utf8'));
 describe('managed external tool contract', () => {
   test('actual release catalogue, notices and implementation share one contract', () => {
@@ -42,5 +42,30 @@ describe('managed external tool contract', () => {
     const sources = executionOwners();
     sources.environment = sources.environment.replace('executable("npm", None)', 'executable("bun", None)');
     expect(() => validateExecutionOwners(sources)).toThrow('probe system/custom Node, npm and Bun separately');
+  });
+  const officeGuidance = () => ({
+    instructions: readFileSync(new URL('../crates/backend/nomifun-skill-library/assets/builtin-skills/officecli/references/runtime.md', import.meta.url), 'utf8'),
+    body: readFileSync(new URL('../crates/backend/nomifun-skill-library/assets/builtin-skills/officecli/SKILL.md', import.meta.url), 'utf8'),
+    component: manifest().components.find(entry => entry.id === 'officecli'),
+  });
+  test('rejects the retired hidden-resource invocation instructions', () => {
+    const guidance = officeGuidance();
+    guidance.instructions += '\nRead the Host-owned Office execution component and copy executable_path.\n';
+    expect(() => validateOfficeSkillGuidance(guidance)).toThrow('hidden component resources');
+  });
+  test('rejects Office examples mixing a component target with a user executable', () => {
+    const guidance = officeGuidance();
+    guidance.instructions = guidance.instructions.replace('{"component":"officecli","args"', '{"component":"officecli","command":"officecli","args"');
+    expect(() => validateOfficeSkillGuidance(guidance)).toThrow('select only component=officecli');
+  });
+  test('keeps mandatory component environment in the Host', () => {
+    const guidance = officeGuidance();
+    guidance.instructions = guidance.instructions.replace('{"component":"officecli","args"', '{"component":"officecli","env":{"OFFICECLI_NO_AUTO_RESIDENT":"0"},"args"');
+    expect(() => validateOfficeSkillGuidance(guidance)).toThrow('host-owned environment');
+  });
+  test('requires the component entry in the Skill setup before the long reference body', () => {
+    const guidance = officeGuidance();
+    guidance.body = guidance.body.replace('`component=officecli`', '`command=officecli`');
+    expect(() => validateOfficeSkillGuidance(guidance)).toThrow('host component target');
   });
 });

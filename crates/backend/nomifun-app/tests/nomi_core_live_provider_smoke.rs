@@ -53,6 +53,8 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SELECTED_MODEL_MARKER: &str = "NOMIFUN_SELECTED_MODEL_LIVE_OK";
 const WORKSPACE_FILE_MARKER: &str = "NOMIFUN_WORKSPACE_FILE_LIVE_OK";
+const COMPONENT_MARKER: &str = "NOMIFUN_MANAGED_COMPONENT_LIVE_OK";
+const COMPONENT_CONTINUATION_MARKER: &str = "NOMIFUN_COMPONENT_CONTINUATION_LIVE_OK";
 const COMPANION_MARKER: &str = "NOMIFUN_COMPANION_LIVE_OK";
 const CREATIVE_MARKER: &str = "NOMIFUN_CREATIVE_LIVE_OK";
 const COLLABORATION_MODEL_MARKER: &str = "NOMIFUN_AGENT_COLLABORATION_LIVE_OK";
@@ -74,6 +76,7 @@ struct LiveFixture {
 enum LiveCase {
     SelectedModel,
     WorkspaceFile,
+    ManagedComponent,
     ReasoningLifecycle,
     CodingPreset,
     SnakeGame,
@@ -2207,6 +2210,100 @@ async fn ensure_secret_not_persisted(
     }))
 }
 
+fn managed_component_evidence(events: &[Value], operation: &str) -> Result<Value, SmokeFailure> {
+    let failure = || SmokeFailure::new("component.evidence", "COMPONENT_CANONICAL_EVIDENCE_INVALID", 422);
+    let turn_start = events.iter().find(|event| event["kind"] == "turn/started"
+        && event["correlation_id"] == operation).ok_or_else(failure)?;
+    if !events.iter().any(|event| event["kind"] == "turn/completed" && event["correlation_id"] == operation) {
+        return Err(failure());
+    }
+    let starts = events.iter().filter(|event| event["kind"] == "tool/call-started"
+        && event["causation_event_id"] == turn_start["event_id"]).collect::<Vec<_>>();
+    let [start] = starts.as_slice() else { return Err(failure()); };
+    if start.pointer("/payload/value/action_id").and_then(Value::as_str) != Some("workspace.process/exec")
+        || start.pointer("/payload/value/name").and_then(Value::as_str) != Some("exec_command") {
+        return Err(failure());
+    }
+    let call_id = start.pointer("/payload/value/call_id").and_then(Value::as_str).ok_or_else(failure)?;
+    let proposal = events.iter().find(|event| event["kind"] == "runtime/progress-recorded"
+        && event["correlation_id"] == operation
+        && event.pointer("/payload/value/event/event").and_then(Value::as_str) == Some("tool_call_completed")
+        && event.pointer("/payload/value/event/call/call_id").and_then(Value::as_str) == Some(call_id))
+        .ok_or_else(failure)?;
+    let arguments = proposal.pointer("/payload/value/event/call/arguments").ok_or_else(failure)?;
+    if arguments["component"] != "officecli" || arguments["args"] != json!(["--version"])
+        || arguments.get("command").is_some() || arguments.get("cmd").is_some() {
+        return Err(failure());
+    }
+    let result = events.iter().find(|event| event["kind"] == "tool/result-recorded"
+        && event["causation_event_id"] == start["event_id"]
+        && event.pointer("/payload/value/operation_id") == start.pointer("/payload/value/operation_id"))
+        .ok_or_else(failure)?;
+    let payload = &result["payload"]["value"];
+    let native = serde_json::from_value::<nomifun_agent_runtime::AgentToolResult>(payload["output"].clone())
+        .map_err(|_| failure())?;
+    if !payload["error"].is_null() || native.is_error || native.call_id.as_ref() != call_id {
+        return Err(failure());
+    }
+    let output = serde_json::from_str::<Value>(&native.output_text()).map_err(|_| failure())?;
+    let identity = &output["component_identity"];
+    let version = identity["version"].as_str().ok_or_else(failure)?;
+    let digest = identity["digest"].as_str().ok_or_else(failure)?;
+    if output["state"] != "exited" || output["success"] != true || output["exit_code"] != 0
+        || output.pointer("/cleanup/reaped") != Some(&json!(true))
+        || identity["component"] != "officecli" || identity["source"] != "managed"
+        || version.is_empty() || version.len() > 64
+        || !version.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        || digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || output.pointer("/output/text").and_then(Value::as_str).map(str::trim) != Some(version) {
+        return Err(failure());
+    }
+    Ok(json!({"schema_version":1,"provider":"stepfun-plan","model":"step-5-preview",
+        "component":"officecli","action_id":"workspace.process/exec","version":version,"digest":digest,
+        "source":"managed","canonical_component_argument":true,"exit_code":0,"cleanup_reaped":true,
+        "call_started_seq":start["seq"],"result_seq":result["seq"]}))
+}
+
+async fn run_live_managed_component_chain(
+    router: &Router, api_key: &str, model: &str,
+) -> Result<(), SmokeFailure> {
+    if model != "step-5-preview" {
+        return Err(SmokeFailure::new("component.model", "COMPONENT_SMOKE_MODEL_INVALID", 400));
+    }
+    let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let (preset_id, _) = create_agent_preset(router, &provider_id, model,
+        &[("workspace.process", &["workspace.process/exec"], "process_session")]).await?;
+    let (session_id, binding) = create_session(router, &preset_id, &provider_id, model,
+        json!([{"resource_kind":"process_session","resource_id":"managed-process-session"}])).await?;
+    assert_session_runtime(router, &session_id).await?;
+    let cursor = session_message_cursor(router, "component.cursor_before", &session_id).await?;
+    let operation = start_session_turn(router, "component.turn", &session_id,
+        &uuid::Uuid::now_v7().to_string(), format!(
+            "Call exec_command exactly once with this JSON object: {{\"component\":\"officecli\",\"args\":[\"--version\"]}}. Use the host-managed component target. Do not set command or cmd, do not use a shell or PATH executable, and do not call any other tool. After its actual successful exit, reply with exactly {COMPONENT_MARKER} and no other text."
+        )).await?;
+    wait_for_session_marker_with_tools(router, "component.reply", &session_id, cursor,
+        COMPONENT_MARKER, TURN_RESULT_DEADLINE, Some("workspace.process/exec")).await?;
+    let mut evidence = managed_component_evidence(&session_events(router, &session_id).await?, &operation)?;
+    let cursor = session_message_cursor(router, "component.continuation_cursor", &session_id).await?;
+    let continuation = start_session_turn(router, "component.continuation_turn", &session_id,
+        &uuid::Uuid::now_v7().to_string(), format!(
+            "This is an ordinary follow-up in the same session. Do not call tools. Reply with exactly {COMPONENT_CONTINUATION_MARKER} and no other text."
+        )).await?;
+    wait_for_session_marker(router, "component.continuation_reply", &session_id, cursor,
+        COMPONENT_CONTINUATION_MARKER, TURN_RESULT_DEADLINE).await?;
+    let events = session_events(router, &session_id).await?;
+    if !events.iter().any(|event| event["kind"] == "turn/completed" && event["correlation_id"] == continuation)
+        || session_binding(router, "component.binding_after", &session_id).await? != binding {
+        return Err(SmokeFailure::new("component.continuation", "COMPONENT_SESSION_CONTINUATION_INVALID", 422));
+    }
+    assert_session_runtime(router, &session_id).await?;
+    evidence["completed_turns"] = json!(2);
+    evidence["ordinary_continuation_no_tools"] = json!(true);
+    evidence["same_session_binding"] = json!(true);
+    eprintln!("NOMIFUN_LIVE_COMPONENT_EVIDENCE {evidence}");
+    Ok(())
+}
+
 async fn run_selected_model_chain(
     router: &Router,
     api_key: &str,
@@ -2393,6 +2490,13 @@ async fn run_live_workspace_file_chain_observed(
         ).await?;
         let observed = envelope_data("file.session", observed)?;
         if observed.pointer("/head/status").and_then(Value::as_str) == Some("ready") {
+            // The terminal may commit between the preceding messages read
+            // and the head read. Verify the post-terminal snapshot rather
+            // than rejecting a stale pre-terminal message window.
+            let (messages, _) = session_messages_after(router, "file.messages", &session_id, cursor).await?;
+            if let Some(code) = first_durable_error_code(&messages) {
+                return Err(SmokeFailure::new("file.messages", code, 422));
+            }
             let file = work_dir.join(file_name);
             emit_live_coding_trace(if snake_game { "snake_game" } else if official_coding { "coding" } else { "file" }, &messages, &file);
             let content = std::fs::read_to_string(&file).ok();
@@ -3056,6 +3160,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         LiveCase::LongCoding => run_live_long_coding_chain(
             &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
+        LiveCase::ManagedComponent => run_live_managed_component_chain(&router, api_key.as_str(), &model).await,
         LiveCase::ReasoningLifecycle => live_reasoning_lifecycle::run(
             &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
@@ -3155,6 +3260,15 @@ async fn nomi_core_reasoning_lifecycle_reaches_live_stepfun() {
 #[ignore = "requires a live credential on stdin; use the runner --model-smoke"]
 async fn nomi_core_selected_model_reaches_live_stepfun() {
     if let Err(failure) = run_live_provider_smoke(LiveCase::SelectedModel).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --component-smoke"]
+async fn nomi_core_managed_component_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::ManagedComponent).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

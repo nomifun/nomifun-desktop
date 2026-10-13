@@ -4,6 +4,7 @@ use crate::{cache, embed, extract};
 use nomi_process_runtime::ChildProcessBuilder;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -31,6 +32,16 @@ pub enum ToolId {
     OfficeCli,
 }
 impl ToolId {
+    /// Parse a published logical component identity, never a command or path.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "bun" => Some(Self::Bun),
+            "node" => Some(Self::Node),
+            "officecli" => Some(Self::OfficeCli),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Bun => "bun",
@@ -56,6 +67,31 @@ pub struct VerifiedTool {
     pub source: ToolSource,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct PreparedComponentLaunch {
+    pub tool: VerifiedTool,
+    pub environment: HashMap<String, String>,
+    id: ToolId,
+    fingerprint: FileFingerprint,
+}
+
+impl PreparedComponentLaunch {
+    /// Recheck the prepared executable at the host's final spawn boundary.
+    /// This observes local metadata only; it never probes or prepares a tool.
+    pub fn validate_for_start(&self) -> Result<(), ToolError> {
+        validate_fingerprint(self.id, &self.tool.executable_path, &self.fingerprint)
+    }
+}
+
+impl std::fmt::Debug for PreparedComponentLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PreparedComponentLaunch")
+            .field("tool", &self.tool)
+            .field("environment_entries", &self.environment.len())
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSource {
@@ -74,6 +110,11 @@ pub enum ToolError {
     },
     #[error("invalid {tool} development override: {reason}")]
     InvalidOverride { tool: &'static str, reason: String },
+    #[error("{tool} requires the host-controlled {variable} environment value")]
+    EnvironmentConflict {
+        tool: &'static str,
+        variable: &'static str,
+    },
     #[error("component extraction failed: {0}")]
     Extract(#[from] extract::ExtractError),
     #[error("component I/O failed: {0}")]
@@ -105,7 +146,7 @@ struct Admitted {
     fingerprint: FileFingerprint,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FileFingerprint {
     size: u64,
     modified: Option<std::time::SystemTime>,
@@ -245,6 +286,56 @@ pub async fn resolve_existing_tool(id: ToolId) -> Result<VerifiedTool, ToolError
         return published_tool(id).unwrap_or(Err(ToolError::NotPrepared));
     }
     await_attempt(start_attempt(id, false)?).await
+}
+
+/// Prepare an explicit component target without authorizing downloads or
+/// changing user-owned command discovery. Reject environment conflicts before
+/// admitting or probing the component; no supplied environment value is logged.
+pub async fn prepare_component_launch(
+    id: ToolId,
+    env: &HashMap<String, String>,
+) -> Result<PreparedComponentLaunch, ToolError> {
+    let environment = component_environment(id, env)?;
+    let tool = resolve_existing_tool(id).await?;
+    let fingerprint = prepared_component_fingerprint(id, &tool).await?;
+    Ok(PreparedComponentLaunch { tool, environment, id, fingerprint })
+}
+
+async fn prepared_component_fingerprint(id: ToolId, tool: &VerifiedTool) -> Result<FileFingerprint, ToolError> {
+    let before = fingerprint(&tool.executable_path)?;
+    let digest = hash(&tool.executable_path).await?;
+    let after = fingerprint(&tool.executable_path)?;
+    if digest != tool.digest || before != after {
+        return Err(ToolError::Changed { tool: id.as_str() });
+    }
+    Ok(after)
+}
+
+fn component_environment(
+    id: ToolId,
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, ToolError> {
+    if id != ToolId::OfficeCli {
+        return Ok(env.clone());
+    }
+    // Office execution may not become resident or refresh external Skills and
+    // user configuration. Apply both policies at the actual component launch
+    // boundary; Skill projection no longer supplies execution environment.
+    const VARIABLES: &[&str] = &["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"];
+    let matches_variable = |name: &str, variable: &str| {
+        if cfg!(windows) { name.eq_ignore_ascii_case(variable) } else { name == variable }
+    };
+    for &variable in VARIABLES {
+        if env.iter().any(|(name, value)| matches_variable(name, variable) && value != "1") {
+            return Err(ToolError::EnvironmentConflict { tool: id.as_str(), variable });
+        }
+    }
+    let mut environment = env.clone();
+    for &variable in VARIABLES {
+        environment.retain(|name, _| !matches_variable(name, variable));
+        environment.insert(variable.into(), "1".into());
+    }
+    Ok(environment)
 }
 
 async fn await_attempt(attempt: Arc<PreparationAttempt>) -> Result<VerifiedTool, ToolError> {
@@ -403,6 +494,11 @@ fn preparation_failure(error: &ToolError) -> ToolPreparationFailure {
         ToolError::Verification { .. } | ToolError::InvalidOverride { .. } => (
             "COMPONENT_VERIFICATION_FAILED",
             "The component failed identity or capability verification.",
+            false,
+        ),
+        ToolError::EnvironmentConflict { .. } => (
+            "COMPONENT_ENVIRONMENT_CONFLICT",
+            "The requested environment conflicts with the component's host-controlled execution policy.",
             false,
         ),
         ToolError::Changed { .. } => (
@@ -603,10 +699,15 @@ fn cached_admission_permit(id: ToolId) -> Option<Result<(), ToolError>> {
 }
 
 fn validate_admission(id: ToolId, admitted: &Admitted) -> Result<VerifiedTool, ToolError> {
-    if fingerprint(&admitted.tool.executable_path)? != admitted.fingerprint {
+    validate_fingerprint(id, &admitted.tool.executable_path, &admitted.fingerprint)?;
+    Ok(admitted.tool.clone())
+}
+
+fn validate_fingerprint(id: ToolId, path: &Path, expected: &FileFingerprint) -> Result<(), ToolError> {
+    if &fingerprint(path)? != expected {
         return Err(ToolError::Changed { tool: id.as_str() });
     }
-    Ok(admitted.tool.clone())
+    Ok(())
 }
 
 async fn supply_tool(
@@ -940,6 +1041,118 @@ async fn read_probe_output<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_launch_names_are_exact_logical_identities() {
+        for id in [ToolId::Bun, ToolId::Node, ToolId::OfficeCli] {
+            assert_eq!(ToolId::parse(id.as_str()), Some(id));
+        }
+        for value in ["", " bun", "bun ", "Bun", "NODE", "OfficeCLI", "bunx",
+            "officecli.exe", "@officecli/officecli", "node@latest", "/usr/bin/bun",
+            "./officecli", "C:\\tools\\officecli.exe"] {
+            assert_eq!(ToolId::parse(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn component_launch_environment_preserves_user_values_and_enforces_office_policy() {
+        let env = HashMap::from([("PATH".into(), "user-search-path".into()),
+            ("USER_FLAG".into(), "keep".into())]);
+        for id in [ToolId::Bun, ToolId::Node] {
+            assert_eq!(component_environment(id, &env).unwrap(), env);
+            let custom = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "0".into()),
+                ("OFFICECLI_SKIP_UPDATE".into(), "0".into())]);
+            assert_eq!(component_environment(id, &custom).unwrap(), custom);
+        }
+        let merged = component_environment(ToolId::OfficeCli, &env).unwrap();
+        assert_eq!(merged["OFFICECLI_NO_AUTO_RESIDENT"], "1");
+        assert_eq!(merged["OFFICECLI_SKIP_UPDATE"], "1");
+        assert_eq!(merged["PATH"], env["PATH"]);
+        assert_eq!(merged["USER_FLAG"], env["USER_FLAG"]);
+        assert_eq!(env.len(), 2, "the caller's environment remains unchanged");
+        let ready = HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "1".into()),
+            ("OFFICECLI_SKIP_UPDATE".into(), "1".into())]);
+        assert_eq!(component_environment(ToolId::OfficeCli, &ready).unwrap(), ready);
+
+        for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+            let lower = variable.to_ascii_lowercase();
+            let different_case = HashMap::from([(lower.clone(), "0".into())]);
+            let result = component_environment(ToolId::OfficeCli, &different_case);
+            if cfg!(windows) {
+                assert!(matches!(result, Err(ToolError::EnvironmentConflict { .. })));
+            } else {
+                let merged = result.unwrap();
+                assert_eq!(merged[variable], "1");
+                assert_eq!(merged[&lower], "0");
+            }
+            let equivalent = HashMap::from([(lower, "1".into())]);
+            let merged = component_environment(ToolId::OfficeCli, &equivalent).unwrap();
+            assert_eq!(merged["OFFICECLI_NO_AUTO_RESIDENT"], "1");
+            assert_eq!(merged["OFFICECLI_SKIP_UPDATE"], "1");
+            assert_eq!(merged.len(), if cfg!(windows) { 2 } else { 3 });
+        }
+    }
+
+    #[tokio::test]
+    async fn component_launch_environment_conflict_returns_only_the_policy_identity() {
+        let value = "request-private-environment-value";
+        for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+            let env = HashMap::from([(variable.into(), value.into())]);
+            let error = prepare_component_launch(ToolId::OfficeCli, &env).await.unwrap_err();
+            assert!(matches!(error, ToolError::EnvironmentConflict {
+                tool: "officecli", variable: rejected,
+            } if rejected == variable));
+            assert!(!error.to_string().contains(value));
+            assert!(!format!("{error:?}").contains(value));
+            let failure = preparation_failure(&error);
+            assert_eq!(failure.code, "COMPONENT_ENVIRONMENT_CONFLICT");
+            assert!(!failure.retryable);
+            assert!(!failure.message.contains(value));
+        }
+    }
+
+    #[tokio::test]
+    async fn component_launch_start_validation_rejects_replaced_or_missing_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("officecli");
+        std::fs::write(&path, b"verified component").unwrap();
+        let tool = VerifiedTool { executable_path: path.clone(), version: "1.0.156".into(),
+            digest: hash(&path).await.unwrap(), source: ToolSource::Managed };
+        let expected = prepared_component_fingerprint(ToolId::OfficeCli, &tool).await.unwrap();
+        let launch = PreparedComponentLaunch {
+            tool, environment: HashMap::from([("OFFICECLI_NO_AUTO_RESIDENT".into(), "1".into()),
+                ("OFFICECLI_SKIP_UPDATE".into(), "1".into()),
+                ("PRIVATE_ENVIRONMENT".into(), "private-environment-value".into())]),
+            id: ToolId::OfficeCli, fingerprint: expected,
+        };
+        let debug = format!("{launch:?}");
+        assert!(!debug.contains("OFFICECLI_NO_AUTO_RESIDENT"));
+        assert!(!debug.contains("private-environment-value"));
+        launch.validate_for_start().unwrap();
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, b"replacement component").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(matches!(launch.validate_for_start(), Err(ToolError::Changed { tool: "officecli" })));
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(launch.validate_for_start(), Err(ToolError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound));
+    }
+
+    #[tokio::test]
+    async fn component_launch_preparation_rejects_replacement_after_tool_verification() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("officecli");
+        std::fs::write(&path, b"verified component").unwrap();
+        let tool = VerifiedTool { executable_path: path.clone(), version: "1.0.156".into(),
+            digest: hash(&path).await.unwrap(), source: ToolSource::Managed };
+        // Both metadata observations in preparation see the new file. Its
+        // bytes must still match the identity returned by the supplier.
+        std::fs::write(&path, b"replaced component").unwrap();
+        assert!(matches!(prepared_component_fingerprint(ToolId::OfficeCli, &tool).await,
+            Err(ToolError::Changed { tool: "officecli" })));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn external_runtime_discovery_is_local_and_prefers_unpinned_system_engines() {
         const CHILD_MODE: &str = "NOMIFUN_EXISTING_RUNTIME_TEST_MODE";
@@ -951,8 +1164,18 @@ mod tests {
                 for id in [ToolId::Node, ToolId::Bun] {
                     assert!(matches!(resolve_tool(id).await, Err(ToolError::NotPrepared)));
                     assert!(matches!(prepare_tool(id).await, Err(ToolError::NotPrepared)));
+                    assert!(matches!(prepare_component_launch(id, &HashMap::new()).await,
+                        Err(ToolError::NotPrepared)));
                     assert_eq!(tool_preparation_snapshot(id).phase, ToolPreparationPhase::Idle);
                     assert!(slot(id).active.lock().unwrap().is_none());
+                }
+                let office_before = tool_preparation_snapshot(ToolId::OfficeCli);
+                for variable in ["OFFICECLI_NO_AUTO_RESIDENT", "OFFICECLI_SKIP_UPDATE"] {
+                    let conflict = HashMap::from([(variable.into(), "0".into())]);
+                    assert!(matches!(prepare_component_launch(ToolId::OfficeCli, &conflict).await,
+                        Err(ToolError::EnvironmentConflict { .. })));
+                    assert_eq!(tool_preparation_snapshot(ToolId::OfficeCli), office_before);
+                    assert!(slot(ToolId::OfficeCli).active.lock().unwrap().is_none());
                 }
                 assert!(matches!(crate::prepare_managed_command("bun", &[]).await,
                     Err(ToolError::NotPrepared)));
@@ -968,6 +1191,9 @@ mod tests {
                     resolve_existing_tool(ToolId::Bun)).await.unwrap(), Err(ToolError::NotPrepared)));
                 assert!(matches!(tokio::time::timeout(Duration::from_millis(100),
                     crate::prepare_managed_command("bun", &[])).await.unwrap(), Err(ToolError::NotPrepared)));
+                assert!(matches!(tokio::time::timeout(Duration::from_millis(100),
+                    prepare_component_launch(ToolId::Bun, &HashMap::new())).await.unwrap(),
+                    Err(ToolError::NotPrepared)));
                 *slot(ToolId::Bun).active.lock().unwrap() = None;
                 let identity = embed::identity(ToolId::Bun);
                 let corrupt = crate::runtime_root().unwrap().join(format!(
@@ -1010,6 +1236,11 @@ mod tests {
                 assert_eq!(tool.version, version);
                 assert_eq!(tool.digest.len(), 64);
                 assert!(tool.executable_path.starts_with(&directory));
+                let env = HashMap::from([("PATH".into(), "explicit-child-path".into()),
+                    ("USER_FLAG".into(), "keep".into())]);
+                let launch = prepare_component_launch(id, &env).await.unwrap();
+                assert_eq!(launch.tool, tool, "explicit targets retain the supplier's system-first policy");
+                assert_eq!(launch.environment, env);
                 assert_eq!(tool_preparation_snapshot(id).phase, ToolPreparationPhase::Idle);
             }
             let args = vec!["fixture-package".to_string()];

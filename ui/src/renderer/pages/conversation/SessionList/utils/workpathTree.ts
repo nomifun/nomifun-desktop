@@ -37,8 +37,6 @@ export type SessionEntry =
 export type WorkpathNode = {
   key: string;
   displayName: string;
-  /** Current App owner display metadata only; never a membership or authority key. */
-  applicationName?: string;
   pinned: boolean;
   activityAt: number;
   interactive: Extract<SessionEntry, { kind: 'interactive' }>[];
