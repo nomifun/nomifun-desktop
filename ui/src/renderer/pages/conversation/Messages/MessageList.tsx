@@ -74,6 +74,8 @@ import {
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
+import KnowledgeWritebackNotice from './components/KnowledgeWritebackNotice';
+import { knowledgeWritebackFromMessage, mergeKnowledgeWritebackNotices, type KnowledgeWritebackNotice as KnowledgeNotice } from './knowledgeWritebackNoticeModel';
 import { useTurnFiles } from './useTurnFiles';
 import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
 import type { ConversationId, MessageId } from '@/common/types/ids';
@@ -145,6 +147,14 @@ type ITurnActionsVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
+type ITurnKnowledgeNoticeVO = {
+  type: 'turn_knowledge_writeback';
+  id: string;
+  turn_id: MessageId;
+  notice: KnowledgeNotice;
+  sourceMessageIds: SourceMessageId[];
+  created_at: number;
+};
 type ITurnCreationTasksVO = {
   type: 'turn_creation_tasks';
   id: string;
@@ -159,6 +169,7 @@ type IProcessedItem =
   | IProcessReceiptVO
   | ITurnDeliverablesVO
   | ITurnActionsVO
+  | ITurnKnowledgeNoticeVO
   | ITurnCreationTasksVO;
 
 type ConversationLocationState = {
@@ -173,6 +184,7 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
       item.type === 'process_receipt' ||
       item.type === 'turn_deliverables' ||
       item.type === 'turn_actions' ||
+      item.type === 'turn_knowledge_writeback' ||
       item.type === 'turn_creation_tasks')
   ) {
     return item.sourceMessageIds;
@@ -208,6 +220,7 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
       'process_receipt',
       'turn_deliverables',
       'turn_actions',
+      'turn_knowledge_writeback',
       'turn_creation_tasks',
     ].includes(item.type)
   ) {
@@ -978,7 +991,19 @@ const MessageList: React.FC<{
       if (item?.type === 'tool_summary') imageCandidates.push({ turnId: entry.turnId, toolMessages: item.messages });
     }
     const verifiedImagesByTurn = collectVerifiedTurnImages(imageCandidates, fileTurnGates, workspaceRoots);
-    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn };
+    const knowledgeNoticesByTurn = new Map<MessageId, KnowledgeNotice>();
+    for (const entry of modelInput) {
+      if (!entry.turnId || fileTurnGates.get(entry.turnId)?.running !== false) continue;
+      const item = itemById.get(entry.id);
+      if (!item) continue;
+      const messages = item.type === 'tool_summary' ? item.messages : [item];
+      for (const message of messages) {
+        const notice = knowledgeWritebackFromMessage(message);
+        if (notice) knowledgeNoticesByTurn.set(entry.turnId,
+          mergeKnowledgeWritebackNotices(knowledgeNoticesByTurn.get(entry.turnId), notice));
+      }
+    }
+    return { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn, knowledgeNoticesByTurn };
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
@@ -1000,7 +1025,7 @@ const MessageList: React.FC<{
   const turnFileSummaries = useTurnFiles(conversationContext?.conversation_id, closedTurnIds);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
-    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn } = turnPresentation;
+    const { disclosureItems, modelInput, turnGates, fileTurnGates, verifiedImagesByTurn, creationOwnerMessageIdByTurn, finalAssistantTextByTurn, knowledgeNoticesByTurn } = turnPresentation;
     const deliverablesByTurn = new Map<MessageId, TurnDeliverableItem[]>();
     for (const [id, gate] of fileTurnGates) {
       if (gate.running) continue;
@@ -1016,6 +1041,7 @@ const MessageList: React.FC<{
       if ('type' in entry && entry.type === 'process_receipt') return undefined;
       if ('type' in entry && entry.type === 'turn_deliverables') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_actions') return entry.turn_id;
+      if ('type' in entry && entry.type === 'turn_knowledge_writeback') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_creation_tasks') return entry.turn_id;
       return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
     };
@@ -1023,14 +1049,14 @@ const MessageList: React.FC<{
     const lastIndexByTurn = new Map<MessageId, number>();
     disclosureItems.forEach((entry, index) => {
       const turnId = getDisplayItemTurnId(entry);
-      if (turnId && deliverablesByTurn.has(turnId)) lastIndexByTurn.set(turnId, index);
+      if (turnId && (deliverablesByTurn.has(turnId) || knowledgeNoticesByTurn.has(turnId))) lastIndexByTurn.set(turnId, index);
     });
 
     const creationTaskPlacements = creationTaskPlacementAfterIndices(
       disclosureItems.map(getDisplayItemTurnId),
       creationOwnerMessageIdByTurn
     );
-    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0) return disclosureItems;
+    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0 && knowledgeNoticesByTurn.size === 0) return disclosureItems;
 
     // A turn's products belong inside its response, before the shared copy /
     // time footer. Decorate files and media together so neither can land after
@@ -1042,7 +1068,8 @@ const MessageList: React.FC<{
       if (!turnId) return;
       const items = lastIndexByTurn.get(turnId) === index ? deliverablesByTurn.get(turnId) : undefined;
       const placement = creationTaskPlacements.get(index);
-      if (!items && !placement) return;
+      const knowledgeNotice = lastIndexByTurn.get(turnId) === index ? knowledgeNoticesByTurn.get(turnId) : undefined;
+      if (!items && !placement && !knowledgeNotice) return;
       if (items) {
         withOutputs.push({
           type: 'turn_deliverables',
@@ -1063,6 +1090,14 @@ const MessageList: React.FC<{
           turn_id: placement.turnId,
           message_id: placement.messageId,
           sourceMessageIds: [placement.messageId],
+          created_at: getProcessedItemCreatedAt(entry),
+        });
+      }
+      if (knowledgeNotice) {
+        withOutputs.push({
+          type: 'turn_knowledge_writeback', id: `turn-knowledge-writeback-${turnId}`,
+          turn_id: turnId, notice: knowledgeNotice,
+          sourceMessageIds: getProcessedItemSourceMessageIds(entry),
           created_at: getProcessedItemCreatedAt(entry),
         });
       }
@@ -1438,6 +1473,11 @@ const MessageList: React.FC<{
     }
     if ('type' in item && item.type === 'turn_creation_tasks') {
       return <ConversationCreationTaskCards messageId={item.message_id} />;
+    }
+    if ('type' in item && item.type === 'turn_knowledge_writeback') {
+      return <div key={item.id} id={`message-${item.id}`} className='min-w-0 message-item turn_knowledge_writeback'>
+        <KnowledgeWritebackNotice notice={item.notice} />
+      </div>;
     }
     if ('type' in item && item.type === 'turn_actions') {
       return (

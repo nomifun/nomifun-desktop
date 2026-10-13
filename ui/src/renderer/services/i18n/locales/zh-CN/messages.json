@@ -113,6 +113,11 @@
     "interruptedReply": "下方是停止前尚未完成的回复。"
   },
   "knowledgeWriteback": {
+    "saved": "已回写知识库 · {{count}} 篇",
+    "savedPartial": "部分回写知识库 · {{count}} 篇",
+    "documents": "已回写的文档",
+    "base": "知识库",
+    "openBase": "打开对应知识库",
     "started": "正在准备回写知识库",
     "extracting": "正在提取可沉淀知识",
     "writing": "正在写入知识库",

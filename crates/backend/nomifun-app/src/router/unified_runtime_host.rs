@@ -1129,11 +1129,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                         .rev()
                         .find_map(|(_, text)| (!text.trim().is_empty()).then(|| text.clone()))
                         .unwrap_or_default();
-                    (message.content.clone(), assistant)
+                    // Capture display ownership before awaiting write-back.
+                    let notice_journal = (turn.root == self.root(message)).then(|| turn.journal.clone());
+                    (message.content.clone(), assistant, notice_journal)
                 })
             })
         };
-        if let Some((user_text, assistant_text)) = writeback_input {
+        if let Some((user_text, assistant_text, journal)) = writeback_input {
             match self
                 .resources
                 .finalize_knowledge_writeback(
@@ -1144,6 +1146,20 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 .await
             {
                 Ok(Some(report)) => {
+                    if matches!(report.status, nomifun_knowledge::TurnWritebackStatus::Written | nomifun_knowledge::TurnWritebackStatus::Partial)
+                        && !report.written.is_empty() && let Some(journal) = &journal {
+                        let notice = nomifun_agent_contracts::KnowledgeWritebackNotice {
+                            status: if report.status == nomifun_knowledge::TurnWritebackStatus::Partial {
+                                nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Partial
+                            } else { nomifun_agent_contracts::KnowledgeWritebackNoticeStatus::Written },
+                            written: report.written.iter().map(|file| nomifun_agent_contracts::KnowledgeWritebackNoticeFile {
+                                kb_id: file.kb_id.as_str().into(), rel_path: file.final_rel_path.clone(),
+                            }).collect(),
+                        };
+                        if let Err(error) = journal.note_knowledge_writeback(notice).await {
+                            tracing::warn!(%error, "Knowledge write-back notice could not be attached");
+                        }
+                    }
                     tracing::info!(
                         agent_session_id = %self.options.conversation_id,
                         status = ?report.status,

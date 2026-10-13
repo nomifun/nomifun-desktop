@@ -7621,8 +7621,17 @@ fn turn_history_projection_from_row(
         Value::Null
     };
     let is_failed = row.state == "failed";
+    let knowledge_writeback = terminal_payload.as_ref().and_then(|payload| payload.get("knowledge_writeback"))
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<nomifun_agent_contracts::KnowledgeWritebackNotice>)
+        .transpose()
+        .map_err(|error| SessionStoreError::InvalidPayload(error.to_string()))?;
+    if let Some(notice) = &knowledge_writeback {
+        notice.validate().map_err(SessionStoreError::InvalidPayload)?;
+    }
     let projection_id = format!("turn_summary:{}", row.started_event_id);
-    let projection = json!({
+    let mut projection = json!({
         "projection_id": projection_id,
         "correlation_id": started_event_uuid.to_string(),
         "presentation_intent": "turn_summary",
@@ -7635,6 +7644,9 @@ fn turn_history_projection_from_row(
         "finished_at_ms": finished_at_ms,
         "error": error,
     });
+    if let Some(notice) = knowledge_writeback {
+        projection["knowledge_writeback"] = serde_json::to_value(notice)?;
+    }
     let semantic_digest = digest_payload(&projection)?.0;
     Ok(Some(MessageProjection {
         session_id: AgentSessionId::from(row.session_id),

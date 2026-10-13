@@ -345,6 +345,8 @@ export type IMessageAgentStatus = IMessage<
     has_active_session?: boolean;
     /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
     turn_summary?: boolean;
+    /** Successful targets from the owning Turn's canonical terminal receipt. */
+    knowledge_writeback?: KnowledgeWritebackState;
     turn_state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
     started_seq?: number;
     finished_seq?: number | null;
@@ -919,6 +921,7 @@ export const normalizeToolCallContent = (
 
 export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['content'] => {
   const data = isObject(value) ? value : {};
+  const knowledgeWriteback = data.turn_summary === true ? normalizeKnowledgeWritebackState(data.knowledge_writeback) : undefined;
   const status =
     data.status === 'connecting' ||
     data.status === 'connected' ||
@@ -939,6 +942,7 @@ export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus
     ...(typeof data.is_connected === 'boolean' ? { is_connected: data.is_connected } : {}),
     ...(typeof data.has_active_session === 'boolean' ? { has_active_session: data.has_active_session } : {}),
     ...(data.turn_summary === true ? { turn_summary: true } : {}),
+    ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
     ...(data.turn_summary === true &&
       ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(data.turn_state as string)
       ? { turn_state: data.turn_state as IMessageAgentStatus['content']['turn_state'] } : {}),

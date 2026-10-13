@@ -113,6 +113,11 @@
     "interruptedReply": "The reply below was written before stopping and is incomplete."
   },
   "knowledgeWriteback": {
+    "saved": "Knowledge saved · {{count}}",
+    "savedPartial": "Knowledge partially saved · {{count}}",
+    "documents": "Saved documents",
+    "base": "Knowledge base",
+    "openBase": "Open knowledge base",
     "started": "Preparing knowledge write-back",
     "extracting": "Extracting reusable knowledge",
     "writing": "Writing to knowledge base",

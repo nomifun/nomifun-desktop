@@ -4,7 +4,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
-import { parseConversationId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
+import { parseConversationId, parseKnowledgeBaseId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
@@ -53,6 +53,38 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); restoreListeners(); });
+
+test('a restored automatic write-back notice sits under its answer and before the shared actions', async () => {
+  const kb = parseKnowledgeBaseId('0190f5fe-7c00-7a00-8000-000000000001');
+  const load = spyOn(ipcBridge.knowledge.getBase, 'invoke').mockResolvedValue({ name: 'Python basics', knowledge_base_id: kb } as never);
+  try {
+    const initial: TMessage[] = [
+      { id: 'knowledge-user', msg_id: turnId, type: 'text', position: 'right', conversation_id: conversationId,
+        created_at: 1, content: { content: 'Explain Python loops.' } },
+      { id: 'knowledge-answer', msg_id: messageId(201), turn_id: turnId, type: 'text', position: 'left',
+        conversation_id: conversationId, created_at: 2, content: { content: 'The normal assistant answer.' } },
+      { id: 'knowledge-terminal', msg_id: messageId(202), turn_id: turnId, type: 'agent_status', position: 'center',
+        conversation_id: conversationId, created_at: 3, content: { backend: 'nomi', status: 'prepared',
+          turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 3000,
+          knowledge_writeback: { status: 'written', written: [{ kb_id: kb, rel_path: 'notes/loops.md' }] } } },
+    ];
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+      <PreviewProvider persistNamespace='knowledge-turn-fixture' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', isProcessing: false, isTurnStateHydrated: true }}>
+          <MessageListProvider initialValue={initial}><MessageList emptySlot={<span>Welcome</span>} /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </ThemeProvider></I18nextProvider></MemoryRouter>);
+    const notice = await page.findByTestId('knowledge-writeback-notice');
+    expect(page.getAllByTestId('knowledge-writeback-notice')).toHaveLength(1);
+    expect(notice.textContent).toContain('Knowledge saved · 1');
+    const answer = await page.findByText('The normal assistant answer.');
+    const actions = page.getByTestId('turn-actions');
+    expect(page.getAllByTestId('message-copy-action')).toHaveLength(2);
+    expect(answer.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notice.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  } finally { load.mockRestore(); }
+});
 
 test.each([
   { errorAt: undefined, cleanupProven: true, pausedAt: 10, expected: 1, projected: true },

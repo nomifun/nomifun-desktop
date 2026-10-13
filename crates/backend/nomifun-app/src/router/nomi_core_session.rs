@@ -14278,6 +14278,16 @@ fn canonical_message_response_with_observation(
             "cancelled" => ("error", MessageStatus::Error),
             _ => return Ok(None),
         };
+        let mut summary_content = json!({
+            "backend": "nomi", "status": activity_status, "agent_name": "Nomi",
+            "turn_id": root_message_id, "turn_summary": true, "turn_state": state,
+            "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
+            "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
+            "started_at_ms": started_at_ms, "finished_at_ms": finished_at_ms,
+        });
+        if let Some(notice) = document.get("knowledge_writeback").filter(|value| !value.is_null()) {
+            summary_content["knowledge_writeback"] = notice.clone();
+        }
         return Ok(Some(MessageResponse {
             message_id: summary_message_id.to_owned(),
             conversation_id: session_id.as_ref().to_owned(),
@@ -14285,18 +14295,7 @@ fn canonical_message_response_with_observation(
             // replaces that transient row instead of rendering a duplicate.
             msg_id: Some(stream_message_id),
             r#type: MessageType::AgentStatus,
-            content: json!({
-                "backend": "nomi",
-                "status": activity_status,
-                "agent_name": "Nomi",
-                "turn_id": root_message_id,
-                "turn_summary": true,
-                "turn_state": state,
-                "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
-                "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
-                "started_at_ms": started_at_ms,
-                "finished_at_ms": finished_at_ms,
-            }),
+            content: summary_content,
             position: Some(MessagePosition::Center),
             status: Some(status),
             hidden: false,
